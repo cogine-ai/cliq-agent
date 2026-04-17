@@ -1,0 +1,20 @@
+{
+  "name": "cliq-agent",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "bin": {
+    "cliq": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
