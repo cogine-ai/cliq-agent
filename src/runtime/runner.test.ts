@@ -23,6 +23,7 @@ test('runner invokes hooks around assistant and tool execution', async () => {
       }
     },
     registry: {
+      definitions: [],
       resolve() {
         throw new Error('tool dispatch should not run for final message');
       }
@@ -65,6 +66,7 @@ test('runner appends tool results and replays them back to the model', async () 
       }
     },
     registry: {
+      definitions: [],
       resolve() {
         return {
           definition: {

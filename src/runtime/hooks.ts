@@ -10,15 +10,11 @@ export type RuntimeHook = {
   afterTurn?(session: Session, finalMessage: string): Promise<void> | void;
 };
 
-export async function runHooks<K extends keyof RuntimeHook>(
-  hooks: RuntimeHook[],
-  name: K,
-  ...args: Parameters<NonNullable<RuntimeHook[K]>>
-) {
+export async function runHooks(hooks: RuntimeHook[], name: keyof RuntimeHook, ...args: unknown[]) {
   for (const hook of hooks) {
     const fn = hook[name];
     if (fn) {
-      await fn(...args);
+      await (fn as (...hookArgs: unknown[]) => Promise<void> | void)(...args);
     }
   }
 }
