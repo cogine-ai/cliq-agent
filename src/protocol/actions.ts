@@ -13,8 +13,9 @@ export function parseModelAction(content: string): ModelAction {
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
-  } catch {
-    throw new Error(`Model returned non-JSON content:\n${content}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid JSON from model: ${message}\n${content}`);
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -26,6 +27,7 @@ export function parseModelAction(content: string): ModelAction {
   if (keys.length !== 1) {
     throw new Error(`Model action must contain exactly one top-level key:\n${content}`);
   }
+  const topLevelKey = keys[0];
 
   if (typeof record.bash === 'string') {
     return { bash: record.bash };
@@ -46,6 +48,10 @@ export function parseModelAction(content: string): ModelAction {
         }
       };
     }
+  }
+
+  if (!['bash', 'edit', 'message'].includes(topLevelKey)) {
+    throw new Error(`Unknown top-level key in model action: ${topLevelKey}\n${content}`);
   }
 
   throw new Error(`Model returned unsupported action:\n${content}`);

@@ -9,7 +9,7 @@ import type { Session, SessionRecord } from './types.js';
 type LegacySession = {
   createdAt?: string;
   updatedAt?: string;
-  messages?: Array<{ role?: string; content?: string | null; name?: string }>;
+  messages?: Array<{ role?: string; content?: string | null; name?: string; status?: 'ok' | 'error' }>;
 };
 
 export function sessionPath(cwd: string) {
@@ -47,7 +47,14 @@ export function createSession(cwd: string): Session {
 }
 
 function isSession(value: unknown): value is Session {
-  return !!value && typeof value === 'object' && Array.isArray((value as Session).records);
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    typeof (value as Session).version === 'number' &&
+    !!(value as Session).lifecycle &&
+    typeof (value as Session).lifecycle === 'object' &&
+    Array.isArray((value as Session).records)
+  );
 }
 
 function migrateLegacySession(cwd: string, legacy: LegacySession): Session {
@@ -78,7 +85,8 @@ function migrateLegacySession(cwd: string, legacy: LegacySession): Session {
         kind: 'tool',
         role: 'user',
         tool: message.name === 'edit' ? 'edit' : 'bash',
-        status: 'ok',
+        // Older sessions may not store tool status, so default only when absent.
+        status: message.status ?? 'ok',
         content: message.content ?? ''
       });
     }

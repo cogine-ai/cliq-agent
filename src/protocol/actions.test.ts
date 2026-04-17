@@ -20,3 +20,11 @@ test('parses final message action', () => {
 test('rejects multiple top-level keys', () => {
   assert.throws(() => parseModelAction('{"bash":"pwd","message":"done"}'), /exactly one top-level key/i);
 });
+
+test('rejects unknown top-level keys', () => {
+  assert.throws(() => parseModelAction('{"unknown":"value"}'), /unknown top-level key/i);
+});
+
+test('rejects malformed json', () => {
+  assert.throws(() => parseModelAction('{"bash":"pwd"'), /invalid json|unexpected token/i);
+});

@@ -1,7 +1,6 @@
 # Phase 0: Cliq Runtime Kernel Foundation Implementation Plan
 
-> This document is the execution plan for [RFC: Cliq Agent Runtime Architecture](/Users/kiedis/Coding/AI/cliq-agent/docs/rfcs/2026-04-17-agent-runtime-architecture.md).
-
+> This document is the execution plan for [RFC: Cliq Agent Runtime Architecture](../../rfcs/2026-04-17-agent-runtime-architecture.md).
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Execute Phase 0 of the runtime architecture RFC by refactoring Cliq from a single-file harness into a small modular runtime kernel with explicit session, protocol, model, tool, runner, and CLI boundaries while preserving the current external behavior.

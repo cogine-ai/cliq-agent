@@ -3,7 +3,7 @@ Return exactly one JSON object and nothing else.
 
 Allowed response shapes:
 - {"bash":"<shell command>"}
-- {"edit":{"path":"<relative-or-absolute-path>","old_text":"<exact old text>","new_text":"<replacement text>"}}
+- {"edit":{"path":"<workspace-relative-path>","old_text":"<exact old text>","new_text":"<replacement text>"}}
 - {"message":"<final user-facing response>"}
 
 Rules:

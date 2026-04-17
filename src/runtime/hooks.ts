@@ -14,7 +14,11 @@ export async function runHooks(hooks: RuntimeHook[], name: keyof RuntimeHook, ..
   for (const hook of hooks) {
     const fn = hook[name];
     if (fn) {
-      await (fn as (...hookArgs: unknown[]) => Promise<void> | void)(...args);
+      try {
+        await (fn as (...hookArgs: unknown[]) => Promise<void> | void)(...args);
+      } catch (error) {
+        console.error(`hook ${String(name)} failed:`, error);
+      }
     }
   }
 }

@@ -19,7 +19,17 @@ export function parseArgs(argv: string[]) {
 }
 
 export function printHelp() {
-  console.log(`cliq - tiny local coding agent harness\n\nUsage:\n  cliq "task"        Run a task in the current directory\n  cliq chat          Start interactive chat in the current directory\n  cliq reset         Clear persisted conversation for this directory\n  cliq history       Print persisted session for this directory\n\nEnv:\n  OPENROUTER_API_KEY Required\n`);
+  console.log(`cliq - tiny local coding agent harness
+
+Usage:
+  cliq "task"        Run a task in the current directory
+  cliq chat          Start interactive chat in the current directory
+  cliq reset         Clear persisted conversation for this directory
+  cliq history       Print persisted session for this directory
+
+Env:
+  OPENROUTER_API_KEY Required
+`);
 }
 
 function createCliHooks(): RuntimeHook[] {
@@ -37,7 +47,7 @@ function createCliHooks(): RuntimeHook[] {
           return;
         }
 
-        process.stdout.write(`\n[edit ${result.status}] ${result.meta.path ?? '(unknown path)'}\n`);
+        process.stdout.write(`\n[${result.tool ?? 'unknown'} ${result.status}] ${result.meta.path ?? '(unknown path)'}\n`);
       }
     }
   ];

@@ -58,8 +58,6 @@ export function createRunner({
 
           if ('message' in action) {
             const finalMessage = action.message.trim() || '(no content)';
-            session.lifecycle.status = 'idle';
-            await saveSession(cwd, session);
             await runHooks(hooks, 'afterTurn', session, finalMessage);
             return finalMessage;
           }

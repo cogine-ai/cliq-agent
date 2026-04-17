@@ -1,16 +1,26 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-import type { ToolDefinition, ToolResult } from './types.js';
+import type { EditModelAction, ToolDefinition, ToolResult } from './types.js';
 
-export const editTool: ToolDefinition<{ edit: { path: string; old_text: string; new_text: string } }> = {
+export const editTool: ToolDefinition<EditModelAction> = {
   name: 'edit',
-  supports(action): action is { edit: { path: string; old_text: string; new_text: string } } {
+  supports(action): action is EditModelAction {
     return typeof (action as { edit?: unknown }).edit === 'object' && !!(action as { edit?: unknown }).edit;
   },
   async execute(action, context): Promise<ToolResult> {
-    const target = path.isAbsolute(action.edit.path) ? action.edit.path : path.join(context.cwd, action.edit.path);
+    const target = path.resolve(context.cwd, action.edit.path);
     const relativePath = path.relative(context.cwd, target) || action.edit.path;
+
+    if (path.isAbsolute(action.edit.path) || relativePath.startsWith('..')) {
+      const meta: ToolResult['meta'] = { path: action.edit.path };
+      return {
+        tool: 'edit',
+        status: 'error',
+        meta,
+        content: `TOOL_RESULT edit ERROR\npath=${action.edit.path}\nedit.path must be a workspace-relative path inside the workspace`
+      };
+    }
 
     try {
       const current = await fs.readFile(target, 'utf8');
