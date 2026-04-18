@@ -33,6 +33,8 @@ export type ModelAction =
   | { grep: GrepAction }
   | { message: string };
 
+const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'message'] as const;
+
 export function parseModelAction(content: string): ModelAction {
   let parsed: unknown;
   try {
@@ -126,7 +128,7 @@ export function parseModelAction(content: string): ModelAction {
     }
   }
 
-  if (!['bash', 'edit', 'read', 'ls', 'find', 'grep', 'message'].includes(topLevelKey)) {
+  if (!TOP_LEVEL_ACTIONS.includes(topLevelKey as (typeof TOP_LEVEL_ACTIONS)[number])) {
     throw new Error(`Unknown top-level key in model action: ${topLevelKey}\n${content}`);
   }
 

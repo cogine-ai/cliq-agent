@@ -23,10 +23,12 @@ export function createPolicyEngine({ mode, confirm }: PolicyEngineOptions) {
       };
     }
 
+    // "confirm-bash" is the current user-facing label, but policy should apply
+    // to any exec-capable tool rather than only the built-in bash tool name.
     const requiresConfirmation =
       mode === 'confirm-all' ||
       (mode === 'confirm-write' && definition.access === 'write') ||
-      (mode === 'confirm-bash' && definition.name === 'bash');
+      (mode === 'confirm-bash' && definition.access === 'exec');
 
     if (!requiresConfirmation) {
       return { allowed: true };

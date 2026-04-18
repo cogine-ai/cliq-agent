@@ -1,26 +1,58 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-import { FIND_MAX_RESULTS } from '../config.js';
+import { FIND_MAX_DEPTH, FIND_MAX_RESULTS } from '../config.js';
 import type { FindAction } from '../protocol/actions.js';
 import type { ToolDefinition, ToolResult } from './types.js';
-import { resolveWorkspacePath } from './path.js';
+import { resolveWorkspaceEntry, resolveWorkspacePath } from './path.js';
 
-async function collectMatches(root: string, query: string, cwd: string, out: string[]) {
-  const entries = await fs.readdir(root, { withFileTypes: true });
+async function collectMatches(
+  root: string,
+  query: string,
+  workspaceRealPath: string,
+  out: string[],
+  depth: number,
+  seenRealPaths: Set<string>,
+  maxDepth: number
+) {
+  if (out.length >= FIND_MAX_RESULTS || depth > maxDepth) {
+    return;
+  }
+
+  const rootRealPath = await fs.realpath(root);
+  if (seenRealPaths.has(rootRealPath)) {
+    return;
+  }
+  seenRealPaths.add(rootRealPath);
+
+  const entries = await fs.readdir(rootRealPath, { withFileTypes: true });
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (out.length >= FIND_MAX_RESULTS) {
       break;
     }
 
-    const target = path.join(root, entry.name);
-    const relativePath = path.relative(cwd, target);
+    const target = path.join(rootRealPath, entry.name);
+    const resolved = await resolveWorkspaceEntry(workspaceRealPath, target).catch(() => null);
+    if (!resolved) {
+      continue;
+    }
+
     if (entry.name.includes(query)) {
-      out.push(relativePath);
+      if (out.length >= FIND_MAX_RESULTS) {
+        break;
+      }
+      out.push(resolved.relativePath);
     }
-    if (entry.isDirectory()) {
-      await collectMatches(target, query, cwd, out);
+
+    if (out.length >= FIND_MAX_RESULTS || depth >= maxDepth || !resolved.stat.isDirectory()) {
+      continue;
     }
+
+    if (seenRealPaths.has(resolved.targetRealPath)) {
+      continue;
+    }
+
+    await collectMatches(resolved.targetRealPath, query, workspaceRealPath, out, depth + 1, seenRealPaths, maxDepth);
   }
 }
 
@@ -32,9 +64,9 @@ export const findTool: ToolDefinition<{ find: FindAction }> = {
   },
   async execute(action, context): Promise<ToolResult> {
     try {
-      const { target, relativePath } = resolveWorkspacePath(context.cwd, action.find.path ?? '.');
+      const { relativePath, targetRealPath, workspaceRealPath } = await resolveWorkspacePath(context.cwd, action.find.path ?? '.');
       const matches: string[] = [];
-      await collectMatches(target, action.find.name, context.cwd, matches);
+      await collectMatches(targetRealPath, action.find.name, workspaceRealPath, matches, 0, new Set<string>(), FIND_MAX_DEPTH);
       return {
         tool: 'find',
         status: 'ok',

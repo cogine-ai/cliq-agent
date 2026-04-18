@@ -13,8 +13,8 @@ export const lsTool: ToolDefinition<{ ls: LsAction }> = {
   },
   async execute(action, context): Promise<ToolResult> {
     try {
-      const { target, relativePath } = resolveWorkspacePath(context.cwd, action.ls.path ?? '.');
-      const entries = (await fs.readdir(target, { withFileTypes: true }))
+      const { relativePath, targetRealPath } = await resolveWorkspacePath(context.cwd, action.ls.path ?? '.');
+      const entries = (await fs.readdir(targetRealPath, { withFileTypes: true }))
         .sort((a, b) => a.name.localeCompare(b.name))
         .slice(0, LIST_MAX_ENTRIES)
         .map((entry) => `${entry.isDirectory() ? 'dir' : 'file'} ${entry.name}${entry.isDirectory() ? '/' : ''}`)

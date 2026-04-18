@@ -4,23 +4,53 @@ import path from 'node:path';
 import { GREP_MAX_FILE_BYTES, GREP_MAX_MATCHES } from '../config.js';
 import type { GrepAction } from '../protocol/actions.js';
 import type { ToolDefinition, ToolResult } from './types.js';
-import { resolveWorkspacePath } from './path.js';
+import { resolveWorkspaceEntry, resolveWorkspacePath } from './path.js';
 
-async function collectGrepMatches(root: string, pattern: string, cwd: string, out: string[]) {
-  const entries = await fs.readdir(root, { withFileTypes: true });
+async function collectGrepMatches(
+  root: string,
+  pattern: string,
+  workspaceRealPath: string,
+  out: string[],
+  seenRealPaths: Set<string>
+) {
+  if (out.length >= GREP_MAX_MATCHES) {
+    return;
+  }
+
+  const rootRealPath = await fs.realpath(root);
+  if (seenRealPaths.has(rootRealPath)) {
+    return;
+  }
+  seenRealPaths.add(rootRealPath);
+
+  const entries = await fs.readdir(rootRealPath, { withFileTypes: true });
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (out.length >= GREP_MAX_MATCHES) {
       break;
     }
 
-    const target = path.join(root, entry.name);
-    if (entry.isDirectory()) {
-      await collectGrepMatches(target, pattern, cwd, out);
+    const target = path.join(rootRealPath, entry.name);
+    const resolved = await resolveWorkspaceEntry(workspaceRealPath, target).catch(() => null);
+    if (!resolved) {
       continue;
     }
 
-    const raw = await fs.readFile(target, 'utf8');
-    if (raw.length > GREP_MAX_FILE_BYTES) {
+    if (resolved.stat.isDirectory()) {
+      await collectGrepMatches(resolved.targetRealPath, pattern, workspaceRealPath, out, seenRealPaths);
+      continue;
+    }
+
+    if (!resolved.stat.isFile()) {
+      continue;
+    }
+
+    const fileStats = await fs.stat(resolved.targetRealPath).catch(() => null);
+    if (!fileStats || fileStats.size > GREP_MAX_FILE_BYTES) {
+      continue;
+    }
+
+    const raw = await fs.readFile(resolved.targetRealPath, 'utf8').catch(() => null);
+    if (raw === null) {
       continue;
     }
 
@@ -29,7 +59,7 @@ async function collectGrepMatches(root: string, pattern: string, cwd: string, ou
         break;
       }
       if (line.includes(pattern)) {
-        out.push(`${path.relative(cwd, target)}:${index + 1}: ${line}`);
+        out.push(`${resolved.relativePath}:${index + 1}: ${line}`);
       }
     }
   }
@@ -43,9 +73,9 @@ export const grepTool: ToolDefinition<{ grep: GrepAction }> = {
   },
   async execute(action, context): Promise<ToolResult> {
     try {
-      const { target, relativePath } = resolveWorkspacePath(context.cwd, action.grep.path ?? '.');
+      const { relativePath, targetRealPath, workspaceRealPath } = await resolveWorkspacePath(context.cwd, action.grep.path ?? '.');
       const matches: string[] = [];
-      await collectGrepMatches(target, action.grep.pattern, context.cwd, matches);
+      await collectGrepMatches(targetRealPath, action.grep.pattern, workspaceRealPath, matches, new Set<string>());
       return {
         tool: 'grep',
         status: 'ok',

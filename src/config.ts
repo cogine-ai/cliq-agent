@@ -10,5 +10,6 @@ export const DEFAULT_POLICY_MODE = 'auto';
 export const READ_MAX_BYTES = 8_000;
 export const LIST_MAX_ENTRIES = 200;
 export const FIND_MAX_RESULTS = 200;
+export const FIND_MAX_DEPTH = 12;
 export const GREP_MAX_MATCHES = 200;
 export const GREP_MAX_FILE_BYTES = 64_000;

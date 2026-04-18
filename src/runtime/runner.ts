@@ -1,4 +1,4 @@
-import { MAX_LOOPS } from '../config.js';
+import { DEFAULT_POLICY_MODE, MAX_LOOPS } from '../config.js';
 import type { ChatMessage, ModelClient } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { parseModelAction } from '../protocol/actions.js';
@@ -20,7 +20,7 @@ export function createRunner({
   model,
   registry = createToolRegistry(),
   hooks = [],
-  policy = createPolicyEngine({ mode: 'auto' })
+  policy = createPolicyEngine({ mode: DEFAULT_POLICY_MODE })
 }: {
   model: ModelClient;
   registry?: ReturnType<typeof createToolRegistry>;

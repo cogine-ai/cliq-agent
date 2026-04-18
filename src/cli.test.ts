@@ -18,3 +18,11 @@ test('parseArgs accepts --policy confirm-all for one-shot prompt', () => {
     policy: 'confirm-all'
   });
 });
+
+test('parseArgs rejects invalid policy values', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', '--policy', 'invalid', 'chat']), /Unknown policy mode/i);
+});
+
+test('parseArgs rejects missing policy values', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', '--policy']), /Missing value for --policy/i);
+});

@@ -11,8 +11,11 @@ import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
 import { ensureFresh, ensureSession, saveSession } from './session/store.js';
 
+const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
+const POLICY_MODE_LIST = POLICY_MODES.join(', ');
+
 function isPolicyMode(value: string): value is PolicyMode {
-  return ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'].includes(value);
+  return (POLICY_MODES as readonly string[]).includes(value);
 }
 
 export function parseArgs(argv: string[]) {
@@ -29,6 +32,9 @@ export function parseArgs(argv: string[]) {
     const token = raw[i];
     if (token.startsWith('--policy=')) {
       const value = token.slice('--policy='.length);
+      if (!value) {
+        throw new Error(`Missing value for --policy; expected one of: ${POLICY_MODE_LIST}`);
+      }
       if (!isPolicyMode(value)) {
         throw new Error(`Unknown policy mode: ${value}`);
       }
@@ -37,7 +43,10 @@ export function parseArgs(argv: string[]) {
     }
 
     if (token === '--policy') {
-      const value = raw[i + 1] ?? '';
+      const value = raw[i + 1];
+      if (value === undefined || value === '') {
+        throw new Error(`Missing value for --policy; expected one of: ${POLICY_MODE_LIST}`);
+      }
       if (!isPolicyMode(value)) {
         throw new Error(`Unknown policy mode: ${value}`);
       }
@@ -96,22 +105,32 @@ function createCliHooks(): RuntimeHook[] {
 
 async function askYesNo(question: string, rl?: readline.Interface) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.warn("Confirmation skipped: non-interactive TTY, defaulting to 'no'");
     return false;
   }
 
   if (rl) {
-    const answer = await new Promise<string>((resolve) => {
-      rl.question(`${question} [y/N] `, resolve);
-    });
-    return answer.trim().toLowerCase() === 'y';
+    try {
+      const answer = await new Promise<string>((resolve) => {
+        rl.question(`${question} [y/N] `, resolve);
+      });
+      return answer.trim().toLowerCase() === 'y';
+    } catch (error) {
+      console.warn(`Confirmation prompt failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
   }
 
-  const promptRl = createPromptInterface({ input, output });
+  let promptRl: ReturnType<typeof createPromptInterface> | undefined;
   try {
+    promptRl = createPromptInterface({ input, output });
     const answer = await promptRl.question(`${question} [y/N] `);
     return answer.trim().toLowerCase() === 'y';
+  } catch (error) {
+    console.warn(`Confirmation prompt failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
   } finally {
-    promptRl.close();
+    promptRl?.close();
   }
 }
 

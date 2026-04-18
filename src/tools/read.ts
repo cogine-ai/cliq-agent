@@ -13,11 +13,12 @@ export const readTool: ToolDefinition<{ read: ReadAction }> = {
   },
   async execute(action, context): Promise<ToolResult> {
     try {
-      const { target, relativePath } = resolveWorkspacePath(context.cwd, action.read.path);
-      const raw = await fs.readFile(target, 'utf8');
+      const { relativePath, targetRealPath } = await resolveWorkspacePath(context.cwd, action.read.path);
+      const raw = await fs.readFile(targetRealPath, 'utf8');
       const lines = raw.split('\n');
-      const start = Math.max(1, action.read.start_line ?? 1);
-      const end = Math.min(lines.length, action.read.end_line ?? Math.min(lines.length, start + 199));
+      const start = Math.min(Math.max(1, action.read.start_line ?? 1), lines.length);
+      const requestedEnd = action.read.end_line ?? Math.min(lines.length, start + 199);
+      const end = Math.max(start, Math.min(lines.length, requestedEnd));
       const snippet = lines
         .slice(start - 1, end)
         .map((line, index) => `${start + index}| ${line}`)
