@@ -1,21 +1,58 @@
 import path from 'node:path';
 import readline from 'node:readline';
 
-import { APP_DIR } from './config.js';
+import { APP_DIR, DEFAULT_POLICY_MODE } from './config.js';
 import { createOpenRouterClient } from './model/openrouter.js';
+import type { PolicyMode } from './policy/types.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
 import { ensureFresh, ensureSession, saveSession } from './session/store.js';
 
+function isPolicyMode(value: string): value is PolicyMode {
+  return ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'].includes(value);
+}
+
 export function parseArgs(argv: string[]) {
-  const args = argv.slice(2);
+  const raw = argv.slice(2);
+  let policy: PolicyMode = DEFAULT_POLICY_MODE;
+  const envPolicy = process.env.CLIQ_POLICY_MODE;
+  if (envPolicy && isPolicyMode(envPolicy)) {
+    policy = envPolicy;
+  }
+
+  const args: string[] = [];
+
+  for (let i = 0; i < raw.length; i += 1) {
+    const token = raw[i];
+    if (token.startsWith('--policy=')) {
+      const value = token.slice('--policy='.length);
+      if (!isPolicyMode(value)) {
+        throw new Error(`Unknown policy mode: ${value}`);
+      }
+      policy = value;
+      continue;
+    }
+
+    if (token === '--policy') {
+      const value = raw[i + 1] ?? '';
+      if (!isPolicyMode(value)) {
+        throw new Error(`Unknown policy mode: ${value}`);
+      }
+      policy = value;
+      i += 1;
+      continue;
+    }
+
+    args.push(token);
+  }
+
   const cmd = args[0];
-  if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' ') };
-  if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' ') };
-  if (cmd === 'reset') return { cmd };
-  if (cmd === 'history') return { cmd };
-  if (cmd === 'help' || cmd === '--help' || cmd === '-h') return { cmd: 'help' };
-  return { cmd: 'chat', prompt: args.join(' ') };
+  if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy };
+  if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy };
+  if (cmd === 'reset') return { cmd, policy };
+  if (cmd === 'history') return { cmd, policy };
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h') return { cmd: 'help', policy };
+  return { cmd: 'chat', prompt: args.join(' '), policy };
 }
 
 export function printHelp() {

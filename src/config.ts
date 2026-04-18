@@ -6,3 +6,4 @@ export const MAX_OUTPUT = 12_000;
 export const BASH_TIMEOUT_MS = 60_000;
 export const OPENROUTER_TIMEOUT_MS = 20_000;
 export const SESSION_VERSION = 2;
+export const DEFAULT_POLICY_MODE = 'auto';
