@@ -86,6 +86,17 @@ Each workspace gets its own local state directory:
 
 Cliq replays prior records back into the model in order, including normalized tool results. This keeps session continuity simple and portable without relying on provider-specific tool call envelopes.
 
+## Internal architecture
+
+The Phase 0 runtime split organizes the code into focused modules:
+
+- `src/session` for persistence, lifecycle state, and migration
+- `src/protocol` for action parsing and protocol types
+- `src/model` for provider clients
+- `src/tools` for executable tool definitions and registry lookup
+- `src/runtime` for turn execution and lifecycle hooks
+- `src/cli.ts` for CLI and REPL behavior
+
 ## Non-goals for the current version
 
 The current version is an early open source starting point. It does **not** yet aim to provide:
