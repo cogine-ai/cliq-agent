@@ -17,8 +17,11 @@ test('lsTool lists directory entries in sorted order', async () => {
     const result = await lsTool.execute({ ls: { path: '.' } }, { cwd, session: createSession(cwd) });
 
     assert.equal(result.status, 'ok');
-    assert.match(result.content, /dir\s+src\//);
-    assert.match(result.content, /file\s+README\.md/);
+    const readmeIndex = result.content.indexOf('file README.md');
+    const srcIndex = result.content.indexOf('dir src/');
+    assert.notEqual(readmeIndex, -1);
+    assert.notEqual(srcIndex, -1);
+    assert.ok(readmeIndex < srcIndex, 'entries should be listed in sorted order');
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

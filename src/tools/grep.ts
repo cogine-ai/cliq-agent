@@ -6,22 +6,22 @@ import type { GrepAction } from '../protocol/actions.js';
 import type { ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspaceEntry, resolveWorkspacePath } from './path.js';
 
-async function collectFileMatches(filePath: string, pattern: string, workspaceRealPath: string, out: string[]) {
+type ResolvedWorkspaceEntry = NonNullable<Awaited<ReturnType<typeof resolveWorkspaceEntry>>>;
+
+async function collectFileMatches(entry: ResolvedWorkspaceEntry, pattern: string, out: string[]) {
   if (out.length >= GREP_MAX_MATCHES) {
     return;
   }
 
-  const resolved = await resolveWorkspaceEntry(workspaceRealPath, filePath).catch(() => null);
-  if (!resolved || !resolved.stat.isFile()) {
+  if (!entry.stat.isFile()) {
     return;
   }
 
-  const fileStats = await fs.stat(resolved.targetRealPath).catch(() => null);
-  if (!fileStats || fileStats.size > GREP_MAX_FILE_BYTES) {
+  if (entry.stat.size > GREP_MAX_FILE_BYTES) {
     return;
   }
 
-  const raw = await fs.readFile(resolved.targetRealPath, 'utf8').catch(() => null);
+  const raw = await fs.readFile(entry.targetRealPath, 'utf8').catch(() => null);
   if (raw === null) {
     return;
   }
@@ -31,7 +31,7 @@ async function collectFileMatches(filePath: string, pattern: string, workspaceRe
       break;
     }
     if (line.includes(pattern)) {
-      out.push(`${resolved.relativePath}:${index + 1}: ${line}`);
+      out.push(`${entry.relativePath}:${index + 1}: ${line}`);
     }
   }
 }
@@ -70,7 +70,7 @@ async function collectGrepMatches(
       continue;
     }
 
-    await collectFileMatches(resolved.targetRealPath, pattern, workspaceRealPath, out);
+    await collectFileMatches(resolved, pattern, out);
   }
 }
 
@@ -89,7 +89,7 @@ export const grepTool: ToolDefinition<{ grep: GrepAction }> = {
       if (targetStats.isDirectory()) {
         await collectGrepMatches(targetRealPath, action.grep.pattern, workspaceRealPath, matches, new Set<string>());
       } else if (targetStats.isFile()) {
-        await collectFileMatches(targetRealPath, action.grep.pattern, workspaceRealPath, matches);
+        await collectFileMatches({ stat: targetStats, targetRealPath, relativePath }, action.grep.pattern, matches);
       }
 
       return {
