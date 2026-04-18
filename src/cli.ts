@@ -22,7 +22,10 @@ export function parseArgs(argv: string[]) {
   const raw = argv.slice(2);
   let policy: PolicyMode = DEFAULT_POLICY_MODE;
   const envPolicy = process.env.CLIQ_POLICY_MODE;
-  if (envPolicy && isPolicyMode(envPolicy)) {
+  if (envPolicy !== undefined) {
+    if (!isPolicyMode(envPolicy)) {
+      throw new Error(`Invalid CLIQ_POLICY_MODE: ${envPolicy}; expected one of: ${POLICY_MODE_LIST}`);
+    }
     policy = envPolicy;
   }
 

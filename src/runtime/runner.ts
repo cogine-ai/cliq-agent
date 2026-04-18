@@ -67,10 +67,25 @@ export function createRunner({
           }
 
           const { definition } = registry.resolve(action);
-          const authorization = await policy.authorize(definition);
-          let result: ToolResult;
+          let result: ToolResult | null = null;
+          let authorization: Awaited<ReturnType<typeof policy.authorize>> | null = null;
 
-          if (!authorization.allowed) {
+          try {
+            authorization = await policy.authorize(definition);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            result = {
+              tool: definition.name,
+              status: 'error',
+              content: `TOOL_RESULT ${definition.name} ERROR\npolicy=${policy.mode}\n${message}`,
+              meta: {
+                policy: policy.mode,
+                error: error instanceof Error ? (error.stack ?? error.message) : message
+              }
+            };
+          }
+
+          if (result === null && authorization !== null && !authorization.allowed) {
             result = {
               tool: definition.name,
               status: 'error',
@@ -79,7 +94,7 @@ export function createRunner({
                 policy: policy.mode
               }
             };
-          } else {
+          } else if (result === null && authorization !== null) {
             await runHooks(hooks, 'beforeTool', session, action);
             try {
               result = await definition.execute(action as never, { cwd, session });
@@ -94,6 +109,10 @@ export function createRunner({
                 }
               };
             }
+          }
+
+          if (result === null) {
+            throw new Error(`No tool result produced for ${definition.name}`);
           }
 
           await appendRecord(cwd, session, {

@@ -14,17 +14,19 @@ export const lsTool: ToolDefinition<{ ls: LsAction }> = {
   async execute(action, context): Promise<ToolResult> {
     try {
       const { relativePath, targetRealPath } = await resolveWorkspacePath(context.cwd, action.ls.path ?? '.');
-      const entries = (await fs.readdir(targetRealPath, { withFileTypes: true }))
-        .sort((a, b) => a.name.localeCompare(b.name))
+      const allEntries = (await fs.readdir(targetRealPath, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+      const truncated = allEntries.length > LIST_MAX_ENTRIES;
+      const entries = allEntries
         .slice(0, LIST_MAX_ENTRIES)
         .map((entry) => `${entry.isDirectory() ? 'dir' : 'file'} ${entry.name}${entry.isDirectory() ? '/' : ''}`)
         .join('\n');
+      const truncationNotice = truncated ? `\n... (truncated, showing ${Math.min(allEntries.length, LIST_MAX_ENTRIES)} of ${allEntries.length} entries)` : '';
 
       return {
         tool: 'ls',
         status: 'ok',
         meta: { path: relativePath },
-        content: `TOOL_RESULT ls OK\npath=${relativePath}\n${entries}`.trim()
+        content: `TOOL_RESULT ls OK\npath=${relativePath}\n${entries}${truncationNotice}`.trim()
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

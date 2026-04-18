@@ -198,6 +198,43 @@ test('runner records a denied bash action when mode is read-only', async () => {
   assert.equal(toolRecord?.status, 'error');
 });
 
+test('runner records policy authorization failures as tool errors', async () => {
+  const session = createSession('/tmp/workspace');
+  const afterToolEvents: string[] = [];
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}';
+      }
+    },
+    policy: {
+      mode: 'confirm-all',
+      async authorize() {
+        throw new Error('confirmation backend unavailable');
+      }
+    },
+    hooks: [
+      {
+        async afterTool(_session, result) {
+          afterToolEvents.push(`${result.tool}:${result.status}`);
+        }
+      }
+    ]
+  });
+
+  const finalMessage = await runner.runTurn(session, 'inspect repo');
+  const toolRecord = session.records.find((record) => record.kind === 'tool');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal(toolRecord?.status, 'error');
+  assert.match(toolRecord?.content ?? '', /policy=confirm-all/);
+  assert.match(toolRecord?.content ?? '', /confirmation backend unavailable/);
+  assert.deepEqual(afterToolEvents, ['bash:error']);
+});
+
 test('runner executes edit only after confirmation in confirm-write mode', async () => {
   const session = createSession('/tmp/workspace');
   let prompted = 0;

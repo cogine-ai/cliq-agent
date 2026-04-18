@@ -26,3 +26,21 @@ test('parseArgs rejects invalid policy values', () => {
 test('parseArgs rejects missing policy values', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--policy']), /Missing value for --policy/i);
 });
+
+test('parseArgs rejects invalid CLIQ_POLICY_MODE values', () => {
+  const previous = process.env.CLIQ_POLICY_MODE;
+  process.env.CLIQ_POLICY_MODE = 'invalid';
+
+  try {
+    assert.throws(
+      () => parseArgs(['node', 'src/index.ts', 'chat']),
+      /Invalid CLIQ_POLICY_MODE: invalid; expected one of:/i
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CLIQ_POLICY_MODE;
+    } else {
+      process.env.CLIQ_POLICY_MODE = previous;
+    }
+  }
+});
