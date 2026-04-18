@@ -14,11 +14,23 @@ export type LsAction = {
   path?: string;
 };
 
+export type FindAction = {
+  path?: string;
+  name: string;
+};
+
+export type GrepAction = {
+  path?: string;
+  pattern: string;
+};
+
 export type ModelAction =
   | { bash: string }
   | { edit: EditAction }
   | { read: ReadAction }
   | { ls: LsAction }
+  | { find: FindAction }
+  | { grep: GrepAction }
   | { message: string };
 
 export function parseModelAction(content: string): ModelAction {
@@ -90,7 +102,31 @@ export function parseModelAction(content: string): ModelAction {
     }
   }
 
-  if (!['bash', 'edit', 'read', 'ls', 'message'].includes(topLevelKey)) {
+  if (record.find && typeof record.find === 'object' && !Array.isArray(record.find)) {
+    const find = record.find as Record<string, unknown>;
+    if ((find.path === undefined || typeof find.path === 'string') && typeof find.name === 'string') {
+      return {
+        find: {
+          path: find.path as string | undefined,
+          name: find.name
+        }
+      };
+    }
+  }
+
+  if (record.grep && typeof record.grep === 'object' && !Array.isArray(record.grep)) {
+    const grep = record.grep as Record<string, unknown>;
+    if ((grep.path === undefined || typeof grep.path === 'string') && typeof grep.pattern === 'string') {
+      return {
+        grep: {
+          path: grep.path as string | undefined,
+          pattern: grep.pattern
+        }
+      };
+    }
+  }
+
+  if (!['bash', 'edit', 'read', 'ls', 'find', 'grep', 'message'].includes(topLevelKey)) {
     throw new Error(`Unknown top-level key in model action: ${topLevelKey}\n${content}`);
   }
 
