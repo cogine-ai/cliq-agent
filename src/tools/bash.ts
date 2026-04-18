@@ -9,6 +9,7 @@ function clip(text: string) {
 
 export const bashTool: ToolDefinition<{ bash: string }> = {
   name: 'bash',
+  access: 'exec',
   supports(action): action is { bash: string } {
     return typeof (action as { bash?: unknown }).bash === 'string';
   },

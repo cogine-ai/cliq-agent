@@ -4,8 +4,10 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { createPolicyEngine } from '../policy/engine.js';
 import { createSession } from '../session/store.js';
 import { createToolRegistry } from '../tools/registry.js';
+import type { EditModelAction, ToolDefinition } from '../tools/types.js';
 import { createRunner } from './runner.js';
 
 test('registry resolves bash and edit tools', () => {
@@ -74,6 +76,7 @@ test('runner appends tool results and replays them back to the model', async () 
         return {
           definition: {
             name: 'bash',
+            access: 'exec',
             supports(action: unknown): action is { bash: string } {
               return typeof (action as { bash?: unknown }).bash === 'string';
             },
@@ -138,6 +141,7 @@ test('runner converts tool exceptions into tool error records and still calls af
         return {
           definition: {
             name: 'bash',
+            access: 'exec',
             supports(action: unknown): action is { bash: string } {
               return typeof (action as { bash?: unknown }).bash === 'string';
             },
@@ -165,4 +169,114 @@ test('runner converts tool exceptions into tool error records and still calls af
   assert.equal(toolRecord?.status, 'error');
   assert.match(toolRecord?.content ?? '', /spawn exploded/);
   assert.deepEqual(afterToolEvents, ['bash:error']);
+});
+
+test('runner records a denied bash action when mode is read-only', async () => {
+  const session = createSession('/tmp/workspace');
+  const outputs: string[] = [];
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return outputs.length === 0 ? '{"bash":"pwd"}' : '{"message":"done"}';
+      }
+    },
+    policy: createPolicyEngine({ mode: 'read-only' }),
+    hooks: [
+      {
+        afterTool(_session, result) {
+          outputs.push(result.content);
+        }
+      }
+    ]
+  });
+
+  const finalMessage = await runner.runTurn(session, 'inspect repo');
+  const toolRecord = session.records.find((record) => record.kind === 'tool');
+
+  assert.equal(finalMessage, 'done');
+  assert.match(outputs[0] ?? '', /policy mode read-only blocks exec tools/);
+  assert.equal(toolRecord?.status, 'error');
+});
+
+test('runner records policy authorization failures as tool errors', async () => {
+  const session = createSession('/tmp/workspace');
+  const afterToolEvents: string[] = [];
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}';
+      }
+    },
+    policy: {
+      mode: 'confirm-all',
+      async authorize() {
+        throw new Error('confirmation backend unavailable');
+      }
+    },
+    hooks: [
+      {
+        async afterTool(_session, result) {
+          afterToolEvents.push(`${result.tool}:${result.status}`);
+        }
+      }
+    ]
+  });
+
+  const finalMessage = await runner.runTurn(session, 'inspect repo');
+  const toolRecord = session.records.find((record) => record.kind === 'tool');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal(toolRecord?.status, 'error');
+  assert.match(toolRecord?.content ?? '', /policy=confirm-all/);
+  assert.match(toolRecord?.content ?? '', /confirmation backend unavailable/);
+  assert.deepEqual(afterToolEvents, ['bash:error']);
+});
+
+test('runner executes edit only after confirmation in confirm-write mode', async () => {
+  const session = createSession('/tmp/workspace');
+  let prompted = 0;
+  const editExecutions: string[] = [];
+  const editDefinition: ToolDefinition<EditModelAction> = {
+    name: 'edit',
+    access: 'write',
+    supports(action): action is EditModelAction {
+      return 'edit' in action;
+    },
+    async execute(action) {
+      editExecutions.push(action.edit.path);
+      return {
+        tool: 'edit',
+        status: 'ok',
+        meta: { path: action.edit.path },
+        content: `TOOL_RESULT edit OK\npath=${action.edit.path}`
+      };
+    }
+  };
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return editExecutions.length === 0
+          ? '{"edit":{"path":"file.txt","old_text":"before","new_text":"after"}}'
+          : '{"message":"done"}';
+      }
+    },
+    policy: createPolicyEngine({
+      mode: 'confirm-write',
+      confirm: async () => {
+        prompted += 1;
+        return true;
+      }
+    }),
+    registry: createToolRegistry([editDefinition])
+  });
+
+  const finalMessage = await runner.runTurn(session, 'apply edit');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal(prompted, 1);
+  assert.deepEqual(editExecutions, ['file.txt']);
 });

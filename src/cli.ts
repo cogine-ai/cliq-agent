@@ -1,21 +1,73 @@
 import path from 'node:path';
+import { stdin as input, stdout as output } from 'node:process';
 import readline from 'node:readline';
+import { createInterface as createPromptInterface } from 'node:readline/promises';
 
-import { APP_DIR } from './config.js';
+import { APP_DIR, DEFAULT_POLICY_MODE } from './config.js';
 import { createOpenRouterClient } from './model/openrouter.js';
+import { createPolicyEngine } from './policy/engine.js';
+import type { PolicyMode } from './policy/types.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
 import { ensureFresh, ensureSession, saveSession } from './session/store.js';
 
+const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
+const POLICY_MODE_LIST = POLICY_MODES.join(', ');
+
+function isPolicyMode(value: string): value is PolicyMode {
+  return (POLICY_MODES as readonly string[]).includes(value);
+}
+
 export function parseArgs(argv: string[]) {
-  const args = argv.slice(2);
+  const raw = argv.slice(2);
+  let policy: PolicyMode = DEFAULT_POLICY_MODE;
+  const envPolicy = process.env.CLIQ_POLICY_MODE;
+  if (envPolicy !== undefined) {
+    if (!isPolicyMode(envPolicy)) {
+      throw new Error(`Invalid CLIQ_POLICY_MODE: ${envPolicy}; expected one of: ${POLICY_MODE_LIST}`);
+    }
+    policy = envPolicy;
+  }
+
+  const args: string[] = [];
+
+  for (let i = 0; i < raw.length; i += 1) {
+    const token = raw[i];
+    if (token.startsWith('--policy=')) {
+      const value = token.slice('--policy='.length);
+      if (!value) {
+        throw new Error(`Missing value for --policy; expected one of: ${POLICY_MODE_LIST}`);
+      }
+      if (!isPolicyMode(value)) {
+        throw new Error(`Unknown policy mode: ${value}`);
+      }
+      policy = value;
+      continue;
+    }
+
+    if (token === '--policy') {
+      const value = raw[i + 1];
+      if (value === undefined || value === '') {
+        throw new Error(`Missing value for --policy; expected one of: ${POLICY_MODE_LIST}`);
+      }
+      if (!isPolicyMode(value)) {
+        throw new Error(`Unknown policy mode: ${value}`);
+      }
+      policy = value;
+      i += 1;
+      continue;
+    }
+
+    args.push(token);
+  }
+
   const cmd = args[0];
-  if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' ') };
-  if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' ') };
-  if (cmd === 'reset') return { cmd };
-  if (cmd === 'history') return { cmd };
-  if (cmd === 'help' || cmd === '--help' || cmd === '-h') return { cmd: 'help' };
-  return { cmd: 'chat', prompt: args.join(' ') };
+  if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy };
+  if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy };
+  if (cmd === 'reset') return { cmd, policy };
+  if (cmd === 'history') return { cmd, policy };
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h') return { cmd: 'help', policy };
+  return { cmd: 'chat', prompt: args.join(' '), policy };
 }
 
 export function printHelp() {
@@ -29,6 +81,7 @@ Usage:
 
 Env:
   OPENROUTER_API_KEY Required
+  CLIQ_POLICY_MODE   Optional (auto | confirm-write | read-only | confirm-bash | confirm-all)
 `);
 }
 
@@ -53,8 +106,43 @@ function createCliHooks(): RuntimeHook[] {
   ];
 }
 
+async function askYesNo(question: string, rl?: readline.Interface) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.warn("Confirmation skipped: non-interactive TTY, defaulting to 'no'");
+    return false;
+  }
+
+  if (rl) {
+    try {
+      const answer = await new Promise<string>((resolve) => {
+        rl.question(`${question} [y/N] `, resolve);
+      });
+      return answer.trim().toLowerCase() === 'y';
+    } catch (error) {
+      console.warn(`Confirmation prompt failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  let promptRl: ReturnType<typeof createPromptInterface> | undefined;
+  try {
+    promptRl = createPromptInterface({ input, output });
+    const answer = await promptRl.question(`${question} [y/N] `);
+    return answer.trim().toLowerCase() === 'y';
+  } catch (error) {
+    console.warn(`Confirmation prompt failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  } finally {
+    promptRl?.close();
+  }
+}
+
+function createConfirmTool(rl?: readline.Interface) {
+  return async (prompt: string) => await askYesNo(prompt, rl);
+}
+
 export async function runCli(argv: string[]) {
-  const { cmd, prompt } = parseArgs(argv) as { cmd: string; prompt?: string };
+  const { cmd, prompt, policy } = parseArgs(argv) as { cmd: string; prompt?: string; policy: PolicyMode };
   const cwd = process.cwd();
 
   if (cmd === 'help') {
@@ -74,18 +162,24 @@ export async function runCli(argv: string[]) {
   }
 
   const session = await ensureSession(cwd);
-  const runner = createRunner({
-    model: createOpenRouterClient(),
-    hooks: createCliHooks()
-  });
 
   if (prompt && prompt.trim()) {
+    const runner = createRunner({
+      model: createOpenRouterClient(),
+      hooks: createCliHooks(),
+      policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool() })
+    });
     const finalMessage = await runner.runTurn(session, prompt.trim());
     console.log(`\n${finalMessage}`);
     return;
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
+  const runner = createRunner({
+    model: createOpenRouterClient(),
+    hooks: createCliHooks(),
+    policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool(rl) })
+  });
   console.log(`cliq chat in ${session.cwd}`);
   rl.prompt();
 

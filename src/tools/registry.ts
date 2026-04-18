@@ -1,9 +1,13 @@
 import type { ModelAction } from '../protocol/actions.js';
 import { bashTool } from './bash.js';
 import { editTool } from './edit.js';
+import { findTool } from './find.js';
+import { grepTool } from './grep.js';
+import { lsTool } from './ls.js';
+import { readTool } from './read.js';
 import type { ToolDefinition } from './types.js';
 
-export function createToolRegistry(definitions: ToolDefinition[] = [bashTool, editTool]) {
+export function createToolRegistry(definitions: ToolDefinition[] = [bashTool, editTool, readTool, lsTool, findTool, grepTool]) {
   return {
     definitions,
     resolve(action: ModelAction) {
