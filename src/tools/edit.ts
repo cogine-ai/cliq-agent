@@ -5,6 +5,7 @@ import type { EditModelAction, ToolDefinition, ToolResult } from './types.js';
 
 export const editTool: ToolDefinition<EditModelAction> = {
   name: 'edit',
+  access: 'write',
   supports(action): action is EditModelAction {
     return typeof (action as { edit?: unknown }).edit === 'object' && !!(action as { edit?: unknown }).edit;
   },

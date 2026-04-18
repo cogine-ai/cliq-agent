@@ -1,4 +1,5 @@
 import type { EditAction, ModelAction } from '../protocol/actions.js';
+import type { ToolAccess } from '../policy/types.js';
 import type { Session } from '../session/types.js';
 
 export type ToolStatus = 'ok' | 'error';
@@ -17,6 +18,7 @@ export type ToolContext = {
 
 export type ToolDefinition<TAction extends ModelAction = ModelAction> = {
   name: string;
+  access: ToolAccess;
   supports(action: ModelAction): action is TAction;
   execute(action: TAction, context: ToolContext): Promise<ToolResult>;
 };

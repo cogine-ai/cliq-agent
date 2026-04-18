@@ -74,6 +74,7 @@ test('runner appends tool results and replays them back to the model', async () 
         return {
           definition: {
             name: 'bash',
+            access: 'exec',
             supports(action: unknown): action is { bash: string } {
               return typeof (action as { bash?: unknown }).bash === 'string';
             },
@@ -138,6 +139,7 @@ test('runner converts tool exceptions into tool error records and still calls af
         return {
           definition: {
             name: 'bash',
+            access: 'exec',
             supports(action: unknown): action is { bash: string } {
               return typeof (action as { bash?: unknown }).bash === 'string';
             },

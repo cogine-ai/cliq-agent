@@ -4,9 +4,21 @@ export type EditAction = {
   new_text: string;
 };
 
+export type ReadAction = {
+  path: string;
+  start_line?: number;
+  end_line?: number;
+};
+
+export type LsAction = {
+  path?: string;
+};
+
 export type ModelAction =
   | { bash: string }
   | { edit: EditAction }
+  | { read: ReadAction }
+  | { ls: LsAction }
   | { message: string };
 
 export function parseModelAction(content: string): ModelAction {
@@ -50,7 +62,35 @@ export function parseModelAction(content: string): ModelAction {
     }
   }
 
-  if (!['bash', 'edit', 'message'].includes(topLevelKey)) {
+  if (record.read && typeof record.read === 'object' && !Array.isArray(record.read)) {
+    const read = record.read as Record<string, unknown>;
+    if (
+      typeof read.path === 'string' &&
+      (read.start_line === undefined || typeof read.start_line === 'number') &&
+      (read.end_line === undefined || typeof read.end_line === 'number')
+    ) {
+      return {
+        read: {
+          path: read.path,
+          start_line: read.start_line as number | undefined,
+          end_line: read.end_line as number | undefined
+        }
+      };
+    }
+  }
+
+  if (record.ls && typeof record.ls === 'object' && !Array.isArray(record.ls)) {
+    const ls = record.ls as Record<string, unknown>;
+    if (ls.path === undefined || typeof ls.path === 'string') {
+      return {
+        ls: {
+          path: ls.path as string | undefined
+        }
+      };
+    }
+  }
+
+  if (!['bash', 'edit', 'read', 'ls', 'message'].includes(topLevelKey)) {
     throw new Error(`Unknown top-level key in model action: ${topLevelKey}\n${content}`);
   }
 
