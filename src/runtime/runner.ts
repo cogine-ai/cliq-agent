@@ -1,9 +1,11 @@
 import { MAX_LOOPS } from '../config.js';
 import type { ChatMessage, ModelClient } from '../model/types.js';
+import { createPolicyEngine } from '../policy/engine.js';
 import { parseModelAction } from '../protocol/actions.js';
 import { appendRecord, makeId, nowIso, saveSession } from '../session/store.js';
 import type { Session } from '../session/types.js';
 import { createToolRegistry } from '../tools/registry.js';
+import type { ToolResult } from '../tools/types.js';
 import { runHooks, type RuntimeHook } from './hooks.js';
 
 function buildChatMessages(session: Session): ChatMessage[] {
@@ -17,11 +19,13 @@ function buildChatMessages(session: Session): ChatMessage[] {
 export function createRunner({
   model,
   registry = createToolRegistry(),
-  hooks = []
+  hooks = [],
+  policy = createPolicyEngine({ mode: 'auto' })
 }: {
   model: ModelClient;
   registry?: ReturnType<typeof createToolRegistry>;
   hooks?: RuntimeHook[];
+  policy?: ReturnType<typeof createPolicyEngine>;
 }) {
   return {
     async runTurn(session: Session, userInput: string): Promise<string> {
@@ -62,22 +66,36 @@ export function createRunner({
             return finalMessage;
           }
 
-          await runHooks(hooks, 'beforeTool', session, action);
           const { definition } = registry.resolve(action);
-          let result;
-          try {
-            result = await definition.execute(action as never, { cwd, session });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+          const authorization = await policy.authorize(definition);
+          let result: ToolResult;
+
+          if (!authorization.allowed) {
             result = {
               tool: definition.name,
-              status: 'error' as const,
-              content: `TOOL_RESULT ${definition.name} ERROR\n${message}`,
+              status: 'error',
+              content: `TOOL_RESULT ${definition.name} ERROR\npolicy=${policy.mode}\n${authorization.reason}`,
               meta: {
-                error: error instanceof Error ? (error.stack ?? error.message) : message
+                policy: policy.mode
               }
             };
+          } else {
+            await runHooks(hooks, 'beforeTool', session, action);
+            try {
+              result = await definition.execute(action as never, { cwd, session });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              result = {
+                tool: definition.name,
+                status: 'error',
+                content: `TOOL_RESULT ${definition.name} ERROR\n${message}`,
+                meta: {
+                  error: error instanceof Error ? (error.stack ?? error.message) : message
+                }
+              };
+            }
           }
+
           await appendRecord(cwd, session, {
             id: makeId('tool'),
             ts: nowIso(),

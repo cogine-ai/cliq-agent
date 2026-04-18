@@ -13,7 +13,7 @@ Cliq is a tiny local coding agent harness built around a minimal, provider-agnos
 
 ## Current scope
 
-Cliq is intentionally small right now. It supports three action types:
+Cliq is intentionally small right now. It supports structured inspection, shell execution, exact text replacement, and final responses:
 
 ```json
 {"bash":"npm test"}
@@ -24,10 +24,24 @@ Cliq is intentionally small right now. It supports three action types:
 ```
 
 ```json
-{"message":"Done. Updated the README and ran tests."}
+{"read":{"path":"src/runtime/runner.ts","start_line":1,"end_line":80}}
 ```
 
-That is the whole protocol.
+```json
+{"ls":{"path":"src"}}
+```
+
+```json
+{"find":{"path":"src","name":"runner"}}
+```
+
+```json
+{"grep":{"path":"src","pattern":"runTurn"}}
+```
+
+```json
+{"message":"Done. Updated the README and ran tests."}
+```
 
 ## Why this shape
 
@@ -76,6 +90,26 @@ Print raw persisted session:
 cliq history
 ```
 
+Run with a stricter policy mode:
+
+```bash
+cliq --policy read-only "inspect the runner and explain how tool dispatch works"
+```
+
+## Policy modes
+
+- `auto`: execute all registered tools
+- `confirm-write`: ask before `edit`
+- `read-only`: allow only `read`, `ls`, `find`, and `grep`
+- `confirm-bash`: ask before `bash`
+- `confirm-all`: ask before every tool
+
+You can set the default with:
+
+```bash
+export CLIQ_POLICY_MODE=read-only
+```
+
 ## Session model
 
 Each workspace gets its own local state directory:
@@ -102,7 +136,7 @@ The Phase 0 runtime split organizes the code into focused modules:
 The current version is an early open source starting point. It does **not** yet aim to provide:
 
 - sandboxing
-- approval flows
+- rich approval UX
 - streaming output
 - broad tool surface area
 - multi-agent orchestration

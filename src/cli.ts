@@ -1,8 +1,11 @@
 import path from 'node:path';
+import { stdin as input, stdout as output } from 'node:process';
 import readline from 'node:readline';
+import { createInterface as createPromptInterface } from 'node:readline/promises';
 
 import { APP_DIR, DEFAULT_POLICY_MODE } from './config.js';
 import { createOpenRouterClient } from './model/openrouter.js';
+import { createPolicyEngine } from './policy/engine.js';
 import type { PolicyMode } from './policy/types.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
@@ -66,6 +69,7 @@ Usage:
 
 Env:
   OPENROUTER_API_KEY Required
+  CLIQ_POLICY_MODE   Optional (auto | confirm-write | read-only | confirm-bash | confirm-all)
 `);
 }
 
@@ -90,8 +94,22 @@ function createCliHooks(): RuntimeHook[] {
   ];
 }
 
+async function confirmTool(prompt: string) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return false;
+  }
+
+  const rl = createPromptInterface({ input, output });
+  try {
+    const answer = await rl.question(`${prompt} [y/N] `);
+    return answer.trim().toLowerCase() === 'y';
+  } finally {
+    rl.close();
+  }
+}
+
 export async function runCli(argv: string[]) {
-  const { cmd, prompt } = parseArgs(argv) as { cmd: string; prompt?: string };
+  const { cmd, prompt, policy } = parseArgs(argv) as { cmd: string; prompt?: string; policy: PolicyMode };
   const cwd = process.cwd();
 
   if (cmd === 'help') {
@@ -113,7 +131,8 @@ export async function runCli(argv: string[]) {
   const session = await ensureSession(cwd);
   const runner = createRunner({
     model: createOpenRouterClient(),
-    hooks: createCliHooks()
+    hooks: createCliHooks(),
+    policy: createPolicyEngine({ mode: policy, confirm: confirmTool })
   });
 
   if (prompt && prompt.trim()) {
