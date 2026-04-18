@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { createSession } from '../session/store.js';
 import { createToolRegistry } from '../tools/registry.js';
@@ -97,4 +100,69 @@ test('runner appends tool results and replays them back to the model', async () 
     secondCallMessages.some((message) => message.role === 'user' && message.content.includes('TOOL_RESULT bash OK')),
     true
   );
+});
+
+test('runner resets lifecycle state when setup fails before the loop', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-runner-'));
+  const filePath = path.join(dir, 'workspace-file');
+  await writeFile(filePath, 'not a directory');
+
+  const session = createSession(filePath);
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return '{"message":"done"}';
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'say done'));
+  assert.equal(session.lifecycle.status, 'idle');
+});
+
+test('runner converts tool exceptions into tool error records and still calls afterTool hooks', async () => {
+  const session = createSession('/tmp/workspace');
+  const afterToolEvents: string[] = [];
+  let callCount = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        callCount += 1;
+        return callCount === 1 ? '{"bash":"pwd"}' : '{"message":"done"}';
+      }
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              throw new Error('spawn exploded');
+            }
+          }
+        };
+      }
+    },
+    hooks: [
+      {
+        async afterTool(_session, result) {
+          afterToolEvents.push(`${result.tool}:${result.status}`);
+        }
+      }
+    ]
+  });
+
+  const finalMessage = await runner.runTurn(session, 'show cwd');
+  const toolRecord = session.records.find((record) => record.kind === 'tool');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal(toolRecord?.kind, 'tool');
+  assert.equal(toolRecord?.status, 'error');
+  assert.match(toolRecord?.content ?? '', /spawn exploded/);
+  assert.deepEqual(afterToolEvents, ['bash:error']);
 });

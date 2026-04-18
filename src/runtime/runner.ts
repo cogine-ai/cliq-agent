@@ -26,20 +26,20 @@ export function createRunner({
   return {
     async runTurn(session: Session, userInput: string): Promise<string> {
       const cwd = session.cwd;
-      session.lifecycle.status = 'running';
-      session.lifecycle.turn += 1;
-      session.lifecycle.lastUserInputAt = nowIso();
-      await appendRecord(cwd, session, {
-        id: makeId('usr'),
-        ts: nowIso(),
-        kind: 'user',
-        role: 'user',
-        content: userInput
-      });
-
-      await runHooks(hooks, 'beforeTurn', session, userInput);
-
       try {
+        session.lifecycle.status = 'running';
+        session.lifecycle.turn += 1;
+        session.lifecycle.lastUserInputAt = nowIso();
+        await appendRecord(cwd, session, {
+          id: makeId('usr'),
+          ts: nowIso(),
+          kind: 'user',
+          role: 'user',
+          content: userInput
+        });
+
+        await runHooks(hooks, 'beforeTurn', session, userInput);
+
         for (let i = 0; i < MAX_LOOPS; i += 1) {
           const rawContent = await model.complete(buildChatMessages(session));
           const action = parseModelAction(rawContent);
@@ -64,7 +64,20 @@ export function createRunner({
 
           await runHooks(hooks, 'beforeTool', session, action);
           const { definition } = registry.resolve(action);
-          const result = await definition.execute(action as never, { cwd, session });
+          let result;
+          try {
+            result = await definition.execute(action as never, { cwd, session });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            result = {
+              tool: definition.name,
+              status: 'error' as const,
+              content: `TOOL_RESULT ${definition.name} ERROR\n${message}`,
+              meta: {
+                error: error instanceof Error ? (error.stack ?? error.message) : message
+              }
+            };
+          }
           await appendRecord(cwd, session, {
             id: makeId('tool'),
             ts: nowIso(),

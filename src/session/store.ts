@@ -12,6 +12,36 @@ type LegacySession = {
   messages?: Array<{ role?: string; content?: string | null; name?: string; status?: 'ok' | 'error' }>;
 };
 
+function isSessionRecord(value: unknown): value is SessionRecord {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const record = value as SessionRecord;
+  if (typeof record.id !== 'string' || typeof record.ts !== 'string' || typeof record.kind !== 'string' || typeof record.role !== 'string') {
+    return false;
+  }
+
+  if (record.kind === 'system' || record.kind === 'user') {
+    return typeof record.content === 'string';
+  }
+
+  if (record.kind === 'assistant') {
+    return record.role === 'assistant' && typeof record.content === 'string' && 'action' in record;
+  }
+
+  if (record.kind === 'tool') {
+    return (
+      record.role === 'user' &&
+      typeof record.tool === 'string' &&
+      (record.status === 'ok' || record.status === 'error') &&
+      typeof record.content === 'string'
+    );
+  }
+
+  return false;
+}
+
 export function sessionPath(cwd: string) {
   return path.join(cwd, APP_DIR, SESSION_FILE);
 }
@@ -51,9 +81,17 @@ function isSession(value: unknown): value is Session {
     !!value &&
     typeof value === 'object' &&
     typeof (value as Session).version === 'number' &&
+    (value as Session).app === 'cliq' &&
+    typeof (value as Session).model === 'string' &&
+    typeof (value as Session).cwd === 'string' &&
+    typeof (value as Session).createdAt === 'string' &&
+    typeof (value as Session).updatedAt === 'string' &&
     !!(value as Session).lifecycle &&
     typeof (value as Session).lifecycle === 'object' &&
-    Array.isArray((value as Session).records)
+    ((value as Session).lifecycle.status === 'idle' || (value as Session).lifecycle.status === 'running') &&
+    typeof (value as Session).lifecycle.turn === 'number' &&
+    Array.isArray((value as Session).records) &&
+    (value as Session).records.every((record) => isSessionRecord(record))
   );
 }
 
