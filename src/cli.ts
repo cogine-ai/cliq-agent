@@ -94,18 +94,29 @@ function createCliHooks(): RuntimeHook[] {
   ];
 }
 
-async function confirmTool(prompt: string) {
+async function askYesNo(question: string, rl?: readline.Interface) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     return false;
   }
 
-  const rl = createPromptInterface({ input, output });
+  if (rl) {
+    const answer = await new Promise<string>((resolve) => {
+      rl.question(`${question} [y/N] `, resolve);
+    });
+    return answer.trim().toLowerCase() === 'y';
+  }
+
+  const promptRl = createPromptInterface({ input, output });
   try {
-    const answer = await rl.question(`${prompt} [y/N] `);
+    const answer = await promptRl.question(`${question} [y/N] `);
     return answer.trim().toLowerCase() === 'y';
   } finally {
-    rl.close();
+    promptRl.close();
   }
+}
+
+function createConfirmTool(rl?: readline.Interface) {
+  return async (prompt: string) => await askYesNo(prompt, rl);
 }
 
 export async function runCli(argv: string[]) {
@@ -129,19 +140,24 @@ export async function runCli(argv: string[]) {
   }
 
   const session = await ensureSession(cwd);
-  const runner = createRunner({
-    model: createOpenRouterClient(),
-    hooks: createCliHooks(),
-    policy: createPolicyEngine({ mode: policy, confirm: confirmTool })
-  });
 
   if (prompt && prompt.trim()) {
+    const runner = createRunner({
+      model: createOpenRouterClient(),
+      hooks: createCliHooks(),
+      policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool() })
+    });
     const finalMessage = await runner.runTurn(session, prompt.trim());
     console.log(`\n${finalMessage}`);
     return;
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
+  const runner = createRunner({
+    model: createOpenRouterClient(),
+    hooks: createCliHooks(),
+    policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool(rl) })
+  });
   console.log(`cliq chat in ${session.cwd}`);
   rl.prompt();
 
