@@ -105,6 +105,50 @@ test('runner appends tool results and replays them back to the model', async () 
   );
 });
 
+test('runner prepends composed instruction messages before replayed session records', async () => {
+  const session = createSession('/tmp/workspace');
+  let seenMessages: Array<{ role: string; content: string }> = [];
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        seenMessages = messages;
+        return '{"message":"done"}';
+      }
+    },
+    instructions: async () => [
+      { role: 'system', layer: 'core', source: 'base', content: 'BASE' },
+      { role: 'system', layer: 'skill', source: 'reviewer', content: 'SKILL' }
+    ]
+  });
+
+  await runner.runTurn(session, 'say done');
+
+  assert.equal(seenMessages[0]?.content, 'BASE');
+  assert.equal(seenMessages[1]?.content, 'SKILL');
+  assert.equal(seenMessages[2]?.content, 'say done');
+});
+
+test('runner does not persist composed instruction messages into the session record log', async () => {
+  const session = createSession('/tmp/workspace');
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return '{"message":"done"}';
+      }
+    },
+    instructions: async () => [
+      { role: 'system', layer: 'core', source: 'base', content: 'BASE' },
+      { role: 'system', layer: 'skill', source: 'reviewer', content: 'SKILL' }
+    ]
+  });
+
+  await runner.runTurn(session, 'say done');
+
+  assert.equal(session.records.some((record) => record.kind === 'system'), false);
+});
+
 test('runner resets lifecycle state when setup fails before the loop', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-runner-'));
   const filePath = path.join(dir, 'workspace-file');

@@ -1,4 +1,5 @@
 import { DEFAULT_POLICY_MODE, MAX_LOOPS } from '../config.js';
+import type { InstructionMessage } from '../instructions/types.js';
 import type { ChatMessage, ModelClient } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { parseModelAction } from '../protocol/actions.js';
@@ -8,24 +9,29 @@ import { createToolRegistry } from '../tools/registry.js';
 import type { ToolResult } from '../tools/types.js';
 import { runHooks, type RuntimeHook } from './hooks.js';
 
-function buildChatMessages(session: Session): ChatMessage[] {
-  return session.records.map((record) =>
-    record.kind === 'tool'
-      ? { role: 'user', content: record.content }
-      : { role: record.role, content: record.content }
-  );
+function buildChatMessages(session: Session, instructions: InstructionMessage[]): ChatMessage[] {
+  return [
+    ...instructions.map<ChatMessage>(({ role, content }) => ({ role, content })),
+    ...session.records.map<ChatMessage>((record) =>
+      record.kind === 'tool'
+        ? { role: 'user', content: record.content }
+        : { role: record.role, content: record.content }
+    )
+  ];
 }
 
 export function createRunner({
   model,
   registry = createToolRegistry(),
   hooks = [],
-  policy = createPolicyEngine({ mode: DEFAULT_POLICY_MODE })
+  policy = createPolicyEngine({ mode: DEFAULT_POLICY_MODE }),
+  instructions = async () => []
 }: {
   model: ModelClient;
   registry?: ReturnType<typeof createToolRegistry>;
   hooks?: RuntimeHook[];
   policy?: ReturnType<typeof createPolicyEngine>;
+  instructions?: (session: Session) => Promise<InstructionMessage[]>;
 }) {
   return {
     async runTurn(session: Session, userInput: string): Promise<string> {
@@ -45,7 +51,7 @@ export function createRunner({
         await runHooks(hooks, 'beforeTurn', session, userInput);
 
         for (let i = 0; i < MAX_LOOPS; i += 1) {
-          const rawContent = await model.complete(buildChatMessages(session));
+          const rawContent = await model.complete(buildChatMessages(session, await instructions(session)));
           const action = parseModelAction(rawContent);
 
           session.lifecycle.lastAssistantOutputAt = nowIso();

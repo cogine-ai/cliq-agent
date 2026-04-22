@@ -96,6 +96,12 @@ Run with a stricter policy mode:
 cliq --policy read-only "inspect the runner and explain how tool dispatch works"
 ```
 
+Activate one or more local skills for a run:
+
+```bash
+cliq --skill reviewer --skill safe-edit "inspect the runtime and suggest a minimal refactor"
+```
+
 ## Policy modes
 
 - `auto`: execute all registered tools
@@ -110,6 +116,57 @@ You can set the default with:
 export CLIQ_POLICY_MODE=read-only
 ```
 
+## Workspace config
+
+Cliq reads optional runtime config from `./.cliq/config.json` in the current workspace.
+
+```json
+{
+  "instructionFiles": [".cliq/instructions.md"],
+  "extensions": ["builtin:policy-instructions", "./.cliq/extensions/log-turns.js"],
+  "defaultSkills": ["reviewer"]
+}
+```
+
+All fields are optional. If the file is missing, Cliq behaves like the default `v0.2.0` runtime with no repo-local prompt or extension inputs.
+
+## Local skills
+
+Local skills live at `./.cliq/skills/<name>/SKILL.md` and inject additional system instructions without changing Cliq core code.
+
+```md
+---
+name: reviewer
+description: inspection-first review mode
+---
+
+Prefer read-only inspection first. Summarize structure before proposing mutations.
+```
+
+You can activate a skill explicitly with `--skill <name>` or make it load by default via `defaultSkills` in workspace config.
+
+## Extensions
+
+Phase 2 extensions add instruction overlays and runtime hooks.
+
+Enable the built-in policy overlay:
+
+```json
+{
+  "extensions": ["builtin:policy-instructions"]
+}
+```
+
+Enable a local workspace extension module:
+
+```json
+{
+  "extensions": ["./.cliq/extensions/log-turns.js"]
+}
+```
+
+In `v0.3.0`, extensions are intentionally limited to hooks and instruction contributions. They do not register new model-callable top-level actions.
+
 ## Session model
 
 Each workspace gets its own local state directory:
@@ -118,7 +175,7 @@ Each workspace gets its own local state directory:
 ./.cliq/session.json
 ```
 
-Cliq replays prior records back into the model in order, including normalized tool results. This keeps session continuity simple and portable without relying on provider-specific tool call envelopes.
+Cliq replays prior records back into the model in order, including normalized tool results. Runtime-composed instructions are rebuilt on each turn from the current workspace config, loaded skills, and extensions; they are not persisted as session records.
 
 ## Internal architecture
 

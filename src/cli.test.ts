@@ -7,7 +7,8 @@ test('parseArgs accepts --policy=read-only', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--policy=read-only', 'chat']), {
     cmd: 'chat',
     prompt: '',
-    policy: 'read-only'
+    policy: 'read-only',
+    skills: []
   });
 });
 
@@ -15,7 +16,8 @@ test('parseArgs accepts --policy confirm-all for one-shot prompt', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--policy', 'confirm-all', 'fix', 'tests']), {
     cmd: 'chat',
     prompt: 'fix tests',
-    policy: 'confirm-all'
+    policy: 'confirm-all',
+    skills: []
   });
 });
 
@@ -43,4 +45,28 @@ test('parseArgs rejects invalid CLIQ_POLICY_MODE values', () => {
       process.env.CLIQ_POLICY_MODE = previous;
     }
   }
+});
+
+test('parseArgs collects repeated --skill flags', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--skill', 'reviewer', '--skill=safe-edit', 'chat']), {
+    cmd: 'chat',
+    prompt: '',
+    policy: 'auto',
+    skills: ['reviewer', 'safe-edit']
+  });
+});
+
+test('parseArgs rejects missing --skill values', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--skill']),
+    /Missing value for --skill/i
+  );
+});
+
+test('parseArgs keeps skills on non-chat commands for downstream assembly parity', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--skill', 'reviewer', 'history']), {
+    cmd: 'history',
+    policy: 'auto',
+    skills: ['reviewer']
+  });
 });
