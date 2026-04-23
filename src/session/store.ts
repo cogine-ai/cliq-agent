@@ -3,7 +3,6 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { APP_DIR, MODEL, SESSION_FILE, SESSION_VERSION } from '../config.js';
-import { BASE_SYSTEM_PROMPT, SYSTEM_PROMPT } from '../prompt/system.js';
 import type { Session, SessionRecord } from './types.js';
 
 type LegacySession = {
@@ -87,19 +86,22 @@ function isSession(value: unknown): value is Session {
   );
 }
 
-function stripSeededSystemPrompt(records: SessionRecord[]) {
+function stripSeededSystemPrompt(records: SessionRecord[], sourceVersion = 0) {
+  if (sourceVersion >= SESSION_VERSION) {
+    return records;
+  }
+
   return records.filter((record, index) => {
     return !(
       index === 0 &&
       record.kind === 'system' &&
-      record.role === 'system' &&
-      (record.content === BASE_SYSTEM_PROMPT || record.content === SYSTEM_PROMPT)
+      record.role === 'system'
     );
   });
 }
 
 function normalizeSession(session: Session): Session {
-  const records = stripSeededSystemPrompt(session.records);
+  const records = stripSeededSystemPrompt(session.records, session.version);
   const version = Math.max(session.version, SESSION_VERSION);
 
   if (version === session.version && records.length === session.records.length) {

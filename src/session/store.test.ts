@@ -4,7 +4,6 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { SYSTEM_PROMPT } from '../prompt/system.js';
 import { createSession, ensureSession, sessionPath } from './store.js';
 
 test('createSession starts without a seeded system record', () => {
@@ -64,7 +63,7 @@ test('ensureSession strips the legacy seeded system prompt during migration', as
             ts: '2026-04-01T00:00:00.000Z',
             kind: 'system',
             role: 'system',
-            content: SYSTEM_PROMPT
+            content: 'old legacy seeded prompt literal'
           }
         ]
       }),
@@ -98,7 +97,7 @@ test('ensureSession preserves non-system records when stripping the legacy seede
             ts: '2026-04-01T00:00:00.000Z',
             kind: 'system',
             role: 'system',
-            content: SYSTEM_PROMPT
+            content: 'old legacy seeded prompt literal'
           },
           {
             id: 'usr_1',
@@ -143,4 +142,39 @@ test('ensureSession rejects malformed sessions and recreates a valid session', a
   assert.equal(session.version > 0, true);
   assert.equal(Array.isArray(session.records), true);
   assert.deepEqual(session.records, []);
+});
+
+test('ensureSession keeps explicit system records for current-version sessions', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-current-system-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'session.json'),
+      JSON.stringify({
+        version: 3,
+        app: 'cliq',
+        model: 'anthropic/claude-sonnet-4.6',
+        cwd,
+        createdAt: '2026-04-01T00:00:00.000Z',
+        updatedAt: '2026-04-01T00:00:00.000Z',
+        lifecycle: { status: 'idle', turn: 1 },
+        records: [
+          {
+            id: 'sys_1',
+            ts: '2026-04-01T00:00:00.000Z',
+            kind: 'system',
+            role: 'system',
+            content: 'explicit current-version system record'
+          }
+        ]
+      }),
+      'utf8'
+    );
+
+    const session = await ensureSession(cwd);
+    assert.equal(session.records[0]?.kind, 'system');
+    assert.equal(session.records[0]?.content, 'explicit current-version system record');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });

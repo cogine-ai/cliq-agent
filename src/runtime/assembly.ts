@@ -5,6 +5,30 @@ import type { PolicyMode } from '../policy/types.js';
 import type { Session } from '../session/types.js';
 import { loadSkills, mergeSkillNames } from '../skills/loader.js';
 import { loadWorkspaceConfig } from '../workspace/config.js';
+import type { InstructionLayer, InstructionMessage } from '../instructions/types.js';
+
+const INSTRUCTION_LAYERS = new Set<InstructionLayer>(['core', 'workspace', 'skill', 'extension']);
+
+function validateExtensionMessages(extensionName: string, value: unknown): InstructionMessage[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`Extension ${extensionName} instruction source returned invalid value, expected array`);
+  }
+
+  value.forEach((message, index) => {
+    if (
+      !message ||
+      typeof message !== 'object' ||
+      (message as Record<string, unknown>).role !== 'system' ||
+      typeof (message as Record<string, unknown>).content !== 'string' ||
+      typeof (message as Record<string, unknown>).source !== 'string' ||
+      !INSTRUCTION_LAYERS.has((message as Record<string, unknown>).layer as InstructionLayer)
+    ) {
+      throw new Error(`Extension ${extensionName} instruction source returned invalid message at index ${index}`);
+    }
+  });
+
+  return value as InstructionMessage[];
+}
 
 export async function createRuntimeAssembly({
   cwd,
@@ -34,7 +58,8 @@ export async function createRuntimeAssembly({
           extensions.flatMap((extension) =>
             (extension.instructionSources ?? []).map(async (source) => {
               try {
-                return await source({ cwd, session: currentSession, policyMode });
+                const messages = await source({ cwd, session: currentSession, policyMode });
+                return validateExtensionMessages(extension.name, messages);
               } catch (error) {
                 throw new Error(
                   `Extension ${extension.name} instruction source failed: ${

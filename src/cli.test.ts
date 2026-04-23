@@ -63,6 +63,13 @@ test('parseArgs rejects missing --skill values', () => {
   );
 });
 
+test('parseArgs rejects --skill when the next token is another flag', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--skill', '--policy', 'read-only', 'chat']),
+    /Missing value for --skill/i
+  );
+});
+
 test('parseArgs keeps skills on non-chat commands for downstream assembly parity', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--skill', 'reviewer', 'history']), {
     cmd: 'history',

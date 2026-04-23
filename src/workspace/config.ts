@@ -15,6 +15,14 @@ const EMPTY_WORKSPACE_CONFIG: WorkspaceConfig = {
   defaultSkills: []
 };
 
+function cloneEmptyWorkspaceConfig(): WorkspaceConfig {
+  return {
+    instructionFiles: [...EMPTY_WORKSPACE_CONFIG.instructionFiles],
+    extensions: [...EMPTY_WORKSPACE_CONFIG.extensions],
+    defaultSkills: [...EMPTY_WORKSPACE_CONFIG.defaultSkills]
+  };
+}
+
 function readStringArray(record: Record<string, unknown>, key: keyof WorkspaceConfig) {
   const value = record[key];
   if (value === undefined) {
@@ -45,7 +53,7 @@ export async function loadWorkspaceConfig(cwd: string): Promise<WorkspaceConfig>
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return EMPTY_WORKSPACE_CONFIG;
+      return cloneEmptyWorkspaceConfig();
     }
 
     throw error;

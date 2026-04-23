@@ -107,3 +107,77 @@ test('createRuntimeAssembly surfaces extension instruction source failures clear
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+test('createRuntimeAssembly rejects extension instruction sources that return non-arrays', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-invalid-array-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq', 'extensions'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify({
+        extensions: ['./.cliq/extensions/broken.js']
+      }),
+      'utf8'
+    );
+    await writeFile(
+      path.join(cwd, '.cliq', 'extensions', 'broken.js'),
+      `export default {
+        name: 'broken',
+        instructionSources: [async () => 'not-an-array'],
+        hooks: []
+      };`,
+      'utf8'
+    );
+
+    const assembly = await createRuntimeAssembly({
+      cwd,
+      session: createSession(cwd),
+      policyMode: 'auto',
+      cliSkillNames: []
+    });
+
+    await assert.rejects(
+      () => assembly.instructions(assembly.session),
+      /Extension broken instruction source failed: Extension broken instruction source returned invalid value, expected array/i
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('createRuntimeAssembly rejects extension instruction sources that return invalid messages', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-invalid-message-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq', 'extensions'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify({
+        extensions: ['./.cliq/extensions/broken.js']
+      }),
+      'utf8'
+    );
+    await writeFile(
+      path.join(cwd, '.cliq', 'extensions', 'broken.js'),
+      `export default {
+        name: 'broken',
+        instructionSources: [async () => [{ role: 'user', content: 'bad' }]],
+        hooks: []
+      };`,
+      'utf8'
+    );
+
+    const assembly = await createRuntimeAssembly({
+      cwd,
+      session: createSession(cwd),
+      policyMode: 'auto',
+      cliSkillNames: []
+    });
+
+    await assert.rejects(
+      () => assembly.instructions(assembly.session),
+      /Extension broken instruction source failed: Extension broken instruction source returned invalid message at index 0/i
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

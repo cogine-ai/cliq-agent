@@ -62,7 +62,7 @@ The new runtime assembly layer should sit **in front of** these modules and comp
 
 ## v0.3.0 Product Bar
 
-`v0.3.0` only counts as shipped if a real user can do all of the following **without editing Cliq source code**:
+`v0.3.0` only counts as shipped if a real user can do all following **without editing Cliq source code**:
 
 1. add `.cliq/config.json` to a repo and change agent behavior for that repo
 2. add `.cliq/skills/<name>/SKILL.md` and activate it via `--skill <name>` or `defaultSkills`
@@ -88,7 +88,7 @@ Phase 2 extensions may **not** contribute:
 
 ## Release Definition
 
-`v0.3.0` is complete when all of the following are true:
+`v0.3.0` is complete when all following are true:
 
 - Cliq loads `.cliq/config.json` if present and behaves the same as `v0.2.0` when it is absent
 - Cliq accepts repeated `--skill <name>` flags

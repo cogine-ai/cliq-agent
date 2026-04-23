@@ -47,3 +47,49 @@ test('loadExtensions reports the failing specifier on import failure', async () 
     /missing\.js/i
   );
 });
+
+test('loadExtensions rejects invalid instructionSources values', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-extension-invalid-sources-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq', 'extensions'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'extensions', 'broken.js'),
+      `export default {
+        name: 'broken',
+        instructionSources: 'nope',
+        hooks: []
+      };`,
+      'utf8'
+    );
+
+    await assert.rejects(
+      () => loadExtensions(cwd, ['./.cliq/extensions/broken.js']),
+      /invalid instructionSources, expected array/i
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('loadExtensions rejects invalid hooks values', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-extension-invalid-hooks-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq', 'extensions'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'extensions', 'broken.js'),
+      `export default {
+        name: 'broken',
+        instructionSources: [],
+        hooks: {}
+      };`,
+      'utf8'
+    );
+
+    await assert.rejects(
+      () => loadExtensions(cwd, ['./.cliq/extensions/broken.js']),
+      /invalid hooks, expected array/i
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

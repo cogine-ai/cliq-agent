@@ -71,7 +71,7 @@ export function parseArgs(argv: string[]) {
 
     if (token === '--skill') {
       const value = raw[i + 1];
-      if (value === undefined || value === '') {
+      if (value === undefined || value === '' || value.startsWith('--')) {
         throw new Error('Missing value for --skill');
       }
       skills.push(value);

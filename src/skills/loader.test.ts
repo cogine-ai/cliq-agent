@@ -93,3 +93,10 @@ test('loadSkills accepts CRLF frontmatter and body separators', async () => {
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+test('loadSkills rejects invalid skill names before resolving paths', async () => {
+  await assert.rejects(
+    () => loadSkills('/tmp/workspace', ['../escape']),
+    /Invalid skill name: \.\.\/escape/i
+  );
+});

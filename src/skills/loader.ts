@@ -9,6 +9,10 @@ export function mergeSkillNames(defaultSkills: string[], cliSkills: string[]) {
   return [...new Set([...defaultSkills, ...cliSkills])];
 }
 
+function isValidSkillName(name: string) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name);
+}
+
 function parseSkillMarkdown(raw: string): LoadedSkill {
   const match = raw.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n+([\s\S]*)$/);
   if (!match) {
@@ -45,6 +49,10 @@ export async function loadSkills(cwd: string, names: string[]): Promise<LoadedSk
   const loaded: LoadedSkill[] = [];
 
   for (const name of names) {
+    if (!isValidSkillName(name)) {
+      throw new Error(`Invalid skill name: ${name}`);
+    }
+
     const { targetRealPath } = await resolveWorkspacePath(cwd, path.join(APP_DIR, 'skills', name, 'SKILL.md'));
     const raw = await fs.readFile(targetRealPath, 'utf8');
     const skill = parseSkillMarkdown(raw);

@@ -42,6 +42,22 @@ export async function loadExtensions(cwd: string, specifiers: string[]) {
       throw new Error(`Extension ${specifier} must export a named CliqExtension`);
     }
 
+    if (extension.instructionSources !== undefined && !Array.isArray(extension.instructionSources)) {
+      throw new Error(`Extension ${specifier} has invalid instructionSources, expected array`);
+    }
+
+    if ((extension.instructionSources ?? []).some((source) => typeof source !== 'function')) {
+      throw new Error(`Extension ${specifier} has invalid instructionSource item, expected function`);
+    }
+
+    if (extension.hooks !== undefined && !Array.isArray(extension.hooks)) {
+      throw new Error(`Extension ${specifier} has invalid hooks, expected array`);
+    }
+
+    if ((extension.hooks ?? []).some((hook) => !hook || typeof hook !== 'object' || Array.isArray(hook))) {
+      throw new Error(`Extension ${specifier} has invalid hook item, expected object`);
+    }
+
     if (names.has(extension.name)) {
       throw new Error(`duplicate extension name: ${extension.name}`);
     }

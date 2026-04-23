@@ -9,6 +9,9 @@ import { loadWorkspaceConfig } from './config.js';
 test('loadWorkspaceConfig returns empty defaults when config is missing', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-workspace-config-'));
   try {
+    const first = await loadWorkspaceConfig(cwd);
+    first.instructionFiles.push('mutated');
+
     assert.deepEqual(await loadWorkspaceConfig(cwd), {
       instructionFiles: [],
       extensions: [],
@@ -30,6 +33,30 @@ test('loadWorkspaceConfig validates array fields', async () => {
     );
 
     await assert.rejects(() => loadWorkspaceConfig(cwd), /instructionFiles must be an array of strings/i);
+
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify({ instructionFiles: [], extensions: 'bad', defaultSkills: [] }),
+      'utf8'
+    );
+
+    await assert.rejects(() => loadWorkspaceConfig(cwd), /extensions must be an array of strings/i);
+
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify({ instructionFiles: [], extensions: [], defaultSkills: 'bad' }),
+      'utf8'
+    );
+
+    await assert.rejects(() => loadWorkspaceConfig(cwd), /defaultSkills must be an array of strings/i);
+
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify([]),
+      'utf8'
+    );
+
+    await assert.rejects(() => loadWorkspaceConfig(cwd), /workspace config must be a JSON object/i);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
