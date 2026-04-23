@@ -7,6 +7,7 @@ import { APP_DIR, DEFAULT_POLICY_MODE } from './config.js';
 import { createOpenRouterClient } from './model/openrouter.js';
 import { createPolicyEngine } from './policy/engine.js';
 import type { PolicyMode } from './policy/types.js';
+import { createRuntimeAssembly } from './runtime/assembly.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
 import { ensureFresh, ensureSession, saveSession } from './session/store.js';
@@ -21,6 +22,7 @@ function isPolicyMode(value: string): value is PolicyMode {
 export function parseArgs(argv: string[]) {
   const raw = argv.slice(2);
   let policy: PolicyMode = DEFAULT_POLICY_MODE;
+  const skills: string[] = [];
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
@@ -58,16 +60,35 @@ export function parseArgs(argv: string[]) {
       continue;
     }
 
+    if (token.startsWith('--skill=')) {
+      const value = token.slice('--skill='.length);
+      if (!value) {
+        throw new Error('Missing value for --skill');
+      }
+      skills.push(value);
+      continue;
+    }
+
+    if (token === '--skill') {
+      const value = raw[i + 1];
+      if (value === undefined || value === '' || value.startsWith('--')) {
+        throw new Error('Missing value for --skill');
+      }
+      skills.push(value);
+      i += 1;
+      continue;
+    }
+
     args.push(token);
   }
 
   const cmd = args[0];
-  if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy };
-  if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy };
-  if (cmd === 'reset') return { cmd, policy };
-  if (cmd === 'history') return { cmd, policy };
-  if (cmd === 'help' || cmd === '--help' || cmd === '-h') return { cmd: 'help', policy };
-  return { cmd: 'chat', prompt: args.join(' '), policy };
+  if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills };
+  if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills };
+  if (cmd === 'reset') return { cmd, policy, skills };
+  if (cmd === 'history') return { cmd, policy, skills };
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills };
+  return { cmd: 'chat', prompt: args.join(' '), policy, skills };
 }
 
 export function printHelp() {
@@ -78,6 +99,7 @@ Usage:
   cliq chat          Start interactive chat in the current directory
   cliq reset         Clear persisted conversation for this directory
   cliq history       Print persisted session for this directory
+  cliq --skill name  Activate a local skill for this run
 
 Env:
   OPENROUTER_API_KEY Required
@@ -142,7 +164,12 @@ function createConfirmTool(rl?: readline.Interface) {
 }
 
 export async function runCli(argv: string[]) {
-  const { cmd, prompt, policy } = parseArgs(argv) as { cmd: string; prompt?: string; policy: PolicyMode };
+  const { cmd, prompt, policy, skills } = parseArgs(argv) as {
+    cmd: string;
+    prompt?: string;
+    policy: PolicyMode;
+    skills: string[];
+  };
   const cwd = process.cwd();
 
   if (cmd === 'help') {
@@ -162,12 +189,19 @@ export async function runCli(argv: string[]) {
   }
 
   const session = await ensureSession(cwd);
+  const assembly = await createRuntimeAssembly({
+    cwd,
+    session,
+    policyMode: policy,
+    cliSkillNames: skills
+  });
 
   if (prompt && prompt.trim()) {
     const runner = createRunner({
       model: createOpenRouterClient(),
-      hooks: createCliHooks(),
-      policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool() })
+      hooks: [...assembly.hooks, ...createCliHooks()],
+      policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool() }),
+      instructions: assembly.instructions
     });
     const finalMessage = await runner.runTurn(session, prompt.trim());
     console.log(`\n${finalMessage}`);
@@ -177,8 +211,9 @@ export async function runCli(argv: string[]) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
   const runner = createRunner({
     model: createOpenRouterClient(),
-    hooks: createCliHooks(),
-    policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool(rl) })
+    hooks: [...assembly.hooks, ...createCliHooks()],
+    policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool(rl) }),
+    instructions: assembly.instructions
   });
   console.log(`cliq chat in ${session.cwd}`);
   rl.prompt();

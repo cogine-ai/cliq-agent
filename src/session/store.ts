@@ -3,7 +3,6 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { APP_DIR, MODEL, SESSION_FILE, SESSION_VERSION } from '../config.js';
-import { SYSTEM_PROMPT } from '../prompt/system.js';
 import type { Session, SessionRecord } from './types.js';
 
 type LegacySession = {
@@ -64,15 +63,7 @@ export function createSession(cwd: string): Session {
     createdAt: now,
     updatedAt: now,
     lifecycle: { status: 'idle', turn: 0 },
-    records: [
-      {
-        id: makeId('sys'),
-        ts: now,
-        kind: 'system',
-        role: 'system',
-        content: SYSTEM_PROMPT
-      }
-    ]
+    records: []
   };
 }
 
@@ -93,6 +84,35 @@ function isSession(value: unknown): value is Session {
     Array.isArray((value as Session).records) &&
     (value as Session).records.every((record) => isSessionRecord(record))
   );
+}
+
+function stripSeededSystemPrompt(records: SessionRecord[], sourceVersion = 0) {
+  if (sourceVersion >= SESSION_VERSION) {
+    return records;
+  }
+
+  return records.filter((record, index) => {
+    return !(
+      index === 0 &&
+      record.kind === 'system' &&
+      record.role === 'system'
+    );
+  });
+}
+
+function normalizeSession(session: Session): Session {
+  const records = stripSeededSystemPrompt(session.records, session.version);
+  const version = Math.max(session.version, SESSION_VERSION);
+
+  if (version === session.version && records.length === session.records.length) {
+    return session;
+  }
+
+  return {
+    ...session,
+    version,
+    records
+  };
 }
 
 function migrateLegacySession(cwd: string, legacy: LegacySession): Session {
@@ -129,17 +149,7 @@ function migrateLegacySession(cwd: string, legacy: LegacySession): Session {
       });
     }
   }
-
-  if (session.records.length === 0 || session.records[0]?.kind !== 'system') {
-    session.records.unshift({
-      id: makeId('sys'),
-      ts: nowIso(),
-      kind: 'system',
-      role: 'system',
-      content: SYSTEM_PROMPT
-    });
-  }
-
+  session.records = stripSeededSystemPrompt(session.records);
   return session;
 }
 
@@ -161,7 +171,11 @@ export async function ensureSession(cwd: string): Promise<Session> {
   try {
     const raw = JSON.parse(await fs.readFile(target, 'utf8')) as unknown;
     if (isSession(raw)) {
-      return raw;
+      const normalized = normalizeSession(raw);
+      if (normalized !== raw) {
+        await saveSession(cwd, normalized);
+      }
+      return normalized;
     }
 
     const migrated = migrateLegacySession(cwd, raw as LegacySession);

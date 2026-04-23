@@ -1,4 +1,4 @@
-export const SYSTEM_PROMPT = `You are a tiny coding agent inside a local CLI harness.
+export const BASE_SYSTEM_PROMPT = `You are a tiny coding agent inside a local CLI runtime.
 Return exactly one JSON object and nothing else.
 
 Allowed response shapes:
@@ -27,3 +27,5 @@ Examples:
 - {"read":{"path":"src/runtime/runner.ts","start_line":1,"end_line":80}}
 - {"find":{"path":"src","name":"runner"}}
 - {"grep":{"path":"src","pattern":"runTurn"}}`;
+
+export const SYSTEM_PROMPT = BASE_SYSTEM_PROMPT;
