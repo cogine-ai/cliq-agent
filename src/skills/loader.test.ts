@@ -75,3 +75,21 @@ name: empty
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+test('loadSkills accepts CRLF frontmatter and body separators', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-crlf-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq', 'skills', 'reviewer'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
+      '---\r\nname: reviewer\r\ndescription: windows-style newlines\r\n---\r\n\r\nPrefer read-only inspection.\r\n',
+      'utf8'
+    );
+
+    const loaded = await loadSkills(cwd, ['reviewer']);
+    assert.equal(loaded[0]?.name, 'reviewer');
+    assert.match(loaded[0]?.prompt ?? '', /Prefer read-only inspection/i);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

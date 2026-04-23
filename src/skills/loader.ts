@@ -10,14 +10,14 @@ export function mergeSkillNames(defaultSkills: string[], cliSkills: string[]) {
 }
 
 function parseSkillMarkdown(raw: string): LoadedSkill {
-  const match = raw.match(/^---\n([\s\S]*?)\n---\n+([\s\S]*)$/);
+  const match = raw.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n+([\s\S]*)$/);
   if (!match) {
     throw new Error('Skill file must begin with frontmatter');
   }
 
   const headers = Object.fromEntries(
     match[1]
-      .split('\n')
+      .split(/\r?\n/)
       .filter(Boolean)
       .map((line) => {
         const [key, ...rest] = line.split(':');

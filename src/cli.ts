@@ -99,6 +99,7 @@ Usage:
   cliq chat          Start interactive chat in the current directory
   cliq reset         Clear persisted conversation for this directory
   cliq history       Print persisted session for this directory
+  cliq --skill name  Activate a local skill for this run
 
 Env:
   OPENROUTER_API_KEY Required
