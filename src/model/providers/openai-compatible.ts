@@ -16,6 +16,20 @@ function headers(config: ResolvedModelConfig) {
   };
 }
 
+async function emitErrorEvent(
+  options: { onEvent?: (event: ModelStreamEvent) => void | Promise<void> } | undefined,
+  error: unknown
+) {
+  try {
+    await options?.onEvent?.({
+      type: 'error',
+      message: error instanceof Error ? error.message : String(error)
+    });
+  } catch {
+    // Preserve the original provider failure even if the event sink fails.
+  }
+}
+
 export function createOpenAICompatibleClient(config: ResolvedModelConfig): ModelClient {
   return {
     async complete(messages: ChatMessage[], options?: { onEvent?: (event: ModelStreamEvent) => void | Promise<void> }) {
@@ -88,10 +102,7 @@ export function createOpenAICompatibleClient(config: ResolvedModelConfig): Model
           model: config.model
         };
       } catch (error) {
-        await options?.onEvent?.({
-          type: 'error',
-          message: error instanceof Error ? error.message : String(error)
-        });
+        await emitErrorEvent(options, error);
         throw error;
       }
     }

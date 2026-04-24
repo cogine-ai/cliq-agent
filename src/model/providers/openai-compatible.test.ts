@@ -50,3 +50,30 @@ test('openai-compatible client rejects missing choices array', async () => {
     fetchMock.mock.restore();
   }
 });
+
+test('openai-compatible client preserves original error when error event handler fails', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ choices: {} }));
+
+  try {
+    const client = createOpenAICompatibleClient({
+      provider: 'openai-compatible',
+      model: 'local-model',
+      baseUrl: 'http://localhost:4000/v1',
+      streaming: 'off'
+    });
+
+    await assert.rejects(
+      () =>
+        client.complete([{ role: 'user', content: 'hello' }], {
+          onEvent(event) {
+            if (event.type === 'error') {
+              throw new Error('event handler failed');
+            }
+          }
+        }),
+      /openai-compatible response missing choices\/content/
+    );
+  } finally {
+    fetchMock.mock.restore();
+  }
+});

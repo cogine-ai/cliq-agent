@@ -333,12 +333,19 @@ export async function runCli(argv: string[]) {
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
+  const eventSink = createCliEventSink();
+  let turnSawRuntimeError = false;
   const runner = createRunner({
     model: modelClient,
     hooks: [...assembly.hooks, ...createCliHooks()],
     policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool(rl) }),
     instructions: assembly.instructions,
-    onEvent: createCliEventSink()
+    async onEvent(event) {
+      if (event.type === 'error') {
+        turnSawRuntimeError = true;
+      }
+      await eventSink(event);
+    }
   });
   console.log(`cliq chat in ${session.cwd}`);
   rl.prompt();
@@ -368,10 +375,15 @@ export async function runCli(argv: string[]) {
     }
 
     try {
+      turnSawRuntimeError = false;
       const finalMessage = await runner.runTurn(session, input);
       console.log(`\n${finalMessage}\n`);
-    } catch {
-      // Runtime event sink owns error rendering for interactive turns.
+    } catch (error) {
+      if (!turnSawRuntimeError) {
+        process.stderr.write(
+          `[interactive fallback error] ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+        );
+      }
     }
 
     rl.prompt();

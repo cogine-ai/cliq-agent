@@ -33,6 +33,7 @@ test('anthropic client sends messages request', async () => {
     });
     assert.equal(result.content, '{"message":"ok"}');
     assert.equal(result.provider, 'anthropic');
+    assert.equal(result.model, 'claude-sonnet-4-20250514');
     assert.deepEqual(events, []);
   } finally {
     fetchMock.mock.restore();
