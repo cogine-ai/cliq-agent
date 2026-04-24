@@ -1,5 +1,8 @@
 # Cliq
 
+[![npm version](https://img.shields.io/npm/v/@cogineai/cliq.svg)](https://www.npmjs.com/package/@cogineai/cliq)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
 Every team has their own agent. This is ours.
 
 Cliq is a tiny local coding agent harness built around a minimal, provider-agnostic action protocol.
@@ -10,6 +13,22 @@ Cliq is a tiny local coding agent harness built around a minimal, provider-agnos
 - **Provider-agnostic protocol**: the model responds with plain JSON actions
 - **Minimal by design**: small surface area, easy to inspect, easy to extend
 - **Persistent sessions**: each workspace keeps its own local session state
+
+## Quick start
+
+Requirements: Node.js 20 or newer.
+
+```bash
+npm install -g @cogineai/cliq
+export OPENROUTER_API_KEY=...
+cliq --policy read-only "inspect this repo and summarize the architecture"
+```
+
+Start an interactive session:
+
+```bash
+cliq chat
+```
 
 ## Current scope
 
@@ -51,6 +70,8 @@ Cliq is intentionally small right now. It supports structured inspection, shell 
 - Provides a simple base for a local coding agent
 
 ## Install
+
+Requirements: Node.js 20 or newer.
 
 Install from npm:
 
@@ -141,6 +162,18 @@ Activate one or more local skills for a run:
 ```bash
 cliq --skill reviewer --skill safe-edit "inspect the runtime and suggest a minimal refactor"
 ```
+
+## Safety model
+
+Cliq runs tools on your local machine in the current workspace. It is not a sandbox.
+
+The default policy mode is `auto`, which allows registered tools to execute without confirmation. For unfamiliar repositories or exploratory review, prefer:
+
+```bash
+cliq --policy read-only "inspect this repo"
+```
+
+For day-to-day coding, `confirm-write`, `confirm-bash`, or `confirm-all` provide explicit approval checkpoints.
 
 ## Policy modes
 
