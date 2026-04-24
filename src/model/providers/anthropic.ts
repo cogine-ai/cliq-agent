@@ -25,10 +25,6 @@ function messagesUrl(baseUrl: string) {
 export function createAnthropicClient(config: ResolvedModelConfig): ModelClient {
   return {
     async complete(messages: ChatMessage[], options?: { onEvent?: (event: ModelStreamEvent) => void | Promise<void> }) {
-      if (!config.apiKey) {
-        throw new Error('ANTHROPIC_API_KEY is required');
-      }
-
       const body = splitMessages(messages);
       await options?.onEvent?.({
         type: 'start',
@@ -38,6 +34,10 @@ export function createAnthropicClient(config: ResolvedModelConfig): ModelClient 
       });
 
       try {
+        if (!config.apiKey) {
+          throw new Error('ANTHROPIC_API_KEY is required');
+        }
+
         if (config.streaming !== 'off') {
           const response = await fetchWithTimeout(messagesUrl(config.baseUrl), {
             method: 'POST',
@@ -97,6 +97,10 @@ export function createAnthropicClient(config: ResolvedModelConfig): ModelClient 
         });
 
         const json = await readJsonResponse<AnthropicResp>(response, 'Anthropic');
+        if (!Array.isArray(json.content)) {
+          throw new Error(`Anthropic response missing or invalid content array: ${JSON.stringify(json)}`);
+        }
+
         const content = json.content
           .find((block) => block.type === 'text' && typeof block.text === 'string')
           ?.text?.trim();

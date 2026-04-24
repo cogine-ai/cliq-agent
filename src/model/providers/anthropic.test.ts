@@ -25,9 +25,15 @@ test('anthropic client sends messages request', async () => {
       maxOutputTokens: 2048
     });
 
-    const result = await client.complete([{ role: 'user', content: 'hello' }]);
+    const events: string[] = [];
+    const result = await client.complete([{ role: 'user', content: 'hello' }], {
+      onEvent(event) {
+        if (event.type === 'error') events.push(event.message);
+      }
+    });
     assert.equal(result.content, '{"message":"ok"}');
     assert.equal(result.provider, 'anthropic');
+    assert.deepEqual(events, []);
   } finally {
     fetchMock.mock.restore();
   }
@@ -44,8 +50,39 @@ test('anthropic client fails before request when api key is missing', async () =
       streaming: 'off'
     });
 
-    await assert.rejects(() => client.complete([{ role: 'user', content: 'hello' }]), /ANTHROPIC_API_KEY is required/);
+    const events: string[] = [];
+    await assert.rejects(
+      () =>
+        client.complete([{ role: 'user', content: 'hello' }], {
+          onEvent(event) {
+            if (event.type === 'error') events.push(event.message);
+          }
+        }),
+      /ANTHROPIC_API_KEY is required/
+    );
     assert.equal(fetchMock.mock.callCount(), 0);
+    assert.deepEqual(events, ['ANTHROPIC_API_KEY is required']);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('anthropic client rejects invalid content array shape', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ content: {} }));
+
+  try {
+    const client = createAnthropicClient({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-20250514',
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      streaming: 'off'
+    });
+
+    await assert.rejects(
+      () => client.complete([{ role: 'user', content: 'hello' }]),
+      /Anthropic response missing or invalid content array/
+    );
   } finally {
     fetchMock.mock.restore();
   }

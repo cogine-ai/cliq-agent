@@ -370,8 +370,8 @@ export async function runCli(argv: string[]) {
     try {
       const finalMessage = await runner.runTurn(session, input);
       console.log(`\n${finalMessage}\n`);
-    } catch (error) {
-      console.error(String(error));
+    } catch {
+      // Runtime event sink owns error rendering for interactive turns.
     }
 
     rl.prompt();

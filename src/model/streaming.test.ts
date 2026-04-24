@@ -20,13 +20,15 @@ function streamResponse(chunks: string[]) {
 }
 
 test('openai-compatible client streams deltas and returns buffered content', async () => {
-  const fetchMock = mock.method(globalThis, 'fetch', async () =>
-    streamResponse([
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    assert.equal(String(_url), 'http://localhost:4000/v1/chat/completions');
+    assert.equal((JSON.parse(String(init?.body)) as { stream?: boolean }).stream, true);
+    return streamResponse([
       'data: {"choices":[{"delta":{"content":"{\\"message\\":\\""}}]}\n\n',
       'data: {"choices":[{"delta":{"content":"ok\\"}"}}]}\n\n',
       'data: [DONE]\n\n'
-    ])
-  );
+    ]);
+  });
 
   try {
     const events: string[] = [];
@@ -51,13 +53,15 @@ test('openai-compatible client streams deltas and returns buffered content', asy
 });
 
 test('openai-compatible client accepts compact sse frames with crlf separators', async () => {
-  const fetchMock = mock.method(globalThis, 'fetch', async () =>
-    streamResponse([
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    assert.equal(String(_url), 'http://localhost:4000/v1/chat/completions');
+    assert.equal((JSON.parse(String(init?.body)) as { stream?: boolean }).stream, true);
+    return streamResponse([
       'data:{"choices":[{"delta":{"content":"{\\"message\\":\\""}}]}\r\n\r\n',
       'data:{"choices":[{"delta":{"content":"ok\\"}"}}]}\r\n\r\n',
       'data:[DONE]\r\n\r\n'
-    ])
-  );
+    ]);
+  });
 
   try {
     const events: string[] = [];

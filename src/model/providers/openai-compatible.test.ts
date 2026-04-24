@@ -30,3 +30,23 @@ test('openai-compatible client sends chat completions request', async () => {
     fetchMock.mock.restore();
   }
 });
+
+test('openai-compatible client rejects missing choices array', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ choices: {} }));
+
+  try {
+    const client = createOpenAICompatibleClient({
+      provider: 'openai-compatible',
+      model: 'local-model',
+      baseUrl: 'http://localhost:4000/v1',
+      streaming: 'off'
+    });
+
+    await assert.rejects(
+      () => client.complete([{ role: 'user', content: 'hello' }]),
+      /openai-compatible response missing choices\/content/
+    );
+  } finally {
+    fetchMock.mock.restore();
+  }
+});

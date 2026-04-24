@@ -72,6 +72,10 @@ export function createOpenAICompatibleClient(config: ResolvedModelConfig): Model
         });
 
         const json = await readJsonResponse<ChatCompletionsResp>(response, config.provider);
+        if (!Array.isArray(json.choices) || json.choices.length === 0) {
+          throw new Error(`${config.provider} response missing choices/content: ${JSON.stringify(json)}`);
+        }
+
         const content = json.choices[0]?.message?.content?.trim();
         if (!content) {
           throw new Error(`${config.provider} response missing choices/content: ${JSON.stringify(json)}`);
