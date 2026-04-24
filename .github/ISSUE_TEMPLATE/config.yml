@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: npm package
+    url: https://www.npmjs.com/package/@cogineai/cliq
+    about: Check the published package metadata and latest version.
+  - name: Releases
+    url: https://github.com/cogine-ai/cliq-agent/releases
+    about: Review shipped versions and release notes.

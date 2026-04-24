@@ -35,6 +35,10 @@ At this stage, the most useful contributions are:
 
 Please keep changes focused and easy to review.
 
+## Issues
+
+Please use the GitHub issue templates when reporting bugs, asking questions, or proposing features. Redact API keys, local session files, private repository paths, and other sensitive data before sharing logs.
+
 ## Pull requests
 
 - prefer small PRs

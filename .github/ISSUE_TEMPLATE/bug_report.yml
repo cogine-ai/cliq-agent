@@ -1,0 +1,105 @@
+name: Bug report
+description: Report reproducible behavior that looks incorrect.
+title: "[Bug]: "
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please remove API keys, session secrets, and private repository details before posting logs.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+      placeholder: "Cliq fails when..."
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Cliq version or commit
+      description: Use the npm package version or the source commit SHA.
+      placeholder: "@cogineai/cliq@0.4.1 or 91a3f05"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - npm
+        - source checkout
+        - other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Model provider
+      options:
+        - openrouter
+        - anthropic
+        - openai
+        - openai-compatible
+        - ollama
+        - not model-related
+        - other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: policy
+    attributes:
+      label: Policy mode
+      options:
+        - auto
+        - confirm-write
+        - read-only
+        - confirm-bash
+        - confirm-all
+        - unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Give the smallest command/config that reproduces the behavior.
+      placeholder: |
+        1. Run `cliq --policy read-only "..."`
+        2. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include relevant output. Redact secrets.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node.js version, shell, and anything else that may matter.
+      placeholder: |
+        macOS 15.x
+        Node.js 22.x
+        zsh
+    validations:
+      required: false
