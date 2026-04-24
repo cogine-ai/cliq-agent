@@ -1,10 +1,42 @@
 {
-  "name": "cliq-agent",
-  "version": "0.4.0",
+  "name": "@cogineai/cliq",
+  "version": "0.4.1",
+  "description": "Tiny local coding agent harness with a provider-agnostic JSON action protocol.",
   "private": false,
   "type": "module",
+  "license": "MIT",
+  "homepage": "https://github.com/cogine-ai/cliq-agent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cogine-ai/cliq-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cogine-ai/cliq-agent/issues"
+  },
+  "keywords": [
+    "agent",
+    "coding-agent",
+    "cli",
+    "llm",
+    "ollama",
+    "openrouter",
+    "openai",
+    "anthropic"
+  ],
   "bin": {
     "cliq": "dist/index.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "!dist/**/*.test.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
