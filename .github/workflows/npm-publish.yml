@@ -1,8 +1,6 @@
 name: Publish npm
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       ref:
