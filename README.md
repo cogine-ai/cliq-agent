@@ -52,6 +52,14 @@ Cliq is intentionally small right now. It supports structured inspection, shell 
 
 ## Install
 
+Install from npm:
+
+```bash
+npm install -g @cogineai/cliq
+```
+
+Or run from source:
+
 ```bash
 npm install
 npm run build
