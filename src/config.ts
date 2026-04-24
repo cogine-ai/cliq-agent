@@ -1,11 +1,14 @@
 export const MODEL = 'anthropic/claude-sonnet-4.6';
+export const DEFAULT_MODEL_PROVIDER = 'openrouter';
+export const DEFAULT_MODEL_BASE_URL = 'https://openrouter.ai/api/v1';
 export const APP_DIR = '.cliq';
 export const SESSION_FILE = 'session.json';
 export const MAX_LOOPS = 24;
 export const MAX_OUTPUT = 12_000;
 export const BASH_TIMEOUT_MS = 60_000;
-export const OPENROUTER_TIMEOUT_MS = 20_000;
-export const SESSION_VERSION = 3;
+export const MODEL_TIMEOUT_MS = 20_000;
+export const OPENROUTER_TIMEOUT_MS = MODEL_TIMEOUT_MS;
+export const SESSION_VERSION = 4;
 export const DEFAULT_POLICY_MODE = 'auto';
 export const READ_MAX_BYTES = 8_000;
 export const LIST_MAX_ENTRIES = 200;

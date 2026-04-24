@@ -2,8 +2,9 @@ import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-import { APP_DIR, MODEL, SESSION_FILE, SESSION_VERSION } from '../config.js';
-import type { Session, SessionRecord } from './types.js';
+import { APP_DIR, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_PROVIDER, MODEL, SESSION_FILE, SESSION_VERSION } from '../config.js';
+import { isProviderName } from '../model/registry.js';
+import type { Session, SessionModelRef, SessionRecord } from './types.js';
 
 type LegacySession = {
   createdAt?: string;
@@ -41,6 +42,46 @@ function isSessionRecord(value: unknown): value is SessionRecord {
   return false;
 }
 
+function defaultSessionModel(): SessionModelRef {
+  return {
+    provider: DEFAULT_MODEL_PROVIDER,
+    model: MODEL,
+    baseUrl: DEFAULT_MODEL_BASE_URL
+  };
+}
+
+function isSessionModelLike(value: unknown): value is string | SessionModelRef {
+  if (typeof value === 'string') {
+    return true;
+  }
+
+  const model = value as { provider?: unknown; model?: unknown; baseUrl?: unknown };
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    typeof model.provider === 'string' &&
+    isProviderName(model.provider) &&
+    typeof model.model === 'string' &&
+    (model.baseUrl === undefined || typeof model.baseUrl === 'string')
+  );
+}
+
+function normalizeSessionModel(value: unknown): SessionModelRef {
+  if (typeof value === 'string') {
+    return {
+      provider: DEFAULT_MODEL_PROVIDER,
+      model: value,
+      baseUrl: DEFAULT_MODEL_BASE_URL
+    };
+  }
+
+  if (isSessionModelLike(value) && typeof value !== 'string') {
+    return value;
+  }
+
+  return defaultSessionModel();
+}
+
 export function sessionPath(cwd: string) {
   return path.join(cwd, APP_DIR, SESSION_FILE);
 }
@@ -58,7 +99,7 @@ export function createSession(cwd: string): Session {
   return {
     version: SESSION_VERSION,
     app: 'cliq',
-    model: MODEL,
+    model: defaultSessionModel(),
     cwd,
     createdAt: now,
     updatedAt: now,
@@ -73,7 +114,7 @@ function isSession(value: unknown): value is Session {
     typeof value === 'object' &&
     typeof (value as Session).version === 'number' &&
     (value as Session).app === 'cliq' &&
-    typeof (value as Session).model === 'string' &&
+    isSessionModelLike((value as { model?: unknown }).model) &&
     typeof (value as Session).cwd === 'string' &&
     typeof (value as Session).createdAt === 'string' &&
     typeof (value as Session).updatedAt === 'string' &&
@@ -87,7 +128,7 @@ function isSession(value: unknown): value is Session {
 }
 
 function stripSeededSystemPrompt(records: SessionRecord[], sourceVersion = 0) {
-  if (sourceVersion >= SESSION_VERSION) {
+  if (sourceVersion > 2) {
     return records;
   }
 
@@ -103,14 +144,18 @@ function stripSeededSystemPrompt(records: SessionRecord[], sourceVersion = 0) {
 function normalizeSession(session: Session): Session {
   const records = stripSeededSystemPrompt(session.records, session.version);
   const version = Math.max(session.version, SESSION_VERSION);
+  const rawModel = (session as { model: unknown }).model;
+  const model = normalizeSessionModel(rawModel);
+  const modelChanged = model !== rawModel;
 
-  if (version === session.version && records.length === session.records.length) {
+  if (version === session.version && records.length === session.records.length && !modelChanged) {
     return session;
   }
 
   return {
     ...session,
     version,
+    model,
     records
   };
 }

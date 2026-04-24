@@ -1,12 +1,13 @@
 import { DEFAULT_POLICY_MODE, MAX_LOOPS } from '../config.js';
 import type { InstructionMessage } from '../instructions/types.js';
-import type { ChatMessage, ModelClient } from '../model/types.js';
+import type { ChatMessage, ModelClient, ModelCompletion } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { parseModelAction } from '../protocol/actions.js';
 import { appendRecord, makeId, nowIso, saveSession } from '../session/store.js';
 import type { Session } from '../session/types.js';
 import { createToolRegistry } from '../tools/registry.js';
 import type { ToolResult } from '../tools/types.js';
+import type { RuntimeEventSink } from './events.js';
 import { runHooks, type RuntimeHook } from './hooks.js';
 
 function buildChatMessages(session: Session, instructions: InstructionMessage[]): ChatMessage[] {
@@ -25,13 +26,15 @@ export function createRunner({
   registry = createToolRegistry(),
   hooks = [],
   policy = createPolicyEngine({ mode: DEFAULT_POLICY_MODE }),
-  instructions = async () => []
+  instructions = async () => [],
+  onEvent = async () => undefined
 }: {
   model: ModelClient;
   registry?: ReturnType<typeof createToolRegistry>;
   hooks?: RuntimeHook[];
   policy?: ReturnType<typeof createPolicyEngine>;
   instructions?: (session: Session) => Promise<InstructionMessage[]>;
+  onEvent?: RuntimeEventSink;
 }) {
   return {
     async runTurn(session: Session, userInput: string): Promise<string> {
@@ -51,8 +54,79 @@ export function createRunner({
         await runHooks(hooks, 'beforeTurn', session, userInput);
 
         for (let i = 0; i < MAX_LOOPS; i += 1) {
-          const rawContent = await model.complete(buildChatMessages(session, await instructions(session)));
-          const action = parseModelAction(rawContent);
+          let chunks = 0;
+          let chars = 0;
+          let activeProvider: ModelCompletion['provider'] | null = null;
+          let activeModel: string | null = null;
+          let sawModelStart = false;
+          let sawModelEnd = false;
+          let sawModelError = false;
+          let completion: ModelCompletion;
+
+          try {
+            completion = await model.complete(buildChatMessages(session, await instructions(session)), {
+              async onEvent(event) {
+                if (event.type === 'start') {
+                  activeProvider = event.provider;
+                  activeModel = event.model;
+                  sawModelStart = true;
+                  await onEvent({
+                    type: 'model-start',
+                    provider: event.provider,
+                    model: event.model,
+                    streaming: event.streaming
+                  });
+                } else if (event.type === 'text-delta') {
+                  chunks += 1;
+                  chars += event.text.length;
+                  await onEvent({ type: 'model-progress', chunks, chars });
+                } else if (event.type === 'end') {
+                  if (activeProvider && activeModel) {
+                    sawModelEnd = true;
+                    await onEvent({ type: 'model-end', provider: activeProvider, model: activeModel });
+                  }
+                } else if (event.type === 'error') {
+                  sawModelError = true;
+                  await onEvent({ type: 'error', stage: 'model', message: event.message });
+                }
+              }
+            });
+          } catch (error) {
+            if (!sawModelError) {
+              await onEvent({
+                type: 'error',
+                stage: 'model',
+                message: error instanceof Error ? error.message : String(error)
+              });
+            }
+            throw error;
+          }
+
+          if (!sawModelStart) {
+            await onEvent({
+              type: 'model-start',
+              provider: completion.provider,
+              model: completion.model,
+              streaming: false
+            });
+          }
+
+          if (!sawModelEnd) {
+            await onEvent({ type: 'model-end', provider: completion.provider, model: completion.model });
+          }
+
+          const rawContent = completion.content;
+          let action;
+          try {
+            action = parseModelAction(rawContent);
+          } catch (error) {
+            await onEvent({
+              type: 'error',
+              stage: 'protocol',
+              message: error instanceof Error ? error.message : String(error)
+            });
+            throw error;
+          }
 
           session.lifecycle.lastAssistantOutputAt = nowIso();
           await appendRecord(cwd, session, {
@@ -69,10 +143,12 @@ export function createRunner({
           if ('message' in action) {
             const finalMessage = action.message.trim() || '(no content)';
             await runHooks(hooks, 'afterTurn', session, finalMessage);
+            await onEvent({ type: 'final', message: finalMessage });
             return finalMessage;
           }
 
           const { definition } = registry.resolve(action);
+          await onEvent({ type: 'tool-start', tool: definition.name, preview: rawContent.slice(0, 120) });
           let result: ToolResult | null = null;
           let authorization: Awaited<ReturnType<typeof policy.authorize>> | null = null;
 
@@ -132,6 +208,7 @@ export function createRunner({
             meta: result.meta
           });
           await runHooks(hooks, 'afterTool', session, result);
+          await onEvent({ type: 'tool-end', tool: result.tool, status: result.status });
         }
 
         throw new Error('Exceeded action loop limit');

@@ -48,6 +48,7 @@ export async function createRuntimeAssembly({
   const workspaceInstructions = await loadWorkspaceInstructionFiles(cwd, workspaceConfig.instructionFiles);
 
   return {
+    workspaceConfig,
     skillNames,
     extensionNames: extensions.map((extension) => extension.name),
     hooks: extensions.flatMap((extension) => extension.hooks ?? []),

@@ -10,6 +10,14 @@ import { createToolRegistry } from '../tools/registry.js';
 import type { EditModelAction, ToolDefinition } from '../tools/types.js';
 import { createRunner } from './runner.js';
 
+function completion(content: string) {
+  return {
+    content,
+    provider: 'openrouter' as const,
+    model: 'test-model'
+  };
+}
+
 test('registry resolves bash and edit tools', () => {
   const registry = createToolRegistry();
 
@@ -24,7 +32,7 @@ test('runner invokes hooks around assistant and tool execution', async () => {
   const runner = createRunner({
     model: {
       async complete() {
-        return '{"message":"done"}';
+        return completion('{"message":"done"}');
       }
     },
     registry: {
@@ -63,11 +71,11 @@ test('runner appends tool results and replays them back to the model', async () 
       async complete(messages) {
         callCount += 1;
         if (callCount === 1) {
-          return '{"bash":"pwd"}';
+          return completion('{"bash":"pwd"}');
         }
 
         secondCallMessages = messages;
-        return '{"message":"done"}';
+        return completion('{"message":"done"}');
       }
     },
     registry: {
@@ -113,7 +121,7 @@ test('runner prepends composed instruction messages before replayed session reco
     model: {
       async complete(messages) {
         seenMessages = messages;
-        return '{"message":"done"}';
+        return completion('{"message":"done"}');
       }
     },
     instructions: async () => [
@@ -135,7 +143,7 @@ test('runner does not persist composed instruction messages into the session rec
   const runner = createRunner({
     model: {
       async complete() {
-        return '{"message":"done"}';
+        return completion('{"message":"done"}');
       }
     },
     instructions: async () => [
@@ -158,7 +166,7 @@ test('runner resets lifecycle state when setup fails before the loop', async () 
   const runner = createRunner({
     model: {
       async complete() {
-        return '{"message":"done"}';
+        return completion('{"message":"done"}');
       }
     }
   });
@@ -176,7 +184,7 @@ test('runner converts tool exceptions into tool error records and still calls af
     model: {
       async complete() {
         callCount += 1;
-        return callCount === 1 ? '{"bash":"pwd"}' : '{"message":"done"}';
+        return completion(callCount === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
     registry: {
@@ -221,7 +229,7 @@ test('runner records a denied bash action when mode is read-only', async () => {
   const runner = createRunner({
     model: {
       async complete() {
-        return outputs.length === 0 ? '{"bash":"pwd"}' : '{"message":"done"}';
+        return completion(outputs.length === 0 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
     policy: createPolicyEngine({ mode: 'read-only' }),
@@ -251,7 +259,7 @@ test('runner records policy authorization failures as tool errors', async () => 
     model: {
       async complete() {
         calls += 1;
-        return calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}';
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
     policy: {
@@ -303,9 +311,11 @@ test('runner executes edit only after confirmation in confirm-write mode', async
   const runner = createRunner({
     model: {
       async complete() {
-        return editExecutions.length === 0
-          ? '{"edit":{"path":"file.txt","old_text":"before","new_text":"after"}}'
-          : '{"message":"done"}';
+        return completion(
+          editExecutions.length === 0
+            ? '{"edit":{"path":"file.txt","old_text":"before","new_text":"after"}}'
+            : '{"message":"done"}'
+        );
       }
     },
     policy: createPolicyEngine({
@@ -323,4 +333,30 @@ test('runner executes edit only after confirmation in confirm-write mode', async
   assert.equal(finalMessage, 'done');
   assert.equal(prompted, 1);
   assert.deepEqual(editExecutions, ['file.txt']);
+});
+
+test('runner emits model lifecycle events without raw deltas', async () => {
+  const session = createSession('/tmp/workspace');
+  const events: Array<{ type: string; chars?: number; message?: string }> = [];
+
+  const runner = createRunner({
+    model: {
+      async complete(_messages, options) {
+        await options?.onEvent?.({ type: 'start', provider: 'openrouter', model: 'test-model', streaming: true });
+        await options?.onEvent?.({ type: 'text-delta', text: '{"message":"' });
+        await options?.onEvent?.({ type: 'text-delta', text: 'done"}' });
+        await options?.onEvent?.({ type: 'end' });
+        return completion('{"message":"done"}');
+      }
+    },
+    onEvent(event) {
+      events.push(event);
+    }
+  });
+
+  const finalMessage = await runner.runTurn(session, 'say done');
+
+  assert.equal(finalMessage, 'done');
+  assert.deepEqual(events.map((event) => event.type), ['model-start', 'model-progress', 'model-progress', 'model-end', 'final']);
+  assert.equal(events.some((event) => event.message?.includes('{"message"')), false);
 });

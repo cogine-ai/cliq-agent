@@ -12,6 +12,15 @@ test('createSession starts without a seeded system record', () => {
   assert.equal(session.cwd, '/tmp/workspace');
 });
 
+test('createSession records structured default model identity', () => {
+  const session = createSession('/tmp/workspace');
+  assert.deepEqual(session.model, {
+    provider: 'openrouter',
+    model: 'anthropic/claude-sonnet-4.6',
+    baseUrl: 'https://openrouter.ai/api/v1'
+  });
+});
+
 test('ensureSession creates the persisted file when missing', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-session-'));
   const session = await ensureSession(cwd);
@@ -151,9 +160,13 @@ test('ensureSession keeps explicit system records for current-version sessions',
     await writeFile(
       path.join(cwd, '.cliq', 'session.json'),
       JSON.stringify({
-        version: 3,
+        version: 4,
         app: 'cliq',
-        model: 'anthropic/claude-sonnet-4.6',
+        model: {
+          provider: 'openrouter',
+          model: 'anthropic/claude-sonnet-4.6',
+          baseUrl: 'https://openrouter.ai/api/v1'
+        },
         cwd,
         createdAt: '2026-04-01T00:00:00.000Z',
         updatedAt: '2026-04-01T00:00:00.000Z',
@@ -174,6 +187,37 @@ test('ensureSession keeps explicit system records for current-version sessions',
     const session = await ensureSession(cwd);
     assert.equal(session.records[0]?.kind, 'system');
     assert.equal(session.records[0]?.content, 'explicit current-version system record');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession migrates v3 string model to structured model ref', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-session-model-migrate-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'session.json'),
+      JSON.stringify({
+        version: 3,
+        app: 'cliq',
+        model: 'anthropic/claude-sonnet-4.6',
+        cwd,
+        createdAt: '2026-04-01T00:00:00.000Z',
+        updatedAt: '2026-04-01T00:00:00.000Z',
+        lifecycle: { status: 'idle', turn: 0 },
+        records: []
+      }),
+      'utf8'
+    );
+
+    const session = await ensureSession(cwd);
+    assert.equal(session.version, 4);
+    assert.deepEqual(session.model, {
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-4.6',
+      baseUrl: 'https://openrouter.ai/api/v1'
+    });
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
