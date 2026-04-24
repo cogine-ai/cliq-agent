@@ -6,19 +6,18 @@ import { createOpenRouterClient } from './openrouter.js';
 function withOpenRouterClient(
   fetchImpl: (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => Promise<Response>
 ) {
-  const originalKey = process.env.OPENROUTER_API_KEY;
-  process.env.OPENROUTER_API_KEY = 'test-key';
   const fetchMock = mock.method(globalThis, 'fetch', fetchImpl);
 
   return {
-    client: createOpenRouterClient(),
+    client: createOpenRouterClient({
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-4.6',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      apiKey: 'test-key',
+      streaming: 'off'
+    }),
     restore() {
       fetchMock.mock.restore();
-      if (originalKey === undefined) {
-        delete process.env.OPENROUTER_API_KEY;
-      } else {
-        process.env.OPENROUTER_API_KEY = originalKey;
-      }
     }
   };
 }
@@ -39,7 +38,11 @@ test('openrouter client passes an abort signal to fetch', async () => {
 
   try {
     const result = await fixture.client.complete([{ role: 'user', content: 'hello' }]);
-    assert.equal(result, 'ok');
+    assert.deepEqual(result, {
+      content: 'ok',
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-4.6'
+    });
     assert.equal(capturedSignal instanceof AbortSignal, true);
   } finally {
     fixture.restore();

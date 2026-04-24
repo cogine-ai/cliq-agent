@@ -58,11 +58,43 @@ npm run build
 npm link
 ```
 
-Set your API key:
+## Model Providers
+
+Cliq defaults to OpenRouter:
 
 ```bash
 export OPENROUTER_API_KEY=...
+cliq "inspect this repo"
 ```
+
+Select a provider from the CLI:
+
+```bash
+cliq --provider anthropic --model claude-sonnet-4-20250514 "inspect this repo"
+cliq --provider openai --model gpt-5.2 "inspect this repo"
+cliq --provider ollama --model qwen3:14b "inspect this repo"
+```
+
+Use `.cliq/config.json` for workspace defaults:
+
+```json
+{
+  "model": {
+    "provider": "ollama",
+    "model": "qwen3:14b",
+    "baseUrl": "http://localhost:11434",
+    "streaming": "auto"
+  }
+}
+```
+
+Supported providers:
+
+- `openrouter`: requires `OPENROUTER_API_KEY`
+- `anthropic`: requires `ANTHROPIC_API_KEY`
+- `openai`: requires `OPENAI_API_KEY`
+- `openai-compatible`: requires `--base-url` or `CLIQ_MODEL_BASE_URL`; uses `CLIQ_MODEL_API_KEY` when set
+- `ollama`: uses local `http://localhost:11434` by default and does not require an API key
 
 ## Usage
 
@@ -124,11 +156,17 @@ Cliq reads optional runtime config from `./.cliq/config.json` in the current wor
 {
   "instructionFiles": [".cliq/instructions.md"],
   "extensions": ["builtin:policy-instructions", "./.cliq/extensions/log-turns.js"],
-  "defaultSkills": ["reviewer"]
+  "defaultSkills": ["reviewer"],
+  "model": {
+    "provider": "ollama",
+    "model": "qwen3:14b",
+    "baseUrl": "http://localhost:11434",
+    "streaming": "auto"
+  }
 }
 ```
 
-All fields are optional. If the file is missing, Cliq behaves like the default `v0.2.0` runtime with no repo-local prompt or extension inputs.
+All fields are optional. If the file is missing, Cliq uses OpenRouter defaults with no repo-local prompt, skill, extension, or model overrides.
 
 ## Local skills
 
@@ -165,7 +203,7 @@ Enable a local workspace extension module:
 }
 ```
 
-In `v0.3.0`, extensions are intentionally limited to hooks and instruction contributions. They do not register new model-callable top-level actions.
+Extensions are intentionally limited to hooks and instruction contributions. They do not register new model-callable top-level actions.
 
 ## Session model
 
@@ -183,7 +221,7 @@ The Phase 0 runtime split organizes the code into focused modules:
 
 - `src/session` for persistence, lifecycle state, and migration
 - `src/protocol` for action parsing and protocol types
-- `src/model` for provider clients
+- `src/model` for provider registry, config resolution, adapters, and streaming transport
 - `src/tools` for executable tool definitions and registry lookup
 - `src/runtime` for turn execution and lifecycle hooks
 - `src/cli.ts` for CLI and REPL behavior
@@ -194,7 +232,7 @@ The current version is an early open source starting point. It does **not** yet 
 
 - sandboxing
 - rich approval UX
-- streaming output
+- token-by-token final answer rendering
 - broad tool surface area
 - multi-agent orchestration
 - remote execution

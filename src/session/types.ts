@@ -1,4 +1,11 @@
+import type { ProviderName } from '../model/types.js';
 import type { ModelAction } from '../protocol/actions.js';
+
+export type SessionModelRef = {
+  provider: ProviderName;
+  model: string;
+  baseUrl?: string;
+};
 
 export type SessionRecord =
   | {
@@ -30,7 +37,7 @@ export type SessionRecord =
 export type Session = {
   version: number;
   app: 'cliq';
-  model: string;
+  model: SessionModelRef;
   cwd: string;
   createdAt: string;
   updatedAt: string;

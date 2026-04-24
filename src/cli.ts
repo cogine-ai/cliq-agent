@@ -4,25 +4,54 @@ import readline from 'node:readline';
 import { createInterface as createPromptInterface } from 'node:readline/promises';
 
 import { APP_DIR, DEFAULT_POLICY_MODE } from './config.js';
-import { createOpenRouterClient } from './model/openrouter.js';
+import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
+import { createModelClient } from './model/index.js';
+import { isProviderName } from './model/registry.js';
 import { createPolicyEngine } from './policy/engine.js';
 import type { PolicyMode } from './policy/types.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
+import type { RuntimeEvent } from './runtime/events.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
 import { ensureFresh, ensureSession, saveSession } from './session/store.js';
 
 const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
 const POLICY_MODE_LIST = POLICY_MODES.join(', ');
+const STREAMING_MODES = ['auto', 'on', 'off'] as const;
+
+type ParsedArgsBase = {
+  policy: PolicyMode;
+  skills: string[];
+  model: PartialModelConfig;
+};
+
+export type ParsedArgs = ParsedArgsBase & (
+  | { cmd: 'chat'; prompt: string }
+  | { cmd: 'reset' | 'history' | 'help'; prompt?: undefined }
+);
 
 function isPolicyMode(value: string): value is PolicyMode {
   return (POLICY_MODES as readonly string[]).includes(value);
 }
 
-export function parseArgs(argv: string[]) {
+function isStreamingMode(value: string) {
+  return (STREAMING_MODES as readonly string[]).includes(value);
+}
+
+function readFlagValue(raw: string[], index: number, flag: string) {
+  const value = raw[index + 1];
+  if (value === undefined || value === '' || value.startsWith('--')) {
+    throw new Error(`Missing value for ${flag}`);
+  }
+
+  return value;
+}
+
+export function parseArgs(argv: string[]): ParsedArgs {
   const raw = argv.slice(2);
   let policy: PolicyMode = DEFAULT_POLICY_MODE;
   const skills: string[] = [];
+  const model: PartialModelConfig = {};
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
@@ -48,10 +77,7 @@ export function parseArgs(argv: string[]) {
     }
 
     if (token === '--policy') {
-      const value = raw[i + 1];
-      if (value === undefined || value === '') {
-        throw new Error(`Missing value for --policy; expected one of: ${POLICY_MODE_LIST}`);
-      }
+      const value = readFlagValue(raw, i, '--policy');
       if (!isPolicyMode(value)) {
         throw new Error(`Unknown policy mode: ${value}`);
       }
@@ -70,11 +96,82 @@ export function parseArgs(argv: string[]) {
     }
 
     if (token === '--skill') {
-      const value = raw[i + 1];
-      if (value === undefined || value === '' || value.startsWith('--')) {
-        throw new Error('Missing value for --skill');
-      }
+      const value = readFlagValue(raw, i, '--skill');
       skills.push(value);
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith('--provider=')) {
+      const value = token.slice('--provider='.length);
+      if (!value) {
+        throw new Error('Missing value for --provider');
+      }
+      if (!isProviderName(value)) {
+        throw new Error(`Unknown model provider: ${value}`);
+      }
+      model.provider = value;
+      continue;
+    }
+
+    if (token === '--provider') {
+      const value = readFlagValue(raw, i, '--provider');
+      if (!isProviderName(value)) {
+        throw new Error(`Unknown model provider: ${value}`);
+      }
+      model.provider = value;
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith('--model=')) {
+      const value = token.slice('--model='.length);
+      if (!value) {
+        throw new Error('Missing value for --model');
+      }
+      model.model = value;
+      continue;
+    }
+
+    if (token === '--model') {
+      model.model = readFlagValue(raw, i, '--model');
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith('--base-url=')) {
+      const value = token.slice('--base-url='.length);
+      if (!value) {
+        throw new Error('Missing value for --base-url');
+      }
+      model.baseUrl = value;
+      continue;
+    }
+
+    if (token === '--base-url') {
+      model.baseUrl = readFlagValue(raw, i, '--base-url');
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith('--streaming=')) {
+      const value = token.slice('--streaming='.length);
+      if (!value) {
+        throw new Error('Missing value for --streaming');
+      }
+      if (!isStreamingMode(value)) {
+        throw new Error(`Unknown streaming mode: ${value}`);
+      }
+      model.streaming = value;
+      continue;
+    }
+
+    if (token === '--streaming') {
+      const value = readFlagValue(raw, i, '--streaming');
+      if (!isStreamingMode(value)) {
+        throw new Error(`Unknown streaming mode: ${value}`);
+      }
+      model.streaming = value;
       i += 1;
       continue;
     }
@@ -83,12 +180,12 @@ export function parseArgs(argv: string[]) {
   }
 
   const cmd = args[0];
-  if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills };
-  if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills };
-  if (cmd === 'reset') return { cmd, policy, skills };
-  if (cmd === 'history') return { cmd, policy, skills };
-  if (cmd === 'help' || cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills };
-  return { cmd: 'chat', prompt: args.join(' '), policy, skills };
+  if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
+  if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
+  if (cmd === 'reset') return { cmd, policy, skills, model };
+  if (cmd === 'history') return { cmd, policy, skills, model };
+  if (cmd === 'help' || cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model };
+  return { cmd: 'chat', prompt: args.join(' '), policy, skills, model };
 }
 
 export function printHelp() {
@@ -100,9 +197,19 @@ Usage:
   cliq reset         Clear persisted conversation for this directory
   cliq history       Print persisted session for this directory
   cliq --skill name  Activate a local skill for this run
+  cliq --provider ollama --model qwen3:14b "task"
+
+Model:
+  --provider       openrouter | anthropic | openai | openai-compatible | ollama
+  --model          Provider model id
+  --base-url       Required for openai-compatible, optional override for ollama
+  --streaming      auto | on | off
 
 Env:
-  OPENROUTER_API_KEY Required
+  OPENROUTER_API_KEY Required for OpenRouter
+  ANTHROPIC_API_KEY  Required for Anthropic
+  OPENAI_API_KEY     Required for OpenAI
+  CLIQ_MODEL_*       Optional provider/model/base URL/streaming defaults
   CLIQ_POLICY_MODE   Optional (auto | confirm-write | read-only | confirm-bash | confirm-all)
 `);
 }
@@ -163,13 +270,22 @@ function createConfirmTool(rl?: readline.Interface) {
   return async (prompt: string) => await askYesNo(prompt, rl);
 }
 
-export async function runCli(argv: string[]) {
-  const { cmd, prompt, policy, skills } = parseArgs(argv) as {
-    cmd: string;
-    prompt?: string;
-    policy: PolicyMode;
-    skills: string[];
+function createCliEventSink() {
+  return async (event: RuntimeEvent) => {
+    if (event.type === 'model-start') {
+      process.stdout.write(`\n[model ${event.provider}/${event.model}]\n`);
+    } else if (event.type === 'model-progress' && event.chunks % 20 === 0) {
+      process.stdout.write('.');
+    } else if (event.type === 'model-end') {
+      process.stdout.write('\n');
+    } else if (event.type === 'error') {
+      process.stderr.write(`[${event.stage} error] ${event.message}\n`);
+    }
   };
+}
+
+export async function runCli(argv: string[]) {
+  const { cmd, prompt, policy, skills, model: cliModel } = parseArgs(argv);
   const cwd = process.cwd();
 
   if (cmd === 'help') {
@@ -195,13 +311,21 @@ export async function runCli(argv: string[]) {
     policyMode: policy,
     cliSkillNames: skills
   });
+  const modelConfig = resolveModelConfig({ workspace: assembly.workspaceConfig, cli: cliModel });
+  const modelClient = createModelClient(modelConfig);
+  session.model = {
+    provider: modelConfig.provider,
+    model: modelConfig.model,
+    baseUrl: modelConfig.baseUrl
+  };
 
   if (prompt && prompt.trim()) {
     const runner = createRunner({
-      model: createOpenRouterClient(),
+      model: modelClient,
       hooks: [...assembly.hooks, ...createCliHooks()],
       policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool() }),
-      instructions: assembly.instructions
+      instructions: assembly.instructions,
+      onEvent: createCliEventSink()
     });
     const finalMessage = await runner.runTurn(session, prompt.trim());
     console.log(`\n${finalMessage}`);
@@ -209,11 +333,19 @@ export async function runCli(argv: string[]) {
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
+  const eventSink = createCliEventSink();
+  let turnSawRuntimeError = false;
   const runner = createRunner({
-    model: createOpenRouterClient(),
+    model: modelClient,
     hooks: [...assembly.hooks, ...createCliHooks()],
     policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool(rl) }),
-    instructions: assembly.instructions
+    instructions: assembly.instructions,
+    async onEvent(event) {
+      if (event.type === 'error') {
+        turnSawRuntimeError = true;
+      }
+      await eventSink(event);
+    }
   });
   console.log(`cliq chat in ${session.cwd}`);
   rl.prompt();
@@ -232,16 +364,26 @@ export async function runCli(argv: string[]) {
     if (input === '/reset') {
       const fresh = await ensureFresh(session.cwd);
       Object.assign(session, fresh);
+      session.model = {
+        provider: modelConfig.provider,
+        model: modelConfig.model,
+        baseUrl: modelConfig.baseUrl
+      };
       console.log('session reset');
       rl.prompt();
       continue;
     }
 
     try {
+      turnSawRuntimeError = false;
       const finalMessage = await runner.runTurn(session, input);
       console.log(`\n${finalMessage}\n`);
     } catch (error) {
-      console.error(String(error));
+      if (!turnSawRuntimeError) {
+        process.stderr.write(
+          `[interactive fallback error] ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+        );
+      }
     }
 
     rl.prompt();

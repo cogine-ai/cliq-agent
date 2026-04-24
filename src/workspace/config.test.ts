@@ -61,3 +61,53 @@ test('loadWorkspaceConfig validates array fields', async () => {
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+test('loadWorkspaceConfig reads model config', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-workspace-model-config-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify({
+        model: {
+          provider: 'ollama',
+          model: 'qwen3:14b',
+          baseUrl: 'http://localhost:11434',
+          streaming: 'auto'
+        }
+      }),
+      'utf8'
+    );
+
+    assert.deepEqual(await loadWorkspaceConfig(cwd), {
+      instructionFiles: [],
+      extensions: [],
+      defaultSkills: [],
+      model: {
+        provider: 'ollama',
+        model: 'qwen3:14b',
+        baseUrl: 'http://localhost:11434',
+        streaming: 'auto'
+      }
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('loadWorkspaceConfig validates model config shape', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-workspace-model-config-invalid-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(path.join(cwd, '.cliq', 'config.json'), JSON.stringify({ model: 'bad' }), 'utf8');
+    await assert.rejects(() => loadWorkspaceConfig(cwd), /model must be an object/i);
+
+    await writeFile(path.join(cwd, '.cliq', 'config.json'), JSON.stringify({ model: { provider: 1 } }), 'utf8');
+    await assert.rejects(() => loadWorkspaceConfig(cwd), /model.provider must be a string/i);
+
+    await writeFile(path.join(cwd, '.cliq', 'config.json'), JSON.stringify({ model: { streaming: 'bad' } }), 'utf8');
+    await assert.rejects(() => loadWorkspaceConfig(cwd), /model.streaming must be one of/i);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
