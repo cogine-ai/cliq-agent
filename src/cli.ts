@@ -19,6 +19,17 @@ const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'con
 const POLICY_MODE_LIST = POLICY_MODES.join(', ');
 const STREAMING_MODES = ['auto', 'on', 'off'] as const;
 
+type ParsedArgsBase = {
+  policy: PolicyMode;
+  skills: string[];
+  model: PartialModelConfig;
+};
+
+export type ParsedArgs = ParsedArgsBase & (
+  | { cmd: 'chat'; prompt: string }
+  | { cmd: 'reset' | 'history' | 'help'; prompt?: undefined }
+);
+
 function isPolicyMode(value: string): value is PolicyMode {
   return (POLICY_MODES as readonly string[]).includes(value);
 }
@@ -36,7 +47,7 @@ function readFlagValue(raw: string[], index: number, flag: string) {
   return value;
 }
 
-export function parseArgs(argv: string[]) {
+export function parseArgs(argv: string[]): ParsedArgs {
   const raw = argv.slice(2);
   let policy: PolicyMode = DEFAULT_POLICY_MODE;
   const skills: string[] = [];
@@ -274,13 +285,7 @@ function createCliEventSink() {
 }
 
 export async function runCli(argv: string[]) {
-  const { cmd, prompt, policy, skills, model: cliModel } = parseArgs(argv) as {
-    cmd: string;
-    prompt?: string;
-    policy: PolicyMode;
-    skills: string[];
-    model: PartialModelConfig;
-  };
+  const { cmd, prompt, policy, skills, model: cliModel } = parseArgs(argv);
   const cwd = process.cwd();
 
   if (cmd === 'help') {

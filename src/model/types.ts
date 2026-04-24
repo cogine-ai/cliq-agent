@@ -37,6 +37,7 @@ export type ResolvedModelConfig = {
   baseUrl: string;
   apiKey?: string;
   streaming: StreamingMode;
+  maxOutputTokens?: number;
 };
 
 export type ModelCompletion = {

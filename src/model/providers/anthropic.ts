@@ -25,6 +25,10 @@ function messagesUrl(baseUrl: string) {
 export function createAnthropicClient(config: ResolvedModelConfig): ModelClient {
   return {
     async complete(messages: ChatMessage[], options?: { onEvent?: (event: ModelStreamEvent) => void | Promise<void> }) {
+      if (!config.apiKey) {
+        throw new Error('ANTHROPIC_API_KEY is required');
+      }
+
       const body = splitMessages(messages);
       await options?.onEvent?.({
         type: 'start',
@@ -39,12 +43,12 @@ export function createAnthropicClient(config: ResolvedModelConfig): ModelClient 
             method: 'POST',
             headers: {
               'content-type': 'application/json',
-              'x-api-key': config.apiKey ?? '',
+              'x-api-key': config.apiKey,
               'anthropic-version': '2023-06-01'
             },
             body: JSON.stringify({
               model: config.model,
-              max_tokens: 4096,
+              max_tokens: config.maxOutputTokens ?? 4096,
               ...(body.system ? { system: body.system } : {}),
               messages: body.messages,
               stream: true
@@ -80,12 +84,12 @@ export function createAnthropicClient(config: ResolvedModelConfig): ModelClient 
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-api-key': config.apiKey ?? '',
+            'x-api-key': config.apiKey,
             'anthropic-version': '2023-06-01'
           },
           body: JSON.stringify({
             model: config.model,
-            max_tokens: 4096,
+            max_tokens: config.maxOutputTokens ?? 4096,
             ...(body.system ? { system: body.system } : {}),
             messages: body.messages,
             stream: false

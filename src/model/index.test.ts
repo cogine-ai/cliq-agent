@@ -16,7 +16,11 @@ test('createModelClient resolves registered provider clients', async () => {
       streaming: 'off'
     });
     const result = await client.complete([{ role: 'user', content: 'hello' }]);
-    assert.equal(result.provider, 'ollama');
+    assert.deepEqual(result, {
+      content: '{"message":"ok"}',
+      provider: 'ollama',
+      model: 'qwen3:14b'
+    });
   } finally {
     fetchMock.mock.restore();
   }

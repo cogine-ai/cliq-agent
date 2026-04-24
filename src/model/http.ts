@@ -58,6 +58,11 @@ export async function readTextStream(response: Response, onChunk: (chunk: string
   return output;
 }
 
+function warnMalformedStreamPayload(format: string, payload: string, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(`Malformed model ${format} payload skipped: ${message}; payload=${payload}`);
+}
+
 export async function readSseDeltas(
   response: Response,
   extractDelta: (json: unknown) => string | null,
@@ -72,7 +77,15 @@ export async function readSseDeltas(
       if (!normalized.startsWith('data:')) continue;
       const payload = normalized.slice('data:'.length).trim();
       if (!payload || payload === '[DONE]') continue;
-      const delta = extractDelta(JSON.parse(payload));
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(payload);
+      } catch (error) {
+        warnMalformedStreamPayload('SSE', payload, error);
+        continue;
+      }
+
+      const delta = extractDelta(parsed);
       if (delta) {
         content += delta;
         await onDelta(delta);
@@ -108,7 +121,15 @@ export async function readNdjsonDeltas(
   async function processLine(line: string) {
     const payload = line.trim();
     if (!payload) return;
-    const delta = extractDelta(JSON.parse(payload));
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch (error) {
+      warnMalformedStreamPayload('NDJSON', payload, error);
+      return;
+    }
+
+    const delta = extractDelta(parsed);
     if (delta) {
       content += delta;
       await onDelta(delta);

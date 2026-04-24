@@ -7,6 +7,7 @@ test('openai-compatible client sends chat completions request', async () => {
   const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
     assert.equal(String(_url), 'http://localhost:4000/v1/chat/completions');
     assert.equal(init?.method, 'POST');
+    assert.equal((init?.headers as Record<string, string>).authorization, 'Bearer local-key');
     assert.match(String(init?.body), /"model":"local-model"/);
     return Response.json({ choices: [{ message: { content: '{"message":"ok"}' } }] });
   });

@@ -61,28 +61,28 @@ export function createOpenAICompatibleClient(config: ResolvedModelConfig): Model
           };
         }
 
-      const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
-        method: 'POST',
-        headers: headers(config),
-        body: JSON.stringify({
-          model: config.model,
-          messages,
-          stream: false
-        })
-      });
+        const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
+          method: 'POST',
+          headers: headers(config),
+          body: JSON.stringify({
+            model: config.model,
+            messages,
+            stream: false
+          })
+        });
 
-      const json = await readJsonResponse<ChatCompletionsResp>(response, config.provider);
-      const content = json.choices[0]?.message?.content?.trim();
-      if (!content) {
-        throw new Error(`${config.provider} response missing choices/content: ${JSON.stringify(json)}`);
-      }
+        const json = await readJsonResponse<ChatCompletionsResp>(response, config.provider);
+        const content = json.choices[0]?.message?.content?.trim();
+        if (!content) {
+          throw new Error(`${config.provider} response missing choices/content: ${JSON.stringify(json)}`);
+        }
 
-      await options?.onEvent?.({ type: 'end' });
-      return {
-        content,
-        provider: config.provider,
-        model: config.model
-      };
+        await options?.onEvent?.({ type: 'end' });
+        return {
+          content,
+          provider: config.provider,
+          model: config.model
+        };
       } catch (error) {
         await options?.onEvent?.({
           type: 'error',

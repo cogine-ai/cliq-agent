@@ -9,7 +9,9 @@ test('anthropic client sends messages request', async () => {
     const headers = init?.headers as Record<string, string>;
     assert.equal(headers['x-api-key'], 'anthropic-key');
     assert.equal(headers['anthropic-version'], '2023-06-01');
-    assert.match(String(init?.body), /"model":"claude-sonnet-4-20250514"/);
+    const body = JSON.parse(String(init?.body)) as { model: string; max_tokens: number };
+    assert.equal(body.model, 'claude-sonnet-4-20250514');
+    assert.equal(body.max_tokens, 2048);
     return Response.json({ content: [{ type: 'text', text: '{"message":"ok"}' }] });
   });
 
@@ -19,12 +21,31 @@ test('anthropic client sends messages request', async () => {
       model: 'claude-sonnet-4-20250514',
       baseUrl: 'https://api.anthropic.com',
       apiKey: 'anthropic-key',
-      streaming: 'off'
+      streaming: 'off',
+      maxOutputTokens: 2048
     });
 
     const result = await client.complete([{ role: 'user', content: 'hello' }]);
     assert.equal(result.content, '{"message":"ok"}');
     assert.equal(result.provider, 'anthropic');
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('anthropic client fails before request when api key is missing', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({}));
+
+  try {
+    const client = createAnthropicClient({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-20250514',
+      baseUrl: 'https://api.anthropic.com',
+      streaming: 'off'
+    });
+
+    await assert.rejects(() => client.complete([{ role: 'user', content: 'hello' }]), /ANTHROPIC_API_KEY is required/);
+    assert.equal(fetchMock.mock.callCount(), 0);
   } finally {
     fetchMock.mock.restore();
   }

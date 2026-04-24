@@ -218,6 +218,17 @@ test('ensureSession migrates v3 string model to structured model ref', async () 
       model: 'anthropic/claude-sonnet-4.6',
       baseUrl: 'https://openrouter.ai/api/v1'
     });
+
+    const persisted = JSON.parse(await readFile(sessionPath(cwd), 'utf8')) as {
+      version: number;
+      model: unknown;
+    };
+    assert.equal(persisted.version, 4);
+    assert.deepEqual(persisted.model, {
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-4.6',
+      baseUrl: 'https://openrouter.ai/api/v1'
+    });
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

@@ -54,30 +54,30 @@ export function createOllamaClient(config: ResolvedModelConfig): ModelClient {
           };
         }
 
-      const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/api/chat'), {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: config.model,
-          messages,
-          stream: false
-        })
-      });
+        const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/api/chat'), {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: config.model,
+            messages,
+            stream: false
+          })
+        });
 
-      const json = await readJsonResponse<OllamaResp>(response, 'Ollama');
-      const content = json.message?.content?.trim();
-      if (!content) {
-        throw new Error(`Ollama response missing message/content: ${JSON.stringify(json)}`);
-      }
+        const json = await readJsonResponse<OllamaResp>(response, 'Ollama');
+        const content = json.message?.content?.trim();
+        if (!content) {
+          throw new Error(`Ollama response missing message/content: ${JSON.stringify(json)}`);
+        }
 
-      await options?.onEvent?.({ type: 'end' });
-      return {
-        content,
-        provider: config.provider,
-        model: config.model
-      };
+        await options?.onEvent?.({ type: 'end' });
+        return {
+          content,
+          provider: config.provider,
+          model: config.model
+        };
       } catch (error) {
         await options?.onEvent?.({
           type: 'error',

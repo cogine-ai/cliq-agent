@@ -64,33 +64,33 @@ export function createOpenRouterClient(config: ResolvedModelConfig): ModelClient
           };
         }
 
-      const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${config.apiKey}`,
-          'HTTP-Referer': 'https://local.cliq',
-          'X-Title': 'cliq-agent'
-        },
-        body: JSON.stringify({
-          model: config.model,
-          messages,
-          stream: false
-        })
-      });
+        const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${config.apiKey}`,
+            'HTTP-Referer': 'https://local.cliq',
+            'X-Title': 'cliq-agent'
+          },
+          body: JSON.stringify({
+            model: config.model,
+            messages,
+            stream: false
+          })
+        });
 
-      const json = await readJsonResponse<OpenRouterResp>(response, 'OpenRouter');
-      const content = json.choices[0]?.message?.content?.trim();
-      if (!content) {
-        throw new Error(`OpenRouter response missing choices/content: ${JSON.stringify(json)}`);
-      }
+        const json = await readJsonResponse<OpenRouterResp>(response, 'OpenRouter');
+        const content = json.choices[0]?.message?.content?.trim();
+        if (!content) {
+          throw new Error(`OpenRouter response missing choices/content: ${JSON.stringify(json)}`);
+        }
 
-      await options?.onEvent?.({ type: 'end' });
-      return {
-        content,
-        provider: config.provider,
-        model: config.model
-      };
+        await options?.onEvent?.({ type: 'end' });
+        return {
+          content,
+          provider: config.provider,
+          model: config.model
+        };
       } catch (error) {
         await options?.onEvent?.({
           type: 'error',
