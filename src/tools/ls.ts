@@ -33,7 +33,7 @@ export const lsTool: ToolDefinition<{ ls: LsAction }> = {
       return {
         tool: 'ls',
         status: 'error',
-        meta: { path: action.ls.path ?? '.' },
+        meta: { path: action.ls.path ?? '.', error: message },
         content: `TOOL_RESULT ls ERROR\npath=${action.ls.path ?? '.'}\n${message}`
       };
     }

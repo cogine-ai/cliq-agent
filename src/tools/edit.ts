@@ -15,12 +15,13 @@ export const editTool: ToolDefinition<EditModelAction> = {
     try {
       ({ targetRealPath, relativePath } = await resolveWorkspacePath(context.cwd, action.edit.path));
     } catch {
-      const meta: ToolResult['meta'] = { path: action.edit.path };
+      const error = 'edit.path must be a workspace-relative path inside the workspace';
+      const meta: ToolResult['meta'] = { path: action.edit.path, error };
       return {
         tool: 'edit',
         status: 'error',
         meta,
-        content: `TOOL_RESULT edit ERROR\npath=${action.edit.path}\nedit.path must be a workspace-relative path inside the workspace`
+        content: `TOOL_RESULT edit ERROR\npath=${action.edit.path}\n${error}`
       };
     }
 
@@ -28,12 +29,13 @@ export const editTool: ToolDefinition<EditModelAction> = {
       const current = await fs.readFile(targetRealPath, 'utf8');
       const matches = current.split(action.edit.old_text).length - 1;
       if (matches !== 1) {
-        const meta: ToolResult['meta'] = { path: relativePath, matches };
+        const error = `expected old_text to match exactly once, but matched ${matches} times`;
+        const meta: ToolResult['meta'] = { path: relativePath, matches, error };
         return {
           tool: 'edit',
           status: 'error',
           meta,
-          content: `TOOL_RESULT edit ERROR\npath=${relativePath}\nexpected old_text to match exactly once, but matched ${matches} times`
+          content: `TOOL_RESULT edit ERROR\npath=${relativePath}\n${error}`
         };
       }
 
@@ -46,12 +48,13 @@ export const editTool: ToolDefinition<EditModelAction> = {
         content: `TOOL_RESULT edit OK\npath=${relativePath}\nreplaced exact text span successfully`
       };
     } catch (error) {
-      const meta: ToolResult['meta'] = { path: relativePath };
+      const message = error instanceof Error ? error.message : String(error);
+      const meta: ToolResult['meta'] = { path: relativePath, error: message };
       return {
         tool: 'edit',
         status: 'error',
         meta,
-        content: `TOOL_RESULT edit ERROR\npath=${relativePath}\n${error instanceof Error ? error.message : String(error)}`
+        content: `TOOL_RESULT edit ERROR\npath=${relativePath}\n${message}`
       };
     }
   }

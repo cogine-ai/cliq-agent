@@ -17,6 +17,7 @@ test('editTool rejects absolute paths', async () => {
 
   assert.equal(result.status, 'error');
   assert.match(result.content, /workspace-relative path|absolute path|outside workspace/i);
+  assert.match(String(result.meta.error), /workspace-relative path|absolute path|outside workspace/i);
 });
 
 test('editTool rejects paths outside the workspace', async () => {

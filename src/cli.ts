@@ -268,7 +268,12 @@ export function formatToolResultLine(result: ToolResult) {
   const policy = firstLine(result.meta.policy);
   const reason = firstLine(result.meta.reason);
   const error = firstLine(result.meta.error);
+  const errorDetail = reason ?? error;
   let detail = pathValue;
+
+  if (detail && result.status === 'error' && errorDetail) {
+    detail = `${detail} - ${errorDetail}`;
+  }
 
   if (!detail && policy && reason) {
     detail = `policy=${policy} ${reason}`;

@@ -78,7 +78,7 @@ export const findTool: ToolDefinition<{ find: FindAction }> = {
       return {
         tool: 'find',
         status: 'error',
-        meta: { path: action.find.path ?? '.' },
+        meta: { path: action.find.path ?? '.', error: message },
         content: `TOOL_RESULT find ERROR\npath=${action.find.path ?? '.'}\n${message}`
       };
     }

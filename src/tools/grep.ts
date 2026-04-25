@@ -103,7 +103,7 @@ export const grepTool: ToolDefinition<{ grep: GrepAction }> = {
       return {
         tool: 'grep',
         status: 'error',
-        meta: { path: action.grep.path ?? '.' },
+        meta: { path: action.grep.path ?? '.', error: message },
         content: `TOOL_RESULT grep ERROR\npath=${action.grep.path ?? '.'}\n${message}`
       };
     }
