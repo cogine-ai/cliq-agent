@@ -237,7 +237,7 @@ Policy modes:
   confirm-all              Ask before every tool
 
 Streaming modes:
-  auto                     Use Cliq/provider default
+  auto                     Use provider default; compatible endpoints may fall back
   on                       Request streaming when supported
   off                      Force non-streaming responses
 
