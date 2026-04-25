@@ -248,6 +248,7 @@ test('runner records a denied bash action when mode is read-only', async () => {
   assert.equal(finalMessage, 'done');
   assert.match(outputs[0] ?? '', /policy mode read-only blocks exec tools/);
   assert.equal(toolRecord?.status, 'error');
+  assert.equal(toolRecord?.meta?.reason, 'policy mode read-only blocks exec tools');
 });
 
 test('runner records policy authorization failures as tool errors', async () => {

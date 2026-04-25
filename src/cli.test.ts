@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { mock } from 'node:test';
 
-import { parseArgs } from './cli.js';
+import {
+  formatToolResultLine,
+  isReportedCliError,
+  parseArgs,
+  renderUnhandledError,
+  ReportedCliError,
+  runCli
+} from './cli.js';
+import type { ToolResult } from './tools/types.js';
 
 test('parseArgs accepts --policy=read-only', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--policy=read-only', 'chat']), {
@@ -121,4 +133,74 @@ test('parseArgs rejects missing model flag values', () => {
 test('parseArgs rejects invalid provider and streaming values', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--provider', 'bad']), /Unknown model provider/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--streaming', 'bad']), /Unknown streaming mode/i);
+});
+
+test('formatToolResultLine surfaces policy denial context when no path exists', () => {
+  const result: ToolResult = {
+    tool: 'edit',
+    status: 'error',
+    content: 'TOOL_RESULT edit ERROR\npolicy=confirm-write\nconfirmation denied',
+    meta: {
+      policy: 'confirm-write',
+      reason: 'confirmation denied'
+    }
+  };
+
+  assert.equal(formatToolResultLine(result), '[edit error] policy=confirm-write confirmation denied');
+});
+
+test('runCli marks already-rendered runtime errors as reported', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-test-'));
+  const previousCwd = process.cwd();
+  let stdout = '';
+  let stderr = '';
+  const stdoutWrite = process.stdout.write;
+  const stderrWrite = process.stderr.write;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    throw new Error('fetch failed');
+  });
+
+  process.chdir(cwd);
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout += String(chunk);
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    await assert.rejects(
+      () =>
+        runCli([
+          'node',
+          'src/index.ts',
+          '--provider',
+          'openai-compatible',
+          '--model',
+          'fake',
+          '--base-url',
+          'http://127.0.0.1:59999/v1',
+          '--streaming',
+          'off',
+          'final-only'
+        ]),
+      isReportedCliError
+    );
+  } finally {
+    process.stdout.write = stdoutWrite;
+    process.stderr.write = stderrWrite;
+    process.chdir(previousCwd);
+    fetchMock.mock.restore();
+    await rm(cwd, { recursive: true, force: true });
+  }
+
+  assert.match(stdout, /\[model openai-compatible\/fake\]/);
+  assert.equal((stderr.match(/\[model error\] fetch failed/g) ?? []).length, 1);
+});
+
+test('renderUnhandledError suppresses errors already reported by runtime events', () => {
+  assert.equal(renderUnhandledError(new Error('plain failure')), 'plain failure');
+  assert.equal(renderUnhandledError(new ReportedCliError(new Error('reported failure'))), null);
 });

@@ -14,6 +14,7 @@ import type { RuntimeEvent } from './runtime/events.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
 import { ensureFresh, ensureSession, saveSession } from './session/store.js';
+import type { ToolResult } from './tools/types.js';
 
 const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
 const POLICY_MODE_LIST = POLICY_MODES.join(', ');
@@ -36,6 +37,25 @@ function isPolicyMode(value: string): value is PolicyMode {
 
 function isStreamingMode(value: string) {
   return (STREAMING_MODES as readonly string[]).includes(value);
+}
+
+export class ReportedCliError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : String(error), { cause: error });
+    this.name = 'ReportedCliError';
+  }
+}
+
+export function isReportedCliError(error: unknown): error is ReportedCliError {
+  return error instanceof ReportedCliError;
+}
+
+export function renderUnhandledError(error: unknown) {
+  if (isReportedCliError(error)) {
+    return null;
+  }
+
+  return error instanceof Error ? error.message : String(error);
 }
 
 function readFlagValue(raw: string[], index: number, flag: string) {
@@ -229,10 +249,40 @@ function createCliHooks(): RuntimeHook[] {
           return;
         }
 
-        process.stdout.write(`\n[${result.tool ?? 'unknown'} ${result.status}] ${result.meta.path ?? '(unknown path)'}\n`);
+        process.stdout.write(`\n${formatToolResultLine(result)}\n`);
       }
     }
   ];
+}
+
+function firstLine(value: unknown) {
+  if (typeof value !== 'string' || !value.trim()) {
+    return null;
+  }
+
+  return value.trim().split('\n')[0];
+}
+
+export function formatToolResultLine(result: ToolResult) {
+  const pathValue = firstLine(result.meta.path);
+  const policy = firstLine(result.meta.policy);
+  const reason = firstLine(result.meta.reason);
+  const error = firstLine(result.meta.error);
+  let detail = pathValue;
+
+  if (!detail && policy && reason) {
+    detail = `policy=${policy} ${reason}`;
+  }
+
+  if (!detail && policy && error) {
+    detail = `policy=${policy} ${error}`;
+  }
+
+  if (!detail) {
+    detail = error ?? '(no details)';
+  }
+
+  return `[${result.tool ?? 'unknown'} ${result.status}] ${detail}`;
 }
 
 async function askYesNo(question: string, rl?: readline.Interface) {
@@ -320,14 +370,31 @@ export async function runCli(argv: string[]) {
   };
 
   if (prompt && prompt.trim()) {
+    const eventSink = createCliEventSink();
+    let turnSawRuntimeError = false;
     const runner = createRunner({
       model: modelClient,
       hooks: [...assembly.hooks, ...createCliHooks()],
       policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool() }),
       instructions: assembly.instructions,
-      onEvent: createCliEventSink()
+      async onEvent(event) {
+        if (event.type === 'error') {
+          turnSawRuntimeError = true;
+        }
+        await eventSink(event);
+      }
     });
-    const finalMessage = await runner.runTurn(session, prompt.trim());
+
+    let finalMessage: string;
+    try {
+      finalMessage = await runner.runTurn(session, prompt.trim());
+    } catch (error) {
+      if (turnSawRuntimeError) {
+        throw new ReportedCliError(error);
+      }
+      throw error;
+    }
+
     console.log(`\n${finalMessage}`);
     return;
   }
