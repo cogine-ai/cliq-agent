@@ -9,6 +9,7 @@ import {
   formatToolResultLine,
   isReportedCliError,
   parseArgs,
+  printHelp,
   renderUnhandledError,
   ReportedCliError,
   runCli
@@ -133,6 +134,34 @@ test('parseArgs rejects missing model flag values', () => {
 test('parseArgs rejects invalid provider and streaming values', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--provider', 'bad']), /Unknown model provider/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--streaming', 'bad']), /Unknown streaming mode/i);
+});
+
+test('printHelp documents aliases, policy modes, skills, and streaming', () => {
+  const previousLog = console.log;
+  let output = '';
+  console.log = (value?: unknown) => {
+    output += String(value);
+  };
+
+  try {
+    printHelp();
+  } finally {
+    console.log = previousLog;
+  }
+
+  assert.match(output, /cliq run "task"/);
+  assert.match(output, /cliq ask "task"/);
+  assert.match(output, /--policy MODE/);
+  assert.match(output, /confirm-write/);
+  assert.match(output, /read-only/);
+  assert.match(output, /confirm-bash/);
+  assert.match(output, /confirm-all/);
+  assert.match(output, /--skill NAME/);
+  assert.match(output, /repeat/i);
+  assert.match(output, /--streaming MODE/);
+  assert.match(output, /auto \| on \| off/);
+  assert.match(output, /openai-compatible/);
+  assert.match(output, /--base-url URL/);
 });
 
 test('formatToolResultLine surfaces policy denial context when no path exists', () => {

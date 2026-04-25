@@ -212,25 +212,46 @@ export function printHelp() {
   console.log(`cliq - tiny local coding agent harness
 
 Usage:
-  cliq "task"        Run a task in the current directory
-  cliq chat          Start interactive chat in the current directory
-  cliq reset         Clear persisted conversation for this directory
-  cliq history       Print persisted session for this directory
-  cliq --skill name  Activate a local skill for this run
-  cliq --provider ollama --model qwen3:14b "task"
+  cliq "task"              Run a task in the current directory
+  cliq run "task"          Alias for one-shot task execution
+  cliq ask "task"          Alias for one-shot task execution
+  cliq chat                Start interactive chat in the current directory
+  cliq reset               Clear persisted conversation for this directory
+  cliq history             Print persisted session for this directory
+  cliq help                Print this help
 
-Model:
-  --provider       openrouter | anthropic | openai | openai-compatible | ollama
-  --model          Provider model id
-  --base-url       Required for openai-compatible, optional override for ollama
-  --streaming      auto | on | off
+Options:
+  --policy MODE            auto | confirm-write | read-only | confirm-bash | confirm-all
+  --skill NAME             Activate a local skill; repeat to load multiple skills
+  --provider NAME          openrouter | anthropic | openai | openai-compatible | ollama
+  --model ID               Provider model id; required for openai-compatible and ollama
+  --base-url URL           Required for openai-compatible; optional provider override
+  --streaming MODE         auto | on | off
+
+Policy modes:
+  auto                     Execute registered tools without confirmation
+  confirm-write            Ask before write tools
+  read-only                Allow read, ls, find, and grep only
+  confirm-bash             Ask before exec tools
+  confirm-all              Ask before every tool
+
+Streaming modes:
+  auto                     Use Cliq/provider default
+  on                       Request streaming when supported
+  off                      Force non-streaming responses
+
+Examples:
+  cliq --policy read-only "inspect this repo"
+  cliq --provider ollama --model qwen3:14b "inspect this repo"
 
 Env:
-  OPENROUTER_API_KEY Required for OpenRouter
-  ANTHROPIC_API_KEY  Required for Anthropic
-  OPENAI_API_KEY     Required for OpenAI
-  CLIQ_MODEL_*       Optional provider/model/base URL/streaming defaults
-  CLIQ_POLICY_MODE   Optional (auto | confirm-write | read-only | confirm-bash | confirm-all)
+  OPENROUTER_API_KEY        Required for OpenRouter
+  ANTHROPIC_API_KEY         Required for Anthropic
+  OPENAI_API_KEY            Required for OpenAI
+  CLIQ_MODEL_API_KEY        Optional for openai-compatible
+  OPENAI_COMPATIBLE_API_KEY Optional for openai-compatible
+  CLIQ_MODEL_*              Optional provider/model/base URL/streaming defaults
+  CLIQ_POLICY_MODE          Optional default policy mode
 `);
 }
 
