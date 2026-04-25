@@ -149,6 +149,23 @@ test('formatToolResultLine surfaces policy denial context when no path exists', 
   assert.equal(formatToolResultLine(result), '[edit error] policy=confirm-write confirmation denied');
 });
 
+test('formatToolResultLine surfaces tool error reason alongside path', () => {
+  const result: ToolResult = {
+    tool: 'read',
+    status: 'error',
+    content: 'TOOL_RESULT read ERROR\npath=/etc/passwd\npath must stay inside the workspace and be workspace-relative',
+    meta: {
+      path: '/etc/passwd',
+      error: 'path must stay inside the workspace and be workspace-relative'
+    }
+  };
+
+  assert.equal(
+    formatToolResultLine(result),
+    '[read error] /etc/passwd - path must stay inside the workspace and be workspace-relative'
+  );
+});
+
 test('runCli marks already-rendered runtime errors as reported', async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-test-'));
   const previousCwd = process.cwd();

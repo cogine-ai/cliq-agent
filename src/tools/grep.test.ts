@@ -61,3 +61,16 @@ test('grepTool supports searching a single file path', async () => {
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+test('grepTool records error reason for paths outside the workspace', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-grep-error-'));
+  try {
+    const result = await grepTool.execute({ grep: { path: '..', pattern: 'runTurn' } }, { cwd, session: createSession(cwd) });
+
+    assert.equal(result.status, 'error');
+    assert.match(result.content, /workspace-relative/i);
+    assert.match(String(result.meta.error), /workspace-relative/i);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

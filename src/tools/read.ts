@@ -36,7 +36,7 @@ export const readTool: ToolDefinition<{ read: ReadAction }> = {
       return {
         tool: 'read',
         status: 'error',
-        meta: { path: action.read.path },
+        meta: { path: action.read.path, error: message },
         content: `TOOL_RESULT read ERROR\npath=${action.read.path}\n${message}`
       };
     }

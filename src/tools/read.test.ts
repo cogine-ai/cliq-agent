@@ -57,6 +57,7 @@ test('readTool rejects symlink escapes outside the workspace', async () => {
 
     assert.equal(result.status, 'error');
     assert.match(result.content, /workspace-relative/i);
+    assert.match(String(result.meta.error), /workspace-relative/i);
   } finally {
     await rm(cwd, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
