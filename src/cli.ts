@@ -225,7 +225,7 @@ Options:
   --policy MODE            auto | confirm-write | read-only | confirm-bash | confirm-all
   --skill NAME             Activate a local skill; repeat to load multiple skills
   --provider NAME          openrouter | anthropic | openai | openai-compatible | ollama
-  --model ID               Provider model id; required for openai-compatible and ollama
+  --model ID               Provider model id; required for openai-compatible; auto-discovered for ollama
   --base-url URL           Required for openai-compatible; optional provider override
   --streaming MODE         auto | on | off
 
@@ -243,7 +243,7 @@ Streaming modes:
 
 Examples:
   cliq --policy read-only "inspect this repo"
-  cliq --provider ollama --model qwen3:14b "inspect this repo"
+  cliq --provider ollama --model qwen3:4b "inspect this repo"
 
 Env:
   OPENROUTER_API_KEY        Required for OpenRouter
@@ -388,7 +388,7 @@ export async function runCli(argv: string[]) {
     policyMode: policy,
     cliSkillNames: skills
   });
-  const modelConfig = resolveModelConfig({ workspace: assembly.workspaceConfig, cli: cliModel });
+  const modelConfig = await resolveModelConfig({ workspace: assembly.workspaceConfig, cli: cliModel });
   const modelClient = createModelClient(modelConfig);
   session.model = {
     provider: modelConfig.provider,

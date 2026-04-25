@@ -89,19 +89,21 @@ npm link
 
 ## Model Providers
 
-Cliq defaults to OpenRouter:
+Cliq is local-first. If you do not configure a provider or model, Cliq tries local Ollama first:
 
 ```bash
-export OPENROUTER_API_KEY=...
+ollama pull qwen3:4b
 cliq "inspect this repo"
 ```
+
+On startup, Cliq calls `http://localhost:11434/api/tags`. If local models exist, it chooses the first model whose name contains `qwen`; otherwise it uses the first model returned by Ollama. If Ollama has no models, Cliq prints a configuration error with next steps instead of silently falling back to a remote provider.
 
 Select a provider from the CLI:
 
 ```bash
 cliq --provider anthropic --model claude-sonnet-4-20250514 "inspect this repo"
 cliq --provider openai --model gpt-5.2 "inspect this repo"
-cliq --provider ollama --model qwen3:14b "inspect this repo"
+cliq --provider ollama --model qwen3:4b "inspect this repo"
 ```
 
 Use `.cliq/config.json` for workspace defaults:
@@ -110,7 +112,7 @@ Use `.cliq/config.json` for workspace defaults:
 {
   "model": {
     "provider": "ollama",
-    "model": "qwen3:14b",
+    "model": "qwen3:4b",
     "baseUrl": "http://localhost:11434",
     "streaming": "auto"
   }
@@ -123,7 +125,7 @@ Supported providers:
 - `anthropic`: requires `ANTHROPIC_API_KEY`
 - `openai`: requires `OPENAI_API_KEY`
 - `openai-compatible`: requires `--base-url` or `CLIQ_MODEL_BASE_URL`; uses `CLIQ_MODEL_API_KEY` when set
-- `ollama`: uses local `http://localhost:11434` by default and does not require an API key
+- `ollama`: uses local `http://localhost:11434` by default, can auto-discover an installed model, and does not require an API key
 
 OpenAI-compatible streaming modes:
 
@@ -206,14 +208,14 @@ Cliq reads optional runtime config from `./.cliq/config.json` in the current wor
   "defaultSkills": ["reviewer"],
   "model": {
     "provider": "ollama",
-    "model": "qwen3:14b",
+    "model": "qwen3:4b",
     "baseUrl": "http://localhost:11434",
     "streaming": "auto"
   }
 }
 ```
 
-All fields are optional. If the file is missing, Cliq uses OpenRouter defaults with no repo-local prompt, skill, extension, or model overrides.
+All fields are optional. If the file is missing, Cliq uses no repo-local prompt, skill, or extension overrides and resolves the model with its local-first Ollama default.
 
 ## Local skills
 

@@ -15,9 +15,9 @@ test('createSession starts without a seeded system record', () => {
 test('createSession records structured default model identity', () => {
   const session = createSession('/tmp/workspace');
   assert.deepEqual(session.model, {
-    provider: 'openrouter',
-    model: 'anthropic/claude-sonnet-4.6',
-    baseUrl: 'https://openrouter.ai/api/v1'
+    provider: 'ollama',
+    model: 'auto',
+    baseUrl: 'http://localhost:11434'
   });
 });
 

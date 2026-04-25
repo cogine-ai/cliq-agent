@@ -1,4 +1,4 @@
-import { DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_PROVIDER, MODEL } from '../config.js';
+import { DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_PROVIDER, MODEL, OLLAMA_DEFAULT_BASE_URL } from '../config.js';
 import type {
   ModelClient,
   ModelDescriptor,
@@ -108,7 +108,7 @@ const PROVIDERS: Record<ProviderName, ModelProviderDefinition> = {
   ollama: {
     name: 'ollama',
     displayName: 'Ollama',
-    defaultBaseUrl: 'http://localhost:11434',
+    defaultBaseUrl: OLLAMA_DEFAULT_BASE_URL,
     requiresApiKey: false,
     getDefaultModel: () => null,
     getKnownModels: () => []
