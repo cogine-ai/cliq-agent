@@ -151,6 +151,7 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
 
   assert.match(output, /cliq run "task"/);
   assert.match(output, /cliq ask "task"/);
+  assert.match(output, /-h, --help/);
   assert.match(output, /--policy MODE/);
   assert.match(output, /confirm-write/);
   assert.match(output, /read-only/);

@@ -219,6 +219,7 @@ Usage:
   cliq reset               Clear persisted conversation for this directory
   cliq history             Print persisted session for this directory
   cliq help                Print this help
+  -h, --help               Print this help
 
 Options:
   --policy MODE            auto | confirm-write | read-only | confirm-bash | confirm-all
