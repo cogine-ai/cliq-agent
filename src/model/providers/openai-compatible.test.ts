@@ -55,6 +55,7 @@ test('openai-compatible client preserves original error when error event handler
   const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ choices: {} }));
 
   try {
+    let sawErrorEvent = false;
     const client = createOpenAICompatibleClient({
       provider: 'openai-compatible',
       model: 'local-model',
@@ -67,12 +68,14 @@ test('openai-compatible client preserves original error when error event handler
         client.complete([{ role: 'user', content: 'hello' }], {
           onEvent(event) {
             if (event.type === 'error') {
+              sawErrorEvent = true;
               throw new Error('event handler failed');
             }
           }
         }),
       /openai-compatible response missing choices\/content/
     );
+    assert.equal(sawErrorEvent, true);
   } finally {
     fetchMock.mock.restore();
   }

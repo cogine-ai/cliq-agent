@@ -147,10 +147,10 @@ export function createOpenAICompatibleClient(config: ResolvedModelConfig): Model
     async complete(messages: ChatMessage[], options?: CompleteOptions) {
       try {
         if (config.streaming !== 'off') {
-          return completeWithStreaming(config, messages, options);
+          return await completeWithStreaming(config, messages, options);
         }
 
-        return completeWithoutStreaming(config, messages, options);
+        return await completeWithoutStreaming(config, messages, options);
       } catch (error) {
         await emitErrorEvent(options, error);
         throw error;
