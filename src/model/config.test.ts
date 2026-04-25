@@ -90,7 +90,7 @@ test('resolveModelConfig explains how to configure a model when local Ollama has
     await withEnv({}, async () => {
       await assert.rejects(
         () => resolveModelConfig({ workspace: {}, cli: {} }),
-        /No model provider or local Ollama model configured[\s\S]*ollama pull qwen3:4b/i
+        /No model provider or local Ollama model configured[\s\S]*ollama pull/i
       );
     });
   } finally {

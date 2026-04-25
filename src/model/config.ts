@@ -70,7 +70,7 @@ function buildNoLocalModelConfiguredError(baseUrl: string, cause?: unknown) {
 }
 
 async function discoverDefaultOllamaModel(baseUrl: string) {
-  let models;
+  let models: Awaited<ReturnType<typeof discoverOllamaModels>>;
   try {
     models = await discoverOllamaModels(baseUrl);
   } catch (error) {

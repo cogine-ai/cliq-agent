@@ -20,7 +20,7 @@ Requirements: Node.js 20 or newer.
 
 ```bash
 npm install -g @cogineai/cliq
-export OPENROUTER_API_KEY=...
+ollama pull qwen3:4b
 cliq --policy read-only "inspect this repo and summarize the architecture"
 ```
 
@@ -28,6 +28,13 @@ Start an interactive session:
 
 ```bash
 cliq chat
+```
+
+Optional remote provider / OpenRouter:
+
+```bash
+export OPENROUTER_API_KEY=...
+cliq --provider openrouter "inspect this repo and summarize the architecture"
 ```
 
 ## Current scope
