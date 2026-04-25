@@ -1,6 +1,9 @@
 export const MODEL = 'anthropic/claude-sonnet-4.6';
 export const DEFAULT_MODEL_PROVIDER = 'openrouter';
 export const DEFAULT_MODEL_BASE_URL = 'https://openrouter.ai/api/v1';
+export const OLLAMA_DEFAULT_BASE_URL = 'http://localhost:11434';
+export const OLLAMA_DEFAULT_MODEL_HINT = 'qwen3:4b';
+export const OLLAMA_DISCOVERY_TIMEOUT_MS = 2_000;
 export const APP_DIR = '.cliq';
 export const SESSION_FILE = 'session.json';
 export const MAX_LOOPS = 24;

@@ -2,7 +2,15 @@ import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-import { APP_DIR, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_PROVIDER, MODEL, SESSION_FILE, SESSION_VERSION } from '../config.js';
+import {
+  APP_DIR,
+  DEFAULT_MODEL_BASE_URL,
+  DEFAULT_MODEL_PROVIDER,
+  MODEL,
+  OLLAMA_DEFAULT_BASE_URL,
+  SESSION_FILE,
+  SESSION_VERSION
+} from '../config.js';
 import { isProviderName } from '../model/registry.js';
 import type { Session, SessionModelRef, SessionRecord } from './types.js';
 
@@ -44,9 +52,9 @@ function isSessionRecord(value: unknown): value is SessionRecord {
 
 function defaultSessionModel(): SessionModelRef {
   return {
-    provider: DEFAULT_MODEL_PROVIDER,
-    model: MODEL,
-    baseUrl: DEFAULT_MODEL_BASE_URL
+    provider: 'ollama',
+    model: 'auto',
+    baseUrl: OLLAMA_DEFAULT_BASE_URL
   };
 }
 
