@@ -9,6 +9,12 @@ type ChatCompletionsResp = {
   }>;
 };
 
+type CompleteOptions = {
+  onEvent?: (event: ModelStreamEvent) => void | Promise<void>;
+};
+
+const AUTO_STREAM_FALLBACK_STATUSES = new Set([400, 404, 405, 415, 422]);
+
 function headers(config: ResolvedModelConfig) {
   return {
     'content-type': 'application/json',
@@ -16,10 +22,19 @@ function headers(config: ResolvedModelConfig) {
   };
 }
 
-async function emitErrorEvent(
-  options: { onEvent?: (event: ModelStreamEvent) => void | Promise<void> } | undefined,
-  error: unknown
-) {
+function shouldFallbackFromStreamingResponse(response: Response) {
+  return AUTO_STREAM_FALLBACK_STATUSES.has(response.status);
+}
+
+async function streamHttpError(response: Response) {
+  const body = (await response.text()).trim();
+  const detail = body ? `: ${body}` : '';
+  return new Error(
+    `Model stream error ${response.status}${detail}. If this endpoint does not support streaming, retry with --streaming off.`
+  );
+}
+
+async function emitErrorEvent(options: CompleteOptions | undefined, error: unknown) {
   try {
     await options?.onEvent?.({
       type: 'error',
@@ -30,9 +45,87 @@ async function emitErrorEvent(
   }
 }
 
+function parseContent(json: ChatCompletionsResp, provider: string) {
+  if (!Array.isArray(json.choices) || json.choices.length === 0) {
+    throw new Error(`${provider} response missing choices/content: ${JSON.stringify(json)}`);
+  }
+
+  const content = json.choices[0]?.message?.content?.trim();
+  if (!content) {
+    throw new Error(`${provider} response missing choices/content: ${JSON.stringify(json)}`);
+  }
+
+  return content;
+}
+
+async function completeWithoutStreaming(config: ResolvedModelConfig, messages: ChatMessage[], options?: CompleteOptions) {
+  const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
+    method: 'POST',
+    headers: headers(config),
+    body: JSON.stringify({
+      model: config.model,
+      messages,
+      stream: false
+    })
+  });
+
+  const json = await readJsonResponse<ChatCompletionsResp>(response, config.provider);
+  const content = parseContent(json, config.provider);
+
+  await options?.onEvent?.({ type: 'end' });
+  return {
+    content,
+    provider: config.provider,
+    model: config.model
+  };
+}
+
+async function completeWithStreaming(config: ResolvedModelConfig, messages: ChatMessage[], options?: CompleteOptions) {
+  const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
+    method: 'POST',
+    headers: headers(config),
+    body: JSON.stringify({
+      model: config.model,
+      messages,
+      stream: true
+    })
+  });
+
+  if (!response.ok) {
+    if (config.streaming === 'auto' && shouldFallbackFromStreamingResponse(response)) {
+      await response.body?.cancel();
+      return completeWithoutStreaming(config, messages, options);
+    }
+
+    throw await streamHttpError(response);
+  }
+
+  const content = (
+    await readSseDeltas(
+      response,
+      (json) => {
+        const choice = (json as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0];
+        return choice?.delta?.content ?? null;
+      },
+      async (text) => options?.onEvent?.({ type: 'text-delta', text })
+    )
+  ).trim();
+
+  if (!content) {
+    throw new Error(`${config.provider} stream missing text content`);
+  }
+
+  await options?.onEvent?.({ type: 'end' });
+  return {
+    content,
+    provider: config.provider,
+    model: config.model
+  };
+}
+
 export function createOpenAICompatibleClient(config: ResolvedModelConfig): ModelClient {
   return {
-    async complete(messages: ChatMessage[], options?: { onEvent?: (event: ModelStreamEvent) => void | Promise<void> }) {
+    async complete(messages: ChatMessage[], options?: CompleteOptions) {
       await options?.onEvent?.({
         type: 'start',
         provider: config.provider,
@@ -42,65 +135,10 @@ export function createOpenAICompatibleClient(config: ResolvedModelConfig): Model
 
       try {
         if (config.streaming !== 'off') {
-          const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
-            method: 'POST',
-            headers: headers(config),
-            body: JSON.stringify({
-              model: config.model,
-              messages,
-              stream: true
-            })
-          });
-
-          const content = (
-            await readSseDeltas(
-              response,
-              (json) => {
-                const choice = (json as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0];
-                return choice?.delta?.content ?? null;
-              },
-              async (text) => options?.onEvent?.({ type: 'text-delta', text })
-            )
-          ).trim();
-
-          if (!content) {
-            throw new Error(`${config.provider} stream missing text content`);
-          }
-
-          await options?.onEvent?.({ type: 'end' });
-          return {
-            content,
-            provider: config.provider,
-            model: config.model
-          };
+          return completeWithStreaming(config, messages, options);
         }
 
-        const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
-          method: 'POST',
-          headers: headers(config),
-          body: JSON.stringify({
-            model: config.model,
-            messages,
-            stream: false
-          })
-        });
-
-        const json = await readJsonResponse<ChatCompletionsResp>(response, config.provider);
-        if (!Array.isArray(json.choices) || json.choices.length === 0) {
-          throw new Error(`${config.provider} response missing choices/content: ${JSON.stringify(json)}`);
-        }
-
-        const content = json.choices[0]?.message?.content?.trim();
-        if (!content) {
-          throw new Error(`${config.provider} response missing choices/content: ${JSON.stringify(json)}`);
-        }
-
-        await options?.onEvent?.({ type: 'end' });
-        return {
-          content,
-          provider: config.provider,
-          model: config.model
-        };
+        return completeWithoutStreaming(config, messages, options);
       } catch (error) {
         await emitErrorEvent(options, error);
         throw error;

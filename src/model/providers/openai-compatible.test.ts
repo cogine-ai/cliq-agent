@@ -77,3 +77,61 @@ test('openai-compatible client preserves original error when error event handler
     fetchMock.mock.restore();
   }
 });
+
+test('openai-compatible auto streaming falls back when streaming is rejected before body consumption', async () => {
+  const seenStreamFlags: boolean[] = [];
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { stream?: boolean };
+    seenStreamFlags.push(body.stream ?? false);
+
+    if (body.stream) {
+      return new Response('streaming unsupported', { status: 400 });
+    }
+
+    return Response.json({ choices: [{ message: { content: '{"message":"ok"}' } }] });
+  });
+
+  try {
+    const client = createOpenAICompatibleClient({
+      provider: 'openai-compatible',
+      model: 'local-model',
+      baseUrl: 'http://localhost:4000/v1',
+      streaming: 'auto'
+    });
+
+    assert.deepEqual(await client.complete([{ role: 'user', content: 'hello' }]), {
+      content: '{"message":"ok"}',
+      provider: 'openai-compatible',
+      model: 'local-model'
+    });
+    assert.deepEqual(seenStreamFlags, [true, false]);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('openai-compatible streaming on does not fall back when streaming is rejected', async () => {
+  const seenStreamFlags: boolean[] = [];
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { stream?: boolean };
+    seenStreamFlags.push(body.stream ?? false);
+    return new Response('streaming unsupported', { status: 400 });
+  });
+
+  try {
+    const client = createOpenAICompatibleClient({
+      provider: 'openai-compatible',
+      model: 'local-model',
+      baseUrl: 'http://localhost:4000/v1',
+      streaming: 'on'
+    });
+
+    await assert.rejects(
+      () => client.complete([{ role: 'user', content: 'hello' }]),
+      /retry with --streaming off/i
+    );
+    assert.deepEqual(seenStreamFlags, [true]);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
