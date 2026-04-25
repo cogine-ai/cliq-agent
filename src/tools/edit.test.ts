@@ -27,6 +27,24 @@ test('editTool rejects paths outside the workspace', async () => {
   assert.match(result.content, /workspace-relative path|outside workspace/i);
 });
 
+test('editTool preserves non-workspace path resolution errors', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-edit-missing-'));
+  try {
+    const session = createSession(cwd);
+    const result = await editTool.execute(
+      { edit: { path: 'missing.txt', old_text: 'a', new_text: 'b' } },
+      { cwd, session }
+    );
+
+    assert.equal(result.status, 'error');
+    assert.match(result.content, /ENOENT|no such file or directory/i);
+    assert.match(String(result.meta.error), /ENOENT|no such file or directory/i);
+    assert.doesNotMatch(String(result.meta.error), /workspace-relative path inside the workspace/i);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('editTool rejects symlink escapes outside the workspace', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-edit-link-'));
   const outside = await mkdtemp(path.join(os.tmpdir(), 'cliq-edit-outside-'));

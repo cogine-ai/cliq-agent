@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 
 import type { EditModelAction, ToolDefinition, ToolResult } from './types.js';
-import { resolveWorkspacePath } from './path.js';
+import { resolveWorkspacePath, WORKSPACE_PATH_ERROR } from './path.js';
 
 export const editTool: ToolDefinition<EditModelAction> = {
   name: 'edit',
@@ -14,14 +14,18 @@ export const editTool: ToolDefinition<EditModelAction> = {
     let relativePath: string;
     try {
       ({ targetRealPath, relativePath } = await resolveWorkspacePath(context.cwd, action.edit.path));
-    } catch {
-      const error = 'edit.path must be a workspace-relative path inside the workspace';
-      const meta: ToolResult['meta'] = { path: action.edit.path, error };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const displayError =
+        message === WORKSPACE_PATH_ERROR
+          ? 'edit.path must be a workspace-relative path inside the workspace'
+          : message;
+      const meta: ToolResult['meta'] = { path: action.edit.path, error: displayError };
       return {
         tool: 'edit',
         status: 'error',
         meta,
-        content: `TOOL_RESULT edit ERROR\npath=${action.edit.path}\n${error}`
+        content: `TOOL_RESULT edit ERROR\npath=${action.edit.path}\n${displayError}`
       };
     }
 
