@@ -173,7 +173,8 @@ export function createRunner({
               status: 'error',
               content: `TOOL_RESULT ${definition.name} ERROR\npolicy=${policy.mode}\n${authorization.reason}`,
               meta: {
-                policy: policy.mode
+                policy: policy.mode,
+                reason: authorization.reason
               }
             };
           } else if (result === null && authorization !== null) {

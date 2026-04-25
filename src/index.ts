@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-import { runCli } from './cli.js';
+import { renderUnhandledError, runCli } from './cli.js';
 
 runCli(process.argv).catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  const message = renderUnhandledError(error);
+  if (message) {
+    console.error(message);
+  }
   process.exit(1);
 });
