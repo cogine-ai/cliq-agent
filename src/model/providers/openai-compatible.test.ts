@@ -92,6 +92,7 @@ test('openai-compatible auto streaming falls back when streaming is rejected bef
   });
 
   try {
+    const starts: boolean[] = [];
     const client = createOpenAICompatibleClient({
       provider: 'openai-compatible',
       model: 'local-model',
@@ -99,12 +100,20 @@ test('openai-compatible auto streaming falls back when streaming is rejected bef
       streaming: 'auto'
     });
 
-    assert.deepEqual(await client.complete([{ role: 'user', content: 'hello' }]), {
+    assert.deepEqual(
+      await client.complete([{ role: 'user', content: 'hello' }], {
+        onEvent(event) {
+          if (event.type === 'start') starts.push(event.streaming);
+        }
+      }),
+      {
       content: '{"message":"ok"}',
       provider: 'openai-compatible',
       model: 'local-model'
-    });
+      }
+    );
     assert.deepEqual(seenStreamFlags, [true, false]);
+    assert.deepEqual(starts, [false]);
   } finally {
     fetchMock.mock.restore();
   }

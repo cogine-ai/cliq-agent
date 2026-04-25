@@ -45,6 +45,15 @@ async function emitErrorEvent(options: CompleteOptions | undefined, error: unkno
   }
 }
 
+async function emitStartEvent(config: ResolvedModelConfig, options: CompleteOptions | undefined, streaming: boolean) {
+  await options?.onEvent?.({
+    type: 'start',
+    provider: config.provider,
+    model: config.model,
+    streaming
+  });
+}
+
 function parseContent(json: ChatCompletionsResp, provider: string) {
   if (!Array.isArray(json.choices) || json.choices.length === 0) {
     throw new Error(`${provider} response missing choices/content: ${JSON.stringify(json)}`);
@@ -59,6 +68,8 @@ function parseContent(json: ChatCompletionsResp, provider: string) {
 }
 
 async function completeWithoutStreaming(config: ResolvedModelConfig, messages: ChatMessage[], options?: CompleteOptions) {
+  await emitStartEvent(config, options, false);
+
   const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
     method: 'POST',
     headers: headers(config),
@@ -81,6 +92,10 @@ async function completeWithoutStreaming(config: ResolvedModelConfig, messages: C
 }
 
 async function completeWithStreaming(config: ResolvedModelConfig, messages: ChatMessage[], options?: CompleteOptions) {
+  if (config.streaming === 'on') {
+    await emitStartEvent(config, options, true);
+  }
+
   const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
     method: 'POST',
     headers: headers(config),
@@ -98,6 +113,10 @@ async function completeWithStreaming(config: ResolvedModelConfig, messages: Chat
     }
 
     throw await streamHttpError(response);
+  }
+
+  if (config.streaming === 'auto') {
+    await emitStartEvent(config, options, true);
   }
 
   const content = (
@@ -126,13 +145,6 @@ async function completeWithStreaming(config: ResolvedModelConfig, messages: Chat
 export function createOpenAICompatibleClient(config: ResolvedModelConfig): ModelClient {
   return {
     async complete(messages: ChatMessage[], options?: CompleteOptions) {
-      await options?.onEvent?.({
-        type: 'start',
-        provider: config.provider,
-        model: config.model,
-        streaming: config.streaming !== 'off'
-      });
-
       try {
         if (config.streaming !== 'off') {
           return completeWithStreaming(config, messages, options);
