@@ -20,54 +20,35 @@ Requirements: Node.js 20 or newer.
 
 ```bash
 npm install -g @cogineai/cliq
-ollama pull qwen3:4b
-cliq --policy read-only "inspect this repo and summarize the architecture"
 ```
 
-Start an interactive session:
+## Usage
+
+Start in any project directory:
 
 ```bash
-cliq chat
+cd path/to/your-project
+cliq
 ```
 
-Optional remote provider / OpenRouter:
+Running `cliq` with no arguments starts interactive chat. `cliq chat` is the explicit equivalent.
+
+Run a one-shot task:
 
 ```bash
-export OPENROUTER_API_KEY=...
-cliq --provider openrouter "inspect this repo and summarize the architecture"
+cliq "inspect this repo and summarize the architecture"
 ```
 
 ## Current scope
 
-Cliq is intentionally small right now. It supports structured inspection, shell execution, exact text replacement, and final responses:
+Cliq is intentionally small right now. It supports:
 
-```json
-{"bash":"npm test"}
-```
-
-```json
-{"edit":{"path":"src/index.ts","old_text":"foo","new_text":"bar"}}
-```
-
-```json
-{"read":{"path":"src/runtime/runner.ts","start_line":1,"end_line":80}}
-```
-
-```json
-{"ls":{"path":"src"}}
-```
-
-```json
-{"find":{"path":"src","name":"runner"}}
-```
-
-```json
-{"grep":{"path":"src","pattern":"runTurn"}}
-```
-
-```json
-{"message":"Done. Updated the README and ran tests."}
-```
+- Interactive chat and one-shot tasks
+- Structured file inspection with read, list, find, and grep
+- Shell command execution
+- Exact text replacement edits
+- Local session persistence per workspace
+- Final assistant responses after tool work completes
 
 ## Why this shape
 
@@ -76,17 +57,7 @@ Cliq is intentionally small right now. It supports structured inspection, shell 
 - Makes local execution and replay straightforward
 - Provides a simple base for a local coding agent
 
-## Install
-
-Requirements: Node.js 20 or newer.
-
-Install from npm:
-
-```bash
-npm install -g @cogineai/cliq
-```
-
-Or run from source:
+## Develop from source
 
 ```bash
 npm install
@@ -140,7 +111,7 @@ OpenAI-compatible streaming modes:
 - `on`: sends `stream: true` and does not fall back
 - `off`: sends `stream: false`
 
-## Usage
+## Commands
 
 Run a one-shot task in the current directory:
 
@@ -151,6 +122,7 @@ cliq "inspect this repo and add a tiny README improvement"
 Start interactive chat:
 
 ```bash
+cliq
 cliq chat
 ```
 
