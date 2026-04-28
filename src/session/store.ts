@@ -15,7 +15,7 @@ import {
   SESSION_VERSION
 } from '../config.js';
 import { isProviderName } from '../model/registry.js';
-import type { Session, SessionCheckpoint, SessionModelRef, SessionRecord } from './types.js';
+import type { CompactionArtifact, Session, SessionCheckpoint, SessionModelRef, SessionRecord } from './types.js';
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_STATE_VERSION = 1;
@@ -116,6 +116,31 @@ function isSessionCheckpoint(value: unknown): value is SessionCheckpoint {
     typeof checkpoint.recordIndex === 'number' &&
     typeof checkpoint.turn === 'number' &&
     (checkpoint.workspaceCheckpointId === undefined || typeof checkpoint.workspaceCheckpointId === 'string')
+  );
+}
+
+function isCompactionArtifact(value: unknown): value is CompactionArtifact {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const artifact = value as CompactionArtifact;
+  return (
+    typeof artifact.id === 'string' &&
+    (artifact.status === 'active' || artifact.status === 'superseded') &&
+    typeof artifact.createdAt === 'string' &&
+    !!artifact.coveredRange &&
+    typeof artifact.coveredRange === 'object' &&
+    typeof artifact.coveredRange.startIndexInclusive === 'number' &&
+    typeof artifact.coveredRange.endIndexExclusive === 'number' &&
+    typeof artifact.firstKeptRecordId === 'string' &&
+    (artifact.anchorCheckpointId === undefined || typeof artifact.anchorCheckpointId === 'string') &&
+    !!artifact.createdBy &&
+    typeof artifact.createdBy === 'object' &&
+    typeof artifact.createdBy.provider === 'string' &&
+    isProviderName(artifact.createdBy.provider) &&
+    typeof artifact.createdBy.model === 'string' &&
+    typeof artifact.summaryMarkdown === 'string'
   );
 }
 
@@ -235,7 +260,8 @@ export function createSession(cwd: string): Session {
     updatedAt: now,
     lifecycle: { status: 'idle', turn: 0 },
     records: [],
-    checkpoints: []
+    checkpoints: [],
+    compactions: []
   };
 }
 
@@ -258,7 +284,10 @@ function isSession(value: unknown): value is Session {
     (value as Session).records.every((record) => isSessionRecord(record)) &&
     ((value as { checkpoints?: unknown }).checkpoints === undefined ||
       (Array.isArray((value as { checkpoints?: unknown }).checkpoints) &&
-        (value as { checkpoints: unknown[] }).checkpoints.every((checkpoint) => isSessionCheckpoint(checkpoint))))
+        (value as { checkpoints: unknown[] }).checkpoints.every((checkpoint) => isSessionCheckpoint(checkpoint)))) &&
+    ((value as { compactions?: unknown }).compactions === undefined ||
+      (Array.isArray((value as { compactions?: unknown }).compactions) &&
+        (value as { compactions: unknown[] }).compactions.every((artifact) => isCompactionArtifact(artifact))))
   );
 }
 
@@ -286,12 +315,16 @@ function normalizeSession(session: Session): Session {
   const checkpoints = Array.isArray((session as { checkpoints?: unknown }).checkpoints)
     ? session.checkpoints
     : [];
+  const compactions = Array.isArray((session as { compactions?: unknown }).compactions)
+    ? session.compactions
+    : [];
 
   if (
     id === session.id &&
     version === session.version &&
     records.length === session.records.length &&
     checkpoints === session.checkpoints &&
+    compactions === session.compactions &&
     !modelChanged
   ) {
     return session;
@@ -303,7 +336,8 @@ function normalizeSession(session: Session): Session {
     version,
     model,
     records,
-    checkpoints
+    checkpoints,
+    compactions
   };
 }
 

@@ -68,10 +68,36 @@ export type WorkspaceCheckpoint =
       error?: string;
     };
 
+export type CompactionArtifact = {
+  id: string;
+  status: 'active' | 'superseded';
+  createdAt: string;
+  coveredRange: {
+    startIndexInclusive: number;
+    endIndexExclusive: number;
+  };
+  firstKeptRecordId: string;
+  anchorCheckpointId?: string;
+  createdBy: {
+    provider: ProviderName;
+    model: string;
+  };
+  summaryMarkdown: string;
+  details?: {
+    filesRead?: string[];
+    filesModified?: string[];
+    tests?: string[];
+    risks?: string[];
+  };
+};
+
 export type Session = {
   version: number;
   app: 'cliq';
   id: string;
+  name?: string;
+  parentSessionId?: string;
+  forkedFromCheckpointId?: string;
   model: SessionModelRef;
   cwd: string;
   createdAt: string;
@@ -84,4 +110,5 @@ export type Session = {
   };
   records: SessionRecord[];
   checkpoints: SessionCheckpoint[];
+  compactions: CompactionArtifact[];
 };

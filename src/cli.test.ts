@@ -14,6 +14,7 @@ import {
   ReportedCliError,
   runCli
 } from './cli.js';
+import { createSession, ensureSession, saveSession } from './session/store.js';
 import type { ToolResult } from './tools/types.js';
 
 test('parseArgs accepts --policy=read-only', () => {
@@ -93,6 +94,21 @@ test('parseArgs keeps skills on non-chat commands for downstream assembly parity
     skills: ['reviewer'],
     model: {}
   });
+});
+
+test('parseArgs accepts fork checkpoint id and name', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'fork', 'chk_123', 'alternate', 'path']), {
+    cmd: 'fork',
+    checkpointId: 'chk_123',
+    name: 'alternate path',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs rejects fork without a checkpoint id', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'fork']), /Missing checkpoint id for fork/i);
 });
 
 test('parseArgs accepts model provider flags', () => {
@@ -326,4 +342,68 @@ test('runCli history prints the active global session for the current workspace'
   assert.equal(session.id.startsWith('sess_'), true);
   assert.equal(session.cwd, runtimeCwd);
   assert.deepEqual(session.records, []);
+});
+
+test('runCli fork switches the active global session to a checkpoint prefix', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-fork-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+  const previousLog = console.log;
+  let output = '';
+
+  process.chdir(cwd);
+  console.log = (value?: unknown) => {
+    output += String(value);
+  };
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    session.records.push(
+      {
+        id: 'usr_1',
+        ts: '2026-04-29T00:00:00.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'first'
+      },
+      {
+        id: 'usr_2',
+        ts: '2026-04-29T00:00:01.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'second'
+      }
+    );
+    session.checkpoints.push({
+      id: 'chk_cli',
+      kind: 'manual',
+      createdAt: '2026-04-29T00:00:02.000Z',
+      recordIndex: 1,
+      turn: 1
+    });
+    await saveSession(cwd, session);
+
+    await runCli(['node', 'src/index.ts', 'fork', 'chk_cli', 'cli branch']);
+    const active = await ensureSession(cwd);
+
+    assert.notEqual(active.id, session.id);
+    assert.equal(active.parentSessionId, session.id);
+    assert.equal(active.forkedFromCheckpointId, 'chk_cli');
+    assert.deepEqual(active.records.map((record) => record.id), ['usr_1']);
+  } finally {
+    console.log = previousLog;
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+
+  assert.match(output, /forked session/i);
+  assert.match(output, /chk_cli/);
 });

@@ -12,6 +12,7 @@ import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './runtime/events.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
+import { forkSessionFromCheckpoint } from './session/fork.js';
 import { ensureFresh, ensureSession, saveSession } from './session/store.js';
 import type { ToolResult } from './tools/types.js';
 
@@ -27,6 +28,7 @@ type ParsedArgsBase = {
 
 export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'chat'; prompt: string }
+  | { cmd: 'fork'; checkpointId: string; name?: string; prompt?: undefined }
   | { cmd: 'reset' | 'history' | 'help'; prompt?: undefined }
 );
 
@@ -201,6 +203,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const cmd = args[0];
   if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
   if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
+  if (cmd === 'fork') {
+    const checkpointId = args[1];
+    if (!checkpointId) {
+      throw new Error('Missing checkpoint id for fork');
+    }
+    const name = args.slice(2).join(' ').trim();
+    return { cmd: 'fork', checkpointId, name: name || undefined, policy, skills, model };
+  }
   if (cmd === 'reset') return { cmd, policy, skills, model };
   if (cmd === 'history') return { cmd, policy, skills, model };
   if (cmd === 'help' || cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model };
@@ -217,6 +227,7 @@ Usage:
   cliq chat                Start interactive chat in the current directory
   cliq reset               Clear persisted conversation for this directory
   cliq history             Print persisted session for this directory
+  cliq fork CHECKPOINT     Fork the current session from a checkpoint
   cliq help                Print this help
   -h, --help               Print this help
 
@@ -361,7 +372,8 @@ function createCliEventSink() {
 }
 
 export async function runCli(argv: string[]) {
-  const { cmd, prompt, policy, skills, model: cliModel } = parseArgs(argv);
+  const parsed = parseArgs(argv);
+  const { cmd, prompt, policy, skills, model: cliModel } = parsed;
   const cwd = process.cwd();
 
   if (cmd === 'help') {
@@ -377,6 +389,13 @@ export async function runCli(argv: string[]) {
 
   if (cmd === 'history') {
     console.log(JSON.stringify(await ensureSession(cwd), null, 2));
+    return;
+  }
+
+  if (parsed.cmd === 'fork') {
+    const session = await ensureSession(cwd);
+    const child = await forkSessionFromCheckpoint(cwd, session, parsed.checkpointId, { name: parsed.name });
+    console.log(`forked session ${child.id} from ${parsed.checkpointId}`);
     return;
   }
 
