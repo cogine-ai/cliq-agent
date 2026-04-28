@@ -74,6 +74,10 @@ function isHelpToken(value: string | undefined) {
   return value === undefined || value === 'help' || value === '--help' || value === '-h';
 }
 
+function hasHelpFlag(values: string[]) {
+  return values.some((value) => value === '--help' || value === '-h');
+}
+
 export class ReportedCliError extends Error {
   constructor(error: unknown) {
     super(error instanceof Error ? error.message : String(error), { cause: error });
@@ -103,6 +107,10 @@ function readFlagValue(raw: string[], index: number, flag: string) {
 }
 
 function parseCompactCreateArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  if (hasHelpFlag(args.slice(2))) {
+    return { ...base, cmd: 'help', topic: 'compact' };
+  }
+
   let summaryMarkdown: string | undefined;
   let beforeCheckpointId: string | undefined;
 
@@ -146,6 +154,10 @@ function parseCompactCreateArgs(args: string[], base: ParsedArgsBase): ParsedArg
 }
 
 function parseHandoffCreateArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  if (hasHelpFlag(args.slice(2))) {
+    return { ...base, cmd: 'help', topic: 'handoff' };
+  }
+
   let checkpointId: string | undefined;
 
   for (let i = 2; i < args.length; i += 1) {
@@ -172,6 +184,10 @@ function parseHandoffCreateArgs(args: string[], base: ParsedArgsBase): ParsedArg
 }
 
 function parseCheckpointRestoreArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  if (hasHelpFlag(args.slice(2))) {
+    return { ...base, cmd: 'help', topic: 'checkpoint' };
+  }
+
   const checkpointId = args[2];
   if (!checkpointId) {
     throw new Error('Missing checkpoint id for checkpoint restore');
@@ -232,16 +248,25 @@ function parseCheckpointArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   }
 
   if (action === 'create') {
+    if (hasHelpFlag(args.slice(2))) {
+      return { ...base, cmd: 'help', topic: 'checkpoint' };
+    }
     const name = args.slice(2).join(' ').trim();
     return { ...base, cmd: 'checkpoint-create', name: name || undefined };
   }
 
   if (action === 'list') {
+    if (hasHelpFlag(args.slice(2))) {
+      return { ...base, cmd: 'help', topic: 'checkpoint' };
+    }
     ensureNoExtraArgs(args, 2, 'checkpoint list');
     return { ...base, cmd: 'checkpoint-list' };
   }
 
   if (action === 'fork') {
+    if (hasHelpFlag(args.slice(2))) {
+      return { ...base, cmd: 'help', topic: 'checkpoint' };
+    }
     const checkpointId = args[2];
     if (!checkpointId) {
       throw new Error('Missing checkpoint id for checkpoint fork');
@@ -301,6 +326,9 @@ function parseCompactGroupArgs(args: string[], base: ParsedArgsBase): ParsedArgs
   }
 
   if (action === 'list') {
+    if (hasHelpFlag(args.slice(2))) {
+      return { ...base, cmd: 'help', topic: 'compact' };
+    }
     ensureNoExtraArgs(args, 2, 'compact list');
     return { ...base, cmd: 'compact-list' };
   }

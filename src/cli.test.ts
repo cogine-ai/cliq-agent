@@ -212,6 +212,41 @@ test('parseArgs accepts workflow asset help commands', () => {
   });
 });
 
+test('parseArgs accepts leaf workflow asset help flags', () => {
+  const expectedCheckpointHelp = {
+    cmd: 'help',
+    topic: 'checkpoint',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  };
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'create', '--help']), expectedCheckpointHelp);
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'list', '-h']), expectedCheckpointHelp);
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'restore', '--help']), expectedCheckpointHelp);
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'fork', '-h']), expectedCheckpointHelp);
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', 'create', '--help']), {
+    cmd: 'help',
+    topic: 'compact',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', 'list', '-h']), {
+    cmd: 'help',
+    topic: 'compact',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'handoff', 'create', '--help']), {
+    cmd: 'help',
+    topic: 'handoff',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+});
+
 test('parseArgs rejects compact without an explicit summary', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'compact', 'create']), /Missing value for --summary/i);
 });
