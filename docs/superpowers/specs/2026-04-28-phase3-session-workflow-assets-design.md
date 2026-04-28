@@ -214,9 +214,10 @@ Checkpoint combines a session anchor with an optional workspace snapshot.
 User commands:
 
 ```bash
-cliq checkpoint [name]
-cliq checkpoints
-cliq restore <checkpoint-id> --scope session|files|both
+cliq checkpoint create [name]
+cliq checkpoint list
+cliq checkpoint restore <checkpoint-id> --scope session|files|both
+cliq checkpoint help
 ```
 
 Runtime behavior:
@@ -261,8 +262,8 @@ Fork is a checkpoint consumer.
 User commands:
 
 ```bash
-cliq fork <checkpoint-id> [name]
-cliq fork <checkpoint-id> [name] --restore-files
+cliq checkpoint fork <checkpoint-id> [name]
+cliq checkpoint fork <checkpoint-id> [name] --restore-files --yes
 ```
 
 Default fork is session-only:
@@ -284,9 +285,10 @@ Compact is a context-management artifact, not a destructive history rewrite.
 User commands:
 
 ```bash
-cliq compact
-cliq compact --before <checkpoint-id>
-cliq compactions
+cliq compact create --summary <markdown>
+cliq compact create --summary <markdown> --before <checkpoint-id>
+cliq compact list
+cliq compact help
 ```
 
 Raw session records remain stored. Compact artifacts affect model replay only.
@@ -335,21 +337,21 @@ Range semantics:
 - `firstKeptRecordId` must equal `session.records[coveredRange.endIndexExclusive].id`.
 - A compaction must leave a non-empty tail. If the selected range would cover all records, the command fails with a clear message.
 
-`cliq compact` range selection:
+`cliq compact create` range selection:
 
 - If no active compaction exists, summarize raw records from index `0` through the selected cut point.
 - If an active compaction exists, summarize the previous active `summaryMarkdown` plus raw records from the previous `firstKeptRecordId` through the new selected cut point.
 - Mark the previous active compaction as `superseded` only after the new artifact is written successfully.
 - Select the cut point using `keepRecentTokens` and turn-boundary rules.
 
-`cliq compact --before <checkpoint-id>` range selection:
+`cliq compact create --before <checkpoint-id>` range selection:
 
 - The checkpoint's `recordIndex` is a boundary between records.
 - Compact records strictly before that boundary.
 - Keep records at and after that boundary raw.
 - Set `anchorCheckpointId` to the supplied checkpoint id.
 
-`cliq compact --from <checkpoint-id>` is intentionally deferred. "From" can mean "summarize after this checkpoint", "keep after this checkpoint", or "start a new compaction lineage"; v1 avoids that ambiguity.
+`cliq compact create --from <checkpoint-id>` is intentionally deferred. "From" can mean "summarize after this checkpoint", "keep after this checkpoint", or "start a new compaction lineage"; v1 avoids that ambiguity.
 
 Cliq-generated Markdown summaries must use stable headings so they can be inspected by humans and injected into future model context without conversion. The context builder treats `summaryMarkdown` as opaque text; the heading requirement belongs to the default Cliq summarizer and future default hooks.
 
@@ -455,8 +457,9 @@ Handoff exports current task state for another executor. It does not modify the 
 User commands:
 
 ```bash
-cliq handoff
-cliq handoff --checkpoint <checkpoint-id>
+cliq handoff create
+cliq handoff create --checkpoint <checkpoint-id>
+cliq handoff help
 ```
 
 If no checkpoint is supplied, Cliq creates a handoff checkpoint first.
@@ -466,7 +469,7 @@ Handoff summary source:
 - If the session has an active compaction, handoff uses that `summaryMarkdown` plus the raw tail and current checkpoint metadata as summarizer input.
 - If the session has no active compaction, handoff runs a handoff-only summarizer over the current context/raw records.
 - A handoff-only summary is persisted only inside the handoff artifact. It does not create a `CompactionArtifact` and does not change the active compaction.
-- If summarization fails, `cliq handoff` fails before writing a partial handoff unless an explicit future `--raw` mode is added.
+- If summarization fails, `cliq handoff create` fails before writing a partial handoff unless an explicit future `--raw` mode is added.
 
 Output:
 
@@ -596,6 +599,6 @@ Source observations:
 - Whether to migrate the default global directory from `~/.cliq` to an XDG/platform state path.
 - Whether to create protected refs such as `refs/cliq/checkpoints/*` for long-lived workspace snapshots.
 - Whether to add an explicit file restore mode that also restores staged/index state.
-- Whether to add `cliq compact --from <checkpoint-id>` after a clearer lineage model exists.
+- Whether to add `cliq compact create --from <checkpoint-id>` after a clearer lineage model exists.
 - Whether to support worktree-backed forks.
 - Whether to expose compact/handoff hooks in Phase 4+ headless/RPC surfaces.

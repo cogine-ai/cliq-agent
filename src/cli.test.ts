@@ -96,58 +96,54 @@ test('parseArgs keeps skills on non-chat commands for downstream assembly parity
   });
 });
 
-test('parseArgs accepts fork checkpoint id and name', () => {
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'fork', 'chk_123', 'alternate', 'path']), {
-    cmd: 'fork',
+test('parseArgs accepts checkpoint fork id and name', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'fork', 'chk_123', 'alternate', 'path']), {
+    cmd: 'checkpoint-fork',
     checkpointId: 'chk_123',
     name: 'alternate path',
     policy: 'auto',
     skills: [],
     model: {}
   });
+  assert.deepEqual(
+    parseArgs(['node', 'src/index.ts', 'checkpoint', 'fork', 'chk_123', '--restore-files', '--yes', 'alternate', 'path']),
+    {
+      cmd: 'checkpoint-fork',
+      checkpointId: 'chk_123',
+      restoreFiles: true,
+      yes: true,
+      name: 'alternate path',
+      policy: 'auto',
+      skills: [],
+      model: {}
+    }
+  );
 });
 
-test('parseArgs rejects fork without a checkpoint id', () => {
-  assert.throws(() => parseArgs(['node', 'src/index.ts', 'fork']), /Missing checkpoint id for fork/i);
+test('parseArgs rejects checkpoint fork without a checkpoint id', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'checkpoint', 'fork']), /Missing checkpoint id for checkpoint fork/i);
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', 'checkpoint', 'fork', 'chk_1', '--bad']),
+    /Unknown checkpoint fork argument/i
+  );
 });
 
 test('parseArgs accepts workflow asset commands', () => {
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'before', 'edit']), {
-    cmd: 'checkpoint',
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'create', 'before', 'edit']), {
+    cmd: 'checkpoint-create',
     name: 'before edit',
     policy: 'auto',
     skills: [],
     model: {}
   });
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoints']), {
-    cmd: 'checkpoints',
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'list']), {
+    cmd: 'checkpoint-list',
     policy: 'auto',
     skills: [],
     model: {}
   });
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', '--before', 'chk_1', '--summary', 'summary text']), {
-    cmd: 'compact',
-    beforeCheckpointId: 'chk_1',
-    summaryMarkdown: 'summary text',
-    policy: 'auto',
-    skills: [],
-    model: {}
-  });
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compactions']), {
-    cmd: 'compactions',
-    policy: 'auto',
-    skills: [],
-    model: {}
-  });
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'handoff', '--checkpoint=chk_1']), {
-    cmd: 'handoff',
-    checkpointId: 'chk_1',
-    policy: 'auto',
-    skills: [],
-    model: {}
-  });
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'restore', 'chk_1', '--scope', 'files', '--yes']), {
-    cmd: 'restore',
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'restore', 'chk_1', '--scope', 'files', '--yes']), {
+    cmd: 'checkpoint-restore',
     checkpointId: 'chk_1',
     scope: 'files',
     yes: true,
@@ -155,18 +151,87 @@ test('parseArgs accepts workflow asset commands', () => {
     skills: [],
     model: {}
   });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', 'create', '--before', 'chk_1', '--summary', 'summary text']), {
+    cmd: 'compact-create',
+    beforeCheckpointId: 'chk_1',
+    summaryMarkdown: 'summary text',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', 'list']), {
+    cmd: 'compact-list',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'handoff', 'create', '--checkpoint=chk_1']), {
+    cmd: 'handoff-create',
+    checkpointId: 'chk_1',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs accepts workflow asset help commands', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint']), {
+    cmd: 'help',
+    topic: 'checkpoint',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'help']), {
+    cmd: 'help',
+    topic: 'checkpoint',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', '--help']), {
+    cmd: 'help',
+    topic: 'compact',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'handoff', '-h']), {
+    cmd: 'help',
+    topic: 'handoff',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'help', 'checkpoint']), {
+    cmd: 'help',
+    topic: 'checkpoint',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
 });
 
 test('parseArgs rejects compact without an explicit summary', () => {
-  assert.throws(() => parseArgs(['node', 'src/index.ts', 'compact']), /Missing value for --summary/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'compact', 'create']), /Missing value for --summary/i);
 });
 
 test('parseArgs rejects restore without a checkpoint id or with an invalid scope', () => {
-  assert.throws(() => parseArgs(['node', 'src/index.ts', 'restore']), /Missing checkpoint id for restore/i);
   assert.throws(
-    () => parseArgs(['node', 'src/index.ts', 'restore', 'chk_1', '--scope', 'bad']),
+    () => parseArgs(['node', 'src/index.ts', 'checkpoint', 'restore']),
+    /Missing checkpoint id for checkpoint restore/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', 'checkpoint', 'restore', 'chk_1', '--scope', 'bad']),
     /Unknown restore scope/i
   );
+});
+
+test('parseArgs rejects old workflow asset command spellings with migration hints', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'checkpoints']), /cliq checkpoint list/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'compactions']), /cliq compact list/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'fork', 'chk_1']), /cliq checkpoint fork/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'restore', 'chk_1']), /cliq checkpoint restore/i);
 });
 
 test('parseArgs accepts model provider flags', () => {
@@ -225,6 +290,14 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
 
   assert.match(output, /cliq run "task"/);
   assert.match(output, /cliq ask "task"/);
+  assert.match(output, /cliq checkpoint create/);
+  assert.match(output, /cliq checkpoint list/);
+  assert.match(output, /cliq compact create/);
+  assert.match(output, /cliq compact list/);
+  assert.match(output, /cliq handoff create/);
+  assert.doesNotMatch(output, /cliq checkpoint \[name\]/);
+  assert.doesNotMatch(output, /cliq checkpoints/);
+  assert.doesNotMatch(output, /cliq compactions/);
   assert.match(output, /-h, --help/);
   assert.match(output, /--policy MODE/);
   assert.match(output, /confirm-write/);
@@ -237,6 +310,25 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /auto \| on \| off/);
   assert.match(output, /openai-compatible/);
   assert.match(output, /--base-url URL/);
+});
+
+test('runCli prints topic help for workflow asset command groups', async () => {
+  const previousLog = console.log;
+  let output = '';
+  console.log = (value?: unknown) => {
+    output += String(value);
+  };
+
+  try {
+    await runCli(['node', 'src/index.ts', 'checkpoint', 'help']);
+  } finally {
+    console.log = previousLog;
+  }
+
+  assert.match(output, /cliq checkpoint create/);
+  assert.match(output, /cliq checkpoint list/);
+  assert.match(output, /cliq checkpoint restore/);
+  assert.match(output, /cliq checkpoint fork/);
 });
 
 test('formatToolResultLine surfaces policy denial context when no path exists', () => {
@@ -443,7 +535,7 @@ test('runCli fork switches the active global session to a checkpoint prefix', as
     });
     await saveSession(cwd, session);
 
-    await runCli(['node', 'src/index.ts', 'fork', 'chk_cli', 'cli branch']);
+    await runCli(['node', 'src/index.ts', 'checkpoint', 'fork', 'chk_cli', 'cli branch']);
     const active = await ensureSession(cwd);
 
     assert.notEqual(active.id, session.id);
@@ -466,7 +558,7 @@ test('runCli fork switches the active global session to a checkpoint prefix', as
   assert.match(output, /chk_cli/);
 });
 
-test('runCli checkpoint and checkpoints operate on the active global session without model setup', async () => {
+test('runCli checkpoint create and list operate on the active global session without model setup', async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-checkpoint-'));
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
   const previousCwd = process.cwd();
@@ -491,9 +583,9 @@ test('runCli checkpoint and checkpoints operate on the active global session wit
     });
     await saveSession(cwd, session);
 
-    await runCli(['node', 'src/index.ts', 'checkpoint', 'before edit']);
+    await runCli(['node', 'src/index.ts', 'checkpoint', 'create', 'before edit']);
     const checkpointed = await ensureSession(cwd);
-    await runCli(['node', 'src/index.ts', 'checkpoints']);
+    await runCli(['node', 'src/index.ts', 'checkpoint', 'list']);
 
     assert.equal(checkpointed.checkpoints.length, 1);
     assert.equal(checkpointed.checkpoints[0]?.name, 'before edit');
@@ -512,7 +604,7 @@ test('runCli checkpoint and checkpoints operate on the active global session wit
   }
 });
 
-test('runCli compact and compactions operate on stored session records', async () => {
+test('runCli compact create and list operate on stored session records', async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-compact-'));
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
   const previousCwd = process.cwd();
@@ -553,9 +645,9 @@ test('runCli compact and compactions operate on stored session records', async (
     );
     await saveSession(cwd, session);
 
-    await runCli(['node', 'src/index.ts', 'compact', '--summary', '## Objective\nKeep first two summarized']);
+    await runCli(['node', 'src/index.ts', 'compact', 'create', '--summary', '## Objective\nKeep first two summarized']);
     const compacted = await ensureSession(cwd);
-    await runCli(['node', 'src/index.ts', 'compactions']);
+    await runCli(['node', 'src/index.ts', 'compact', 'list']);
 
     assert.equal(compacted.compactions.length, 1);
     assert.equal(compacted.compactions[0]?.status, 'active');
@@ -600,7 +692,7 @@ test('runCli handoff exports an artifact and creates a handoff checkpoint when n
     });
     await saveSession(cwd, session);
 
-    await runCli(['node', 'src/index.ts', 'handoff']);
+    await runCli(['node', 'src/index.ts', 'handoff', 'create']);
     const handedOff = await ensureSession(cwd);
 
     assert.equal(handedOff.checkpoints.at(-1)?.kind, 'handoff');
@@ -660,7 +752,7 @@ test('runCli restore --scope session switches the active session to a checkpoint
     });
     await saveSession(cwd, session);
 
-    await runCli(['node', 'src/index.ts', 'restore', 'chk_restore', '--scope', 'session']);
+    await runCli(['node', 'src/index.ts', 'checkpoint', 'restore', 'chk_restore', '--scope', 'session']);
     const restored = await ensureSession(cwd);
 
     assert.notEqual(restored.id, session.id);
@@ -704,7 +796,44 @@ test('runCli restore --scope files requires --yes before changing files', async 
     await saveSession(cwd, session);
 
     await assert.rejects(
-      () => runCli(['node', 'src/index.ts', 'restore', 'chk_files', '--scope', 'files']),
+      () => runCli(['node', 'src/index.ts', 'checkpoint', 'restore', 'chk_files', '--scope', 'files']),
+      /requires --yes/i
+    );
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('runCli checkpoint fork --restore-files requires --yes before changing files', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-fork-files-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+
+  process.chdir(cwd);
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    session.checkpoints.push({
+      id: 'chk_files',
+      kind: 'manual',
+      createdAt: '2026-04-29T00:00:00.000Z',
+      recordIndex: 0,
+      turn: 0,
+      workspaceCheckpointId: 'wchk_missing'
+    });
+    await saveSession(cwd, session);
+
+    await assert.rejects(
+      () => runCli(['node', 'src/index.ts', 'checkpoint', 'fork', 'chk_files', '--restore-files']),
       /requires --yes/i
     );
   } finally {
