@@ -1,9 +1,8 @@
-import path from 'node:path';
 import { stdin as input, stdout as output } from 'node:process';
 import readline from 'node:readline';
 import { createInterface as createPromptInterface } from 'node:readline/promises';
 
-import { APP_DIR, DEFAULT_POLICY_MODE } from './config.js';
+import { DEFAULT_POLICY_MODE } from './config.js';
 import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
@@ -372,7 +371,7 @@ export async function runCli(argv: string[]) {
 
   if (cmd === 'reset') {
     await ensureFresh(cwd);
-    console.log(`reset session in ${path.join(cwd, APP_DIR)}`);
+    console.log(`reset active session for ${cwd}`);
     return;
   }
 

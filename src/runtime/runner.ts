@@ -3,6 +3,7 @@ import type { InstructionMessage } from '../instructions/types.js';
 import type { ChatMessage, ModelClient, ModelCompletion } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { parseModelAction } from '../protocol/actions.js';
+import { createCheckpoint } from '../session/checkpoints.js';
 import { appendRecord, makeId, nowIso, saveSession } from '../session/store.js';
 import type { Session } from '../session/types.js';
 import { createToolRegistry } from '../tools/registry.js';
@@ -43,6 +44,7 @@ export function createRunner({
         session.lifecycle.status = 'running';
         session.lifecycle.turn += 1;
         session.lifecycle.lastUserInputAt = nowIso();
+        await createCheckpoint(cwd, session, { kind: 'auto' });
         await appendRecord(cwd, session, {
           id: makeId('usr'),
           ts: nowIso(),

@@ -198,7 +198,9 @@ test('formatToolResultLine surfaces tool error reason alongside path', () => {
 
 test('runCli marks already-rendered runtime errors as reported', async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-test-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
   const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
   let stdout = '';
   let stderr = '';
   const stdoutWrite = process.stdout.write;
@@ -218,6 +220,7 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
   }) as typeof process.stderr.write;
 
   try {
+    process.env.CLIQ_HOME = home;
     await assert.rejects(
       () =>
         runCli([
@@ -238,9 +241,15 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
   } finally {
     process.stdout.write = stdoutWrite;
     process.stderr.write = stderrWrite;
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
     process.chdir(previousCwd);
     fetchMock.mock.restore();
     await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   }
 
   assert.match(stdout, /\[model openai-compatible\/fake\]/);
@@ -250,4 +259,71 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
 test('renderUnhandledError suppresses errors already reported by runtime events', () => {
   assert.equal(renderUnhandledError(new Error('plain failure')), 'plain failure');
   assert.equal(renderUnhandledError(new ReportedCliError(new Error('reported failure'))), null);
+});
+
+test('runCli reset creates a global active session without referencing workspace .cliq', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-reset-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+  const previousLog = console.log;
+  let output = '';
+
+  process.chdir(cwd);
+  console.log = (value?: unknown) => {
+    output += String(value);
+  };
+
+  try {
+    process.env.CLIQ_HOME = home;
+    await runCli(['node', 'src/index.ts', 'reset']);
+  } finally {
+    console.log = previousLog;
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+
+  assert.match(output, /reset active session/i);
+  assert.doesNotMatch(output, /\.cliq/);
+});
+
+test('runCli history prints the active global session for the current workspace', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-history-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+  const previousLog = console.log;
+  let output = '';
+
+  process.chdir(cwd);
+  const runtimeCwd = process.cwd();
+  console.log = (value?: unknown) => {
+    output += String(value);
+  };
+
+  try {
+    process.env.CLIQ_HOME = home;
+    await runCli(['node', 'src/index.ts', 'history']);
+  } finally {
+    console.log = previousLog;
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+
+  const session = JSON.parse(output) as { id: string; cwd: string; records: unknown[] };
+  assert.equal(session.id.startsWith('sess_'), true);
+  assert.equal(session.cwd, runtimeCwd);
+  assert.deepEqual(session.records, []);
 });
