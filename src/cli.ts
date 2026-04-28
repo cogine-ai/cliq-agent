@@ -3,6 +3,7 @@ import readline from 'node:readline';
 import { createInterface as createPromptInterface } from 'node:readline/promises';
 
 import { DEFAULT_POLICY_MODE } from './config.js';
+import { exportHandoff } from './handoff/export.js';
 import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
@@ -12,6 +13,8 @@ import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './runtime/events.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
+import { createCheckpoint, restoreWorkspaceCheckpoint } from './session/checkpoints.js';
+import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
 import { ensureFresh, ensureSession, saveSession } from './session/store.js';
 import type { ToolResult } from './tools/types.js';
@@ -19,6 +22,9 @@ import type { ToolResult } from './tools/types.js';
 const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
 const POLICY_MODE_LIST = POLICY_MODES.join(', ');
 const STREAMING_MODES = ['auto', 'on', 'off'] as const;
+const RESTORE_SCOPES = ['session', 'files', 'both'] as const;
+
+type RestoreScope = (typeof RESTORE_SCOPES)[number];
 
 type ParsedArgsBase = {
   policy: PolicyMode;
@@ -28,7 +34,13 @@ type ParsedArgsBase = {
 
 export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'chat'; prompt: string }
+  | { cmd: 'checkpoint'; name?: string; prompt?: undefined }
+  | { cmd: 'checkpoints'; prompt?: undefined }
+  | { cmd: 'compact'; summaryMarkdown: string; beforeCheckpointId?: string; prompt?: undefined }
+  | { cmd: 'compactions'; prompt?: undefined }
   | { cmd: 'fork'; checkpointId: string; name?: string; prompt?: undefined }
+  | { cmd: 'handoff'; checkpointId?: string; prompt?: undefined }
+  | { cmd: 'restore'; checkpointId: string; scope: RestoreScope; yes: boolean; prompt?: undefined }
   | { cmd: 'reset' | 'history' | 'help'; prompt?: undefined }
 );
 
@@ -38,6 +50,10 @@ function isPolicyMode(value: string): value is PolicyMode {
 
 function isStreamingMode(value: string) {
   return (STREAMING_MODES as readonly string[]).includes(value);
+}
+
+function isRestoreScope(value: string): value is RestoreScope {
+  return (RESTORE_SCOPES as readonly string[]).includes(value);
 }
 
 export class ReportedCliError extends Error {
@@ -66,6 +82,122 @@ function readFlagValue(raw: string[], index: number, flag: string) {
   }
 
   return value;
+}
+
+function parseCompactArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  let summaryMarkdown: string | undefined;
+  let beforeCheckpointId: string | undefined;
+
+  for (let i = 1; i < args.length; i += 1) {
+    const token = args[i];
+    if (token.startsWith('--summary=')) {
+      summaryMarkdown = token.slice('--summary='.length);
+      continue;
+    }
+
+    if (token === '--summary') {
+      summaryMarkdown = readFlagValue(args, i, '--summary');
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith('--before=')) {
+      beforeCheckpointId = token.slice('--before='.length);
+      continue;
+    }
+
+    if (token === '--before') {
+      beforeCheckpointId = readFlagValue(args, i, '--before');
+      i += 1;
+      continue;
+    }
+
+    throw new Error(`Unknown compact argument: ${token}`);
+  }
+
+  if (!summaryMarkdown) {
+    throw new Error('Missing value for --summary');
+  }
+
+  return {
+    ...base,
+    cmd: 'compact',
+    summaryMarkdown,
+    beforeCheckpointId
+  };
+}
+
+function parseHandoffArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  let checkpointId: string | undefined;
+
+  for (let i = 1; i < args.length; i += 1) {
+    const token = args[i];
+    if (token.startsWith('--checkpoint=')) {
+      checkpointId = token.slice('--checkpoint='.length);
+      continue;
+    }
+
+    if (token === '--checkpoint') {
+      checkpointId = readFlagValue(args, i, '--checkpoint');
+      i += 1;
+      continue;
+    }
+
+    throw new Error(`Unknown handoff argument: ${token}`);
+  }
+
+  return {
+    ...base,
+    cmd: 'handoff',
+    checkpointId
+  };
+}
+
+function parseRestoreArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  const checkpointId = args[1];
+  if (!checkpointId) {
+    throw new Error('Missing checkpoint id for restore');
+  }
+
+  let scope: RestoreScope = 'session';
+  let yes = false;
+
+  for (let i = 2; i < args.length; i += 1) {
+    const token = args[i];
+    if (token.startsWith('--scope=')) {
+      const value = token.slice('--scope='.length);
+      if (!isRestoreScope(value)) {
+        throw new Error(`Unknown restore scope: ${value}`);
+      }
+      scope = value;
+      continue;
+    }
+
+    if (token === '--scope') {
+      const value = readFlagValue(args, i, '--scope');
+      if (!isRestoreScope(value)) {
+        throw new Error(`Unknown restore scope: ${value}`);
+      }
+      scope = value;
+      i += 1;
+      continue;
+    }
+
+    if (token === '--yes') {
+      yes = true;
+      continue;
+    }
+
+    throw new Error(`Unknown restore argument: ${token}`);
+  }
+
+  return {
+    ...base,
+    cmd: 'restore',
+    checkpointId,
+    scope,
+    yes
+  };
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -201,16 +333,26 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   const cmd = args[0];
+  const base: ParsedArgsBase = { policy, skills, model };
   if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
   if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
+  if (cmd === 'checkpoint') {
+    const name = args.slice(1).join(' ').trim();
+    return { ...base, cmd: 'checkpoint', name: name || undefined };
+  }
+  if (cmd === 'checkpoints') return { ...base, cmd: 'checkpoints' };
+  if (cmd === 'compact') return parseCompactArgs(args, base);
+  if (cmd === 'compactions') return { ...base, cmd: 'compactions' };
   if (cmd === 'fork') {
     const checkpointId = args[1];
     if (!checkpointId) {
       throw new Error('Missing checkpoint id for fork');
     }
     const name = args.slice(2).join(' ').trim();
-    return { cmd: 'fork', checkpointId, name: name || undefined, policy, skills, model };
+    return { ...base, cmd: 'fork', checkpointId, name: name || undefined };
   }
+  if (cmd === 'handoff') return parseHandoffArgs(args, base);
+  if (cmd === 'restore') return parseRestoreArgs(args, base);
   if (cmd === 'reset') return { cmd, policy, skills, model };
   if (cmd === 'history') return { cmd, policy, skills, model };
   if (cmd === 'help' || cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model };
@@ -227,7 +369,13 @@ Usage:
   cliq chat                Start interactive chat in the current directory
   cliq reset               Clear persisted conversation for this directory
   cliq history             Print persisted session for this directory
+  cliq checkpoint [name]   Create a manual checkpoint
+  cliq checkpoints         Print session checkpoints
+  cliq compact --summary S Create a manual compaction summary
+  cliq compactions         Print session compactions
   cliq fork CHECKPOINT     Fork the current session from a checkpoint
+  cliq restore CHECKPOINT  Restore session or files from a checkpoint
+  cliq handoff             Export a handoff artifact
   cliq help                Print this help
   -h, --help               Print this help
 
@@ -392,10 +540,88 @@ export async function runCli(argv: string[]) {
     return;
   }
 
+  if (parsed.cmd === 'checkpoint') {
+    const session = await ensureSession(cwd);
+    const checkpoint = await createCheckpoint(cwd, session, { kind: 'manual', name: parsed.name });
+    console.log(`created checkpoint ${checkpoint.id}${checkpoint.name ? ` (${checkpoint.name})` : ''}`);
+    return;
+  }
+
+  if (parsed.cmd === 'checkpoints') {
+    const session = await ensureSession(cwd);
+    console.log(JSON.stringify(session.checkpoints, null, 2));
+    return;
+  }
+
+  if (parsed.cmd === 'compact') {
+    const session = await ensureSession(cwd);
+    const checkpoint = parsed.beforeCheckpointId
+      ? session.checkpoints.find((candidate) => candidate.id === parsed.beforeCheckpointId)
+      : undefined;
+    if (parsed.beforeCheckpointId && !checkpoint) {
+      throw new Error(`checkpoint not found: ${parsed.beforeCheckpointId}`);
+    }
+    const artifact = await createCompaction(cwd, session, {
+      endIndexExclusive: checkpoint?.recordIndex ?? session.records.length - 1,
+      anchorCheckpointId: checkpoint?.id,
+      summaryMarkdown: parsed.summaryMarkdown
+    });
+    console.log(`created compaction ${artifact.id}`);
+    return;
+  }
+
+  if (parsed.cmd === 'compactions') {
+    const session = await ensureSession(cwd);
+    console.log(JSON.stringify(session.compactions, null, 2));
+    return;
+  }
+
   if (parsed.cmd === 'fork') {
     const session = await ensureSession(cwd);
     const child = await forkSessionFromCheckpoint(cwd, session, parsed.checkpointId, { name: parsed.name });
     console.log(`forked session ${child.id} from ${parsed.checkpointId}`);
+    return;
+  }
+
+  if (parsed.cmd === 'restore') {
+    const session = await ensureSession(cwd);
+    const checkpoint = session.checkpoints.find((candidate) => candidate.id === parsed.checkpointId);
+    if (!checkpoint) {
+      throw new Error(`checkpoint not found: ${parsed.checkpointId}`);
+    }
+
+    if (parsed.scope === 'files' || parsed.scope === 'both') {
+      if (!parsed.yes) {
+        throw new Error('restore files requires --yes in non-interactive CLI mode');
+      }
+      if (!checkpoint.workspaceCheckpointId) {
+        throw new Error(`checkpoint has no workspace snapshot: ${parsed.checkpointId}`);
+      }
+      if (parsed.scope === 'both') {
+        await createCheckpoint(cwd, session, {
+          kind: 'restore-safety',
+          name: `before restore ${parsed.checkpointId}`
+        });
+      }
+      await restoreWorkspaceCheckpoint(cwd, checkpoint.workspaceCheckpointId, { allowStagedChanges: parsed.yes });
+    }
+
+    if (parsed.scope === 'session' || parsed.scope === 'both') {
+      const child = await forkSessionFromCheckpoint(cwd, session, parsed.checkpointId, {
+        name: `restore ${parsed.checkpointId}`
+      });
+      console.log(`restored session ${child.id} from ${parsed.checkpointId}`);
+      return;
+    }
+
+    console.log(`restored files from ${parsed.checkpointId}`);
+    return;
+  }
+
+  if (parsed.cmd === 'handoff') {
+    const session = await ensureSession(cwd);
+    const artifact = await exportHandoff(cwd, session, { checkpointId: parsed.checkpointId });
+    console.log(`created handoff ${artifact.id} at ${artifact.paths.markdown}`);
     return;
   }
 

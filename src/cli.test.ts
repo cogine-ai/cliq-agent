@@ -111,6 +111,64 @@ test('parseArgs rejects fork without a checkpoint id', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'fork']), /Missing checkpoint id for fork/i);
 });
 
+test('parseArgs accepts workflow asset commands', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'before', 'edit']), {
+    cmd: 'checkpoint',
+    name: 'before edit',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoints']), {
+    cmd: 'checkpoints',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', '--before', 'chk_1', '--summary', 'summary text']), {
+    cmd: 'compact',
+    beforeCheckpointId: 'chk_1',
+    summaryMarkdown: 'summary text',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compactions']), {
+    cmd: 'compactions',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'handoff', '--checkpoint=chk_1']), {
+    cmd: 'handoff',
+    checkpointId: 'chk_1',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'restore', 'chk_1', '--scope', 'files', '--yes']), {
+    cmd: 'restore',
+    checkpointId: 'chk_1',
+    scope: 'files',
+    yes: true,
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs rejects compact without an explicit summary', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'compact']), /Missing value for --summary/i);
+});
+
+test('parseArgs rejects restore without a checkpoint id or with an invalid scope', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'restore']), /Missing checkpoint id for restore/i);
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', 'restore', 'chk_1', '--scope', 'bad']),
+    /Unknown restore scope/i
+  );
+});
+
 test('parseArgs accepts model provider flags', () => {
   assert.deepEqual(
     parseArgs([
@@ -406,4 +464,257 @@ test('runCli fork switches the active global session to a checkpoint prefix', as
 
   assert.match(output, /forked session/i);
   assert.match(output, /chk_cli/);
+});
+
+test('runCli checkpoint and checkpoints operate on the active global session without model setup', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-checkpoint-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+  const previousLog = console.log;
+  let output = '';
+
+  process.chdir(cwd);
+  console.log = (value?: unknown) => {
+    output += `${String(value)}\n`;
+  };
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    session.records.push({
+      id: 'usr_1',
+      ts: '2026-04-29T00:00:00.000Z',
+      kind: 'user',
+      role: 'user',
+      content: 'first'
+    });
+    await saveSession(cwd, session);
+
+    await runCli(['node', 'src/index.ts', 'checkpoint', 'before edit']);
+    const checkpointed = await ensureSession(cwd);
+    await runCli(['node', 'src/index.ts', 'checkpoints']);
+
+    assert.equal(checkpointed.checkpoints.length, 1);
+    assert.equal(checkpointed.checkpoints[0]?.name, 'before edit');
+    assert.match(output, /created checkpoint/);
+    assert.match(output, /before edit/);
+  } finally {
+    console.log = previousLog;
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('runCli compact and compactions operate on stored session records', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-compact-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+  const previousLog = console.log;
+  let output = '';
+
+  process.chdir(cwd);
+  console.log = (value?: unknown) => {
+    output += `${String(value)}\n`;
+  };
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    session.records.push(
+      {
+        id: 'usr_1',
+        ts: '2026-04-29T00:00:00.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'first'
+      },
+      {
+        id: 'usr_2',
+        ts: '2026-04-29T00:00:01.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'second'
+      },
+      {
+        id: 'usr_3',
+        ts: '2026-04-29T00:00:02.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'third'
+      }
+    );
+    await saveSession(cwd, session);
+
+    await runCli(['node', 'src/index.ts', 'compact', '--summary', '## Objective\nKeep first two summarized']);
+    const compacted = await ensureSession(cwd);
+    await runCli(['node', 'src/index.ts', 'compactions']);
+
+    assert.equal(compacted.compactions.length, 1);
+    assert.equal(compacted.compactions[0]?.status, 'active');
+    assert.equal(compacted.compactions[0]?.firstKeptRecordId, 'usr_3');
+    assert.match(output, /created compaction/);
+    assert.match(output, /Keep first two summarized/);
+  } finally {
+    console.log = previousLog;
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('runCli handoff exports an artifact and creates a handoff checkpoint when needed', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-handoff-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+  const previousLog = console.log;
+  let output = '';
+
+  process.chdir(cwd);
+  console.log = (value?: unknown) => {
+    output += `${String(value)}\n`;
+  };
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    session.records.push({
+      id: 'usr_1',
+      ts: '2026-04-29T00:00:00.000Z',
+      kind: 'user',
+      role: 'user',
+      content: 'prepare handoff'
+    });
+    await saveSession(cwd, session);
+
+    await runCli(['node', 'src/index.ts', 'handoff']);
+    const handedOff = await ensureSession(cwd);
+
+    assert.equal(handedOff.checkpoints.at(-1)?.kind, 'handoff');
+    assert.match(output, /created handoff/);
+    assert.match(output, /HANDOFF\.md/);
+  } finally {
+    console.log = previousLog;
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('runCli restore --scope session switches the active session to a checkpoint prefix', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-restore-session-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+  const previousLog = console.log;
+  let output = '';
+
+  process.chdir(cwd);
+  console.log = (value?: unknown) => {
+    output += `${String(value)}\n`;
+  };
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    session.records.push(
+      {
+        id: 'usr_1',
+        ts: '2026-04-29T00:00:00.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'keep'
+      },
+      {
+        id: 'usr_2',
+        ts: '2026-04-29T00:00:01.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'discard'
+      }
+    );
+    session.checkpoints.push({
+      id: 'chk_restore',
+      kind: 'manual',
+      createdAt: '2026-04-29T00:00:02.000Z',
+      recordIndex: 1,
+      turn: 1
+    });
+    await saveSession(cwd, session);
+
+    await runCli(['node', 'src/index.ts', 'restore', 'chk_restore', '--scope', 'session']);
+    const restored = await ensureSession(cwd);
+
+    assert.notEqual(restored.id, session.id);
+    assert.equal(restored.forkedFromCheckpointId, 'chk_restore');
+    assert.deepEqual(restored.records.map((record) => record.id), ['usr_1']);
+  } finally {
+    console.log = previousLog;
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+
+  assert.match(output, /restored session/i);
+  assert.match(output, /chk_restore/);
+});
+
+test('runCli restore --scope files requires --yes before changing files', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-restore-files-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+
+  process.chdir(cwd);
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    session.checkpoints.push({
+      id: 'chk_files',
+      kind: 'manual',
+      createdAt: '2026-04-29T00:00:00.000Z',
+      recordIndex: 0,
+      turn: 0,
+      workspaceCheckpointId: 'wchk_missing'
+    });
+    await saveSession(cwd, session);
+
+    await assert.rejects(
+      () => runCli(['node', 'src/index.ts', 'restore', 'chk_files', '--scope', 'files']),
+      /requires --yes/i
+    );
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
 });
