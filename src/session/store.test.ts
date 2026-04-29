@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -9,23 +9,33 @@ import {
   ensureFresh,
   ensureSession,
   resolveCliqHome,
+  saveSession,
   sessionFilePath,
   sessionPath,
   workspaceIdFromRealPath,
   workspaceStatePath
 } from './store.js';
 
-const originalCliqHome = process.env.CLIQ_HOME;
-const fileCliqHome = await mkdtemp(path.join(os.tmpdir(), 'cliq-store-home-'));
-process.env.CLIQ_HOME = fileCliqHome;
+let originalCliqHome: string | undefined;
+let fileCliqHome: string | undefined;
 
-test.after(async () => {
+test.beforeEach(async () => {
+  originalCliqHome = process.env.CLIQ_HOME;
+  fileCliqHome = await mkdtemp(path.join(os.tmpdir(), 'cliq-store-home-'));
+  process.env.CLIQ_HOME = fileCliqHome;
+});
+
+test.afterEach(async () => {
   if (originalCliqHome === undefined) {
     delete process.env.CLIQ_HOME;
   } else {
     process.env.CLIQ_HOME = originalCliqHome;
   }
-  await rm(fileCliqHome, { recursive: true, force: true });
+  if (fileCliqHome) {
+    await rm(fileCliqHome, { recursive: true, force: true });
+  }
+  originalCliqHome = undefined;
+  fileCliqHome = undefined;
 });
 
 test('createSession starts without a seeded system record', () => {
@@ -158,6 +168,95 @@ test('ensureSession recovers from malformed workspace index JSON', async () => {
     const activeSessionIds = Object.values(index.workspaces ?? {}).map((entry) => entry.activeSessionId);
 
     assert.ok(activeSessionIds.includes(session.id));
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('saveSession recovers from a stale session file lock', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-stale-lock-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    const target = sessionFilePath(session);
+    const lockPath = `${target}.lock`;
+    await mkdir(lockPath, { recursive: true });
+    const stale = new Date(Date.now() - 10_000);
+    await utimes(lockPath, stale, stale);
+
+    await saveSession(cwd, session);
+
+    await assert.rejects(() => access(lockPath), { code: 'ENOENT' });
+    assert.equal(JSON.parse(await readFile(target, 'utf8')).id, session.id);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession does not persist normalized active global sessions by default', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-active-normalize-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    const target = sessionFilePath(session);
+    const rawSession = {
+      ...session,
+      version: 3,
+      model: 'anthropic/claude-sonnet-4.6'
+    };
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, JSON.stringify(rawSession, null, 2), 'utf8');
+
+    const workspaceRealPath = await realpath(cwd);
+    const statePath = await workspaceStatePath(cwd);
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify(
+        {
+          version: 1,
+          workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+          workspaceRealPath,
+          activeSessionId: session.id,
+          activeSessionPath: target,
+          recentSessions: [],
+          lastSeenAt: '2026-04-29T00:00:00.000Z'
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const loaded = await ensureSession(cwd);
+    const persisted = JSON.parse(await readFile(target, 'utf8')) as { version: number; model: unknown };
+
+    assert.equal(loaded.version, 5);
+    assert.deepEqual(loaded.model, {
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-4.6',
+      baseUrl: 'https://openrouter.ai/api/v1'
+    });
+    assert.equal(persisted.version, 3);
+    assert.equal(persisted.model, 'anthropic/claude-sonnet-4.6');
   } finally {
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;

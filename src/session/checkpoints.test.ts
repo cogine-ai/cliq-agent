@@ -82,6 +82,27 @@ test('createCheckpoint records a session anchor and non-git workspace metadata',
   }
 });
 
+test('createCheckpoint initializes missing checkpoint arrays before saving', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-checkpoint-missing-array-'));
+  try {
+    await withCliqHome(async () => {
+      const session = createSession(cwd) as Omit<ReturnType<typeof createSession>, 'checkpoints'> & {
+        checkpoints?: ReturnType<typeof createSession>['checkpoints'];
+      };
+      delete session.checkpoints;
+
+      const checkpoint = await createCheckpoint(cwd, session as ReturnType<typeof createSession>);
+      const mutated = session as { checkpoints?: Array<{ id: string }> };
+
+      assert.equal(checkpoint.kind, 'manual');
+      assert.equal(mutated.checkpoints?.length, 1);
+      assert.equal(mutated.checkpoints?.[0]?.id, checkpoint.id);
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('createCheckpoint creates a git ghost snapshot without changing the real index', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-checkpoint-git-'));
   try {

@@ -188,6 +188,7 @@ export async function createCheckpoint(
     workspaceCheckpointId: workspaceCheckpoint.id
   };
 
+  session.checkpoints ??= [];
   session.checkpoints.push(checkpoint);
   await saveSession(cwd, session);
   return checkpoint;

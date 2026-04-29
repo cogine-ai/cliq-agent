@@ -7,17 +7,26 @@ import path from 'node:path';
 import { forkSessionFromCheckpoint } from './fork.js';
 import { createSession, ensureSession, saveSession } from './store.js';
 
-const originalCliqHome = process.env.CLIQ_HOME;
-const forkCliqHome = await mkdtemp(path.join(os.tmpdir(), 'cliq-fork-home-'));
-process.env.CLIQ_HOME = forkCliqHome;
+let originalCliqHome: string | undefined;
+let forkCliqHome: string | undefined;
 
-test.after(async () => {
+test.beforeEach(async () => {
+  originalCliqHome = process.env.CLIQ_HOME;
+  forkCliqHome = await mkdtemp(path.join(os.tmpdir(), 'cliq-fork-home-'));
+  process.env.CLIQ_HOME = forkCliqHome;
+});
+
+test.afterEach(async () => {
   if (originalCliqHome === undefined) {
     delete process.env.CLIQ_HOME;
   } else {
     process.env.CLIQ_HOME = originalCliqHome;
   }
-  await rm(forkCliqHome, { recursive: true, force: true });
+  if (forkCliqHome) {
+    await rm(forkCliqHome, { recursive: true, force: true });
+  }
+  originalCliqHome = undefined;
+  forkCliqHome = undefined;
 });
 
 test('forkSessionFromCheckpoint creates a child session from the checkpoint prefix and makes it active', async () => {

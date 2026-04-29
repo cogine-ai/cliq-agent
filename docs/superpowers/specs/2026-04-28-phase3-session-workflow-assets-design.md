@@ -154,6 +154,7 @@ export type Session = {
   version: 5;
   app: 'cliq';
   id: string;
+  name?: string;
   parentSessionId?: string;
   forkedFromCheckpointId?: string;
   model: SessionModelRef;

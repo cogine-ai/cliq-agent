@@ -274,6 +274,9 @@ async function withPathLock<T>(target: string, callback: () => Promise<T>): Prom
       if (code !== 'EEXIST') {
         throw error;
       }
+      if (await removeStaleLock(lockPath)) {
+        continue;
+      }
       if (Date.now() - startedAt > LOCK_TIMEOUT_MS) {
         throw new Error(`timed out waiting for session store lock: ${lockPath}`);
       }
@@ -285,6 +288,22 @@ async function withPathLock<T>(target: string, callback: () => Promise<T>): Prom
     return await callback();
   } finally {
     await fs.rm(lockPath, { recursive: true, force: true });
+  }
+}
+
+async function removeStaleLock(lockPath: string) {
+  try {
+    const stat = await fs.stat(lockPath);
+    if (Date.now() - stat.mtimeMs <= LOCK_TIMEOUT_MS) {
+      return false;
+    }
+    await fs.rm(lockPath, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return true;
+    }
+    throw error;
   }
 }
 
@@ -503,6 +522,10 @@ function replaceSessionContents(target: Session, source: Session) {
   if (target === source) {
     return;
   }
+  // Mutate the existing Session object so callers that keep a reference observe
+  // the saved state after a locked read-modify-write. This is a runtime
+  // identity guarantee only; TypeScript cannot enforce it, so keep the
+  // delete-and-assign shape unless all callers stop relying on object identity.
   const mutableTarget = target as unknown as Record<string, unknown>;
   for (const key of Object.keys(mutableTarget)) {
     delete mutableTarget[key];
@@ -650,9 +673,6 @@ async function loadSessionFromPath(target: string): Promise<Session | null> {
   }
 
   const normalized = normalizeSession(raw);
-  if (normalized !== raw) {
-    await saveSession(normalized.cwd, normalized);
-  }
   return normalized;
 }
 
@@ -720,7 +740,6 @@ async function recordWorkspaceSession(
     };
 
     await fs.mkdir(workspaceDir, { recursive: true });
-    await fs.mkdir(path.dirname(indexPath), { recursive: true });
     await atomicWriteJson(statePath, nextState);
     await atomicWriteJson(indexPath, index);
     await atomicWriteJson(globalStatePath, { version: GLOBAL_STATE_VERSION, updatedAt: now });
