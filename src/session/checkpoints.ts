@@ -21,6 +21,10 @@ export type RestoreWorkspaceCheckpointOptions = {
   allowStagedChanges?: boolean;
 };
 
+export type CreatedSessionCheckpoint = SessionCheckpoint & {
+  workspaceCheckpoint: WorkspaceCheckpoint;
+};
+
 export function workspaceCheckpointFilePath(workspaceCheckpointId: string, cliqHome = resolveCliqHome()) {
   if (!SAFE_WORKSPACE_CHECKPOINT_ID.test(workspaceCheckpointId)) {
     throw new Error(`invalid workspace checkpoint id: ${workspaceCheckpointId}`);
@@ -30,8 +34,19 @@ export function workspaceCheckpointFilePath(workspaceCheckpointId: string, cliqH
 
 async function writeWorkspaceCheckpoint(checkpoint: WorkspaceCheckpoint) {
   const target = workspaceCheckpointFilePath(checkpoint.id);
+  await atomicWriteJson(target, checkpoint);
+}
+
+async function atomicWriteJson(target: string, value: unknown) {
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, JSON.stringify(checkpoint, null, 2));
+  const temp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  try {
+    await fs.writeFile(temp, JSON.stringify(value, null, 2));
+    await fs.rename(temp, target);
+  } catch (error) {
+    await fs.rm(temp, { force: true });
+    throw error;
+  }
 }
 
 async function resolveWorkspaceRealPath(cwd: string) {
@@ -51,10 +66,7 @@ async function resolveGitRoot(cwd: string) {
 async function runGit(cwd: string, args: string[], env: Record<string, string> = {}) {
   const { stdout } = await execFileAsync('git', args, {
     cwd,
-    env: {
-      ...process.env,
-      ...env
-    }
+    env: gitEnv(env)
   });
   return stdout.trim();
 }
@@ -62,12 +74,21 @@ async function runGit(cwd: string, args: string[], env: Record<string, string> =
 async function runGitRaw(cwd: string, args: string[], env: Record<string, string> = {}) {
   const { stdout } = await execFileAsync('git', args, {
     cwd,
-    env: {
-      ...process.env,
-      ...env
-    }
+    env: gitEnv(env)
   });
   return stdout;
+}
+
+function gitEnv(overrides: Record<string, string>) {
+  const allowed = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'TMP', 'TEMP', 'USERPROFILE', 'SystemRoot', 'COMSPEC', 'PATHEXT'];
+  const env: Record<string, string> = {};
+  for (const name of allowed) {
+    const value = process.env[name];
+    if (value !== undefined) {
+      env[name] = value;
+    }
+  }
+  return { ...env, ...overrides };
 }
 
 function splitNullList(output: string) {
@@ -174,7 +195,7 @@ export async function createCheckpoint(
   cwd: string,
   session: Session,
   options: CreateCheckpointOptions = {}
-): Promise<SessionCheckpoint> {
+): Promise<CreatedSessionCheckpoint> {
   const workspaceCheckpoint = await createWorkspaceCheckpoint(cwd);
   await writeWorkspaceCheckpoint(workspaceCheckpoint);
 
@@ -191,7 +212,7 @@ export async function createCheckpoint(
   session.checkpoints ??= [];
   session.checkpoints.push(checkpoint);
   await saveSession(cwd, session);
-  return checkpoint;
+  return { ...checkpoint, workspaceCheckpoint };
 }
 
 async function readWorkspaceCheckpoint(workspaceCheckpointId: string): Promise<WorkspaceCheckpoint> {
@@ -369,6 +390,34 @@ async function assertSameWorkspace(cwd: string, checkpoint: WorkspaceCheckpoint)
   }
 }
 
+async function resolveRestorableWorkspaceCheckpoint(
+  cwd: string,
+  workspaceCheckpointId: string,
+  options: RestoreWorkspaceCheckpointOptions = {}
+) {
+  const rawCheckpoint = await readWorkspaceCheckpoint(workspaceCheckpointId);
+  await assertSameWorkspace(cwd, rawCheckpoint);
+  const checkpoint = workspaceCheckpointRestoreTarget(rawCheckpoint);
+  await verifyGitCommitExists(checkpoint);
+
+  const stagedFiles = await listStagedFiles(checkpoint.gitRootRealPath, checkpoint.repoRelativeScope);
+  if (stagedFiles.length > 0 && !options.allowStagedChanges) {
+    throw new Error(
+      `cannot restore workspace checkpoint with staged changes in scope: ${stagedFiles.join(', ')}`
+    );
+  }
+
+  return checkpoint;
+}
+
+export async function assertWorkspaceCheckpointRestorable(
+  cwd: string,
+  workspaceCheckpointId: string,
+  options: RestoreWorkspaceCheckpointOptions = {}
+) {
+  await resolveRestorableWorkspaceCheckpoint(cwd, workspaceCheckpointId, options);
+}
+
 async function removeNewUntrackedFiles(
   gitRootRealPath: string,
   repoRelativeScope: string,
@@ -396,17 +445,7 @@ export async function restoreWorkspaceCheckpoint(
   workspaceCheckpointId: string,
   options: RestoreWorkspaceCheckpointOptions = {}
 ) {
-  const rawCheckpoint = await readWorkspaceCheckpoint(workspaceCheckpointId);
-  await assertSameWorkspace(cwd, rawCheckpoint);
-  const checkpoint = workspaceCheckpointRestoreTarget(rawCheckpoint);
-  await verifyGitCommitExists(checkpoint);
-
-  const stagedFiles = await listStagedFiles(checkpoint.gitRootRealPath, checkpoint.repoRelativeScope);
-  if (stagedFiles.length > 0 && !options.allowStagedChanges) {
-    throw new Error(
-      `cannot restore workspace checkpoint with staged changes in scope: ${stagedFiles.join(', ')}`
-    );
-  }
+  const checkpoint = await resolveRestorableWorkspaceCheckpoint(cwd, workspaceCheckpointId, options);
 
   await runGit(checkpoint.gitRootRealPath, [
     'restore',

@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { mock } from 'node:test';
+import { promisify } from 'node:util';
 
 import {
   formatToolResultLine,
@@ -14,8 +16,11 @@ import {
   ReportedCliError,
   runCli
 } from './cli.js';
+import { createCheckpoint } from './session/checkpoints.js';
 import { createSession, ensureSession, saveSession } from './session/store.js';
 import type { ToolResult } from './tools/types.js';
+
+const execFileAsync = promisify(execFile);
 
 test('parseArgs accepts --policy=read-only', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--policy=read-only', 'chat']), {
@@ -142,15 +147,19 @@ test('parseArgs accepts workflow asset commands', () => {
     skills: [],
     model: {}
   });
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'restore', 'chk_1', '--scope', 'files', '--yes']), {
-    cmd: 'checkpoint-restore',
-    checkpointId: 'chk_1',
-    scope: 'files',
-    yes: true,
-    policy: 'auto',
-    skills: [],
-    model: {}
-  });
+  assert.deepEqual(
+    parseArgs(['node', 'src/index.ts', 'checkpoint', 'restore', 'chk_1', '--scope', 'files', '--yes', '--allow-staged']),
+    {
+      cmd: 'checkpoint-restore',
+      checkpointId: 'chk_1',
+      scope: 'files',
+      yes: true,
+      allowStagedChanges: true,
+      policy: 'auto',
+      skills: [],
+      model: {}
+    }
+  );
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', 'create', '--before', 'chk_1', '--summary', 'summary text']), {
     cmd: 'compact-create',
     beforeCheckpointId: 'chk_1',
@@ -466,7 +475,9 @@ type CliTestEnv = {
   cwd: string;
   home: string;
   output: string[];
+  stderr: string[];
   outputText: () => string;
+  stderrText: () => string;
 };
 
 async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Promise<void>) {
@@ -475,12 +486,18 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
   const previousLog = console.log;
+  const previousStderrWrite = process.stderr.write;
   const output: string[] = [];
+  const stderr: string[] = [];
 
   process.chdir(cwd);
   console.log = (value?: unknown) => {
     output.push(String(value));
   };
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
 
   try {
     process.env.CLIQ_HOME = home;
@@ -488,10 +505,13 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
       cwd,
       home,
       output,
-      outputText: () => (output.length > 0 ? `${output.join('\n')}\n` : '')
+      stderr,
+      outputText: () => (output.length > 0 ? `${output.join('\n')}\n` : ''),
+      stderrText: () => stderr.join('')
     });
   } finally {
     console.log = previousLog;
+    process.stderr.write = previousStderrWrite;
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
     } else {
@@ -566,7 +586,7 @@ test('runCli fork switches the active global session to a checkpoint prefix', as
 });
 
 test('runCli checkpoint create and list operate on the active global session without model setup', async () => {
-  await withCliTestEnv('checkpoint', async ({ cwd, outputText }) => {
+  await withCliTestEnv('checkpoint', async ({ cwd, outputText, stderrText }) => {
     const session = createSession(cwd);
     session.records.push({
       id: 'usr_1',
@@ -585,6 +605,8 @@ test('runCli checkpoint create and list operate on the active global session wit
     assert.equal(checkpointed.checkpoints[0]?.name, 'before edit');
     assert.match(outputText(), /created checkpoint/);
     assert.match(outputText(), /before edit/);
+    assert.match(outputText(), /workspace snapshot unavailable: not-git/);
+    assert.match(stderrText(), /workspace snapshot unavailable: not-git/);
   });
 });
 
@@ -625,6 +647,60 @@ test('runCli compact create and list operate on stored session records', async (
     assert.equal(compacted.compactions[0]?.firstKeptRecordId, 'usr_3');
     assert.match(outputText(), /created compaction/);
     assert.match(outputText(), /Keep first two summarized/);
+  });
+});
+
+test('runCli compact create fails clearly when there is no compactable tail', async () => {
+  await withCliTestEnv('compact-short', async ({ cwd }) => {
+    const session = createSession(cwd);
+    session.records.push({
+      id: 'usr_1',
+      ts: '2026-04-29T00:00:00.000Z',
+      kind: 'user',
+      role: 'user',
+      content: 'single'
+    });
+    await saveSession(cwd, session);
+
+    await assert.rejects(
+      () => runCli(['node', 'src/index.ts', 'compact', 'create', '--summary', 'single summary']),
+      /compact requires at least two session records/i
+    );
+  });
+});
+
+test('runCli compact create fails clearly when --before leaves no compactable range', async () => {
+  await withCliTestEnv('compact-before-start', async ({ cwd }) => {
+    const session = createSession(cwd);
+    session.records.push(
+      {
+        id: 'usr_1',
+        ts: '2026-04-29T00:00:00.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'first'
+      },
+      {
+        id: 'usr_2',
+        ts: '2026-04-29T00:00:01.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'second'
+      }
+    );
+    session.checkpoints.push({
+      id: 'chk_start',
+      kind: 'auto',
+      createdAt: '2026-04-29T00:00:00.000Z',
+      recordIndex: 0,
+      turn: 0
+    });
+    await saveSession(cwd, session);
+
+    await assert.rejects(
+      () => runCli(['node', 'src/index.ts', 'compact', 'create', '--before', 'chk_start', '--summary', 'summary']),
+      /checkpoint chk_start does not leave a compactable range/i
+    );
   });
 });
 
@@ -705,6 +781,52 @@ test('runCli restore --scope files requires --yes before changing files', async 
     await assert.rejects(
       () => runCli(['node', 'src/index.ts', 'checkpoint', 'restore', 'chk_files', '--scope', 'files']),
       /requires --yes/i
+    );
+  });
+});
+
+test('runCli restore --scope files does not let --yes overwrite staged changes', async () => {
+  await withCliTestEnv('restore-staged', async ({ cwd }) => {
+    await execFileAsync('git', ['init'], { cwd });
+    await execFileAsync('git', ['config', 'user.name', 'Cliq Test'], { cwd });
+    await execFileAsync('git', ['config', 'user.email', 'test@cliq.local'], { cwd });
+    await writeFile(path.join(cwd, 'tracked.txt'), 'before\n', 'utf8');
+    await execFileAsync('git', ['add', 'tracked.txt'], { cwd });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd });
+
+    const session = createSession(cwd);
+    const checkpoint = await createCheckpoint(cwd, session, { kind: 'manual' });
+    await writeFile(path.join(cwd, 'tracked.txt'), 'after\n', 'utf8');
+    await execFileAsync('git', ['add', 'tracked.txt'], { cwd });
+
+    await assert.rejects(
+      () => runCli(['node', 'src/index.ts', 'checkpoint', 'restore', checkpoint.id, '--scope', 'files', '--yes']),
+      /staged changes/i
+    );
+  });
+});
+
+test('runCli restore --scope both validates workspace restore before creating a safety checkpoint', async () => {
+  await withCliTestEnv('restore-both-non-git', async ({ cwd }) => {
+    const session = createSession(cwd);
+    session.records.push({
+      id: 'usr_1',
+      ts: '2026-04-29T00:00:00.000Z',
+      kind: 'user',
+      role: 'user',
+      content: 'before restore'
+    });
+    const checkpoint = await createCheckpoint(cwd, session, { kind: 'manual' });
+
+    await assert.rejects(
+      () => runCli(['node', 'src/index.ts', 'checkpoint', 'restore', checkpoint.id, '--scope', 'both', '--yes']),
+      /workspace checkpoint cannot be restored: not-git/i
+    );
+
+    const after = await ensureSession(cwd);
+    assert.deepEqual(
+      after.checkpoints.map((candidate) => candidate.id),
+      [checkpoint.id]
     );
   });
 });

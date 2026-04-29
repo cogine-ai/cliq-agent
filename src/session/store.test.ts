@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, mkdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -209,7 +209,7 @@ test('saveSession recovers from a stale session file lock', async () => {
   }
 });
 
-test('mutateSession only releases the lock owner it acquired', async () => {
+test('mutateSession refuses to write after lock ownership is lost', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-lock-owner-'));
 
   try {
@@ -218,15 +218,72 @@ test('mutateSession only releases the lock owner it acquired', async () => {
     const lockPath = `${target}.lock`;
     const otherOwnerPath = path.join(lockPath, 'owner');
 
-    await mutateSession(cwd, session, async (current) => {
-      await rm(lockPath, { recursive: true, force: true });
-      await mkdir(lockPath, { recursive: true });
-      await writeFile(otherOwnerPath, 'other-owner', 'utf8');
-      current.name = 'mutated';
-    });
+    await assert.rejects(
+      () =>
+        mutateSession(cwd, session, async (current) => {
+          await rm(lockPath, { recursive: true, force: true });
+          await mkdir(lockPath, { recursive: true });
+          await writeFile(otherOwnerPath, 'other-owner', 'utf8');
+          current.name = 'mutated';
+        }),
+      /lost session store lock/i
+    );
 
     assert.equal(await readFile(otherOwnerPath, 'utf8'), 'other-owner');
     await rm(lockPath, { recursive: true, force: true });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('mutateSession serializes concurrent updates without losing records', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-lock-concurrent-'));
+
+  try {
+    const session = createSession(cwd);
+    await saveSession(cwd, session);
+    let releaseFirst!: () => void;
+    const firstCanFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstStarted!: () => void;
+    const firstHasLock = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+
+    const first = mutateSession(cwd, session, async (current) => {
+      current.records.push({
+        id: 'usr_1',
+        ts: '2026-04-29T00:00:00.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'first'
+      });
+      firstStarted();
+      await firstCanFinish;
+    });
+    await firstHasLock;
+
+    const second = mutateSession(cwd, session, (current) => {
+      current.records.push({
+        id: 'usr_2',
+        ts: '2026-04-29T00:00:01.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'second'
+      });
+    });
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    const persisted = JSON.parse(await readFile(sessionFilePath(session), 'utf8')) as {
+      records: Array<{ id: string }>;
+    };
+    assert.deepEqual(
+      persisted.records.map((record) => record.id),
+      ['usr_1', 'usr_2']
+    );
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -281,6 +338,51 @@ test('ensureSession does not persist normalized active global sessions by defaul
     });
     assert.equal(persisted.version, 3);
     assert.equal(persisted.model, 'anthropic/claude-sonnet-4.6');
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession surfaces malformed active global session JSON', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-active-malformed-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    const target = sessionFilePath(session);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, '{"records":', 'utf8');
+
+    const workspaceRealPath = await realpath(cwd);
+    const statePath = await workspaceStatePath(cwd);
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify(
+        {
+          version: 1,
+          workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+          workspaceRealPath,
+          activeSessionId: session.id,
+          activeSessionPath: target,
+          recentSessions: [],
+          lastSeenAt: '2026-04-29T00:00:00.000Z'
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    await assert.rejects(() => ensureSession(cwd), /invalid JSON/i);
   } finally {
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
@@ -424,6 +526,34 @@ test('ensureSession propagates legacy migration errors after a valid read', asyn
 
     await assert.rejects(() => ensureSession(cwd), /invalid legacy session: messages must be an array/);
   } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession backs up malformed legacy session JSON before starting fresh', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-legacy-corrupt-'));
+  const legacyDir = path.join(cwd, '.cliq');
+  const legacyPath = path.join(legacyDir, 'session.json');
+  const stderrWrite = process.stderr.write;
+  let stderr = '';
+
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    await mkdir(legacyDir, { recursive: true });
+    await writeFile(legacyPath, '{"records":', 'utf8');
+
+    const session = await ensureSession(cwd);
+    const legacyFiles = await readdir(legacyDir);
+
+    assert.equal(session.records.length, 0);
+    assert.equal(legacyFiles.some((file) => /^session\.corrupt-.+\.json$/.test(file)), true);
+    assert.match(stderr, /legacy session JSON is malformed/i);
+  } finally {
+    process.stderr.write = stderrWrite;
     await rm(cwd, { recursive: true, force: true });
   }
 });

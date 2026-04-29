@@ -137,6 +137,30 @@ test('createCheckpoint creates a git ghost snapshot without changing the real in
   }
 });
 
+test('createCheckpoint creates a git ghost snapshot in an empty repository', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-checkpoint-empty-git-'));
+  try {
+    await git(cwd, ['init', '--initial-branch=main']);
+    await writeFile(path.join(cwd, 'first.txt'), 'first\n', 'utf8');
+
+    await withCliqHome(async () => {
+      const session = createSession(cwd);
+      const checkpoint = await createCheckpoint(cwd, session, { kind: 'manual' });
+      const workspaceCheckpoint = JSON.parse(
+        await readFile(workspaceCheckpointFilePath(checkpoint.workspaceCheckpointId!), 'utf8')
+      ) as { kind: string; status: string; commitId: string; parentCommitId?: string };
+
+      assert.equal(workspaceCheckpoint.kind, 'git-ghost');
+      assert.equal(workspaceCheckpoint.status, 'available');
+      assert.equal(workspaceCheckpoint.parentCommitId, undefined);
+      await git(cwd, ['cat-file', '-e', `${workspaceCheckpoint.commitId}^{commit}`]);
+      assert.equal(await git(cwd, ['show', `${workspaceCheckpoint.commitId}:first.txt`]), 'first');
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('restoreWorkspaceCheckpoint refuses to restore over staged changes by default', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-checkpoint-restore-staged-'));
   try {

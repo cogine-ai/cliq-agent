@@ -72,6 +72,12 @@ type WorkspaceIdentity = {
 
 type WorkspaceIndexEntry = WorkspaceIndex['workspaces'][string];
 type SessionMutator<T> = (session: Session) => T | Promise<T>;
+type PathLock = {
+  assertCurrentOwner: () => Promise<void>;
+};
+type ReadJsonOptions = {
+  tolerateSyntaxError?: boolean;
+};
 
 const LOCK_TIMEOUT_MS = 5000;
 const LOCK_RETRY_MS = 25;
@@ -262,7 +268,7 @@ function sleep(ms: number) {
   });
 }
 
-async function withPathLock<T>(target: string, callback: () => Promise<T>): Promise<T> {
+async function withPathLock<T>(target: string, callback: (lock: PathLock) => Promise<T>): Promise<T> {
   const lockPath = `${target}.lock`;
   const ownerToken = `${process.pid}:${crypto.randomUUID()}`;
   const startedAt = Date.now();
@@ -294,8 +300,13 @@ async function withPathLock<T>(target: string, callback: () => Promise<T>): Prom
   }
 
   const heartbeat = startLockHeartbeat(lockPath, ownerToken);
+  const lock: PathLock = {
+    assertCurrentOwner: async () => {
+      await assertPathLockOwner(lockPath, ownerToken);
+    }
+  };
   try {
-    return await callback();
+    return await callback(lock);
   } finally {
     clearInterval(heartbeat);
     await releasePathLock(lockPath, ownerToken);
@@ -347,6 +358,14 @@ async function releasePathLock(lockPath: string, ownerToken: string) {
   await fs.rm(lockPath, { recursive: true, force: true });
 }
 
+async function assertPathLockOwner(lockPath: string, ownerToken: string) {
+  const currentOwner = await readLockOwner(lockPath);
+  if (currentOwner !== ownerToken) {
+    throw new Error(`lost session store lock: ${lockPath}`);
+  }
+  await refreshLockLease(lockPath, ownerToken);
+}
+
 async function readLockOwner(lockPath: string) {
   try {
     return await fs.readFile(path.join(lockPath, LOCK_OWNER_FILE), 'utf8');
@@ -376,11 +395,12 @@ async function removeStaleLock(lockPath: string) {
   }
 }
 
-async function atomicWriteFile(target: string, content: string) {
+async function atomicWriteFile(target: string, content: string, beforeRename?: () => Promise<void>) {
   await fs.mkdir(path.dirname(target), { recursive: true });
   const temp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
     await fs.writeFile(temp, content);
+    await beforeRename?.();
     await fs.rename(temp, target);
   } catch (error) {
     await fs.rm(temp, { force: true });
@@ -388,8 +408,8 @@ async function atomicWriteFile(target: string, content: string) {
   }
 }
 
-async function atomicWriteJson(target: string, value: unknown) {
-  await atomicWriteFile(target, JSON.stringify(value, null, 2));
+async function atomicWriteJson(target: string, value: unknown, beforeRename?: () => Promise<void>) {
+  await atomicWriteFile(target, JSON.stringify(value, null, 2), beforeRename);
 }
 
 export function createSession(cwd: string): Session {
@@ -650,14 +670,19 @@ export async function saveSession(cwd: string, session: Session) {
     session.id = makeId('sess');
   }
   const target = sessionFilePath(session);
-  await withPathLock(target, async () => {
-    await saveSessionUnlocked(cwd, session, target);
+  await withPathLock(target, async (lock) => {
+    await saveSessionUnlocked(cwd, session, target, lock.assertCurrentOwner);
   });
 }
 
-async function saveSessionUnlocked(cwd: string, session: Session, target = sessionFilePath(session)) {
+async function saveSessionUnlocked(
+  cwd: string,
+  session: Session,
+  target = sessionFilePath(session),
+  beforeSessionWrite?: () => Promise<void>
+) {
   session.updatedAt = nowIso();
-  await atomicWriteJson(target, session);
+  await atomicWriteJson(target, session, beforeSessionWrite);
   await recordWorkspaceSession(cwd, session, target);
 }
 
@@ -666,10 +691,10 @@ export async function mutateSession<T>(cwd: string, session: Session, mutator: S
     session.id = makeId('sess');
   }
   const target = sessionFilePath(session);
-  return await withPathLock(target, async () => {
+  return await withPathLock(target, async (lock) => {
     const current = await readSessionForMutation(target, session);
     const result = await mutator(current);
-    await saveSessionUnlocked(cwd, current, target);
+    await saveSessionUnlocked(cwd, current, target, lock.assertCurrentOwner);
     replaceSessionContents(session, current);
     return result;
   });
@@ -694,7 +719,9 @@ export async function ensureSession(cwd: string): Promise<Session> {
   try {
     raw = JSON.parse(await fs.readFile(legacyTarget, 'utf8')) as unknown;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) {
+    if (error instanceof SyntaxError) {
+      await backupMalformedLegacySession(legacyTarget, error);
+    } else if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw error;
     }
     const session = createSession(cwd);
@@ -713,11 +740,53 @@ export async function ensureFresh(cwd: string): Promise<Session> {
   return session;
 }
 
-async function readJson<T>(target: string): Promise<T | null> {
+async function backupMalformedLegacySession(target: string, error: SyntaxError) {
+  const backupPath = path.join(
+    path.dirname(target),
+    `session.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+  );
+  await fs.rename(target, backupPath);
+  process.stderr.write(
+    `[session warning] legacy session JSON is malformed; moved it to ${backupPath}: ${error.message}\n`
+  );
+}
+
+async function readJson<T>(target: string, options: ReadJsonOptions = {}): Promise<T | null> {
   try {
     return JSON.parse(await fs.readFile(target, 'utf8')) as T;
-  } catch {
-    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    if (error instanceof SyntaxError && options.tolerateSyntaxError) {
+      return null;
+    }
+    if (error instanceof SyntaxError) {
+      throw new Error(`invalid JSON in ${target}: ${error.message}`, { cause: error });
+    }
+    throw error;
+  }
+}
+
+async function readRecoverableJson<T>(target: string): Promise<T | null> {
+  try {
+    return await readJson<T>(target, { tolerateSyntaxError: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function readSessionJson<T>(target: string): Promise<T | null> {
+  try {
+    return await readJson<T>(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw error;
   }
 }
 
@@ -742,11 +811,11 @@ function emptyWorkspaceState(identity: WorkspaceIdentity): WorkspaceState {
 async function loadWorkspaceState(cwd: string) {
   const identity = await resolveWorkspaceIdentity(cwd);
   const target = await workspaceStatePath(cwd);
-  return normalizeWorkspaceState(await readJson<unknown>(target), identity);
+  return normalizeWorkspaceState(await readRecoverableJson<unknown>(target), identity);
 }
 
 async function loadSessionFromPath(target: string): Promise<Session | null> {
-  const raw = await readJson<unknown>(target);
+  const raw = await readSessionJson<unknown>(target);
   if (!isSession(raw)) {
     return null;
   }
@@ -783,8 +852,8 @@ async function recordWorkspaceSession(
   const globalStatePath = path.join(cliqHome, 'state.json');
   const lockPath = path.join(cliqHome, 'workspace-state');
 
-  await withPathLock(lockPath, async () => {
-    const existingState = normalizeWorkspaceState(await readJson<unknown>(statePath), identity);
+  await withPathLock(lockPath, async (lock) => {
+    const existingState = normalizeWorkspaceState(await readRecoverableJson<unknown>(statePath), identity);
     const recentSession: WorkspaceSessionRef = {
       id: session.id,
       path: sessionFile,
@@ -808,7 +877,7 @@ async function recordWorkspaceSession(
       lastSeenAt: now
     };
 
-    const index = normalizeWorkspaceIndex(await readJson<unknown>(indexPath));
+    const index = normalizeWorkspaceIndex(await readRecoverableJson<unknown>(indexPath));
     index.workspaces[identity.workspaceId] = {
       workspaceId: identity.workspaceId,
       workspaceRealPath: identity.workspaceRealPath,
@@ -819,8 +888,8 @@ async function recordWorkspaceSession(
     };
 
     await fs.mkdir(workspaceDir, { recursive: true });
-    await atomicWriteJson(statePath, nextState);
-    await atomicWriteJson(indexPath, index);
-    await atomicWriteJson(globalStatePath, { version: GLOBAL_STATE_VERSION, updatedAt: now });
+    await atomicWriteJson(statePath, nextState, lock.assertCurrentOwner);
+    await atomicWriteJson(indexPath, index, lock.assertCurrentOwner);
+    await atomicWriteJson(globalStatePath, { version: GLOBAL_STATE_VERSION, updatedAt: now }, lock.assertCurrentOwner);
   });
 }

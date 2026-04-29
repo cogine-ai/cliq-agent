@@ -13,7 +13,12 @@ import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './runtime/events.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
-import { createCheckpoint, restoreWorkspaceCheckpoint } from './session/checkpoints.js';
+import {
+  assertWorkspaceCheckpointRestorable,
+  createCheckpoint,
+  restoreWorkspaceCheckpoint,
+  type CreatedSessionCheckpoint
+} from './session/checkpoints.js';
 import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
 import { ensureFresh, ensureSession, saveSession } from './session/store.js';
@@ -44,9 +49,17 @@ export type ParsedArgs = ParsedArgsBase & (
       name?: string;
       restoreFiles?: true;
       yes?: boolean;
+      allowStagedChanges?: boolean;
       prompt?: undefined;
     }
-  | { cmd: 'checkpoint-restore'; checkpointId: string; scope: RestoreScope; yes: boolean; prompt?: undefined }
+  | {
+      cmd: 'checkpoint-restore';
+      checkpointId: string;
+      scope: RestoreScope;
+      yes: boolean;
+      allowStagedChanges: boolean;
+      prompt?: undefined;
+    }
   | { cmd: 'compact-create'; summaryMarkdown: string; beforeCheckpointId?: string; prompt?: undefined }
   | { cmd: 'compact-list'; prompt?: undefined }
   | { cmd: 'handoff-create'; checkpointId?: string; prompt?: undefined }
@@ -195,6 +208,7 @@ function parseCheckpointRestoreArgs(args: string[], base: ParsedArgsBase): Parse
 
   let scope: RestoreScope = 'session';
   let yes = false;
+  let allowStagedChanges = false;
 
   for (let i = 3; i < args.length; i += 1) {
     const token = args[i];
@@ -222,6 +236,11 @@ function parseCheckpointRestoreArgs(args: string[], base: ParsedArgsBase): Parse
       continue;
     }
 
+    if (token === '--allow-staged') {
+      allowStagedChanges = true;
+      continue;
+    }
+
     throw new Error(`Unknown restore argument: ${token}`);
   }
 
@@ -230,7 +249,8 @@ function parseCheckpointRestoreArgs(args: string[], base: ParsedArgsBase): Parse
     cmd: 'checkpoint-restore',
     checkpointId,
     scope,
-    yes
+    yes,
+    allowStagedChanges
   };
 }
 
@@ -274,6 +294,7 @@ function parseCheckpointArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     const nameParts: string[] = [];
     let restoreFiles = false;
     let yes = false;
+    let allowStagedChanges = false;
 
     for (let i = 3; i < args.length; i += 1) {
       const token = args[i];
@@ -287,6 +308,11 @@ function parseCheckpointArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
         continue;
       }
 
+      if (token === '--allow-staged') {
+        allowStagedChanges = true;
+        continue;
+      }
+
       if (token.startsWith('--')) {
         throw new Error(`Unknown checkpoint fork argument: ${token}`);
       }
@@ -297,13 +323,18 @@ function parseCheckpointArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     if (yes && !restoreFiles) {
       throw new Error('checkpoint fork --yes requires --restore-files');
     }
+    if (allowStagedChanges && !restoreFiles) {
+      throw new Error('checkpoint fork --allow-staged requires --restore-files');
+    }
 
     const name = nameParts.join(' ').trim();
     return {
       ...base,
       cmd: 'checkpoint-fork',
       checkpointId,
-      ...(restoreFiles ? { restoreFiles: true as const, yes } : {}),
+      ...(restoreFiles
+        ? { restoreFiles: true as const, yes, ...(allowStagedChanges ? { allowStagedChanges } : {}) }
+        : {}),
       name: name || undefined
     };
   }
@@ -524,15 +555,16 @@ Usage:
   cliq checkpoint create [name]              Create a manual checkpoint
   cliq checkpoint list                       Print session checkpoints
   cliq checkpoint restore CHECKPOINT         Restore session history from a checkpoint
-  cliq checkpoint restore CHECKPOINT --scope session|files|both [--yes]
+  cliq checkpoint restore CHECKPOINT --scope session|files|both [--yes] [--allow-staged]
   cliq checkpoint fork CHECKPOINT [name]     Fork the active session from a checkpoint
-  cliq checkpoint fork CHECKPOINT [name] --restore-files --yes
+  cliq checkpoint fork CHECKPOINT [name] --restore-files --yes [--allow-staged]
   cliq checkpoint help                       Print this help
 
 Notes:
   restore --scope session                    Creates a new active session from the checkpoint prefix
   restore --scope files --yes                Restores workspace files without changing the Git index
   restore --scope both --yes                 Restores files and creates a new active session
+  --allow-staged                             Allows file restore when staged changes are present
 `);
 }
 
@@ -744,6 +776,43 @@ function createCliEventSink() {
   };
 }
 
+function workspaceSnapshotUnavailableMessage(checkpoint: CreatedSessionCheckpoint) {
+  const workspaceCheckpoint = checkpoint.workspaceCheckpoint;
+  if (workspaceCheckpoint.kind !== 'unavailable') {
+    return null;
+  }
+
+  return `workspace snapshot unavailable: ${workspaceCheckpoint.reason}${
+    workspaceCheckpoint.error ? ` (${workspaceCheckpoint.error})` : ''
+  }`;
+}
+
+function renderCreatedCheckpointMessage(checkpoint: CreatedSessionCheckpoint) {
+  const unavailable = workspaceSnapshotUnavailableMessage(checkpoint);
+  if (unavailable) {
+    process.stderr.write(`[checkpoint warning] ${unavailable}\n`);
+  }
+  return [
+    `created checkpoint ${checkpoint.id}${checkpoint.name ? ` (${checkpoint.name})` : ''}`,
+    unavailable ? ` (${unavailable})` : ''
+  ].join('');
+}
+
+function defaultCompactEndIndex(recordCount: number) {
+  if (recordCount < 2) {
+    throw new Error('compact requires at least two session records so one raw tail record can remain');
+  }
+  return recordCount - 1;
+}
+
+function compactEndIndexForSession(recordCount: number, checkpoint?: { id: string; recordIndex: number }) {
+  const endIndexExclusive = checkpoint?.recordIndex ?? defaultCompactEndIndex(recordCount);
+  if (checkpoint && (endIndexExclusive <= 0 || endIndexExclusive >= recordCount)) {
+    throw new Error(`checkpoint ${checkpoint.id} does not leave a compactable range`);
+  }
+  return endIndexExclusive;
+}
+
 export async function runCli(argv: string[]) {
   const parsed = parseArgs(argv);
   const { cmd, prompt, policy, skills, model: cliModel } = parsed;
@@ -768,7 +837,7 @@ export async function runCli(argv: string[]) {
   if (parsed.cmd === 'checkpoint-create') {
     const session = await ensureSession(cwd);
     const checkpoint = await createCheckpoint(cwd, session, { kind: 'manual', name: parsed.name });
-    console.log(`created checkpoint ${checkpoint.id}${checkpoint.name ? ` (${checkpoint.name})` : ''}`);
+    console.log(renderCreatedCheckpointMessage(checkpoint));
     return;
   }
 
@@ -787,7 +856,7 @@ export async function runCli(argv: string[]) {
       throw new Error(`checkpoint not found: ${parsed.beforeCheckpointId}`);
     }
     const artifact = await createCompaction(cwd, session, {
-      endIndexExclusive: checkpoint?.recordIndex ?? session.records.length - 1,
+      endIndexExclusive: compactEndIndexForSession(session.records.length, checkpoint),
       anchorCheckpointId: checkpoint?.id,
       summaryMarkdown: parsed.summaryMarkdown
     });
@@ -814,7 +883,9 @@ export async function runCli(argv: string[]) {
       if (!checkpoint.workspaceCheckpointId) {
         throw new Error(`checkpoint has no workspace snapshot: ${parsed.checkpointId}`);
       }
-      await restoreWorkspaceCheckpoint(cwd, checkpoint.workspaceCheckpointId, { allowStagedChanges: parsed.yes });
+      await restoreWorkspaceCheckpoint(cwd, checkpoint.workspaceCheckpointId, {
+        allowStagedChanges: parsed.allowStagedChanges
+      });
     }
 
     const child = await forkSessionFromCheckpoint(cwd, session, parsed.checkpointId, { name: parsed.name });
@@ -837,12 +908,17 @@ export async function runCli(argv: string[]) {
         throw new Error(`checkpoint has no workspace snapshot: ${parsed.checkpointId}`);
       }
       if (parsed.scope === 'both') {
+        await assertWorkspaceCheckpointRestorable(cwd, checkpoint.workspaceCheckpointId, {
+          allowStagedChanges: parsed.allowStagedChanges
+        });
         await createCheckpoint(cwd, session, {
           kind: 'restore-safety',
           name: `before restore ${parsed.checkpointId}`
         });
       }
-      await restoreWorkspaceCheckpoint(cwd, checkpoint.workspaceCheckpointId, { allowStagedChanges: parsed.yes });
+      await restoreWorkspaceCheckpoint(cwd, checkpoint.workspaceCheckpointId, {
+        allowStagedChanges: parsed.allowStagedChanges
+      });
     }
 
     if (parsed.scope === 'session' || parsed.scope === 'both') {
