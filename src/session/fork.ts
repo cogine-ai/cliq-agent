@@ -19,10 +19,11 @@ export async function forkSessionFromCheckpoint(
   checkpointId: string,
   options: ForkSessionOptions = {}
 ): Promise<Session> {
-  const checkpoint = parent.checkpoints.find((candidate) => candidate.id === checkpointId);
-  if (!checkpoint) {
+  const checkpointIndex = parent.checkpoints.findIndex((candidate) => candidate.id === checkpointId);
+  if (checkpointIndex === -1) {
     throw new Error(`checkpoint not found: ${checkpointId}`);
   }
+  const checkpoint = parent.checkpoints[checkpointIndex]!;
 
   if (checkpoint.recordIndex < 0 || checkpoint.recordIndex > parent.records.length) {
     throw new Error(`checkpoint has invalid record index: ${checkpoint.id}`);
@@ -36,9 +37,7 @@ export async function forkSessionFromCheckpoint(
   child.model = { ...parent.model };
   child.lifecycle.turn = checkpoint.turn;
   child.records = cloneRecords(parent.records.slice(0, checkpoint.recordIndex));
-  child.checkpoints = cloneCheckpoints(
-    parent.checkpoints.filter((candidate) => candidate.recordIndex <= checkpoint.recordIndex)
-  );
+  child.checkpoints = cloneCheckpoints(parent.checkpoints.slice(0, checkpointIndex + 1));
 
   await saveSession(cwd, child);
   return child;

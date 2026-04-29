@@ -452,17 +452,17 @@ Runner remains responsible for the turn loop, model call, protocol parsing, tool
 
 ## 12. Handoff
 
-Handoff exports current task state for another executor. It does not modify the session or workspace.
+Handoff exports current task state for another executor. `cliq handoff create` persists a `kind: "handoff"` checkpoint into session metadata when the user does not supply an existing checkpoint. This gives the artifact a stable session/workspace anchor. It does not modify user workspace files, but it can write global Cliq session metadata and a workspace checkpoint artifact.
 
 User commands:
 
 ```bash
-cliq handoff create
-cliq handoff create --checkpoint <checkpoint-id>
+cliq handoff create                         # creates and persists a handoff checkpoint first
+cliq handoff create --checkpoint <checkpoint-id>  # reuses an existing checkpoint
 cliq handoff help
 ```
 
-If no checkpoint is supplied, Cliq creates a handoff checkpoint first.
+If no checkpoint is supplied, Cliq creates and persists a handoff checkpoint before writing the handoff artifact. If `--checkpoint <checkpoint-id>` is supplied, Cliq reuses that checkpoint and does not create another one.
 
 Handoff summary source:
 
@@ -596,9 +596,9 @@ Source observations:
 
 ## 17. Deferred Decisions
 
-- Whether to migrate the default global directory from `~/.cliq` to an XDG/platform state path.
-- Whether to create protected refs such as `refs/cliq/checkpoints/*` for long-lived workspace snapshots.
-- Whether to add an explicit file restore mode that also restores staged/index state.
-- Whether to add `cliq compact create --from <checkpoint-id>` after a clearer lineage model exists.
-- Whether to support worktree-backed forks.
-- Whether to expose compact/handoff hooks in Phase 4+ headless/RPC surfaces.
+- Decide if the default global directory should migrate from `~/.cliq` to an XDG/platform state path.
+- Consider protected refs such as `refs/cliq/checkpoints/*` for long-lived workspace snapshots.
+- Add an explicit file restore mode that also restores staged/index state only if a real user workflow requires it.
+- Introduce `cliq compact create --from <checkpoint-id>` after the lineage model is clearer.
+- Evaluate worktree-backed forks after session-only forks prove useful.
+- Expose compact/handoff hooks in Phase 4+ headless/RPC surfaces when plugin use cases are concrete.

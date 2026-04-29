@@ -71,7 +71,7 @@ test('ensureSession creates the persisted file in CLIQ_HOME when missing', async
     assert.deepEqual(session.records, []);
     assert.deepEqual(raw.records, []);
     assert.equal(workspaceState.activeSessionId, session.id);
-    await assert.rejects(() => access(sessionPath(cwd)));
+    await assert.rejects(() => access(sessionPath(cwd)), { code: 'ENOENT' });
   } finally {
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
@@ -101,6 +101,63 @@ test('ensureFresh creates a new active global session without deleting legacy wo
     assert.equal(workspaceState.activeSessionId, fresh.id);
     assert.deepEqual(fresh.records, []);
     assert.equal(JSON.parse(await readFile(path.join(cwd, '.cliq', 'session.json'), 'utf8')).records.length, 0);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession recovers from malformed workspace state JSON', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-malformed-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const statePath = await workspaceStatePath(cwd);
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(statePath, JSON.stringify({ recentSessions: 'not-an-array' }), 'utf8');
+
+    const session = await ensureSession(cwd);
+    const workspaceState = JSON.parse(await readFile(statePath, 'utf8')) as {
+      activeSessionId?: string;
+      recentSessions?: unknown[];
+    };
+
+    assert.equal(workspaceState.activeSessionId, session.id);
+    assert.equal(Array.isArray(workspaceState.recentSessions), true);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession recovers from malformed workspace index JSON', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-index-malformed-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    await writeFile(path.join(home, 'workspace-index.json'), JSON.stringify({ workspaces: [] }), 'utf8');
+
+    const session = await ensureSession(cwd);
+    const index = JSON.parse(await readFile(path.join(home, 'workspace-index.json'), 'utf8')) as {
+      workspaces?: Record<string, { activeSessionId?: string }>;
+    };
+    const activeSessionIds = Object.values(index.workspaces ?? {}).map((entry) => entry.activeSessionId);
+
+    assert.ok(activeSessionIds.includes(session.id));
   } finally {
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
@@ -235,7 +292,7 @@ test('ensureSession rejects malformed sessions and recreates a valid session', a
   assert.deepEqual(session.records, []);
 });
 
-test('ensureSession keeps explicit system records for current-version sessions', async () => {
+test('ensureSession keeps explicit system records for version 4 sessions', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-current-system-'));
   try {
     await mkdir(path.join(cwd, '.cliq'), { recursive: true });

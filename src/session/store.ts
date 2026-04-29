@@ -69,6 +69,12 @@ type WorkspaceIdentity = {
   gitRootRealPath?: string;
 };
 
+type WorkspaceIndexEntry = WorkspaceIndex['workspaces'][string];
+type SessionMutator<T> = (session: Session) => T | Promise<T>;
+
+const LOCK_TIMEOUT_MS = 5000;
+const LOCK_RETRY_MS = 25;
+
 function isSessionRecord(value: unknown): value is SessionRecord {
   if (!value || typeof value !== 'object') {
     return false;
@@ -248,6 +254,56 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function withPathLock<T>(target: string, callback: () => Promise<T>): Promise<T> {
+  const lockPath = `${target}.lock`;
+  const startedAt = Date.now();
+  await fs.mkdir(path.dirname(lockPath), { recursive: true });
+
+  while (true) {
+    try {
+      await fs.mkdir(lockPath);
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') {
+        throw error;
+      }
+      if (Date.now() - startedAt > LOCK_TIMEOUT_MS) {
+        throw new Error(`timed out waiting for session store lock: ${lockPath}`);
+      }
+      await sleep(LOCK_RETRY_MS);
+    }
+  }
+
+  try {
+    return await callback();
+  } finally {
+    await fs.rm(lockPath, { recursive: true, force: true });
+  }
+}
+
+async function atomicWriteFile(target: string, content: string) {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const temp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  try {
+    await fs.writeFile(temp, content);
+    await fs.rename(temp, target);
+  } catch (error) {
+    await fs.rm(temp, { force: true });
+    throw error;
+  }
+}
+
+async function atomicWriteJson(target: string, value: unknown) {
+  await atomicWriteFile(target, JSON.stringify(value, null, 2));
+}
+
 export function createSession(cwd: string): Session {
   const now = nowIso();
   return {
@@ -341,6 +397,119 @@ function normalizeSession(session: Session): Session {
   };
 }
 
+function isWorkspaceSessionRef(value: unknown): value is WorkspaceSessionRef {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const ref = value as WorkspaceSessionRef;
+  return (
+    typeof ref.id === 'string' &&
+    typeof ref.path === 'string' &&
+    typeof ref.createdAt === 'string' &&
+    typeof ref.updatedAt === 'string'
+  );
+}
+
+function isWorkspaceIndexEntry(value: unknown): value is WorkspaceIndexEntry {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const entry = value as WorkspaceIndexEntry;
+  return (
+    typeof entry.workspaceId === 'string' &&
+    typeof entry.workspaceRealPath === 'string' &&
+    (entry.gitRootRealPath === undefined || typeof entry.gitRootRealPath === 'string') &&
+    (entry.activeSessionId === undefined || typeof entry.activeSessionId === 'string') &&
+    (entry.activeSessionPath === undefined || typeof entry.activeSessionPath === 'string') &&
+    typeof entry.lastSeenAt === 'string'
+  );
+}
+
+function normalizeWorkspaceState(value: unknown, identity: WorkspaceIdentity): WorkspaceState {
+  const fallback = emptyWorkspaceState(identity);
+  if (!value || typeof value !== 'object') {
+    return fallback;
+  }
+
+  const state = value as Partial<WorkspaceState>;
+  if (
+    state.version !== GLOBAL_STATE_VERSION ||
+    state.workspaceId !== identity.workspaceId ||
+    state.workspaceRealPath !== identity.workspaceRealPath
+  ) {
+    return fallback;
+  }
+
+  const recentSessions = Array.isArray(state.recentSessions)
+    ? state.recentSessions.filter((entry) => isWorkspaceSessionRef(entry))
+    : [];
+  const migratedFrom =
+    state.migratedFrom &&
+    typeof state.migratedFrom === 'object' &&
+    typeof state.migratedFrom.path === 'string' &&
+    typeof state.migratedFrom.migratedAt === 'string'
+      ? state.migratedFrom
+      : undefined;
+
+  return {
+    version: GLOBAL_STATE_VERSION,
+    workspaceId: identity.workspaceId,
+    workspaceRealPath: identity.workspaceRealPath,
+    gitRootRealPath: identity.gitRootRealPath,
+    activeSessionId: typeof state.activeSessionId === 'string' ? state.activeSessionId : undefined,
+    activeSessionPath: typeof state.activeSessionPath === 'string' ? state.activeSessionPath : undefined,
+    recentSessions,
+    migratedFrom,
+    lastSeenAt: typeof state.lastSeenAt === 'string' ? state.lastSeenAt : nowIso()
+  };
+}
+
+function normalizeWorkspaceIndex(value: unknown): WorkspaceIndex {
+  if (!value || typeof value !== 'object') {
+    return emptyWorkspaceIndex();
+  }
+
+  const rawWorkspaces = (value as { workspaces?: unknown }).workspaces;
+  if (!rawWorkspaces || typeof rawWorkspaces !== 'object' || Array.isArray(rawWorkspaces)) {
+    return emptyWorkspaceIndex();
+  }
+
+  const workspaces: WorkspaceIndex['workspaces'] = {};
+  for (const [workspaceId, entry] of Object.entries(rawWorkspaces)) {
+    if (isWorkspaceIndexEntry(entry) && entry.workspaceId === workspaceId) {
+      workspaces[workspaceId] = entry;
+    }
+  }
+
+  return {
+    version: GLOBAL_STATE_VERSION,
+    workspaces
+  };
+}
+
+async function readSessionForMutation(target: string, fallback: Session) {
+  const raw = await readJson<unknown>(target);
+  if (!isSession(raw)) {
+    return fallback;
+  }
+
+  const normalized = normalizeSession(raw);
+  return normalized.id === fallback.id ? normalized : fallback;
+}
+
+function replaceSessionContents(target: Session, source: Session) {
+  if (target === source) {
+    return;
+  }
+  const mutableTarget = target as unknown as Record<string, unknown>;
+  for (const key of Object.keys(mutableTarget)) {
+    delete mutableTarget[key];
+  }
+  Object.assign(target, source);
+}
+
 function migrateLegacySession(cwd: string, legacy: LegacySession): Session {
   const session = createSession(cwd);
   session.createdAt = legacy.createdAt ?? session.createdAt;
@@ -383,11 +552,30 @@ export async function saveSession(cwd: string, session: Session) {
   if (!session.id) {
     session.id = makeId('sess');
   }
-  session.updatedAt = nowIso();
   const target = sessionFilePath(session);
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, JSON.stringify(session, null, 2));
+  await withPathLock(target, async () => {
+    await saveSessionUnlocked(cwd, session, target);
+  });
+}
+
+async function saveSessionUnlocked(cwd: string, session: Session, target = sessionFilePath(session)) {
+  session.updatedAt = nowIso();
+  await atomicWriteJson(target, session);
   await recordWorkspaceSession(cwd, session, target);
+}
+
+export async function mutateSession<T>(cwd: string, session: Session, mutator: SessionMutator<T>): Promise<T> {
+  if (!session.id) {
+    session.id = makeId('sess');
+  }
+  const target = sessionFilePath(session);
+  return await withPathLock(target, async () => {
+    const current = await readSessionForMutation(target, session);
+    const result = await mutator(current);
+    await saveSessionUnlocked(cwd, current, target);
+    replaceSessionContents(session, current);
+    return result;
+  });
 }
 
 export async function appendRecord(cwd: string, session: Session, record: SessionRecord) {
@@ -450,8 +638,9 @@ function emptyWorkspaceState(identity: WorkspaceIdentity): WorkspaceState {
 }
 
 async function loadWorkspaceState(cwd: string) {
+  const identity = await resolveWorkspaceIdentity(cwd);
   const target = await workspaceStatePath(cwd);
-  return await readJson<WorkspaceState>(target);
+  return normalizeWorkspaceState(await readJson<unknown>(target), identity);
 }
 
 async function loadSessionFromPath(target: string): Promise<Session | null> {
@@ -473,8 +662,7 @@ async function saveSessionWithMigration(cwd: string, session: Session, migratedF
   }
   session.updatedAt = nowIso();
   const target = sessionFilePath(session);
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, JSON.stringify(session, null, 2));
+  await atomicWriteJson(target, session);
   await recordWorkspaceSession(cwd, session, target, {
     path: migratedFromPath,
     migratedAt: nowIso()
@@ -494,44 +682,47 @@ async function recordWorkspaceSession(
   const statePath = path.join(workspaceDir, 'state.json');
   const indexPath = path.join(cliqHome, 'workspace-index.json');
   const globalStatePath = path.join(cliqHome, 'state.json');
-  const existingState = (await readJson<WorkspaceState>(statePath)) ?? emptyWorkspaceState(identity);
-  const recentSession: WorkspaceSessionRef = {
-    id: session.id,
-    path: sessionFile,
-    createdAt: session.createdAt,
-    updatedAt: session.updatedAt
-  };
-  const recentSessions = [
-    recentSession,
-    ...existingState.recentSessions.filter((entry) => entry.id !== session.id)
-  ].slice(0, 50);
-  const nextState: WorkspaceState = {
-    ...existingState,
-    version: GLOBAL_STATE_VERSION,
-    workspaceId: identity.workspaceId,
-    workspaceRealPath: identity.workspaceRealPath,
-    gitRootRealPath: identity.gitRootRealPath,
-    activeSessionId: session.id,
-    activeSessionPath: sessionFile,
-    recentSessions,
-    migratedFrom: migratedFrom ?? existingState.migratedFrom,
-    lastSeenAt: now
-  };
+  const lockPath = path.join(cliqHome, 'workspace-state');
 
-  await fs.mkdir(workspaceDir, { recursive: true });
-  await fs.mkdir(path.dirname(indexPath), { recursive: true });
-  await fs.writeFile(statePath, JSON.stringify(nextState, null, 2));
+  await withPathLock(lockPath, async () => {
+    const existingState = normalizeWorkspaceState(await readJson<unknown>(statePath), identity);
+    const recentSession: WorkspaceSessionRef = {
+      id: session.id,
+      path: sessionFile,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt
+    };
+    const recentSessions = [
+      recentSession,
+      ...existingState.recentSessions.filter((entry) => entry.id !== session.id)
+    ].slice(0, 50);
+    const nextState: WorkspaceState = {
+      ...existingState,
+      version: GLOBAL_STATE_VERSION,
+      workspaceId: identity.workspaceId,
+      workspaceRealPath: identity.workspaceRealPath,
+      gitRootRealPath: identity.gitRootRealPath,
+      activeSessionId: session.id,
+      activeSessionPath: sessionFile,
+      recentSessions,
+      migratedFrom: migratedFrom ?? existingState.migratedFrom,
+      lastSeenAt: now
+    };
 
-  const index = (await readJson<WorkspaceIndex>(indexPath)) ?? emptyWorkspaceIndex();
-  index.version = GLOBAL_STATE_VERSION;
-  index.workspaces[identity.workspaceId] = {
-    workspaceId: identity.workspaceId,
-    workspaceRealPath: identity.workspaceRealPath,
-    gitRootRealPath: identity.gitRootRealPath,
-    activeSessionId: session.id,
-    activeSessionPath: sessionFile,
-    lastSeenAt: now
-  };
-  await fs.writeFile(indexPath, JSON.stringify(index, null, 2));
-  await fs.writeFile(globalStatePath, JSON.stringify({ version: GLOBAL_STATE_VERSION, updatedAt: now }, null, 2));
+    const index = normalizeWorkspaceIndex(await readJson<unknown>(indexPath));
+    index.workspaces[identity.workspaceId] = {
+      workspaceId: identity.workspaceId,
+      workspaceRealPath: identity.workspaceRealPath,
+      gitRootRealPath: identity.gitRootRealPath,
+      activeSessionId: session.id,
+      activeSessionPath: sessionFile,
+      lastSeenAt: now
+    };
+
+    await fs.mkdir(workspaceDir, { recursive: true });
+    await fs.mkdir(path.dirname(indexPath), { recursive: true });
+    await atomicWriteJson(statePath, nextState);
+    await atomicWriteJson(indexPath, index);
+    await atomicWriteJson(globalStatePath, { version: GLOBAL_STATE_VERSION, updatedAt: now });
+  });
 }

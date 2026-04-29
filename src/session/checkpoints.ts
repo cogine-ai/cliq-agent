@@ -9,6 +9,8 @@ import type { Session, SessionCheckpoint, WorkspaceCheckpoint } from './types.js
 
 const execFileAsync = promisify(execFile);
 const GHOST_COMMIT_MESSAGE = 'cliq checkpoint snapshot';
+const SAFE_WORKSPACE_CHECKPOINT_ID = /^[A-Za-z0-9_-]+$/;
+const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/i;
 
 export type CreateCheckpointOptions = {
   kind?: SessionCheckpoint['kind'];
@@ -20,6 +22,9 @@ export type RestoreWorkspaceCheckpointOptions = {
 };
 
 export function workspaceCheckpointFilePath(workspaceCheckpointId: string, cliqHome = resolveCliqHome()) {
+  if (!SAFE_WORKSPACE_CHECKPOINT_ID.test(workspaceCheckpointId)) {
+    throw new Error(`invalid workspace checkpoint id: ${workspaceCheckpointId}`);
+  }
   return path.join(cliqHome, 'checkpoints', `${workspaceCheckpointId}.json`);
 }
 
@@ -190,7 +195,117 @@ export async function createCheckpoint(
 
 async function readWorkspaceCheckpoint(workspaceCheckpointId: string): Promise<WorkspaceCheckpoint> {
   const target = workspaceCheckpointFilePath(workspaceCheckpointId);
-  return JSON.parse(await fs.readFile(target, 'utf8')) as WorkspaceCheckpoint;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await fs.readFile(target, 'utf8')) as unknown;
+  } catch (error) {
+    throw new Error(
+      `invalid workspace checkpoint ${workspaceCheckpointId}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+  return validateWorkspaceCheckpoint(raw, workspaceCheckpointId);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function isSafeAbsolutePath(value: string) {
+  return path.isAbsolute(value) && path.resolve(value) === value && !value.includes('\0');
+}
+
+function isSubPathOrSame(parent: string, child: string) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function isSafeRepoRelativePath(value: string, allowDot = false) {
+  if (value.includes('\0') || path.posix.isAbsolute(value)) {
+    return false;
+  }
+
+  if (value === '.') {
+    return allowDot;
+  }
+
+  if (!value || value.startsWith('../') || value === '..') {
+    return false;
+  }
+
+  return !value.split('/').includes('..');
+}
+
+function invalidWorkspaceCheckpoint(id: string, reason: string): never {
+  throw new Error(`invalid workspace checkpoint ${id}: ${reason}`);
+}
+
+function validateWorkspaceCheckpoint(raw: unknown, expectedId: string): WorkspaceCheckpoint {
+  if (!raw || typeof raw !== 'object') {
+    invalidWorkspaceCheckpoint(expectedId, 'expected object');
+  }
+
+  const checkpoint = raw as Record<string, unknown>;
+  if (checkpoint.id !== expectedId) {
+    invalidWorkspaceCheckpoint(expectedId, 'id mismatch');
+  }
+  if (typeof checkpoint.createdAt !== 'string') {
+    invalidWorkspaceCheckpoint(expectedId, 'createdAt must be a string');
+  }
+  if (typeof checkpoint.workspaceRealPath !== 'string' || !isSafeAbsolutePath(checkpoint.workspaceRealPath)) {
+    invalidWorkspaceCheckpoint(expectedId, 'workspaceRealPath must be a normalized absolute path');
+  }
+
+  if (checkpoint.kind === 'unavailable') {
+    if (checkpoint.status !== 'unavailable') {
+      invalidWorkspaceCheckpoint(expectedId, 'unavailable checkpoint status must be unavailable');
+    }
+    if (checkpoint.reason !== 'not-git' && checkpoint.reason !== 'snapshot-failed') {
+      invalidWorkspaceCheckpoint(expectedId, 'unavailable checkpoint reason is invalid');
+    }
+    if (checkpoint.error !== undefined && typeof checkpoint.error !== 'string') {
+      invalidWorkspaceCheckpoint(expectedId, 'unavailable checkpoint error must be a string');
+    }
+    return checkpoint as WorkspaceCheckpoint;
+  }
+
+  if (checkpoint.kind !== 'git-ghost') {
+    invalidWorkspaceCheckpoint(expectedId, 'kind is invalid');
+  }
+  if (checkpoint.status !== 'available' && checkpoint.status !== 'expired') {
+    invalidWorkspaceCheckpoint(expectedId, 'git checkpoint status is invalid');
+  }
+  if (typeof checkpoint.gitRootRealPath !== 'string' || !isSafeAbsolutePath(checkpoint.gitRootRealPath)) {
+    invalidWorkspaceCheckpoint(expectedId, 'gitRootRealPath must be a normalized absolute path');
+  }
+  if (!isSubPathOrSame(checkpoint.gitRootRealPath, checkpoint.workspaceRealPath)) {
+    invalidWorkspaceCheckpoint(expectedId, 'workspaceRealPath must stay inside gitRootRealPath');
+  }
+  if (typeof checkpoint.repoRelativeScope !== 'string' || !isSafeRepoRelativePath(checkpoint.repoRelativeScope, true)) {
+    invalidWorkspaceCheckpoint(expectedId, 'repoRelativeScope must be a safe repository-relative path');
+  }
+  if (typeof checkpoint.commitId !== 'string' || !GIT_OBJECT_ID.test(checkpoint.commitId)) {
+    invalidWorkspaceCheckpoint(expectedId, 'commitId is invalid');
+  }
+  if (checkpoint.parentCommitId !== undefined) {
+    if (typeof checkpoint.parentCommitId !== 'string' || !GIT_OBJECT_ID.test(checkpoint.parentCommitId)) {
+      invalidWorkspaceCheckpoint(expectedId, 'parentCommitId is invalid');
+    }
+  }
+  if (!isStringArray(checkpoint.preexistingUntrackedFiles)) {
+    invalidWorkspaceCheckpoint(expectedId, 'preexistingUntrackedFiles must be an array of strings');
+  }
+  for (const file of checkpoint.preexistingUntrackedFiles) {
+    if (!isSafeRepoRelativePath(file)) {
+      invalidWorkspaceCheckpoint(expectedId, `unsafe preexisting untracked file path: ${file}`);
+    }
+  }
+  if (!isStringArray(checkpoint.warnings)) {
+    invalidWorkspaceCheckpoint(expectedId, 'warnings must be an array of strings');
+  }
+
+  return checkpoint as WorkspaceCheckpoint;
 }
 
 async function listUntrackedFiles(gitRootRealPath: string, repoRelativeScope: string) {

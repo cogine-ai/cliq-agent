@@ -1,4 +1,4 @@
-import { makeId, nowIso, saveSession } from './store.js';
+import { makeId, mutateSession, nowIso } from './store.js';
 import type { CompactionArtifact, Session } from './types.js';
 
 export type CreateCompactionOptions = {
@@ -34,34 +34,36 @@ export async function createCompaction(
   session: Session,
   options: CreateCompactionOptions
 ): Promise<CompactionArtifact> {
-  validateCompactionRange(session, options.endIndexExclusive);
   const summaryMarkdown = options.summaryMarkdown.trim();
   if (!summaryMarkdown) {
     throw new Error('compact summary cannot be empty');
   }
 
-  const artifact: CompactionArtifact = {
-    id: makeId('cmp'),
-    status: 'active',
-    createdAt: nowIso(),
-    coveredRange: {
-      startIndexInclusive: 0,
-      endIndexExclusive: options.endIndexExclusive
-    },
-    firstKeptRecordId: session.records[options.endIndexExclusive]!.id,
-    anchorCheckpointId: options.anchorCheckpointId,
-    createdBy: options.createdBy ?? {
-      provider: session.model.provider,
-      model: session.model.model
-    },
-    summaryMarkdown,
-    details: options.details
-  };
+  return await mutateSession(cwd, session, (current) => {
+    validateCompactionRange(current, options.endIndexExclusive);
 
-  for (const active of activeCompactions(session)) {
-    active.status = 'superseded';
-  }
-  session.compactions.push(artifact);
-  await saveSession(cwd, session);
-  return artifact;
+    const artifact: CompactionArtifact = {
+      id: makeId('cmp'),
+      status: 'active',
+      createdAt: nowIso(),
+      coveredRange: {
+        startIndexInclusive: 0,
+        endIndexExclusive: options.endIndexExclusive
+      },
+      firstKeptRecordId: current.records[options.endIndexExclusive]!.id,
+      anchorCheckpointId: options.anchorCheckpointId,
+      createdBy: options.createdBy ?? {
+        provider: current.model.provider,
+        model: current.model.model
+      },
+      summaryMarkdown,
+      details: options.details
+    };
+
+    for (const active of activeCompactions(current)) {
+      active.status = 'superseded';
+    }
+    current.compactions.push(artifact);
+    return artifact;
+  });
 }

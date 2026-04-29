@@ -74,6 +74,43 @@ test('forkSessionFromCheckpoint creates a child session from the checkpoint pref
   }
 });
 
+test('forkSessionFromCheckpoint keeps checkpoints only through the exact fork point', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-fork-same-index-'));
+  try {
+    const parent = createSession(cwd);
+    parent.records.push({
+      id: 'usr_1',
+      ts: '2026-04-29T00:00:00.000Z',
+      kind: 'user',
+      role: 'user',
+      content: 'same boundary'
+    });
+    parent.checkpoints.push(
+      {
+        id: 'chk_target',
+        kind: 'manual',
+        createdAt: '2026-04-29T00:00:01.000Z',
+        recordIndex: 1,
+        turn: 1
+      },
+      {
+        id: 'chk_later_same_boundary',
+        kind: 'manual',
+        createdAt: '2026-04-29T00:00:02.000Z',
+        recordIndex: 1,
+        turn: 1
+      }
+    );
+    await saveSession(cwd, parent);
+
+    const child = await forkSessionFromCheckpoint(cwd, parent, 'chk_target');
+
+    assert.deepEqual(child.checkpoints.map((checkpoint) => checkpoint.id), ['chk_target']);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('forkSessionFromCheckpoint rejects unknown checkpoints without changing the active session', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-fork-missing-'));
   try {

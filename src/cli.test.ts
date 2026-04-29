@@ -462,22 +462,34 @@ test('renderUnhandledError suppresses errors already reported by runtime events'
   assert.equal(renderUnhandledError(new ReportedCliError(new Error('reported failure'))), null);
 });
 
-test('runCli reset creates a global active session without referencing workspace .cliq', async () => {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-reset-'));
+type CliTestEnv = {
+  cwd: string;
+  home: string;
+  output: string[];
+  outputText: () => string;
+};
+
+async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Promise<void>) {
+  const cwd = await mkdtemp(path.join(tmpdir(), `cliq-cli-${prefix}-`));
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
   const previousLog = console.log;
-  let output = '';
+  const output: string[] = [];
 
   process.chdir(cwd);
   console.log = (value?: unknown) => {
-    output += String(value);
+    output.push(String(value));
   };
 
   try {
     process.env.CLIQ_HOME = home;
-    await runCli(['node', 'src/index.ts', 'reset']);
+    await callback({
+      cwd,
+      home,
+      output,
+      outputText: () => (output.length > 0 ? `${output.join('\n')}\n` : '')
+    });
   } finally {
     console.log = previousLog;
     if (previousHome === undefined) {
@@ -489,61 +501,31 @@ test('runCli reset creates a global active session without referencing workspace
     await rm(cwd, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
   }
+}
 
-  assert.match(output, /reset active session/i);
-  assert.doesNotMatch(output, /\.cliq/);
+test('runCli reset creates a global active session without referencing workspace .cliq', async () => {
+  await withCliTestEnv('reset', async ({ outputText }) => {
+    await runCli(['node', 'src/index.ts', 'reset']);
+
+    assert.match(outputText(), /reset active session/i);
+    assert.doesNotMatch(outputText(), /\.cliq/);
+  });
 });
 
 test('runCli history prints the active global session for the current workspace', async () => {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-history-'));
-  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
-  const previousCwd = process.cwd();
-  const previousHome = process.env.CLIQ_HOME;
-  const previousLog = console.log;
-  let output = '';
-
-  process.chdir(cwd);
-  const runtimeCwd = process.cwd();
-  console.log = (value?: unknown) => {
-    output += String(value);
-  };
-
-  try {
-    process.env.CLIQ_HOME = home;
+  await withCliTestEnv('history', async ({ outputText }) => {
+    const runtimeCwd = process.cwd();
     await runCli(['node', 'src/index.ts', 'history']);
-  } finally {
-    console.log = previousLog;
-    if (previousHome === undefined) {
-      delete process.env.CLIQ_HOME;
-    } else {
-      process.env.CLIQ_HOME = previousHome;
-    }
-    process.chdir(previousCwd);
-    await rm(cwd, { recursive: true, force: true });
-    await rm(home, { recursive: true, force: true });
-  }
 
-  const session = JSON.parse(output) as { id: string; cwd: string; records: unknown[] };
-  assert.equal(session.id.startsWith('sess_'), true);
-  assert.equal(session.cwd, runtimeCwd);
-  assert.deepEqual(session.records, []);
+    const session = JSON.parse(outputText()) as { id: string; cwd: string; records: unknown[] };
+    assert.equal(session.id.startsWith('sess_'), true);
+    assert.equal(session.cwd, runtimeCwd);
+    assert.deepEqual(session.records, []);
+  });
 });
 
 test('runCli fork switches the active global session to a checkpoint prefix', async () => {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-fork-'));
-  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
-  const previousCwd = process.cwd();
-  const previousHome = process.env.CLIQ_HOME;
-  const previousLog = console.log;
-  let output = '';
-
-  process.chdir(cwd);
-  console.log = (value?: unknown) => {
-    output += String(value);
-  };
-
-  try {
-    process.env.CLIQ_HOME = home;
+  await withCliTestEnv('fork', async ({ cwd, outputText }) => {
     const session = createSession(cwd);
     session.records.push(
       {
@@ -577,37 +559,14 @@ test('runCli fork switches the active global session to a checkpoint prefix', as
     assert.equal(active.parentSessionId, session.id);
     assert.equal(active.forkedFromCheckpointId, 'chk_cli');
     assert.deepEqual(active.records.map((record) => record.id), ['usr_1']);
-  } finally {
-    console.log = previousLog;
-    if (previousHome === undefined) {
-      delete process.env.CLIQ_HOME;
-    } else {
-      process.env.CLIQ_HOME = previousHome;
-    }
-    process.chdir(previousCwd);
-    await rm(cwd, { recursive: true, force: true });
-    await rm(home, { recursive: true, force: true });
-  }
 
-  assert.match(output, /forked session/i);
-  assert.match(output, /chk_cli/);
+    assert.match(outputText(), /forked session/i);
+    assert.match(outputText(), /chk_cli/);
+  });
 });
 
 test('runCli checkpoint create and list operate on the active global session without model setup', async () => {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-checkpoint-'));
-  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
-  const previousCwd = process.cwd();
-  const previousHome = process.env.CLIQ_HOME;
-  const previousLog = console.log;
-  let output = '';
-
-  process.chdir(cwd);
-  console.log = (value?: unknown) => {
-    output += `${String(value)}\n`;
-  };
-
-  try {
-    process.env.CLIQ_HOME = home;
+  await withCliTestEnv('checkpoint', async ({ cwd, outputText }) => {
     const session = createSession(cwd);
     session.records.push({
       id: 'usr_1',
@@ -624,36 +583,13 @@ test('runCli checkpoint create and list operate on the active global session wit
 
     assert.equal(checkpointed.checkpoints.length, 1);
     assert.equal(checkpointed.checkpoints[0]?.name, 'before edit');
-    assert.match(output, /created checkpoint/);
-    assert.match(output, /before edit/);
-  } finally {
-    console.log = previousLog;
-    if (previousHome === undefined) {
-      delete process.env.CLIQ_HOME;
-    } else {
-      process.env.CLIQ_HOME = previousHome;
-    }
-    process.chdir(previousCwd);
-    await rm(cwd, { recursive: true, force: true });
-    await rm(home, { recursive: true, force: true });
-  }
+    assert.match(outputText(), /created checkpoint/);
+    assert.match(outputText(), /before edit/);
+  });
 });
 
 test('runCli compact create and list operate on stored session records', async () => {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-compact-'));
-  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
-  const previousCwd = process.cwd();
-  const previousHome = process.env.CLIQ_HOME;
-  const previousLog = console.log;
-  let output = '';
-
-  process.chdir(cwd);
-  console.log = (value?: unknown) => {
-    output += `${String(value)}\n`;
-  };
-
-  try {
-    process.env.CLIQ_HOME = home;
+  await withCliTestEnv('compact', async ({ cwd, outputText }) => {
     const session = createSession(cwd);
     session.records.push(
       {
@@ -687,36 +623,13 @@ test('runCli compact create and list operate on stored session records', async (
     assert.equal(compacted.compactions.length, 1);
     assert.equal(compacted.compactions[0]?.status, 'active');
     assert.equal(compacted.compactions[0]?.firstKeptRecordId, 'usr_3');
-    assert.match(output, /created compaction/);
-    assert.match(output, /Keep first two summarized/);
-  } finally {
-    console.log = previousLog;
-    if (previousHome === undefined) {
-      delete process.env.CLIQ_HOME;
-    } else {
-      process.env.CLIQ_HOME = previousHome;
-    }
-    process.chdir(previousCwd);
-    await rm(cwd, { recursive: true, force: true });
-    await rm(home, { recursive: true, force: true });
-  }
+    assert.match(outputText(), /created compaction/);
+    assert.match(outputText(), /Keep first two summarized/);
+  });
 });
 
 test('runCli handoff exports an artifact and creates a handoff checkpoint when needed', async () => {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-handoff-'));
-  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
-  const previousCwd = process.cwd();
-  const previousHome = process.env.CLIQ_HOME;
-  const previousLog = console.log;
-  let output = '';
-
-  process.chdir(cwd);
-  console.log = (value?: unknown) => {
-    output += `${String(value)}\n`;
-  };
-
-  try {
-    process.env.CLIQ_HOME = home;
+  await withCliTestEnv('handoff', async ({ cwd, outputText }) => {
     const session = createSession(cwd);
     session.records.push({
       id: 'usr_1',
@@ -731,36 +644,13 @@ test('runCli handoff exports an artifact and creates a handoff checkpoint when n
     const handedOff = await ensureSession(cwd);
 
     assert.equal(handedOff.checkpoints.at(-1)?.kind, 'handoff');
-    assert.match(output, /created handoff/);
-    assert.match(output, /HANDOFF\.md/);
-  } finally {
-    console.log = previousLog;
-    if (previousHome === undefined) {
-      delete process.env.CLIQ_HOME;
-    } else {
-      process.env.CLIQ_HOME = previousHome;
-    }
-    process.chdir(previousCwd);
-    await rm(cwd, { recursive: true, force: true });
-    await rm(home, { recursive: true, force: true });
-  }
+    assert.match(outputText(), /created handoff/);
+    assert.match(outputText(), /HANDOFF\.md/);
+  });
 });
 
 test('runCli restore --scope session switches the active session to a checkpoint prefix', async () => {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-restore-session-'));
-  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
-  const previousCwd = process.cwd();
-  const previousHome = process.env.CLIQ_HOME;
-  const previousLog = console.log;
-  let output = '';
-
-  process.chdir(cwd);
-  console.log = (value?: unknown) => {
-    output += `${String(value)}\n`;
-  };
-
-  try {
-    process.env.CLIQ_HOME = home;
+  await withCliTestEnv('restore-session', async ({ cwd, outputText }) => {
     const session = createSession(cwd);
     session.records.push(
       {
@@ -793,32 +683,14 @@ test('runCli restore --scope session switches the active session to a checkpoint
     assert.notEqual(restored.id, session.id);
     assert.equal(restored.forkedFromCheckpointId, 'chk_restore');
     assert.deepEqual(restored.records.map((record) => record.id), ['usr_1']);
-  } finally {
-    console.log = previousLog;
-    if (previousHome === undefined) {
-      delete process.env.CLIQ_HOME;
-    } else {
-      process.env.CLIQ_HOME = previousHome;
-    }
-    process.chdir(previousCwd);
-    await rm(cwd, { recursive: true, force: true });
-    await rm(home, { recursive: true, force: true });
-  }
 
-  assert.match(output, /restored session/i);
-  assert.match(output, /chk_restore/);
+    assert.match(outputText(), /restored session/i);
+    assert.match(outputText(), /chk_restore/);
+  });
 });
 
 test('runCli restore --scope files requires --yes before changing files', async () => {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-restore-files-'));
-  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
-  const previousCwd = process.cwd();
-  const previousHome = process.env.CLIQ_HOME;
-
-  process.chdir(cwd);
-
-  try {
-    process.env.CLIQ_HOME = home;
+  await withCliTestEnv('restore-files', async ({ cwd }) => {
     const session = createSession(cwd);
     session.checkpoints.push({
       id: 'chk_files',
@@ -834,28 +706,11 @@ test('runCli restore --scope files requires --yes before changing files', async 
       () => runCli(['node', 'src/index.ts', 'checkpoint', 'restore', 'chk_files', '--scope', 'files']),
       /requires --yes/i
     );
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.CLIQ_HOME;
-    } else {
-      process.env.CLIQ_HOME = previousHome;
-    }
-    process.chdir(previousCwd);
-    await rm(cwd, { recursive: true, force: true });
-    await rm(home, { recursive: true, force: true });
-  }
+  });
 });
 
 test('runCli checkpoint fork --restore-files requires --yes before changing files', async () => {
-  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-cli-fork-files-'));
-  const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
-  const previousCwd = process.cwd();
-  const previousHome = process.env.CLIQ_HOME;
-
-  process.chdir(cwd);
-
-  try {
-    process.env.CLIQ_HOME = home;
+  await withCliTestEnv('fork-files', async ({ cwd }) => {
     const session = createSession(cwd);
     session.checkpoints.push({
       id: 'chk_files',
@@ -871,14 +726,5 @@ test('runCli checkpoint fork --restore-files requires --yes before changing file
       () => runCli(['node', 'src/index.ts', 'checkpoint', 'fork', 'chk_files', '--restore-files']),
       /requires --yes/i
     );
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.CLIQ_HOME;
-    } else {
-      process.env.CLIQ_HOME = previousHome;
-    }
-    process.chdir(previousCwd);
-    await rm(cwd, { recursive: true, force: true });
-    await rm(home, { recursive: true, force: true });
-  }
+  });
 });
