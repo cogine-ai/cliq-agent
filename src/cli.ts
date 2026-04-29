@@ -813,6 +813,24 @@ function compactEndIndexForSession(recordCount: number, checkpoint?: { id: strin
   return endIndexExclusive;
 }
 
+async function createRestoreSafetyCheckpoint(cwd: string, session: Awaited<ReturnType<typeof ensureSession>>, checkpointId: string) {
+  await createCheckpoint(cwd, session, {
+    kind: 'restore-safety',
+    name: `before restore ${checkpointId}`
+  });
+}
+
+async function prepareWorkspaceRestore(
+  cwd: string,
+  session: Awaited<ReturnType<typeof ensureSession>>,
+  checkpointId: string,
+  workspaceCheckpointId: string,
+  allowStagedChanges?: boolean
+) {
+  await assertWorkspaceCheckpointRestorable(cwd, workspaceCheckpointId, { allowStagedChanges });
+  await createRestoreSafetyCheckpoint(cwd, session, checkpointId);
+}
+
 export async function runCli(argv: string[]) {
   const parsed = parseArgs(argv);
   const { cmd, prompt, policy, skills, model: cliModel } = parsed;
@@ -883,6 +901,13 @@ export async function runCli(argv: string[]) {
       if (!checkpoint.workspaceCheckpointId) {
         throw new Error(`checkpoint has no workspace snapshot: ${parsed.checkpointId}`);
       }
+      await prepareWorkspaceRestore(
+        cwd,
+        session,
+        parsed.checkpointId,
+        checkpoint.workspaceCheckpointId,
+        parsed.allowStagedChanges
+      );
       await restoreWorkspaceCheckpoint(cwd, checkpoint.workspaceCheckpointId, {
         allowStagedChanges: parsed.allowStagedChanges
       });
@@ -907,15 +932,13 @@ export async function runCli(argv: string[]) {
       if (!checkpoint.workspaceCheckpointId) {
         throw new Error(`checkpoint has no workspace snapshot: ${parsed.checkpointId}`);
       }
-      if (parsed.scope === 'both') {
-        await assertWorkspaceCheckpointRestorable(cwd, checkpoint.workspaceCheckpointId, {
-          allowStagedChanges: parsed.allowStagedChanges
-        });
-        await createCheckpoint(cwd, session, {
-          kind: 'restore-safety',
-          name: `before restore ${parsed.checkpointId}`
-        });
-      }
+      await prepareWorkspaceRestore(
+        cwd,
+        session,
+        parsed.checkpointId,
+        checkpoint.workspaceCheckpointId,
+        parsed.allowStagedChanges
+      );
       await restoreWorkspaceCheckpoint(cwd, checkpoint.workspaceCheckpointId, {
         allowStagedChanges: parsed.allowStagedChanges
       });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -17,7 +17,7 @@ import {
   runCli
 } from './cli.js';
 import { createCheckpoint } from './session/checkpoints.js';
-import { createSession, ensureSession, saveSession } from './session/store.js';
+import { createSession, ensureSession, saveSession, sessionFilePath } from './session/store.js';
 import type { ToolResult } from './tools/types.js';
 
 const execFileAsync = promisify(execFile);
@@ -806,6 +806,30 @@ test('runCli restore --scope files does not let --yes overwrite staged changes',
   });
 });
 
+test('runCli restore --scope files creates a restore-safety checkpoint before changing files', async () => {
+  await withCliTestEnv('restore-files-safety', async ({ cwd }) => {
+    await execFileAsync('git', ['init'], { cwd });
+    await execFileAsync('git', ['config', 'user.name', 'Cliq Test'], { cwd });
+    await execFileAsync('git', ['config', 'user.email', 'test@cliq.local'], { cwd });
+    await writeFile(path.join(cwd, 'tracked.txt'), 'before\n', 'utf8');
+    await execFileAsync('git', ['add', 'tracked.txt'], { cwd });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd });
+
+    const session = createSession(cwd);
+    const checkpoint = await createCheckpoint(cwd, session, { kind: 'manual' });
+    await writeFile(path.join(cwd, 'tracked.txt'), 'after\n', 'utf8');
+
+    await runCli(['node', 'src/index.ts', 'checkpoint', 'restore', checkpoint.id, '--scope', 'files', '--yes']);
+    const active = await ensureSession(cwd);
+
+    assert.equal(await readFile(path.join(cwd, 'tracked.txt'), 'utf8'), 'before\n');
+    assert.deepEqual(
+      active.checkpoints.map((candidate) => candidate.kind),
+      ['manual', 'restore-safety']
+    );
+  });
+});
+
 test('runCli restore --scope both validates workspace restore before creating a safety checkpoint', async () => {
   await withCliTestEnv('restore-both-non-git', async ({ cwd }) => {
     const session = createSession(cwd);
@@ -847,6 +871,41 @@ test('runCli checkpoint fork --restore-files requires --yes before changing file
     await assert.rejects(
       () => runCli(['node', 'src/index.ts', 'checkpoint', 'fork', 'chk_files', '--restore-files']),
       /requires --yes/i
+    );
+  });
+});
+
+test('runCli checkpoint fork --restore-files creates a restore-safety checkpoint before changing files', async () => {
+  await withCliTestEnv('fork-files-safety', async ({ cwd }) => {
+    await execFileAsync('git', ['init'], { cwd });
+    await execFileAsync('git', ['config', 'user.name', 'Cliq Test'], { cwd });
+    await execFileAsync('git', ['config', 'user.email', 'test@cliq.local'], { cwd });
+    await writeFile(path.join(cwd, 'tracked.txt'), 'before\n', 'utf8');
+    await execFileAsync('git', ['add', 'tracked.txt'], { cwd });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd });
+
+    const session = createSession(cwd);
+    session.records.push({
+      id: 'usr_1',
+      ts: '2026-04-29T00:00:00.000Z',
+      kind: 'user',
+      role: 'user',
+      content: 'before fork'
+    });
+    const checkpoint = await createCheckpoint(cwd, session, { kind: 'manual' });
+    await writeFile(path.join(cwd, 'tracked.txt'), 'after\n', 'utf8');
+
+    await runCli(['node', 'src/index.ts', 'checkpoint', 'fork', checkpoint.id, '--restore-files', '--yes', 'child']);
+    const parent = JSON.parse(await readFile(sessionFilePath(session), 'utf8')) as {
+      checkpoints: Array<{ kind: string }>;
+    };
+    const child = await ensureSession(cwd);
+
+    assert.equal(await readFile(path.join(cwd, 'tracked.txt'), 'utf8'), 'before\n');
+    assert.equal(child.parentSessionId, session.id);
+    assert.deepEqual(
+      parent.checkpoints.map((candidate) => candidate.kind),
+      ['manual', 'restore-safety']
     );
   });
 });

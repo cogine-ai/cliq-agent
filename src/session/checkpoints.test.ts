@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { createCheckpoint, restoreWorkspaceCheckpoint, workspaceCheckpointFilePath } from './checkpoints.js';
-import { createSession, sessionFilePath } from './store.js';
+import { createSession, saveSession, sessionFilePath } from './store.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -97,6 +97,44 @@ test('createCheckpoint initializes missing checkpoint arrays before saving', asy
       assert.equal(checkpoint.kind, 'manual');
       assert.equal(mutated.checkpoints?.length, 1);
       assert.equal(mutated.checkpoints?.[0]?.id, checkpoint.id);
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('createCheckpoint preserves concurrent checkpoint metadata updates', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-checkpoint-concurrent-'));
+  try {
+    await withCliqHome(async () => {
+      const session = createSession(cwd);
+      session.records.push({
+        id: 'usr_1',
+        ts: '2026-04-29T00:00:00.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'start'
+      });
+      await saveSession(cwd, session);
+      const firstCopy = JSON.parse(JSON.stringify(session)) as typeof session;
+      const secondCopy = JSON.parse(JSON.stringify(session)) as typeof session;
+
+      const [first, second] = await Promise.all([
+        createCheckpoint(cwd, firstCopy, { kind: 'manual', name: 'first' }),
+        createCheckpoint(cwd, secondCopy, { kind: 'manual', name: 'second' })
+      ]);
+      const persisted = JSON.parse(await readFile(sessionFilePath(session), 'utf8')) as {
+        checkpoints: Array<{ id: string; name?: string }>;
+      };
+
+      assert.deepEqual(
+        persisted.checkpoints.map((checkpoint) => checkpoint.id).sort(),
+        [first.id, second.id].sort()
+      );
+      assert.deepEqual(
+        persisted.checkpoints.map((checkpoint) => checkpoint.name).sort(),
+        ['first', 'second']
+      );
     });
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -276,6 +314,54 @@ test('restoreWorkspaceCheckpoint rejects malformed checkpoint artifacts clearly'
       await assert.rejects(
         restoreWorkspaceCheckpoint(cwd, 'wchk_malformed', { allowStagedChanges: true }),
         /invalid workspace checkpoint/i
+      );
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('restoreWorkspaceCheckpoint rejects repo scopes outside the declared workspace path', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-checkpoint-scope-'));
+  try {
+    await git(cwd, ['init', '--initial-branch=main']);
+    await git(cwd, ['config', 'user.email', 'test@example.com']);
+    await git(cwd, ['config', 'user.name', 'Test User']);
+    await mkdir(path.join(cwd, 'workspace'), { recursive: true });
+    await writeFile(path.join(cwd, 'workspace', 'tracked.txt'), 'initial\n', 'utf8');
+    await git(cwd, ['add', 'workspace/tracked.txt']);
+    await git(cwd, ['commit', '-m', 'initial']);
+    const commitId = await git(cwd, ['rev-parse', 'HEAD']);
+    const gitRootRealPath = await realpath(cwd);
+    const workspaceRealPath = await realpath(path.join(cwd, 'workspace'));
+
+    await withCliqHome(async () => {
+      const target = workspaceCheckpointFilePath('wchk_scope_escape');
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(
+        target,
+        JSON.stringify(
+          {
+            id: 'wchk_scope_escape',
+            kind: 'git-ghost',
+            status: 'available',
+            createdAt: '2026-04-29T00:00:00.000Z',
+            workspaceRealPath,
+            gitRootRealPath,
+            repoRelativeScope: '.',
+            commitId,
+            preexistingUntrackedFiles: [],
+            warnings: []
+          },
+          null,
+          2
+        ),
+        'utf8'
+      );
+
+      await assert.rejects(
+        restoreWorkspaceCheckpoint(path.join(cwd, 'workspace'), 'wchk_scope_escape', { allowStagedChanges: true }),
+        /repoRelativeScope must resolve inside workspaceRealPath/i
       );
     });
   } finally {

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import { makeId, nowIso, resolveCliqHome, saveSession } from './store.js';
+import { makeId, mutateSession, nowIso, resolveCliqHome } from './store.js';
 import type { Session, SessionCheckpoint, WorkspaceCheckpoint } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -199,19 +199,28 @@ export async function createCheckpoint(
   const workspaceCheckpoint = await createWorkspaceCheckpoint(cwd);
   await writeWorkspaceCheckpoint(workspaceCheckpoint);
 
-  const checkpoint: SessionCheckpoint = {
+  const checkpointBase = {
     id: makeId('chk'),
     name: options.name,
     kind: options.kind ?? 'manual',
     createdAt: nowIso(),
-    recordIndex: session.records.length,
-    turn: session.lifecycle.turn,
     workspaceCheckpointId: workspaceCheckpoint.id
   };
+  let checkpoint: SessionCheckpoint | undefined;
 
-  session.checkpoints ??= [];
-  session.checkpoints.push(checkpoint);
-  await saveSession(cwd, session);
+  await mutateSession(cwd, session, (current) => {
+    checkpoint = {
+      ...checkpointBase,
+      recordIndex: current.records.length,
+      turn: current.lifecycle.turn
+    };
+    current.checkpoints ??= [];
+    current.checkpoints.push(checkpoint);
+  });
+
+  if (!checkpoint) {
+    throw new Error('checkpoint creation failed before session metadata was recorded');
+  }
   return { ...checkpoint, workspaceCheckpoint };
 }
 
@@ -257,6 +266,13 @@ function isSafeRepoRelativePath(value: string, allowDot = false) {
   }
 
   return !value.split('/').includes('..');
+}
+
+function resolveRepoRelativeScope(gitRootRealPath: string, repoRelativeScope: string) {
+  if (repoRelativeScope === '.') {
+    return gitRootRealPath;
+  }
+  return path.resolve(gitRootRealPath, ...repoRelativeScope.split('/'));
 }
 
 function invalidWorkspaceCheckpoint(id: string, reason: string): never {
@@ -306,6 +322,13 @@ function validateWorkspaceCheckpoint(raw: unknown, expectedId: string): Workspac
   }
   if (typeof checkpoint.repoRelativeScope !== 'string' || !isSafeRepoRelativePath(checkpoint.repoRelativeScope, true)) {
     invalidWorkspaceCheckpoint(expectedId, 'repoRelativeScope must be a safe repository-relative path');
+  }
+  const scopeRealPath = resolveRepoRelativeScope(checkpoint.gitRootRealPath, checkpoint.repoRelativeScope);
+  if (!isSubPathOrSame(checkpoint.gitRootRealPath, scopeRealPath)) {
+    invalidWorkspaceCheckpoint(expectedId, 'repoRelativeScope must resolve inside gitRootRealPath');
+  }
+  if (!isSubPathOrSame(checkpoint.workspaceRealPath, scopeRealPath)) {
+    invalidWorkspaceCheckpoint(expectedId, 'repoRelativeScope must resolve inside workspaceRealPath');
   }
   if (typeof checkpoint.commitId !== 'string' || !GIT_OBJECT_ID.test(checkpoint.commitId)) {
     invalidWorkspaceCheckpoint(expectedId, 'commitId is invalid');
