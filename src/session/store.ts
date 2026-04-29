@@ -19,6 +19,7 @@ import type { CompactionArtifact, Session, SessionCheckpoint, SessionModelRef, S
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_STATE_VERSION = 1;
+const LOCK_OWNER_FILE = 'owner';
 
 type LegacySession = {
   createdAt?: string;
@@ -74,6 +75,7 @@ type SessionMutator<T> = (session: Session) => T | Promise<T>;
 
 const LOCK_TIMEOUT_MS = 5000;
 const LOCK_RETRY_MS = 25;
+const LOCK_HEARTBEAT_MS = Math.max(LOCK_RETRY_MS, Math.floor(LOCK_TIMEOUT_MS / 3));
 
 function isSessionRecord(value: unknown): value is SessionRecord {
   if (!value || typeof value !== 'object') {
@@ -262,12 +264,19 @@ function sleep(ms: number) {
 
 async function withPathLock<T>(target: string, callback: () => Promise<T>): Promise<T> {
   const lockPath = `${target}.lock`;
+  const ownerToken = `${process.pid}:${crypto.randomUUID()}`;
   const startedAt = Date.now();
   await fs.mkdir(path.dirname(lockPath), { recursive: true });
 
   while (true) {
     try {
       await fs.mkdir(lockPath);
+      try {
+        await writeLockOwner(lockPath, ownerToken);
+      } catch (error) {
+        await fs.rm(lockPath, { recursive: true, force: true });
+        throw error;
+      }
       break;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -284,17 +293,77 @@ async function withPathLock<T>(target: string, callback: () => Promise<T>): Prom
     }
   }
 
+  const heartbeat = startLockHeartbeat(lockPath, ownerToken);
   try {
     return await callback();
   } finally {
-    await fs.rm(lockPath, { recursive: true, force: true });
+    clearInterval(heartbeat);
+    await releasePathLock(lockPath, ownerToken);
+  }
+}
+
+async function writeLockOwner(lockPath: string, ownerToken: string) {
+  await fs.writeFile(path.join(lockPath, LOCK_OWNER_FILE), ownerToken, { flag: 'wx' });
+}
+
+function startLockHeartbeat(lockPath: string, ownerToken: string) {
+  const heartbeat = setInterval(() => {
+    void refreshLockLease(lockPath, ownerToken).catch(() => {
+      // The next lock waiter will decide whether the lease is stale. Heartbeat
+      // failures should not mask the protected store operation.
+    });
+  }, LOCK_HEARTBEAT_MS);
+  heartbeat.unref?.();
+  return heartbeat;
+}
+
+async function refreshLockLease(lockPath: string, ownerToken: string) {
+  const ownerPath = path.join(lockPath, LOCK_OWNER_FILE);
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(ownerPath, 'r+');
+    const currentOwner = await handle.readFile({ encoding: 'utf8' });
+    if (currentOwner !== ownerToken) {
+      return false;
+    }
+    const now = new Date();
+    await handle.utimes(now, now);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function releasePathLock(lockPath: string, ownerToken: string) {
+  const currentOwner = await readLockOwner(lockPath);
+  if (currentOwner !== ownerToken) {
+    return;
+  }
+  await fs.rm(lockPath, { recursive: true, force: true });
+}
+
+async function readLockOwner(lockPath: string) {
+  try {
+    return await fs.readFile(path.join(lockPath, LOCK_OWNER_FILE), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw error;
   }
 }
 
 async function removeStaleLock(lockPath: string) {
   try {
-    const stat = await fs.stat(lockPath);
-    if (Date.now() - stat.mtimeMs <= LOCK_TIMEOUT_MS) {
+    const ownerPath = path.join(lockPath, LOCK_OWNER_FILE);
+    const owner = await readLockOwner(lockPath);
+    const leaseStat = owner === null ? await fs.stat(lockPath) : await fs.stat(ownerPath);
+    if (Date.now() - leaseStat.mtimeMs <= LOCK_TIMEOUT_MS) {
       return false;
     }
     await fs.rm(lockPath, { recursive: true, force: true });
@@ -539,7 +608,12 @@ function migrateLegacySession(cwd: string, legacy: LegacySession): Session {
   session.updatedAt = legacy.updatedAt ?? session.updatedAt;
   session.records = [];
 
-  for (const message of legacy.messages ?? []) {
+  const messages = legacy.messages ?? [];
+  if (!Array.isArray(messages)) {
+    throw new Error('invalid legacy session: messages must be an array');
+  }
+
+  for (const message of messages) {
     const ts = nowIso();
     if (message.role === 'system' && typeof message.content === 'string') {
       session.records.push({ id: makeId('sys'), ts, kind: 'system', role: 'system', content: message.content });
@@ -616,16 +690,21 @@ export async function ensureSession(cwd: string): Promise<Session> {
   }
 
   const legacyTarget = sessionPath(cwd);
+  let raw: unknown;
   try {
-    const raw = JSON.parse(await fs.readFile(legacyTarget, 'utf8')) as unknown;
-    const session = isSession(raw) ? normalizeSession(raw) : migrateLegacySession(cwd, raw as LegacySession);
-    await saveSessionWithMigration(cwd, session, legacyTarget);
-    return session;
-  } catch {
+    raw = JSON.parse(await fs.readFile(legacyTarget, 'utf8')) as unknown;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) {
+      throw error;
+    }
     const session = createSession(cwd);
     await saveSession(cwd, session);
     return session;
   }
+
+  const session = isSession(raw) ? normalizeSession(raw) : migrateLegacySession(cwd, raw as LegacySession);
+  await saveSessionWithMigration(cwd, session, legacyTarget);
+  return session;
 }
 
 export async function ensureFresh(cwd: string): Promise<Session> {

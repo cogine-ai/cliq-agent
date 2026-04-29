@@ -8,6 +8,7 @@ import {
   createSession,
   ensureFresh,
   ensureSession,
+  mutateSession,
   resolveCliqHome,
   saveSession,
   sessionFilePath,
@@ -54,8 +55,8 @@ test('createSession records structured default model identity', () => {
 });
 
 test('resolveCliqHome uses CLIQ_HOME when provided and falls back to ~/.cliq', () => {
-  assert.equal(resolveCliqHome({ CLIQ_HOME: '/tmp/custom-cliq' }, '/home/alice'), '/tmp/custom-cliq');
-  assert.equal(resolveCliqHome({}, '/home/alice'), '/home/alice/.cliq');
+  assert.equal(resolveCliqHome({ CLIQ_HOME: '/tmp/custom-cliq' }, '/home/alice'), path.resolve('/tmp/custom-cliq'));
+  assert.equal(resolveCliqHome({}, '/home/alice'), path.resolve(path.join('/home/alice', '.cliq')));
 });
 
 test('workspaceIdFromRealPath is a stable sha256 hex digest of realpath(cwd)', () => {
@@ -205,6 +206,29 @@ test('saveSession recovers from a stale session file lock', async () => {
     }
     await rm(cwd, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('mutateSession only releases the lock owner it acquired', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-lock-owner-'));
+
+  try {
+    const session = createSession(cwd);
+    const target = sessionFilePath(session);
+    const lockPath = `${target}.lock`;
+    const otherOwnerPath = path.join(lockPath, 'owner');
+
+    await mutateSession(cwd, session, async (current) => {
+      await rm(lockPath, { recursive: true, force: true });
+      await mkdir(lockPath, { recursive: true });
+      await writeFile(otherOwnerPath, 'other-owner', 'utf8');
+      current.name = 'mutated';
+    });
+
+    assert.equal(await readFile(otherOwnerPath, 'utf8'), 'other-owner');
+    await rm(lockPath, { recursive: true, force: true });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
   }
 });
 
@@ -389,6 +413,19 @@ test('ensureSession rejects malformed sessions and recreates a valid session', a
   assert.equal(session.version > 0, true);
   assert.equal(Array.isArray(session.records), true);
   assert.deepEqual(session.records, []);
+});
+
+test('ensureSession propagates legacy migration errors after a valid read', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-legacy-invalid-'));
+
+  try {
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(path.join(cwd, '.cliq', 'session.json'), JSON.stringify({ messages: {} }), 'utf8');
+
+    await assert.rejects(() => ensureSession(cwd), /invalid legacy session: messages must be an array/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test('ensureSession keeps explicit system records for version 4 sessions', async () => {
