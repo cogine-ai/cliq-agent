@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -18,6 +18,27 @@ function completion(content: string) {
   };
 }
 
+const originalCliqHome = process.env.CLIQ_HOME;
+const runnerCliqHome = await mkdtemp(path.join(os.tmpdir(), 'cliq-runner-home-'));
+const cleanupDirs: string[] = [runnerCliqHome];
+process.env.CLIQ_HOME = runnerCliqHome;
+
+test.after(async () => {
+  if (originalCliqHome === undefined) {
+    delete process.env.CLIQ_HOME;
+  } else {
+    process.env.CLIQ_HOME = originalCliqHome;
+  }
+
+  await Promise.all(cleanupDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+async function createTempSession() {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-runner-workspace-'));
+  cleanupDirs.push(cwd);
+  return createSession(cwd);
+}
+
 test('registry resolves bash and edit tools', () => {
   const registry = createToolRegistry();
 
@@ -26,7 +47,7 @@ test('registry resolves bash and edit tools', () => {
 });
 
 test('runner invokes hooks around assistant and tool execution', async () => {
-  const session = createSession('/tmp/workspace');
+  const session = await createTempSession();
   const events: string[] = [];
 
   const runner = createRunner({
@@ -61,8 +82,26 @@ test('runner invokes hooks around assistant and tool execution', async () => {
   assert.deepEqual(events, ['beforeTurn', 'afterAssistantAction', 'afterTurn']);
 });
 
+test('runner creates an automatic checkpoint before appending the user record', async () => {
+  const session = await createTempSession();
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'say done');
+
+  assert.equal(session.checkpoints.length, 1);
+  assert.equal(session.checkpoints[0]?.kind, 'auto');
+  assert.equal(session.checkpoints[0]?.recordIndex, 0);
+  assert.equal(session.records[0]?.kind, 'user');
+});
+
 test('runner appends tool results and replays them back to the model', async () => {
-  const session = createSession('/tmp/workspace');
+  const session = await createTempSession();
   let callCount = 0;
   let secondCallMessages: Array<{ role: string; content: string }> = [];
 
@@ -114,7 +153,7 @@ test('runner appends tool results and replays them back to the model', async () 
 });
 
 test('runner prepends composed instruction messages before replayed session records', async () => {
-  const session = createSession('/tmp/workspace');
+  const session = await createTempSession();
   let seenMessages: Array<{ role: string; content: string }> = [];
 
   const runner = createRunner({
@@ -138,7 +177,7 @@ test('runner prepends composed instruction messages before replayed session reco
 });
 
 test('runner does not persist composed instruction messages into the session record log', async () => {
-  const session = createSession('/tmp/workspace');
+  const session = await createTempSession();
 
   const runner = createRunner({
     model: {
@@ -159,13 +198,16 @@ test('runner does not persist composed instruction messages into the session rec
 
 test('runner resets lifecycle state when setup fails before the loop', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-runner-'));
+  cleanupDirs.push(dir);
   const filePath = path.join(dir, 'workspace-file');
   await writeFile(filePath, 'not a directory');
 
   const session = createSession(filePath);
+  let modelCalls = 0;
   const runner = createRunner({
     model: {
       async complete() {
+        modelCalls += 1;
         return completion('{"message":"done"}');
       }
     }
@@ -173,10 +215,11 @@ test('runner resets lifecycle state when setup fails before the loop', async () 
 
   await assert.rejects(() => runner.runTurn(session, 'say done'));
   assert.equal(session.lifecycle.status, 'idle');
+  assert.equal(modelCalls, 0);
 });
 
 test('runner converts tool exceptions into tool error records and still calls afterTool hooks', async () => {
-  const session = createSession('/tmp/workspace');
+  const session = await createTempSession();
   const afterToolEvents: string[] = [];
   let callCount = 0;
 
@@ -224,7 +267,7 @@ test('runner converts tool exceptions into tool error records and still calls af
 });
 
 test('runner records a denied bash action when mode is read-only', async () => {
-  const session = createSession('/tmp/workspace');
+  const session = await createTempSession();
   const outputs: string[] = [];
   const runner = createRunner({
     model: {
@@ -252,7 +295,7 @@ test('runner records a denied bash action when mode is read-only', async () => {
 });
 
 test('runner records policy authorization failures as tool errors', async () => {
-  const session = createSession('/tmp/workspace');
+  const session = await createTempSession();
   const afterToolEvents: string[] = [];
   let calls = 0;
 
@@ -289,7 +332,7 @@ test('runner records policy authorization failures as tool errors', async () => 
 });
 
 test('runner executes edit only after confirmation in confirm-write mode', async () => {
-  const session = createSession('/tmp/workspace');
+  const session = await createTempSession();
   let prompted = 0;
   const editExecutions: string[] = [];
   const editDefinition: ToolDefinition<EditModelAction> = {
@@ -337,7 +380,7 @@ test('runner executes edit only after confirmation in confirm-write mode', async
 });
 
 test('runner emits model lifecycle events without raw deltas', async () => {
-  const session = createSession('/tmp/workspace');
+  const session = await createTempSession();
   const events: Array<{ type: string; chars?: number; message?: string }> = [];
 
   const runner = createRunner({

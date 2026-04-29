@@ -1,10 +1,43 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createSession, ensureSession, sessionPath } from './store.js';
+import {
+  createSession,
+  ensureFresh,
+  ensureSession,
+  mutateSession,
+  resolveCliqHome,
+  saveSession,
+  sessionFilePath,
+  sessionPath,
+  workspaceIdFromRealPath,
+  workspaceStatePath
+} from './store.js';
+
+let originalCliqHome: string | undefined;
+let fileCliqHome: string | undefined;
+
+test.beforeEach(async () => {
+  originalCliqHome = process.env.CLIQ_HOME;
+  fileCliqHome = await mkdtemp(path.join(os.tmpdir(), 'cliq-store-home-'));
+  process.env.CLIQ_HOME = fileCliqHome;
+});
+
+test.afterEach(async () => {
+  if (originalCliqHome === undefined) {
+    delete process.env.CLIQ_HOME;
+  } else {
+    process.env.CLIQ_HOME = originalCliqHome;
+  }
+  if (fileCliqHome) {
+    await rm(fileCliqHome, { recursive: true, force: true });
+  }
+  originalCliqHome = undefined;
+  fileCliqHome = undefined;
+});
 
 test('createSession starts without a seeded system record', () => {
   const session = createSession('/tmp/workspace');
@@ -21,13 +54,344 @@ test('createSession records structured default model identity', () => {
   });
 });
 
-test('ensureSession creates the persisted file when missing', async () => {
-  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-session-'));
-  const session = await ensureSession(cwd);
-  const raw = JSON.parse(await readFile(sessionPath(cwd), 'utf8')) as { records: Array<{ kind: string }> };
+test('resolveCliqHome uses CLIQ_HOME when provided and falls back to ~/.cliq', () => {
+  assert.equal(resolveCliqHome({ CLIQ_HOME: '/tmp/custom-cliq' }, '/home/alice'), path.resolve('/tmp/custom-cliq'));
+  assert.equal(resolveCliqHome({}, '/home/alice'), path.resolve(path.join('/home/alice', '.cliq')));
+});
 
-  assert.deepEqual(session.records, []);
-  assert.deepEqual(raw.records, []);
+test('workspaceIdFromRealPath is a stable sha256 hex digest of realpath(cwd)', () => {
+  const id = workspaceIdFromRealPath('/tmp/workspace');
+
+  assert.equal(id, workspaceIdFromRealPath('/tmp/workspace'));
+  assert.match(id, /^[a-f0-9]{64}$/);
+  assert.notEqual(id, workspaceIdFromRealPath('/tmp/other-workspace'));
+});
+
+test('ensureSession creates the persisted file in CLIQ_HOME when missing', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-session-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = await ensureSession(cwd);
+    const raw = JSON.parse(await readFile(sessionFilePath(session), 'utf8')) as { records: Array<{ kind: string }> };
+    const workspaceState = JSON.parse(await readFile(await workspaceStatePath(cwd), 'utf8')) as { activeSessionId: string };
+
+    assert.equal(session.id.startsWith('sess_'), true);
+    assert.deepEqual(session.records, []);
+    assert.deepEqual(raw.records, []);
+    assert.equal(workspaceState.activeSessionId, session.id);
+    await assert.rejects(() => access(sessionPath(cwd)), { code: 'ENOENT' });
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureFresh creates a new active global session without deleting legacy workspace files', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-reset-global-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(path.join(cwd, '.cliq', 'session.json'), JSON.stringify({ records: [] }), 'utf8');
+
+    const first = await ensureSession(cwd);
+    const fresh = await ensureFresh(cwd);
+    const workspaceState = JSON.parse(await readFile(await workspaceStatePath(cwd), 'utf8')) as { activeSessionId: string };
+
+    assert.notEqual(fresh.id, first.id);
+    assert.equal(workspaceState.activeSessionId, fresh.id);
+    assert.deepEqual(fresh.records, []);
+    assert.equal(JSON.parse(await readFile(path.join(cwd, '.cliq', 'session.json'), 'utf8')).records.length, 0);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession recovers from malformed workspace state JSON', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-malformed-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const statePath = await workspaceStatePath(cwd);
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(statePath, JSON.stringify({ recentSessions: 'not-an-array' }), 'utf8');
+
+    const session = await ensureSession(cwd);
+    const workspaceState = JSON.parse(await readFile(statePath, 'utf8')) as {
+      activeSessionId?: string;
+      recentSessions?: unknown[];
+    };
+
+    assert.equal(workspaceState.activeSessionId, session.id);
+    assert.equal(Array.isArray(workspaceState.recentSessions), true);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession recovers from malformed workspace index JSON', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-index-malformed-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    await writeFile(path.join(home, 'workspace-index.json'), JSON.stringify({ workspaces: [] }), 'utf8');
+
+    const session = await ensureSession(cwd);
+    const index = JSON.parse(await readFile(path.join(home, 'workspace-index.json'), 'utf8')) as {
+      workspaces?: Record<string, { activeSessionId?: string }>;
+    };
+    const activeSessionIds = Object.values(index.workspaces ?? {}).map((entry) => entry.activeSessionId);
+
+    assert.ok(activeSessionIds.includes(session.id));
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('saveSession recovers from a stale session file lock', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-stale-lock-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    const target = sessionFilePath(session);
+    const lockPath = `${target}.lock`;
+    await mkdir(lockPath, { recursive: true });
+    const stale = new Date(Date.now() - 10_000);
+    await utimes(lockPath, stale, stale);
+
+    await saveSession(cwd, session);
+
+    await assert.rejects(() => access(lockPath), { code: 'ENOENT' });
+    assert.equal(JSON.parse(await readFile(target, 'utf8')).id, session.id);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('mutateSession refuses to write after lock ownership is lost', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-lock-owner-'));
+
+  try {
+    const session = createSession(cwd);
+    const target = sessionFilePath(session);
+    const lockPath = `${target}.lock`;
+    const otherOwnerPath = path.join(lockPath, 'owner');
+
+    await assert.rejects(
+      () =>
+        mutateSession(cwd, session, async (current) => {
+          await rm(lockPath, { recursive: true, force: true });
+          await mkdir(lockPath, { recursive: true });
+          await writeFile(otherOwnerPath, 'other-owner', 'utf8');
+          current.name = 'mutated';
+        }),
+      /lost session store lock/i
+    );
+
+    assert.equal(await readFile(otherOwnerPath, 'utf8'), 'other-owner');
+    await rm(lockPath, { recursive: true, force: true });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('mutateSession serializes concurrent updates without losing records', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-lock-concurrent-'));
+
+  try {
+    const session = createSession(cwd);
+    await saveSession(cwd, session);
+    let releaseFirst!: () => void;
+    const firstCanFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstStarted!: () => void;
+    const firstHasLock = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+
+    const first = mutateSession(cwd, session, async (current) => {
+      current.records.push({
+        id: 'usr_1',
+        ts: '2026-04-29T00:00:00.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'first'
+      });
+      firstStarted();
+      await firstCanFinish;
+    });
+    await firstHasLock;
+
+    const second = mutateSession(cwd, session, (current) => {
+      current.records.push({
+        id: 'usr_2',
+        ts: '2026-04-29T00:00:01.000Z',
+        kind: 'user',
+        role: 'user',
+        content: 'second'
+      });
+    });
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    const persisted = JSON.parse(await readFile(sessionFilePath(session), 'utf8')) as {
+      records: Array<{ id: string }>;
+    };
+    assert.deepEqual(
+      persisted.records.map((record) => record.id),
+      ['usr_1', 'usr_2']
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession does not persist normalized active global sessions by default', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-active-normalize-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    const target = sessionFilePath(session);
+    const rawSession = {
+      ...session,
+      version: 3,
+      model: 'anthropic/claude-sonnet-4.6'
+    };
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, JSON.stringify(rawSession, null, 2), 'utf8');
+
+    const workspaceRealPath = await realpath(cwd);
+    const statePath = await workspaceStatePath(cwd);
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify(
+        {
+          version: 1,
+          workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+          workspaceRealPath,
+          activeSessionId: session.id,
+          activeSessionPath: target,
+          recentSessions: [],
+          lastSeenAt: '2026-04-29T00:00:00.000Z'
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const loaded = await ensureSession(cwd);
+    const persisted = JSON.parse(await readFile(target, 'utf8')) as { version: number; model: unknown };
+
+    assert.equal(loaded.version, 5);
+    assert.deepEqual(loaded.model, {
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-4.6',
+      baseUrl: 'https://openrouter.ai/api/v1'
+    });
+    assert.equal(persisted.version, 3);
+    assert.equal(persisted.model, 'anthropic/claude-sonnet-4.6');
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession surfaces malformed active global session JSON', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-active-malformed-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
+  const previousHome = process.env.CLIQ_HOME;
+
+  try {
+    process.env.CLIQ_HOME = home;
+    const session = createSession(cwd);
+    const target = sessionFilePath(session);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, '{"records":', 'utf8');
+
+    const workspaceRealPath = await realpath(cwd);
+    const statePath = await workspaceStatePath(cwd);
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify(
+        {
+          version: 1,
+          workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+          workspaceRealPath,
+          activeSessionId: session.id,
+          activeSessionPath: target,
+          recentSessions: [],
+          lastSeenAt: '2026-04-29T00:00:00.000Z'
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    await assert.rejects(() => ensureSession(cwd), /invalid JSON/i);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test('ensureSession migrates legacy tool status when present', async () => {
@@ -153,7 +517,48 @@ test('ensureSession rejects malformed sessions and recreates a valid session', a
   assert.deepEqual(session.records, []);
 });
 
-test('ensureSession keeps explicit system records for current-version sessions', async () => {
+test('ensureSession propagates legacy migration errors after a valid read', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-legacy-invalid-'));
+
+  try {
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(path.join(cwd, '.cliq', 'session.json'), JSON.stringify({ messages: {} }), 'utf8');
+
+    await assert.rejects(() => ensureSession(cwd), /invalid legacy session: messages must be an array/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession backs up malformed legacy session JSON before starting fresh', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-legacy-corrupt-'));
+  const legacyDir = path.join(cwd, '.cliq');
+  const legacyPath = path.join(legacyDir, 'session.json');
+  const stderrWrite = process.stderr.write;
+  let stderr = '';
+
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    await mkdir(legacyDir, { recursive: true });
+    await writeFile(legacyPath, '{"records":', 'utf8');
+
+    const session = await ensureSession(cwd);
+    const legacyFiles = await readdir(legacyDir);
+
+    assert.equal(session.records.length, 0);
+    assert.equal(legacyFiles.some((file) => /^session\.corrupt-.+\.json$/.test(file)), true);
+    assert.match(stderr, /legacy session JSON is malformed/i);
+  } finally {
+    process.stderr.write = stderrWrite;
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('ensureSession keeps explicit system records for version 4 sessions', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-current-system-'));
   try {
     await mkdir(path.join(cwd, '.cliq'), { recursive: true });
@@ -212,18 +617,18 @@ test('ensureSession migrates v3 string model to structured model ref', async () 
     );
 
     const session = await ensureSession(cwd);
-    assert.equal(session.version, 4);
+    assert.equal(session.version, 5);
     assert.deepEqual(session.model, {
       provider: 'openrouter',
       model: 'anthropic/claude-sonnet-4.6',
       baseUrl: 'https://openrouter.ai/api/v1'
     });
 
-    const persisted = JSON.parse(await readFile(sessionPath(cwd), 'utf8')) as {
+    const persisted = JSON.parse(await readFile(sessionFilePath(session), 'utf8')) as {
       version: number;
       model: unknown;
     };
-    assert.equal(persisted.version, 4);
+    assert.equal(persisted.version, 5);
     assert.deepEqual(persisted.model, {
       provider: 'openrouter',
       model: 'anthropic/claude-sonnet-4.6',
