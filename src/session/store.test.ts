@@ -94,6 +94,28 @@ test('ensureSession creates the persisted file in CLIQ_HOME when missing', async
   }
 });
 
+test('ensureSession serializes concurrent initial session creation', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-session-concurrent-'));
+
+  try {
+    const sessions = await Promise.all(Array.from({ length: 16 }, () => ensureSession(cwd)));
+    const sessionIds = new Set(sessions.map((session) => session.id));
+    const workspaceState = JSON.parse(await readFile(await workspaceStatePath(cwd), 'utf8')) as {
+      activeSessionId?: string;
+      recentSessions?: Array<{ id: string }>;
+    };
+
+    assert.equal(sessionIds.size, 1);
+    assert.equal(workspaceState.activeSessionId, sessions[0]?.id);
+    assert.deepEqual(
+      workspaceState.recentSessions?.map((session) => session.id),
+      [sessions[0]?.id]
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('ensureFresh creates a new active global session without deleting legacy workspace files', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-reset-global-'));
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-home-'));
