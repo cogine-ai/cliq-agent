@@ -41,7 +41,7 @@ The design follows Pi/OpenCode/Claude-style persisted compaction artifacts rathe
 - Do not delete raw records in v1.
 - Do not create a separate permanent task-intent anchor outside compact summaries.
 - Do not implement Codex's remote compact endpoint.
-- Do not implement OpenCode-style tool-output pruning in v1. It remains a later optimization.
+- Do not implement OpenCode-style replay pruning in v1. A central stored tool-result cap is still required as an input-safety invariant.
 - Do not require provider-native tokenizers in v1.
 - Do not threshold-trigger auto compaction when Cliq cannot determine a context window and the user has not configured one.
 
@@ -96,8 +96,21 @@ Resolution rules:
 - `"off"` disables both threshold auto-compact and overflow recovery auto-compact. Manual `cliq compact create` still works.
 - `"on"` enables threshold checks, but requires a context window from config or model metadata. If no context window is available, Cliq errors during runtime assembly with a clear message.
 - `"auto"` enables threshold checks only when a context window is known. If no context window is known, Cliq silently skips threshold auto-compact. Overflow recovery also requires an effective context window from config, model metadata, or provider error metadata; otherwise Cliq reports the overflow without attempting compaction.
-- `contextWindowTokens` from workspace config is the v1 source of truth when present.
-- Future provider model metadata can supply `contextWindowTokens`, but v1 must not depend on a live model catalog.
+- `contextWindowTokens` from workspace config is the v1 override and wins when present.
+- v1 must include a static known-model context-window table for built-in default models. This is not a live provider catalog; it is a small local descriptor set used so `enabled: "auto"` works out of the box for Cliq defaults.
+- Provider error metadata can supply a context window only for the overflow recovery attempt that observed that error. It must not silently become persisted model metadata.
+
+Context window resolution order:
+
+```text
+effectiveContextWindowTokens =
+  autoCompact.contextWindowTokens
+  ?? knownModelDescriptor.capabilities.contextWindow
+  ?? overflowError.contextWindowTokens
+  ?? null
+```
+
+Threshold-triggered compaction can use only config or known-model descriptor windows. Overflow recovery can additionally use provider error metadata.
 
 Validation rules:
 
@@ -151,6 +164,7 @@ export type CompactionArtifact = {
     estimatedTokensAfter?: number;
     usableLimitTokens?: number;
     contextWindowTokens?: number;
+    contextWindowSource?: 'config' | 'model-descriptor' | 'overflow-error';
     keepRecentTokens: number;
     summaryInputBudgetTokens?: number;
     overflowRetryAttempt?: number;
@@ -191,6 +205,20 @@ runTurn
 This mirrors Codex's useful trigger placement without adopting Codex's replacement-history storage. A tool result can make the next model request too large, so the check must run before every model call in the loop, not only once before the turn.
 
 `phase: "pre-model"` means the first model request after appending the user record. `phase: "mid-loop"` means any later model request in the same turn after assistant and/or tool records have been appended.
+
+## Stored Tool Result Admission
+
+Auto Compact cannot rescue an unbounded record that must remain in the raw tail. Before v1 auto compact is enabled by default, the runner must enforce a central stored tool-result cap for every tool result, including future extension or MCP tools.
+
+Rules:
+
+- `MAX_STORED_TOOL_RESULT_CHARS` defaults to `12000`, matching the current shell output budget.
+- The cap is applied immediately before appending a `tool` session record.
+- Built-in tool-specific limits can still produce smaller outputs. The central cap is the final guardrail.
+- When the cap trims content, Cliq preserves the tool name, status, structured `meta`, and an explicit truncation marker in `content`.
+- The record `meta` must include `truncated: true`, `originalChars`, and `storedChars` when content is trimmed.
+- Raw session records remain durable after admission. The admission step may normalize unbounded tool output before it becomes a session record.
+- This is not OpenCode-style replay pruning: Cliq does not delete or rewrite previously admitted records during context assembly in v1.
 
 ## Token Estimation
 
@@ -382,10 +410,11 @@ The v1 implementation does not expose public hook APIs.
 
 Expected code boundaries:
 
+- `src/model/registry.ts`: provide static context-window metadata for built-in default models.
 - `src/workspace/config.ts`: parse and validate `autoCompact`.
 - `src/session/auto-compaction.ts`: policy resolution, token estimation, range selection, summary prompt construction, and `maybeAutoCompact`.
 - `src/session/compaction.ts`: accept optional auto metadata while preserving existing manual behavior.
-- `src/runtime/runner.ts`: invoke `maybeAutoCompact` before model calls and once for overflow recovery.
+- `src/runtime/runner.ts`: enforce the stored tool-result cap, invoke `maybeAutoCompact` before model calls, and invoke it once for overflow recovery.
 - `src/runtime/context.ts`: continue consuming exactly one active compaction.
 - `src/model/errors.ts`: classify provider errors as context overflow using provider-specific status/messages where available and conservative message matching otherwise.
 
@@ -399,6 +428,7 @@ Unit tests:
 - Config parsing rejects invalid numeric relationships such as `reserveTokens >= contextWindowTokens`, `thresholdRatio <= 0`, `thresholdRatio >= 1`, and `keepRecentTokens >= usableLimit`.
 - `"auto"` skips threshold checks when context window is unknown.
 - `"on"` errors clearly when context window is unknown.
+- Context-window resolution prefers workspace config, then known model descriptor, then overflow error metadata only for overflow recovery.
 - Token estimator is deterministic.
 - Range selection keeps a raw tail, advances over previous active compaction, and avoids splitting tool results from their action context.
 - Split-turn fallback only cuts at formal safe record boundaries, rejects malformed assistant/tool sequences, and adds turn-prefix context when one recent turn is too large for boundary-only compaction.
@@ -410,6 +440,7 @@ Unit tests:
 
 Runner tests:
 
+- Tool results larger than `MAX_STORED_TOOL_RESULT_CHARS` are capped before append, keep structured `meta`, and include an explicit truncation marker.
 - Auto compact runs before model call when threshold is exceeded.
 - Tool result can trigger compaction before the next loop model call.
 - Threshold compaction failure warns and continues once.
@@ -436,13 +467,14 @@ Existing workspace config without `autoCompact` resolves to:
 }
 ```
 
-Because `"auto"` requires a known context window for threshold checks, existing users are not surprised by threshold-triggered automatic LLM calls unless they configure `contextWindowTokens` or the selected model has known metadata. Overflow recovery can still run only when Cliq can derive an effective context window from config, model metadata, or provider error metadata.
+Because `"auto"` requires a known context window for threshold checks, existing users are not surprised by threshold-triggered automatic LLM calls unless they configure `contextWindowTokens` or the selected model has known static metadata. Cliq default models must ship with static context-window metadata so the default `"auto"` path is useful without extra config. Overflow recovery can still run only when Cliq can derive an effective context window from config, model metadata, or provider error metadata.
 
 ## Deferred Decisions
 
-- Add provider/model catalog metadata for context windows.
+- Expand the static context-window descriptor table into a fuller provider/model catalog.
 - Add a separate `compactModel` configuration.
-- Add OpenCode-style tool-output pruning before summarization.
+- Add OpenCode-style replay pruning before summarization.
+- Make `MAX_STORED_TOOL_RESULT_CHARS` configurable if users need larger durable tool outputs.
 - Expose compact hooks publicly through extensions/RPC.
 - Add interactive cancellation in TUI/RPC.
 - Add UI controls for compaction history and summary inspection.
@@ -451,7 +483,9 @@ Because `"auto"` requires a known context window for threshold checks, existing 
 ## Acceptance Criteria
 
 - Auto Compact is enabled by default in `"auto"` mode.
+- Built-in default models provide static context-window metadata so default `"auto"` can trigger threshold compaction without workspace config.
 - Sessions with unknown context windows do not auto-compact by threshold unless explicitly configured.
+- Tool results are centrally capped before they are admitted into session records.
 - Sessions with configured context windows compact before model calls once replay estimate crosses the usable limit.
 - Auto compact artifacts are normal `CompactionArtifact`s and participate in context replay, handoff, and audit.
 - Raw records remain durable.
