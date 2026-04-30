@@ -1,25 +1,16 @@
 import { DEFAULT_POLICY_MODE, MAX_LOOPS } from '../config.js';
 import type { InstructionMessage } from '../instructions/types.js';
-import type { ChatMessage, ModelClient, ModelCompletion } from '../model/types.js';
+import type { ModelClient, ModelCompletion } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { parseModelAction } from '../protocol/actions.js';
+import { createCheckpoint } from '../session/checkpoints.js';
 import { appendRecord, makeId, nowIso, saveSession } from '../session/store.js';
 import type { Session } from '../session/types.js';
 import { createToolRegistry } from '../tools/registry.js';
 import type { ToolResult } from '../tools/types.js';
+import { buildContextMessages } from './context.js';
 import type { RuntimeEventSink } from './events.js';
 import { runHooks, type RuntimeHook } from './hooks.js';
-
-function buildChatMessages(session: Session, instructions: InstructionMessage[]): ChatMessage[] {
-  return [
-    ...instructions.map<ChatMessage>(({ role, content }) => ({ role, content })),
-    ...session.records.map<ChatMessage>((record) =>
-      record.kind === 'tool'
-        ? { role: 'user', content: record.content }
-        : { role: record.role, content: record.content }
-    )
-  ];
-}
 
 export function createRunner({
   model,
@@ -43,6 +34,7 @@ export function createRunner({
         session.lifecycle.status = 'running';
         session.lifecycle.turn += 1;
         session.lifecycle.lastUserInputAt = nowIso();
+        await createCheckpoint(cwd, session, { kind: 'auto' });
         await appendRecord(cwd, session, {
           id: makeId('usr'),
           ts: nowIso(),
@@ -64,7 +56,7 @@ export function createRunner({
           let completion: ModelCompletion;
 
           try {
-            completion = await model.complete(buildChatMessages(session, await instructions(session)), {
+            completion = await model.complete(buildContextMessages(session, await instructions(session)), {
               async onEvent(event) {
                 if (event.type === 'start') {
                   activeProvider = event.provider;
