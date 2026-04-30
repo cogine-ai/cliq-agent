@@ -58,7 +58,8 @@ Auto Compact config lives in workspace config first:
     "reserveTokens": 16000,
     "keepRecentTokens": 20000,
     "minNewTokens": 4000,
-    "maxPerTurn": 1
+    "maxThresholdCompactionsPerTurn": 1,
+    "maxOverflowRetriesPerModelCall": 1
   }
 }
 ```
@@ -75,7 +76,8 @@ export type AutoCompactConfig = {
   reserveTokens?: number;
   keepRecentTokens?: number;
   minNewTokens?: number;
-  maxPerTurn?: number;
+  maxThresholdCompactionsPerTurn?: number;
+  maxOverflowRetriesPerModelCall?: number;
 };
 ```
 
@@ -86,15 +88,27 @@ Defaults:
 - `reserveTokens`: `16000`
 - `keepRecentTokens`: `20000`
 - `minNewTokens`: `4000`
-- `maxPerTurn`: `1`
+- `maxThresholdCompactionsPerTurn`: `1`
+- `maxOverflowRetriesPerModelCall`: `1`
 
 Resolution rules:
 
 - `"off"` disables both threshold auto-compact and overflow recovery auto-compact. Manual `cliq compact create` still works.
 - `"on"` enables threshold checks, but requires a context window from config or model metadata. If no context window is available, Cliq errors during runtime assembly with a clear message.
-- `"auto"` enables threshold checks only when a context window is known. If no context window is known, Cliq silently skips threshold auto-compact and can still use overflow recovery if the provider returns a recognizable context overflow error.
+- `"auto"` enables threshold checks only when a context window is known. If no context window is known, Cliq silently skips threshold auto-compact. Overflow recovery also requires an effective context window from config, model metadata, or provider error metadata; otherwise Cliq reports the overflow without attempting compaction.
 - `contextWindowTokens` from workspace config is the v1 source of truth when present.
 - Future provider model metadata can supply `contextWindowTokens`, but v1 must not depend on a live model catalog.
+
+Validation rules:
+
+- `contextWindowTokens`, when provided, must be a positive integer.
+- `thresholdRatio` must be greater than `0` and less than `1`.
+- `reserveTokens`, `keepRecentTokens`, and `minNewTokens` must be non-negative integers.
+- `maxThresholdCompactionsPerTurn` and `maxOverflowRetriesPerModelCall` must be positive integers.
+- When `contextWindowTokens` is known, `reserveTokens` must be less than `contextWindowTokens`.
+- The computed `usableLimit` must be positive.
+- `keepRecentTokens` must be less than `usableLimit`; otherwise Cliq rejects the config instead of silently keeping an uncompactable tail.
+- If `minNewTokens` is larger than the currently compactable span, Cliq skips threshold compaction for that check. This is a runtime decision, not a config error.
 
 Effective threshold:
 
@@ -134,9 +148,12 @@ export type CompactionArtifact = {
     trigger: 'threshold' | 'overflow';
     phase: 'pre-model' | 'mid-loop';
     estimatedTokensBefore: number;
+    estimatedTokensAfter?: number;
     usableLimitTokens?: number;
     contextWindowTokens?: number;
     keepRecentTokens: number;
+    summaryInputBudgetTokens?: number;
+    overflowRetryAttempt?: number;
     previousCompactionId?: string;
   };
 };
@@ -238,8 +255,14 @@ firstKeptRecordId = records[endIndexExclusive].id
 Split-turn fallback:
 
 - v1 first tries boundary-only selection.
-- If boundary-only selection cannot get under the usable limit because one recent turn is too large, v1 splits inside the oversized turn only at a safe assistant/tool boundary.
-- A safe split point must keep each assistant tool action with its corresponding tool result.
+- If boundary-only selection cannot get under the usable limit because one recent turn is too large, v1 splits inside the oversized turn only at a safe record boundary.
+- A safe split point sets `firstKeptRecordId = records[index].id` and must satisfy one of these shapes:
+  - `records[index].kind === "user"`.
+  - `records[index].kind === "assistant"` and the previous record is not an assistant tool action waiting for its tool result.
+  - `records[index - 1].kind === "tool"`, `records[index].kind` is `"user"` or `"assistant"`, and the assistant action that produced that tool result is inside the summarized prefix.
+- The first kept record must never be a `tool` record.
+- A split point is invalid when `records[index - 1]` is a non-message assistant action whose tool result would fall outside both sides of the split.
+- Because v1 records do not have call ids, assistant/tool matching is positional: a non-message assistant action is paired with the immediately following `tool` record before the next `user` or `assistant` record. If records violate this invariant, split-turn fallback fails safely.
 - When v1 splits a turn, the summary must include a `Turn Prefix Context` section that captures the original user request and earlier work from the split turn.
 - If no safe split exists, auto-compact fails gracefully and reports that the current turn is too large to compact automatically.
 
@@ -253,6 +276,19 @@ The summarizer input is not the normal replay context. It is a purpose-built pro
 - Include the selected raw records to summarize.
 - Do not include regenerated Head messages as content to summarize.
 - Include current date/workspace only as metadata if useful for continuity.
+
+Summarizer input budget:
+
+- Summarization has its own budget and must never assume the selected raw range fits into one model call.
+- `summaryInputBudgetTokens = contextWindowTokens - reserveTokens - promptOverheadTokens`.
+- `promptOverheadTokens` includes the fixed compact prompt, headings, metadata, and output-format instructions as estimated by the same deterministic estimator.
+- If `summaryInputBudgetTokens <= 0`, compaction fails before mutating the session.
+- If the previous summary plus selected raw records fit, v1 makes one summarizer call.
+- If they do not fit, v1 runs iterative chunked summarization from oldest to newest. Each chunk prompt contains the rolling summary plus the next raw-record chunk, and each response replaces the rolling summary using the same headings.
+- Only tool record payloads may be truncated for the summarizer input. The serialized input must keep the tool name, status, exit code or error, and an explicit truncation marker. Raw records on disk are never modified.
+- User records, assistant messages, assistant actions, and previous summaries are not silently truncated.
+- If a single required non-tool record cannot fit, or a tool record cannot fit after tool-payload truncation, compaction fails clearly and leaves the active compaction unchanged.
+- Cliq writes the new compaction artifact only after the final summarizer chunk succeeds.
 
 Default summary headings:
 
@@ -297,7 +333,9 @@ Overflow compaction:
 
 Anti-thrashing:
 
-- `maxPerTurn` defaults to `1`.
+- `maxThresholdCompactionsPerTurn` defaults to `1` and limits only threshold-triggered auto compactions in the current user turn.
+- `maxOverflowRetriesPerModelCall` defaults to `1` and limits only overflow recovery attempts for the current `model.complete` call.
+- Overflow recovery does not consume the threshold compaction budget. A successful overflow compaction suppresses any additional threshold compaction for the same model call because the context has already been rebuilt.
 - Skip threshold compaction when compactable new content is below `minNewTokens`.
 - After any auto compaction, re-estimate context. If still above limit and no safe range can advance, do not loop.
 - Never compact twice for the same overflow error.
@@ -316,7 +354,7 @@ Runtime events are observable but minimal:
 type AutoCompactRuntimeEvent =
   | { type: 'compact-start'; trigger: 'threshold' | 'overflow'; phase: 'pre-model' | 'mid-loop' }
   | { type: 'compact-end'; artifactId: string; estimatedTokensBefore: number; estimatedTokensAfter: number }
-  | { type: 'compact-skip'; reason: 'disabled' | 'unknown-context-window' | 'too-small' | 'min-new-tokens' | 'max-per-turn' }
+  | { type: 'compact-skip'; reason: 'disabled' | 'unknown-context-window' | 'too-small' | 'min-new-tokens' | 'max-threshold-per-turn' | 'max-overflow-retries' }
   | { type: 'compact-error'; trigger: 'threshold' | 'overflow'; message: string };
 ```
 
@@ -358,11 +396,15 @@ Runner must remain orchestration-only. Range selection and summarization logic b
 Unit tests:
 
 - Config parsing accepts `enabled: "auto" | "on" | "off"` and rejects invalid numeric values.
+- Config parsing rejects invalid numeric relationships such as `reserveTokens >= contextWindowTokens`, `thresholdRatio <= 0`, `thresholdRatio >= 1`, and `keepRecentTokens >= usableLimit`.
 - `"auto"` skips threshold checks when context window is unknown.
 - `"on"` errors clearly when context window is unknown.
 - Token estimator is deterministic.
 - Range selection keeps a raw tail, advances over previous active compaction, and avoids splitting tool results from their action context.
-- Split-turn fallback adds turn-prefix context when one recent turn is too large for boundary-only compaction.
+- Split-turn fallback only cuts at formal safe record boundaries, rejects malformed assistant/tool sequences, and adds turn-prefix context when one recent turn is too large for boundary-only compaction.
+- Summary generation uses one call when the selected input fits the summarizer budget.
+- Summary generation chunks oldest-to-newest when selected input exceeds the summarizer budget.
+- Summary generation marks truncated oversized tool records and fails without mutating the active compaction when no summarizer chunk can fit.
 - `minNewTokens` prevents immediate repeated compaction.
 - Existing active compaction is superseded only after new artifact creation succeeds.
 
@@ -373,7 +415,8 @@ Runner tests:
 - Threshold compaction failure warns and continues once.
 - Overflow error triggers one compact-and-retry.
 - Overflow retry failure stops cleanly.
-- `maxPerTurn` prevents repeated compaction loops.
+- `maxThresholdCompactionsPerTurn` prevents repeated threshold compaction loops.
+- `maxOverflowRetriesPerModelCall` prevents repeated overflow retries for the same model call.
 
 Regression tests:
 
@@ -393,7 +436,7 @@ Existing workspace config without `autoCompact` resolves to:
 }
 ```
 
-Because `"auto"` requires a known context window for threshold checks, existing users are not surprised by automatic LLM calls unless they configure `contextWindowTokens` or the selected model has known metadata.
+Because `"auto"` requires a known context window for threshold checks, existing users are not surprised by threshold-triggered automatic LLM calls unless they configure `contextWindowTokens` or the selected model has known metadata. Overflow recovery can still run only when Cliq can derive an effective context window from config, model metadata, or provider error metadata.
 
 ## Deferred Decisions
 
@@ -415,3 +458,4 @@ Because `"auto"` requires a known context window for threshold checks, existing 
 - The runner does not contain range-selection or summary-prompt logic.
 - A failed threshold compaction does not silently corrupt session state.
 - Overflow recovery attempts at most one compact-and-retry per model call.
+- Threshold auto compact obeys `maxThresholdCompactionsPerTurn`; overflow recovery obeys `maxOverflowRetriesPerModelCall` and is not blocked by threshold count.
