@@ -195,3 +195,38 @@ test('maybeAutoCompact chunks summarizer input when selected records exceed summ
     assert.equal(model.calls.length > 1, true);
   });
 });
+
+test('maybeAutoCompact rejects summaries that exceed the summarizer budget', async () => {
+  await withTempSession(async ({ cwd, session }) => {
+    session.records.push(user('u1', 'old '.repeat(100)), assistant('a1', '{"message":"old"}'), user('u2', 'tail'));
+    const model = fakeModel(['oversized summary '.repeat(1000)]);
+
+    const result = await maybeAutoCompact({
+      cwd,
+      session,
+      model: model.client,
+      modelConfig: { provider: 'openrouter', model: 'test-model', baseUrl: 'https://example.test', streaming: 'off' },
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 400,
+        thresholdRatio: 0.8,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1,
+        maxThresholdCompactionsPerTurn: 1,
+        maxOverflowRetriesPerModelCall: 1,
+        usableLimitTokens: 300,
+        contextWindowSource: 'config'
+      },
+      instructions: [],
+      phase: 'pre-model',
+      trigger: 'threshold',
+      state: { thresholdCompactionsThisTurn: 0, thresholdSuppressed: false },
+      estimateOverrideTokens: 350
+    });
+
+    assert.equal(result.status, 'error');
+    assert.match(result.status === 'error' ? result.error.message : '', /summarizer.*budget/i);
+    assert.equal(session.compactions.length, 0);
+  });
+});

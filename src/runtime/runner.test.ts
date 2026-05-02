@@ -490,6 +490,53 @@ test('runner auto compacts before model call when threshold is exceeded', async 
   assert.equal(firstCallMessages.some((message) => message.content.includes('COMPACTED SESSION SUMMARY')), true);
 });
 
+test('runner treats auto compact off as a hard disable without compact events', async () => {
+  const session = await createTempSession();
+  session.records.push(
+    { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
+    { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
+  );
+  const events: string[] = [];
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        assert.equal(
+          messages.some((message) => message.content.includes('Records to summarize')),
+          false
+        );
+        return completion('{"message":"done"}');
+      }
+    },
+    onEvent(event) {
+      events.push(event.type);
+    },
+    autoCompact: {
+      config: {
+        enabled: 'off',
+        contextWindowTokens: 700,
+        thresholdRatio: 0.35,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openrouter',
+        model: 'anthropic/claude-sonnet-4.6',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    }
+  });
+
+  const final = await runner.runTurn(session, 'new request');
+
+  assert.equal(final, 'done');
+  assert.equal(session.compactions.length, 0);
+  assert.equal(events.includes('compact-start'), false);
+  assert.equal(events.includes('compact-skip'), false);
+});
+
 test('runner retries once after recognized context overflow and successful compaction', async () => {
   const session = await createTempSession();
   session.records.push(

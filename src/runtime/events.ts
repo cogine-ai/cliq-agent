@@ -1,4 +1,5 @@
 import type { ProviderName } from '../model/types.js';
+import type { AutoCompactSkipReason } from '../session/auto-compaction.js';
 
 export type RuntimeEvent =
   | { type: 'model-start'; provider: ProviderName; model: string; streaming: boolean }
@@ -6,7 +7,7 @@ export type RuntimeEvent =
   | { type: 'model-end'; provider: ProviderName; model: string }
   | { type: 'compact-start'; trigger: 'threshold' | 'overflow'; phase: 'pre-model' | 'mid-loop' }
   | { type: 'compact-end'; artifactId: string; estimatedTokensBefore: number; estimatedTokensAfter: number }
-  | { type: 'compact-skip'; reason: string }
+  | { type: 'compact-skip'; reason: AutoCompactSkipReason }
   | { type: 'compact-error'; trigger: 'threshold' | 'overflow'; message: string }
   | { type: 'tool-start'; tool: string; preview?: string }
   | { type: 'tool-end'; tool: string; status: 'ok' | 'error' }

@@ -24,8 +24,17 @@ export type AutoCompactState = {
   thresholdSuppressed: boolean;
 };
 
+export type AutoCompactSkipReason =
+  | 'disabled'
+  | 'unknown-context-window'
+  | 'threshold-suppressed'
+  | 'max-threshold-per-turn'
+  | 'too-small'
+  | 'no-safe-range'
+  | 'max-overflow-retries';
+
 export type AutoCompactResult =
-  | { status: 'disabled' | 'skipped'; reason: string }
+  | { status: 'disabled' | 'skipped'; reason: AutoCompactSkipReason }
   | { status: 'compacted'; artifact: CompactionArtifact; estimatedTokensBefore: number; estimatedTokensAfter: number }
   | { status: 'error'; error: Error };
 
@@ -267,6 +276,9 @@ async function summarizeChunks({
     rollingSummary = completion.content.trim();
     if (!rollingSummary) {
       throw new Error('compact summarizer returned an empty summary');
+    }
+    if (estimateTextTokens(rollingSummary) > summaryInputBudgetTokens) {
+      throw new Error('compact summarizer output exceeds input budget');
     }
     index += consumed;
   }

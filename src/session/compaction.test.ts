@@ -139,8 +139,12 @@ test('createCompaction persists optional auto metadata', async () => {
         }
       });
 
+      const persisted = await ensureSession(cwd);
+
       assert.equal(artifact.auto?.trigger, 'threshold');
       assert.equal(session.compactions[0]?.auto?.contextWindowSource, 'config');
+      assert.equal(persisted.compactions[0]?.auto?.trigger, 'threshold');
+      assert.equal(persisted.compactions[0]?.auto?.contextWindowSource, 'config');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

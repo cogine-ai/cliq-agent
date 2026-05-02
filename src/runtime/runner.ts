@@ -153,6 +153,10 @@ export function createRunner({
             overflowContextWindowTokens
           });
 
+          if (resolvedAutoCompact.enabled === 'off') {
+            return null;
+          }
+
           await onEvent({ type: 'compact-start', trigger, phase });
           const compactResult = await maybeAutoCompact({
             cwd,
