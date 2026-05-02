@@ -1,5 +1,7 @@
-import type { ChatMessage } from '../model/types.js';
-import type { Session, SessionRecord } from './types.js';
+import type { ChatMessage, ModelClient, ResolvedModelConfig } from '../model/types.js';
+import type { ResolvedAutoCompactConfig } from './auto-compact-config.js';
+import { createCompaction } from './compaction.js';
+import type { CompactionArtifact, Session, SessionRecord } from './types.js';
 
 const TOKEN_MESSAGE_OVERHEAD = 4;
 
@@ -16,6 +18,29 @@ export type AutoCompactRange = {
   compactableNewTokens: number;
   splitTurnPrefix: boolean;
 };
+
+export type AutoCompactState = {
+  thresholdCompactionsThisTurn: number;
+  thresholdSuppressed: boolean;
+};
+
+export type AutoCompactResult =
+  | { status: 'disabled' | 'skipped'; reason: string }
+  | { status: 'compacted'; artifact: CompactionArtifact; estimatedTokensBefore: number; estimatedTokensAfter: number }
+  | { status: 'error'; error: Error };
+
+const SUMMARY_PROMPT = `You are compacting a local agent session.
+
+Write a durable markdown summary with these headings:
+## Objective
+## Current State
+## Decisions And Constraints
+## Relevant Artifacts
+## Validation
+## Open Questions And Risks
+## Next Steps
+
+Preserve exact paths, commands, identifiers, constraints, and errors. Mark absent sections as (none).`;
 
 export function estimateTextTokens(text: string) {
   return Math.ceil(text.length / 4);
@@ -161,4 +186,202 @@ export function serializeRecordForSummary(record: SessionRecord, maxToolPayloadC
   return [`<record id="${record.id}" kind="${record.kind}" role="${record.role}">`, record.content, '</record>'].join(
     '\n'
   );
+}
+
+function buildSummaryMessages(input: string): ChatMessage[] {
+  return [
+    { role: 'system', content: SUMMARY_PROMPT },
+    { role: 'user', content: input }
+  ];
+}
+
+function summaryInputBudget(config: ResolvedAutoCompactConfig) {
+  if (config.contextWindowTokens === null) {
+    return null;
+  }
+
+  const promptOverheadTokens = estimateMessagesTokens(buildSummaryMessages('')).tokens;
+  return config.contextWindowTokens - config.reserveTokens - promptOverheadTokens;
+}
+
+function buildSummarizerInput({
+  rollingSummary,
+  chunk
+}: {
+  rollingSummary: string;
+  chunk: string;
+}) {
+  return [
+    rollingSummary ? `Previous summary:\n${rollingSummary}` : '',
+    `Records to summarize:\n${chunk}`
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function fitsSummarizerBudget(input: string, totalBudgetTokens: number) {
+  return estimateMessagesTokens(buildSummaryMessages(input)).tokens <= totalBudgetTokens;
+}
+
+async function summarizeChunks({
+  model,
+  previousSummary,
+  serializedRecords,
+  summaryInputBudgetTokens,
+  totalBudgetTokens
+}: {
+  model: ModelClient;
+  previousSummary?: string;
+  serializedRecords: string[];
+  summaryInputBudgetTokens: number;
+  totalBudgetTokens: number;
+}) {
+  let rollingSummary = previousSummary ?? '';
+  let index = 0;
+
+  while (index < serializedRecords.length) {
+    let chunk = '';
+    let consumed = 0;
+
+    while (index + consumed < serializedRecords.length) {
+      const next = serializedRecords[index + consumed]!;
+      const candidateChunk = chunk ? `${chunk}\n\n${next}` : next;
+      const candidateInput = buildSummarizerInput({ rollingSummary, chunk: candidateChunk });
+      if (!fitsSummarizerBudget(candidateInput, totalBudgetTokens)) {
+        break;
+      }
+      chunk = candidateChunk;
+      consumed += 1;
+    }
+
+    if (consumed === 0) {
+      const singleRecordTokens = estimateTextTokens(serializedRecords[index]!);
+      if (singleRecordTokens > summaryInputBudgetTokens) {
+        throw new Error('single compact summary input record exceeds summarizer budget');
+      }
+      throw new Error('compact summarizer chunk exceeds input budget');
+    }
+
+    const input = buildSummarizerInput({ rollingSummary, chunk });
+    const completion = await model.complete(buildSummaryMessages(input));
+    rollingSummary = completion.content.trim();
+    if (!rollingSummary) {
+      throw new Error('compact summarizer returned an empty summary');
+    }
+    index += consumed;
+  }
+
+  return rollingSummary;
+}
+
+function recordRole(record: SessionRecord): ChatMessage['role'] {
+  return record.kind === 'assistant' ? 'assistant' : 'user';
+}
+
+export async function maybeAutoCompact({
+  cwd,
+  session,
+  model,
+  modelConfig,
+  config,
+  instructions,
+  phase,
+  trigger,
+  state,
+  estimateOverrideTokens
+}: {
+  cwd: string;
+  session: Session;
+  model: ModelClient;
+  modelConfig: ResolvedModelConfig;
+  config: ResolvedAutoCompactConfig;
+  instructions: ChatMessage[];
+  phase: 'pre-model' | 'mid-loop';
+  trigger: 'threshold' | 'overflow';
+  state: AutoCompactState;
+  estimateOverrideTokens?: number;
+}): Promise<AutoCompactResult> {
+  if (config.enabled === 'off') {
+    return { status: 'disabled', reason: 'disabled' };
+  }
+  if (config.contextWindowTokens === null || config.usableLimitTokens === null) {
+    return { status: 'skipped', reason: 'unknown-context-window' };
+  }
+  if (trigger === 'threshold' && state.thresholdSuppressed) {
+    return { status: 'skipped', reason: 'threshold-suppressed' };
+  }
+  if (trigger === 'threshold' && state.thresholdCompactionsThisTurn >= config.maxThresholdCompactionsPerTurn) {
+    return { status: 'skipped', reason: 'max-threshold-per-turn' };
+  }
+
+  const estimatedTokensBefore =
+    estimateOverrideTokens ??
+    estimateMessagesTokens([
+      ...instructions,
+      ...session.records.map((record) => ({ role: recordRole(record), content: record.content }))
+    ]).tokens;
+
+  if (trigger === 'threshold' && estimatedTokensBefore < config.usableLimitTokens) {
+    return { status: 'skipped', reason: 'too-small' };
+  }
+
+  const range = selectAutoCompactRange({
+    session,
+    keepRecentTokens: config.keepRecentTokens,
+    minNewTokens: config.minNewTokens
+  });
+  if (!range) {
+    return { status: 'skipped', reason: 'no-safe-range' };
+  }
+
+  const inputBudget = summaryInputBudget(config);
+  if (inputBudget === null || inputBudget <= 0) {
+    return { status: 'error', error: new Error('compact summarizer input budget is not positive') };
+  }
+
+  try {
+    const previous = range.previousCompactionId
+      ? session.compactions.find((artifact) => artifact.id === range.previousCompactionId)
+      : undefined;
+    const startIndex = previous?.coveredRange.endIndexExclusive ?? 0;
+    const records = session.records.slice(startIndex, range.endIndexExclusive);
+    const serializedRecords = records.map((record) => serializeRecordForSummary(record, Math.floor(inputBudget * 4)));
+    const totalBudgetTokens = config.contextWindowTokens - config.reserveTokens;
+    const summaryMarkdown = await summarizeChunks({
+      model,
+      previousSummary: previous?.summaryMarkdown,
+      serializedRecords,
+      summaryInputBudgetTokens: inputBudget,
+      totalBudgetTokens
+    });
+    const estimatedTokensAfter =
+      estimateRecordsTokens(session.records.slice(range.endIndexExclusive)) + estimateTextTokens(summaryMarkdown);
+    const artifact = await createCompaction(cwd, session, {
+      endIndexExclusive: range.endIndexExclusive,
+      summaryMarkdown,
+      createdBy: {
+        provider: modelConfig.provider,
+        model: modelConfig.model
+      },
+      auto: {
+        trigger,
+        phase,
+        estimatedTokensBefore,
+        estimatedTokensAfter,
+        usableLimitTokens: config.usableLimitTokens,
+        contextWindowTokens: config.contextWindowTokens,
+        contextWindowSource: config.contextWindowSource ?? undefined,
+        keepRecentTokens: config.keepRecentTokens,
+        summaryInputBudgetTokens: inputBudget,
+        previousCompactionId: range.previousCompactionId
+      }
+    });
+
+    if (trigger === 'threshold') {
+      state.thresholdCompactionsThisTurn += 1;
+    }
+    return { status: 'compacted', artifact, estimatedTokensBefore, estimatedTokensAfter };
+  } catch (error) {
+    return { status: 'error', error: error instanceof Error ? error : new Error(String(error)) };
+  }
 }

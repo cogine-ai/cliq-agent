@@ -8,6 +8,7 @@ import { createSession } from './store.js';
 import {
   estimateMessagesTokens,
   estimateRecordTokens,
+  maybeAutoCompact,
   selectAutoCompactRange,
   serializeRecordForSummary
 } from './auto-compaction.js';
@@ -99,4 +100,98 @@ test('serializeRecordForSummary includes tool metadata', () => {
   assert.match(serialized, /tool=bash/);
   assert.match(serialized, /status=ok/);
   assert.match(serialized, /TOOL_RESULT bash OK/);
+});
+
+function fakeModel(outputs: string[]) {
+  const calls: Array<{ role: string; content: string }[]> = [];
+  return {
+    calls,
+    client: {
+      async complete(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>) {
+        calls.push(messages);
+        return {
+          content: outputs.shift() ?? '## Objective\nGenerated summary',
+          provider: 'openrouter' as const,
+          model: 'test-model'
+        };
+      }
+    }
+  };
+}
+
+test('maybeAutoCompact writes an active artifact when threshold is exceeded', async () => {
+  await withTempSession(async ({ cwd, session }) => {
+    session.records.push(
+      user('u1', 'old '.repeat(100)),
+      assistant('a1', '{"message":"old"}'),
+      user('u2', 'tail')
+    );
+    const model = fakeModel(['## Objective\nSummarized old context']);
+
+    const result = await maybeAutoCompact({
+      cwd,
+      session,
+      model: model.client,
+      modelConfig: { provider: 'openrouter', model: 'test-model', baseUrl: 'https://example.test', streaming: 'off' },
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 400,
+        thresholdRatio: 0.8,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1,
+        maxThresholdCompactionsPerTurn: 1,
+        maxOverflowRetriesPerModelCall: 1,
+        usableLimitTokens: 300,
+        contextWindowSource: 'config'
+      },
+      instructions: [],
+      phase: 'pre-model',
+      trigger: 'threshold',
+      state: { thresholdCompactionsThisTurn: 0, thresholdSuppressed: false },
+      estimateOverrideTokens: 350
+    });
+
+    assert.equal(result.status, 'compacted');
+    assert.equal(session.compactions[0]?.status, 'active');
+    assert.match(session.compactions[0]?.summaryMarkdown ?? '', /Summarized old context/);
+  });
+});
+
+test('maybeAutoCompact chunks summarizer input when selected records exceed summary budget', async () => {
+  await withTempSession(async ({ cwd, session }) => {
+    session.records.push(
+      user('u1', 'old '.repeat(240)),
+      user('u2', 'older '.repeat(240)),
+      user('u3', 'tail')
+    );
+    const model = fakeModel(['## Objective\nChunk 1 summary', '## Objective\nChunk 2 summary']);
+
+    const result = await maybeAutoCompact({
+      cwd,
+      session,
+      model: model.client,
+      modelConfig: { provider: 'openrouter', model: 'test-model', baseUrl: 'https://example.test', streaming: 'off' },
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 900,
+        thresholdRatio: 0.8,
+        reserveTokens: 300,
+        keepRecentTokens: 1,
+        minNewTokens: 1,
+        maxThresholdCompactionsPerTurn: 1,
+        maxOverflowRetriesPerModelCall: 1,
+        usableLimitTokens: 600,
+        contextWindowSource: 'config'
+      },
+      instructions: [],
+      phase: 'pre-model',
+      trigger: 'threshold',
+      state: { thresholdCompactionsThisTurn: 0, thresholdSuppressed: false },
+      estimateOverrideTokens: 800
+    });
+
+    assert.equal(result.status, 'compacted');
+    assert.equal(model.calls.length > 1, true);
+  });
 });
