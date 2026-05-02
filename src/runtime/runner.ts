@@ -7,6 +7,7 @@ import { createCheckpoint } from '../session/checkpoints.js';
 import { appendRecord, makeId, nowIso, saveSession } from '../session/store.js';
 import type { Session } from '../session/types.js';
 import { createToolRegistry } from '../tools/registry.js';
+import { normalizeToolResultForStorage } from '../tools/results.js';
 import type { ToolResult } from '../tools/types.js';
 import { buildContextMessages } from './context.js';
 import type { RuntimeEventSink } from './events.js';
@@ -190,18 +191,19 @@ export function createRunner({
             throw new Error(`No tool result produced for ${definition.name}`);
           }
 
+          const storedResult = normalizeToolResultForStorage(result);
           await appendRecord(cwd, session, {
             id: makeId('tool'),
             ts: nowIso(),
             kind: 'tool',
             role: 'user',
-            tool: result.tool,
-            status: result.status,
-            content: result.content,
-            meta: result.meta
+            tool: storedResult.tool,
+            status: storedResult.status,
+            content: storedResult.content,
+            meta: storedResult.meta
           });
-          await runHooks(hooks, 'afterTool', session, result);
-          await onEvent({ type: 'tool-end', tool: result.tool, status: result.status });
+          await runHooks(hooks, 'afterTool', session, storedResult);
+          await onEvent({ type: 'tool-end', tool: storedResult.tool, status: storedResult.status });
         }
 
         throw new Error('Exceeded action loop limit');

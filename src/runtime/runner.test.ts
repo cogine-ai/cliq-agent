@@ -152,6 +152,49 @@ test('runner appends tool results and replays them back to the model', async () 
   );
 });
 
+test('runner caps stored tool result content before appending tool record', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"huge"}' : '{"message":"done"}');
+      }
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              return {
+                tool: 'bash',
+                status: 'ok' as const,
+                content: `TOOL_RESULT bash OK\n${'x'.repeat(20_000)}`,
+                meta: { exit: 0 }
+              };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'run huge output');
+  const toolRecord = session.records.find((record) => record.kind === 'tool');
+
+  assert.equal(toolRecord?.kind, 'tool');
+  assert.match(toolRecord?.content ?? '', /cliq truncated tool result/i);
+  assert.equal(toolRecord?.meta?.truncated, true);
+});
+
 test('runner prepends composed instruction messages before replayed session records', async () => {
   const session = await createTempSession();
   let seenMessages: Array<{ role: string; content: string }> = [];
