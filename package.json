@@ -1,6 +1,6 @@
 {
   "name": "@cogineai/cliq",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Tiny local coding agent harness with a provider-agnostic JSON action protocol.",
   "private": false,
   "type": "module",
