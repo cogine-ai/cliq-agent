@@ -770,6 +770,10 @@ function createCliEventSink() {
       process.stdout.write('.');
     } else if (event.type === 'model-end') {
       process.stdout.write('\n');
+    } else if (event.type === 'compact-end') {
+      process.stderr.write(`[compact] created ${event.artifactId}\n`);
+    } else if (event.type === 'compact-error') {
+      process.stderr.write(`[compact ${event.trigger} error] ${event.message}\n`);
     } else if (event.type === 'error') {
       process.stderr.write(`[${event.stage} error] ${event.message}\n`);
     }
@@ -986,6 +990,10 @@ export async function runCli(argv: string[]) {
       hooks: [...assembly.hooks, ...createCliHooks()],
       policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool() }),
       instructions: assembly.instructions,
+      autoCompact: {
+        config: assembly.workspaceConfig.autoCompact,
+        modelConfig
+      },
       async onEvent(event) {
         if (event.type === 'error') {
           turnSawRuntimeError = true;
@@ -1016,6 +1024,10 @@ export async function runCli(argv: string[]) {
     hooks: [...assembly.hooks, ...createCliHooks()],
     policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool(rl) }),
     instructions: assembly.instructions,
+    autoCompact: {
+      config: assembly.workspaceConfig.autoCompact,
+      modelConfig
+    },
     async onEvent(event) {
       if (event.type === 'error') {
         turnSawRuntimeError = true;

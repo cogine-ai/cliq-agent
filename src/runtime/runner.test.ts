@@ -447,3 +447,91 @@ test('runner emits model lifecycle events without raw deltas', async () => {
   assert.deepEqual(events.map((event) => event.type), ['model-start', 'model-progress', 'model-progress', 'model-end', 'final']);
   assert.equal(events.some((event) => event.message?.includes('{"message"')), false);
 });
+
+test('runner auto compacts before model call when threshold is exceeded', async () => {
+  const session = await createTempSession();
+  session.records.push(
+    { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
+    { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
+  );
+  let firstCallMessages: Array<{ role: string; content: string }> = [];
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+          return completion('## Objective\nSummarized');
+        }
+        firstCallMessages = messages;
+        return completion('{"message":"done"}');
+      }
+    },
+    autoCompact: {
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 700,
+        thresholdRatio: 0.35,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openrouter',
+        model: 'anthropic/claude-sonnet-4.6',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'new request');
+
+  assert.equal(session.compactions.length, 1);
+  assert.equal(firstCallMessages.some((message) => message.content.includes('COMPACTED SESSION SUMMARY')), true);
+});
+
+test('runner retries once after recognized context overflow and successful compaction', async () => {
+  const session = await createTempSession();
+  session.records.push(
+    { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
+    { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
+  );
+  let normalCalls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+          return completion('## Objective\nSummarized');
+        }
+        normalCalls += 1;
+        if (normalCalls === 1) {
+          throw new Error('context length exceeded, maximum context window is 700 tokens');
+        }
+        return completion('{"message":"done"}');
+      }
+    },
+    autoCompact: {
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 700,
+        thresholdRatio: 0.99,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openrouter',
+        model: 'anthropic/claude-sonnet-4.6',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    }
+  });
+
+  const final = await runner.runTurn(session, 'new request');
+
+  assert.equal(final, 'done');
+  assert.equal(normalCalls, 2);
+  assert.equal(session.compactions.length, 1);
+});

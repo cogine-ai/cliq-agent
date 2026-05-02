@@ -1,8 +1,12 @@
 import { DEFAULT_POLICY_MODE, MAX_LOOPS } from '../config.js';
 import type { InstructionMessage } from '../instructions/types.js';
-import type { ModelClient, ModelCompletion } from '../model/types.js';
+import { classifyContextOverflow } from '../model/errors.js';
+import { findKnownModelDescriptor } from '../model/registry.js';
+import type { ChatMessage, ModelClient, ModelCompletion, ResolvedModelConfig } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { parseModelAction } from '../protocol/actions.js';
+import { resolveAutoCompactConfig, type AutoCompactConfig } from '../session/auto-compact-config.js';
+import { maybeAutoCompact, type AutoCompactState } from '../session/auto-compaction.js';
 import { createCheckpoint } from '../session/checkpoints.js';
 import { appendRecord, makeId, nowIso, saveSession } from '../session/store.js';
 import type { Session } from '../session/types.js';
@@ -13,13 +17,23 @@ import { buildContextMessages } from './context.js';
 import type { RuntimeEventSink } from './events.js';
 import { runHooks, type RuntimeHook } from './hooks.js';
 
+type AutoCompactRunnerOptions = {
+  config: AutoCompactConfig;
+  modelConfig: ResolvedModelConfig;
+};
+
+type ModelAttemptResult =
+  | { ok: true; completion: ModelCompletion }
+  | { ok: false; error: unknown; sawModelError: boolean };
+
 export function createRunner({
   model,
   registry = createToolRegistry(),
   hooks = [],
   policy = createPolicyEngine({ mode: DEFAULT_POLICY_MODE }),
   instructions = async () => [],
-  onEvent = async () => undefined
+  onEvent = async () => undefined,
+  autoCompact
 }: {
   model: ModelClient;
   registry?: ReturnType<typeof createToolRegistry>;
@@ -27,6 +41,7 @@ export function createRunner({
   policy?: ReturnType<typeof createPolicyEngine>;
   instructions?: (session: Session) => Promise<InstructionMessage[]>;
   onEvent?: RuntimeEventSink;
+  autoCompact?: AutoCompactRunnerOptions;
 }) {
   return {
     async runTurn(session: Session, userInput: string): Promise<string> {
@@ -46,7 +61,20 @@ export function createRunner({
 
         await runHooks(hooks, 'beforeTurn', session, userInput);
 
-        for (let i = 0; i < MAX_LOOPS; i += 1) {
+        const autoCompactState: AutoCompactState = {
+          thresholdCompactionsThisTurn: 0,
+          thresholdSuppressed: false
+        };
+
+        const emitModelError = async (error: unknown) => {
+          await onEvent({
+            type: 'error',
+            stage: 'model',
+            message: error instanceof Error ? error.message : String(error)
+          });
+        };
+
+        const completeModel = async (currentInstructions: InstructionMessage[]): Promise<ModelAttemptResult> => {
           let chunks = 0;
           let chars = 0;
           let activeProvider: ModelCompletion['provider'] | null = null;
@@ -54,10 +82,9 @@ export function createRunner({
           let sawModelStart = false;
           let sawModelEnd = false;
           let sawModelError = false;
-          let completion: ModelCompletion;
 
           try {
-            completion = await model.complete(buildContextMessages(session, await instructions(session)), {
+            const completion = await model.complete(buildContextMessages(session, currentInstructions), {
               async onEvent(event) {
                 if (event.type === 'start') {
                   activeProvider = event.provider;
@@ -84,29 +111,135 @@ export function createRunner({
                 }
               }
             });
-          } catch (error) {
-            if (!sawModelError) {
+
+            if (!sawModelStart) {
               await onEvent({
-                type: 'error',
-                stage: 'model',
-                message: error instanceof Error ? error.message : String(error)
+                type: 'model-start',
+                provider: completion.provider,
+                model: completion.model,
+                streaming: false
               });
             }
-            throw error;
+
+            if (!sawModelEnd) {
+              await onEvent({ type: 'model-end', provider: completion.provider, model: completion.model });
+            }
+
+            return { ok: true, completion };
+          } catch (error) {
+            return { ok: false, error, sawModelError };
+          }
+        };
+
+        const runAutoCompact = async ({
+          trigger,
+          phase,
+          currentInstructions,
+          overflowContextWindowTokens
+        }: {
+          trigger: 'threshold' | 'overflow';
+          phase: 'pre-model' | 'mid-loop';
+          currentInstructions: ChatMessage[];
+          overflowContextWindowTokens?: number;
+        }) => {
+          if (!autoCompact) {
+            return null;
           }
 
-          if (!sawModelStart) {
+          const descriptor = findKnownModelDescriptor(autoCompact.modelConfig.provider, autoCompact.modelConfig.model);
+          const resolvedAutoCompact = resolveAutoCompactConfig({
+            config: autoCompact.config,
+            modelContextWindowTokens: descriptor?.capabilities.contextWindow,
+            overflowContextWindowTokens
+          });
+
+          await onEvent({ type: 'compact-start', trigger, phase });
+          const compactResult = await maybeAutoCompact({
+            cwd,
+            session,
+            model,
+            modelConfig: autoCompact.modelConfig,
+            config: resolvedAutoCompact,
+            instructions: currentInstructions,
+            phase,
+            trigger,
+            state: autoCompactState
+          });
+
+          if (compactResult.status === 'compacted') {
             await onEvent({
-              type: 'model-start',
-              provider: completion.provider,
-              model: completion.model,
-              streaming: false
+              type: 'compact-end',
+              artifactId: compactResult.artifact.id,
+              estimatedTokensBefore: compactResult.estimatedTokensBefore,
+              estimatedTokensAfter: compactResult.estimatedTokensAfter
             });
+          } else if (compactResult.status === 'error') {
+            if (trigger === 'threshold') {
+              autoCompactState.thresholdSuppressed = true;
+            }
+            await onEvent({ type: 'compact-error', trigger, message: compactResult.error.message });
+          } else {
+            await onEvent({ type: 'compact-skip', reason: compactResult.reason });
           }
 
-          if (!sawModelEnd) {
-            await onEvent({ type: 'model-end', provider: completion.provider, model: completion.model });
+          return compactResult;
+        };
+
+        for (let i = 0; i < MAX_LOOPS; i += 1) {
+          let completion: ModelCompletion;
+          let currentInstructions = await instructions(session);
+          const phase = i === 0 ? 'pre-model' : 'mid-loop';
+
+          const thresholdResult = await runAutoCompact({ trigger: 'threshold', phase, currentInstructions });
+          if (thresholdResult?.status === 'compacted') {
+            currentInstructions = await instructions(session);
           }
+
+          let modelAttempt = await completeModel(currentInstructions);
+          let overflowRetries = 0;
+          while (!modelAttempt.ok) {
+            const overflow = classifyContextOverflow(modelAttempt.error);
+            const resolvedOverflowLimit =
+              autoCompact && overflow
+                ? resolveAutoCompactConfig({
+                    config: autoCompact.config,
+                    modelContextWindowTokens: findKnownModelDescriptor(
+                      autoCompact.modelConfig.provider,
+                      autoCompact.modelConfig.model
+                    )?.capabilities.contextWindow,
+                    overflowContextWindowTokens: overflow.contextWindowTokens
+                  }).maxOverflowRetriesPerModelCall
+                : 0;
+
+            if (!overflow || !autoCompact || overflowRetries >= resolvedOverflowLimit) {
+              if (overflow && autoCompact && overflowRetries >= resolvedOverflowLimit) {
+                await onEvent({ type: 'compact-skip', reason: 'max-overflow-retries' });
+              }
+              if (!modelAttempt.sawModelError) {
+                await emitModelError(modelAttempt.error);
+              }
+              throw modelAttempt.error;
+            }
+
+            const overflowInstructions = await instructions(session);
+            const overflowResult = await runAutoCompact({
+              trigger: 'overflow',
+              phase,
+              currentInstructions: overflowInstructions,
+              overflowContextWindowTokens: overflow.contextWindowTokens
+            });
+            if (overflowResult?.status !== 'compacted') {
+              if (!modelAttempt.sawModelError) {
+                await emitModelError(modelAttempt.error);
+              }
+              throw modelAttempt.error;
+            }
+
+            overflowRetries += 1;
+            const retryInstructions = await instructions(session);
+            modelAttempt = await completeModel(retryInstructions);
+          }
+          completion = modelAttempt.completion;
 
           const rawContent = completion.content;
           let action;

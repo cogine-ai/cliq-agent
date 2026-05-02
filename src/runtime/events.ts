@@ -4,6 +4,10 @@ export type RuntimeEvent =
   | { type: 'model-start'; provider: ProviderName; model: string; streaming: boolean }
   | { type: 'model-progress'; chunks: number; chars: number }
   | { type: 'model-end'; provider: ProviderName; model: string }
+  | { type: 'compact-start'; trigger: 'threshold' | 'overflow'; phase: 'pre-model' | 'mid-loop' }
+  | { type: 'compact-end'; artifactId: string; estimatedTokensBefore: number; estimatedTokensAfter: number }
+  | { type: 'compact-skip'; reason: string }
+  | { type: 'compact-error'; trigger: 'threshold' | 'overflow'; message: string }
   | { type: 'tool-start'; tool: string; preview?: string }
   | { type: 'tool-end'; tool: string; status: 'ok' | 'error' }
   | { type: 'final'; message: string }
