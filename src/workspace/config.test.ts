@@ -15,7 +15,8 @@ test('loadWorkspaceConfig returns empty defaults when config is missing', async 
     assert.deepEqual(await loadWorkspaceConfig(cwd), {
       instructionFiles: [],
       extensions: [],
-      defaultSkills: []
+      defaultSkills: [],
+      autoCompact: {}
     });
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -83,6 +84,7 @@ test('loadWorkspaceConfig reads model config', async () => {
       instructionFiles: [],
       extensions: [],
       defaultSkills: [],
+      autoCompact: {},
       model: {
         provider: 'ollama',
         model: 'qwen3:14b',
@@ -107,6 +109,42 @@ test('loadWorkspaceConfig validates model config shape', async () => {
 
     await writeFile(path.join(cwd, '.cliq', 'config.json'), JSON.stringify({ model: { streaming: 'bad' } }), 'utf8');
     await assert.rejects(() => loadWorkspaceConfig(cwd), /model.streaming must be one of/i);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('loadWorkspaceConfig reads autoCompact config', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-workspace-auto-compact-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify({
+        autoCompact: {
+          enabled: 'on',
+          contextWindowTokens: 128000,
+          thresholdRatio: 0.75,
+          reserveTokens: 12000,
+          keepRecentTokens: 16000,
+          minNewTokens: 3000,
+          maxThresholdCompactionsPerTurn: 2,
+          maxOverflowRetriesPerModelCall: 1
+        }
+      }),
+      'utf8'
+    );
+
+    assert.deepEqual((await loadWorkspaceConfig(cwd)).autoCompact, {
+      enabled: 'on',
+      contextWindowTokens: 128000,
+      thresholdRatio: 0.75,
+      reserveTokens: 12000,
+      keepRecentTokens: 16000,
+      minNewTokens: 3000,
+      maxThresholdCompactionsPerTurn: 2,
+      maxOverflowRetriesPerModelCall: 1
+    });
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

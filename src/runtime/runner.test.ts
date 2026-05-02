@@ -152,6 +152,49 @@ test('runner appends tool results and replays them back to the model', async () 
   );
 });
 
+test('runner caps stored tool result content before appending tool record', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"huge"}' : '{"message":"done"}');
+      }
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              return {
+                tool: 'bash',
+                status: 'ok' as const,
+                content: `TOOL_RESULT bash OK\n${'x'.repeat(20_000)}`,
+                meta: { exit: 0 }
+              };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'run huge output');
+  const toolRecord = session.records.find((record) => record.kind === 'tool');
+
+  assert.equal(toolRecord?.kind, 'tool');
+  assert.match(toolRecord?.content ?? '', /cliq truncated tool result/i);
+  assert.equal(toolRecord?.meta?.truncated, true);
+});
+
 test('runner prepends composed instruction messages before replayed session records', async () => {
   const session = await createTempSession();
   let seenMessages: Array<{ role: string; content: string }> = [];
@@ -403,4 +446,139 @@ test('runner emits model lifecycle events without raw deltas', async () => {
   assert.equal(finalMessage, 'done');
   assert.deepEqual(events.map((event) => event.type), ['model-start', 'model-progress', 'model-progress', 'model-end', 'final']);
   assert.equal(events.some((event) => event.message?.includes('{"message"')), false);
+});
+
+test('runner auto compacts before model call when threshold is exceeded', async () => {
+  const session = await createTempSession();
+  session.records.push(
+    { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
+    { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
+  );
+  let firstCallMessages: Array<{ role: string; content: string }> = [];
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+          return completion('## Objective\nSummarized');
+        }
+        firstCallMessages = messages;
+        return completion('{"message":"done"}');
+      }
+    },
+    autoCompact: {
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 700,
+        thresholdRatio: 0.35,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openrouter',
+        model: 'anthropic/claude-sonnet-4.6',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'new request');
+
+  assert.equal(session.compactions.length, 1);
+  assert.equal(firstCallMessages.some((message) => message.content.includes('COMPACTED SESSION SUMMARY')), true);
+});
+
+test('runner treats auto compact off as a hard disable without compact events', async () => {
+  const session = await createTempSession();
+  session.records.push(
+    { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
+    { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
+  );
+  const events: string[] = [];
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        assert.equal(
+          messages.some((message) => message.content.includes('Records to summarize')),
+          false
+        );
+        return completion('{"message":"done"}');
+      }
+    },
+    onEvent(event) {
+      events.push(event.type);
+    },
+    autoCompact: {
+      config: {
+        enabled: 'off',
+        contextWindowTokens: 700,
+        thresholdRatio: 0.35,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openrouter',
+        model: 'anthropic/claude-sonnet-4.6',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    }
+  });
+
+  const final = await runner.runTurn(session, 'new request');
+
+  assert.equal(final, 'done');
+  assert.equal(session.compactions.length, 0);
+  assert.equal(events.includes('compact-start'), false);
+  assert.equal(events.includes('compact-skip'), false);
+});
+
+test('runner retries once after recognized context overflow and successful compaction', async () => {
+  const session = await createTempSession();
+  session.records.push(
+    { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
+    { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
+  );
+  let normalCalls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+          return completion('## Objective\nSummarized');
+        }
+        normalCalls += 1;
+        if (normalCalls === 1) {
+          throw new Error('context length exceeded, maximum context window is 700 tokens');
+        }
+        return completion('{"message":"done"}');
+      }
+    },
+    autoCompact: {
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 700,
+        thresholdRatio: 0.99,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openrouter',
+        model: 'anthropic/claude-sonnet-4.6',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    }
+  });
+
+  const final = await runner.runTurn(session, 'new request');
+
+  assert.equal(final, 'done');
+  assert.equal(normalCalls, 2);
+  assert.equal(session.compactions.length, 1);
 });

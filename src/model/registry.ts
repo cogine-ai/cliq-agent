@@ -35,6 +35,19 @@ const TEXT_TO_TEXT = {
   toolCalling: false
 } satisfies ModelDescriptor['capabilities'];
 
+const CLAUDE_CONTEXT_WINDOW = 200_000;
+const OPENAI_DEFAULT_CONTEXT_WINDOW = 128_000;
+
+function withContextWindow(
+  capabilities: ModelDescriptor['capabilities'],
+  contextWindow: number
+): ModelDescriptor['capabilities'] {
+  return {
+    ...capabilities,
+    contextWindow
+  };
+}
+
 const TEXT_TO_TEXT_REASONING = {
   ...TEXT_TO_TEXT,
   reasoning: true
@@ -60,7 +73,7 @@ const PROVIDERS: Record<ProviderName, ModelProviderDefinition> = {
         provider: 'openrouter',
         model: MODEL,
         displayName: 'Claude Sonnet 4.6 via OpenRouter',
-        capabilities: TEXT_TO_TEXT_REASONING
+        capabilities: withContextWindow(TEXT_TO_TEXT_REASONING, CLAUDE_CONTEXT_WINDOW)
       }
     ]
   },
@@ -76,7 +89,7 @@ const PROVIDERS: Record<ProviderName, ModelProviderDefinition> = {
         provider: 'anthropic',
         model: 'claude-sonnet-4-20250514',
         displayName: 'Claude Sonnet 4',
-        capabilities: TEXT_TO_TEXT_REASONING
+        capabilities: withContextWindow(TEXT_TO_TEXT_REASONING, CLAUDE_CONTEXT_WINDOW)
       }
     ]
   },
@@ -92,7 +105,7 @@ const PROVIDERS: Record<ProviderName, ModelProviderDefinition> = {
         provider: 'openai',
         model: 'gpt-5.2',
         displayName: 'GPT-5.2',
-        capabilities: TEXT_TO_TEXT_REASONING
+        capabilities: withContextWindow(TEXT_TO_TEXT_REASONING, OPENAI_DEFAULT_CONTEXT_WINDOW)
       }
     ]
   },
@@ -138,6 +151,10 @@ export function getModelProvider(provider: ProviderName): ModelProvider {
       return factory(config);
     }
   };
+}
+
+export function findKnownModelDescriptor(provider: ProviderName, model: string): ModelDescriptor | null {
+  return getModelProvider(provider).getKnownModels().find((descriptor) => descriptor.model === model) ?? null;
 }
 
 export function listModelProviders(): ModelProvider[] {

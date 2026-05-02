@@ -154,7 +154,32 @@ function isCompactionArtifact(value: unknown): value is CompactionArtifact {
     typeof artifact.createdBy.provider === 'string' &&
     isProviderName(artifact.createdBy.provider) &&
     typeof artifact.createdBy.model === 'string' &&
-    typeof artifact.summaryMarkdown === 'string'
+    typeof artifact.summaryMarkdown === 'string' &&
+    (artifact.auto === undefined || isAutoCompactionMetadata(artifact.auto))
+  );
+}
+
+function isAutoCompactionMetadata(value: unknown): value is NonNullable<CompactionArtifact['auto']> {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const auto = value as NonNullable<CompactionArtifact['auto']>;
+  return (
+    (auto.trigger === 'threshold' || auto.trigger === 'overflow') &&
+    (auto.phase === 'pre-model' || auto.phase === 'mid-loop') &&
+    typeof auto.estimatedTokensBefore === 'number' &&
+    (auto.estimatedTokensAfter === undefined || typeof auto.estimatedTokensAfter === 'number') &&
+    (auto.usableLimitTokens === undefined || typeof auto.usableLimitTokens === 'number') &&
+    (auto.contextWindowTokens === undefined || typeof auto.contextWindowTokens === 'number') &&
+    (auto.contextWindowSource === undefined ||
+      auto.contextWindowSource === 'config' ||
+      auto.contextWindowSource === 'model-descriptor' ||
+      auto.contextWindowSource === 'overflow-error') &&
+    typeof auto.keepRecentTokens === 'number' &&
+    (auto.summaryInputBudgetTokens === undefined || typeof auto.summaryInputBudgetTokens === 'number') &&
+    (auto.overflowRetryAttempt === undefined || typeof auto.overflowRetryAttempt === 'number') &&
+    (auto.previousCompactionId === undefined || typeof auto.previousCompactionId === 'string')
   );
 }
 

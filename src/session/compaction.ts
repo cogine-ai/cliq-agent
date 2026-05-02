@@ -7,6 +7,7 @@ export type CreateCompactionOptions = {
   anchorCheckpointId?: string;
   createdBy?: CompactionArtifact['createdBy'];
   details?: CompactionArtifact['details'];
+  auto?: CompactionArtifact['auto'];
 };
 
 function activeCompactions(session: Session) {
@@ -57,7 +58,8 @@ export async function createCompaction(
         model: current.model.model
       },
       summaryMarkdown,
-      details: options.details
+      details: options.details,
+      auto: options.auto
     };
 
     for (const active of activeCompactions(current)) {

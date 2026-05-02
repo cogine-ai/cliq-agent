@@ -115,3 +115,38 @@ test('createCompaction rejects ranges that leave no raw tail', async () => {
     }
   });
 });
+
+test('createCompaction persists optional auto metadata', async () => {
+  await withCliqHome(async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-compaction-auto-'));
+    try {
+      const session = createSession(cwd);
+      addUserRecords(session, 3);
+
+      const artifact = await createCompaction(cwd, session, {
+        endIndexExclusive: 1,
+        summaryMarkdown: 'auto summary',
+        auto: {
+          trigger: 'threshold',
+          phase: 'pre-model',
+          estimatedTokensBefore: 100_000,
+          estimatedTokensAfter: 40_000,
+          usableLimitTokens: 80_000,
+          contextWindowTokens: 128_000,
+          contextWindowSource: 'config',
+          keepRecentTokens: 20_000,
+          summaryInputBudgetTokens: 100_000
+        }
+      });
+
+      const persisted = await ensureSession(cwd);
+
+      assert.equal(artifact.auto?.trigger, 'threshold');
+      assert.equal(session.compactions[0]?.auto?.contextWindowSource, 'config');
+      assert.equal(persisted.compactions[0]?.auto?.trigger, 'threshold');
+      assert.equal(persisted.compactions[0]?.auto?.contextWindowSource, 'config');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});

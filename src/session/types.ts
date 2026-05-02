@@ -1,5 +1,6 @@
 import type { ProviderName } from '../model/types.js';
 import type { ModelAction } from '../protocol/actions.js';
+import type { AutoCompactContextWindowSource } from './auto-compact-config.js';
 
 export type SessionModelRef = {
   provider: ProviderName;
@@ -89,6 +90,21 @@ export type CompactionArtifact = {
     tests?: string[];
     risks?: string[];
   };
+  auto?: AutoCompactionMetadata;
+};
+
+export type AutoCompactionMetadata = {
+  trigger: 'threshold' | 'overflow';
+  phase: 'pre-model' | 'mid-loop';
+  estimatedTokensBefore: number;
+  estimatedTokensAfter?: number;
+  usableLimitTokens?: number;
+  contextWindowTokens?: number;
+  contextWindowSource?: AutoCompactContextWindowSource;
+  keepRecentTokens: number;
+  summaryInputBudgetTokens?: number;
+  overflowRetryAttempt?: number;
+  previousCompactionId?: string;
 };
 
 export type Session = {
