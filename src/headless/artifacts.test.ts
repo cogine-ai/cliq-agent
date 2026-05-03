@@ -1,0 +1,105 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
+import { exportHandoff } from '../handoff/export.js';
+import { createCheckpoint } from '../session/checkpoints.js';
+import { createCompaction } from '../session/compaction.js';
+import { createSession } from '../session/store.js';
+import { getArtifactView, toSessionView } from './artifacts.js';
+
+const previousHome = process.env.CLIQ_HOME;
+const cleanupDirs: string[] = [];
+
+test.after(async () => {
+  if (previousHome === undefined) {
+    delete process.env.CLIQ_HOME;
+  } else {
+    process.env.CLIQ_HOME = previousHome;
+  }
+  await Promise.all(cleanupDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+async function setupWorkspace() {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-artifacts-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-artifacts-workspace-'));
+  cleanupDirs.push(home, cwd);
+  process.env.CLIQ_HOME = home;
+  return { home, cwd };
+}
+
+test('toSessionView exposes stable records without raw assistant JSON', async () => {
+  const { cwd } = await setupWorkspace();
+  const session = createSession(cwd);
+  session.records.push(
+    { id: 'usr_1', ts: '2026-05-03T00:00:00.000Z', kind: 'user', role: 'user', content: 'hello' },
+    {
+      id: 'ast_1',
+      ts: '2026-05-03T00:00:01.000Z',
+      kind: 'assistant',
+      role: 'assistant',
+      content: '{"message":"done"}',
+      action: { message: 'done' }
+    },
+    {
+      id: 'tool_1',
+      ts: '2026-05-03T00:00:02.000Z',
+      kind: 'tool',
+      role: 'user',
+      tool: 'bash',
+      status: 'ok',
+      content: `TOOL_RESULT bash OK\n${'x'.repeat(500)}`,
+      meta: { exit: 0 }
+    }
+  );
+
+  const view = toSessionView(session);
+
+  assert.equal(view.records[0]?.kind, 'user');
+  assert.equal(view.records[1]?.kind, 'assistant');
+  assert.deepEqual(view.records[1], {
+    id: 'ast_1',
+    ts: '2026-05-03T00:00:01.000Z',
+    kind: 'assistant',
+    role: 'assistant',
+    actionType: 'message',
+    message: 'done'
+  });
+  assert.equal(view.records[2]?.kind, 'tool');
+  assert.equal('content' in view.records[2]!, false);
+  assert.equal((view.records[2] as { contentPreview: string }).contentPreview.length <= 280, true);
+});
+
+test('getArtifactView resolves checkpoint, workspace checkpoint, compaction, and handoff views', async () => {
+  const { cwd } = await setupWorkspace();
+  const session = createSession(cwd);
+  session.records.push(
+    { id: 'usr_1', ts: '2026-05-03T00:00:00.000Z', kind: 'user', role: 'user', content: 'summarize' },
+    {
+      id: 'ast_1',
+      ts: '2026-05-03T00:00:01.000Z',
+      kind: 'assistant',
+      role: 'assistant',
+      content: '{"message":"ok"}',
+      action: { message: 'ok' }
+    }
+  );
+
+  const checkpoint = await createCheckpoint(cwd, session, { kind: 'manual', name: 'manual' });
+  const compaction = await createCompaction(cwd, session, {
+    endIndexExclusive: 1,
+    summaryMarkdown: 'summary'
+  });
+  const handoff = await exportHandoff(cwd, session, { checkpointId: checkpoint.id });
+
+  assert.equal((await getArtifactView(session, checkpoint.id)).kind, 'checkpoint');
+  assert.equal((await getArtifactView(session, checkpoint.workspaceCheckpointId!)).kind, 'workspace-checkpoint');
+  assert.equal((await getArtifactView(session, compaction.id)).kind, 'compaction');
+  assert.equal((await getArtifactView(session, handoff.id)).kind, 'handoff');
+  await assert.rejects(() => getArtifactView(session, 'missing'), /artifact not found/i);
+  await assert.rejects(() => getArtifactView(session, 'wchk_missing'), /artifact not found/i);
+  await assert.rejects(() => getArtifactView(session, 'handoff_missing'), /artifact not found/i);
+  await assert.rejects(() => getArtifactView(session, 'handoff_../../../outside'), /artifact not found/i);
+});

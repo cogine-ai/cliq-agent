@@ -31,6 +31,15 @@ export function handoffDirPath(handoffId: string, cliqHome = resolveCliqHome()) 
   return path.join(cliqHome, 'handoffs', handoffId);
 }
 
+export async function readHandoffArtifact(handoffId: string): Promise<{ json: HandoffArtifact; markdown: string }> {
+  const dir = handoffDirPath(handoffId);
+  const jsonPath = path.join(dir, 'handoff.json');
+  const markdownPath = path.join(dir, 'HANDOFF.md');
+  const json = JSON.parse(await fs.readFile(jsonPath, 'utf8')) as HandoffArtifact;
+  const markdown = await fs.readFile(markdownPath, 'utf8');
+  return { json, markdown };
+}
+
 function activeCompaction(session: Session): CompactionArtifact | null {
   const active = session.compactions.filter((artifact) => artifact.status === 'active');
   if (active.length > 1) {

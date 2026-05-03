@@ -167,3 +167,106 @@ export type RunEndPayload = {
   exitCode: number;
   output: HeadlessRunOutput;
 };
+
+export type SessionRecordView =
+  | {
+      id: string;
+      ts: string;
+      kind: 'system' | 'user';
+      role: 'system' | 'user';
+      text: string;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'assistant';
+      role: 'assistant';
+      actionType: 'message' | 'tool-call' | 'invalid' | 'none';
+      message?: string;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'tool';
+      role: 'user';
+      tool: string;
+      status: 'ok' | 'error';
+      contentPreview: string;
+      meta?: Record<string, string | number | boolean | null>;
+    };
+
+export type CheckpointView = {
+  id: string;
+  name?: string;
+  kind: 'auto' | 'manual' | 'restore-safety' | 'handoff';
+  createdAt: string;
+  recordIndex: number;
+  turn: number;
+  workspaceCheckpointId?: string;
+};
+
+export type WorkspaceCheckpointView = {
+  id: string;
+  kind: 'git-ghost' | 'unavailable';
+  status: 'available' | 'expired' | 'unavailable';
+  createdAt: string;
+  workspaceRealPath: string;
+  gitRootRealPath?: string;
+  commitId?: string;
+  reason?: 'not-git' | 'snapshot-failed';
+  warnings?: string[];
+};
+
+export type CompactionView = {
+  id: string;
+  status: 'active' | 'superseded';
+  createdAt: string;
+  coveredRange: {
+    startIndexInclusive: number;
+    endIndexExclusive: number;
+  };
+  firstKeptRecordId: string;
+  anchorCheckpointId?: string;
+  createdBy: {
+    provider: ProviderName;
+    model: string;
+  };
+  summaryMarkdown: string;
+  auto?: {
+    trigger: 'threshold' | 'overflow';
+    phase: 'pre-model' | 'mid-loop';
+    estimatedTokensBefore: number;
+    estimatedTokensAfter?: number;
+  };
+};
+
+export type HandoffView = {
+  id: string;
+  checkpointId: string;
+  summarySource: 'active-compaction' | 'handoff-only';
+  json: unknown;
+  markdown: string;
+};
+
+export type SessionView = {
+  id: string;
+  cwd: string;
+  model: SessionModelRef;
+  lifecycle: {
+    status: 'idle' | 'running';
+    turn: number;
+    lastUserInputAt?: string;
+    lastAssistantOutputAt?: string;
+  };
+  parentSessionId?: string;
+  forkedFromCheckpointId?: string;
+  records: SessionRecordView[];
+  checkpoints: CheckpointView[];
+  compactions: CompactionView[];
+};
+
+export type ArtifactView =
+  | { kind: 'checkpoint'; checkpoint: CheckpointView; workspaceCheckpoint?: WorkspaceCheckpointView }
+  | { kind: 'workspace-checkpoint'; workspaceCheckpoint: WorkspaceCheckpointView }
+  | { kind: 'compaction'; compaction: CompactionView }
+  | { kind: 'handoff'; handoff: HandoffView };
