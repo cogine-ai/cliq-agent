@@ -100,6 +100,74 @@ test('runner creates an automatic checkpoint before appending the user record', 
   assert.equal(session.records[0]?.kind, 'user');
 });
 
+test('runner emits checkpoint-created after automatic checkpoint creation', async () => {
+  const session = await createTempSession();
+  const events: string[] = [];
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    onEvent(event) {
+      events.push(event.type);
+    }
+  });
+
+  await runner.runTurn(session, 'say done');
+
+  assert.equal(events[0], 'checkpoint-created');
+  assert.equal(session.checkpoints.length, 1);
+});
+
+test('runner cancellation before checkpoint leaves session records unchanged', async () => {
+  const session = await createTempSession();
+  const controller = new AbortController();
+  controller.abort();
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    signal: controller.signal
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'say done'), /cancelled/i);
+  assert.equal(session.records.length, 0);
+  assert.equal(session.checkpoints.length, 0);
+  assert.equal(session.lifecycle.status, 'idle');
+});
+
+test('runner cancellation after checkpoint keeps checkpoint and skips user append', async () => {
+  const session = await createTempSession();
+  const controller = new AbortController();
+  const events: string[] = [];
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    signal: controller.signal,
+    onEvent(event) {
+      events.push(event.type);
+      if (event.type === 'checkpoint-created') {
+        controller.abort();
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'say done'), /cancelled/i);
+  assert.deepEqual(events, ['checkpoint-created', 'error']);
+  assert.equal(session.checkpoints.length, 1);
+  assert.equal(session.records.length, 0);
+  assert.equal(session.lifecycle.status, 'idle');
+});
+
 test('runner appends tool results and replays them back to the model', async () => {
   const session = await createTempSession();
   let callCount = 0;
@@ -444,7 +512,14 @@ test('runner emits model lifecycle events without raw deltas', async () => {
   const finalMessage = await runner.runTurn(session, 'say done');
 
   assert.equal(finalMessage, 'done');
-  assert.deepEqual(events.map((event) => event.type), ['model-start', 'model-progress', 'model-progress', 'model-end', 'final']);
+  assert.deepEqual(events.map((event) => event.type), [
+    'checkpoint-created',
+    'model-start',
+    'model-progress',
+    'model-progress',
+    'model-end',
+    'final'
+  ]);
   assert.equal(events.some((event) => event.message?.includes('{"message"')), false);
 });
 

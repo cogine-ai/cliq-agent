@@ -14,6 +14,7 @@ export type ToolResult = {
 export type ToolContext = {
   cwd: string;
   session: Session;
+  signal?: AbortSignal;
 };
 
 export type ToolDefinition<TAction extends ModelAction = ModelAction> = {

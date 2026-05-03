@@ -1,5 +1,5 @@
 import { fetchWithTimeout, joinUrl, readJsonResponse, readSseDeltas } from '../http.js';
-import type { ChatMessage, ModelClient, ModelStreamEvent, ResolvedModelConfig } from '../types.js';
+import type { ChatMessage, ModelClient, ModelCompleteOptions, ResolvedModelConfig } from '../types.js';
 
 type ChatCompletionsResp = {
   choices: Array<{
@@ -9,9 +9,7 @@ type ChatCompletionsResp = {
   }>;
 };
 
-type CompleteOptions = {
-  onEvent?: (event: ModelStreamEvent) => void | Promise<void>;
-};
+type CompleteOptions = ModelCompleteOptions;
 
 const AUTO_STREAM_FALLBACK_STATUSES = new Set([400, 404, 405, 415, 422]);
 
@@ -35,6 +33,10 @@ async function streamHttpError(response: Response) {
 }
 
 async function emitErrorEvent(options: CompleteOptions | undefined, error: unknown) {
+  if (options?.signal?.aborted) {
+    return;
+  }
+
   try {
     await options?.onEvent?.({
       type: 'error',
@@ -77,7 +79,8 @@ async function completeWithoutStreaming(config: ResolvedModelConfig, messages: C
       model: config.model,
       messages,
       stream: false
-    })
+    }),
+    signal: options?.signal
   });
 
   const json = await readJsonResponse<ChatCompletionsResp>(response, config.provider);
@@ -103,7 +106,8 @@ async function completeWithStreaming(config: ResolvedModelConfig, messages: Chat
       model: config.model,
       messages,
       stream: true
-    })
+    }),
+    signal: options?.signal
   });
 
   if (!response.ok) {

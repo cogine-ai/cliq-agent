@@ -1,5 +1,5 @@
 import { fetchWithTimeout, joinUrl, readJsonResponse, readSseDeltas } from '../http.js';
-import type { ChatMessage, ModelClient, ModelStreamEvent, ResolvedModelConfig } from '../types.js';
+import type { ChatMessage, ModelClient, ModelCompleteOptions, ResolvedModelConfig } from '../types.js';
 
 type AnthropicResp = {
   content: Array<{ type: string; text?: string }>;
@@ -24,7 +24,7 @@ function messagesUrl(baseUrl: string) {
 
 export function createAnthropicClient(config: ResolvedModelConfig): ModelClient {
   return {
-    async complete(messages: ChatMessage[], options?: { onEvent?: (event: ModelStreamEvent) => void | Promise<void> }) {
+    async complete(messages: ChatMessage[], options?: ModelCompleteOptions) {
       const body = splitMessages(messages);
       await options?.onEvent?.({
         type: 'start',
@@ -52,7 +52,8 @@ export function createAnthropicClient(config: ResolvedModelConfig): ModelClient 
               ...(body.system ? { system: body.system } : {}),
               messages: body.messages,
               stream: true
-            })
+            }),
+            signal: options?.signal
           });
 
           const content = (
@@ -87,14 +88,15 @@ export function createAnthropicClient(config: ResolvedModelConfig): ModelClient 
             'x-api-key': config.apiKey,
             'anthropic-version': '2023-06-01'
           },
-          body: JSON.stringify({
-            model: config.model,
-            max_tokens: config.maxOutputTokens ?? 4096,
-            ...(body.system ? { system: body.system } : {}),
-            messages: body.messages,
-            stream: false
-          })
-        });
+            body: JSON.stringify({
+              model: config.model,
+              max_tokens: config.maxOutputTokens ?? 4096,
+              ...(body.system ? { system: body.system } : {}),
+              messages: body.messages,
+              stream: false
+            }),
+            signal: options?.signal
+          });
 
         const json = await readJsonResponse<AnthropicResp>(response, 'Anthropic');
         if (!Array.isArray(json.content)) {
@@ -115,10 +117,12 @@ export function createAnthropicClient(config: ResolvedModelConfig): ModelClient 
           model: config.model
         };
       } catch (error) {
-        await options?.onEvent?.({
-          type: 'error',
-          message: error instanceof Error ? error.message : String(error)
-        });
+        if (!options?.signal?.aborted) {
+          await options?.onEvent?.({
+            type: 'error',
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
         throw error;
       }
     }
