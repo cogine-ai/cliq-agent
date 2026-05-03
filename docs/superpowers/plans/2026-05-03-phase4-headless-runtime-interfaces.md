@@ -1920,13 +1920,20 @@ Update the command dispatch:
 if (cmd === '--jsonl' || cmd?.startsWith('--jsonl=')) {
   throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
 }
+const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
 if (!cmd || cmd === 'chat') {
-  if (args.includes('--jsonl')) {
+  if (hasJsonlArg) {
     throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
   }
   return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
 }
-if (cmd === 'run' || cmd === 'ask') return parseRunArgs(args, base);
+if (cmd === 'run') return parseRunArgs(args, base);
+if (cmd === 'ask') {
+  if (hasJsonlArg) {
+    throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
+  }
+  return parseAskArgs(args, base);
+}
 ```
 
 - [ ] **Step 6: Route one-shot runs through headless**
@@ -2009,7 +2016,10 @@ if (prompt && prompt.trim()) {
       }
     );
     if (output.exitCode !== 0) {
-      throw new ReportedCliError(output.error?.message ?? `headless run failed with exit code ${output.exitCode}`);
+      throw new ReportedCliError(output.error?.message ?? `headless run failed with exit code ${output.exitCode}`, {
+        exitCode: output.exitCode,
+        status: output.status
+      });
     }
     return;
   }
@@ -2038,7 +2048,10 @@ if (prompt && prompt.trim()) {
   );
 
   if (output.status !== 'completed') {
-    throw new ReportedCliError(output.error?.message ?? 'headless run failed');
+    throw new ReportedCliError(output.error?.message ?? 'headless run failed', {
+      exitCode: output.exitCode,
+      status: output.status
+    });
   }
   console.log(`\n${finalMessage || output.finalMessage || '(no content)'}`);
   return;

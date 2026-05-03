@@ -307,6 +307,7 @@ export function createRunner({
             });
             throw error;
           }
+          await throwIfCancelled();
 
           session.lifecycle.lastAssistantOutputAt = nowIso();
           await appendRecord(cwd, session, {

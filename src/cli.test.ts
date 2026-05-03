@@ -533,11 +533,13 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-jsonl-home-'));
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
-  const previousWrite = process.stdout.write;
+  const previousStdoutWrite = process.stdout.write;
+  const previousStderrWrite = process.stderr.write;
   const fetchMock = mock.method(globalThis, 'fetch', async () => {
     throw new Error('fetch failed');
   });
   const chunks: string[] = [];
+  const stderrChunks: string[] = [];
 
   process.chdir(cwd);
   process.env.CLIQ_HOME = home;
@@ -545,6 +547,10 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
     chunks.push(String(chunk));
     return true;
   }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderrChunks.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
 
   try {
     await assert.rejects(
@@ -567,7 +573,8 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
       isReportedCliError
     );
   } finally {
-    process.stdout.write = previousWrite;
+    process.stdout.write = previousStdoutWrite;
+    process.stderr.write = previousStderrWrite;
     fetchMock.mock.restore();
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
@@ -587,6 +594,7 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
   assert.equal(lines.some((line) => JSON.parse(line).type === 'run-start'), true);
   assert.equal(lines.some((line) => JSON.parse(line).type === 'error'), true);
   assert.equal(JSON.parse(lines.at(-1)!).type, 'run-end');
+  assert.equal(stderrChunks.join('').trim(), '');
 });
 
 test('renderUnhandledError suppresses errors already reported by runtime events', () => {

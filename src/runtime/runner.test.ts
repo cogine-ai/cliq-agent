@@ -173,6 +173,31 @@ test('runner cancellation after checkpoint keeps checkpoint and skips user appen
   assert.equal(session.lifecycle.lastUserInputAt, undefined);
 });
 
+test('runner cancellation after parsing assistant output skips assistant append', async () => {
+  const session = await createTempSession();
+  let reads = 0;
+  const signal = {
+    get aborted() {
+      reads += 1;
+      return reads >= 10;
+    }
+  } as AbortSignal;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    signal
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'say done'), /cancelled/i);
+  assert.equal(session.records.length, 1);
+  assert.equal(session.records[0]?.kind, 'user');
+  assert.equal(session.lifecycle.lastAssistantOutputAt, undefined);
+});
+
 test('runner appends tool results and replays them back to the model', async () => {
   const session = await createTempSession();
   let callCount = 0;
