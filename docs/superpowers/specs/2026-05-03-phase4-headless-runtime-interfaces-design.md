@@ -15,7 +15,7 @@ The release adds a stable headless contract above the existing runner:
 - `cliq run --jsonl` as the first machine-readable adapter
 - cooperative cancellation boundaries
 - a stable artifact query surface for sessions, checkpoints, compactions, and handoffs
-- a minimal stdio JSON-RPC protocol after the JSONL contract is proven
+- a minimal stdio JSON-RPC protocol in `v0.7.x` after the JSONL contract is proven
 
 The goal is not to add another human CLI command. The goal is to let a GUI, gateway, automation process, or another agent start runs, subscribe to events, cancel work, and read artifacts without scraping terminal text or knowing the internal `CLIQ_HOME` layout.
 
@@ -160,12 +160,12 @@ Current gaps:
 
 ## 8. Headless Run Contract
 
-### 8.1 Input
+### 8.1 Request And Local Options
 
-The headless run API accepts a single normalized request.
+The public run request is serializable. It is the shape used by JSONL input, RPC params, and future GUI/gateway callers.
 
 ```ts
-export type HeadlessRunInput = {
+export type HeadlessRunRequest = {
   prompt: string;
   cwd: string;
   policy?: PolicyMode;
@@ -174,10 +174,17 @@ export type HeadlessRunInput = {
   autoCompact?: AutoCompactConfig;
   session?: {
     mode?: 'active' | 'new';
-    id?: string;
   };
   metadata?: Record<string, string | number | boolean | null>;
+};
+```
+
+The in-process TypeScript API accepts local execution options separately.
+
+```ts
+export type HeadlessRunOptions = {
   signal?: AbortSignal;
+  onEvent?: (event: RuntimeEventEnvelope) => void | Promise<void>;
 };
 ```
 
@@ -189,9 +196,11 @@ Rules:
 - `model` follows existing workspace, CLI, and environment resolution order.
 - `skills` are additive over workspace-discovered skills.
 - `autoCompact` overrides workspace auto compact config only for this run.
-- `session.mode: "active"` uses the active session for the workspace.
+- omitted `session` or `session.mode: "active"` uses the active session for the workspace.
 - `session.mode: "new"` creates a new active session before the run.
-- `session.id` targets an existing session if supported by the session store; v1 may reject cross-workspace session ids until the lookup semantics are explicit.
+- Unknown `session` fields such as `id` are invalid in the v1 run request.
+- Running a turn against an explicit existing `sessionId` is deferred until same-workspace and cross-workspace targeting semantics are explicit.
+- `HeadlessRunOptions.signal` is local-only and never appears in JSONL or RPC payloads.
 
 ### 8.2 Output
 
@@ -200,8 +209,8 @@ The headless run resolves with a terminal output object.
 ```ts
 export type HeadlessRunOutput = {
   runId: string;
-  sessionId: string;
-  turn: number;
+  sessionId?: string;
+  turn?: number;
   status: 'completed' | 'failed' | 'cancelled';
   exitCode: number;
   finalMessage?: string;
@@ -221,6 +230,8 @@ Rules:
 - `completed` uses exit code `0`.
 - `failed` uses a non-zero exit code.
 - `cancelled` uses a non-zero exit code distinct from generic failure.
+- `sessionId` and `turn` are present after session resolution succeeds.
+- `sessionId` and `turn` may be absent for pre-session failures such as invalid input or invalid `cwd`.
 - `finalMessage` is present only when the model returned a final message.
 - `checkpointId` is the automatic checkpoint created before the turn when available.
 - `artifacts` lists artifacts created or activated during this run.
@@ -234,8 +245,8 @@ export type RuntimeEventEnvelope<TPayload = unknown> = {
   schemaVersion: 1;
   eventId: string;
   runId: string;
-  sessionId: string;
-  turn: number;
+  sessionId?: string;
+  turn?: number;
   timestamp: string;
   type: HeadlessRuntimeEventType;
   payload: TPayload;
@@ -247,13 +258,15 @@ Required properties:
 - `schemaVersion`: public event schema version
 - `eventId`: unique id for this event
 - `runId`: unique id for the headless run
-- `sessionId`: session that owns the turn
-- `turn`: session turn number associated with the event
+- `sessionId`: session that owns the turn, present after session resolution
+- `turn`: session turn number associated with the event, present after session resolution
 - `timestamp`: ISO timestamp
 - `type`: event type
 - `payload`: event-specific data
 
-Event ids must be monotonically emitted in process order, but consumers should rely on event order in the stream rather than lexicographic id sorting.
+Pre-session `error` and `run-end` events may omit `sessionId` and `turn`. This is required for errors that occur before Cliq can load or create a session, such as invalid input or invalid `cwd`.
+
+Stream order is authoritative. Event ids must be unique within a run and may be sequential, but consumers must not infer ordering from lexicographic id sorting.
 
 ## 10. Event Types
 
@@ -288,6 +301,8 @@ export type HeadlessRuntimeEventType =
   model: SessionModelRef;
 }
 ```
+
+`run-start` is emitted after request validation, session resolution, model resolution, and policy resolution succeed. Pre-session failures may emit only `error` and `run-end`.
 
 `run-end` payload:
 
@@ -497,16 +512,16 @@ Output shape:
 
 The exact ids and timestamps are examples. The required contract is the envelope and payload schema.
 
-## 13. Minimal RPC Mode
+## 13. Minimal RPC Mode (v0.7.x Follow-Up)
 
-RPC should be implemented after the JSONL adapter because it depends on the same event and run contracts.
+RPC should be implemented after the JSONL adapter because it depends on the same event and run contracts. It is part of the broader Phase 4 direction, but not part of the `v0.7.0` acceptance scope.
 
 The first RPC transport should be stdio JSON-RPC, not a daemon or HTTP server.
 
 Initial methods:
 
 ```text
-run.start(params: HeadlessRunInput without signal) -> { runId }
+run.start(params: HeadlessRunRequest) -> { runId }
 run.cancel(params: { runId: string }) -> { status: 'cancelled' | 'not-found' | 'already-finished' }
 session.get(params: { sessionId: string }) -> SessionView
 artifact.get(params: { artifactId: string }) -> ArtifactView
@@ -518,7 +533,7 @@ Runtime events are emitted as server notifications:
 {"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":1,"eventId":"evt_001","runId":"run_abc","sessionId":"ses_123","turn":4,"timestamp":"2026-05-03T00:00:00.000Z","type":"run-start","payload":{}}}
 ```
 
-Concurrency rule for v1:
+Concurrency rule for the first RPC follow-up:
 
 - A single stdio RPC process may run one active run at a time.
 - `run.start` rejects a second run while one is active.
@@ -533,7 +548,7 @@ Cancellation enters through a run controller.
 ```text
 RPC cancel or process signal
   -> RunController.abort()
-  -> HeadlessRunInput.signal aborts
+  -> HeadlessRunOptions.signal aborts
   -> runner observes signal at runtime boundaries
   -> model/tool/compact receives signal where supported
   -> error(cancelled)
@@ -567,6 +582,32 @@ Session semantics:
 - If cancellation occurs after a tool has executed, its stored result remains in raw history if it was produced.
 - Cliq must not silently delete partial history to make cancellation look clean.
 
+Mutation ordering:
+
+```text
+resolve request and session
+  -> cancellation check before session mutation
+  -> mark lifecycle running and increment turn
+  -> cancellation check before automatic checkpoint
+  -> create automatic checkpoint and emit checkpoint-created
+  -> cancellation check before appending user record
+  -> append user record
+  -> model/tool/compact loop with boundary checks
+  -> mark lifecycle idle and save session in finally
+```
+
+Cancellation state table:
+
+| Cancellation point | Durable session state | Output |
+| --- | --- | --- |
+| Before session resolution | No session mutation. | `error(cancelled)` and `run-end(cancelled)` without `sessionId` or `turn`. |
+| After session resolution but before lifecycle mutation | Session remains unchanged except normal store reads. | `error(cancelled)` and `run-end(cancelled)` with `sessionId`; `turn` may be omitted. |
+| After lifecycle turn increment but before checkpoint | Session saves `lifecycle.status: "idle"` in `finally`; no user record is appended. | `error(cancelled)` and `run-end(cancelled)` include `sessionId` and incremented `turn`. |
+| After checkpoint creation but before user append | Checkpoint remains durable and is included in artifacts; no user record is appended. | `checkpoint-created`, `error(cancelled)`, `run-end(cancelled)`. |
+| After user append | User record remains durable so the raw history reflects the attempted run. | `error(cancelled)` and `run-end(cancelled)`. |
+| After tool result append | Tool result remains durable if produced; runner stops before the next model request. | `tool-end` if emitted, then `error(cancelled)` and `run-end(cancelled)`. |
+| During provider or tool work that cannot abort immediately | In-flight work may finish before Cliq observes cancellation. | Runner stops at the next boundary and records any completed durable result. |
+
 ## 15. Artifact Query Surface
 
 External hosts need stable read APIs.
@@ -580,28 +621,116 @@ src/headless/artifacts.ts
 Views:
 
 ```ts
+export type SessionRecordView =
+  | {
+      id: string;
+      ts: string;
+      kind: 'system' | 'user';
+      role: 'system' | 'user';
+      text: string;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'assistant';
+      role: 'assistant';
+      actionType: 'message' | 'tool-call' | 'invalid' | 'none';
+      message?: string;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'tool';
+      role: 'user';
+      tool: string;
+      status: 'ok' | 'error';
+      contentPreview: string;
+      meta?: Record<string, string | number | boolean | null>;
+    };
+
+export type CheckpointView = {
+  id: string;
+  name?: string;
+  kind: 'auto' | 'manual' | 'restore-safety' | 'handoff';
+  createdAt: string;
+  recordIndex: number;
+  turn: number;
+  workspaceCheckpointId?: string;
+};
+
+export type WorkspaceCheckpointView = {
+  id: string;
+  kind: 'git-ghost' | 'unavailable';
+  status: 'available' | 'expired' | 'unavailable';
+  createdAt: string;
+  workspaceRealPath: string;
+  gitRootRealPath?: string;
+  commitId?: string;
+  reason?: 'not-git' | 'snapshot-failed';
+  warnings?: string[];
+};
+
+export type CompactionView = {
+  id: string;
+  status: 'active' | 'superseded';
+  createdAt: string;
+  coveredRange: {
+    startIndexInclusive: number;
+    endIndexExclusive: number;
+  };
+  firstKeptRecordId: string;
+  anchorCheckpointId?: string;
+  createdBy: {
+    provider: ProviderName;
+    model: string;
+  };
+  summaryMarkdown: string;
+  auto?: {
+    trigger: 'threshold' | 'overflow';
+    phase: 'pre-model' | 'mid-loop';
+    estimatedTokensBefore: number;
+    estimatedTokensAfter?: number;
+  };
+};
+
+export type HandoffView = {
+  id: string;
+  checkpointId: string;
+  summarySource: 'active-compaction' | 'handoff-only';
+  json: unknown;
+  markdown: string;
+};
+
 export type SessionView = {
   id: string;
   cwd: string;
   model: SessionModelRef;
-  lifecycle: Session['lifecycle'];
+  lifecycle: {
+    status: 'idle' | 'running';
+    turn: number;
+    lastUserInputAt?: string;
+    lastAssistantOutputAt?: string;
+  };
   parentSessionId?: string;
   forkedFromCheckpointId?: string;
-  records: SessionRecord[];
-  checkpoints: SessionCheckpoint[];
-  compactions: CompactionArtifact[];
+  records: SessionRecordView[];
+  checkpoints: CheckpointView[];
+  compactions: CompactionView[];
 };
 
 export type ArtifactView =
-  | { kind: 'checkpoint'; checkpoint: SessionCheckpoint; workspaceCheckpoint?: WorkspaceCheckpoint }
-  | { kind: 'workspace-checkpoint'; workspaceCheckpoint: WorkspaceCheckpoint }
-  | { kind: 'compaction'; compaction: CompactionArtifact }
-  | { kind: 'handoff'; id: string; json: unknown; markdown: string };
+  | { kind: 'checkpoint'; checkpoint: CheckpointView; workspaceCheckpoint?: WorkspaceCheckpointView }
+  | { kind: 'workspace-checkpoint'; workspaceCheckpoint: WorkspaceCheckpointView }
+  | { kind: 'compaction'; compaction: CompactionView }
+  | { kind: 'handoff'; handoff: HandoffView };
 ```
 
 Rules:
 
 - Views are stable API shapes, not direct file dumps.
+- View types are external contract types. They may map closely to storage in v1, but storage types must not be exported as the public headless API.
+- Assistant records expose normalized `actionType` and final `message` when available; they do not expose raw assistant JSON action text by default.
+- Tool records expose `contentPreview` rather than full stored tool output by default.
 - Paths may be included as metadata only when they are useful and safe; path layout is not the contract.
 - Missing artifacts return `artifact-not-found`.
 - Handoff markdown can be returned as content, but callers should not need to know where it lives on disk.
@@ -647,7 +776,7 @@ Runner should not import JSONL, RPC, or headless adapter code.
 CLI / RPC / GUI host
         |
         v
-HeadlessRunInput
+HeadlessRunRequest
         |
         v
 headless/run.ts
@@ -692,13 +821,18 @@ Existing sessions remain valid. Phase 4 adds public views over existing data; it
 
 - Headless input rejects empty prompt.
 - Headless input rejects missing or invalid `cwd`.
-- Headless run output includes `runId`, `sessionId`, `turn`, `status`, `exitCode`, and artifact arrays.
+- Headless request rejects unknown `session` fields such as `id`.
+- Headless request is JSON-serializable; `AbortSignal` exists only in `HeadlessRunOptions`.
+- Successful headless run output includes `runId`, `sessionId`, `turn`, `status`, `exitCode`, and artifact arrays.
+- Pre-session failures include `runId`, `status`, `exitCode`, and structured error, but may omit `sessionId` and `turn`.
 - Failed runs include a structured `HeadlessRunError`.
 
 ### 19.2 Event Tests
 
-- Every emitted event has `schemaVersion`, `eventId`, `runId`, `sessionId`, `turn`, `timestamp`, `type`, and `payload`.
+- Every emitted event has `schemaVersion`, `eventId`, `runId`, `timestamp`, `type`, and `payload`.
+- Every session-scoped event has `sessionId` and `turn`.
 - Event order for a final-message run is `run-start`, `checkpoint-created`, model lifecycle, `final`, `run-end`.
+- Pre-session failures may emit `error` and `run-end` without `sessionId` or `turn`.
 - `final` is not the last required event; `run-end` is.
 - Runtime error emits `error` before `run-end`.
 - Raw model delta text is not emitted in public headless events.
@@ -713,6 +847,8 @@ Existing sessions remain valid. Phase 4 adds public views over existing data; it
 ### 19.4 Cancellation Tests
 
 - Cancelling before model call emits `error(cancelled)` and `run-end(cancelled)`.
+- Cancelling before session mutation leaves the session unchanged.
+- Cancelling after checkpoint creation includes that checkpoint in artifacts and does not append a user record.
 - Cancelling during a tool prevents the next model call after the tool returns.
 - Cancelling during auto compact leaves session valid.
 - Cancelled runs save lifecycle status back to idle.
@@ -722,6 +858,8 @@ Existing sessions remain valid. Phase 4 adds public views over existing data; it
 - `session.get` returns a stable view without requiring callers to read `CLIQ_HOME`.
 - `artifact.get` resolves checkpoint, workspace checkpoint, compaction, and handoff ids.
 - Unknown artifact id returns `artifact-not-found`.
+- External views do not export internal storage types directly.
+- Assistant record views do not expose raw assistant JSON action text by default.
 - Handoff artifact query returns JSON and markdown content without exposing path layout as the primary contract.
 
 ### 19.6 Regression Tests
@@ -741,14 +879,18 @@ Recommended implementation order:
 4. Add `cliq run --jsonl`.
 5. Add artifact query views.
 6. Add cooperative cancellation through `AbortSignal`.
-7. Add minimal stdio JSON-RPC adapter.
 
 Each step should be independently tested and shippable.
 
+Follow-up `v0.7.x`:
+
+1. Add minimal stdio JSON-RPC adapter after JSONL contract tests have stabilized.
+2. Reuse the same `HeadlessRunRequest`, event envelope, artifact views, and cancellation controller.
+
 ## 21. Deferred Decisions
 
-- Whether future JSONL should support reading `HeadlessRunInput` from stdin or `--input request.json`.
-- Whether direct session targeting by `session.id` can cross workspace boundaries in v1.
+- Whether future JSONL should support reading `HeadlessRunRequest` from stdin or `--input request.json`.
+- Whether direct run targeting by `sessionId` should support same-workspace sessions first or cross-workspace sessions from the start.
 - Whether event payloads should include redacted tool output snippets in a later schema version.
 - Whether cancellation should create an explicit checkpoint after cancellation for recovery UX.
 - Whether RPC should eventually support multiple concurrent runs.
