@@ -413,10 +413,18 @@ function parseRunArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
 
   const prompt = promptParts.join(' ').trim();
   if (!prompt) {
-    throw new Error('Missing prompt for cliq run/ask');
+    throw new Error('Missing prompt for cliq run');
   }
 
   return { ...base, cmd: 'chat', prompt, ...(jsonl ? { jsonl } : {}) };
+}
+
+function parseAskArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  const prompt = args.slice(1).join(' ').trim();
+  if (!prompt) {
+    throw new Error('Missing prompt for cliq ask');
+  }
+  return { ...base, cmd: 'chat', prompt };
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -554,13 +562,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const cmd = args[0];
   const base: ParsedArgsBase = { policy, skills, model };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
-  if (hasJsonlArg && cmd !== 'run' && cmd !== 'ask') {
+  if (hasJsonlArg && cmd !== 'run') {
     throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
   }
   if (!cmd || cmd === 'chat') {
     return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
   }
-  if (cmd === 'run' || cmd === 'ask') return parseRunArgs(args, base);
+  if (cmd === 'run') return parseRunArgs(args, base);
+  if (cmd === 'ask') return parseAskArgs(args, base);
   if (cmd === 'checkpoint') return parseCheckpointArgs(args, base);
   if (cmd === 'compact') return parseCompactGroupArgs(args, base);
   if (cmd === 'handoff') return parseHandoffGroupArgs(args, base);

@@ -210,8 +210,10 @@ export function createRunner({
             instructions: currentInstructions,
             phase,
             trigger,
-            state: autoCompactState
+            state: autoCompactState,
+            signal
           });
+          await throwIfCancelled();
 
           if (compactResult.status === 'compacted') {
             await onEvent({

@@ -15,7 +15,9 @@ export function createOpenRouterClient(config: ResolvedModelConfig): ModelClient
   return {
     async complete(messages: ChatMessage[], options?: ModelCompleteOptions) {
       if (!config.apiKey) {
-        throw new Error('OPENROUTER_API_KEY is required');
+        const error = new Error('OPENROUTER_API_KEY is required');
+        await emitModelErrorEvent(options, error);
+        throw error;
       }
 
       await options?.onEvent?.({

@@ -237,13 +237,15 @@ async function summarizeChunks({
   previousSummary,
   serializedRecords,
   summaryInputBudgetTokens,
-  totalBudgetTokens
+  totalBudgetTokens,
+  signal
 }: {
   model: ModelClient;
   previousSummary?: string;
   serializedRecords: string[];
   summaryInputBudgetTokens: number;
   totalBudgetTokens: number;
+  signal?: AbortSignal;
 }) {
   let rollingSummary = previousSummary ?? '';
   let index = 0;
@@ -272,7 +274,7 @@ async function summarizeChunks({
     }
 
     const input = buildSummarizerInput({ rollingSummary, chunk });
-    const completion = await model.complete(buildSummaryMessages(input));
+    const completion = await model.complete(buildSummaryMessages(input), { signal });
     rollingSummary = completion.content.trim();
     if (!rollingSummary) {
       throw new Error('compact summarizer returned an empty summary');
@@ -300,6 +302,7 @@ export async function maybeAutoCompact({
   phase,
   trigger,
   state,
+  signal,
   estimateOverrideTokens
 }: {
   cwd: string;
@@ -311,6 +314,7 @@ export async function maybeAutoCompact({
   phase: 'pre-model' | 'mid-loop';
   trigger: 'threshold' | 'overflow';
   state: AutoCompactState;
+  signal?: AbortSignal;
   estimateOverrideTokens?: number;
 }): Promise<AutoCompactResult> {
   if (config.enabled === 'off') {
@@ -364,7 +368,8 @@ export async function maybeAutoCompact({
       previousSummary: previous?.summaryMarkdown,
       serializedRecords,
       summaryInputBudgetTokens: inputBudget,
-      totalBudgetTokens
+      totalBudgetTokens,
+      signal
     });
     const estimatedTokensAfter =
       estimateRecordsTokens(session.records.slice(range.endIndexExclusive)) + estimateTextTokens(summaryMarkdown);

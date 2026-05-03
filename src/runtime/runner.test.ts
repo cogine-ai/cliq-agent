@@ -616,22 +616,26 @@ test('runner emits model lifecycle events without raw deltas', async () => {
 
 test('runner auto compacts before model call when threshold is exceeded', async () => {
   const session = await createTempSession();
+  const controller = new AbortController();
   session.records.push(
     { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
     { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
   );
   let firstCallMessages: Array<{ role: string; content: string }> = [];
+  let summarizerSignal: AbortSignal | undefined;
 
   const runner = createRunner({
     model: {
-      async complete(messages) {
+      async complete(messages, options) {
         if (messages.some((message) => message.content.includes('Records to summarize'))) {
+          summarizerSignal = options?.signal;
           return completion('## Objective\nSummarized');
         }
         firstCallMessages = messages;
         return completion('{"message":"done"}');
       }
     },
+    signal: controller.signal,
     autoCompact: {
       config: {
         enabled: 'on',
@@ -653,7 +657,58 @@ test('runner auto compacts before model call when threshold is exceeded', async 
   await runner.runTurn(session, 'new request');
 
   assert.equal(session.compactions.length, 1);
+  assert.equal(summarizerSignal, controller.signal);
   assert.equal(firstCallMessages.some((message) => message.content.includes('COMPACTED SESSION SUMMARY')), true);
+});
+
+test('runner cancellation during auto compaction stops before the main model call', async () => {
+  const session = await createTempSession();
+  const controller = new AbortController();
+  const events: string[] = [];
+  session.records.push(
+    { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
+    { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
+  );
+  let normalCalls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+          controller.abort();
+          throw new Error('summarizer aborted');
+        }
+        normalCalls += 1;
+        return completion('{"message":"done"}');
+      }
+    },
+    signal: controller.signal,
+    onEvent(event) {
+      events.push(event.type);
+    },
+    autoCompact: {
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 700,
+        thresholdRatio: 0.35,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openrouter',
+        model: 'anthropic/claude-sonnet-4.6',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'new request'), /cancelled/i);
+
+  assert.equal(normalCalls, 0);
+  assert.equal(events.includes('compact-error'), false);
+  assert.equal(events.includes('error'), true);
 });
 
 test('runner treats auto compact off as a hard disable without compact events', async () => {

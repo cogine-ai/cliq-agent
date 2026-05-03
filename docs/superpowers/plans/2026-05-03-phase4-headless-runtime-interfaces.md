@@ -1099,7 +1099,7 @@ export async function getArtifactView(session: Session, artifactId: string): Pro
   const checkpoint = session.checkpoints.find((candidate) => candidate.id === artifactId);
   if (checkpoint) {
     const workspaceCheckpoint = checkpoint.workspaceCheckpointId
-      ? await getWorkspaceCheckpointView(checkpoint.workspaceCheckpointId)
+      ? toWorkspaceCheckpointView(await getWorkspaceCheckpoint(checkpoint.workspaceCheckpointId))
       : undefined;
     return {
       kind: 'checkpoint',

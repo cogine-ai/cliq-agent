@@ -62,9 +62,12 @@ test('parseArgs keeps --jsonl in the prompt after the first prompt token', () =>
     skills: [],
     model: {}
   });
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'ask', '--literal', '--jsonl']), {
+});
+
+test('parseArgs accepts ask as a prompt-only run alias', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'ask', '--literal', 'prompt']), {
     cmd: 'chat',
-    prompt: '--literal --jsonl',
+    prompt: '--literal prompt',
     policy: 'auto',
     skills: [],
     model: {}
@@ -72,13 +75,15 @@ test('parseArgs keeps --jsonl in the prompt after the first prompt token', () =>
 });
 
 test('parseArgs requires a prompt for run aliases', () => {
-  assert.throws(() => parseArgs(['node', 'src/index.ts', 'run']), /missing prompt for cliq run\/ask/i);
-  assert.throws(() => parseArgs(['node', 'src/index.ts', 'run', '--jsonl']), /missing prompt for cliq run\/ask/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'run']), /missing prompt for cliq run/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'run', '--jsonl']), /missing prompt for cliq run/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'ask']), /missing prompt for cliq ask/i);
 });
 
-test('parseArgs rejects --jsonl outside one-shot run aliases', () => {
+test('parseArgs rejects --jsonl outside cliq run', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--jsonl', 'inspect']), /--jsonl is only supported with cliq run/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'chat', '--jsonl']), /--jsonl is only supported with cliq run/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'ask', '--jsonl', 'inspect']), /--jsonl is only supported with cliq run/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'inspect', '--jsonl']), /--jsonl is only supported with cliq run/i);
 });
 

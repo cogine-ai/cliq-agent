@@ -261,7 +261,7 @@ export type HeadlessEventPayloadByType = {
 export type RuntimeEventEnvelopeFor<TType extends HeadlessRuntimeEventType> =
   TType extends HeadlessRuntimeEventType
     ? {
-        schemaVersion: 1;
+        schemaVersion: typeof HEADLESS_SCHEMA_VERSION;
         eventId: string;
         runId: string;
         sessionId?: string;
@@ -627,7 +627,7 @@ Cancellation state table:
 | Cancellation point | Durable session state | Output |
 | --- | --- | --- |
 | Before session resolution | No session mutation. | `error(cancelled)` and `run-end(cancelled)` without `sessionId` or `turn`. |
-| After session resolution but before lifecycle mutation | Session remains unchanged except normal store reads. | `error(cancelled)` and `run-end(cancelled)` with `sessionId`; `turn` may be omitted. |
+| After session resolution but before lifecycle mutation | Session remains unchanged except normal store reads. | `error(cancelled)` and `run-end(cancelled)` include `sessionId` and the resolved `turn`. |
 | After lifecycle turn increment but before checkpoint | Session saves `lifecycle.status: "idle"` in `finally`; no user record is appended. | `error(cancelled)` and `run-end(cancelled)` include `sessionId` and incremented `turn`. |
 | After checkpoint creation but before user append | Checkpoint remains durable and is included in artifacts; no user record is appended. | `checkpoint-created`, `error(cancelled)`, `run-end(cancelled)`. |
 | After user append | User record remains durable so the raw history reflects the attempted run. | `error(cancelled)` and `run-end(cancelled)`. |

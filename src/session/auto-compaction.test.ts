@@ -104,11 +104,17 @@ test('serializeRecordForSummary includes tool metadata', () => {
 
 function fakeModel(outputs: string[]) {
   const calls: Array<{ role: string; content: string }[]> = [];
+  const signals: Array<AbortSignal | undefined> = [];
   return {
     calls,
+    signals,
     client: {
-      async complete(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>) {
+      async complete(
+        messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+        options?: { signal?: AbortSignal }
+      ) {
         calls.push(messages);
+        signals.push(options?.signal);
         return {
           content: outputs.shift() ?? '## Objective\nGenerated summary',
           provider: 'openrouter' as const,
@@ -166,6 +172,7 @@ test('maybeAutoCompact chunks summarizer input when selected records exceed summ
       user('u3', 'tail')
     );
     const model = fakeModel(['## Objective\nChunk 1 summary', '## Objective\nChunk 2 summary']);
+    const controller = new AbortController();
 
     const result = await maybeAutoCompact({
       cwd,
@@ -188,11 +195,13 @@ test('maybeAutoCompact chunks summarizer input when selected records exceed summ
       phase: 'pre-model',
       trigger: 'threshold',
       state: { thresholdCompactionsThisTurn: 0, thresholdSuppressed: false },
+      signal: controller.signal,
       estimateOverrideTokens: 800
     });
 
     assert.equal(result.status, 'compacted');
     assert.equal(model.calls.length > 1, true);
+    assert.deepEqual(model.signals, [controller.signal, controller.signal]);
   });
 });
 

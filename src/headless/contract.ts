@@ -196,7 +196,7 @@ export type HeadlessEventPayloadByType = {
 
 export type RuntimeEventEnvelopeFor<TType extends HeadlessRuntimeEventType> = TType extends HeadlessRuntimeEventType
   ? {
-      schemaVersion: 1;
+      schemaVersion: typeof HEADLESS_SCHEMA_VERSION;
       eventId: string;
       runId: string;
       sessionId?: string;
