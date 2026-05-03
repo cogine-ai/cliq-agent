@@ -695,9 +695,16 @@ export type CompactionView = {
 
 export type HandoffView = {
   id: string;
+  createdAt: string;
+  sessionId: string;
+  parentSessionId?: string;
   checkpointId: string;
+  activeCompactionId?: string;
   summarySource: 'active-compaction' | 'handoff-only';
-  json: unknown;
+  provider: string;
+  model: string;
+  workspaceCheckpointId?: string;
+  summaryMarkdown: string;
   markdown: string;
 };
 

@@ -174,11 +174,19 @@ export function toSessionView(session: Session): SessionView {
 
 async function toHandoffView(handoffId: string): Promise<HandoffView> {
   const handoff = await readHandoffArtifact(handoffId);
+  const artifact = handoff.json;
   return {
-    id: handoff.json.id,
-    checkpointId: handoff.json.checkpointId,
-    summarySource: handoff.json.summarySource,
-    json: handoff.json,
+    id: artifact.id,
+    createdAt: artifact.createdAt,
+    sessionId: artifact.sessionId,
+    ...(artifact.parentSessionId ? { parentSessionId: artifact.parentSessionId } : {}),
+    checkpointId: artifact.checkpointId,
+    ...(artifact.activeCompactionId ? { activeCompactionId: artifact.activeCompactionId } : {}),
+    summarySource: artifact.summarySource,
+    provider: artifact.provider,
+    model: artifact.model,
+    ...(artifact.workspaceCheckpointId ? { workspaceCheckpointId: artifact.workspaceCheckpointId } : {}),
+    summaryMarkdown: artifact.summaryMarkdown,
     markdown: handoff.markdown
   };
 }

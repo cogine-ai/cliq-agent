@@ -97,7 +97,12 @@ test('getArtifactView resolves checkpoint, workspace checkpoint, compaction, and
   assert.equal((await getArtifactView(session, checkpoint.id)).kind, 'checkpoint');
   assert.equal((await getArtifactView(session, checkpoint.workspaceCheckpointId!)).kind, 'workspace-checkpoint');
   assert.equal((await getArtifactView(session, compaction.id)).kind, 'compaction');
-  assert.equal((await getArtifactView(session, handoff.id)).kind, 'handoff');
+  const handoffView = await getArtifactView(session, handoff.id);
+  assert.equal(handoffView.kind, 'handoff');
+  assert.equal('json' in handoffView.handoff, false);
+  assert.equal('paths' in handoffView.handoff, false);
+  assert.match(handoffView.handoff.summaryMarkdown, /summary/);
+  assert.match(handoffView.handoff.markdown, /# Handoff/);
   await assert.rejects(() => getArtifactView(session, 'missing'), /artifact not found/i);
   await assert.rejects(() => getArtifactView(session, 'wchk_missing'), /artifact not found/i);
   await assert.rejects(() => getArtifactView(session, 'handoff_missing'), /artifact not found/i);
