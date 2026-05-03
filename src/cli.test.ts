@@ -81,10 +81,25 @@ test('parseArgs requires a prompt for run aliases', () => {
 });
 
 test('parseArgs rejects --jsonl outside cliq run', () => {
-  assert.throws(() => parseArgs(['node', 'src/index.ts', '--jsonl', 'inspect']), /--jsonl is only supported with cliq run/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'chat', '--jsonl']), /--jsonl is only supported with cliq run/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'ask', '--jsonl', 'inspect']), /--jsonl is only supported with cliq run/i);
-  assert.throws(() => parseArgs(['node', 'src/index.ts', 'inspect', '--jsonl']), /--jsonl is only supported with cliq run/i);
+});
+
+test('parseArgs keeps --jsonl literal in prompt fallback paths', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'inspect', '--jsonl']), {
+    cmd: 'chat',
+    prompt: 'inspect --jsonl',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--jsonl', 'inspect']), {
+    cmd: 'chat',
+    prompt: '--jsonl inspect',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
 });
 
 test('parseArgs rejects invalid policy values', () => {

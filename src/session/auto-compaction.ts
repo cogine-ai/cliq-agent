@@ -232,6 +232,14 @@ function fitsSummarizerBudget(input: string, totalBudgetTokens: number) {
   return estimateMessagesTokens(buildSummaryMessages(input)).tokens <= totalBudgetTokens;
 }
 
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    const error = new Error('run cancelled');
+    error.name = 'AbortError';
+    throw error;
+  }
+}
+
 async function summarizeChunks({
   model,
   previousSummary,
@@ -275,6 +283,7 @@ async function summarizeChunks({
 
     const input = buildSummarizerInput({ rollingSummary, chunk });
     const completion = await model.complete(buildSummaryMessages(input), { signal });
+    throwIfAborted(signal);
     rollingSummary = completion.content.trim();
     if (!rollingSummary) {
       throw new Error('compact summarizer returned an empty summary');
@@ -371,6 +380,7 @@ export async function maybeAutoCompact({
       totalBudgetTokens,
       signal
     });
+    throwIfAborted(signal);
     const estimatedTokensAfter =
       estimateRecordsTokens(session.records.slice(range.endIndexExclusive)) + estimateTextTokens(summaryMarkdown);
     const artifact = await createCompaction(cwd, session, {

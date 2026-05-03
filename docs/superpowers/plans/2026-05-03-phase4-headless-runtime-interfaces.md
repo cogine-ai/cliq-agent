@@ -1326,7 +1326,6 @@ Change the setup sequence to:
 await throwIfCancelled();
 session.lifecycle.status = 'running';
 session.lifecycle.turn += 1;
-session.lifecycle.lastUserInputAt = nowIso();
 await throwIfCancelled();
 const checkpoint = await createCheckpoint(cwd, session, { kind: 'auto' });
 await onEvent({
@@ -1341,13 +1340,17 @@ await onEvent({
       : undefined
 });
 await throwIfCancelled();
+const ts = nowIso();
 await appendRecord(cwd, session, {
   id: makeId('usr'),
-  ts: nowIso(),
+  ts,
   kind: 'user',
   role: 'user',
   content: userInput
 });
+session.lifecycle.lastUserInputAt = ts;
+await saveSession(cwd, session);
+await throwIfCancelled();
 ```
 
 Pass `signal` to model completion:

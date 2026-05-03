@@ -83,14 +83,15 @@ export function createRunner({
           ...(warning ? { warning } : {})
         });
         await throwIfCancelled();
+        const ts = nowIso();
         await appendRecord(cwd, session, {
           id: makeId('usr'),
-          ts: nowIso(),
+          ts,
           kind: 'user',
           role: 'user',
           content: userInput
         });
-        session.lifecycle.lastUserInputAt = nowIso();
+        session.lifecycle.lastUserInputAt = ts;
         await saveSession(cwd, session);
         await throwIfCancelled();
 

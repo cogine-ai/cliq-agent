@@ -98,6 +98,7 @@ test('runner creates an automatic checkpoint before appending the user record', 
   assert.equal(session.checkpoints[0]?.kind, 'auto');
   assert.equal(session.checkpoints[0]?.recordIndex, 0);
   assert.equal(session.records[0]?.kind, 'user');
+  assert.equal(session.lifecycle.lastUserInputAt, session.records[0]?.ts);
 });
 
 test('runner emits checkpoint-created after automatic checkpoint creation', async () => {
@@ -676,7 +677,7 @@ test('runner cancellation during auto compaction stops before the main model cal
       async complete(messages) {
         if (messages.some((message) => message.content.includes('Records to summarize'))) {
           controller.abort();
-          throw new Error('summarizer aborted');
+          return completion('## Objective\nShould not persist');
         }
         normalCalls += 1;
         return completion('{"message":"done"}');

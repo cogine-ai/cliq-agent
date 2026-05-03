@@ -427,6 +427,26 @@ function parseAskArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   return { ...base, cmd: 'chat', prompt };
 }
 
+function isKnownCommand(cmd: string | undefined) {
+  return (
+    cmd === 'chat' ||
+    cmd === 'run' ||
+    cmd === 'ask' ||
+    cmd === 'checkpoint' ||
+    cmd === 'compact' ||
+    cmd === 'handoff' ||
+    cmd === 'checkpoints' ||
+    cmd === 'compactions' ||
+    cmd === 'fork' ||
+    cmd === 'restore' ||
+    cmd === 'reset' ||
+    cmd === 'history' ||
+    cmd === 'help' ||
+    cmd === '--help' ||
+    cmd === '-h'
+  );
+}
+
 export function parseArgs(argv: string[]): ParsedArgs {
   const raw = argv.slice(2);
   let policy: PolicyMode = DEFAULT_POLICY_MODE;
@@ -562,7 +582,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const cmd = args[0];
   const base: ParsedArgsBase = { policy, skills, model };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
-  if (hasJsonlArg && cmd !== 'run') {
+  if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
     throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
   }
   if (!cmd || cmd === 'chat') {

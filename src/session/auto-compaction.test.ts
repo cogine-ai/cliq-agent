@@ -201,7 +201,56 @@ test('maybeAutoCompact chunks summarizer input when selected records exceed summ
 
     assert.equal(result.status, 'compacted');
     assert.equal(model.calls.length > 1, true);
-    assert.deepEqual(model.signals, [controller.signal, controller.signal]);
+    assert.equal(model.signals.length, model.calls.length);
+    assert.equal(model.signals.every((signal) => signal === controller.signal), true);
+  });
+});
+
+test('maybeAutoCompact stops after summarizer returns if cancellation was requested', async () => {
+  await withTempSession(async ({ cwd, session }) => {
+    session.records.push(user('u1', 'old '.repeat(100)), assistant('a1', '{"message":"old"}'), user('u2', 'tail'));
+    const controller = new AbortController();
+    const model = {
+      client: {
+        async complete() {
+          controller.abort();
+          return {
+            content: '## Objective\nShould not persist',
+            provider: 'openrouter' as const,
+            model: 'test-model'
+          };
+        }
+      }
+    };
+
+    const result = await maybeAutoCompact({
+      cwd,
+      session,
+      model: model.client,
+      modelConfig: { provider: 'openrouter', model: 'test-model', baseUrl: 'https://example.test', streaming: 'off' },
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 400,
+        thresholdRatio: 0.8,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1,
+        maxThresholdCompactionsPerTurn: 1,
+        maxOverflowRetriesPerModelCall: 1,
+        usableLimitTokens: 300,
+        contextWindowSource: 'config'
+      },
+      instructions: [],
+      phase: 'pre-model',
+      trigger: 'threshold',
+      state: { thresholdCompactionsThisTurn: 0, thresholdSuppressed: false },
+      signal: controller.signal,
+      estimateOverrideTokens: 350
+    });
+
+    assert.equal(result.status, 'error');
+    assert.equal(result.status === 'error' ? result.error.name : '', 'AbortError');
+    assert.equal(session.compactions.length, 0);
   });
 });
 
