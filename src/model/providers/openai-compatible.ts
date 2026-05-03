@@ -1,4 +1,5 @@
 import { fetchWithTimeout, joinUrl, readJsonResponse, readSseDeltas } from '../http.js';
+import { emitModelErrorEvent } from '../events.js';
 import type { ChatMessage, ModelClient, ModelCompleteOptions, ResolvedModelConfig } from '../types.js';
 
 type ChatCompletionsResp = {
@@ -30,21 +31,6 @@ async function streamHttpError(response: Response) {
   return new Error(
     `Model stream error ${response.status}${detail}. If this endpoint does not support streaming, retry with --streaming off.`
   );
-}
-
-async function emitErrorEvent(options: CompleteOptions | undefined, error: unknown) {
-  if (options?.signal?.aborted) {
-    return;
-  }
-
-  try {
-    await options?.onEvent?.({
-      type: 'error',
-      message: error instanceof Error ? error.message : String(error)
-    });
-  } catch {
-    // Preserve the original provider failure even if the event sink fails.
-  }
 }
 
 async function emitStartEvent(config: ResolvedModelConfig, options: CompleteOptions | undefined, streaming: boolean) {
@@ -156,7 +142,7 @@ export function createOpenAICompatibleClient(config: ResolvedModelConfig): Model
 
         return await completeWithoutStreaming(config, messages, options);
       } catch (error) {
-        await emitErrorEvent(options, error);
+        await emitModelErrorEvent(options, error);
         throw error;
       }
     }

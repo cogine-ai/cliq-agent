@@ -4,7 +4,7 @@ import { createInterface as createPromptInterface } from 'node:readline/promises
 
 import { DEFAULT_POLICY_MODE } from './config.js';
 import { exportHandoff } from './handoff/export.js';
-import type { RuntimeEventEnvelope } from './headless/contract.js';
+import type { HeadlessRunStatus, RuntimeEventEnvelope } from './headless/contract.js';
 import { writeJsonlEvent } from './headless/jsonl.js';
 import { runHeadless } from './headless/run.js';
 import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
@@ -96,9 +96,14 @@ function hasHelpFlag(values: string[]) {
 }
 
 export class ReportedCliError extends Error {
-  constructor(error: unknown) {
+  readonly exitCode?: number;
+  readonly status?: HeadlessRunStatus;
+
+  constructor(error: unknown, options: { exitCode?: number; status?: HeadlessRunStatus } = {}) {
     super(error instanceof Error ? error.message : String(error), { cause: error });
     this.name = 'ReportedCliError';
+    this.exitCode = options.exitCode;
+    this.status = options.status;
   }
 }
 
@@ -112,6 +117,10 @@ export function renderUnhandledError(error: unknown) {
   }
 
   return error instanceof Error ? error.message : String(error);
+}
+
+export function cliExitCode(error: unknown) {
+  return isReportedCliError(error) && error.exitCode !== undefined ? error.exitCode : 1;
 }
 
 function readFlagValue(raw: string[], index: number, flag: string) {
@@ -387,20 +396,27 @@ function parseHandoffGroupArgs(args: string[], base: ParsedArgsBase): ParsedArgs
 function parseRunArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   const promptParts: string[] = [];
   let jsonl = false;
+  let parsingFlags = true;
 
   for (let i = 1; i < args.length; i += 1) {
     const token = args[i]!;
-    if (token === '--jsonl') {
+    if (parsingFlags && token === '--jsonl') {
       jsonl = true;
       continue;
     }
-    if (token.startsWith('--jsonl=')) {
+    if (parsingFlags && token.startsWith('--jsonl=')) {
       throw new Error('--jsonl does not accept a value');
     }
+    parsingFlags = false;
     promptParts.push(token);
   }
 
-  return { ...base, cmd: 'chat', prompt: promptParts.join(' '), ...(jsonl ? { jsonl } : {}) };
+  const prompt = promptParts.join(' ').trim();
+  if (!prompt) {
+    throw new Error('Missing prompt for cliq run/ask');
+  }
+
+  return { ...base, cmd: 'chat', prompt, ...(jsonl ? { jsonl } : {}) };
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -1068,7 +1084,10 @@ export async function runCli(argv: string[]) {
         }
       );
       if (output.exitCode !== 0) {
-        throw new ReportedCliError(output.error?.message ?? `headless run failed with exit code ${output.exitCode}`);
+        throw new ReportedCliError(output.error?.message ?? `headless run failed with exit code ${output.exitCode}`, {
+          exitCode: output.exitCode,
+          status: output.status
+        });
       }
       return;
     }
@@ -1097,7 +1116,10 @@ export async function runCli(argv: string[]) {
     );
 
     if (output.status !== 'completed') {
-      throw new ReportedCliError(output.error?.message ?? 'headless run failed');
+      throw new ReportedCliError(output.error?.message ?? 'headless run failed', {
+        exitCode: output.exitCode,
+        status: output.status
+      });
     }
     console.log(`\n${finalMessage || output.finalMessage || '(no content)'}`);
     return;

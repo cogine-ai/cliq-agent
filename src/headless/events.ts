@@ -4,10 +4,11 @@ import {
   emptyHeadlessArtifacts,
   HEADLESS_SCHEMA_VERSION,
   type CheckpointCreatedPayload,
+  type HeadlessEventPayloadByType,
   type HeadlessArtifacts,
   type HeadlessErrorCode,
   type HeadlessRuntimeEventType,
-  type RuntimeEventEnvelope
+  type RuntimeEventEnvelopeFor
 } from './contract.js';
 
 type EnvelopeScope = {
@@ -21,10 +22,12 @@ type EventFactoryOptions = {
 };
 
 export type RuntimeEventMapping = {
-  type: HeadlessRuntimeEventType;
-  payload: unknown;
-  artifacts?: HeadlessArtifacts;
-};
+  [TType in HeadlessRuntimeEventType]: {
+    type: TType;
+    payload: HeadlessEventPayloadByType[TType];
+    artifacts?: HeadlessArtifacts;
+  };
+}[HeadlessRuntimeEventType];
 
 const codeByRuntimeErrorStage = {
   model: 'model-error',
@@ -59,11 +62,11 @@ export function mergeArtifacts(target: HeadlessArtifacts, source: HeadlessArtifa
 }
 
 export function createHeadlessEventFactory({ runId, now = nowIso }: EventFactoryOptions) {
-  return function createEvent<TPayload>(
-    type: HeadlessRuntimeEventType,
-    payload: TPayload,
+  return function createEvent<TType extends HeadlessRuntimeEventType>(
+    type: TType,
+    payload: HeadlessEventPayloadByType[TType],
     scope: EnvelopeScope = {}
-  ): RuntimeEventEnvelope<TPayload> {
+  ): RuntimeEventEnvelopeFor<TType> {
     return {
       schemaVersion: HEADLESS_SCHEMA_VERSION,
       eventId: makeId('evt'),
@@ -73,7 +76,7 @@ export function createHeadlessEventFactory({ runId, now = nowIso }: EventFactory
       timestamp: now(),
       type,
       payload
-    };
+    } as RuntimeEventEnvelopeFor<TType>;
   };
 }
 

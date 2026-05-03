@@ -29,3 +29,33 @@ test('ollama client sends native chat request', async () => {
     fetchMock.mock.restore();
   }
 });
+
+test('ollama client preserves original provider error when error event handler fails', async () => {
+  const originalError = new Error('ollama unavailable');
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    throw originalError;
+  });
+
+  try {
+    const client = createOllamaClient({
+      provider: 'ollama',
+      model: 'qwen3:14b',
+      baseUrl: 'http://localhost:11434',
+      streaming: 'off'
+    });
+
+    await assert.rejects(
+      () =>
+        client.complete([{ role: 'user', content: 'hello' }], {
+          onEvent(event) {
+            if (event.type === 'error') {
+              throw new Error('event sink failed');
+            }
+          }
+        }),
+      /ollama unavailable/
+    );
+  } finally {
+    fetchMock.mock.restore();
+  }
+});

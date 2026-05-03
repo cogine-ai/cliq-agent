@@ -107,4 +107,14 @@ test('getArtifactView resolves checkpoint, workspace checkpoint, compaction, and
   await assert.rejects(() => getArtifactView(session, 'wchk_missing'), /artifact not found/i);
   await assert.rejects(() => getArtifactView(session, 'handoff_missing'), /artifact not found/i);
   await assert.rejects(() => getArtifactView(session, 'handoff_../../../outside'), /artifact not found/i);
+
+  session.checkpoints.push({
+    id: 'chk_missing_workspace',
+    kind: 'manual',
+    createdAt: '2026-05-03T00:00:02.000Z',
+    recordIndex: 1,
+    turn: 1,
+    workspaceCheckpointId: 'wchk_missing_for_checkpoint'
+  });
+  await assert.rejects(() => getArtifactView(session, 'chk_missing_workspace'), /artifact not found/i);
 });

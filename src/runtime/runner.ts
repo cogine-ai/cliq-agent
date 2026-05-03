@@ -26,6 +26,10 @@ type ModelAttemptResult =
   | { ok: true; completion: ModelCompletion }
   | { ok: false; error: unknown; sawModelError: boolean };
 
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
 export function createRunner({
   model,
   registry = createToolRegistry(),
@@ -64,7 +68,6 @@ export function createRunner({
         }
         session.lifecycle.status = 'running';
         session.lifecycle.turn += 1;
-        session.lifecycle.lastUserInputAt = nowIso();
         await throwIfCancelled();
         const checkpoint = await createCheckpoint(cwd, session, { kind: 'auto' });
         const warning =
@@ -87,6 +90,8 @@ export function createRunner({
           role: 'user',
           content: userInput
         });
+        session.lifecycle.lastUserInputAt = nowIso();
+        await saveSession(cwd, session);
         await throwIfCancelled();
 
         await runHooks(hooks, 'beforeTurn', session, userInput);
@@ -355,9 +360,14 @@ export function createRunner({
           } else if (result === null && authorization !== null) {
             await throwIfCancelled();
             await runHooks(hooks, 'beforeTool', session, action);
+            await throwIfCancelled();
             try {
               result = await definition.execute(action as never, { cwd, session, signal });
             } catch (error) {
+              if (signal?.aborted || isAbortError(error)) {
+                await throwIfCancelled();
+                throw error;
+              }
               const message = error instanceof Error ? error.message : String(error);
               result = {
                 tool: definition.name,

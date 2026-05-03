@@ -1,9 +1,12 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
+import type { ProviderName } from '../model/types.js';
 import { createCheckpoint } from '../session/checkpoints.js';
 import { makeId, nowIso, resolveCliqHome } from '../session/store.js';
 import type { CompactionArtifact, Session, SessionCheckpoint, SessionRecord } from '../session/types.js';
+
+const SAFE_HANDOFF_ID = /^[A-Za-z0-9_-]+$/;
 
 export type HandoffArtifact = {
   id: string;
@@ -13,7 +16,7 @@ export type HandoffArtifact = {
   checkpointId: string;
   activeCompactionId?: string;
   summarySource: 'active-compaction' | 'handoff-only';
-  provider: string;
+  provider: ProviderName;
   model: string;
   workspaceCheckpointId?: string;
   summaryMarkdown: string;
@@ -28,6 +31,9 @@ export type ExportHandoffOptions = {
 };
 
 export function handoffDirPath(handoffId: string, cliqHome = resolveCliqHome()) {
+  if (!SAFE_HANDOFF_ID.test(handoffId)) {
+    throw new Error(`invalid handoff id: ${handoffId}`);
+  }
   return path.join(cliqHome, 'handoffs', handoffId);
 }
 

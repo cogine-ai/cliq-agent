@@ -107,17 +107,6 @@ export type HeadlessRuntimeEventType =
   | 'error'
   | 'run-end';
 
-export type RuntimeEventEnvelope<TPayload = unknown> = {
-  schemaVersion: 1;
-  eventId: string;
-  runId: string;
-  sessionId?: string;
-  turn?: number;
-  timestamp: string;
-  type: HeadlessRuntimeEventType;
-  payload: TPayload;
-};
-
 export type RunStartPayload = {
   cwd: string;
   policy: PolicyMode;
@@ -158,6 +147,26 @@ export type ToolEndPayload = {
   status: 'ok' | 'error';
 };
 
+export type CompactStartPayload = {
+  trigger: 'threshold' | 'overflow';
+  phase: 'pre-model' | 'mid-loop';
+};
+
+export type CompactEndPayload = {
+  artifactId: string;
+  estimatedTokensBefore: number;
+  estimatedTokensAfter: number;
+};
+
+export type CompactSkipPayload = {
+  reason: string;
+};
+
+export type CompactErrorPayload = {
+  trigger: 'threshold' | 'overflow';
+  message: string;
+};
+
 export type FinalPayload = {
   message: string;
 };
@@ -168,12 +177,53 @@ export type RunEndPayload = {
   output: HeadlessRunOutput;
 };
 
+export type HeadlessEventPayloadByType = {
+  'run-start': RunStartPayload;
+  'checkpoint-created': CheckpointCreatedPayload;
+  'model-start': ModelStartPayload;
+  'model-progress': ModelProgressPayload;
+  'model-end': ModelEndPayload;
+  'tool-start': ToolStartPayload;
+  'tool-end': ToolEndPayload;
+  'compact-start': CompactStartPayload;
+  'compact-end': CompactEndPayload;
+  'compact-skip': CompactSkipPayload;
+  'compact-error': CompactErrorPayload;
+  final: FinalPayload;
+  error: HeadlessRunError;
+  'run-end': RunEndPayload;
+};
+
+export type RuntimeEventEnvelopeFor<TType extends HeadlessRuntimeEventType> = TType extends HeadlessRuntimeEventType
+  ? {
+      schemaVersion: 1;
+      eventId: string;
+      runId: string;
+      sessionId?: string;
+      turn?: number;
+      timestamp: string;
+      type: TType;
+      payload: HeadlessEventPayloadByType[TType];
+    }
+  : never;
+
+export type RuntimeEventEnvelope = {
+  [TType in HeadlessRuntimeEventType]: RuntimeEventEnvelopeFor<TType>;
+}[HeadlessRuntimeEventType];
+
 export type SessionRecordView =
   | {
       id: string;
       ts: string;
-      kind: 'system' | 'user';
-      role: 'system' | 'user';
+      kind: 'system';
+      role: 'system';
+      text: string;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'user';
+      role: 'user';
       text: string;
     }
   | {
@@ -248,7 +298,7 @@ export type HandoffView = {
   checkpointId: string;
   activeCompactionId?: string;
   summarySource: 'active-compaction' | 'handoff-only';
-  provider: string;
+  provider: ProviderName;
   model: string;
   workspaceCheckpointId?: string;
   summaryMarkdown: string;

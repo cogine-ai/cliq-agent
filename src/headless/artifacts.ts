@@ -73,12 +73,19 @@ function actionType(record: Extract<SessionRecord, { kind: 'assistant' }>): Sess
 export function toSessionRecordView(record: SessionRecord): SessionRecordView {
   switch (record.kind) {
     case 'system':
+      return {
+        id: record.id,
+        ts: record.ts,
+        kind: 'system',
+        role: 'system',
+        text: record.content
+      };
     case 'user':
       return {
         id: record.id,
         ts: record.ts,
-        kind: record.kind,
-        role: record.role,
+        kind: 'user',
+        role: 'user',
         text: record.content
       };
     case 'tool':
@@ -222,7 +229,7 @@ export async function getArtifactView(session: Session, artifactId: string): Pro
   if (checkpoint) {
     const checkpointView = toCheckpointView(checkpoint);
     const workspaceCheckpoint = checkpoint.workspaceCheckpointId
-      ? toWorkspaceCheckpointView(await getWorkspaceCheckpoint(checkpoint.workspaceCheckpointId))
+      ? await getWorkspaceCheckpointView(checkpoint.workspaceCheckpointId)
       : undefined;
     return {
       kind: 'checkpoint',

@@ -310,17 +310,6 @@ export type HeadlessRuntimeEventType =
   | 'error'
   | 'run-end';
 
-export type RuntimeEventEnvelope<TPayload = unknown> = {
-  schemaVersion: 1;
-  eventId: string;
-  runId: string;
-  sessionId?: string;
-  turn?: number;
-  timestamp: string;
-  type: HeadlessRuntimeEventType;
-  payload: TPayload;
-};
-
 export type RunStartPayload = {
   cwd: string;
   policy: PolicyMode;
@@ -361,6 +350,26 @@ export type ToolEndPayload = {
   status: 'ok' | 'error';
 };
 
+export type CompactStartPayload = {
+  trigger: 'threshold' | 'overflow';
+  phase: 'pre-model' | 'mid-loop';
+};
+
+export type CompactEndPayload = {
+  artifactId: string;
+  estimatedTokensBefore: number;
+  estimatedTokensAfter: number;
+};
+
+export type CompactSkipPayload = {
+  reason: string;
+};
+
+export type CompactErrorPayload = {
+  trigger: 'threshold' | 'overflow';
+  message: string;
+};
+
 export type FinalPayload = {
   message: string;
 };
@@ -370,6 +379,41 @@ export type RunEndPayload = {
   exitCode: number;
   output: HeadlessRunOutput;
 };
+
+export type HeadlessEventPayloadByType = {
+  'run-start': RunStartPayload;
+  'checkpoint-created': CheckpointCreatedPayload;
+  'model-start': ModelStartPayload;
+  'model-progress': ModelProgressPayload;
+  'model-end': ModelEndPayload;
+  'tool-start': ToolStartPayload;
+  'tool-end': ToolEndPayload;
+  'compact-start': CompactStartPayload;
+  'compact-end': CompactEndPayload;
+  'compact-skip': CompactSkipPayload;
+  'compact-error': CompactErrorPayload;
+  final: FinalPayload;
+  error: HeadlessRunError;
+  'run-end': RunEndPayload;
+};
+
+export type RuntimeEventEnvelopeFor<TType extends HeadlessRuntimeEventType> =
+  TType extends HeadlessRuntimeEventType
+    ? {
+        schemaVersion: 1;
+        eventId: string;
+        runId: string;
+        sessionId?: string;
+        turn?: number;
+        timestamp: string;
+        type: TType;
+        payload: HeadlessEventPayloadByType[TType];
+      }
+    : never;
+
+export type RuntimeEventEnvelope = {
+  [TType in HeadlessRuntimeEventType]: RuntimeEventEnvelopeFor<TType>;
+}[HeadlessRuntimeEventType];
 ```
 
 - [ ] **Step 4: Extend runtime event types**
@@ -411,9 +455,10 @@ import {
   emptyHeadlessArtifacts,
   HEADLESS_SCHEMA_VERSION,
   type CheckpointCreatedPayload,
+  type HeadlessEventPayloadByType,
   type HeadlessArtifacts,
   type HeadlessRuntimeEventType,
-  type RuntimeEventEnvelope
+  type RuntimeEventEnvelopeFor
 } from './contract.js';
 
 type EnvelopeScope = {
@@ -427,10 +472,12 @@ type EventFactoryOptions = {
 };
 
 export type RuntimeEventMapping = {
-  type: HeadlessRuntimeEventType;
-  payload: unknown;
-  artifacts?: HeadlessArtifacts;
-};
+  [TType in HeadlessRuntimeEventType]: {
+    type: TType;
+    payload: HeadlessEventPayloadByType[TType];
+    artifacts?: HeadlessArtifacts;
+  };
+}[HeadlessRuntimeEventType];
 
 function artifactsWith(values: Partial<HeadlessArtifacts>): HeadlessArtifacts {
   return {
@@ -457,11 +504,11 @@ export function mergeArtifacts(target: HeadlessArtifacts, source: HeadlessArtifa
 }
 
 export function createHeadlessEventFactory({ runId, now = nowIso }: EventFactoryOptions) {
-  return function createEvent<TPayload>(
-    type: HeadlessRuntimeEventType,
-    payload: TPayload,
+  return function createEvent<TType extends HeadlessRuntimeEventType>(
+    type: TType,
+    payload: HeadlessEventPayloadByType[TType],
     scope: EnvelopeScope = {}
-  ): RuntimeEventEnvelope<TPayload> {
+  ): RuntimeEventEnvelopeFor<TType> {
     return {
       schemaVersion: HEADLESS_SCHEMA_VERSION,
       eventId: makeId('evt'),
@@ -471,7 +518,7 @@ export function createHeadlessEventFactory({ runId, now = nowIso }: EventFactory
       timestamp: now(),
       type,
       payload
-    };
+    } as RuntimeEventEnvelopeFor<TType>;
   };
 }
 
@@ -766,8 +813,15 @@ export type SessionRecordView =
   | {
       id: string;
       ts: string;
-      kind: 'system' | 'user';
-      role: 'system' | 'user';
+      kind: 'system';
+      role: 'system';
+      text: string;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'user';
+      role: 'user';
       text: string;
     }
   | {
@@ -836,9 +890,16 @@ export type CompactionView = {
 
 export type HandoffView = {
   id: string;
+  createdAt: string;
+  sessionId: string;
+  parentSessionId?: string;
   checkpointId: string;
+  activeCompactionId?: string;
   summarySource: 'active-compaction' | 'handoff-only';
-  json: unknown;
+  provider: ProviderName;
+  model: string;
+  workspaceCheckpointId?: string;
+  summaryMarkdown: string;
   markdown: string;
 };
 
@@ -1017,11 +1078,19 @@ export function toSessionView(session: Session): SessionView {
 
 async function toHandoffView(handoffId: string): Promise<HandoffView> {
   const handoff = await readHandoffArtifact(handoffId);
+  const artifact = handoff.json;
   return {
-    id: handoff.json.id,
-    checkpointId: handoff.json.checkpointId,
-    summarySource: handoff.json.summarySource,
-    json: handoff.json,
+    id: artifact.id,
+    createdAt: artifact.createdAt,
+    sessionId: artifact.sessionId,
+    parentSessionId: artifact.parentSessionId,
+    checkpointId: artifact.checkpointId,
+    activeCompactionId: artifact.activeCompactionId,
+    summarySource: artifact.summarySource,
+    provider: artifact.provider,
+    model: artifact.model,
+    workspaceCheckpointId: artifact.workspaceCheckpointId,
+    summaryMarkdown: artifact.summaryMarkdown,
     markdown: handoff.markdown
   };
 }
@@ -1030,7 +1099,7 @@ export async function getArtifactView(session: Session, artifactId: string): Pro
   const checkpoint = session.checkpoints.find((candidate) => candidate.id === artifactId);
   if (checkpoint) {
     const workspaceCheckpoint = checkpoint.workspaceCheckpointId
-      ? toWorkspaceCheckpointView(await getWorkspaceCheckpoint(checkpoint.workspaceCheckpointId))
+      ? await getWorkspaceCheckpointView(checkpoint.workspaceCheckpointId)
       : undefined;
     return {
       kind: 'checkpoint',
@@ -2113,7 +2182,7 @@ Expected: `jsonl ok`.
 Run:
 
 ```bash
-git diff --stat HEAD~5..HEAD
+git diff --stat origin/main...HEAD
 git status --short
 ```
 

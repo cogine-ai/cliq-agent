@@ -241,17 +241,43 @@ Rules:
 Headless adapters emit one JSON object per event.
 
 ```ts
-export type RuntimeEventEnvelope<TPayload = unknown> = {
-  schemaVersion: 1;
-  eventId: string;
-  runId: string;
-  sessionId?: string;
-  turn?: number;
-  timestamp: string;
-  type: HeadlessRuntimeEventType;
-  payload: TPayload;
+export type HeadlessEventPayloadByType = {
+  'run-start': RunStartPayload;
+  'checkpoint-created': CheckpointCreatedPayload;
+  'model-start': ModelStartPayload;
+  'model-progress': ModelProgressPayload;
+  'model-end': ModelEndPayload;
+  'tool-start': ToolStartPayload;
+  'tool-end': ToolEndPayload;
+  'compact-start': CompactStartPayload;
+  'compact-end': CompactEndPayload;
+  'compact-skip': CompactSkipPayload;
+  'compact-error': CompactErrorPayload;
+  final: FinalPayload;
+  error: HeadlessRunError;
+  'run-end': RunEndPayload;
 };
+
+export type RuntimeEventEnvelopeFor<TType extends HeadlessRuntimeEventType> =
+  TType extends HeadlessRuntimeEventType
+    ? {
+        schemaVersion: 1;
+        eventId: string;
+        runId: string;
+        sessionId?: string;
+        turn?: number;
+        timestamp: string;
+        type: TType;
+        payload: HeadlessEventPayloadByType[TType];
+      }
+    : never;
+
+export type RuntimeEventEnvelope = {
+  [TType in HeadlessRuntimeEventType]: RuntimeEventEnvelopeFor<TType>;
+}[HeadlessRuntimeEventType];
 ```
+
+The payload aliases above correspond to the event-specific payload shapes documented in Section 10.
 
 Required properties:
 
@@ -625,8 +651,15 @@ export type SessionRecordView =
   | {
       id: string;
       ts: string;
-      kind: 'system' | 'user';
-      role: 'system' | 'user';
+      kind: 'system';
+      role: 'system';
+      text: string;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'user';
+      role: 'user';
       text: string;
     }
   | {
@@ -701,7 +734,7 @@ export type HandoffView = {
   checkpointId: string;
   activeCompactionId?: string;
   summarySource: 'active-compaction' | 'handoff-only';
-  provider: string;
+  provider: ProviderName;
   model: string;
   workspaceCheckpointId?: string;
   summaryMarkdown: string;

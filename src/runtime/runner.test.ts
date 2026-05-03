@@ -169,7 +169,7 @@ test('runner cancellation after checkpoint keeps checkpoint and skips user appen
   assert.equal(session.records.length, 0);
   assert.equal(session.lifecycle.status, 'idle');
   assert.equal(session.lifecycle.turn, 1);
-  assert.equal(typeof session.lifecycle.lastUserInputAt, 'string');
+  assert.equal(session.lifecycle.lastUserInputAt, undefined);
 });
 
 test('runner appends tool results and replays them back to the model', async () => {
@@ -330,7 +330,94 @@ test('runner resets lifecycle state when setup fails before the loop', async () 
 
   await assert.rejects(() => runner.runTurn(session, 'say done'));
   assert.equal(session.lifecycle.status, 'idle');
+  assert.equal(session.lifecycle.lastUserInputAt, undefined);
   assert.equal(modelCalls, 0);
+});
+
+test('runner cancellation after beforeTool skips tool execution and tool record', async () => {
+  const session = await createTempSession();
+  const controller = new AbortController();
+  let executed = false;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"bash":"pwd"}');
+      }
+    },
+    signal: controller.signal,
+    hooks: [
+      {
+        beforeTool() {
+          controller.abort();
+        }
+      }
+    ],
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executed = true;
+              return {
+                tool: 'bash',
+                status: 'ok' as const,
+                content: 'TOOL_RESULT bash OK\n$ pwd\n(exit=0 signal=none)\n/tmp/workspace',
+                meta: { exit: 0 }
+              };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'use tool'), /cancelled/i);
+  assert.equal(executed, false);
+  assert.equal(session.records.some((record) => record.kind === 'tool'), false);
+});
+
+test('runner cancellation during tool execution does not persist a tool error record', async () => {
+  const session = await createTempSession();
+  const controller = new AbortController();
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"bash":"pwd"}');
+      }
+    },
+    signal: controller.signal,
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              controller.abort();
+              const error = new Error('aborted');
+              error.name = 'AbortError';
+              throw error;
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'use tool'), /cancelled/i);
+  assert.equal(session.records.some((record) => record.kind === 'tool'), false);
 });
 
 test('runner converts tool exceptions into tool error records and still calls afterTool hooks', async () => {

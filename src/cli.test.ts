@@ -8,6 +8,7 @@ import { mock } from 'node:test';
 import { promisify } from 'node:util';
 
 import {
+  cliExitCode,
   formatToolResultLine,
   isReportedCliError,
   parseArgs,
@@ -51,6 +52,28 @@ test('parseArgs accepts command-scoped run --jsonl', () => {
     skills: [],
     model: {}
   });
+});
+
+test('parseArgs keeps --jsonl in the prompt after the first prompt token', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', 'inspect', '--jsonl']), {
+    cmd: 'chat',
+    prompt: 'inspect --jsonl',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'ask', '--literal', '--jsonl']), {
+    cmd: 'chat',
+    prompt: '--literal --jsonl',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs requires a prompt for run aliases', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'run']), /missing prompt for cliq run\/ask/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'run', '--jsonl']), /missing prompt for cliq run\/ask/i);
 });
 
 test('parseArgs rejects --jsonl outside one-shot run aliases', () => {
@@ -549,6 +572,15 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
 test('renderUnhandledError suppresses errors already reported by runtime events', () => {
   assert.equal(renderUnhandledError(new Error('plain failure')), 'plain failure');
   assert.equal(renderUnhandledError(new ReportedCliError(new Error('reported failure'))), null);
+});
+
+test('ReportedCliError preserves headless exit details for the CLI entrypoint', () => {
+  const error = new ReportedCliError('cancelled', { exitCode: 130, status: 'cancelled' });
+
+  assert.equal(error.exitCode, 130);
+  assert.equal(error.status, 'cancelled');
+  assert.equal(cliExitCode(error), 130);
+  assert.equal(cliExitCode(new Error('plain failure')), 1);
 });
 
 type CliTestEnv = {

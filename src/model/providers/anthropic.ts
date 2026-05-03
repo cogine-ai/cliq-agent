@@ -1,4 +1,5 @@
 import { fetchWithTimeout, joinUrl, readJsonResponse, readSseDeltas } from '../http.js';
+import { emitModelErrorEvent } from '../events.js';
 import type { ChatMessage, ModelClient, ModelCompleteOptions, ResolvedModelConfig } from '../types.js';
 
 type AnthropicResp = {
@@ -117,12 +118,7 @@ export function createAnthropicClient(config: ResolvedModelConfig): ModelClient 
           model: config.model
         };
       } catch (error) {
-        if (!options?.signal?.aborted) {
-          await options?.onEvent?.({
-            type: 'error',
-            message: error instanceof Error ? error.message : String(error)
-          });
-        }
+        await emitModelErrorEvent(options, error);
         throw error;
       }
     }
