@@ -4,9 +4,13 @@ import { createInterface as createPromptInterface } from 'node:readline/promises
 
 import { DEFAULT_POLICY_MODE } from './config.js';
 import { exportHandoff } from './handoff/export.js';
+import type { RuntimeEventEnvelope } from './headless/contract.js';
+import { writeJsonlEvent } from './headless/jsonl.js';
+import { runHeadless } from './headless/run.js';
 import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
+import type { ProviderName } from './model/types.js';
 import { createPolicyEngine } from './policy/engine.js';
 import type { PolicyMode } from './policy/types.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
@@ -40,7 +44,7 @@ type ParsedArgsBase = {
 };
 
 export type ParsedArgs = ParsedArgsBase & (
-  | { cmd: 'chat'; prompt: string }
+  | { cmd: 'chat'; prompt: string; jsonl?: boolean }
   | { cmd: 'checkpoint-create'; name?: string; prompt?: undefined }
   | { cmd: 'checkpoint-list'; prompt?: undefined }
   | {
@@ -380,6 +384,25 @@ function parseHandoffGroupArgs(args: string[], base: ParsedArgsBase): ParsedArgs
   throw new Error(`Unknown handoff action: ${action}. Run "cliq handoff help".`);
 }
 
+function parseRunArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  const promptParts: string[] = [];
+  let jsonl = false;
+
+  for (let i = 1; i < args.length; i += 1) {
+    const token = args[i]!;
+    if (token === '--jsonl') {
+      jsonl = true;
+      continue;
+    }
+    if (token.startsWith('--jsonl=')) {
+      throw new Error('--jsonl does not accept a value');
+    }
+    promptParts.push(token);
+  }
+
+  return { ...base, cmd: 'chat', prompt: promptParts.join(' '), ...(jsonl ? { jsonl } : {}) };
+}
+
 export function parseArgs(argv: string[]): ParsedArgs {
   const raw = argv.slice(2);
   let policy: PolicyMode = DEFAULT_POLICY_MODE;
@@ -514,8 +537,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
   const cmd = args[0];
   const base: ParsedArgsBase = { policy, skills, model };
-  if (!cmd || cmd === 'chat') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
-  if (cmd === 'run' || cmd === 'ask') return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
+  const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
+  if (hasJsonlArg && cmd !== 'run' && cmd !== 'ask') {
+    throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
+  }
+  if (!cmd || cmd === 'chat') {
+    return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
+  }
+  if (cmd === 'run' || cmd === 'ask') return parseRunArgs(args, base);
   if (cmd === 'checkpoint') return parseCheckpointArgs(args, base);
   if (cmd === 'compact') return parseCompactGroupArgs(args, base);
   if (cmd === 'handoff') return parseHandoffGroupArgs(args, base);
@@ -618,6 +647,7 @@ export function printHelp(topic?: HelpTopic) {
 Usage:
   cliq "task"              Run a task in the current directory
   cliq run "task"          Alias for one-shot task execution
+  cliq run --jsonl "task"  Emit machine-readable JSONL runtime events
   cliq ask "task"          Alias for one-shot task execution
   cliq chat                Start interactive chat in the current directory
   cliq reset               Clear persisted conversation for this directory
@@ -643,6 +673,7 @@ Options:
   --model ID               Provider model id; required for openai-compatible; auto-discovered for ollama
   --base-url URL           Required for openai-compatible; optional provider override
   --streaming MODE         auto | on | off
+  --jsonl                  With cliq run only, write structured JSONL events to stdout
 
 Policy modes:
   auto                     Execute registered tools without confirmation
@@ -778,6 +809,59 @@ function createCliEventSink() {
       process.stderr.write(`[${event.stage} error] ${event.message}\n`);
     }
   };
+}
+
+async function renderHeadlessEventToCli(
+  event: RuntimeEventEnvelope,
+  eventSink: ReturnType<typeof createCliEventSink>
+) {
+  if (event.type === 'run-start' || event.type === 'run-end') {
+    return;
+  }
+
+  if (event.type === 'model-start') {
+    const payload = event.payload as { provider: ProviderName; model: string; streaming: boolean };
+    await eventSink({
+      type: 'model-start',
+      provider: payload.provider,
+      model: payload.model,
+      streaming: payload.streaming
+    });
+    return;
+  }
+
+  if (event.type === 'model-progress') {
+    const payload = event.payload as { chunks: number; chars: number };
+    await eventSink({ type: 'model-progress', chunks: payload.chunks, chars: payload.chars });
+    return;
+  }
+
+  if (event.type === 'model-end') {
+    const payload = event.payload as { provider: ProviderName; model: string };
+    await eventSink({ type: 'model-end', provider: payload.provider, model: payload.model });
+    return;
+  }
+
+  if (event.type === 'compact-end') {
+    const payload = event.payload as {
+      artifactId: string;
+      estimatedTokensBefore: number;
+      estimatedTokensAfter: number;
+    };
+    await eventSink({ type: 'compact-end', ...payload });
+    return;
+  }
+
+  if (event.type === 'compact-error') {
+    const payload = event.payload as { trigger: 'threshold' | 'overflow'; message: string };
+    await eventSink({ type: 'compact-error', trigger: payload.trigger, message: payload.message });
+    return;
+  }
+
+  if (event.type === 'error') {
+    const payload = event.payload as { stage: string; message: string };
+    process.stderr.write(`[${payload.stage} error] ${payload.message}\n`);
+  }
 }
 
 function workspaceSnapshotUnavailableMessage(checkpoint: CreatedSessionCheckpoint) {
@@ -967,6 +1051,58 @@ export async function runCli(argv: string[]) {
     return;
   }
 
+  if (prompt && prompt.trim()) {
+    if (parsed.jsonl) {
+      const output = await runHeadless(
+        {
+          cwd,
+          prompt: prompt.trim(),
+          policy,
+          skills,
+          model: cliModel
+        },
+        {
+          onEvent(event) {
+            writeJsonlEvent(event);
+          }
+        }
+      );
+      if (output.exitCode !== 0) {
+        throw new ReportedCliError(output.error?.message ?? `headless run failed with exit code ${output.exitCode}`);
+      }
+      return;
+    }
+
+    const eventSink = createCliEventSink();
+    let finalMessage = '';
+    const output = await runHeadless(
+      {
+        cwd,
+        prompt: prompt.trim(),
+        policy,
+        skills,
+        model: cliModel
+      },
+      {
+        hooks: createCliHooks(),
+        confirm: createConfirmTool(),
+        async onEvent(event) {
+          if (event.type === 'final') {
+            finalMessage = (event.payload as { message: string }).message;
+            return;
+          }
+          await renderHeadlessEventToCli(event, eventSink);
+        }
+      }
+    );
+
+    if (output.status !== 'completed') {
+      throw new ReportedCliError(output.error?.message ?? 'headless run failed');
+    }
+    console.log(`\n${finalMessage || output.finalMessage || '(no content)'}`);
+    return;
+  }
+
   const session = await ensureSession(cwd);
   const assembly = await createRuntimeAssembly({
     cwd,
@@ -981,40 +1117,6 @@ export async function runCli(argv: string[]) {
     model: modelConfig.model,
     baseUrl: modelConfig.baseUrl
   };
-
-  if (prompt && prompt.trim()) {
-    const eventSink = createCliEventSink();
-    let turnSawRuntimeError = false;
-    const runner = createRunner({
-      model: modelClient,
-      hooks: [...assembly.hooks, ...createCliHooks()],
-      policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool() }),
-      instructions: assembly.instructions,
-      autoCompact: {
-        config: assembly.workspaceConfig.autoCompact,
-        modelConfig
-      },
-      async onEvent(event) {
-        if (event.type === 'error') {
-          turnSawRuntimeError = true;
-        }
-        await eventSink(event);
-      }
-    });
-
-    let finalMessage: string;
-    try {
-      finalMessage = await runner.runTurn(session, prompt.trim());
-    } catch (error) {
-      if (turnSawRuntimeError) {
-        throw new ReportedCliError(error);
-      }
-      throw error;
-    }
-
-    console.log(`\n${finalMessage}`);
-    return;
-  }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
   const eventSink = createCliEventSink();

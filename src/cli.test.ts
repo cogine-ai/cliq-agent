@@ -42,6 +42,23 @@ test('parseArgs accepts --policy confirm-all for one-shot prompt', () => {
   });
 });
 
+test('parseArgs accepts command-scoped run --jsonl', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', '--jsonl', 'inspect', 'repo']), {
+    cmd: 'chat',
+    prompt: 'inspect repo',
+    jsonl: true,
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs rejects --jsonl outside one-shot run aliases', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', '--jsonl', 'inspect']), /--jsonl is only supported with cliq run/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'chat', '--jsonl']), /--jsonl is only supported with cliq run/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'inspect', '--jsonl']), /--jsonl is only supported with cliq run/i);
+});
+
 test('parseArgs rejects invalid policy values', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--policy', 'invalid', 'chat']), /Unknown policy mode/i);
 });
@@ -333,6 +350,7 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   }
 
   assert.match(output, /cliq run "task"/);
+  assert.match(output, /cliq run --jsonl "task"/);
   assert.match(output, /cliq ask "task"/);
   assert.match(output, /cliq checkpoint create/);
   assert.match(output, /cliq checkpoint list/);
@@ -351,6 +369,7 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /--skill NAME/);
   assert.match(output, /repeat/i);
   assert.match(output, /--streaming MODE/);
+  assert.match(output, /--jsonl/);
   assert.match(output, /auto \| on \| off/);
   assert.match(output, /openai-compatible/);
   assert.match(output, /--base-url URL/);
@@ -464,6 +483,67 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
 
   assert.match(stdout, /\[model openai-compatible\/fake\]/);
   assert.equal((stderr.match(/\[model error\] fetch failed/g) ?? []).length, 1);
+});
+
+test('runCli run --jsonl writes only JSONL events to stdout for model errors', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-jsonl-cwd-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-jsonl-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+  const previousWrite = process.stdout.write;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    throw new Error('fetch failed');
+  });
+  const chunks: string[] = [];
+
+  process.chdir(cwd);
+  process.env.CLIQ_HOME = home;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+
+  try {
+    await assert.rejects(
+      () =>
+        runCli([
+          'node',
+          'src/index.ts',
+          '--provider',
+          'openai-compatible',
+          '--model',
+          'fake',
+          '--base-url',
+          'http://127.0.0.1:59999/v1',
+          '--streaming',
+          'off',
+          'run',
+          '--jsonl',
+          'hello'
+        ]),
+      isReportedCliError
+    );
+  } finally {
+    process.stdout.write = previousWrite;
+    fetchMock.mock.restore();
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+
+  const lines = chunks.join('').trim().split('\n').filter(Boolean);
+  assert.equal(lines.length >= 2, true);
+  for (const line of lines) {
+    assert.doesNotThrow(() => JSON.parse(line));
+  }
+  assert.equal(lines.some((line) => JSON.parse(line).type === 'run-start'), true);
+  assert.equal(lines.some((line) => JSON.parse(line).type === 'error'), true);
+  assert.equal(JSON.parse(lines.at(-1)!).type, 'run-end');
 });
 
 test('renderUnhandledError suppresses errors already reported by runtime events', () => {
