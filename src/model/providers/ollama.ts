@@ -60,13 +60,13 @@ export function createOllamaClient(config: ResolvedModelConfig): ModelClient {
           headers: {
             'content-type': 'application/json'
           },
-            body: JSON.stringify({
-              model: config.model,
-              messages,
-              stream: false
-            }),
-            signal: options?.signal
-          });
+          body: JSON.stringify({
+            model: config.model,
+            messages,
+            stream: false
+          }),
+          signal: options?.signal
+        });
 
         const json = await readJsonResponse<OllamaResp>(response, 'Ollama');
         const content = json.message?.content?.trim();

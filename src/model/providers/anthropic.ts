@@ -88,15 +88,15 @@ export function createAnthropicClient(config: ResolvedModelConfig): ModelClient 
             'x-api-key': config.apiKey,
             'anthropic-version': '2023-06-01'
           },
-            body: JSON.stringify({
-              model: config.model,
-              max_tokens: config.maxOutputTokens ?? 4096,
-              ...(body.system ? { system: body.system } : {}),
-              messages: body.messages,
-              stream: false
-            }),
-            signal: options?.signal
-          });
+          body: JSON.stringify({
+            model: config.model,
+            max_tokens: config.maxOutputTokens ?? 4096,
+            ...(body.system ? { system: body.system } : {}),
+            messages: body.messages,
+            stream: false
+          }),
+          signal: options?.signal
+        });
 
         const json = await readJsonResponse<AnthropicResp>(response, 'Anthropic');
         if (!Array.isArray(json.content)) {

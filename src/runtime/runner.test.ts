@@ -139,6 +139,8 @@ test('runner cancellation before checkpoint leaves session records unchanged', a
   assert.equal(session.records.length, 0);
   assert.equal(session.checkpoints.length, 0);
   assert.equal(session.lifecycle.status, 'idle');
+  assert.equal(session.lifecycle.turn, 0);
+  assert.equal(session.lifecycle.lastUserInputAt, undefined);
 });
 
 test('runner cancellation after checkpoint keeps checkpoint and skips user append', async () => {
@@ -166,6 +168,8 @@ test('runner cancellation after checkpoint keeps checkpoint and skips user appen
   assert.equal(session.checkpoints.length, 1);
   assert.equal(session.records.length, 0);
   assert.equal(session.lifecycle.status, 'idle');
+  assert.equal(session.lifecycle.turn, 1);
+  assert.equal(typeof session.lifecycle.lastUserInputAt, 'string');
 });
 
 test('runner appends tool results and replays them back to the model', async () => {

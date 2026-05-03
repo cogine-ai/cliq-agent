@@ -38,7 +38,7 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
   try {
     return await fetch(url, { ...init, signal: signal.signal });
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
+    if (signal.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
       throw new Error(signal.didTimeout() ? `Model request timed out after ${timeoutMs}ms` : 'Model request cancelled');
     }
 

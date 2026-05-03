@@ -98,3 +98,41 @@ test('runHeadless rejects unknown session request fields', async () => {
   assert.equal(output.error?.code, 'invalid-input');
   assert.match(output.error?.message ?? '', /unknown session field/i);
 });
+
+test('runHeadless maps invalid model config to config-error', async () => {
+  const { cwd } = await setupWorkspace();
+
+  const output = await runHeadless(
+    { cwd, prompt: 'say done', model: { provider: 'missing-provider' } },
+    { modelClient: finalModel('done') }
+  );
+
+  assert.equal(output.status, 'failed');
+  assert.equal(output.error?.code, 'config-error');
+  assert.equal(output.error?.stage, 'assembly');
+  assert.equal(output.error?.recoverable, true);
+});
+
+test('runHeadless maps missing model credentials to model-auth-error', async () => {
+  const { cwd } = await setupWorkspace();
+  const previousOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+
+  try {
+    const output = await runHeadless(
+      { cwd, prompt: 'say done', model: { provider: 'openrouter', model: 'test-model', streaming: 'off' } },
+      { modelClient: finalModel('done') }
+    );
+
+    assert.equal(output.status, 'failed');
+    assert.equal(output.error?.code, 'model-auth-error');
+    assert.equal(output.error?.stage, 'assembly');
+    assert.equal(output.error?.recoverable, true);
+  } finally {
+    if (previousOpenRouterKey === undefined) {
+      delete process.env.OPENROUTER_API_KEY;
+    } else {
+      process.env.OPENROUTER_API_KEY = previousOpenRouterKey;
+    }
+  }
+});

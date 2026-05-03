@@ -48,15 +48,20 @@ export function createRunner({
   return {
     async runTurn(session: Session, userInput: string): Promise<string> {
       const cwd = session.cwd;
+      const throwCancelled = async (): Promise<never> => {
+        await onEvent({ type: 'error', stage: 'cancel', message: 'run cancelled' });
+        throw new Error('run cancelled');
+      };
       const throwIfCancelled = async () => {
         if (signal?.aborted) {
-          await onEvent({ type: 'error', stage: 'cancel', message: 'run cancelled' });
-          throw new Error('run cancelled');
+          await throwCancelled();
         }
       };
 
       try {
-        await throwIfCancelled();
+        if (signal?.aborted) {
+          await throwCancelled();
+        }
         session.lifecycle.status = 'running';
         session.lifecycle.turn += 1;
         session.lifecycle.lastUserInputAt = nowIso();

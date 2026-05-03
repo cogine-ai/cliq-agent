@@ -114,8 +114,26 @@ function normalizeCaughtError(error: unknown): HeadlessRunError {
   }
 
   const message = error instanceof Error ? error.message : String(error);
-  const cancelled = message.toLowerCase().includes('cancelled');
-  return errorFrom(cancelled ? 'cancelled' : 'internal-error', cancelled ? 'cancel' : 'assembly', message);
+  const lowerMessage = message.toLowerCase();
+  if (lowerMessage.includes('cancelled')) {
+    return errorFrom('cancelled', 'cancel', message);
+  }
+
+  if (/\bapi key is required\b/i.test(message) || /\b[A-Z0-9_]+_API_KEY\b/.test(message)) {
+    return errorFrom('model-auth-error', 'assembly', message, true);
+  }
+
+  if (
+    /unknown model provider/i.test(message) ||
+    /invalid streaming mode/i.test(message) ||
+    /model is required/i.test(message) ||
+    /baseUrl is required/i.test(message) ||
+    /no model provider or local ollama model configured/i.test(message)
+  ) {
+    return errorFrom('config-error', 'assembly', message, true);
+  }
+
+  return errorFrom('internal-error', 'assembly', message);
 }
 
 export async function runHeadless(
