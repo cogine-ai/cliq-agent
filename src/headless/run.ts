@@ -38,6 +38,7 @@ type RunScope = {
   session: Session;
   modelConfig: ResolvedModelConfig;
   policy: PolicyMode;
+  intendedTurn: number;
 };
 
 const POLICY_MODES = new Set<PolicyMode>(['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all']);
@@ -113,7 +114,7 @@ function scopeEnvelope(scope: RunScope | undefined) {
   return scope
     ? {
         sessionId: scope.session.id,
-        turn: scope.session.lifecycle.turn
+        turn: scope.intendedTurn
       }
     : {};
 }
@@ -168,7 +169,7 @@ export async function runHeadless(
     const envelopeScope = scopeEnvelope(scope);
     const output: HeadlessRunOutput = {
       runId,
-      ...(scope ? { sessionId: scope.session.id, turn: scope.session.lifecycle.turn } : {}),
+      ...(scope ? { sessionId: scope.session.id, turn: scope.intendedTurn } : {}),
       status,
       exitCode,
       artifacts,
@@ -208,11 +209,13 @@ export async function runHeadless(
       model: modelConfig.model,
       baseUrl: modelConfig.baseUrl
     };
-    scope = {
+    const runScope: RunScope = {
       session,
       modelConfig,
-      policy
+      policy,
+      intendedTurn: session.lifecycle.turn + 1
     };
+    scope = runScope;
 
     await emit(
       createEvent(
@@ -222,7 +225,7 @@ export async function runHeadless(
           policy,
           model: session.model
         },
-        { sessionId: session.id, turn: session.lifecycle.turn + 1 }
+        { sessionId: session.id, turn: runScope.intendedTurn }
       )
     );
 
@@ -248,7 +251,7 @@ export async function runHeadless(
         await emit(
           createEvent(mapped.type, mapped.payload, {
             sessionId: session.id,
-            turn: session.lifecycle.turn
+            turn: runScope.intendedTurn
           })
         );
       }
@@ -258,7 +261,7 @@ export async function runHeadless(
     const output: HeadlessRunOutput = {
       runId,
       sessionId: session.id,
-      turn: session.lifecycle.turn,
+      turn: runScope.intendedTurn,
       status: 'completed',
       exitCode: HEADLESS_EXIT_SUCCESS,
       finalMessage,
@@ -269,7 +272,7 @@ export async function runHeadless(
       createEvent(
         'run-end',
         { status: 'completed', exitCode: HEADLESS_EXIT_SUCCESS, output },
-        { sessionId: session.id, turn: session.lifecycle.turn }
+        { sessionId: session.id, turn: runScope.intendedTurn }
       )
     );
     return output;

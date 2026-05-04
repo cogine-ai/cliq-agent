@@ -86,6 +86,39 @@ test('runHeadless returns structured pre-session errors without session fields',
   assert.equal(events[0]?.turn, undefined);
 });
 
+test('runHeadless uses the intended turn for post-session setup failures', async () => {
+  const { cwd } = await setupWorkspace();
+  const events: Array<{ type: string; turn?: number }> = [];
+  let failedRunStart = false;
+
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'say done',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    {
+      modelClient: finalModel('done'),
+      onEvent(event) {
+        events.push({ type: event.type, turn: event.turn });
+        if (event.type === 'run-start' && !failedRunStart) {
+          failedRunStart = true;
+          throw new Error('event sink failed');
+        }
+      }
+    }
+  );
+
+  assert.equal(output.status, 'failed');
+  assert.equal(output.turn, 1);
+  assert.deepEqual(events, [
+    { type: 'run-start', turn: 1 },
+    { type: 'error', turn: 1 },
+    { type: 'run-end', turn: 1 }
+  ]);
+});
+
 test('runHeadless rejects unknown session request fields', async () => {
   const { cwd } = await setupWorkspace();
 
