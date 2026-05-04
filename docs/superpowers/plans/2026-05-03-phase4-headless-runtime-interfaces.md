@@ -530,6 +530,10 @@ const codeByRuntimeErrorStage = {
   cancel: 'cancelled'
 } as const;
 
+function assertNever(value: never): never {
+  throw new Error(`unhandled runtime event: ${JSON.stringify(value)}`);
+}
+
 export function runtimeEventToHeadless(event: RuntimeEvent): RuntimeEventMapping {
   if (event.type === 'checkpoint-created') {
     const payload: CheckpointCreatedPayload = {
@@ -626,10 +630,14 @@ export function runtimeEventToHeadless(event: RuntimeEvent): RuntimeEventMapping
     };
   }
 
-  return {
-    type: 'final',
-    payload: { message: event.message }
-  };
+  if (event.type === 'final') {
+    return {
+      type: 'final',
+      payload: { message: event.message }
+    };
+  }
+
+  return assertNever(event);
 }
 ```
 
@@ -946,9 +954,13 @@ import type {
 } from './contract.js';
 
 const TOOL_PREVIEW_CHARS = 240;
+const TRUNCATION_MARKER = '\n[cliq preview truncated]';
 
 function preview(value: string, limit = TOOL_PREVIEW_CHARS) {
-  return value.length <= limit ? value : `${value.slice(0, limit)}\n[cliq preview truncated]`;
+  if (value.length <= limit) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, limit - TRUNCATION_MARKER.length))}${TRUNCATION_MARKER}`;
 }
 
 export function toSessionRecordView(record: SessionRecord): SessionRecordView {
@@ -1323,11 +1335,20 @@ const throwIfCancelled = async () => {
 Change the setup sequence to:
 
 ```ts
+const previousLifecycle = {
+  status: session.lifecycle.status,
+  turn: session.lifecycle.turn,
+  lastUserInputAt: session.lifecycle.lastUserInputAt,
+  lastAssistantOutputAt: session.lifecycle.lastAssistantOutputAt
+};
+let checkpointCreated = false;
+
 await throwIfCancelled();
 session.lifecycle.status = 'running';
 session.lifecycle.turn += 1;
 await throwIfCancelled();
 const checkpoint = await createCheckpoint(cwd, session, { kind: 'auto' });
+checkpointCreated = true;
 await onEvent({
   type: 'checkpoint-created',
   checkpointId: checkpoint.id,
@@ -1351,6 +1372,20 @@ await appendRecord(cwd, session, {
 session.lifecycle.lastUserInputAt = ts;
 await saveSession(cwd, session);
 await throwIfCancelled();
+```
+
+Change the `finally` block to preserve pre-checkpoint cancellation semantics:
+
+```ts
+if (!checkpointCreated) {
+  session.lifecycle.status = previousLifecycle.status;
+  session.lifecycle.turn = previousLifecycle.turn;
+  session.lifecycle.lastUserInputAt = previousLifecycle.lastUserInputAt;
+  session.lifecycle.lastAssistantOutputAt = previousLifecycle.lastAssistantOutputAt;
+} else {
+  session.lifecycle.status = 'idle';
+}
+await saveSession(cwd, session);
 ```
 
 Pass `signal` to model completion:

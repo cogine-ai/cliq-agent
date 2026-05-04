@@ -51,6 +51,10 @@ function checkpointArtifacts(payload: CheckpointCreatedPayload): HeadlessArtifac
   });
 }
 
+function assertNever(value: never): never {
+  throw new Error(`unhandled runtime event: ${JSON.stringify(value)}`);
+}
+
 export function mergeArtifacts(target: HeadlessArtifacts, source: HeadlessArtifacts) {
   for (const key of Object.keys(target) as Array<keyof HeadlessArtifacts>) {
     for (const id of source[key]) {
@@ -176,8 +180,12 @@ export function runtimeEventToHeadless(event: RuntimeEvent): RuntimeEventMapping
     };
   }
 
-  return {
-    type: 'final',
-    payload: { message: event.message }
-  };
+  if (event.type === 'final') {
+    return {
+      type: 'final',
+      payload: { message: event.message }
+    };
+  }
+
+  return assertNever(event);
 }

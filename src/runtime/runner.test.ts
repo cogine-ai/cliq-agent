@@ -144,6 +144,34 @@ test('runner cancellation before checkpoint leaves session records unchanged', a
   assert.equal(session.lifecycle.lastUserInputAt, undefined);
 });
 
+test('runner cancellation after lifecycle mutation before checkpoint restores lifecycle', async () => {
+  const session = await createTempSession();
+  let reads = 0;
+  const signal = {
+    get aborted() {
+      reads += 1;
+      return reads >= 2;
+    }
+  } as AbortSignal;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    signal
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'say done'), /cancelled/i);
+  assert.equal(session.records.length, 0);
+  assert.equal(session.checkpoints.length, 0);
+  assert.equal(session.lifecycle.status, 'idle');
+  assert.equal(session.lifecycle.turn, 0);
+  assert.equal(session.lifecycle.lastUserInputAt, undefined);
+  assert.equal(session.lifecycle.lastAssistantOutputAt, undefined);
+});
+
 test('runner cancellation after checkpoint keeps checkpoint and skips user append', async () => {
   const session = await createTempSession();
   const controller = new AbortController();

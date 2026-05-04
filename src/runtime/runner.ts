@@ -61,6 +61,13 @@ export function createRunner({
           await throwCancelled();
         }
       };
+      const previousLifecycle = {
+        status: session.lifecycle.status,
+        turn: session.lifecycle.turn,
+        lastUserInputAt: session.lifecycle.lastUserInputAt,
+        lastAssistantOutputAt: session.lifecycle.lastAssistantOutputAt
+      };
+      let checkpointCreated = false;
 
       try {
         if (signal?.aborted) {
@@ -70,6 +77,7 @@ export function createRunner({
         session.lifecycle.turn += 1;
         await throwIfCancelled();
         const checkpoint = await createCheckpoint(cwd, session, { kind: 'auto' });
+        checkpointCreated = true;
         const warning =
           checkpoint.workspaceCheckpoint.kind === 'unavailable'
             ? checkpoint.workspaceCheckpoint.error ?? checkpoint.workspaceCheckpoint.reason
@@ -406,7 +414,14 @@ export function createRunner({
 
         throw new Error('Exceeded action loop limit');
       } finally {
-        session.lifecycle.status = 'idle';
+        if (!checkpointCreated) {
+          session.lifecycle.status = previousLifecycle.status;
+          session.lifecycle.turn = previousLifecycle.turn;
+          session.lifecycle.lastUserInputAt = previousLifecycle.lastUserInputAt;
+          session.lifecycle.lastAssistantOutputAt = previousLifecycle.lastAssistantOutputAt;
+        } else {
+          session.lifecycle.status = 'idle';
+        }
         await saveSession(cwd, session);
       }
     }
