@@ -1627,6 +1627,20 @@ function errorFrom(code: HeadlessErrorCode, stage: HeadlessErrorStage, message: 
   return { code, stage, message, recoverable };
 }
 
+function isCancelledError(error: unknown) {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const candidate = error as { name?: unknown; code?: unknown; cancelled?: unknown };
+  return (
+    candidate.cancelled === true ||
+    candidate.name === 'AbortError' ||
+    candidate.code === 'ERR_ABORTED' ||
+    candidate.code === 'ABORT_ERR'
+  );
+}
+
 async function validateRequest(request: HeadlessRunRequest) {
   if (!request.prompt?.trim()) {
     throw errorFrom('invalid-input', 'input', 'prompt is required');
@@ -1771,12 +1785,13 @@ export async function runHeadless(
       return await emitErrorAndEnd(headlessError, status);
     }
     const message = error instanceof Error ? error.message : String(error);
+    const cancelled = isCancelledError(error);
     const headlessError = errorFrom(
-      message.toLowerCase().includes('cancelled') ? 'cancelled' : 'internal-error',
-      message.toLowerCase().includes('cancelled') ? 'cancel' : 'assembly',
+      cancelled ? 'cancelled' : 'internal-error',
+      cancelled ? 'cancel' : 'assembly',
       message
     );
-    return await emitErrorAndEnd(headlessError, headlessError.code === 'cancelled' ? 'cancelled' : 'failed');
+    return await emitErrorAndEnd(headlessError, cancelled ? 'cancelled' : 'failed');
   }
 }
 ```

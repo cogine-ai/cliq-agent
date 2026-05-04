@@ -27,7 +27,17 @@ type ModelAttemptResult =
   | { ok: false; error: unknown; sawModelError: boolean };
 
 function isAbortError(error: unknown) {
-  return error instanceof Error && error.name === 'AbortError';
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const candidate = error as { name?: unknown; code?: unknown; cancelled?: unknown };
+  return (
+    candidate.cancelled === true ||
+    candidate.name === 'AbortError' ||
+    candidate.code === 'ERR_ABORTED' ||
+    candidate.code === 'ABORT_ERR'
+  );
 }
 
 export function createRunner({
@@ -317,15 +327,16 @@ export function createRunner({
           }
           await throwIfCancelled();
 
-          session.lifecycle.lastAssistantOutputAt = nowIso();
+          const assistantTs = nowIso();
           await appendRecord(cwd, session, {
             id: makeId('ast'),
-            ts: nowIso(),
+            ts: assistantTs,
             kind: 'assistant',
             role: 'assistant',
             content: rawContent,
             action
           });
+          session.lifecycle.lastAssistantOutputAt = assistantTs;
 
           await runHooks(hooks, 'afterAssistantAction', session, action, rawContent);
           await throwIfCancelled();
@@ -377,8 +388,7 @@ export function createRunner({
               result = await definition.execute(action as never, { cwd, session, signal });
             } catch (error) {
               if (signal?.aborted || isAbortError(error)) {
-                await throwIfCancelled();
-                throw error;
+                await throwCancelled();
               }
               const message = error instanceof Error ? error.message : String(error);
               result = {

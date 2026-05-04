@@ -273,6 +273,10 @@ test('runner appends tool results and replays them back to the model', async () 
   assert.equal(session.records.at(-1)?.kind, 'assistant');
   assert.equal(session.records.at(-2)?.kind, 'tool');
   assert.equal(
+    session.records.filter((record) => record.kind === 'assistant').at(-1)?.ts,
+    session.lifecycle.lastAssistantOutputAt
+  );
+  assert.equal(
     secondCallMessages.some((message) => message.role === 'user' && message.content.includes('TOOL_RESULT bash OK')),
     true
   );
@@ -460,6 +464,40 @@ test('runner cancellation during tool execution does not persist a tool error re
             },
             async execute() {
               controller.abort();
+              const error = new Error('aborted');
+              error.name = 'AbortError';
+              throw error;
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'use tool'), /cancelled/i);
+  assert.equal(session.records.some((record) => record.kind === 'tool'), false);
+});
+
+test('runner treats tool AbortError as cancellation even when signal is not aborted', async () => {
+  const session = await createTempSession();
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"bash":"pwd"}');
+      }
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
               const error = new Error('aborted');
               error.name = 'AbortError';
               throw error;

@@ -136,3 +136,51 @@ test('runHeadless maps missing model credentials to model-auth-error', async () 
     }
   }
 });
+
+test('runHeadless maps explicit abort errors to cancellation', async () => {
+  const { cwd } = await setupWorkspace();
+
+  const output = await runHeadless(
+    { cwd, prompt: 'say done', model: { provider: 'ollama', model: 'test-model' }, autoCompact: { enabled: 'off' } },
+    {
+      createModelClient() {
+        const error = new Error('transport aborted');
+        error.name = 'AbortError';
+        throw error;
+      }
+    }
+  );
+
+  assert.equal(output.status, 'cancelled');
+  assert.equal(output.exitCode, 130);
+  assert.equal(output.error?.code, 'cancelled');
+  assert.equal(output.error?.stage, 'cancel');
+});
+
+test('runHeadless does not classify arbitrary cancelled text as cancellation', async () => {
+  const { cwd } = await setupWorkspace();
+  let threw = false;
+
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'say done',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    {
+      modelClient: finalModel('done'),
+      onEvent() {
+        if (!threw) {
+          threw = true;
+          throw new Error('logger cancelled write');
+        }
+      }
+    }
+  );
+
+  assert.equal(output.status, 'failed');
+  assert.equal(output.exitCode, 1);
+  assert.equal(output.error?.code, 'internal-error');
+  assert.equal(output.error?.stage, 'assembly');
+});

@@ -62,6 +62,20 @@ function isHeadlessRunError(error: unknown): error is HeadlessRunError {
   );
 }
 
+function isCancelledError(error: unknown) {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const candidate = error as { name?: unknown; code?: unknown; cancelled?: unknown };
+  return (
+    candidate.cancelled === true ||
+    candidate.name === 'AbortError' ||
+    candidate.code === 'ERR_ABORTED' ||
+    candidate.code === 'ABORT_ERR'
+  );
+}
+
 async function validateRequest(request: HeadlessRunRequest) {
   if (!request.prompt?.trim()) {
     throw errorFrom('invalid-input', 'input', 'prompt is required');
@@ -114,8 +128,7 @@ function normalizeCaughtError(error: unknown): HeadlessRunError {
   }
 
   const message = error instanceof Error ? error.message : String(error);
-  const lowerMessage = message.toLowerCase();
-  if (lowerMessage.includes('cancelled')) {
+  if (isCancelledError(error)) {
     return errorFrom('cancelled', 'cancel', message);
   }
 
