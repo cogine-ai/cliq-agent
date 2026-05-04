@@ -52,11 +52,11 @@ export type ModelStreamEvent =
   | { type: 'end' }
   | { type: 'error'; message: string };
 
+export type ModelCompleteOptions = {
+  onEvent?: (event: ModelStreamEvent) => void | Promise<void>;
+  signal?: AbortSignal;
+};
+
 export type ModelClient = {
-  complete(
-    messages: ChatMessage[],
-    options?: {
-      onEvent?: (event: ModelStreamEvent) => void | Promise<void>;
-    }
-  ): Promise<ModelCompletion>;
+  complete(messages: ChatMessage[], options?: ModelCompleteOptions): Promise<ModelCompletion>;
 };

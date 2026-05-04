@@ -239,6 +239,10 @@ async function readWorkspaceCheckpoint(workspaceCheckpointId: string): Promise<W
   return validateWorkspaceCheckpoint(raw, workspaceCheckpointId);
 }
 
+export async function getWorkspaceCheckpoint(workspaceCheckpointId: string): Promise<WorkspaceCheckpoint> {
+  return await readWorkspaceCheckpoint(workspaceCheckpointId);
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }

@@ -4,19 +4,47 @@ export function joinUrl(baseUrl: string, pathname: string) {
   return `${baseUrl.replace(/\/+$/, '')}/${pathname.replace(/^\/+/, '')}`;
 }
 
-export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = MODEL_TIMEOUT_MS) {
+function timeoutSignal(externalSignal: AbortSignal | null | undefined, timeoutMs: number) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const abortFromExternalSignal = () => {
+    controller.abort(externalSignal?.reason);
+  };
+
+  if (externalSignal?.aborted) {
+    abortFromExternalSignal();
+  } else {
+    externalSignal?.addEventListener('abort', abortFromExternalSignal, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    cleanup() {
+      clearTimeout(timeout);
+      externalSignal?.removeEventListener('abort', abortFromExternalSignal);
+    }
+  };
+}
+
+export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = MODEL_TIMEOUT_MS) {
+  const signal = timeoutSignal(init.signal, timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await fetch(url, { ...init, signal: signal.signal });
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Model request timed out after ${timeoutMs}ms`);
+    if (signal.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+      throw new Error(signal.didTimeout() ? `Model request timed out after ${timeoutMs}ms` : 'Model request cancelled');
     }
 
     throw error;
   } finally {
-    clearTimeout(timeout);
+    signal.cleanup();
   }
 }
 

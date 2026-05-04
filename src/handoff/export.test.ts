@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { exportHandoff, handoffDirPath } from './export.js';
+import { exportHandoff, handoffDirPath, readHandoffArtifact } from './export.js';
 import { createSession } from '../session/store.js';
 
 async function withCliqHome<T>(callback: (home: string) => Promise<T>) {
@@ -105,4 +105,12 @@ test('exportHandoff reuses active compact summary without creating a new compact
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+test('readHandoffArtifact rejects unsafe handoff ids before path access', async () => {
+  await withCliqHome(async () => {
+    await assert.rejects(() => readHandoffArtifact('../outside'), /invalid handoff id/i);
+    await assert.rejects(() => readHandoffArtifact('handoff_../../outside'), /invalid handoff id/i);
+    assert.throws(() => handoffDirPath('handoff_/outside'), /invalid handoff id/i);
+  });
 });

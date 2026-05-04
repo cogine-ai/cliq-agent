@@ -26,6 +26,20 @@ type ModelAttemptResult =
   | { ok: true; completion: ModelCompletion }
   | { ok: false; error: unknown; sawModelError: boolean };
 
+function isAbortError(error: unknown) {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const candidate = error as { name?: unknown; code?: unknown; cancelled?: unknown };
+  return (
+    candidate.cancelled === true ||
+    candidate.name === 'AbortError' ||
+    candidate.code === 'ERR_ABORTED' ||
+    candidate.code === 'ABORT_ERR'
+  );
+}
+
 export function createRunner({
   model,
   registry = createToolRegistry(),
@@ -33,7 +47,8 @@ export function createRunner({
   policy = createPolicyEngine({ mode: DEFAULT_POLICY_MODE }),
   instructions = async () => [],
   onEvent = async () => undefined,
-  autoCompact
+  autoCompact,
+  signal
 }: {
   model: ModelClient;
   registry?: ReturnType<typeof createToolRegistry>;
@@ -42,22 +57,61 @@ export function createRunner({
   instructions?: (session: Session) => Promise<InstructionMessage[]>;
   onEvent?: RuntimeEventSink;
   autoCompact?: AutoCompactRunnerOptions;
+  signal?: AbortSignal;
 }) {
   return {
     async runTurn(session: Session, userInput: string): Promise<string> {
       const cwd = session.cwd;
+      const throwCancelled = async (): Promise<never> => {
+        await onEvent({ type: 'error', stage: 'cancel', message: 'run cancelled' });
+        throw new Error('run cancelled');
+      };
+      const throwIfCancelled = async () => {
+        if (signal?.aborted) {
+          await throwCancelled();
+        }
+      };
+      const previousLifecycle = {
+        status: session.lifecycle.status,
+        turn: session.lifecycle.turn,
+        lastUserInputAt: session.lifecycle.lastUserInputAt,
+        lastAssistantOutputAt: session.lifecycle.lastAssistantOutputAt
+      };
+      let checkpointCreated = false;
+
       try {
+        if (signal?.aborted) {
+          await throwCancelled();
+        }
         session.lifecycle.status = 'running';
         session.lifecycle.turn += 1;
-        session.lifecycle.lastUserInputAt = nowIso();
-        await createCheckpoint(cwd, session, { kind: 'auto' });
+        await throwIfCancelled();
+        const checkpoint = await createCheckpoint(cwd, session, { kind: 'auto' });
+        checkpointCreated = true;
+        const warning =
+          checkpoint.workspaceCheckpoint.kind === 'unavailable'
+            ? checkpoint.workspaceCheckpoint.error ?? checkpoint.workspaceCheckpoint.reason
+            : undefined;
+        await onEvent({
+          type: 'checkpoint-created',
+          checkpointId: checkpoint.id,
+          kind: checkpoint.kind,
+          ...(checkpoint.workspaceCheckpointId ? { workspaceCheckpointId: checkpoint.workspaceCheckpointId } : {}),
+          workspaceSnapshotStatus: checkpoint.workspaceCheckpoint.status,
+          ...(warning ? { warning } : {})
+        });
+        await throwIfCancelled();
+        const ts = nowIso();
         await appendRecord(cwd, session, {
           id: makeId('usr'),
-          ts: nowIso(),
+          ts,
           kind: 'user',
           role: 'user',
           content: userInput
         });
+        session.lifecycle.lastUserInputAt = ts;
+        await saveSession(cwd, session);
+        await throwIfCancelled();
 
         await runHooks(hooks, 'beforeTurn', session, userInput);
 
@@ -84,7 +138,9 @@ export function createRunner({
           let sawModelError = false;
 
           try {
+            await throwIfCancelled();
             const completion = await model.complete(buildContextMessages(session, currentInstructions), {
+              signal,
               async onEvent(event) {
                 if (event.type === 'start') {
                   activeProvider = event.provider;
@@ -111,6 +167,7 @@ export function createRunner({
                 }
               }
             });
+            await throwIfCancelled();
 
             if (!sawModelStart) {
               await onEvent({
@@ -127,6 +184,9 @@ export function createRunner({
 
             return { ok: true, completion };
           } catch (error) {
+            if (signal?.aborted) {
+              await throwIfCancelled();
+            }
             return { ok: false, error, sawModelError };
           }
         };
@@ -142,6 +202,7 @@ export function createRunner({
           currentInstructions: ChatMessage[];
           overflowContextWindowTokens?: number;
         }) => {
+          await throwIfCancelled();
           if (!autoCompact) {
             return null;
           }
@@ -158,6 +219,7 @@ export function createRunner({
           }
 
           await onEvent({ type: 'compact-start', trigger, phase });
+          await throwIfCancelled();
           const compactResult = await maybeAutoCompact({
             cwd,
             session,
@@ -167,8 +229,10 @@ export function createRunner({
             instructions: currentInstructions,
             phase,
             trigger,
-            state: autoCompactState
+            state: autoCompactState,
+            signal
           });
+          await throwIfCancelled();
 
           if (compactResult.status === 'compacted') {
             await onEvent({
@@ -190,6 +254,7 @@ export function createRunner({
         };
 
         for (let i = 0; i < MAX_LOOPS; i += 1) {
+          await throwIfCancelled();
           let completion: ModelCompletion;
           let currentInstructions = await instructions(session);
           const phase = i === 0 ? 'pre-model' : 'mid-loop';
@@ -226,6 +291,7 @@ export function createRunner({
             }
 
             const overflowInstructions = await instructions(session);
+            await throwIfCancelled();
             const overflowResult = await runAutoCompact({
               trigger: 'overflow',
               phase,
@@ -241,9 +307,11 @@ export function createRunner({
 
             overflowRetries += 1;
             const retryInstructions = await instructions(session);
+            await throwIfCancelled();
             modelAttempt = await completeModel(retryInstructions);
           }
           completion = modelAttempt.completion;
+          await throwIfCancelled();
 
           const rawContent = completion.content;
           let action;
@@ -257,18 +325,21 @@ export function createRunner({
             });
             throw error;
           }
+          await throwIfCancelled();
 
-          session.lifecycle.lastAssistantOutputAt = nowIso();
+          const assistantTs = nowIso();
           await appendRecord(cwd, session, {
             id: makeId('ast'),
-            ts: nowIso(),
+            ts: assistantTs,
             kind: 'assistant',
             role: 'assistant',
             content: rawContent,
             action
           });
+          session.lifecycle.lastAssistantOutputAt = assistantTs;
 
           await runHooks(hooks, 'afterAssistantAction', session, action, rawContent);
+          await throwIfCancelled();
 
           if ('message' in action) {
             const finalMessage = action.message.trim() || '(no content)';
@@ -279,9 +350,11 @@ export function createRunner({
 
           const { definition } = registry.resolve(action);
           await onEvent({ type: 'tool-start', tool: definition.name, preview: rawContent.slice(0, 120) });
+          await throwIfCancelled();
           let result: ToolResult | null = null;
           let authorization: Awaited<ReturnType<typeof policy.authorize>> | null = null;
 
+          await throwIfCancelled();
           try {
             authorization = await policy.authorize(definition);
           } catch (error) {
@@ -308,10 +381,15 @@ export function createRunner({
               }
             };
           } else if (result === null && authorization !== null) {
+            await throwIfCancelled();
             await runHooks(hooks, 'beforeTool', session, action);
+            await throwIfCancelled();
             try {
-              result = await definition.execute(action as never, { cwd, session });
+              result = await definition.execute(action as never, { cwd, session, signal });
             } catch (error) {
+              if (signal?.aborted || isAbortError(error)) {
+                await throwCancelled();
+              }
               const message = error instanceof Error ? error.message : String(error);
               result = {
                 tool: definition.name,
@@ -341,11 +419,19 @@ export function createRunner({
           });
           await runHooks(hooks, 'afterTool', session, storedResult);
           await onEvent({ type: 'tool-end', tool: storedResult.tool, status: storedResult.status });
+          await throwIfCancelled();
         }
 
         throw new Error('Exceeded action loop limit');
       } finally {
-        session.lifecycle.status = 'idle';
+        if (!checkpointCreated) {
+          session.lifecycle.status = previousLifecycle.status;
+          session.lifecycle.turn = previousLifecycle.turn;
+          session.lifecycle.lastUserInputAt = previousLifecycle.lastUserInputAt;
+          session.lifecycle.lastAssistantOutputAt = previousLifecycle.lastAssistantOutputAt;
+        } else {
+          session.lifecycle.status = 'idle';
+        }
         await saveSession(cwd, session);
       }
     }

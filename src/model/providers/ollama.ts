@@ -1,5 +1,6 @@
 import { fetchWithTimeout, joinUrl, readJsonResponse, readNdjsonDeltas } from '../http.js';
-import type { ChatMessage, ModelClient, ModelStreamEvent, ResolvedModelConfig } from '../types.js';
+import { emitModelErrorEvent } from '../events.js';
+import type { ChatMessage, ModelClient, ModelCompleteOptions, ResolvedModelConfig } from '../types.js';
 
 type OllamaResp = {
   message?: {
@@ -9,7 +10,7 @@ type OllamaResp = {
 
 export function createOllamaClient(config: ResolvedModelConfig): ModelClient {
   return {
-    async complete(messages: ChatMessage[], options?: { onEvent?: (event: ModelStreamEvent) => void | Promise<void> }) {
+    async complete(messages: ChatMessage[], options?: ModelCompleteOptions) {
       await options?.onEvent?.({
         type: 'start',
         provider: config.provider,
@@ -28,7 +29,8 @@ export function createOllamaClient(config: ResolvedModelConfig): ModelClient {
               model: config.model,
               messages,
               stream: true
-            })
+            }),
+            signal: options?.signal
           });
 
           const content = (
@@ -63,7 +65,8 @@ export function createOllamaClient(config: ResolvedModelConfig): ModelClient {
             model: config.model,
             messages,
             stream: false
-          })
+          }),
+          signal: options?.signal
         });
 
         const json = await readJsonResponse<OllamaResp>(response, 'Ollama');
@@ -79,10 +82,7 @@ export function createOllamaClient(config: ResolvedModelConfig): ModelClient {
           model: config.model
         };
       } catch (error) {
-        await options?.onEvent?.({
-          type: 'error',
-          message: error instanceof Error ? error.message : String(error)
-        });
+        await emitModelErrorEvent(options, error);
         throw error;
       }
     }

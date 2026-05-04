@@ -98,6 +98,132 @@ test('runner creates an automatic checkpoint before appending the user record', 
   assert.equal(session.checkpoints[0]?.kind, 'auto');
   assert.equal(session.checkpoints[0]?.recordIndex, 0);
   assert.equal(session.records[0]?.kind, 'user');
+  assert.equal(session.lifecycle.lastUserInputAt, session.records[0]?.ts);
+});
+
+test('runner emits checkpoint-created after automatic checkpoint creation', async () => {
+  const session = await createTempSession();
+  const events: string[] = [];
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    onEvent(event) {
+      events.push(event.type);
+    }
+  });
+
+  await runner.runTurn(session, 'say done');
+
+  assert.equal(events[0], 'checkpoint-created');
+  assert.equal(session.checkpoints.length, 1);
+});
+
+test('runner cancellation before checkpoint leaves session records unchanged', async () => {
+  const session = await createTempSession();
+  const controller = new AbortController();
+  controller.abort();
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    signal: controller.signal
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'say done'), /cancelled/i);
+  assert.equal(session.records.length, 0);
+  assert.equal(session.checkpoints.length, 0);
+  assert.equal(session.lifecycle.status, 'idle');
+  assert.equal(session.lifecycle.turn, 0);
+  assert.equal(session.lifecycle.lastUserInputAt, undefined);
+});
+
+test('runner cancellation after lifecycle mutation before checkpoint restores lifecycle', async () => {
+  const session = await createTempSession();
+  let reads = 0;
+  const signal = {
+    get aborted() {
+      reads += 1;
+      return reads >= 2;
+    }
+  } as AbortSignal;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    signal
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'say done'), /cancelled/i);
+  assert.equal(session.records.length, 0);
+  assert.equal(session.checkpoints.length, 0);
+  assert.equal(session.lifecycle.status, 'idle');
+  assert.equal(session.lifecycle.turn, 0);
+  assert.equal(session.lifecycle.lastUserInputAt, undefined);
+  assert.equal(session.lifecycle.lastAssistantOutputAt, undefined);
+});
+
+test('runner cancellation after checkpoint keeps checkpoint and skips user append', async () => {
+  const session = await createTempSession();
+  const controller = new AbortController();
+  const events: string[] = [];
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    signal: controller.signal,
+    onEvent(event) {
+      events.push(event.type);
+      if (event.type === 'checkpoint-created') {
+        controller.abort();
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'say done'), /cancelled/i);
+  assert.deepEqual(events, ['checkpoint-created', 'error']);
+  assert.equal(session.checkpoints.length, 1);
+  assert.equal(session.records.length, 0);
+  assert.equal(session.lifecycle.status, 'idle');
+  assert.equal(session.lifecycle.turn, 1);
+  assert.equal(session.lifecycle.lastUserInputAt, undefined);
+});
+
+test('runner cancellation after parsing assistant output skips assistant append', async () => {
+  const session = await createTempSession();
+  let reads = 0;
+  const signal = {
+    get aborted() {
+      reads += 1;
+      return reads >= 10;
+    }
+  } as AbortSignal;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    signal
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'say done'), /cancelled/i);
+  assert.equal(session.records.length, 1);
+  assert.equal(session.records[0]?.kind, 'user');
+  assert.equal(session.lifecycle.lastAssistantOutputAt, undefined);
 });
 
 test('runner appends tool results and replays them back to the model', async () => {
@@ -146,6 +272,10 @@ test('runner appends tool results and replays them back to the model', async () 
   assert.equal(callCount, 2);
   assert.equal(session.records.at(-1)?.kind, 'assistant');
   assert.equal(session.records.at(-2)?.kind, 'tool');
+  assert.equal(
+    session.records.filter((record) => record.kind === 'assistant').at(-1)?.ts,
+    session.lifecycle.lastAssistantOutputAt
+  );
   assert.equal(
     secondCallMessages.some((message) => message.role === 'user' && message.content.includes('TOOL_RESULT bash OK')),
     true
@@ -258,7 +388,128 @@ test('runner resets lifecycle state when setup fails before the loop', async () 
 
   await assert.rejects(() => runner.runTurn(session, 'say done'));
   assert.equal(session.lifecycle.status, 'idle');
+  assert.equal(session.lifecycle.lastUserInputAt, undefined);
   assert.equal(modelCalls, 0);
+});
+
+test('runner cancellation after beforeTool skips tool execution and tool record', async () => {
+  const session = await createTempSession();
+  const controller = new AbortController();
+  let executed = false;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"bash":"pwd"}');
+      }
+    },
+    signal: controller.signal,
+    hooks: [
+      {
+        beforeTool() {
+          controller.abort();
+        }
+      }
+    ],
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executed = true;
+              return {
+                tool: 'bash',
+                status: 'ok' as const,
+                content: 'TOOL_RESULT bash OK\n$ pwd\n(exit=0 signal=none)\n/tmp/workspace',
+                meta: { exit: 0 }
+              };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'use tool'), /cancelled/i);
+  assert.equal(executed, false);
+  assert.equal(session.records.some((record) => record.kind === 'tool'), false);
+});
+
+test('runner cancellation during tool execution does not persist a tool error record', async () => {
+  const session = await createTempSession();
+  const controller = new AbortController();
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"bash":"pwd"}');
+      }
+    },
+    signal: controller.signal,
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              controller.abort();
+              const error = new Error('aborted');
+              error.name = 'AbortError';
+              throw error;
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'use tool'), /cancelled/i);
+  assert.equal(session.records.some((record) => record.kind === 'tool'), false);
+});
+
+test('runner treats tool AbortError as cancellation even when signal is not aborted', async () => {
+  const session = await createTempSession();
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"bash":"pwd"}');
+      }
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              const error = new Error('aborted');
+              error.name = 'AbortError';
+              throw error;
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'use tool'), /cancelled/i);
+  assert.equal(session.records.some((record) => record.kind === 'tool'), false);
 });
 
 test('runner converts tool exceptions into tool error records and still calls afterTool hooks', async () => {
@@ -444,28 +695,39 @@ test('runner emits model lifecycle events without raw deltas', async () => {
   const finalMessage = await runner.runTurn(session, 'say done');
 
   assert.equal(finalMessage, 'done');
-  assert.deepEqual(events.map((event) => event.type), ['model-start', 'model-progress', 'model-progress', 'model-end', 'final']);
+  assert.deepEqual(events.map((event) => event.type), [
+    'checkpoint-created',
+    'model-start',
+    'model-progress',
+    'model-progress',
+    'model-end',
+    'final'
+  ]);
   assert.equal(events.some((event) => event.message?.includes('{"message"')), false);
 });
 
 test('runner auto compacts before model call when threshold is exceeded', async () => {
   const session = await createTempSession();
+  const controller = new AbortController();
   session.records.push(
     { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
     { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
   );
   let firstCallMessages: Array<{ role: string; content: string }> = [];
+  let summarizerSignal: AbortSignal | undefined;
 
   const runner = createRunner({
     model: {
-      async complete(messages) {
+      async complete(messages, options) {
         if (messages.some((message) => message.content.includes('Records to summarize'))) {
+          summarizerSignal = options?.signal;
           return completion('## Objective\nSummarized');
         }
         firstCallMessages = messages;
         return completion('{"message":"done"}');
       }
     },
+    signal: controller.signal,
     autoCompact: {
       config: {
         enabled: 'on',
@@ -487,7 +749,58 @@ test('runner auto compacts before model call when threshold is exceeded', async 
   await runner.runTurn(session, 'new request');
 
   assert.equal(session.compactions.length, 1);
+  assert.equal(summarizerSignal, controller.signal);
   assert.equal(firstCallMessages.some((message) => message.content.includes('COMPACTED SESSION SUMMARY')), true);
+});
+
+test('runner cancellation during auto compaction stops before the main model call', async () => {
+  const session = await createTempSession();
+  const controller = new AbortController();
+  const events: string[] = [];
+  session.records.push(
+    { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
+    { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
+  );
+  let normalCalls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+          controller.abort();
+          return completion('## Objective\nShould not persist');
+        }
+        normalCalls += 1;
+        return completion('{"message":"done"}');
+      }
+    },
+    signal: controller.signal,
+    onEvent(event) {
+      events.push(event.type);
+    },
+    autoCompact: {
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 700,
+        thresholdRatio: 0.35,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openrouter',
+        model: 'anthropic/claude-sonnet-4.6',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'new request'), /cancelled/i);
+
+  assert.equal(normalCalls, 0);
+  assert.equal(events.includes('compact-error'), false);
+  assert.equal(events.includes('error'), true);
 });
 
 test('runner treats auto compact off as a hard disable without compact events', async () => {

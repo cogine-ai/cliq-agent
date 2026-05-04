@@ -8,6 +8,7 @@ import { mock } from 'node:test';
 import { promisify } from 'node:util';
 
 import {
+  cliExitCode,
   formatToolResultLine,
   isReportedCliError,
   parseArgs,
@@ -37,6 +38,65 @@ test('parseArgs accepts --policy confirm-all for one-shot prompt', () => {
     cmd: 'chat',
     prompt: 'fix tests',
     policy: 'confirm-all',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs accepts command-scoped run --jsonl', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', '--jsonl', 'inspect', 'repo']), {
+    cmd: 'chat',
+    prompt: 'inspect repo',
+    jsonl: true,
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs keeps --jsonl in the prompt after the first prompt token', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', 'inspect', '--jsonl']), {
+    cmd: 'chat',
+    prompt: 'inspect --jsonl',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs accepts ask as a prompt-only run alias', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'ask', '--literal', 'prompt']), {
+    cmd: 'chat',
+    prompt: '--literal prompt',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs requires a prompt for run aliases', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'run']), /missing prompt for cliq run/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'run', '--jsonl']), /missing prompt for cliq run/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'ask']), /missing prompt for cliq ask/i);
+});
+
+test('parseArgs rejects --jsonl outside cliq run', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'chat', '--jsonl']), /--jsonl is only supported with cliq run/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'ask', '--jsonl', 'inspect']), /--jsonl is only supported with cliq run/i);
+});
+
+test('parseArgs keeps --jsonl literal in prompt fallback paths', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'inspect', '--jsonl']), {
+    cmd: 'chat',
+    prompt: 'inspect --jsonl',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--jsonl', 'inspect']), {
+    cmd: 'chat',
+    prompt: '--jsonl inspect',
+    policy: 'auto',
     skills: [],
     model: {}
   });
@@ -333,6 +393,7 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   }
 
   assert.match(output, /cliq run "task"/);
+  assert.match(output, /cliq run --jsonl "task"/);
   assert.match(output, /cliq ask "task"/);
   assert.match(output, /cliq checkpoint create/);
   assert.match(output, /cliq checkpoint list/);
@@ -351,6 +412,7 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /--skill NAME/);
   assert.match(output, /repeat/i);
   assert.match(output, /--streaming MODE/);
+  assert.match(output, /--jsonl/);
   assert.match(output, /auto \| on \| off/);
   assert.match(output, /openai-compatible/);
   assert.match(output, /--base-url URL/);
@@ -466,9 +528,87 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
   assert.equal((stderr.match(/\[model error\] fetch failed/g) ?? []).length, 1);
 });
 
+test('runCli run --jsonl writes only JSONL events to stdout for model errors', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-jsonl-cwd-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-jsonl-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+  const previousStdoutWrite = process.stdout.write;
+  const previousStderrWrite = process.stderr.write;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    throw new Error('fetch failed');
+  });
+  const chunks: string[] = [];
+  const stderrChunks: string[] = [];
+
+  process.chdir(cwd);
+  process.env.CLIQ_HOME = home;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderrChunks.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    await assert.rejects(
+      () =>
+        runCli([
+          'node',
+          'src/index.ts',
+          '--provider',
+          'openai-compatible',
+          '--model',
+          'fake',
+          '--base-url',
+          'http://127.0.0.1:59999/v1',
+          '--streaming',
+          'off',
+          'run',
+          '--jsonl',
+          'hello'
+        ]),
+      isReportedCliError
+    );
+  } finally {
+    process.stdout.write = previousStdoutWrite;
+    process.stderr.write = previousStderrWrite;
+    fetchMock.mock.restore();
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+
+  const lines = chunks.join('').trim().split('\n').filter(Boolean);
+  assert.equal(lines.length >= 2, true);
+  for (const line of lines) {
+    assert.doesNotThrow(() => JSON.parse(line));
+  }
+  assert.equal(lines.some((line) => JSON.parse(line).type === 'run-start'), true);
+  assert.equal(lines.some((line) => JSON.parse(line).type === 'error'), true);
+  assert.equal(JSON.parse(lines.at(-1)!).type, 'run-end');
+  assert.equal(stderrChunks.join('').trim(), '');
+});
+
 test('renderUnhandledError suppresses errors already reported by runtime events', () => {
   assert.equal(renderUnhandledError(new Error('plain failure')), 'plain failure');
   assert.equal(renderUnhandledError(new ReportedCliError(new Error('reported failure'))), null);
+});
+
+test('ReportedCliError preserves headless exit details for the CLI entrypoint', () => {
+  const error = new ReportedCliError('cancelled', { exitCode: 130, status: 'cancelled' });
+
+  assert.equal(error.exitCode, 130);
+  assert.equal(error.status, 'cancelled');
+  assert.equal(cliExitCode(error), 130);
+  assert.equal(cliExitCode(new Error('plain failure')), 1);
 });
 
 type CliTestEnv = {

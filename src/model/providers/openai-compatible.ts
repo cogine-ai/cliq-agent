@@ -1,5 +1,6 @@
 import { fetchWithTimeout, joinUrl, readJsonResponse, readSseDeltas } from '../http.js';
-import type { ChatMessage, ModelClient, ModelStreamEvent, ResolvedModelConfig } from '../types.js';
+import { emitModelErrorEvent } from '../events.js';
+import type { ChatMessage, ModelClient, ModelCompleteOptions, ResolvedModelConfig } from '../types.js';
 
 type ChatCompletionsResp = {
   choices: Array<{
@@ -9,9 +10,7 @@ type ChatCompletionsResp = {
   }>;
 };
 
-type CompleteOptions = {
-  onEvent?: (event: ModelStreamEvent) => void | Promise<void>;
-};
+type CompleteOptions = ModelCompleteOptions;
 
 const AUTO_STREAM_FALLBACK_STATUSES = new Set([400, 404, 405, 415, 422]);
 
@@ -32,17 +31,6 @@ async function streamHttpError(response: Response) {
   return new Error(
     `Model stream error ${response.status}${detail}. If this endpoint does not support streaming, retry with --streaming off.`
   );
-}
-
-async function emitErrorEvent(options: CompleteOptions | undefined, error: unknown) {
-  try {
-    await options?.onEvent?.({
-      type: 'error',
-      message: error instanceof Error ? error.message : String(error)
-    });
-  } catch {
-    // Preserve the original provider failure even if the event sink fails.
-  }
 }
 
 async function emitStartEvent(config: ResolvedModelConfig, options: CompleteOptions | undefined, streaming: boolean) {
@@ -77,7 +65,8 @@ async function completeWithoutStreaming(config: ResolvedModelConfig, messages: C
       model: config.model,
       messages,
       stream: false
-    })
+    }),
+    signal: options?.signal
   });
 
   const json = await readJsonResponse<ChatCompletionsResp>(response, config.provider);
@@ -103,7 +92,8 @@ async function completeWithStreaming(config: ResolvedModelConfig, messages: Chat
       model: config.model,
       messages,
       stream: true
-    })
+    }),
+    signal: options?.signal
   });
 
   if (!response.ok) {
@@ -152,7 +142,7 @@ export function createOpenAICompatibleClient(config: ResolvedModelConfig): Model
 
         return await completeWithoutStreaming(config, messages, options);
       } catch (error) {
-        await emitErrorEvent(options, error);
+        await emitModelErrorEvent(options, error);
         throw error;
       }
     }

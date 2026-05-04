@@ -1,5 +1,6 @@
 import { fetchWithTimeout, joinUrl, readJsonResponse, readSseDeltas } from '../http.js';
-import type { ChatMessage, ModelClient, ModelStreamEvent, ResolvedModelConfig } from '../types.js';
+import { emitModelErrorEvent } from '../events.js';
+import type { ChatMessage, ModelClient, ModelCompleteOptions, ResolvedModelConfig } from '../types.js';
 
 type OpenRouterResp = {
   choices: Array<{
@@ -12,9 +13,11 @@ type OpenRouterResp = {
 
 export function createOpenRouterClient(config: ResolvedModelConfig): ModelClient {
   return {
-    async complete(messages: ChatMessage[], options?: { onEvent?: (event: ModelStreamEvent) => void | Promise<void> }) {
+    async complete(messages: ChatMessage[], options?: ModelCompleteOptions) {
       if (!config.apiKey) {
-        throw new Error('OPENROUTER_API_KEY is required');
+        const error = new Error('OPENROUTER_API_KEY is required');
+        await emitModelErrorEvent(options, error);
+        throw error;
       }
 
       await options?.onEvent?.({
@@ -38,7 +41,8 @@ export function createOpenRouterClient(config: ResolvedModelConfig): ModelClient
               model: config.model,
               messages,
               stream: true
-            })
+            }),
+            signal: options?.signal
           });
 
           const content = (
@@ -76,7 +80,8 @@ export function createOpenRouterClient(config: ResolvedModelConfig): ModelClient
             model: config.model,
             messages,
             stream: false
-          })
+          }),
+          signal: options?.signal
         });
 
         const json = await readJsonResponse<OpenRouterResp>(response, 'OpenRouter');
@@ -92,10 +97,7 @@ export function createOpenRouterClient(config: ResolvedModelConfig): ModelClient
           model: config.model
         };
       } catch (error) {
-        await options?.onEvent?.({
-          type: 'error',
-          message: error instanceof Error ? error.message : String(error)
-        });
+        await emitModelErrorEvent(options, error);
         throw error;
       }
     }

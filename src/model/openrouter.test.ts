@@ -68,3 +68,27 @@ test('openrouter client throws when choices content is missing', async () => {
     fixture.restore();
   }
 });
+
+test('openrouter client emits model error event when api key is missing', async () => {
+  const client = createOpenRouterClient({
+    provider: 'openrouter',
+    model: 'anthropic/claude-sonnet-4.6',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    streaming: 'off'
+  });
+  const events: string[] = [];
+
+  await assert.rejects(
+    () =>
+      client.complete([{ role: 'user', content: 'hello' }], {
+        onEvent(event) {
+          if (event.type === 'error') {
+            events.push(event.message);
+          }
+        }
+      }),
+    /OPENROUTER_API_KEY is required/
+  );
+
+  assert.deepEqual(events, ['OPENROUTER_API_KEY is required']);
+});
