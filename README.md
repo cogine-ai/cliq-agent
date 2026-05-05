@@ -44,10 +44,11 @@ cliq "inspect this repo and summarize the architecture"
 Cliq is intentionally small right now. It supports:
 
 - Interactive chat and one-shot tasks
+- Machine-readable JSONL headless runs
 - Structured file inspection with read, list, find, and grep
 - Shell command execution
 - Exact text replacement edits
-- Local session persistence per workspace
+- Local session persistence, checkpoints, forks, compactions, and handoffs
 - Final assistant responses after tool work completes
 
 ## Why this shape
@@ -150,6 +151,27 @@ Activate one or more local skills for a run:
 cliq --skill reviewer --skill safe-edit "inspect the runtime and suggest a minimal refactor"
 ```
 
+Run a headless task with structured JSONL events:
+
+```bash
+cliq run --jsonl "inspect this repo"
+```
+
+`--jsonl` writes one JSON object per line to stdout and keeps human terminal text out of the event stream. The event stream is versioned and includes run lifecycle, model lifecycle, tool lifecycle, checkpoint, compaction, final, and error events. Exit codes are stable: `0` for completed runs, `1` for failed runs, and `130` for cancelled runs.
+
+Create and inspect workflow artifacts:
+
+```bash
+cliq checkpoint create "before refactor"
+cliq checkpoint list
+cliq checkpoint fork CHECKPOINT_ID "alternate approach"
+cliq checkpoint restore CHECKPOINT_ID --scope session
+cliq checkpoint restore CHECKPOINT_ID --scope files --yes
+cliq compact create --summary "Stable context summary"
+cliq compact list
+cliq handoff create
+```
+
 ## Safety model
 
 Cliq runs tools on your local machine in the current workspace. It is not a sandbox.
@@ -235,11 +257,13 @@ Extensions are intentionally limited to hooks and instruction contributions. The
 
 ## Session model
 
-Each workspace gets its own local state directory:
+By default, session state is stored outside the project:
 
 ```txt
-./.cliq/session.json
+~/.cliq/
 ```
+
+Cliq stores sessions and workflow artifacts under `CLIQ_HOME`, which defaults to `~/.cliq`. Workspaces are tracked by real path, so multiple projects can keep separate active sessions without writing conversation history into the repository. The workspace-local `./.cliq/config.json`, instruction files, skills, and extensions remain opt-in project configuration.
 
 Cliq replays prior records back into the model in order, including normalized tool results. Runtime-composed instructions are rebuilt on each turn from the current workspace config, loaded skills, and extensions; they are not persisted as session records.
 
@@ -269,10 +293,10 @@ The current version is an early open source starting point. It does **not** yet 
 
 Near-term priorities are:
 
-1. safer execution controls
-2. richer local tool primitives beyond raw shell
-3. stronger validation and recovery paths
-4. better session and run ergonomics
+1. minimal stdio JSON-RPC on top of the headless contract
+2. observability, audit export, and debug/replay
+3. cost and token governance
+4. richer local UX on top of the same runtime interfaces
 
 ## Contributing
 
