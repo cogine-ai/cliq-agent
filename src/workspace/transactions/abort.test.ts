@@ -128,3 +128,37 @@ test('AB0/AB0a allow normal abort when no flags and not partial', async () => {
     assert.equal(decision?.restoreConfirmed, false);
   });
 });
+
+test('AB3a rejects when apply-progress in any in-flight phase (race after AB0 passed)', async () => {
+  await setupHome(async (home) => {
+    await setupTx(home, 'tx_ab3a_race', 'approved');
+    // simulate the AB0 read showing the phase non-flight is fine -- but we just write
+    // an in-flight phase here to ensure the under-lock recheck catches it.
+    await writeApplyProgress(resolveTxRoot(home), 'tx_ab3a_race', {
+      phase: 'apply-committed',
+      ghostSnapshotId: 'snap_x',
+      startedAt: 'x',
+      filesPlanned: ['a.txt'],
+      filesWritten: ['a.txt']
+    });
+    await assert.rejects(
+      decideAbort(buildCtx(home, 'tx_ab3a_race')),
+      (err: unknown) => err instanceof AbortRejected && /apply is in flight/.test((err as Error).message)
+    );
+  });
+});
+
+test('AB3a permits abort when apply-progress.phase is apply-failed-partial', async () => {
+  await setupHome(async (home) => {
+    await setupTx(home, 'tx_ab3a_partial', 'applied-partial');
+    await writeApplyProgress(resolveTxRoot(home), 'tx_ab3a_partial', {
+      phase: 'apply-failed-partial',
+      ghostSnapshotId: 'snap_x',
+      startedAt: 'x',
+      filesPlanned: ['a.txt', 'b.txt'],
+      filesWritten: ['a.txt']
+    });
+    const decision = await decideAbort(buildCtx(home, 'tx_ab3a_partial', { restoreConfirmed: true }));
+    assert.equal(decision?.reason, 'apply-failed-partial-restored');
+  });
+});

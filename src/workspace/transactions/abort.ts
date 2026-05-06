@@ -68,16 +68,27 @@ async function checkAB0a(ctx: AbortContext): Promise<AB0aResult> {
   return null;
 }
 
-// Public entry point that runs only AB0 + AB0a so far.
-// Future tasks (31-33) will append AB1..AB3b under-lock checks before returning.
+// Public entry point. Runs AB0 + AB0a pre-lock, then acquires the per-tx lock
+// for AB2 re-read and AB3a authoritative recheck of apply-progress phase.
+// Future tasks (32-33) will append AB3a.5 + AB3b under-lock checks before returning.
 export async function decideAbort(ctx: AbortContext): Promise<AbortDecision> {
   await checkAB0(ctx);
   const ab0a = await checkAB0a(ctx);
-  // Until tasks 31-33 land, we return a partial decision shaped for the eventual contract.
-  // Reason resolution: AB0a result wins; otherwise ctx.reason; otherwise default 'user-abort'.
-  const reason: AbortReason = ab0a?.reason ?? ctx.reason ?? 'user-abort';
-  return {
-    reason,
-    restoreConfirmed: ab0a?.restoreConfirmed ?? false
-  };
+  return await withTxLock(ctx.root, ctx.txId, async () => {
+    // AB2: re-read authoritative state under lock.
+    const _txUnderLock = await readTxState(ctx.root, ctx.txId);
+    const progressUnderLock = await readApplyProgress(ctx.root, ctx.txId);
+    // AB3a: re-check apply-progress phase. If it's now in-flight, reject (race after AB0).
+    if (progressUnderLock && IN_FLIGHT_PHASES.has(progressUnderLock.phase)) {
+      throw new AbortRejected(
+        `apply is in flight (phase=${progressUnderLock.phase}); cannot abort (race)`
+      );
+    }
+    // For now, return decision based on AB0a result (AB3a.5 + AB3b in next tasks).
+    const reason: AbortReason = ab0a?.reason ?? ctx.reason ?? 'user-abort';
+    return {
+      reason,
+      restoreConfirmed: ab0a?.restoreConfirmed ?? false
+    };
+  });
 }
