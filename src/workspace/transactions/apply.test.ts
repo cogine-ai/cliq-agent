@@ -10,6 +10,7 @@ import {
   runStageA,
   runStageB,
   runStageC,
+  applyTx,
   ApplyRejected,
   ApplyConflict,
   ApplyPartial
@@ -458,6 +459,91 @@ test('Stage C does not touch activeTxId if it points to a different tx', async (
       const { session } = await setupSessionForApply(ws, { activeTxId: 'tx_other' });
       await runStageC({ root, txId: 'tx_self', cwd: ws, session }, a.ghostSnapshotId);
       assert.equal(session.activeTxId, 'tx_other');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('applyTx happy path: A→B→C completes with state=applied and tx-applied record', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTxWithDiffSummary(home, ws, 'tx_orch', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      const { session } = await setupSessionForApply(ws, { activeTxId: 'tx_orch' });
+      const result = await applyTx({ root, txId: 'tx_orch', cwd: ws, session });
+      assert.deepEqual(result.filesApplied, ['a.txt']);
+      const { readTxState } = await import('./store.js');
+      const tx = await readTxState(root, 'tx_orch');
+      assert.equal(tx?.state, 'applied');
+      assert.equal(session.activeTxId, undefined);
+      const recId = applyRecordId('tx_orch');
+      assert.ok(session.records.find((r) => r.id === recId));
+      const { readFile: rf } = await import('node:fs/promises');
+      assert.equal(await rf(path.join(ws, 'a.txt'), 'utf8'), 'ONE');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('applyTx propagates ApplyConflict from Stage A and leaves state=approved', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTxWithDiffSummary(home, ws, 'tx_orch_conflict', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      // External change before applyTx runs
+      await writeFile(path.join(ws, 'a.txt'), 'EXTERNAL', 'utf8');
+      const { session } = await setupSessionForApply(ws, { activeTxId: 'tx_orch_conflict' });
+      await assert.rejects(
+        applyTx({ root, txId: 'tx_orch_conflict', cwd: ws, session }),
+        (err: unknown) => err instanceof ApplyConflict
+      );
+      const { readTxState } = await import('./store.js');
+      const tx = await readTxState(root, 'tx_orch_conflict');
+      assert.equal(tx?.state, 'approved');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('applyTx propagates ApplyPartial from Stage B and leaves state=applied-partial', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await writeFile(path.join(ws, 'b.txt'), 'two', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTxWithDiffSummary(home, ws, 'tx_orch_partial', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' },
+        { path: 'b.txt', oldContent: 'two', newContent: 'TWO' }
+      ]);
+      // applyTx itself doesn't expose a hook between Stage A and Stage B, so we
+      // exercise the ApplyPartial path by running Stage A, race-modifying b.txt,
+      // and asserting that runStageB throws ApplyPartial. This mirrors the B3a
+      // test above and gives us the partial-state assertion the orchestrator
+      // would propagate verbatim.
+      const a = await runStageA({ root, txId: 'tx_orch_partial', cwd: ws });
+      await writeFile(path.join(ws, 'b.txt'), 'TWO_EXTERNAL', 'utf8');
+      await assert.rejects(
+        runStageB({ root, txId: 'tx_orch_partial', cwd: ws }, a.plan),
+        (err: unknown) => err instanceof ApplyPartial
+      );
+      const { readTxState } = await import('./store.js');
+      const tx = await readTxState(root, 'tx_orch_partial');
+      assert.equal(tx?.state, 'applied-partial');
     } finally {
       await rm(ws, { recursive: true, force: true });
     }

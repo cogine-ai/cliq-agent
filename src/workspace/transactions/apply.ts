@@ -284,3 +284,30 @@ export async function runStageC(ctx: StageCContext, ghostSnapshotId: string): Pr
   });
 }
 
+export type ApplyOutcome = {
+  ghostSnapshotId: string;
+  filesApplied: string[];
+};
+
+/**
+ * Top-level apply orchestrator: A → B → C.
+ *
+ * Error semantics:
+ *   - ApplyRejected from Stage A: tx state unchanged. Re-thrown.
+ *   - ApplyConflict from Stage A: tx state stays 'approved' (Stage A never
+ *     wrote apply-progress, so nothing to roll back). Re-thrown.
+ *   - ApplyPartial from Stage B: tx is already 'applied-partial' and progress
+ *     is 'apply-failed-partial'. Re-thrown so the caller can initiate abort
+ *     via --restore-confirmed or --keep-partial.
+ *   - Successful completion: apply-progress.phase='apply-finalized',
+ *     tx.state='applied', session has tx-applied record + activeTxId cleared.
+ */
+export async function applyTx(ctx: ApplyContext & { session: Session }): Promise<ApplyOutcome> {
+  const a = await runStageA(ctx);
+  const b = await runStageB(ctx, a.plan);
+  await runStageC({ ...ctx, session: ctx.session }, b.ghostSnapshotId);
+  return {
+    ghostSnapshotId: b.ghostSnapshotId,
+    filesApplied: a.plan.map((p) => p.path)
+  };
+}
