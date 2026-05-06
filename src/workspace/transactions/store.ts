@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
-import type { Transaction, TxKind } from './types.js';
+import type { Transaction, TxKind, ApplyProgress, AbortProgress } from './types.js';
 
 export function resolveTxRoot(cliqHome: string): string {
   return path.join(cliqHome, 'tx');
@@ -81,4 +81,68 @@ export async function writeTxState(root: string, tx: Transaction): Promise<void>
     await fh.close();
   }
   await fs.rename(tmp, target);
+}
+
+export async function readApplyProgress(root: string, txId: string): Promise<ApplyProgress | null> {
+  try {
+    const raw = await fs.readFile(applyProgressPath(root, txId), 'utf8');
+    return JSON.parse(raw) as ApplyProgress;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+export async function writeApplyProgress(root: string, txId: string, progress: ApplyProgress): Promise<void> {
+  await fs.mkdir(txDir(root, txId), { recursive: true });
+  const target = applyProgressPath(root, txId);
+  const tmp = `${target}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(progress, null, 2), 'utf8');
+  const fh = await fs.open(tmp, 'r+');
+  try {
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmp, target);
+}
+
+export async function deleteApplyProgress(root: string, txId: string): Promise<void> {
+  try {
+    await fs.unlink(applyProgressPath(root, txId));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+export async function readAbortProgress(root: string, txId: string): Promise<AbortProgress | null> {
+  try {
+    const raw = await fs.readFile(abortProgressPath(root, txId), 'utf8');
+    return JSON.parse(raw) as AbortProgress;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+export async function writeAbortProgress(root: string, txId: string, progress: AbortProgress): Promise<void> {
+  await fs.mkdir(txDir(root, txId), { recursive: true });
+  const target = abortProgressPath(root, txId);
+  const tmp = `${target}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(progress, null, 2), 'utf8');
+  const fh = await fs.open(tmp, 'r+');
+  try {
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmp, target);
+}
+
+export async function deleteAbortProgress(root: string, txId: string): Promise<void> {
+  try {
+    await fs.unlink(abortProgressPath(root, txId));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
 }

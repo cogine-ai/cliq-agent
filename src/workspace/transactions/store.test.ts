@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { resolveTxRoot, txDir, applyProgressPath, abortProgressPath, stateJsonPath, auditJsonPath, readTxState, writeTxState, createTx } from './store.js';
+import { resolveTxRoot, txDir, applyProgressPath, abortProgressPath, stateJsonPath, auditJsonPath, readTxState, writeTxState, createTx, readApplyProgress, writeApplyProgress, deleteApplyProgress, readAbortProgress, writeAbortProgress, deleteAbortProgress } from './store.js';
 
 test('resolveTxRoot honors CLIQ_HOME', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-home-'));
@@ -54,6 +54,69 @@ test('readTxState returns null for missing tx', async () => {
   try {
     const loaded = await readTxState(resolveTxRoot(home), 'tx_nope');
     assert.equal(loaded, null);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('writeApplyProgress then readApplyProgress preserves phase', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-apply-progress-'));
+  try {
+    const root = resolveTxRoot(home);
+    const txId = 'tx_apply_01HX';
+    const applyProg = {
+      phase: 'apply-pending' as const,
+      ghostSnapshotId: 'snap_abc',
+      startedAt: '2026-05-06T00:00:00Z',
+      filesPlanned: ['a.ts', 'b.ts'],
+      filesWritten: []
+    };
+    await writeApplyProgress(root, txId, applyProg);
+    const loaded = await readApplyProgress(root, txId);
+    assert.deepEqual(loaded, applyProg);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('writeAbortProgress then readAbortProgress preserves phase', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-abort-progress-'));
+  try {
+    const root = resolveTxRoot(home);
+    const txId = 'tx_abort_01HX';
+    const abortProg = {
+      phase: 'aborting' as const,
+      reason: 'user-abort' as const,
+      startedAt: '2026-05-06T00:00:00Z',
+      ts: '2026-05-06T00:00:01Z'
+    };
+    await writeAbortProgress(root, txId, abortProg);
+    const loaded = await readAbortProgress(root, txId);
+    assert.deepEqual(loaded, abortProg);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('deleteApplyProgress is idempotent on missing file', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-delete-apply-'));
+  try {
+    const root = resolveTxRoot(home);
+    const txId = 'tx_delete_01HX';
+    // Should not throw even though file doesn't exist
+    await deleteApplyProgress(root, txId);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('deleteAbortProgress is idempotent on missing file', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-delete-abort-'));
+  try {
+    const root = resolveTxRoot(home);
+    const txId = 'tx_delete_abort_01HX';
+    // Should not throw even though file doesn't exist
+    await deleteAbortProgress(root, txId);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
