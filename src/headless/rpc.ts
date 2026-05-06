@@ -13,7 +13,13 @@ import {
   type RuntimeEventEnvelope,
   type SessionView
 } from './contract.js';
-import { getArtifactViewForRequest, getSessionView as defaultGetSessionView } from './artifacts.js';
+import {
+  ArtifactNotFoundError,
+  getArtifactViewForRequest,
+  getSessionView as defaultGetSessionView,
+  SessionNotFoundError,
+  WorkspaceNotFoundError
+} from './artifacts.js';
 import { runHeadless as defaultRunHeadless } from './run.js';
 import { makeId } from '../session/store.js';
 
@@ -170,7 +176,11 @@ function asArtifactGetParams(params: unknown): { cwd: string; artifactId: string
 }
 
 function isNotFoundError(error: unknown) {
-  return error instanceof Error && /\b(session|artifact) not found\b/i.test(error.message);
+  return error instanceof SessionNotFoundError || error instanceof ArtifactNotFoundError;
+}
+
+function isWorkspaceNotFoundError(error: unknown) {
+  return error instanceof WorkspaceNotFoundError;
 }
 
 export function createRpcServer(options: RpcServerOptions): RpcServer {
@@ -350,6 +360,10 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
     try {
       responder.result(await getSessionView(parsed.cwd, parsed.sessionId));
     } catch (error) {
+      if (isWorkspaceNotFoundError(error)) {
+        responder.error(INVALID_PARAMS, errorMessage(error));
+        return;
+      }
       if (isNotFoundError(error)) {
         responder.error(NOT_FOUND_ERROR, errorMessage(error));
         return;
@@ -368,6 +382,10 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
     try {
       responder.result(await getArtifactView(parsed.cwd, parsed.artifactId, parsed.sessionId));
     } catch (error) {
+      if (isWorkspaceNotFoundError(error)) {
+        responder.error(INVALID_PARAMS, errorMessage(error));
+        return;
+      }
       if (isNotFoundError(error)) {
         responder.error(NOT_FOUND_ERROR, errorMessage(error));
         return;
