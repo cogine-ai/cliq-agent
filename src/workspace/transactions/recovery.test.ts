@@ -6,7 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import { recoverAbort, recoverAll, recoverApply, scanForRecovery } from './recovery.js';
+import {
+  readRecoveryRecord,
+  recoverAbort,
+  recoverAll,
+  recoverApply,
+  scanForRecovery
+} from './recovery.js';
 import {
   resolveTxRoot,
   createTx,
@@ -548,5 +554,86 @@ test('recovery is idempotent: running twice yields same state', async () => {
     } finally {
       await rm(ws, { recursive: true, force: true });
     }
+  });
+});
+
+// -- Task 39: recovery.json warning artifact ---------------------------------
+
+test('recoverAll writes recovery.json with action + ts (skipped for no-op)', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-warn-'));
+    try {
+      await makeTx(root, 'tx_warn', 'approved');
+      await writeApplyProgress(root, 'tx_warn', {
+        phase: 'apply-pending',
+        ghostSnapshotId: 'snap',
+        startedAt: 'x',
+        filesPlanned: ['a.txt'],
+        filesWritten: []
+      });
+      const session = createSession(ws);
+      await recoverAll(root, { cwd: ws, session });
+      const record = await readRecoveryRecord(root, 'tx_warn');
+      assert.ok(record);
+      assert.equal(record?.action, 'apply-pending-reverted');
+      assert.match(record?.ts ?? '', /^\d{4}-\d{2}-\d{2}T/);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('recovery.json includes warning when recovery emits one', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-warn-msg-'));
+    try {
+      await makeTx(root, 'tx_warn_msg', 'approved');
+      await writeApplyProgress(root, 'tx_warn_msg', {
+        phase: 'apply-writing',
+        ghostSnapshotId: 'snap',
+        startedAt: 'x',
+        filesPlanned: ['a.txt', 'b.txt'],
+        filesWritten: ['a.txt']
+      });
+      const session = createSession(ws);
+      await recoverAll(root, { cwd: ws, session });
+      const record = await readRecoveryRecord(root, 'tx_warn_msg');
+      assert.ok(record);
+      assert.equal(record?.action, 'apply-writing-partial');
+      assert.match(record?.warning ?? '', /a\.txt/);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('recovery.json round-trips for inspection', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-rt-'));
+    try {
+      await makeTx(root, 'tx_rt', 'approved');
+      await writeApplyProgress(root, 'tx_rt', {
+        phase: 'apply-finalized',
+        ghostSnapshotId: 'snap_y',
+        startedAt: 'x',
+        filesPlanned: ['a.txt'],
+        filesWritten: ['a.txt']
+      });
+      const session = createSession(ws);
+      const [outcome] = await recoverAll(root, { cwd: ws, session });
+      const record = await readRecoveryRecord(root, 'tx_rt');
+      assert.equal(record?.txId, outcome.txId);
+      assert.equal(record?.action, outcome.action);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('readRecoveryRecord returns null when no recovery has run', async () => {
+  await setupHomeWithEnv(async (root) => {
+    await makeTx(root, 'tx_no_rec', 'approved');
+    const record = await readRecoveryRecord(root, 'tx_no_rec');
+    assert.equal(record, null);
   });
 });

@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 
 import {
   readTxState,
@@ -7,7 +8,8 @@ import {
   writeApplyProgress,
   deleteApplyProgress,
   readAbortProgress,
-  withTxLock
+  withTxLock,
+  txDir
 } from './store.js';
 import { runStageC } from './apply.js';
 import { decideAbort, runAbortWritePhase } from './abort.js';
@@ -311,10 +313,69 @@ export async function recoverAbort(
 }
 
 /**
+ * Recovery warning artifact (Section 16.4.3). After each non-trivial recovery
+ * action, recoverAll writes a small JSON file under the tx directory so
+ * downstream surfaces (e.g., `cliq tx status`) can display what happened.
+ *
+ * The artifact is written atomically (tmp + fsync + rename) so partial files
+ * are never visible. No-op outcomes are not recorded — there is nothing
+ * meaningful to surface.
+ */
+export type RecoveryRecord = {
+  txId: string;
+  action: RecoveryOutcomeAction;
+  warning?: string;
+  ts: string;
+};
+
+export function recoveryJsonPath(root: string, txId: string): string {
+  return path.join(txDir(root, txId), 'recovery.json');
+}
+
+export async function writeRecoveryRecord(
+  root: string,
+  outcome: RecoveryOutcome
+): Promise<void> {
+  const target = recoveryJsonPath(root, outcome.txId);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const tmp = `${target}.tmp`;
+  const record: RecoveryRecord = {
+    txId: outcome.txId,
+    action: outcome.action,
+    warning: outcome.warning,
+    ts: outcome.ts
+  };
+  await fs.writeFile(tmp, JSON.stringify(record, null, 2), 'utf8');
+  const fh = await fs.open(tmp, 'r+');
+  try {
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmp, target);
+}
+
+export async function readRecoveryRecord(
+  root: string,
+  txId: string
+): Promise<RecoveryRecord | null> {
+  try {
+    const raw = await fs.readFile(recoveryJsonPath(root, txId), 'utf8');
+    return JSON.parse(raw) as RecoveryRecord;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
  * Top-level recovery driver. Scans the tx-store for non-terminal transactions
  * and runs the appropriate recovery action for each. Iterates serially: the
  * session lock can't be held by two concurrent recovery operations, so this
  * loop must not parallelise.
+ *
+ * After each non-no-op outcome, writes recovery.json to the tx directory so
+ * subsequent CLI/UI surfaces can display the recovery summary.
  */
 export async function recoverAll(
   root: string,
@@ -323,11 +384,16 @@ export async function recoverAll(
   const actions = await scanForRecovery(root);
   const outcomes: RecoveryOutcome[] = [];
   for (const action of actions) {
+    let outcome: RecoveryOutcome;
     if (action.kind === 'apply') {
-      outcomes.push(await recoverApply(root, action, ctx));
+      outcome = await recoverApply(root, action, ctx);
     } else {
-      outcomes.push(await recoverAbort(root, action, ctx));
+      outcome = await recoverAbort(root, action, ctx);
     }
+    if (outcome.action !== 'no-op') {
+      await writeRecoveryRecord(root, outcome);
+    }
+    outcomes.push(outcome);
   }
   return outcomes;
 }
