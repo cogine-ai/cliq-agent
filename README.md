@@ -159,6 +159,27 @@ cliq run --jsonl "inspect this repo"
 
 `--jsonl` writes one JSON object per line to stdout and keeps human terminal text out of the event stream. The event stream is versioned and includes run lifecycle, model lifecycle, tool lifecycle, checkpoint, compaction, final, and error events. Exit codes are stable: `0` for completed runs, `1` for failed runs, and `130` for cancelled runs.
 
+### Stdio JSON-RPC
+
+`cliq rpc` starts a newline-delimited JSON-RPC 2.0 server over stdio. It is intended for local GUI, gateway, automation, and future subagent orchestrators that need to start runs, subscribe to events, cancel work, and query stable artifacts without scraping terminal output.
+
+Initial methods:
+
+```text
+run.start(params: HeadlessRunRequest) -> { runId }
+run.cancel(params: { runId: string }) -> { status: 'cancelled' | 'not-found' | 'already-finished' }
+session.get(params: { cwd: string; sessionId?: string }) -> SessionView
+artifact.get(params: { cwd: string; artifactId: string; sessionId?: string }) -> ArtifactView
+```
+
+Runtime events are emitted as notifications:
+
+```json
+{"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":1,"eventId":"evt_...","runId":"run_...","timestamp":"...","type":"run-start","payload":{}}}
+```
+
+The first version allows one active run per `cliq rpc` process. The public protocol still carries `runId` on events so future orchestrators can run multiple Cliq workers or migrate to a multi-run process without changing event consumers.
+
 Create and inspect workflow artifacts:
 
 ```bash
