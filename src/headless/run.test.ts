@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { ModelClient } from '../model/types.js';
+import type { RuntimeEventEnvelope } from './contract.js';
 import { runHeadless } from './run.js';
 
 const previousHome = process.env.CLIQ_HOME;
@@ -216,4 +217,29 @@ test('runHeadless does not classify arbitrary cancelled text as cancellation', a
   assert.equal(output.exitCode, 1);
   assert.equal(output.error?.code, 'internal-error');
   assert.equal(output.error?.stage, 'assembly');
+});
+
+test('runHeadless uses a caller-supplied run id for output and events', async () => {
+  const { cwd } = await setupWorkspace();
+  const events: RuntimeEventEnvelope[] = [];
+
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'hello',
+      model: { provider: 'openai-compatible', model: 'fake', baseUrl: 'http://localhost.test/v1' },
+      autoCompact: { enabled: 'off' }
+    },
+    {
+      runId: 'run_rpc_known',
+      modelClient: finalModel('hello from rpc'),
+      onEvent(event) {
+        events.push(event);
+      }
+    }
+  );
+
+  assert.equal(output.runId, 'run_rpc_known');
+  assert.ok(events.length > 0);
+  assert.ok(events.every((event) => event.runId === 'run_rpc_known'));
 });

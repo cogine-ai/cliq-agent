@@ -1,5 +1,6 @@
 import { readHandoffArtifact } from '../handoff/export.js';
 import { getWorkspaceCheckpoint } from '../session/checkpoints.js';
+import { loadActiveSession, loadSessionById } from '../session/store.js';
 import type {
   CompactionArtifact,
   Session,
@@ -220,6 +221,30 @@ async function getHandoffView(artifactId: string) {
   }
 }
 
+function sessionNotFound(sessionId: string): never {
+  throw new Error(`session not found: ${sessionId}`);
+}
+
+async function sessionForView(cwd: string, sessionId?: string): Promise<Session> {
+  if (!sessionId) {
+    return (await loadActiveSession(cwd)) ?? sessionNotFound('active');
+  }
+
+  return (await loadSessionById(cwd, sessionId)) ?? sessionNotFound(sessionId);
+}
+
+export async function getSessionView(cwd: string, sessionId?: string): Promise<SessionView> {
+  return toSessionView(await sessionForView(cwd, sessionId));
+}
+
+export async function getArtifactViewForRequest(
+  cwd: string,
+  artifactId: string,
+  sessionId?: string
+): Promise<ArtifactView> {
+  return await getArtifactView(await sessionForView(cwd, sessionId), artifactId);
+}
+
 export async function getArtifactView(session: Session, artifactId: string): Promise<ArtifactView> {
   if (!SAFE_ARTIFACT_ID.test(artifactId)) {
     artifactNotFound(artifactId);
@@ -239,6 +264,10 @@ export async function getArtifactView(session: Session, artifactId: string): Pro
   }
 
   if (artifactId.startsWith('wchk_')) {
+    if (!session.checkpoints.some((candidate) => candidate.workspaceCheckpointId === artifactId)) {
+      artifactNotFound(artifactId);
+    }
+
     return {
       kind: 'workspace-checkpoint',
       workspaceCheckpoint: await getWorkspaceCheckpointView(artifactId)
@@ -254,9 +283,14 @@ export async function getArtifactView(session: Session, artifactId: string): Pro
   }
 
   if (artifactId.startsWith('handoff_')) {
+    const handoff = await getHandoffView(artifactId);
+    if (handoff.sessionId !== session.id) {
+      artifactNotFound(artifactId);
+    }
+
     return {
       kind: 'handoff',
-      handoff: await getHandoffView(artifactId)
+      handoff
     };
   }
 

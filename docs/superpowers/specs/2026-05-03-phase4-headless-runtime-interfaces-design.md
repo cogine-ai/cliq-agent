@@ -549,21 +549,26 @@ Initial methods:
 ```text
 run.start(params: HeadlessRunRequest) -> { runId }
 run.cancel(params: { runId: string }) -> { status: 'cancelled' | 'not-found' | 'already-finished' }
-session.get(params: { sessionId: string }) -> SessionView
-artifact.get(params: { artifactId: string }) -> ArtifactView
+session.get(params: { cwd: string; sessionId?: string }) -> SessionView
+artifact.get(params: { cwd: string; artifactId: string; sessionId?: string }) -> ArtifactView
 ```
 
 Runtime events are emitted as server notifications:
 
 ```json
-{"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":1,"eventId":"evt_001","runId":"run_abc","sessionId":"ses_123","turn":4,"timestamp":"2026-05-03T00:00:00.000Z","type":"run-start","payload":{}}}
+{"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":1,"eventId":"evt_001","runId":"run_abc","sessionId":"ses_123","turn":4,"timestamp":"2026-05-03T00:00:00.000Z","type":"run-start","payload":{"cwd":"/repo","policy":"auto","model":{"provider":"openai","model":"example-model"}}}}
 ```
+
+`run.cancel` returning `cancelled` means the abort signal was delivered. Clients should wait for the terminal `run.event` with `type: "run-end"` before treating the run as finished. Clients that send notification-style `run.start` requests without an `id` must read the `runId` from subsequent `run.event` notifications.
 
 Concurrency rule for the first RPC follow-up:
 
 - A single stdio RPC process may run one active run at a time.
 - `run.start` rejects a second run while one is active.
 - Multi-run scheduling is deferred.
+- Batch requests are not supported in v1.
+
+The one-active-run limit is a process-level v1 constraint, not a public event-contract constraint. Every event and terminal output keeps `runId` so a future subagent orchestrator can launch multiple `cliq rpc` workers or a later multi-run server without changing event consumers.
 
 This keeps lifecycle, cancellation, output ordering, and session mutation simple.
 

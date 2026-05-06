@@ -6,6 +6,7 @@ import { DEFAULT_POLICY_MODE } from './config.js';
 import { exportHandoff } from './handoff/export.js';
 import type { HeadlessRunStatus, RuntimeEventEnvelope } from './headless/contract.js';
 import { writeJsonlEvent } from './headless/jsonl.js';
+import { runStdioJsonRpcServer } from './headless/rpc.js';
 import { runHeadless } from './headless/run.js';
 import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
@@ -67,7 +68,7 @@ export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'compact-create'; summaryMarkdown: string; beforeCheckpointId?: string; prompt?: undefined }
   | { cmd: 'compact-list'; prompt?: undefined }
   | { cmd: 'handoff-create'; checkpointId?: string; prompt?: undefined }
-  | { cmd: 'reset' | 'history'; prompt?: undefined }
+  | { cmd: 'reset' | 'history' | 'rpc'; prompt?: undefined }
   | { cmd: 'help'; topic?: HelpTopic; prompt?: undefined }
 );
 
@@ -441,6 +442,7 @@ function isKnownCommand(cmd: string | undefined) {
     cmd === 'restore' ||
     cmd === 'reset' ||
     cmd === 'history' ||
+    cmd === 'rpc' ||
     cmd === 'help' ||
     cmd === '--help' ||
     cmd === '-h'
@@ -607,6 +609,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
   if (cmd === 'reset') return { cmd, policy, skills, model };
   if (cmd === 'history') return { cmd, policy, skills, model };
+  if (cmd === 'rpc') {
+    ensureNoExtraArgs(args, 1, 'rpc');
+    return { cmd, policy, skills, model };
+  }
   if (cmd === 'help') {
     const topic = args[1];
     if (topic === undefined) {
@@ -697,6 +703,7 @@ Usage:
   cliq chat                Start interactive chat in the current directory
   cliq reset               Clear persisted conversation for this directory
   cliq history             Print persisted session for this directory
+  cliq rpc                 Start stdio JSON-RPC mode
   cliq checkpoint create   Create a manual checkpoint
   cliq checkpoint list     Print session checkpoints
   cliq checkpoint restore  Restore session or files from a checkpoint
@@ -731,6 +738,9 @@ Streaming modes:
   auto                     Use provider default; compatible endpoints may fall back
   on                       Request streaming when supported
   off                      Force non-streaming responses
+
+RPC:
+  cliq rpc                 Reads newline-delimited JSON-RPC 2.0 requests from stdin and writes protocol messages to stdout
 
 Examples:
   cliq --policy read-only "inspect this repo"
@@ -982,6 +992,11 @@ export async function runCli(argv: string[]) {
 
   if (cmd === 'history') {
     console.log(JSON.stringify(await ensureSession(cwd), null, 2));
+    return;
+  }
+
+  if (cmd === 'rpc') {
+    await runStdioJsonRpcServer();
     return;
   }
 
