@@ -25,8 +25,17 @@ import {
 } from './session/checkpoints.js';
 import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
-import { ensureFresh, ensureSession, saveSession } from './session/store.js';
+import { ensureFresh, ensureSession, saveSession, workspaceIdFromRealPath } from './session/store.js';
 import type { ToolResult } from './tools/types.js';
+import {
+  openTx as coordOpenTx,
+  applyTx as coordApplyTx,
+  abortTx as coordAbortTx,
+  getTxStatus as coordGetTxStatus,
+  listTx as coordListTx,
+  type CoordinatorContext
+} from './workspace/transactions/coordinator.js';
+import { promises as fsPromises } from 'node:fs';
 
 const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
 const POLICY_MODE_LIST = POLICY_MODES.join(', ');
@@ -1333,21 +1342,148 @@ export async function runCli(argv: string[]) {
     parsed.cmd === 'tx-apply' ||
     parsed.cmd === 'tx-abort'
   ) {
-    const message = `${parsed.cmd}: handler not yet implemented (Task 48 wires the coordinator)`;
-    if (parsed.json || parsed.headless) {
-      process.stdout.write(
-        `${JSON.stringify({
-          type: 'error',
-          code: 'internal-error',
-          stage: 'input',
-          message,
-          recoverable: false
-        })}\n`
-      );
-    } else {
-      process.stderr.write(`${message}\n`);
+    const session = await ensureSession(cwd);
+    const wantsJson = Boolean(parsed.json || parsed.headless);
+    // workspaceRealPath: prefer the OS-level real path so it is stable across
+    // symlinked invocations; fall back to cwd if realpath fails.
+    let workspaceRealPath = cwd;
+    try {
+      workspaceRealPath = await fsPromises.realpath(cwd);
+    } catch {
+      // ignore, use cwd verbatim.
     }
-    throw new ReportedCliError(message, { exitCode: 2 });
+    const ctx: CoordinatorContext = {
+      cwd,
+      session,
+      workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+      sessionId: session.id,
+      workspaceRealPath
+    };
+
+    const writeJson = (payload: unknown) => {
+      process.stdout.write(`${JSON.stringify(payload)}\n`);
+    };
+
+    if (parsed.cmd === 'tx-open') {
+      const tx = await coordOpenTx(ctx, { explicit: true, name: parsed.name });
+      if (wantsJson) {
+        writeJson({ type: 'tx-opened', txId: tx.id, ...(parsed.name ? { name: parsed.name } : {}) });
+      } else {
+        process.stdout.write(`tx opened: ${tx.id}${parsed.name ? ` (${parsed.name})` : ''}\n`);
+      }
+      return;
+    }
+
+    if (parsed.cmd === 'tx-list') {
+      const list = await coordListTx(ctx);
+      if (wantsJson) {
+        writeJson({
+          type: 'tx-list',
+          transactions: list.map((t) => ({ id: t.id, state: t.state, createdAt: t.createdAt }))
+        });
+      } else if (list.length === 0) {
+        process.stdout.write('no transactions\n');
+      } else {
+        for (const t of list) process.stdout.write(`${t.id} ${t.state}\n`);
+      }
+      return;
+    }
+
+    if (parsed.cmd === 'tx-status') {
+      if (!parsed.txId) {
+        // No id provided: behave like list (matches operator expectations).
+        const list = await coordListTx(ctx);
+        if (wantsJson) {
+          writeJson({
+            type: 'tx-list',
+            transactions: list.map((t) => ({ id: t.id, state: t.state, createdAt: t.createdAt }))
+          });
+        } else if (list.length === 0) {
+          process.stdout.write('no transactions\n');
+        } else {
+          for (const t of list) process.stdout.write(`${t.id} ${t.state}\n`);
+        }
+        return;
+      }
+      const status = await coordGetTxStatus(ctx, parsed.txId);
+      if (!status) {
+        const message = `tx not found: ${parsed.txId}`;
+        if (wantsJson) {
+          writeJson({ type: 'error', code: 'tx-not-found', message });
+        } else {
+          process.stderr.write(`${message}\n`);
+        }
+        throw new ReportedCliError(message, { exitCode: 2 });
+      }
+      if (wantsJson) {
+        writeJson({
+          type: 'tx-status',
+          tx: status.tx,
+          hasApplyProgress: status.hasApplyProgress,
+          hasAbortProgress: status.hasAbortProgress
+        });
+      } else {
+        process.stdout.write(`${status.tx.id} ${status.tx.state}\n`);
+      }
+      return;
+    }
+
+    if (parsed.cmd === 'tx-apply') {
+      const result = await coordApplyTx(ctx, parsed.txId, {
+        overrides: parsed.overrides,
+        ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
+      });
+      if (result.ok) {
+        if (wantsJson) {
+          writeJson({
+            type: 'tx-applied',
+            txId: result.txId,
+            filesApplied: result.filesApplied,
+            ghostSnapshotId: result.ghostSnapshotId
+          });
+        } else {
+          process.stdout.write(`tx applied: ${result.txId} (${result.filesApplied.length} files)\n`);
+        }
+        return;
+      }
+      if (wantsJson) {
+        writeJson({ type: 'error', code: result.error, message: result.message });
+      } else {
+        process.stderr.write(`tx apply ${result.error}: ${result.message}\n`);
+      }
+      throw new ReportedCliError(result.message, { exitCode: 1 });
+    }
+
+    if (parsed.cmd === 'tx-abort') {
+      const result = await coordAbortTx(ctx, parsed.txId, {
+        restoreConfirmed: parsed.restoreConfirmed,
+        keepPartial: parsed.keepPartial,
+        ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
+      });
+      if (result.ok) {
+        if (wantsJson) {
+          writeJson({
+            type: 'tx-aborted',
+            txId: parsed.txId,
+            aborted: result.aborted,
+            ...(result.reason !== undefined ? { reason: result.reason } : {})
+          });
+        } else if (result.aborted) {
+          process.stdout.write(
+            `tx aborted: ${parsed.txId}${result.reason ? ` (${result.reason})` : ''}\n`
+          );
+        } else {
+          process.stdout.write(`tx already terminal: ${parsed.txId}\n`);
+        }
+        return;
+      }
+      if (wantsJson) {
+        writeJson({ type: 'error', code: result.error, message: result.message });
+      } else {
+        process.stderr.write(`tx abort ${result.error}: ${result.message}\n`);
+      }
+      throw new ReportedCliError(result.message, { exitCode: 1 });
+    }
   }
 
   if (prompt && prompt.trim()) {
