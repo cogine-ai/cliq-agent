@@ -13,7 +13,6 @@ import {
   AbortRejected,
   type AbortContext
 } from './abort.js';
-import { createCheckpoint } from '../../session/checkpoints.js';
 
 const execFileAsync = promisify(execFile);
 import {
@@ -504,12 +503,8 @@ test('abortTx with --restore-confirmed restores files from ghost snapshot', asyn
       await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
       await execFileAsync('git', ['add', '.'], { cwd: ws });
       await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
-      // Create a workspace checkpoint that persists the artifact so it can be
-      // restored later. createApplyPreSnapshot doesn't persist on its own, so
-      // we use createCheckpoint here to get a fully restorable ghost snapshot.
-      const sessionForCk = await setupSessionForAbort(ws);
-      const ck = await createCheckpoint(ws, sessionForCk, { kind: 'manual' });
-      const ghostId = ck.workspaceCheckpointId!;
+      const { createApplyPreSnapshot } = await import('./snapshot.js');
+      const ghostId = await createApplyPreSnapshot(ws);
       // Now mutate the file to simulate "partial apply".
       await writeFile(path.join(ws, 'a.txt'), 'PARTIAL_BAD', 'utf8');
       await setupTxWithDiffSummary(home, ws, 'tx_orch_restore', 'applied-partial');

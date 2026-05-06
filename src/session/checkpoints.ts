@@ -32,7 +32,7 @@ export function workspaceCheckpointFilePath(workspaceCheckpointId: string, cliqH
   return path.join(cliqHome, 'checkpoints', `${workspaceCheckpointId}.json`);
 }
 
-async function writeWorkspaceCheckpoint(checkpoint: WorkspaceCheckpoint) {
+export async function writeWorkspaceCheckpoint(checkpoint: WorkspaceCheckpoint) {
   const target = workspaceCheckpointFilePath(checkpoint.id);
   await atomicWriteJson(target, checkpoint);
 }
