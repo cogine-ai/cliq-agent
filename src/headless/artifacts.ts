@@ -1,5 +1,6 @@
 import { readHandoffArtifact } from '../handoff/export.js';
 import { getWorkspaceCheckpoint } from '../session/checkpoints.js';
+import { ensureSession, loadSessionById } from '../session/store.js';
 import type {
   CompactionArtifact,
   Session,
@@ -218,6 +219,30 @@ async function getHandoffView(artifactId: string) {
     }
     throw error;
   }
+}
+
+function sessionNotFound(sessionId: string): never {
+  throw new Error(`session not found: ${sessionId}`);
+}
+
+async function sessionForView(cwd: string, sessionId?: string): Promise<Session> {
+  if (!sessionId) {
+    return await ensureSession(cwd);
+  }
+
+  return (await loadSessionById(cwd, sessionId)) ?? sessionNotFound(sessionId);
+}
+
+export async function getSessionView(cwd: string, sessionId?: string): Promise<SessionView> {
+  return toSessionView(await sessionForView(cwd, sessionId));
+}
+
+export async function getArtifactViewForRequest(
+  cwd: string,
+  artifactId: string,
+  sessionId?: string
+): Promise<ArtifactView> {
+  return await getArtifactView(await sessionForView(cwd, sessionId), artifactId);
 }
 
 export async function getArtifactView(session: Session, artifactId: string): Promise<ArtifactView> {

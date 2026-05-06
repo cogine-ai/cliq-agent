@@ -774,6 +774,17 @@ export async function ensureSession(cwd: string): Promise<Session> {
   });
 }
 
+export async function loadSessionById(cwd: string, sessionId: string): Promise<Session | null> {
+  const state = await loadWorkspaceState(cwd);
+  const match = state.recentSessions.find((entry) => entry.id === sessionId);
+  if (!match) {
+    return null;
+  }
+
+  const session = await loadSessionFromPath(match.path);
+  return session?.id === sessionId ? session : null;
+}
+
 export async function ensureFresh(cwd: string): Promise<Session> {
   const session = createSession(cwd);
   await saveSession(cwd, session);

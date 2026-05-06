@@ -7,8 +7,8 @@ import path from 'node:path';
 import { exportHandoff } from '../handoff/export.js';
 import { createCheckpoint } from '../session/checkpoints.js';
 import { createCompaction } from '../session/compaction.js';
-import { createSession } from '../session/store.js';
-import { getArtifactView, toSessionView } from './artifacts.js';
+import { createSession, ensureSession, saveSession } from '../session/store.js';
+import { getArtifactView, getArtifactViewForRequest, getSessionView, toSessionView } from './artifacts.js';
 
 const previousHome = process.env.CLIQ_HOME;
 const cleanupDirs: string[] = [];
@@ -117,4 +117,53 @@ test('getArtifactView resolves checkpoint, workspace checkpoint, compaction, and
     workspaceCheckpointId: 'wchk_missing_for_checkpoint'
   });
   await assert.rejects(() => getArtifactView(session, 'chk_missing_workspace'), /artifact not found/i);
+});
+
+test('getSessionView returns active and explicit session views for a workspace', async () => {
+  const { cwd } = await setupWorkspace();
+  const active = await ensureSession(cwd);
+  active.records.push({
+    id: 'usr_rpc_1',
+    ts: '2026-05-06T00:00:00.000Z',
+    kind: 'user',
+    role: 'user',
+    content: 'hello'
+  });
+  await saveSession(cwd, active);
+
+  const activeView = await getSessionView(cwd);
+  const explicitView = await getSessionView(cwd, active.id);
+
+  assert.equal(activeView.id, active.id);
+  assert.equal(explicitView.id, active.id);
+  assert.equal(explicitView.records[0]?.kind, 'user');
+});
+
+test('getSessionView rejects unknown session ids without creating raw file contracts', async () => {
+  const { cwd } = await setupWorkspace();
+  await ensureSession(cwd);
+
+  await assert.rejects(
+    async () => await getSessionView(cwd, 'sess_missing'),
+    /session not found: sess_missing/
+  );
+});
+
+test('getArtifactViewForRequest resolves artifacts through stable session lookup', async () => {
+  const { cwd } = await setupWorkspace();
+  const session = await ensureSession(cwd);
+  session.records.push({
+    id: 'usr_rpc_1',
+    ts: '2026-05-06T00:00:00.000Z',
+    kind: 'user',
+    role: 'user',
+    content: 'checkpoint me'
+  });
+  await saveSession(cwd, session);
+  const checkpoint = await createCheckpoint(cwd, session, { kind: 'manual', name: 'rpc-checkpoint' });
+
+  const artifact = await getArtifactViewForRequest(cwd, checkpoint.id, session.id);
+
+  assert.equal(artifact.kind, 'checkpoint');
+  assert.equal(artifact.checkpoint.id, checkpoint.id);
 });
