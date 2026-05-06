@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { HeadlessRunOutput, HeadlessRunRequest, RuntimeEventEnvelope } from './contract.js';
-import { HEADLESS_EXIT_CANCELLED, HEADLESS_EXIT_SUCCESS, emptyHeadlessArtifacts } from './contract.js';
+import {
+  HEADLESS_EXIT_CANCELLED,
+  HEADLESS_EXIT_FAILURE,
+  HEADLESS_EXIT_SUCCESS,
+  emptyHeadlessArtifacts
+} from './contract.js';
 import { createRpcServer } from './rpc.js';
 
 function parseLines(lines: string[]) {
@@ -21,7 +26,11 @@ function completedOutput(runId: string): HeadlessRunOutput {
 
 test('rpc returns parse errors for invalid JSON lines', async () => {
   const writes: string[] = [];
-  const server = createRpcServer({ writeLine: (line) => writes.push(line) });
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    }
+  });
 
   await server.handleLine('{bad json');
 
@@ -34,7 +43,9 @@ test('rpc returns parse errors for invalid JSON lines', async () => {
 test('rpc run.start returns a run id and emits run events with the same id', async () => {
   const writes: string[] = [];
   const server = createRpcServer({
-    writeLine: (line) => writes.push(line),
+    writeLine(line) {
+      writes.push(line);
+    },
     makeRunId: () => 'run_rpc_1',
     async runHeadless(request: HeadlessRunRequest, options) {
       const event: RuntimeEventEnvelope = {
@@ -77,7 +88,9 @@ test('rpc rejects a second active run in the same process', async () => {
     release = resolve;
   });
   const server = createRpcServer({
-    writeLine: (line) => writes.push(line),
+    writeLine(line) {
+      writes.push(line);
+    },
     makeRunId: () => `run_rpc_${writes.length}`,
     async runHeadless(_request, options) {
       await blocking;
@@ -103,7 +116,9 @@ test('rpc rejects a second active run in the same process', async () => {
 test('rpc run.cancel aborts the active run controller', async () => {
   const writes: string[] = [];
   const server = createRpcServer({
-    writeLine: (line) => writes.push(line),
+    writeLine(line) {
+      writes.push(line);
+    },
     makeRunId: () => 'run_rpc_cancel',
     async runHeadless(_request, options) {
       await new Promise<void>((resolve) => {
@@ -134,4 +149,124 @@ test('rpc run.cancel aborts the active run controller', async () => {
 
   const messages = parseLines(writes);
   assert.deepEqual(messages[1], { jsonrpc: '2.0', id: 2, result: { status: 'cancelled' } });
+});
+
+test('rpc emits terminal failure events when an accepted run rejects', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    },
+    makeRunId: () => 'run_rpc_reject',
+    async runHeadless() {
+      throw new Error('runner exploded');
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'run.start',
+      params: { cwd: process.cwd(), prompt: 'explode' }
+    })
+  );
+  await server.waitForIdle();
+
+  const messages = parseLines(writes);
+  assert.deepEqual(messages[0], { jsonrpc: '2.0', id: 1, result: { runId: 'run_rpc_reject' } });
+  assert.equal(messages[1].method, 'run.event');
+  assert.equal(messages[1].params.runId, 'run_rpc_reject');
+  assert.equal(messages[1].params.type, 'error');
+  assert.deepEqual(messages[1].params.payload, {
+    code: 'internal-error',
+    stage: 'assembly',
+    message: 'runner exploded',
+    recoverable: false
+  });
+  assert.equal(messages[2].method, 'run.event');
+  assert.equal(messages[2].params.runId, 'run_rpc_reject');
+  assert.equal(messages[2].params.type, 'run-end');
+  assert.equal(messages[2].params.payload.status, 'failed');
+  assert.equal(messages[2].params.payload.exitCode, HEADLESS_EXIT_FAILURE);
+  assert.equal(messages[2].params.payload.output.runId, 'run_rpc_reject');
+  assert.equal(messages[2].params.payload.output.status, 'failed');
+});
+
+test('rpc write failures abort the active run and close future writes', async () => {
+  const writes: string[] = [];
+  let eventCallbackRejected = false;
+  let signalAborted = false;
+  const server = createRpcServer({
+    writeLine(line) {
+      const message = JSON.parse(line);
+      if (message.method === 'run.event') {
+        throw new Error('sink failed');
+      }
+      writes.push(line);
+    },
+    makeRunId: () => `run_rpc_write_${writes.length}`,
+    async runHeadless(_request, options) {
+      const event: RuntimeEventEnvelope = {
+        schemaVersion: 1,
+        eventId: 'evt_rpc_write',
+        runId: options.runId!,
+        timestamp: '2026-05-06T00:00:00.000Z',
+        type: 'run-start',
+        payload: {
+          cwd: process.cwd(),
+          policy: 'auto',
+          model: { provider: 'ollama', model: 'fake' }
+        }
+      };
+      try {
+        await options.onEvent?.(event);
+      } catch {
+        eventCallbackRejected = true;
+      }
+      signalAborted = options.signal?.aborted ?? false;
+      return completedOutput(options.runId!);
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'run.start',
+      params: { cwd: process.cwd(), prompt: 'write failure' }
+    })
+  );
+  await server.waitForIdle();
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'run.start',
+      params: { cwd: process.cwd(), prompt: 'after failure' }
+    })
+  );
+  await server.waitForIdle();
+
+  assert.equal(eventCallbackRejected, false);
+  assert.equal(signalAborted, true);
+  assert.deepEqual(parseLines(writes), [{ jsonrpc: '2.0', id: 1, result: { runId: 'run_rpc_write_0' } }]);
+});
+
+test('rpc rejects notifications because request ids are required', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({ jsonrpc: '2.0', method: 'run.cancel', params: { runId: 'run_missing' } })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.jsonrpc, '2.0');
+  assert.equal(response.id, null);
+  assert.equal(response.error.code, -32600);
 });

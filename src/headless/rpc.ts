@@ -1,7 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 
-import type { HeadlessRunOptions, HeadlessRunOutput, HeadlessRunRequest, RuntimeEventEnvelope } from './contract.js';
+import {
+  emptyHeadlessArtifacts,
+  HEADLESS_EXIT_FAILURE,
+  HEADLESS_SCHEMA_VERSION,
+  type HeadlessRunError,
+  type HeadlessRunOptions,
+  type HeadlessRunOutput,
+  type HeadlessRunRequest,
+  type RuntimeEventEnvelope
+} from './contract.js';
 import { runHeadless as defaultRunHeadless } from './run.js';
 
 type JsonRpcId = string | number | null;
@@ -19,7 +28,7 @@ type RunHeadless = (
 ) => HeadlessRunOutput | Promise<HeadlessRunOutput>;
 
 export type RpcServerOptions = {
-  writeLine: (line: string) => void;
+  writeLine: (line: string) => void | Promise<void>;
   makeRunId?: () => string;
   runHeadless?: RunHeadless;
 };
@@ -73,14 +82,44 @@ function defaultMakeRunId() {
   return `run_${randomUUID().replaceAll('-', '')}`;
 }
 
+function makeEventId() {
+  return `evt_${randomUUID().replaceAll('-', '')}`;
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function createRpcServer(options: RpcServerOptions): RpcServer {
   const runHeadless = options.runHeadless ?? defaultRunHeadless;
   const makeRunId = options.makeRunId ?? defaultMakeRunId;
   const finishedRunIds = new Set<string>();
   let activeRun: ActiveRun | undefined;
+  let transportClosed = false;
+
+  const closeTransport = () => {
+    if (transportClosed) {
+      return;
+    }
+    transportClosed = true;
+    activeRun?.controller.abort();
+  };
 
   const write = (message: unknown) => {
-    options.writeLine(JSON.stringify(message));
+    if (transportClosed) {
+      return;
+    }
+
+    try {
+      const result = options.writeLine(JSON.stringify(message));
+      if (result && typeof result === 'object' && 'then' in result) {
+        void result.catch(() => {
+          closeTransport();
+        });
+      }
+    } catch {
+      closeTransport();
+    }
   };
 
   const writeResult = (id: JsonRpcId, result: unknown) => {
@@ -93,6 +132,44 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
 
   const writeEvent = (event: RuntimeEventEnvelope) => {
     write({ jsonrpc: JSON_RPC_VERSION, method: 'run.event', params: event });
+  };
+
+  const emitRunFailure = (runId: string, error: unknown) => {
+    const runError: HeadlessRunError = {
+      code: 'internal-error',
+      stage: 'assembly',
+      message: errorMessage(error),
+      recoverable: false
+    };
+    const output: HeadlessRunOutput = {
+      runId,
+      status: 'failed',
+      exitCode: HEADLESS_EXIT_FAILURE,
+      artifacts: emptyHeadlessArtifacts(),
+      error: runError
+    };
+    const timestamp = new Date().toISOString();
+
+    writeEvent({
+      schemaVersion: HEADLESS_SCHEMA_VERSION,
+      eventId: makeEventId(),
+      runId,
+      timestamp,
+      type: 'error',
+      payload: runError
+    });
+    writeEvent({
+      schemaVersion: HEADLESS_SCHEMA_VERSION,
+      eventId: makeEventId(),
+      runId,
+      timestamp: new Date().toISOString(),
+      type: 'run-end',
+      payload: {
+        status: 'failed',
+        exitCode: HEADLESS_EXIT_FAILURE,
+        output
+      }
+    });
   };
 
   const startRun = (id: JsonRpcId, params: unknown) => {
@@ -116,7 +193,9 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
           onEvent: writeEvent
         });
       })
-      .catch(() => undefined)
+      .catch((error) => {
+        emitRunFailure(runId, error);
+      })
       .finally(() => {
         finishedRunIds.add(runId);
         if (activeRun?.runId === runId) {
@@ -171,6 +250,10 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
 
   return {
     async handleLine(line: string) {
+      if (transportClosed) {
+        return;
+      }
+
       let parsed: unknown;
       try {
         parsed = JSON.parse(line);
@@ -179,7 +262,7 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
         return;
       }
 
-      if (!isJsonRpcRequest(parsed)) {
+      if (!isJsonRpcRequest(parsed) || !Object.hasOwn(parsed, 'id')) {
         writeError(requestId(parsed), INVALID_REQUEST, 'invalid request');
         return;
       }
