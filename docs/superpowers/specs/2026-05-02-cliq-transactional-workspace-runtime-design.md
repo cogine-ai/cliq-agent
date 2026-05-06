@@ -596,7 +596,7 @@ Why this split:
 |---|---|
 | Stage A preflight fails (oldContent mismatch on any file) | No file written. Tx returns to `approved`. User sees the conflicting path and decides whether to investigate, re-validate, or abort. |
 | Crash before A5 (no `apply-progress.json`) | No-op. Tx is still in `approved`. User retries `tx apply`. |
-| `apply-pending` (plan recorded, no writes started) | Next cliq startup reverts to `approved` and discards `apply-progress.json`. User retries cleanly. |
+| `apply-pending` (plan recorded, no writes started) | Next cliq startup branches on the current `state.json.state`: if state is still `approved` (the normal crash case), recovery confirms it as `approved` and discards `apply-progress.json` so the user can retry cleanly. If state is anything else (it shouldn't be, but B1a's defense-in-depth path or an unforeseen race could leave the orphan), recovery discards `apply-progress.json` only and emits a `recovery.json` warning — it does **not** mutate `state.json`. The runtime never resurrects a non-`approved` state into `approved` from a leftover `apply-pending` file. See Section 16.4.1 for the full rule. |
 | `apply-writing` (partial files written by stage B) | Next cliq startup moves tx to `applied-partial`, surfaces the list of files written from `apply-progress.filesWritten[]`, and recommends `cliq checkpoint restore <ghostSnapshotId>`. No automatic file restore. |
 | Stage B re-verification (B3a) detects mid-write external change | Same as the row above: tx transitions to `applied-partial`. |
 | `apply-committed` (all files written, no session record yet) | Next cliq startup runs Stage C from scratch under the proper lock order. The deterministic record id (`txrec_apply_<txId>`) makes C4's append idempotent: if a previous attempt got as far as appending the record before crashing, the rerun finds it and skips. |
@@ -1360,7 +1360,7 @@ Required tests grouped by concern:
 
 **Crash recovery (Section 16.4)**
 - Crash before `apply-progress.json` exists: tx remains in `approved`, no recovery action needed
-- Crash in `apply-pending`: recovery reverts to `approved`, discards apply-progress
+- Crash in `apply-pending` with current state still `approved` (normal case): recovery confirms `approved` and discards apply-progress
 - Crash in `apply-writing`: recovery moves to `applied-partial` and surfaces warning at next invocation; no automatic file restore
 - Crash in `apply-committed`: recovery idempotently appends session record and transitions to `applied`
 - Crash in `apply-finalized`: recovery transitions tx state to `applied`
