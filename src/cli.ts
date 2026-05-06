@@ -33,14 +33,20 @@ const POLICY_MODE_LIST = POLICY_MODES.join(', ');
 const STREAMING_MODES = ['auto', 'on', 'off'] as const;
 const RESTORE_SCOPES = ['session', 'files', 'both'] as const;
 const HELP_TOPICS = ['checkpoint', 'compact', 'handoff'] as const;
+const TX_MODES = ['off', 'edit'] as const;
+const TX_APPLY_POLICIES = ['interactive', 'auto-on-pass', 'manual-only'] as const;
 
 type RestoreScope = (typeof RESTORE_SCOPES)[number];
 type HelpTopic = (typeof HELP_TOPICS)[number];
+type TxMode = (typeof TX_MODES)[number];
+type TxApplyPolicy = (typeof TX_APPLY_POLICIES)[number];
 
 type ParsedArgsBase = {
   policy: PolicyMode;
   skills: string[];
   model: PartialModelConfig;
+  txMode?: TxMode;
+  txApply?: TxApplyPolicy;
 };
 
 export type ParsedArgs = ParsedArgsBase & (
@@ -69,6 +75,28 @@ export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'handoff-create'; checkpointId?: string; prompt?: undefined }
   | { cmd: 'reset' | 'history'; prompt?: undefined }
   | { cmd: 'help'; topic?: HelpTopic; prompt?: undefined }
+  | { cmd: 'tx-open'; name?: string; explicit: true; json?: boolean; headless?: boolean; prompt?: undefined }
+  | { cmd: 'tx-status'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
+  | { cmd: 'tx-list'; json?: boolean; headless?: boolean; prompt?: undefined }
+  | {
+      cmd: 'tx-apply';
+      txId: string;
+      overrides: string[];
+      reason?: string;
+      json?: boolean;
+      headless?: boolean;
+      prompt?: undefined;
+    }
+  | {
+      cmd: 'tx-abort';
+      txId: string;
+      restoreConfirmed?: boolean;
+      keepPartial?: boolean;
+      reason?: string;
+      json?: boolean;
+      headless?: boolean;
+      prompt?: undefined;
+    }
 );
 
 function isPolicyMode(value: string): value is PolicyMode {
@@ -85,6 +113,150 @@ function isRestoreScope(value: string): value is RestoreScope {
 
 function isHelpTopic(value: string): value is HelpTopic {
   return (HELP_TOPICS as readonly string[]).includes(value);
+}
+
+function isTxMode(value: string): value is TxMode {
+  return (TX_MODES as readonly string[]).includes(value);
+}
+
+function isTxApplyPolicy(value: string): value is TxApplyPolicy {
+  return (TX_APPLY_POLICIES as readonly string[]).includes(value);
+}
+
+function consumeFlag(args: string[], name: string): boolean {
+  const idx = args.indexOf(name);
+  if (idx === -1) return false;
+  args.splice(idx, 1);
+  return true;
+}
+
+function consumeOption(args: string[], name: string): string | undefined {
+  const idx = args.indexOf(name);
+  if (idx === -1) return undefined;
+  if (idx === args.length - 1) {
+    throw new Error(`${name} requires a value`);
+  }
+  const value = args[idx + 1]!;
+  args.splice(idx, 2);
+  return value;
+}
+
+function consumeRepeatable(args: string[], name: string): string[] {
+  const out: string[] = [];
+  while (true) {
+    const value = consumeOption(args, name);
+    if (value === undefined) break;
+    out.push(value);
+  }
+  return out;
+}
+
+function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  const sub = args[1];
+  if (!sub) {
+    throw new Error('cliq tx requires a subcommand (open, status, list, apply, abort)');
+  }
+  const rest = args.slice(2);
+  const json = consumeFlag(rest, '--json') || undefined;
+  const headless = consumeFlag(rest, '--headless') || undefined;
+
+  switch (sub) {
+    case 'open': {
+      const first = rest[0];
+      const name = first !== undefined && !first.startsWith('--') ? first : undefined;
+      if (name !== undefined) {
+        rest.shift();
+      }
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx open argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-open',
+        explicit: true as const,
+        ...(name !== undefined ? { name } : {}),
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'status': {
+      const first = rest[0];
+      const txId = first !== undefined && !first.startsWith('--') ? first : undefined;
+      if (txId !== undefined) {
+        rest.shift();
+      }
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx status argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-status',
+        ...(txId !== undefined ? { txId } : {}),
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'list': {
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx list argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-list',
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'apply': {
+      const txId = rest[0];
+      if (!txId || txId.startsWith('--')) {
+        throw new Error('tx apply requires <txId>');
+      }
+      rest.shift();
+      const overrides = consumeRepeatable(rest, '--override');
+      const reason = consumeOption(rest, '--reason');
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx apply argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-apply',
+        txId,
+        overrides,
+        ...(reason !== undefined ? { reason } : {}),
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'abort': {
+      const txId = rest[0];
+      if (!txId || txId.startsWith('--')) {
+        throw new Error('tx abort requires <txId>');
+      }
+      rest.shift();
+      const restoreConfirmed = consumeFlag(rest, '--restore-confirmed');
+      const keepPartial = consumeFlag(rest, '--keep-partial');
+      if (restoreConfirmed && keepPartial) {
+        throw new Error('--restore-confirmed and --keep-partial are mutually exclusive');
+      }
+      const reason = consumeOption(rest, '--reason');
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx abort argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-abort',
+        txId,
+        ...(restoreConfirmed ? { restoreConfirmed: true } : {}),
+        ...(keepPartial ? { keepPartial: true } : {}),
+        ...(reason !== undefined ? { reason } : {}),
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    default:
+      throw new Error(`unknown tx subcommand: ${sub}`);
+  }
 }
 
 function isHelpToken(value: string | undefined) {
@@ -442,6 +614,7 @@ function isKnownCommand(cmd: string | undefined) {
     cmd === 'reset' ||
     cmd === 'history' ||
     cmd === 'help' ||
+    cmd === 'tx' ||
     cmd === '--help' ||
     cmd === '-h'
   );
@@ -452,6 +625,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let policy: PolicyMode = DEFAULT_POLICY_MODE;
   const skills: string[] = [];
   const model: PartialModelConfig = {};
+  let txMode: TxMode | undefined;
+  let txApply: TxApplyPolicy | undefined;
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
@@ -464,6 +639,50 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
   for (let i = 0; i < raw.length; i += 1) {
     const token = raw[i];
+    if (token.startsWith('--tx=')) {
+      const value = token.slice('--tx='.length);
+      if (!value) {
+        throw new Error('Missing value for --tx; expected one of: off, edit');
+      }
+      if (!isTxMode(value)) {
+        throw new Error(`Unknown tx mode: ${value}; expected one of: off, edit`);
+      }
+      txMode = value;
+      continue;
+    }
+
+    if (token === '--tx') {
+      const value = readFlagValue(raw, i, '--tx');
+      if (!isTxMode(value)) {
+        throw new Error(`Unknown tx mode: ${value}; expected one of: off, edit`);
+      }
+      txMode = value;
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith('--tx-apply=')) {
+      const value = token.slice('--tx-apply='.length);
+      if (!value) {
+        throw new Error('Missing value for --tx-apply; expected one of: interactive, auto-on-pass, manual-only');
+      }
+      if (!isTxApplyPolicy(value)) {
+        throw new Error(`Unknown tx-apply policy: ${value}; expected one of: interactive, auto-on-pass, manual-only`);
+      }
+      txApply = value;
+      continue;
+    }
+
+    if (token === '--tx-apply') {
+      const value = readFlagValue(raw, i, '--tx-apply');
+      if (!isTxApplyPolicy(value)) {
+        throw new Error(`Unknown tx-apply policy: ${value}; expected one of: interactive, auto-on-pass, manual-only`);
+      }
+      txApply = value;
+      i += 1;
+      continue;
+    }
+
     if (token.startsWith('--policy=')) {
       const value = token.slice('--policy='.length);
       if (!value) {
@@ -580,19 +799,30 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   const cmd = args[0];
-  const base: ParsedArgsBase = { policy, skills, model };
+  const base: ParsedArgsBase = {
+    policy,
+    skills,
+    model,
+    ...(txMode !== undefined ? { txMode } : {}),
+    ...(txApply !== undefined ? { txApply } : {})
+  };
+  const baseExtras = {
+    ...(txMode !== undefined ? { txMode } : {}),
+    ...(txApply !== undefined ? { txApply } : {})
+  };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
   if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
     throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
   }
   if (!cmd || cmd === 'chat') {
-    return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
+    return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model, ...baseExtras };
   }
   if (cmd === 'run') return parseRunArgs(args, base);
   if (cmd === 'ask') return parseAskArgs(args, base);
   if (cmd === 'checkpoint') return parseCheckpointArgs(args, base);
   if (cmd === 'compact') return parseCompactGroupArgs(args, base);
   if (cmd === 'handoff') return parseHandoffGroupArgs(args, base);
+  if (cmd === 'tx') return parseTxArgs(args, base);
   if (cmd === 'checkpoints') {
     throw new Error('Command changed. Use "cliq checkpoint list".');
   }
@@ -605,21 +835,21 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (cmd === 'restore') {
     throw new Error('Command changed. Use "cliq checkpoint restore <checkpoint-id> --scope session|files|both".');
   }
-  if (cmd === 'reset') return { cmd, policy, skills, model };
-  if (cmd === 'history') return { cmd, policy, skills, model };
+  if (cmd === 'reset') return { cmd, policy, skills, model, ...baseExtras };
+  if (cmd === 'history') return { cmd, policy, skills, model, ...baseExtras };
   if (cmd === 'help') {
     const topic = args[1];
     if (topic === undefined) {
-      return { cmd: 'help', policy, skills, model };
+      return { cmd: 'help', policy, skills, model, ...baseExtras };
     }
     if (!isHelpTopic(topic)) {
       throw new Error(`Unknown help topic: ${topic}. Expected one of: ${HELP_TOPICS.join(', ')}`);
     }
     ensureNoExtraArgs(args, 2, 'help');
-    return { cmd: 'help', topic, policy, skills, model };
+    return { cmd: 'help', topic, policy, skills, model, ...baseExtras };
   }
-  if (cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model };
-  return { cmd: 'chat', prompt: args.join(' '), policy, skills, model };
+  if (cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model, ...baseExtras };
+  return { cmd: 'chat', prompt: args.join(' '), policy, skills, model, ...baseExtras };
 }
 
 function printCheckpointHelp() {
@@ -1094,6 +1324,30 @@ export async function runCli(argv: string[]) {
     const artifact = await exportHandoff(cwd, session, { checkpointId: parsed.checkpointId });
     console.log(`created handoff ${artifact.id} at ${artifact.paths.markdown}`);
     return;
+  }
+
+  if (
+    parsed.cmd === 'tx-open' ||
+    parsed.cmd === 'tx-status' ||
+    parsed.cmd === 'tx-list' ||
+    parsed.cmd === 'tx-apply' ||
+    parsed.cmd === 'tx-abort'
+  ) {
+    const message = `${parsed.cmd}: handler not yet implemented (Task 48 wires the coordinator)`;
+    if (parsed.json || parsed.headless) {
+      process.stdout.write(
+        `${JSON.stringify({
+          type: 'error',
+          code: 'internal-error',
+          stage: 'input',
+          message,
+          recoverable: false
+        })}\n`
+      );
+    } else {
+      process.stderr.write(`${message}\n`);
+    }
+    throw new ReportedCliError(message, { exitCode: 2 });
   }
 
   if (prompt && prompt.trim()) {

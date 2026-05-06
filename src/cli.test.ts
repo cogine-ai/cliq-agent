@@ -331,6 +331,106 @@ test('parseArgs rejects restore without a checkpoint id or with an invalid scope
   );
 });
 
+test('parseArgs recognizes cliq tx open with optional name', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'open']);
+  assert.equal(a.cmd, 'tx-open');
+  if (a.cmd === 'tx-open') {
+    assert.equal(a.name, undefined);
+    assert.equal(a.explicit, true);
+  }
+  const b = parseArgs(['node', 'src/index.ts', 'tx', 'open', 'feature-x']);
+  assert.equal(b.cmd, 'tx-open');
+  if (b.cmd === 'tx-open') {
+    assert.equal(b.name, 'feature-x');
+    assert.equal(b.explicit, true);
+  }
+});
+
+test('parseArgs recognizes cliq tx status with optional txId', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'status']);
+  assert.equal(a.cmd, 'tx-status');
+  const b = parseArgs(['node', 'src/index.ts', 'tx', 'status', 'tx_abc']);
+  assert.equal(b.cmd, 'tx-status');
+  if (b.cmd === 'tx-status') {
+    assert.equal(b.txId, 'tx_abc');
+  }
+});
+
+test('parseArgs recognizes cliq tx list', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'list']);
+  assert.equal(a.cmd, 'tx-list');
+});
+
+test('parseArgs recognizes cliq tx apply with --override and --reason', () => {
+  const a = parseArgs([
+    'node',
+    'src/index.ts',
+    'tx',
+    'apply',
+    'tx_abc',
+    '--override',
+    'size-limit',
+    '--override',
+    'tsc',
+    '--reason',
+    'manual override'
+  ]);
+  assert.equal(a.cmd, 'tx-apply');
+  if (a.cmd === 'tx-apply') {
+    assert.equal(a.txId, 'tx_abc');
+    assert.deepEqual(a.overrides, ['size-limit', 'tsc']);
+    assert.equal(a.reason, 'manual override');
+  }
+});
+
+test('parseArgs rejects cliq tx apply without txId', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'apply']), /requires <txId>/);
+});
+
+test('parseArgs recognizes cliq tx abort with --restore-confirmed', () => {
+  const a = parseArgs([
+    'node',
+    'src/index.ts',
+    'tx',
+    'abort',
+    'tx_abc',
+    '--restore-confirmed',
+    '--reason',
+    'partial cleanup'
+  ]);
+  assert.equal(a.cmd, 'tx-abort');
+  if (a.cmd === 'tx-abort') {
+    assert.equal(a.txId, 'tx_abc');
+    assert.equal(a.restoreConfirmed, true);
+    assert.equal(a.keepPartial, undefined);
+    assert.equal(a.reason, 'partial cleanup');
+  }
+});
+
+test('parseArgs rejects cliq tx abort with both --restore-confirmed and --keep-partial', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', 'tx', 'abort', 'tx_abc', '--restore-confirmed', '--keep-partial']),
+    /mutually exclusive/
+  );
+});
+
+test('parseArgs accepts top-level --tx and --tx-apply flags', () => {
+  const a = parseArgs(['node', 'src/index.ts', '--tx', 'edit', '--tx-apply', 'auto-on-pass', 'tx', 'list']);
+  assert.equal(a.cmd, 'tx-list');
+  if (a.cmd === 'tx-list') {
+    assert.equal(a.txMode, 'edit');
+    assert.equal(a.txApply, 'auto-on-pass');
+  }
+});
+
+test('parseArgs --tx rejects invalid values', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', '--tx', 'bogus', 'tx', 'list']), /tx mode/i);
+});
+
+test('parseArgs unknown tx subcommand throws', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'frobnicate']), /unknown tx subcommand/);
+});
+
 test('parseArgs rejects old workflow asset command spellings with migration hints', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'checkpoints']), /cliq checkpoint list/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'compactions']), /cliq compact list/i);
