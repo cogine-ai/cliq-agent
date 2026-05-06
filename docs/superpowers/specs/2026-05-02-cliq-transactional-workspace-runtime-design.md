@@ -1,8 +1,8 @@
 # Cliq Transactional Workspace Runtime Design
 
-**Date:** 2026-05-02
+**Date:** 2026-05-02 (revised 2026-05-06 to reflect shipped Phase 4 and auto-compact)
 **Status:** Draft
-**Target Release:** `v0.7.0` (edit-tx) / `v0.8.0` (worktree-tx, deferred)
+**Target Release:** `v0.8.0` (edit-tx) / `v0.9.0` (worktree-tx, deferred)
 
 ## 1. Summary
 
@@ -10,11 +10,11 @@ Cliq today applies tool mutations directly to the working tree. Phase 3 added Gi
 
 The new layer is called the **transactional workspace runtime**. A transaction (tx) is a persistent, externally consumable artifact that captures the proposed change set, the validator results, and an audit trail of state transitions. Tx coexists with Phase 3 ghost snapshots; it does not replace recovery, it adds prevention.
 
-**Scope of v0.7 prevention** (deliberately narrow):
+**Scope of this release's prevention** (deliberately narrow):
 
 - The gate covers `edit`-driven text replacements in existing files. These are staged into an overlay and never written to the real workspace until apply.
 - The gate **does not** cover shell side-effects. `bash` runs against the real working tree by default. Operations like `npm install`, `mkdir build/`, generated files, package locks, and so on land in the real workspace as the agent executes them, regardless of tx state. They are recorded out-of-band in the diff for reviewer awareness but **are not rolled back** if the tx is aborted.
-- Workspaces requiring containment of shell side-effects must use worktree-tx (deferred to v0.8) or restrict `bash` via `transactions.bashPolicy` (Section 9.4) and a stricter `--policy` mode.
+- Workspaces requiring containment of shell side-effects must use worktree-tx (deferred to `v0.9.0`) or restrict `bash` via `transactions.bashPolicy` (Section 9.4) and a stricter `--policy` mode.
 
 The release ships two concrete capabilities:
 
@@ -25,22 +25,24 @@ A heavier `worktree-tx` mode (where `bash` side-effects are also captured by run
 
 ## 2. Roadmap Placement
 
-This release sits between Phase 3 (Session As Workflow Asset) and Phase 6 (Automation, Worktrees, Rich UX) on the runtime architecture roadmap. It is not a new layer; it lives inside the existing **Runtime/Tool Layer**.
+This release sits between Phase 4 (Headless Runtime Interfaces, shipped in `v0.7.0`) and Phase 6 (Automation, Worktrees, Rich UX) on the runtime architecture roadmap. It is not a new layer; it lives inside the existing **Runtime/Tool Layer**.
 
-It builds on:
+It builds on shipped foundations:
 
-- Phase 3's `$CLIQ_HOME` global storage and workspace identity model
-- Phase 3's ghost snapshot mechanism (used as the apply-pre safety net)
-- Phase 3's session record append model
+- Phase 3 (`v0.6.0`): `$CLIQ_HOME` global storage, workspace identity, ghost snapshot mechanism (used as apply-pre safety net), session record append model
+- Phase 4 (`v0.7.0`): the `src/headless/` contract, `RuntimeEventEnvelope` event shape, `HeadlessRunOutput.artifacts`, `HeadlessErrorCode` taxonomy, `cliq run --jsonl` adapter
+- Auto-compact (shipped alongside Phase 4): `compact-start/end/skip/error` events, `AutoCompactConfig`, `compaction` artifact id surface
 
-It does not depend on, but is designed to compose cleanly with:
+This spec **extends** those contracts rather than parallel-defining new ones. Specifically:
 
-- A separately-tracked auto-compact effort in the session/context layer (see Section 15)
-- A future Phase 4 headless RPC/JSONL surface (the JSON envelope defined here is intended to be that surface's first consumer)
+- New runtime events (`tx-staging-start`, `tx-finalized`, `tx-validated`, `tx-applied`, `tx-aborted`) plug into the existing `HeadlessRuntimeEventType` union and reuse `RuntimeEventEnvelope`'s envelope fields (`schemaVersion`, `eventId`, `runId`, `sessionId`, `turn`, `timestamp`).
+- A new `transactions: string[]` field is added to `HeadlessArtifacts` so headless callers learn which tx ids a run produced.
+- New `HeadlessErrorCode` values (`tx-validator-blocking`, `tx-apply-conflict`, `tx-apply-partial`, `tx-overlay-error`) extend the existing taxonomy.
+- New session record kinds (`'tx-applied'`, `'tx-aborted'`) extend the existing `SessionRecord` enum and slot into auto-compact's range-selection rules (Section 15).
 
 It does not implement, defer to later phases:
 
-- worktree-tx (`v0.8` or Phase 6)
+- worktree-tx (`v0.9` or Phase 6)
 - TUI / visual diff browsing
 - automated retry loops driven by validator failures
 - model-callable validators or model-controlled approval
@@ -82,8 +84,8 @@ This release does not provide:
 
 Cliq must distinguish three layers of state, each with its own lifecycle:
 
-1. **Workspace mutation layer (where this release lives)**: file edits, file creations, file deletions, and shell side-effects. **v0.7 edit-tx stages only `edit`-driven text replacements in existing files.** File creates, file deletes, and shell side-effects fall outside the staging boundary in v0.7: they happen via `bash` against the real working tree (gated by `transactions.bashPolicy`, Section 9.4) or are deferred to worktree-tx.
-2. **Session/context layer (Phase 3, plus the parallel auto-compact effort)**: append-only records, checkpoints, compactions, handoffs. The tx system writes summary records into this layer, but never raw diffs.
+1. **Workspace mutation layer (where this release lives)**: file edits, file creations, file deletions, and shell side-effects. **This release's edit-tx stages only `edit`-driven text replacements in existing files.** File creates, file deletes, and shell side-effects fall outside the staging boundary in this release: they happen via `bash` against the real working tree (gated by `transactions.bashPolicy`, Section 9.4) or are deferred to worktree-tx.
+2. **Session/context layer (Phase 3 plus shipped auto-compact)**: append-only records, checkpoints, compactions, handoffs. The tx system writes summary records into this layer, but never raw diffs.
 3. **Runtime side effects (out of scope for any layer)**: shell processes, databases, services, network calls. Neither tx nor checkpoint claims to manage these.
 
 The contract between layers is one-way: tx writes summary records into the session; the session/auto-compact never reads tx internals or modifies workspace files. See Section 15 for the precise record schema.
@@ -98,7 +100,7 @@ $CLIQ_HOME/
   sessions/.../<sessionId>.json         # Phase 3, extended: + activeTxId
   tx/<txId>/
     state.json                          # current state, kind, sessionId, workspaceId, timestamps
-    diff.json                           # structured diff (per-file old→new); v0.7 contains only modify entries
+    diff.json                           # structured diff (per-file old→new); v0.8 contains only modify entries
     overlay/                            # materialized staged files (durable across cliq restart)
     validators/<validatorName>.json     # per-validator structured result
     apply-progress.json                 # phased apply protocol state (Section 11)
@@ -130,7 +132,7 @@ The `overlay/` directory is materialized to disk as edits arrive, not held in me
 ## 7. Transaction Schema
 
 ```ts
-export type TxKind = 'edit';   // 'worktree' deferred to v0.8
+export type TxKind = 'edit';   // 'worktree' deferred to v0.9
 
 export type TxState =
   | 'staging'      // overlay accepts mutations
@@ -189,7 +191,7 @@ export type AuditEntry = {
 
 `Transaction.state` is the source of truth; `state.json` on disk is the persistent form.
 
-**v0.7 scope of `DiffSummary`**: `creates[]` and `deletes[]` are present in the schema for forward-compatibility with worktree-tx (v0.8), but in v0.7 they are always empty arrays. Edit-tx is built on top of the existing `edit` tool, which only replaces text in existing files. File creation, deletion, rename, mode change, and similar operations remain `bash`-driven and out-of-band (Section 9.4) until worktree-tx ships.
+**v0.8 scope of `DiffSummary`**: `creates[]` and `deletes[]` are present in the schema for forward-compatibility with worktree-tx (`v0.9.0`), but in v0.8 they are always empty arrays. Edit-tx is built on top of the existing `edit` tool, which only replaces text in existing files. File creation, deletion, rename, mode change, and similar operations remain `bash`-driven and out-of-band (Section 9.4) until worktree-tx ships.
 
 ## 8. State Machine
 
@@ -217,13 +219,13 @@ The `applied-partial` state is reachable only from the apply path when filesyste
 
 ## 9. Edit-tx Overlay Model
 
-Edit-tx captures `edit`-driven text replacements in existing files. v0.7 does not stage file creates, deletes, renames, or shell side-effects.
+Edit-tx captures `edit`-driven text replacements in existing files. v0.8 does not stage file creates, deletes, renames, or shell side-effects.
 
 ### 9.1 Overlay storage
 
 Each accepted `edit` mutation writes the full post-mutation file content into `$CLIQ_HOME/tx/<txId>/overlay/<workspace-relative-path>`. The overlay tree mirrors the workspace tree for changed paths only; unchanged files are not copied.
 
-The overlay records `modify` operations only. Because the existing `edit` tool can only replace text in existing files, no `create` or `delete` markers are needed in v0.7. The overlay format reserves space for future `create`/`delete` markers (e.g., a sibling `<path>.cliq-tx-delete` file) when worktree-tx introduces them, but v0.7 does not use them.
+The overlay records `modify` operations only. Because the existing `edit` tool can only replace text in existing files, no `create` or `delete` markers are needed in v0.8. The overlay format reserves space for future `create`/`delete` markers (e.g., a sibling `<path>.cliq-tx-delete` file) when worktree-tx introduces them, but v0.8 does not use them.
 
 ### 9.2 Diff materialization
 
@@ -232,15 +234,15 @@ At `finalize`, the tx-coordinator walks `overlay/`, compares each staged file ag
 ```ts
 type Diff = {
   files: Array<
-    | { path: string; op: 'create'; newContent: string }     // reserved; not produced in v0.7
+    | { path: string; op: 'create'; newContent: string }     // reserved; not produced in v0.8
     | { path: string; op: 'modify'; oldContent: string; newContent: string }
-    | { path: string; op: 'delete'; oldContent: string }     // reserved; not produced in v0.7
+    | { path: string; op: 'delete'; oldContent: string }     // reserved; not produced in v0.8
   >;
   outOfBand: BashEffect[];  // see 9.4
 };
 ```
 
-In v0.7 every entry in `files[]` has `op: 'modify'`. The `create` and `delete` shapes exist for forward compatibility with worktree-tx; v0.7 readers may assert their absence.
+In v0.8 every entry in `files[]` has `op: 'modify'`. The `create` and `delete` shapes exist for forward compatibility with worktree-tx; v0.8 readers may assert their absence.
 
 Storing full content (not patches) keeps the format simple and makes apply trivially deterministic. Patches can be derived on demand by `cliq tx diff` for human display.
 
@@ -249,27 +251,49 @@ Storing full content (not patches) keeps the format simple and makes apply trivi
 Validators need to see the post-apply state without requiring an actual apply. At `validate`, the tx-coordinator materializes `$CLIQ_HOME/tx/<txId>/staged-view/`:
 
 1. Walk the real workspace tree. For each entry:
-   - If the path is under a configured **bind path** (Section 9.3.1), create a symlink from `staged-view/<path>` to the real workspace path. This lets validators reach dependency directories like `node_modules/` without paying copy cost.
-   - Otherwise, hard-link the file into `staged-view/`. Hard links preserve content cheaply on the same filesystem; if the source filesystem is different (rare), fall back to copy.
-2. Walk the overlay tree. For each `modify` entry, replace the corresponding hard link in `staged-view/` with a freshly written file containing the staged content. (The original real file is untouched because the hard link is broken by the new write.)
+   - If the path is under a configured **bind path** (Section 9.3.2), create a symlink from `staged-view/<path>` to the real workspace path. (Acknowledged write leak; documented below.)
+   - Otherwise, materialize the file in `staged-view/` using the configured **copy mode** (Section 9.3.1). The default uses copy-on-write reflinks where the filesystem supports them, falling back to a full byte copy.
+2. Walk the overlay tree. For each `modify` entry, write a freshly written file at `staged-view/<path>` containing the staged content. With reflink or copy materialization, this write does not propagate back to the real workspace because the staged-view file is a distinct inode (or a CoW clone whose first write triggers divergence).
 3. Pass `staged-view/` to validators as `ValidatorContext.workspaceView`.
 4. After validation, delete `staged-view/` (kept only with `--keep-staged-view` debug flag).
 
-This avoids the `.gitignore` skip strategy from earlier drafts, which produced false validator failures on Node, Python, and similar ecosystems where dependency directories live in ignored paths but are required by the validator command (`npm test`, `pytest`, etc.).
+This avoids both the earlier `.gitignore`-skip strategy (which produced false validator failures on Node, Python, and similar ecosystems) and the earlier hardlink strategy (which silently leaked validator writes back into the real workspace via shared inodes).
 
-#### 9.3.1 Bind paths
+#### 9.3.1 Copy mode
 
-Bind paths are workspace-relative paths that are exposed in the staged view as symlinks to the real workspace, rather than hard-linked or copied. Configured via `transactions.stagedView.bindPaths`. Default: `["node_modules"]`.
+Hard links are explicitly **not** used for staged-view content. A hardlink shares the underlying inode, so any write inside the staged view (e.g., a snapshot test updating fixtures, a formatter run with `--write`, a coverage collector emitting `.coverage`, a build tool touching mtime) silently mutates the real workspace file. This violates the gate.
 
-Bind paths exist for two reasons:
+Cliq materializes non-bound files using:
 
-- **Performance**: large dependency trees (millions of files in `node_modules/`) are prohibitive to hard-link or copy per validation.
-- **Correctness for tools that resolve symlinks shallowly**: many language runtimes find dependencies relative to the resolved path of imported files; a symlinked `node_modules` typically still resolves correctly because the dependency tree is self-contained.
+| `transactions.stagedView.copyMode` | Behavior |
+|---|---|
+| `auto` (default) | Try copy-on-write reflink first (`clonefile()` on macOS APFS, `FICLONE`/`FICLONERANGE` ioctl on Linux Btrfs/XFS/ext4-with-reflink); on first failure for a tx, fall back to full copy and emit a one-time warning event |
+| `reflink` | Require reflink; fail validation if the filesystem does not support it |
+| `copy` | Always full byte copy (slowest, most portable, no reflink dependency) |
+
+Reflink is a true copy-on-write clone: the staged-view file shares physical blocks with the real file until either side is written, at which point the writing side gets its own block. Validator writes therefore stay inside `staged-view/` and never reach the real workspace.
+
+Practical support matrix:
+
+- macOS: APFS supports reflinks via `clonefile(2)`; available everywhere on modern macOS
+- Linux: Btrfs, XFS (with `reflink=1`), and ext4 (with `reflink` mount option) support `FICLONE`; ext4 default mounts and tmpfs do not
+- Windows / cross-filesystem boundary: not supported; falls back to copy in `auto` mode
+
+Performance expectation: reflink is metadata-only and effectively free regardless of file size; copy fallback is O(total workspace size minus bind paths) per validate. For typical TypeScript/Python repos (dependencies bound, sources copied) the copy fallback is on the order of a few MB and completes in tens of milliseconds.
+
+#### 9.3.2 Bind paths
+
+Bind paths are workspace-relative paths that are exposed in the staged view as symlinks to the real workspace, rather than reflinked or copied. Configured via `transactions.stagedView.bindPaths`. Default: `["node_modules"]`.
+
+Bind paths exist because:
+
+- **Performance**: large dependency trees (millions of files in `node_modules/`) are prohibitive to materialize per validation, even via reflink, due to per-file metadata cost.
+- **Correctness for runtime resolution**: many language runtimes find dependencies via path resolution rooted at imported files; a symlinked `node_modules` typically resolves correctly because the dependency tree is self-contained.
 
 **Trade-offs explicitly documented**:
 
-- A validator that **writes** into a bind path writes into the real workspace. This is a known leak; tx does not isolate writes inside bind paths. Validators that perform builds with output inside `node_modules/` (uncommon but possible) will affect the real workspace. Users who need stricter isolation should use worktree-tx (deferred) or remove the affected path from `bindPaths`.
-- A validator that resolves bind paths to real paths (e.g., webpack, esbuild via `realpath`) sees the real workspace location. For read-only validation this is harmless; for codegen tools that emit absolute paths into output it can produce paths pointing into the real workspace. Out-of-scope for v0.7; users tighten `bindPaths` accordingly or wait for worktree-tx.
+- A validator that **writes** into a bind path writes into the real workspace. This is a known leak. Validators that build with output inside `node_modules/` (uncommon but possible: some plugin generators) affect the real workspace. Users who need stricter isolation should use worktree-tx (deferred) or remove the affected path from `bindPaths` (paying the materialization cost in exchange).
+- A validator that resolves a bind path through `realpath` (e.g., some bundlers) sees the real workspace location. For read-only validation this is harmless; for codegen that emits absolute paths into output it produces paths pointing into the real workspace. Out-of-scope for v1; users tighten `bindPaths` accordingly or wait for worktree-tx.
 
 Sensible default extensions per ecosystem (configured by users, not built in by default to keep cliq lean):
 
@@ -308,7 +332,7 @@ Because `bash` side-effects bypass the gate, users who want a stricter posture c
 
 `bashPolicy` is independent of the existing `--policy` modes (`auto`, `confirm-bash`, etc.). When both are configured, the stricter wins (e.g., `--policy confirm-bash` plus `bashPolicy: deny` results in `deny` because `deny` is strictly stronger than `confirm-bash`).
 
-This is the v0.7 honest tradeoff: edit-tx covers declarative file changes, `bash` is acknowledged and configurable but not contained. Users who want full containment use worktree-tx (deferred).
+This is the v0.8 honest tradeoff: edit-tx covers declarative file changes, `bash` is acknowledged and configurable but not contained. Users who want full containment use worktree-tx (deferred).
 
 ## 10. Validators
 
@@ -446,58 +470,87 @@ type ApplyProgress = {
 };
 ```
 
-Apply sequence (called from `approved` state):
+Apply sequence (called from `approved` state) is split into three lock-disjoint stages so the global lock hierarchy `workspace > session > tx` is never violated:
 
 ```
-1. acquire tx-store lock
-2. recheck builtin:index-clean (it may have changed since validate)
-3. create Phase 3 ghost snapshot; record id in tx.ghostSnapshotId
-4. write apply-progress.json with phase: 'apply-pending', empty filesWritten[]
-   (this is the durable intent log; if we crash before this write, no real
-   workspace damage has occurred yet)
-5. transition phase: 'apply-pending' → 'apply-writing'
-6. for each entry in diff.json (v0.7: all 'modify' entries):
-     a. read current real file at <path>
-     b. verify it matches diff.oldContent
-        - on mismatch: stop. transition to applied-partial. Error includes
-          ghostSnapshotId and the file path. Files written so far stay written.
-     c. write the new content to <path>.cliq-tx-tmp on the same filesystem
-     d. fsync the temp file
-     e. rename <path>.cliq-tx-tmp → <path> (atomic on POSIX)
-     f. append <path> to apply-progress.json filesWritten[]
-     g. fsync apply-progress.json
-7. transition phase: 'apply-writing' → 'apply-committed'
-   (at this point all file writes are durable; the only remaining action is
-   appending the session record)
-8. acquire session lock (already holding tx-store lock; lock order is workspace > session > tx
-   for new acquisitions, but this is a reverse upgrade safe because no other
-   thread can hold the tx-store lock for this txId)
-9. append session record (kind: 'tx-applied', Section 15); record id stored
-   in apply-progress.json sessionRecordId
-10. transition phase: 'apply-committed' → 'apply-finalized'
-11. transition tx state.json: 'approved' → 'applied'
-12. release session lock, release tx-store lock
-13. schedule overlay/ cleanup
+STAGE A — preflight (tx-store lock only)
+  A1. acquire tx-store lock
+  A2. recheck builtin:index-clean (it may have changed since validate)
+  A3. for each entry in diff.json (v0.8: all 'modify' entries):
+        a. read current real file at <path>
+        b. verify it matches diff.oldContent
+        c. record (path, fingerprint, currentSize) in an in-memory plan
+      If any verification fails: abort the apply. Tx returns to `approved`.
+      No file has been written. The user sees "external change detected at
+      <path>" and can decide to investigate, re-validate, or abort the tx.
+  A4. create Phase 3 ghost snapshot; record id in tx.ghostSnapshotId
+  A5. write apply-progress.json with phase: 'apply-pending', plan recorded,
+      filesWritten: []. fsync.
+  A6. release tx-store lock
+
+STAGE B — write (tx-store lock only, re-acquired)
+  B1. acquire tx-store lock
+  B2. transition phase: 'apply-pending' → 'apply-writing'
+  B3. for each entry in the recorded plan:
+        a. re-verify the real file fingerprint matches the planned fingerprint
+           (defense in depth against a third party racing between A6 and B1;
+            this re-check is per-file and adds negligible cost)
+           - on mismatch: stop. Transition to applied-partial. Files written
+             so far in this stage stay written. Error includes ghostSnapshotId.
+        b. write the new content to <path>.cliq-tx-tmp on the same filesystem
+        c. fsync the temp file
+        d. rename <path>.cliq-tx-tmp → <path>  (atomic per POSIX rename(2))
+        e. append <path> to apply-progress.json.filesWritten[]
+        f. fsync apply-progress.json
+  B4. transition phase: 'apply-writing' → 'apply-committed'. fsync.
+  B5. release tx-store lock
+      (At this point all file writes are durable. The only outstanding
+       action is appending the session record. If the process is killed
+       between B5 and C, the crash recovery protocol idempotently completes
+       the record append at next startup. See Section 16.4.)
+
+STAGE C — record (session lock, then tx-store lock; respects hierarchy)
+  C1. acquire session lock
+  C2. acquire tx-store lock      (session > tx in the global hierarchy)
+  C3. read apply-progress.json. If phase is already 'apply-finalized',
+      another process or a recovery pass already completed C; release
+      both locks and exit (idempotent no-op).
+  C4. append session record (kind: 'tx-applied', Section 15). Record the
+      session record id in apply-progress.json.sessionRecordId. fsync both.
+  C5. transition phase: 'apply-committed' → 'apply-finalized'. fsync.
+  C6. transition tx state.json: 'approved' → 'applied'. fsync.
+  C7. release tx-store lock, release session lock
+  C8. schedule overlay/ cleanup
 ```
 
-The recheck in step 2 is necessary because validation may have run minutes or hours earlier; the user may have done a `git checkout` in between. If oldContent verification fails in step 6b, that file's modification is rejected with a clear "external change detected" message before any partial state for that file.
+Why this split:
+
+- **Lock hierarchy is preserved.** No stage holds the tx-store lock while attempting to acquire the session lock. Stage C acquires session first, then tx-store, in the canonical order.
+- **External-change detection happens before any write.** Stage A's preflight verifies *every* file's `oldContent` against the real workspace before stage B writes the *first* byte. A file conflict at the third entry no longer leaves the first two entries written. This is what the test "external `git checkout` during validate→apply window detected and rejected before partial writes" actually means.
+- **Stage B's per-file re-verification (B3a)** narrows the race window between A's bulk preflight and B's writes. A truly malicious concurrent writer can still squeeze in between B3a and B3d for a single file, but this is materially harder than the previous "between sequential per-file checks" race, and the result is at most one stale-overwrite (not a cascading partial apply) which the user resolves via ghost snapshot restore.
+- **Stage C is idempotent.** If the process dies between B5 and C7, recovery (Section 16.4) detects `apply-committed` without `apply-finalized` and runs C from scratch; the `sessionRecordId` field guards against duplicate record append.
+- **Crash before A5** leaves no `apply-progress.json` and no real-workspace mutation; the tx stays in `approved` and the user retries.
 
 ### 11.2 Apply failure handling
 
-| Phase reached when interrupted | Recovery action |
+| Failure point | Recovery action |
 |---|---|
-| Crash before step 4 (no `apply-progress.json`) | No-op. Tx is still in `approved`. User can retry `tx apply`. |
-| `apply-pending` (intent logged, no files written) | At next cliq startup, surface tx as "interrupted before apply". User can retry or abort cleanly. |
-| `apply-writing` (partial files written) | At next cliq startup, surface tx with the list of files written so far and the ghost snapshot id. Recommend `cliq checkpoint restore <ghostSnapshotId>`. Tx is moved to `applied-partial` until the user explicitly resolves. |
-| `apply-committed` (all files written, no session record) | At next cliq startup, **idempotent reconciliation**: append the session record now and transition to `applied`. The file writes are already done and visible; the missing record is the only inconsistency. This reconciliation is automatic because it cannot make things worse. |
-| `apply-finalized` but state.json not yet transitioned | At next cliq startup, transition tx state to `applied`. Idempotent. |
+| Stage A preflight fails (oldContent mismatch on any file) | No file written. Tx returns to `approved`. User sees the conflicting path and decides whether to investigate, re-validate, or abort. |
+| Crash before A5 (no `apply-progress.json`) | No-op. Tx is still in `approved`. User retries `tx apply`. |
+| `apply-pending` (plan recorded, no writes started) | Next cliq startup reverts to `approved` and discards `apply-progress.json`. User retries cleanly. |
+| `apply-writing` (partial files written by stage B) | Next cliq startup moves tx to `applied-partial`, surfaces the list of files written from `apply-progress.filesWritten[]`, and recommends `cliq checkpoint restore <ghostSnapshotId>`. No automatic file restore. |
+| Stage B re-verification (B3a) detects mid-write external change | Same as the row above: tx transitions to `applied-partial`. |
+| `apply-committed` (all files written, no session record yet) | Next cliq startup runs Stage C from scratch under the proper lock order. The `sessionRecordId` field in `apply-progress.json` guards against duplicate record append. Idempotent. |
+| `apply-finalized` but tx state.json not yet flipped | Next cliq startup transitions tx state to `applied`. Idempotent. |
 | `applied` | Nothing to do. |
 
-The `applied-partial` state is the only one requiring explicit user resolution. It is reached only when:
+The `applied-partial` state requires explicit user resolution. It is reached only when:
 
-- Step 6b oldContent mismatch interrupts mid-apply
-- Disk error during step 6c–6e for a file after some files have already been written
-- Process kill specifically during `apply-writing` phase
+- Stage B per-file re-verification (B3a) catches a concurrent external change after preflight
+- Disk error during stage B's write/fsync/rename for a file after earlier files succeeded
+- Process kill specifically during the `apply-writing` phase
+
+External-content drift detected before any write (stage A preflight) does **not** produce `applied-partial`; it returns the tx cleanly to `approved`.
 
 Recovery tools the user has access to:
 
@@ -515,22 +568,6 @@ A turn already triggers a Phase 3 ghost snapshot at its start. In tx mode (espec
 Two ghost snapshots per applied tx is acceptable overhead: ghost snapshots are cheap Git objects and are eligible for normal Git GC.
 
 ### 11.4 Layer responsibilities (do not blur)
-
-| Layer | Trigger | Purpose | Lifetime |
-|---|---|---|---|
-| Phase 3 ghost snapshot | turn start (existing); apply pre (new) | post-mutation recovery point | Git object lifetime |
-| tx overlay | tx in `staging` | pre-mutation review artifact | tx terminal state + retention |
-| validator results | tx in `validated` | structured pass/fail evidence | tx terminal state + retention |
-
-Tx does not replace ghost snapshots. Ghost snapshots do not replace tx. They answer different questions.
-
-### 11.2 Why pre-apply ghost snapshot
-
-A turn already triggers a Phase 3 ghost snapshot at its start. In tx mode (especially explicit multi-turn or headless deferred-apply), the time gap between that snapshot and the apply moment can be large. The pre-apply snapshot freezes the apply-time state so post-apply restore remains useful.
-
-Two ghost snapshots per applied tx is acceptable overhead: ghost snapshots are cheap Git objects and are eligible for normal Git GC.
-
-### 11.3 Layer responsibilities (do not blur)
 
 | Layer | Trigger | Purpose | Lifetime |
 |---|---|---|---|
@@ -573,83 +610,169 @@ cliq tx help
 
 `tx finalize` is intentionally not exposed as a subcommand. Finalize is always implied by validate or apply; surfacing it separately would add a vocabulary item with no use case beyond debugging.
 
-## 13. Headless JSON Protocol
+## 13. Headless Integration
 
-### 13.1 Envelope shape
+This spec **extends** the shipped Phase 4 headless contract (`src/headless/contract.ts`). It does not introduce a parallel envelope or schema. Headless callers using `cliq run --jsonl` automatically observe tx behavior through new event types and artifact fields once `transactions.mode: edit` is configured.
 
-All `--json` output and all `--headless` output follows one envelope:
+The user-facing `cliq tx` subcommands (Section 12) accept `--json` to emit per-command snapshots; those snapshots reuse the same `Transaction` shape that flows through the headless event payloads (Section 13.2). There is one shape, two delivery channels.
+
+### 13.1 New runtime event types
+
+Added to `HeadlessRuntimeEventType` and `HeadlessEventPayloadByType` in `src/headless/contract.ts`:
+
+```ts
+// added to HeadlessRuntimeEventType
+| 'tx-staging-start'
+| 'tx-finalized'
+| 'tx-validated'
+| 'tx-applied'
+| 'tx-aborted'
+
+// added to HeadlessEventPayloadByType
+'tx-staging-start':  TxStagingStartPayload;
+'tx-finalized':      TxFinalizedPayload;
+'tx-validated':      TxValidatedPayload;
+'tx-applied':        TxAppliedPayload;
+'tx-aborted':        TxAbortedPayload;
+
+export type TxStagingStartPayload = {
+  txId: string;
+  txKind: TxKind;
+  trigger: 'auto-turn' | 'explicit-open';
+};
+
+export type TxFinalizedPayload = {
+  txId: string;
+  diffSummary: DiffSummary;          // see Section 7
+  diffArtifactPath: string;
+  outOfBandCount: number;            // count of BashEffect entries
+};
+
+export type TxValidatedPayload = {
+  txId: string;
+  validators: ValidatorResultSummary[];   // name, severity, status, durationMs only
+  blockingFailures: string[];
+};
+
+export type TxAppliedPayload = {
+  txId: string;
+  ghostSnapshotId: string;
+  filesWritten: string[];
+  overrides: OverrideEntry[];
+};
+
+export type TxAbortedPayload = {
+  txId: string;
+  reason: 'validator-fail' | 'user-abort' | 'apply-error' | 'apply-conflict' | 'staging-error';
+  failedValidators?: string[];
+};
+```
+
+Payload sizing follows Phase 4's existing convention: file paths are inlined, blob content is not. Validator `findings[]`, full validator stdout, and the structured diff body remain accessible via `*ArtifactPath` fields, not inlined into events.
+
+### 13.2 `HeadlessArtifacts` extension
+
+```ts
+// extends HeadlessArtifacts in src/headless/contract.ts
+export type HeadlessArtifacts = {
+  checkpoints: string[];
+  workspaceCheckpoints: string[];
+  compactions: string[];
+  handoffs: string[];
+  transactions: string[];   // NEW: tx ids produced by this run
+};
+```
+
+`emptyHeadlessArtifacts()` is updated to initialize `transactions: []`. The merge helper in `src/headless/events.ts` extends to merge tx ids by id.
+
+### 13.3 New error codes
+
+Added to `HeadlessErrorCode`:
+
+| Code | Stage | Triggered by |
+|---|---|---|
+| `tx-validator-blocking` | `tool` | apply / approve attempted while blocking validator failures exist and no override flag was given |
+| `tx-apply-conflict` | `tool` | Stage A preflight detected external workspace change; tx returned to `approved` |
+| `tx-apply-partial` | `tool` | Stage B failed mid-write; tx in `applied-partial`; `ghostSnapshotId` available for restore |
+| `tx-overlay-error` | `tool` | overlay write failure during `staging` (disk full, permission, path escape) |
+
+`HeadlessErrorStage` adds no new entries; tx errors slot under the existing `tool` stage because they originate from tool-driven mutations.
+
+`HeadlessRunError.recoverable` is `true` for `tx-validator-blocking` and `tx-apply-conflict` (caller can re-validate, override, or re-apply); `false` for `tx-apply-partial` (requires manual ghost-snapshot restore) and `tx-overlay-error` (requires resolving the underlying IO problem).
+
+### 13.4 `cliq run --jsonl` behavior with tx mode on
+
+When the run starts under `transactions.mode: edit`, the existing `cliq run --jsonl` adapter emits the new tx events interleaved with the existing event stream. A typical successful run looks like:
+
+```
+run-start
+checkpoint-created          ← Phase 3 ghost snapshot, Section 11
+tx-staging-start            ← NEW
+model-start ... model-end
+tool-start (edit) ... tool-end
+tx-finalized                ← NEW (auto-finalize at turn end if applyPolicy: per-turn)
+tx-validated                ← NEW
+checkpoint-created          ← apply-pre ghost snapshot (Section 11.3)
+tx-applied                  ← NEW
+final
+run-end
+```
+
+A failure example (validator blocking, no override):
+
+```
+run-start ... tx-validated
+error                       ← code: tx-validator-blocking, stage: tool, recoverable: true
+tx-aborted                  ← NEW; reason: validator-fail
+run-end                     ← exitCode reflects the run-level cancellation, not 0
+```
+
+The existing Phase 4 cancellation contract applies unchanged: `AbortSignal` triggers a `cancel`-stage `error` event followed by `tx-aborted` (reason: `user-abort`), then `run-end` with `cancelled` status.
+
+### 13.5 Snapshot output for `cliq tx <subcommand> --json`
+
+User-facing `cliq tx show`/`tx status`/`tx list` with `--json` emit a snapshot of the same `Transaction` shape (Section 7) — not the Phase 4 envelope, because these are query commands, not run streams.
 
 ```json
 {
   "schemaVersion": 1,
-  "command": "tx.apply",
   "tx": {
-    "id": "tx_01HX...",
-    "kind": "edit",
-    "state": "applied",
-    "sessionId": "sess_...",
-    "workspaceId": "ws_...",
-    "createdAt": "2026-05-02T10:00:00Z",
-    "updatedAt": "2026-05-02T10:00:42Z",
-    "diffSummary": {
-      "filesChanged": 4,
-      "additions": 12,
-      "deletions": 3,
-      "creates": ["src/foo.ts"],
-      "modifies": ["src/bar.ts", "src/baz.ts"],
-      "deletes": []
-    },
+    "id": "tx_01HX...", "kind": "edit", "state": "applied",
+    "sessionId": "sess_...", "workspaceId": "ws_...",
+    "createdAt": "2026-05-06T10:00:00Z", "updatedAt": "2026-05-06T10:00:42Z",
+    "diffSummary": { "filesChanged": 4, "additions": 12, "deletions": 3,
+                     "creates": [], "modifies": ["src/bar.ts", "src/baz.ts"], "deletes": [] },
     "diffArtifactPath": "$CLIQ_HOME/tx/tx_01HX.../diff.json",
-    "validators": [
-      { "name": "builtin:diff-sanity", "severity": "blocking", "status": "pass", "durationMs": 12 },
-      { "name": "shell:tsc", "severity": "blocking", "status": "fail", "durationMs": 8421,
-        "message": "src/foo.ts(42,10): error TS2322: ...",
-        "artifactPath": "$CLIQ_HOME/tx/tx_01HX.../validators/shell:tsc.json" }
-    ],
-    "blockingFailures": ["shell:tsc"],
-    "overridesApplied": [
-      { "validatorName": "shell:tsc", "reason": "flaky in CI", "by": "cli", "ts": "..." }
-    ],
+    "validators": [ { "name": "builtin:diff-sanity", "severity": "blocking", "status": "pass", "durationMs": 12 } ],
+    "blockingFailures": [],
+    "overridesApplied": [],
     "ghostSnapshotId": "ws_chk_...",
-    "transitions": [
-      { "from": null,        "to": "staging",   "ts": "...", "by": "auto:turn-1" },
-      { "from": "staging",   "to": "finalized", "ts": "...", "by": "auto:turn-end" },
-      { "from": "finalized", "to": "validated", "ts": "...", "by": "cli" },
-      { "from": "validated", "to": "applied",   "ts": "...", "by": "cli", "overrides": ["shell:tsc"], "reason": "flaky in CI" }
-    ]
-  },
-  "warnings": [],
-  "errors": []
+    "transitions": [ { "from": null, "to": "staging", "ts": "...", "by": "auto:turn-1" } ]
+  }
 }
 ```
 
-### 13.2 Envelope rules
+This output is intentionally narrower than Phase 4's `RuntimeEventEnvelope` because it answers "what is the state of this tx right now", not "what happened during a run". The `schemaVersion` shares Phase 4's `HEADLESS_SCHEMA_VERSION` so callers can use one parser.
 
-- `schemaVersion: 1` is a contract. Breaking changes increment it. Callers may reject unrecognized versions.
-- Large content (full diffs, full validator stdout) is not inlined. References use `*ArtifactPath` fields; callers read those files as needed. This bounds envelope size.
-- `errors[]` reports command-level failures (invalid arguments, tx not found, IO errors). Validator failures are not `errors`; they are part of `tx.validators`.
-- `validators[]`, `blockingFailures[]`, `overridesApplied[]`, and other "current snapshot" fields reflect the moment of output and may change between successive calls. `transitions[]` is append-only audit history.
-
-### 13.3 Exit codes
+### 13.6 Exit codes (CLI surface)
 
 | Code | Meaning |
 |---|---|
-| 0 | Command succeeded; if apply, tx is now `applied` |
-| 1 | Command itself failed (bad arguments, tx not found, IO error) |
-| 2 | Tx exists but the requested transition was rejected by business rules (e.g., blocking validator failed, no override) |
-| 3 | Tx entered `aborted` |
+| 0 | Command succeeded |
+| 1 | Command-level error (bad arguments, tx not found, IO) |
+| 2 | Business-rule rejection (blocking validator failed without override; tx not in expected state) |
+| 3 | Tx entered `aborted` (or already aborted at command time) |
 
-CI scripts use exit codes to distinguish tooling failures from gate failures.
+These are the `cliq tx` subcommand exit codes. Exit codes for `cliq run --jsonl` are governed by Phase 4 (`HEADLESS_EXIT_*`) and are unchanged: the tx contract communicates failure through the typed `error` events plus a non-zero `run-end` payload, not through new exit codes on `cliq run`.
 
-### 13.4 Output mode resolution
+### 13.7 Output mode resolution
 
 | Condition | Behavior |
 |---|---|
-| TTY, no `--json` | Human-readable text, color, interactive prompts |
-| `--json` | JSON envelope, no prompts; missing approval information exits with code 2 and a clear envelope `errors[]` entry |
-| `--headless` | Forces `--json`; forces `applyPolicy: manual-only`; suppresses color and progress; no prompts |
-
-`--json` controls output format. `--headless` is the full non-interactive contract. CI typically passes both: `--headless --json`.
+| `cliq tx ...` on TTY without `--json` | Human-readable text, color, interactive prompts |
+| `cliq tx ... --json` | Snapshot JSON, no prompts; missing approval info exits 2 with a structured error |
+| `cliq run --jsonl` (Phase 4 adapter) | Phase 4 envelope stream; tx events appear interleaved as in Section 13.4 |
+| `cliq tx ... --headless` (alias) | Equivalent to `--json --tx-apply manual-only`; provided for symmetry with the run-time `--headless` posture |
 
 ## 14. Configuration
 
@@ -709,7 +832,9 @@ CLI flag > environment variable (CLIQ_TX_*) > workspace config > built-in defaul
 
 ## 15. Session Record Contract (Boundary with Auto-Compact)
 
-The session/auto-compact effort proceeds in parallel. The contract between the two is a small, additive set of session record kinds. Tx writes records into the session; nothing in the session/auto-compact layer reads tx internals or modifies `$CLIQ_HOME/tx/`.
+Auto-compact shipped in `v0.7.0` (`src/session/auto-compaction.ts`, `src/session/auto-compact-config.ts`) with its own structured runtime events (`compact-start`, `compact-end`, `compact-skip`, `compact-error`) and durable compaction artifacts. The tx layer integrates with the existing auto-compact surface rather than co-designing it; nothing in this spec changes auto-compact's contract.
+
+The boundary between tx and auto-compact remains: tx writes records into the session; nothing in auto-compact reads tx internals or modifies `$CLIQ_HOME/tx/`.
 
 ### 15.1 New record kinds
 
@@ -764,15 +889,21 @@ Tx layer guarantees:
 - `meta.diffSummary` and `meta.files` are stable, structured fields suitable for direct programmatic consumption (preferred by summarizers over `content`).
 - `content` is a human-readable sentence intended for model replay; it never contains base64 blobs, full validator output, or content larger than ~512 bytes.
 
-Session/auto-compact layer should:
+Required updates to existing modules (this spec's PR introduces them):
 
-- Add `'tx-applied'` and `'tx-aborted'` to its record kind enum and treat them as opaque in display flows by default.
-- When summarizing, prefer `meta.diffSummary` and `meta.files` over `content` for these record kinds.
-- Treat the open and apply/abort moments of an explicit multi-turn tx as **non-splittable boundaries** in compact range selection (analogous to the existing turn-boundary rule). Implicit per-turn tx requires no special handling; it is contained within a single turn.
+- **`src/session/types.ts`**: extend the `SessionRecord` discriminated union with `TxAppliedRecord` and `TxAbortedRecord` variants. The session store's existing append/replay paths handle them as opaque records; no change to `appendRecord`, `loadSession`, or migration logic is required because the existing schema treats unknown kinds as pass-through readable.
+- **`src/session/auto-compaction.ts`** range selector: extend the existing turn-boundary rule to also treat `tx-staging-start`/`tx-finalized` (or, equivalently, the open and apply/abort moments derived from `tx-applied`/`tx-aborted` records and the explicit-tx-open marker) as non-splittable boundaries, so a long explicit multi-turn tx is summarized as one unit. Implicit per-turn tx is contained inside a single turn and requires no special handling.
+- **Auto-compact summarizer hooks**: when the default summarizer encounters `tx-applied` or `tx-aborted` records, prefer `meta.diffSummary` and `meta.files` over `content` for the structured fields it surfaces in the compact summary. This is a default-summarizer change; the data shape and replay invariant are unchanged.
 
 ### 15.3 Coordination
 
-A standalone PR introducing only the new `SessionRecord` kind enum and the `TxAppliedRecord`/`TxAbortedRecord` types should land before either side of the work merges. This unblocks both efforts on independent code paths.
+The new session record kinds, the auto-compact range-selector extension, and the summarizer preference change land in this spec's PR. The work touches:
+
+- `src/session/types.ts` (additive)
+- `src/session/auto-compaction.ts` (additive boundary rule)
+- the default summarizer module (preference logic only)
+
+No `SESSION_VERSION` bump is required because the addition is additive and existing consumers ignore unknown kinds. If a future migration is desired (e.g., to backfill `tx-*` records into pre-tx sessions for consistent display), that is a separate, optional follow-up.
 
 ## 16. Concurrency, Locks, and Errors
 
@@ -787,10 +918,12 @@ workspace state lock > session lock > tx-store lock
 | Lock | Holder | Scope |
 |---|---|---|
 | workspace state lock (existing) | Phase 3 callers; tx does not acquire this | `workspaces/<workspaceId>/state.json` |
-| session lock (existing) | runner during a turn; tx-coordinator during apply step 9 (session record append) | `sessions/.../<sessionId>.json` |
-| tx-store lock (new) | tx state transitions and apply phases | `tx/<txId>/state.json`, `tx/<txId>/apply-progress.json` |
+| session lock (existing) | runner during a turn; tx-coordinator during apply Stage C (session record append) | `sessions/.../<sessionId>.json` |
+| tx-store lock (new) | tx state transitions; apply Stages A and B; held briefly inside Stage C after the session lock | `tx/<txId>/state.json`, `tx/<txId>/apply-progress.json` |
 
 The tx-store lock is per-tx (keyed on `txId`), not global. Different tx never contend with each other.
+
+The apply protocol releases the tx-store lock between Stage B and Stage C so it can re-acquire it after the session lock in the canonical hierarchy order. See Section 11.1 for the full sequence and the rationale for why the in-between window is safe.
 
 ### 16.2 Concurrent invocation scenarios
 
@@ -798,8 +931,8 @@ The tx-store lock is per-tx (keyed on `txId`), not global. Different tx never co
 |---|---|
 | Two `cliq` processes in the same session | The second process attempting to open a tx reads the session's `activeTxId` and fails with "session already has active tx tx_..."; user sees the conflict explicitly |
 | Two processes in different sessions, same workspace | Each session owns its own `Session.activeTxId`; both sessions can have an active tx simultaneously, with no cross-interference |
-| Two processes targeting the same `txId` (e.g., one runs `tx apply`, another runs `tx abort`) | Per-tx tx-store lock serializes. Second sees "tx already in <state>", exits 1 |
-| External `git checkout` during tx | `builtin:index-clean` recheck at apply step 2 detects index change; `oldContent` recheck at apply step 6b detects file content change; tx fails before partial writes (or, if interrupted partway, transitions to `applied-partial` with the files-written list intact for recovery) |
+| Two processes targeting the same `txId` (e.g., one runs `tx apply`, another runs `tx abort`) | Per-tx tx-store lock serializes inside any single stage. Cross-stage races (e.g., a recovery pass running Stage C while the original process is also running Stage C) are serialized inside Stage C and the second caller sees `apply-finalized` already set; it exits cleanly as a no-op |
+| External `git checkout` during tx | `builtin:index-clean` recheck in Stage A2 detects index change; bulk `oldContent` preflight in Stage A3 detects file-content change; both reject the apply before any write. Stage B's per-file re-verification (B3a) catches a third-party that races between Stage A and Stage B |
 
 ### 16.3 Error paths
 
@@ -807,9 +940,10 @@ The tx-store lock is per-tx (keyed on `txId`), not global. Different tx never co
 |---|---|
 | Overlay write fails (disk full, permission) during `staging` | Tool returns error; tx remains in `staging`; user can `abort` or resolve and retry |
 | Validator infrastructure fails (`status: 'error'`) | Counts neither as pass nor fail; transition rejected unless `--allow-validator-error <name>` is provided |
-| Apply pre-flight checks fail (index changed, oldContent mismatch on first file) | Apply rejected before any file write. Tx returns to `approved`. User can investigate and re-apply or abort. |
-| Apply fails mid-write (some files written, some not) | Tx transitions to `applied-partial`. `apply-progress.json` records exactly which files were written. Error output includes `ghostSnapshotId` and the restore command. Recovery is user-driven (Section 11.2). No automatic rollback. |
-| Session record write fails after `apply-committed` phase | Subsequent cliq startup detects `apply-committed` without `apply-finalized` and runs idempotent reconciliation (appends record, transitions to `applied`). Files are already durable; only the bookkeeping is incomplete. |
+| Stage A preflight fails (index changed or any oldContent mismatch) | Apply rejected before any file write. Tx returns to `approved` with a clear "external change detected at <path>" error. User can investigate and re-apply, re-validate, or abort. |
+| Stage B disk error mid-write (some files written, some not) | Tx transitions to `applied-partial`. `apply-progress.json` records exactly which files were written. Error output includes `ghostSnapshotId` and the restore command. Recovery is user-driven (Section 11.2). No automatic rollback. |
+| Stage B per-file re-verification (B3a) detects mid-write external change | Same as the row above. |
+| Process killed between Stage B and Stage C (`apply-committed` durable, no record) | Next cliq startup runs Stage C from scratch under the proper lock order (Section 16.4 idempotent reconciliation). Files are already on disk; only the session record append needs completion. |
 | Cliq process killed mid-tx (SIGKILL, power loss) | Tx state on disk is durable. Next invocation runs the crash recovery protocol (Section 16.4) for any tx in non-terminal apply phases. |
 
 The `applied-partial` state is intentionally not on the main state diagram. It is reached only from `apply` errors and exits only via explicit user intervention (manual restore from `ghostSnapshotId`, then `tx abort`).
@@ -862,9 +996,15 @@ src/
       size-limit.ts
     shell.ts             # config-driven shell-hook adapter
   runtime/
-    runner.ts            # extended: WorkspaceWriter injection
+    runner.ts            # extended: WorkspaceWriter injection; tx event emission via existing onEvent surface
     workspace-writer.ts  # WorkspaceWriter interface + passthrough and overlay implementations
     bash-policy.ts       # bashPolicy enforcement around bash invocation
+  headless/
+    contract.ts          # extended: new tx event types, payloads, error codes; HeadlessArtifacts.transactions
+    events.ts            # extended: runtime → headless event mapping for tx events; mergeArtifacts handles transactions
+  session/
+    types.ts             # extended: SessionRecord union gains TxAppliedRecord, TxAbortedRecord variants
+    auto-compaction.ts   # extended: range-selector treats tx open/apply boundaries as non-splittable
   tools/
     edit.ts              # minimal change: writes via WorkspaceWriter (read + replaceText) instead of fs directly
     bash.ts              # unchanged invocation surface; coordinator records BashEffect around it
@@ -926,7 +1066,7 @@ Required tests grouped by concern:
 - `bash` runs against real cwd; `BashEffect` records appear in diff.outOfBand
 - Mutations after finalize rejected
 - Multi-turn diff accumulation produces correct final diff
-- v0.7 diff entries are all `op: 'modify'`; create/delete entries never produced
+- v0.8 diff entries are all `op: 'modify'`; create/delete entries never produced
 
 **Validators**
 - `builtin:diff-sanity` rejects path escapes and binary-as-text mistakes
@@ -934,6 +1074,9 @@ Required tests grouped by concern:
 - Shell-hook validators run in `staged-view`, not real cwd (regression)
 - Staged view exposes `node_modules` via bind path; `npm test` succeeds when project tests pass
 - Bind path writes leak to real workspace (documented behavior; assert via test)
+- **Non-bound files are reflinked or copied, never hardlinked**: validator writes to a non-bound file inside staged-view do not appear in the real workspace
+- `copyMode: auto` succeeds with reflinks on supported filesystems; falls back to copy with one-time warning on others
+- `copyMode: reflink` fails fast on filesystems that do not support reflink (no silent slow path)
 - Parallel and serial execution both honored
 - Timeout produces `status: 'error'`, not `'fail'`
 - `--override` requires the exact validator name; misspellings are rejected
@@ -941,13 +1084,16 @@ Required tests grouped by concern:
 
 **Apply and Phase 3 coexistence**
 - Pre-apply ghost snapshot taken and recorded in `tx.ghostSnapshotId`
-- Apply pre-flight oldContent mismatch rejects without writing any file
-- Apply failure mid-write transitions to `applied-partial` with correct `apply-progress.filesWritten[]`
+- Stage A preflight rejects on any oldContent mismatch with no file written; tx returns to `approved`
+- Stage A preflight rejects when external change touches a non-first file (the regression motivating the preflight split)
+- Stage B disk error mid-write transitions to `applied-partial` with correct `apply-progress.filesWritten[]`
+- Stage B per-file re-verification (B3a) catches a mid-stage external change and transitions to `applied-partial` (not silently overwrite)
 - Apply failure includes ghost snapshot id in error output
 - Successful apply writes `tx-applied` session record with all `meta` fields
 - Aborted apply writes `tx-aborted` session record
 - Session records never contain inlined full diffs
-- External `git checkout` during validate→apply window detected and rejected before partial writes
+- Apply releases tx-store lock between Stage B and Stage C; concurrent recovery in Stage C is idempotent (verified by spawning a second process during the window)
+- Lock acquisition order audit: no code path holds tx-store while attempting to acquire session lock (assertion in tests)
 
 **Crash recovery (Section 16.4)**
 - Crash before `apply-progress.json` exists: tx remains in `approved`, no recovery action needed
@@ -967,10 +1113,14 @@ Required tests grouped by concern:
 
 **CLI and headless**
 - `--tx off` overrides config
-- `--headless` forces `applyPolicy: manual-only`
-- `--json` envelope contains `schemaVersion: 1`
-- Exit codes 0/1/2/3 map to documented scenarios
+- `cliq tx ... --headless` forces `applyPolicy: manual-only`
+- `cliq tx ... --json` snapshot output contains `schemaVersion: 1` (shared with Phase 4 `HEADLESS_SCHEMA_VERSION`)
+- Exit codes 0/1/2/3 map to documented scenarios on `cliq tx` subcommands
 - Missing `<txId>` and missing `Session.activeTxId` produces clear error message
+- `cliq run --jsonl` with tx mode on emits new event types interleaved at correct lifecycle points (start before model-start, finalized at turn end, validated before apply, applied after pre-apply checkpoint)
+- `HeadlessArtifacts.transactions[]` is populated for every applied/aborted tx in a run
+- New `HeadlessErrorCode` values appear in error events with correct stage and recoverable flag
+- Phase 4 `RuntimeEventEnvelope` shape (envelope fields, schemaVersion) is unchanged for existing event types (regression)
 
 **Coexistence with existing cliq behavior**
 - `transactions.mode: off` produces no behavior change vs. current cliq (regression suite)
@@ -993,19 +1143,22 @@ The Phase 3 spec's practice of citing source observations alongside design choic
 
 This release is purely additive at the user-visible level:
 
-- Existing users on `v0.6` who upgrade see no behavior change. `transactions` config is absent; `mode` defaults to `off`; no tx code paths execute.
-- No session schema bump is required for the consumers of session records that ignore unknown `kind` values. If the auto-compact effort lands at the same time and bumps `SESSION_VERSION`, that bump should include the new tx record kinds in its migration; otherwise the additive nature of `kind` enums means no version bump is required for tx alone.
+- Existing users on `v0.7.0` who upgrade to the tx release see no behavior change. `transactions` config is absent; `mode` defaults to `off`; no tx code paths execute.
+- No `SESSION_VERSION` bump is required: the new `tx-applied` and `tx-aborted` record kinds are additive, and existing readers (the runner, the headless adapters, auto-compact's record consumers) treat unknown record kinds as pass-through.
+- No `HEADLESS_SCHEMA_VERSION` bump is required: the new event types extend `HeadlessRuntimeEventType`, the new artifact field extends `HeadlessArtifacts`, and the new error codes extend `HeadlessErrorCode`. All existing v1 consumers remain compatible because they iterate event types and artifact keys without exhaustive enumeration.
 - No changes to `.cliq/session.json` migration logic (Phase 3 already handled the workspace-local → global migration).
 - `$CLIQ_HOME/tx/` is created lazily on first tx open; does not exist for users who never enable tx.
+
+If a future revision needs to break either schema, it bumps the corresponding version constant. v1 of both contracts must remain stable for the lifetime of v0.8.x.
 
 ## 21. Deferred Decisions
 
 - **worktree-tx**: full workspace as a Git worktree so `bash` side-effects are also captured. Defer until edit-tx has real-world usage data on which workflows hit the `bash`-out-of-band limitation.
-- **Staged file creates and deletes**: v0.7 only stages `modify` operations, because the existing `edit` tool only supports text replacement. Adding staged creates and deletes requires either a new declarative tool (`create_file`, `delete_file`) or routing `bash`-driven creates/deletes through the overlay. Both are non-trivial and defer to worktree-tx, which naturally subsumes both via Git worktree semantics.
+- **Staged file creates and deletes**: v0.8 only stages `modify` operations, because the existing `edit` tool only supports text replacement. Adding staged creates and deletes requires either a new declarative tool (`create_file`, `delete_file`) or routing `bash`-driven creates/deletes through the overlay. Both are non-trivial and defer to worktree-tx, which naturally subsumes both via Git worktree semantics.
 - **Sparse staged-view materialization**: only copy files differing in the staged view plus their dependency closure. Defer until a concrete performance complaint with measurements is filed.
 - **Cross-session tx merging**: for workflows where multiple sessions converge on a single review unit. Defer until a concrete user workflow is documented.
 - **Partial apply**: apply only some files from a tx. Defer; current discipline is "tx is reviewed and applied as a unit".
 - **Automatic validator-driven retry loops**: tx fails validation, model is asked to fix and tries again automatically. Defer; risks runaway loops and is better explored after tx is in real use.
-- **Tx protocol RPC / SDK packaging**: Phase 4 concern. The JSON envelope here is the substrate; explicit RPC framing (JSONL stream, request/response) is its concern.
+- **Tx protocol stdio JSON-RPC adapter**: the Phase 4 spec lists a stdio JSON-RPC adapter for the same headless contract as a `v0.7.x` follow-up. When that adapter ships, tx events automatically flow through it because they are part of the same `RuntimeEventEnvelope` stream. No tx-specific RPC work is required by this spec.
 - **TUI / visual diff browsing**: defer to richer UX phases.
 - **Non-Git overlay alternative**: tx overlay does not require Git, but Phase 3 ghost snapshots do. A non-Git workspace using tx still loses recovery if `applied-partial` happens. Defer alternative snapshot mechanisms (e.g., copy-on-write directory snapshots) until needed.
