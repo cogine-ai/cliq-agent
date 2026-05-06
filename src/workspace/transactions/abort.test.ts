@@ -13,9 +13,11 @@ import {
   resolveTxRoot,
   createTx,
   writeTxState,
-  writeApplyProgress
+  writeApplyProgress,
+  writeAbortProgress
 } from './store.js';
 import type { TxState } from './types.js';
+import { abortRecordId } from './types.js';
 import { createSession } from '../../session/store.js';
 
 async function setupHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
@@ -199,4 +201,62 @@ test('AB3a.5 rejects flags when state is not applied-partial at lock time', asyn
   // (no injection hook exists today). The standalone assertion is exercised by
   // 'AB0a rejects flags when state is not applied-partial' above; AB3a.5 reuses identical rules.
   assert.ok(true);
+});
+
+test('AB3b exits no-op when all four terminal markers are set', async () => {
+  await setupHome(async (home) => {
+    await setupTx(home, 'tx_ab3b_terminal', 'aborted');
+    await writeAbortProgress(resolveTxRoot(home), 'tx_ab3b_terminal', {
+      phase: 'aborted',
+      reason: 'user-abort',
+      startedAt: 'x',
+      ts: 'x'
+    });
+    const ctx = buildCtx(home, 'tx_ab3b_terminal');
+    ctx.session.activeTxId = undefined;
+    ctx.session.records.push({
+      id: abortRecordId('tx_ab3b_terminal'),
+      ts: 'x',
+      kind: 'tx-aborted',
+      role: 'user',
+      content: 'previously aborted',
+      meta: {
+        txId: 'tx_ab3b_terminal',
+        txKind: 'edit',
+        reason: 'user-abort',
+        files: { wouldHaveCreated: [], wouldHaveModified: [], wouldHaveDeleted: [] },
+        artifactRef: 'tx/tx_ab3b_terminal/'
+      }
+    } as any);
+    const decision = await decideAbort(ctx);
+    assert.equal(decision, null);
+  });
+});
+
+test('AB3b proceeds when ANY one marker is missing', async () => {
+  await setupHome(async (home) => {
+    // Setup: tx state aborted, abort-progress missing -- should proceed (not no-op).
+    await setupTx(home, 'tx_ab3b_partial', 'aborted');
+    const ctx = buildCtx(home, 'tx_ab3b_partial');
+    ctx.session.activeTxId = undefined;
+    // No record, no abort-progress -> AB3b should NOT short-circuit.
+    const decision = await decideAbort(ctx);
+    assert.notEqual(decision, null);
+    assert.equal(decision?.reason, 'user-abort');
+  });
+});
+
+test('AB3b proceeds idempotently when crash left state=aborted but abort-progress.phase=aborting', async () => {
+  await setupHome(async (home) => {
+    await setupTx(home, 'tx_ab3b_crash', 'aborted');
+    await writeAbortProgress(resolveTxRoot(home), 'tx_ab3b_crash', {
+      phase: 'aborting',
+      reason: 'user-abort',
+      startedAt: 'x',
+      ts: 'x' // not 'aborted' yet
+    });
+    const decision = await decideAbort(buildCtx(home, 'tx_ab3b_crash'));
+    assert.notEqual(decision, null);
+    assert.equal(decision?.reason, 'user-abort');
+  });
 });

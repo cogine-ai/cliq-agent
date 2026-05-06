@@ -1,5 +1,6 @@
 import { withTxLock, readTxState, readApplyProgress, readAbortProgress } from './store.js';
 import type { Transaction, AbortReason } from './types.js';
+import { abortRecordId } from './types.js';
 import type { Session } from '../../session/types.js';
 
 export type AbortContext = {
@@ -113,6 +114,20 @@ export async function decideAbort(ctx: AbortContext): Promise<AbortDecision> {
         );
       }
       reason = ctx.reason ?? 'user-abort';
+    }
+    // AB3b: all-four-terminal-markers idempotency check. If the tx has already been
+    // fully aborted (state, abort-progress, session.activeTxId, and tx-aborted record
+    // all consistent), short-circuit with a no-op (null).
+    const abortProgressUnderLock = await readAbortProgress(ctx.root, ctx.txId);
+    const recordId = abortRecordId(ctx.txId);
+    const recordPresent = ctx.session.records.some((r) => r.id === recordId);
+    if (
+      txUnderLock?.state === 'aborted' &&
+      abortProgressUnderLock?.phase === 'aborted' &&
+      ctx.session.activeTxId !== ctx.txId &&
+      recordPresent
+    ) {
+      return null;
     }
     return {
       reason,
