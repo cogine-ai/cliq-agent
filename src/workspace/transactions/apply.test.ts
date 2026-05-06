@@ -6,7 +6,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { runStageA, ApplyRejected, ApplyConflict } from './apply.js';
+import { runStageA, runStageB, ApplyRejected, ApplyConflict, ApplyPartial } from './apply.js';
 import {
   resolveTxRoot,
   createTx,
@@ -14,7 +14,8 @@ import {
   writeDiff,
   writeApplyProgress,
   writeAbortProgress,
-  readApplyProgress
+  readApplyProgress,
+  readTxState as readTxStateAgain
 } from './store.js';
 
 const execFileAsync = promisify(execFile);
@@ -199,6 +200,118 @@ test('Stage A success: writes apply-progress with phase=apply-pending and return
       const ap = await readApplyProgress(root, 'tx_ok');
       assert.equal(ap?.phase, 'apply-pending');
       assert.deepEqual(ap?.filesPlanned, ['a.txt', 'b.txt']);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('Stage B writes each planned file via tmp+rename, fsyncs, and reaches apply-committed', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await writeFile(path.join(ws, 'b.txt'), 'two', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTx(home, ws, 'tx_b_ok', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' },
+        { path: 'b.txt', oldContent: 'two', newContent: 'TWO' }
+      ]);
+      const outcomeA = await runStageA({ root, txId: 'tx_b_ok', cwd: ws });
+      const outcomeB = await runStageB({ root, txId: 'tx_b_ok', cwd: ws }, outcomeA.plan);
+      assert.equal(outcomeB.ghostSnapshotId, outcomeA.ghostSnapshotId);
+      const { readFile: rf } = await import('node:fs/promises');
+      assert.equal(await rf(path.join(ws, 'a.txt'), 'utf8'), 'ONE');
+      assert.equal(await rf(path.join(ws, 'b.txt'), 'utf8'), 'TWO');
+      const ap = await readApplyProgress(root, 'tx_b_ok');
+      assert.equal(ap?.phase, 'apply-committed');
+      assert.deepEqual(ap?.filesWritten, ['a.txt', 'b.txt']);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('Stage B B1a defense: state changed mid-stage deletes apply-progress and exits with internal error', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTx(home, ws, 'tx_b1a', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      const outcomeA = await runStageA({ root, txId: 'tx_b1a', cwd: ws });
+      // Race injection: flip state out of 'approved' between Stage A and Stage B
+      const { readTxState, writeTxState } = await import('./store.js');
+      const tx = await readTxState(root, 'tx_b1a');
+      await writeTxState(root, { ...tx!, state: 'aborted' });
+      await assert.rejects(
+        runStageB({ root, txId: 'tx_b1a', cwd: ws }, outcomeA.plan),
+        /tx state changed during apply/
+      );
+      assert.equal(await readApplyProgress(root, 'tx_b1a'), null);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('Stage B B3a per-file re-verification catches mid-write external change and transitions to applied-partial', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await writeFile(path.join(ws, 'b.txt'), 'two', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTx(home, ws, 'tx_b3a', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' },
+        { path: 'b.txt', oldContent: 'two', newContent: 'TWO' }
+      ]);
+      const outcomeA = await runStageA({ root, txId: 'tx_b3a', cwd: ws });
+      // Mid-write race: change b.txt after Stage A took its fingerprint
+      await writeFile(path.join(ws, 'b.txt'), 'TWO_LOCAL', 'utf8');
+      await assert.rejects(
+        runStageB({ root, txId: 'tx_b3a', cwd: ws }, outcomeA.plan),
+        (err: unknown) => err instanceof ApplyPartial && /b\.txt/.test((err as Error).message)
+      );
+      const tx = await readTxStateAgain(root, 'tx_b3a');
+      assert.equal(tx?.state, 'applied-partial');
+      const ap = await readApplyProgress(root, 'tx_b3a');
+      assert.equal(ap?.phase, 'apply-failed-partial');
+      assert.deepEqual(ap?.filesWritten, ['a.txt']);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('Stage B records filesWritten incrementally so abort sees what was written', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await writeFile(path.join(ws, 'b.txt'), 'two', 'utf8');
+      await writeFile(path.join(ws, 'c.txt'), 'three', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTx(home, ws, 'tx_inc', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' },
+        { path: 'b.txt', oldContent: 'two', newContent: 'TWO' },
+        { path: 'c.txt', oldContent: 'three', newContent: 'THREE' }
+      ]);
+      const outcomeA = await runStageA({ root, txId: 'tx_inc', cwd: ws });
+      // Break the third file mid-stream
+      await writeFile(path.join(ws, 'c.txt'), 'THREE_LOCAL', 'utf8');
+      await assert.rejects(
+        runStageB({ root, txId: 'tx_inc', cwd: ws }, outcomeA.plan),
+        (err: unknown) => err instanceof ApplyPartial
+      );
+      const ap = await readApplyProgress(root, 'tx_inc');
+      assert.deepEqual(ap?.filesWritten, ['a.txt', 'b.txt']);
     } finally {
       await rm(ws, { recursive: true, force: true });
     }
