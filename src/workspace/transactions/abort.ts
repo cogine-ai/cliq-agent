@@ -76,7 +76,7 @@ export async function decideAbort(ctx: AbortContext): Promise<AbortDecision> {
   const ab0a = await checkAB0a(ctx);
   return await withTxLock(ctx.root, ctx.txId, async () => {
     // AB2: re-read authoritative state under lock.
-    const _txUnderLock = await readTxState(ctx.root, ctx.txId);
+    const txUnderLock = await readTxState(ctx.root, ctx.txId);
     const progressUnderLock = await readApplyProgress(ctx.root, ctx.txId);
     // AB3a: re-check apply-progress phase. If it's now in-flight, reject (race after AB0).
     if (progressUnderLock && IN_FLIGHT_PHASES.has(progressUnderLock.phase)) {
@@ -84,11 +84,41 @@ export async function decideAbort(ctx: AbortContext): Promise<AbortDecision> {
         `apply is in flight (phase=${progressUnderLock.phase}); cannot abort (race)`
       );
     }
-    // For now, return decision based on AB0a result (AB3a.5 + AB3b in next tasks).
-    const reason: AbortReason = ab0a?.reason ?? ctx.reason ?? 'user-abort';
+    // AB3a.5: re-check applied-partial flag rules using under-lock state. The under-lock
+    // state is authoritative; AB0a's pre-lock check was a fast-fail and may have raced.
+    let reason: AbortReason;
+    let restoreConfirmed = false;
+    let partialFiles: string[] | undefined;
+    let ghostSnapshotId: string | undefined;
+    if (txUnderLock?.state === 'applied-partial') {
+      if (ctx.restoreConfirmed && ctx.keepPartial) {
+        throw new AbortRejected('--restore-confirmed and --keep-partial are mutually exclusive');
+      }
+      if (ctx.restoreConfirmed) {
+        reason = 'apply-failed-partial-restored';
+        restoreConfirmed = true;
+      } else if (ctx.keepPartial) {
+        reason = 'apply-failed-partial-kept';
+      } else {
+        throw new AbortRejected(
+          'tx is applied-partial; pass --restore-confirmed or --keep-partial (under-lock recheck)'
+        );
+      }
+      partialFiles = progressUnderLock?.filesWritten ?? [];
+      ghostSnapshotId = progressUnderLock?.ghostSnapshotId ?? txUnderLock.ghostSnapshotId;
+    } else {
+      if (ctx.restoreConfirmed || ctx.keepPartial) {
+        throw new AbortRejected(
+          `flags --restore-confirmed/--keep-partial only apply when state is applied-partial (state=${txUnderLock?.state}, under-lock)`
+        );
+      }
+      reason = ctx.reason ?? 'user-abort';
+    }
     return {
       reason,
-      restoreConfirmed: ab0a?.restoreConfirmed ?? false
+      restoreConfirmed,
+      partialFiles,
+      ghostSnapshotId
     };
   });
 }
