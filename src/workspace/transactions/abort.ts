@@ -1,7 +1,15 @@
-import { withTxLock, readTxState, readApplyProgress, readAbortProgress } from './store.js';
+import {
+  withTxLock,
+  readTxState,
+  readApplyProgress,
+  readAbortProgress,
+  writeAbortProgress,
+  writeTxState
+} from './store.js';
 import type { Transaction, AbortReason } from './types.js';
 import { abortRecordId } from './types.js';
-import type { Session } from '../../session/types.js';
+import { mutateSession } from '../../session/store.js';
+import type { Session, SessionRecord } from '../../session/types.js';
 
 export type AbortContext = {
   root: string;
@@ -135,5 +143,109 @@ export async function decideAbort(ctx: AbortContext): Promise<AbortDecision> {
       partialFiles,
       ghostSnapshotId
     };
+  });
+}
+
+/**
+ * AB4..AB7 — Abort write phase. Mirrors apply.ts Stage C in shape: two distinct
+ * lock-acquisition phases so that session fsync MUST happen before tx state.json
+ * transitions. A crash between phases leaves session ahead of tx-store; recovery
+ * converges by re-running this phase.
+ *
+ * Phase abort-session: take the session lock via mutateSession; inside, take the
+ * tx-store lock briefly to write abort-progress.phase=aborting, then mutate the
+ * in-memory session to append the deterministic tx-aborted record and clear
+ * activeTxId when it points to this tx. mutateSession fsyncs the session.
+ *
+ * Phase abort-tx: re-acquire the tx-store lock; finalize abort-progress
+ * (phase=aborted) then tx state (state=aborted). Both writes are idempotent.
+ */
+export async function runAbortWritePhase(
+  ctx: AbortContext,
+  decision: NonNullable<AbortDecision>
+): Promise<void> {
+  // Snapshot the data we need to build the tx-aborted record from the
+  // authoritative on-disk tx state. This read happens before we take the
+  // session lock; AB3b idempotency already guarded against duplicate work.
+  const txInitial = await readTxState(ctx.root, ctx.txId);
+  const files = {
+    wouldHaveCreated: txInitial?.diffSummary?.creates ?? [],
+    wouldHaveModified: txInitial?.diffSummary?.modifies ?? [],
+    wouldHaveDeleted: txInitial?.diffSummary?.deletes ?? []
+  };
+  const failedValidators =
+    txInitial?.blockingFailures && txInitial.blockingFailures.length > 0
+      ? txInitial.blockingFailures
+      : undefined;
+  const appliedPartial =
+    decision.reason === 'apply-failed-partial-restored' ||
+    decision.reason === 'apply-failed-partial-kept'
+      ? {
+          partialFiles: decision.partialFiles ?? [],
+          ghostSnapshotId: decision.ghostSnapshotId ?? '',
+          restoreConfirmed: decision.restoreConfirmed
+        }
+      : undefined;
+
+  // Phase abort-session: take session lock, briefly take tx-store lock to write
+  // abort-progress=aborting, then append the deterministic record and clear
+  // activeTxId. mutateSession fsyncs on return.
+  await mutateSession(ctx.cwd, ctx.session, async (session) => {
+    const recordId = abortRecordId(ctx.txId);
+    const present = session.records.some((r) => r.id === recordId);
+    if (!present) {
+      // AB4: write abort-progress.phase=aborting under tx-store lock.
+      await withTxLock(ctx.root, ctx.txId, async () => {
+        const existing = await readAbortProgress(ctx.root, ctx.txId);
+        if (!existing || existing.phase !== 'aborting') {
+          const ts = new Date().toISOString();
+          await writeAbortProgress(ctx.root, ctx.txId, {
+            phase: 'aborting',
+            reason: decision.reason,
+            startedAt: existing?.startedAt ?? ts,
+            ts
+          });
+        }
+      });
+      // AB5: append the deterministic tx-aborted record.
+      const record: SessionRecord = {
+        id: recordId,
+        ts: new Date().toISOString(),
+        kind: 'tx-aborted',
+        role: 'user',
+        content: `Transaction ${ctx.txId} aborted: ${decision.reason}`,
+        meta: {
+          txId: ctx.txId,
+          txKind: 'edit',
+          reason: decision.reason,
+          ...(failedValidators ? { failedValidators } : {}),
+          files,
+          artifactRef: `tx/${ctx.txId}/`,
+          ...(appliedPartial ? { appliedPartial } : {})
+        }
+      };
+      session.records.push(record);
+    }
+    // AB5c: clear activeTxId only if it points to this tx.
+    if (session.activeTxId === ctx.txId) {
+      session.activeTxId = undefined;
+    }
+  });
+
+  // Phase abort-tx: re-acquire tx-store lock; finalize abort-progress and
+  // tx state. Preserves original abort-progress.reason/startedAt fields.
+  await withTxLock(ctx.root, ctx.txId, async () => {
+    const progress = await readAbortProgress(ctx.root, ctx.txId);
+    const tx = await readTxState(ctx.root, ctx.txId);
+    if (progress && progress.phase !== 'aborted') {
+      await writeAbortProgress(ctx.root, ctx.txId, {
+        ...progress,
+        phase: 'aborted',
+        ts: new Date().toISOString()
+      });
+    }
+    if (tx && tx.state !== 'aborted') {
+      await writeTxState(ctx.root, { ...tx, state: 'aborted' });
+    }
   });
 }

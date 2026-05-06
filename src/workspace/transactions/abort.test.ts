@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import {
   decideAbort,
+  runAbortWritePhase,
   AbortRejected,
   type AbortContext
 } from './abort.js';
@@ -14,11 +15,14 @@ import {
   createTx,
   writeTxState,
   writeApplyProgress,
-  writeAbortProgress
+  writeAbortProgress,
+  readTxState,
+  readAbortProgress
 } from './store.js';
 import type { TxState } from './types.js';
 import { abortRecordId } from './types.js';
-import { createSession } from '../../session/store.js';
+import { createSession, mutateSession } from '../../session/store.js';
+import type { Session } from '../../session/types.js';
 
 async function setupHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-'));
@@ -258,5 +262,163 @@ test('AB3b proceeds idempotently when crash left state=aborted but abort-progres
     const decision = await decideAbort(buildCtx(home, 'tx_ab3b_crash'));
     assert.notEqual(decision, null);
     assert.equal(decision?.reason, 'user-abort');
+  });
+});
+
+// --- Task 34: AB4..AB7 write-phase tests ---
+
+async function setupSessionForAbort(
+  ws: string,
+  opts?: { activeTxId?: string }
+): Promise<Session> {
+  const session = createSession(ws);
+  await mutateSession(ws, session, (s) => {
+    s.activeTxId = opts?.activeTxId;
+  });
+  return session;
+}
+
+async function setupTxWithDiffSummary(
+  home: string,
+  ws: string,
+  txId: string,
+  state: TxState = 'approved'
+) {
+  const root = resolveTxRoot(home);
+  const tx = await createTx(root, {
+    id: txId,
+    kind: 'edit',
+    workspaceId: 'w',
+    sessionId: 's',
+    workspaceRealPath: ws
+  });
+  await writeTxState(root, {
+    ...tx,
+    state,
+    diffSummary: {
+      filesChanged: 1,
+      additions: 0,
+      deletions: 0,
+      creates: [],
+      modifies: ['a.txt'],
+      deletes: []
+    }
+  });
+  return root;
+}
+
+test('AB5 writes deterministic txrec_abort_<txId> record with reason', async () => {
+  await setupHome(async (home) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-ws-'));
+    try {
+      await setupTxWithDiffSummary(home, ws, 'tx_ab5_record');
+      const session = await setupSessionForAbort(ws, { activeTxId: 'tx_ab5_record' });
+      const ctx: AbortContext = {
+        root: resolveTxRoot(home),
+        txId: 'tx_ab5_record',
+        cwd: ws,
+        session,
+        reason: 'user-abort'
+      };
+      const decision = await decideAbort(ctx);
+      assert.notEqual(decision, null);
+      await runAbortWritePhase(ctx, decision!);
+      const recId = abortRecordId('tx_ab5_record');
+      const rec = session.records.find((r) => r.id === recId);
+      assert.ok(rec, 'tx-aborted record should be present');
+      assert.equal(rec?.kind, 'tx-aborted');
+      assert.equal((rec?.meta as { reason?: string }).reason, 'user-abort');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('AB5c clears Session.activeTxId only if it equals this txId', async () => {
+  await setupHome(async (home) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-ws-'));
+    try {
+      await setupTxWithDiffSummary(home, ws, 'tx_self_clear');
+      const session = await setupSessionForAbort(ws, { activeTxId: 'tx_other' });
+      const ctx: AbortContext = {
+        root: resolveTxRoot(home),
+        txId: 'tx_self_clear',
+        cwd: ws,
+        session,
+        reason: 'user-abort'
+      };
+      const decision = await decideAbort(ctx);
+      await runAbortWritePhase(ctx, decision!);
+      assert.equal(session.activeTxId, 'tx_other');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('AB5b includes meta.appliedPartial when reason is applied-partial-derived', async () => {
+  await setupHome(async (home) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-ws-'));
+    try {
+      await setupTxWithDiffSummary(home, ws, 'tx_ab5b', 'applied-partial');
+      await writeApplyProgress(resolveTxRoot(home), 'tx_ab5b', {
+        phase: 'apply-failed-partial',
+        ghostSnapshotId: 'snap_abc',
+        startedAt: 'x',
+        filesPlanned: ['a.txt', 'b.txt'],
+        filesWritten: ['a.txt']
+      });
+      const session = await setupSessionForAbort(ws);
+      const ctx: AbortContext = {
+        root: resolveTxRoot(home),
+        txId: 'tx_ab5b',
+        cwd: ws,
+        session,
+        keepPartial: true
+      };
+      const decision = await decideAbort(ctx);
+      await runAbortWritePhase(ctx, decision!);
+      const rec = session.records.find((r) => r.id === abortRecordId('tx_ab5b'));
+      assert.ok(rec);
+      assert.equal(rec?.kind, 'tx-aborted');
+      if (rec?.kind !== 'tx-aborted') return;
+      assert.ok(rec.meta.appliedPartial);
+      assert.deepEqual(rec.meta.appliedPartial?.partialFiles, ['a.txt']);
+      assert.equal(rec.meta.appliedPartial?.ghostSnapshotId, 'snap_abc');
+      assert.equal(rec.meta.appliedPartial?.restoreConfirmed, false);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('AB6/AB7 transitions are idempotent: rerunning yields same state', async () => {
+  await setupHome(async (home) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-ws-'));
+    try {
+      await setupTxWithDiffSummary(home, ws, 'tx_idem');
+      const session = await setupSessionForAbort(ws);
+      const ctx: AbortContext = {
+        root: resolveTxRoot(home),
+        txId: 'tx_idem',
+        cwd: ws,
+        session,
+        reason: 'user-abort'
+      };
+      const d1 = await decideAbort(ctx);
+      await runAbortWritePhase(ctx, d1!);
+      // Rerun: decideAbort should now return null (AB3b idempotency).
+      const d2 = await decideAbort(ctx);
+      assert.equal(d2, null);
+      // Reading tx state confirms it stayed aborted.
+      const tx = await readTxState(resolveTxRoot(home), 'tx_idem');
+      assert.equal(tx?.state, 'aborted');
+      const progress = await readAbortProgress(resolveTxRoot(home), 'tx_idem');
+      assert.equal(progress?.phase, 'aborted');
+      const rec = session.records.filter((r) => r.id === abortRecordId('tx_idem'));
+      assert.equal(rec.length, 1, 'idempotent rerun must not duplicate the record');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
   });
 });
