@@ -218,6 +218,30 @@ Cliq reads optional runtime config from `./.cliq/config.json` in the current wor
 
 All fields are optional. If the file is missing, Cliq uses no repo-local prompt, skill, or extension overrides and resolves the model with its local-first Ollama default.
 
+## Transactions
+
+Cliq's transactional workspace runtime stages file edits before they hit your real working tree. Validators run against the staged view, and changes only land after explicit approval.
+
+Transactions are opt-in via the `--tx edit` flag or the `transactions.mode` config field.
+
+```bash
+# Enable tx for a single run
+cliq --tx edit "fix the null deref in foo.ts"
+
+# Multi-turn explicit transaction
+cliq tx open refactor-auth
+cliq "rename UserService to AccountService"
+cliq "update all callers"
+cliq tx apply <txId>
+
+# Inspect or abort
+cliq tx list
+cliq tx status <txId>
+cliq tx abort <txId>
+```
+
+When a transaction's apply leaves files partially written (e.g., a disk error mid-write), aborting requires an explicit `--restore-confirmed` (rolls back via the pre-apply ghost snapshot) or `--keep-partial` (leaves the partial state in place). See `docs/superpowers/specs/2026-05-02-cliq-transactional-workspace-runtime-design.md` for the full design.
+
 ## Local skills
 
 Local skills live at `./.cliq/skills/<name>/SKILL.md` and inject additional system instructions without changing Cliq core code.
