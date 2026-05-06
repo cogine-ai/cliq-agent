@@ -1,8 +1,25 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
+import crypto from 'node:crypto';
 
 import { withPathLock } from '../../lib/path-lock.js';
 import type { Transaction, TxKind, ApplyProgress, AbortProgress, AuditEntry } from './types.js';
+
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+export function makeTxId(now = Date.now()): string {
+  const time = now.toString(2).padStart(48, '0');
+  const rand = [...crypto.randomBytes(10)]
+    .map((b) => b.toString(2).padStart(8, '0'))
+    .join('')
+    .slice(0, 80);
+  const bits = time + rand;
+  let out = 'tx_';
+  for (let i = 0; i < 26; i++) {
+    out += CROCKFORD[parseInt(bits.slice(i * 5, i * 5 + 5), 2)];
+  }
+  return out;
+}
 
 export function resolveTxRoot(cliqHome: string): string {
   return path.join(cliqHome, 'tx');

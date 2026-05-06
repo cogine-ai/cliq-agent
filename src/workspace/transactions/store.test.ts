@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { resolveTxRoot, txDir, applyProgressPath, abortProgressPath, stateJsonPath, auditJsonPath, readTxState, writeTxState, createTx, readApplyProgress, writeApplyProgress, deleteApplyProgress, readAbortProgress, writeAbortProgress, deleteAbortProgress, withTxLock, appendAudit, readAudit } from './store.js';
+import { resolveTxRoot, txDir, applyProgressPath, abortProgressPath, stateJsonPath, auditJsonPath, readTxState, writeTxState, createTx, readApplyProgress, writeApplyProgress, deleteApplyProgress, readAbortProgress, writeAbortProgress, deleteAbortProgress, withTxLock, appendAudit, readAudit, makeTxId } from './store.js';
 
 test('resolveTxRoot honors CLIQ_HOME', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-home-'));
@@ -158,4 +158,12 @@ test('appendAudit writes JSONL entries in order', async () => {
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test('makeTxId returns lexicographically sortable IDs with tx_ prefix', () => {
+  const a = makeTxId(1700000000000);
+  const b = makeTxId(1700000000001);
+  assert.match(a, /^tx_[0-9A-HJKMNP-TV-Z]{26}$/);
+  assert.match(b, /^tx_[0-9A-HJKMNP-TV-Z]{26}$/);
+  assert.ok(a < b);
 });
