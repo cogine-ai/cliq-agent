@@ -42,7 +42,11 @@ export type HeadlessErrorCode =
   | 'session-store-error'
   | 'artifact-not-found'
   | 'cancelled'
-  | 'internal-error';
+  | 'internal-error'
+  | 'tx-validator-blocking'
+  | 'tx-apply-conflict'
+  | 'tx-apply-partial'
+  | 'tx-overlay-error';
 
 export type HeadlessErrorStage =
   | 'input'

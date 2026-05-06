@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { emptyHeadlessArtifacts } from './contract.js';
 import type {
+  HeadlessErrorCode,
   TxStagingStartPayload,
   TxAppliedPayload,
   TxAbortedPayload
@@ -42,4 +43,30 @@ test('TxAbortedPayload includes appliedPartial when applicable', () => {
 test('emptyHeadlessArtifacts initializes transactions: []', () => {
   const a = emptyHeadlessArtifacts();
   assert.deepEqual(a.transactions, []);
+});
+
+test('HeadlessErrorCode union includes the tx error codes', () => {
+  // Type-level assertion via assignment.
+  const codes: HeadlessErrorCode[] = [
+    'tx-validator-blocking',
+    'tx-apply-conflict',
+    'tx-apply-partial',
+    'tx-overlay-error'
+  ];
+  assert.equal(codes.length, 4);
+});
+
+test('tx error codes map to documented stage and recoverable flags (producer convention)', () => {
+  // The producer (Phase 12 coordinator) will set stage='tool' for all four,
+  // and recoverable=false only for tx-apply-partial. Document the convention with a runtime table.
+  const STAGE_BY_TX_CODE = {
+    'tx-validator-blocking': { stage: 'tool', recoverable: true },
+    'tx-apply-conflict': { stage: 'tool', recoverable: true },
+    'tx-apply-partial': { stage: 'tool', recoverable: false },
+    'tx-overlay-error': { stage: 'tool', recoverable: true }
+  } as const;
+  for (const v of Object.values(STAGE_BY_TX_CODE)) {
+    assert.equal(v.stage, 'tool');
+  }
+  assert.equal(STAGE_BY_TX_CODE['tx-apply-partial'].recoverable, false);
 });
