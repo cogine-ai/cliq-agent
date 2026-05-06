@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import crypto from 'node:crypto';
 
 import { withPathLock } from '../../lib/path-lock.js';
-import type { Transaction, TxKind, ApplyProgress, AbortProgress, AuditEntry } from './types.js';
+import type { Transaction, TxKind, ApplyProgress, AbortProgress, AuditEntry, Diff } from './types.js';
 
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -177,6 +177,30 @@ export async function deleteAbortProgress(root: string, txId: string): Promise<v
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+}
+
+export async function readDiff(root: string, txId: string): Promise<Diff | null> {
+  try {
+    const raw = await fs.readFile(diffJsonPath(root, txId), 'utf8');
+    return JSON.parse(raw) as Diff;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+export async function writeDiff(root: string, txId: string, diff: Diff): Promise<void> {
+  await fs.mkdir(txDir(root, txId), { recursive: true });
+  const target = diffJsonPath(root, txId);
+  const tmp = `${target}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(diff, null, 2), 'utf8');
+  const fh = await fs.open(tmp, 'r+');
+  try {
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await fs.rename(tmp, target);
 }
 
 export async function appendAudit(root: string, txId: string, entry: AuditEntry): Promise<void> {

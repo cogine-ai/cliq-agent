@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { resolveTxRoot, txDir, applyProgressPath, abortProgressPath, stateJsonPath, auditJsonPath, readTxState, writeTxState, createTx, readApplyProgress, writeApplyProgress, deleteApplyProgress, readAbortProgress, writeAbortProgress, deleteAbortProgress, withTxLock, appendAudit, readAudit, makeTxId } from './store.js';
+import { resolveTxRoot, txDir, applyProgressPath, abortProgressPath, stateJsonPath, auditJsonPath, readTxState, writeTxState, createTx, readApplyProgress, writeApplyProgress, deleteApplyProgress, readAbortProgress, writeAbortProgress, deleteAbortProgress, withTxLock, appendAudit, readAudit, makeTxId, writeDiff, readDiff } from './store.js';
 
 test('resolveTxRoot honors CLIQ_HOME', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-home-'));
@@ -159,6 +159,23 @@ test('appendAudit writes JSONL entries in order', async () => {
     const entries = await readAudit(root, 'tx_a');
     assert.equal(entries.length, 2);
     assert.equal(entries[1].to, 'finalized');
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('writeDiff then readDiff round-trips', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-diff-rw-'));
+  try {
+    const root = resolveTxRoot(home);
+    await createTx(root, { id: 'tx_diff', kind: 'edit', workspaceId: 'w', sessionId: 's', workspaceRealPath: '/tmp' });
+    const diff = {
+      files: [{ path: 'a.txt', op: 'modify' as const, oldContent: 'one', newContent: 'ONE' }],
+      outOfBand: []
+    };
+    await writeDiff(root, 'tx_diff', diff);
+    const loaded = await readDiff(root, 'tx_diff');
+    assert.deepEqual(loaded, diff);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
