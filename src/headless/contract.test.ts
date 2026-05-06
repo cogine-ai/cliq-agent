@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { emptyHeadlessArtifacts } from './contract.js';
 import type {
   TxStagingStartPayload,
   TxAppliedPayload,
@@ -36,4 +37,9 @@ test('TxAbortedPayload includes appliedPartial when applicable', () => {
     appliedPartial: { partialFiles: ['a.txt'], ghostSnapshotId: 'wchk_x', restoreConfirmed: true }
   };
   assert.equal(p.appliedPartial?.restoreConfirmed, true);
+});
+
+test('emptyHeadlessArtifacts initializes transactions: []', () => {
+  const a = emptyHeadlessArtifacts();
+  assert.deepEqual(a.transactions, []);
 });

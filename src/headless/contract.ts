@@ -68,6 +68,7 @@ export type HeadlessArtifacts = {
   workspaceCheckpoints: string[];
   compactions: string[];
   handoffs: string[];
+  transactions: string[];
 };
 
 export function emptyHeadlessArtifacts(): HeadlessArtifacts {
@@ -75,7 +76,8 @@ export function emptyHeadlessArtifacts(): HeadlessArtifacts {
     checkpoints: [],
     workspaceCheckpoints: [],
     compactions: [],
-    handoffs: []
+    handoffs: [],
+    transactions: []
   };
 }
 

@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { RuntimeEvent } from '../runtime/events.js';
-import { createHeadlessEventFactory, runtimeEventToHeadless } from './events.js';
+import { emptyHeadlessArtifacts } from './contract.js';
+import { createHeadlessEventFactory, mergeArtifacts, runtimeEventToHeadless } from './events.js';
 
 test('createHeadlessEventFactory emits versioned envelopes with optional session fields', () => {
   const factory = createHeadlessEventFactory({
@@ -72,7 +73,17 @@ test('runtimeEventToHeadless maps checkpoint-created artifacts', () => {
       checkpoints: ['chk_test'],
       workspaceCheckpoints: ['wchk_test'],
       compactions: [],
-      handoffs: []
+      handoffs: [],
+      transactions: []
     }
   });
+});
+
+test('mergeArtifacts unions transactions[] without duplicates', () => {
+  const target = emptyHeadlessArtifacts();
+  target.transactions.push('tx_a');
+  const source = emptyHeadlessArtifacts();
+  source.transactions.push('tx_a', 'tx_b');
+  mergeArtifacts(target, source);
+  assert.deepEqual(target.transactions, ['tx_a', 'tx_b']);
 });
