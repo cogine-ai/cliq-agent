@@ -40,6 +40,66 @@ test('rpc returns parse errors for invalid JSON lines', async () => {
   assert.equal(response.error.code, -32700);
 });
 
+test('rpc returns method-not-found errors for unknown methods', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    }
+  });
+
+  await server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'missing.method' }));
+
+  const [response] = parseLines(writes);
+  assert.equal(response.jsonrpc, '2.0');
+  assert.equal(response.id, 1);
+  assert.equal(response.error.code, -32601);
+});
+
+test('rpc returns invalid params errors for malformed run params', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    }
+  });
+
+  await server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'run.start' }));
+  await server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'run.cancel', params: {} }));
+
+  const messages = parseLines(writes);
+  assert.equal(messages[0].id, 1);
+  assert.equal(messages[0].error.code, -32602);
+  assert.equal(messages[1].id, 2);
+  assert.equal(messages[1].error.code, -32602);
+});
+
+test('rpc returns internal errors for synchronous dispatcher failures', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    },
+    makeRunId() {
+      throw new Error('id generator failed');
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'run.start',
+      params: { cwd: process.cwd(), prompt: 'hello' }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.jsonrpc, '2.0');
+  assert.equal(response.id, 1);
+  assert.equal(response.error.code, -32603);
+});
+
 test('rpc run.start returns a run id and emits run events with the same id', async () => {
   const writes: string[] = [];
   const server = createRpcServer({
@@ -251,6 +311,67 @@ test('rpc write failures abort the active run and close future writes', async ()
   assert.equal(eventCallbackRejected, false);
   assert.equal(signalAborted, true);
   assert.deepEqual(parseLines(writes), [{ jsonrpc: '2.0', id: 1, result: { runId: 'run_rpc_write_0' } }]);
+});
+
+test('rpc async write failures abort the active run and close future writes', async () => {
+  const writes: string[] = [];
+  let eventCallbackRejected = false;
+  let signalAborted = false;
+  const server = createRpcServer({
+    writeLine(line) {
+      const message = JSON.parse(line);
+      if (message.method === 'run.event') {
+        return Promise.reject(new Error('sink closed'));
+      }
+      writes.push(line);
+    },
+    makeRunId: () => `run_rpc_async_write_${writes.length}`,
+    async runHeadless(_request, options) {
+      const event: RuntimeEventEnvelope = {
+        schemaVersion: 1,
+        eventId: 'evt_rpc_async_write',
+        runId: options.runId!,
+        timestamp: '2026-05-06T00:00:00.000Z',
+        type: 'run-start',
+        payload: {
+          cwd: process.cwd(),
+          policy: 'auto',
+          model: { provider: 'ollama', model: 'fake' }
+        }
+      };
+      try {
+        await options.onEvent?.(event);
+      } catch {
+        eventCallbackRejected = true;
+      }
+      await Promise.resolve();
+      signalAborted = options.signal?.aborted ?? false;
+      return completedOutput(options.runId!);
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'run.start',
+      params: { cwd: process.cwd(), prompt: 'async write failure' }
+    })
+  );
+  await server.waitForIdle();
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'run.start',
+      params: { cwd: process.cwd(), prompt: 'after async failure' }
+    })
+  );
+  await server.waitForIdle();
+
+  assert.equal(eventCallbackRejected, false);
+  assert.equal(signalAborted, true);
+  assert.deepEqual(parseLines(writes), [{ jsonrpc: '2.0', id: 1, result: { runId: 'run_rpc_async_write_0' } }]);
 });
 
 test('rpc rejects notifications because request ids are required', async () => {
