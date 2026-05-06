@@ -61,7 +61,7 @@ It does not implement, defer to later phases:
 
 - Route `edit` writes through a `WorkspaceWriter` abstraction (passthrough or overlay), with minimal change to existing tool implementations. `bash` continues to run against the real `cwd`; the coordinator wraps it for side-effect bookkeeping.
 - Represent transactions as first-class persistent objects under `$CLIQ_HOME`, not transient command outputs.
-- Define a single JSON envelope shape used by every `--json` command and by `--headless` mode, so callers write one parser.
+- Reuse Phase 4's `HEADLESS_SCHEMA_VERSION` across both surfaces tx exposes: `cliq run --jsonl` emits new tx event types inside the existing `RuntimeEventEnvelope`, and `cliq tx show/status/list --json` emit `Transaction` snapshot objects under the same schema version. Implementers do not introduce a second envelope shape; they extend the existing one with new event payloads and pair it with a related snapshot shape (Section 13).
 - Keep validator severity (blocking vs advisory) explicit and per-validator-overridable, with audit trail.
 - Treat apply as a phased, recoverable operation with explicit on-disk state; do not claim filesystem-level atomicity.
 - Default to off. Existing users see no behavior change until they opt in.
@@ -103,7 +103,8 @@ $CLIQ_HOME/
     diff.json                           # structured diff (per-file old→new); v0.8 contains only modify entries
     overlay/                            # materialized staged files (durable across cliq restart)
     validators/<validatorName>.json     # per-validator structured result
-    apply-progress.json                 # phased apply protocol state (Section 11)
+    apply-progress.json                 # phased apply protocol state (Section 11.1); present only during/after an apply attempt
+    abort-progress.json                 # abort termination protocol state (Section 11.3); present only during/after an abort
     audit.json                          # append-only state transition log
   checkpoints/...                       # Phase 3, unchanged
 ```
@@ -511,24 +512,30 @@ STAGE B — write (tx-store lock only, re-acquired)
        between B5 and C, the crash recovery protocol idempotently completes
        the record append at next startup. See Section 16.4.)
 
-STAGE C — record (session lock, then tx-store lock; respects hierarchy)
+STAGE C — record + terminal session cleanup (session lock, then tx-store lock)
   C1. acquire session lock
   C2. acquire tx-store lock      (session > tx in the global hierarchy)
-  C3. read apply-progress.json. If phase is already 'apply-finalized',
-      another process or a recovery pass already completed C; release
-      both locks and exit (idempotent no-op).
-  C4. compute the deterministic record id: recordId = `txrec_apply_<txId>`.
-      Scan session.records for a record with this exact id.
-        - If present: the record was already appended by a previous
-          attempt (e.g., a process killed between C5 and C6 of an earlier
-          run). Skip C5 and proceed to C6.
-        - If absent: append the session record (kind: 'tx-applied',
-          Section 15) with this exact id. fsync the session file.
+  C3. read apply-progress.json. If phase is already 'apply-finalized'
+      AND tx state.json is 'applied' AND Session.activeTxId !== txId,
+      everything is already done; release both locks and exit no-op.
+  C4. session-side terminal write (single fsync at the end):
+        a. compute the deterministic record id: recordId = `txrec_apply_<txId>`.
+        b. scan session.records for a record with this exact id.
+             - If absent: append the session record (kind: 'tx-applied',
+               Section 15) with this exact id.
+             - If present: skip the append (a previous attempt got this
+               far before crashing).
+        c. if Session.activeTxId === txId: clear it (set to undefined).
+           If Session.activeTxId is already undefined or points elsewhere,
+           do not touch it (defensive idempotency).
+        d. fsync the session file once for both updates.
   C5. transition phase: 'apply-committed' → 'apply-finalized'. fsync.
   C6. transition tx state.json: 'approved' → 'applied'. fsync.
   C7. release tx-store lock, release session lock
   C8. schedule overlay/ cleanup
 ```
+
+C4 is a single session-write transaction: the record append and `activeTxId` clear share one fsync, so a crash between them is impossible. A crash between C4 and C5/C6 leaves the session correct and the tx-progress files behind; recovery (Section 16.4) re-enters C from C3, sees the record already present and `activeTxId` already cleared, and converges to `applied`.
 
 Why this split:
 
@@ -568,13 +575,56 @@ cliq checkpoint restore <ghostSnapshotId>   # restore real workspace to pre-appl
 cliq tx abort <txId>         # mark tx as terminally aborted after manual recovery
 ```
 
-### 11.3 Why pre-apply ghost snapshot
+### 11.3 Abort termination protocol
+
+Abort is the second terminal-state path. Like apply, it must produce a session record (`tx-aborted`), clear `Session.activeTxId`, and transition tx state, all crash-safely. Abort uses a parallel protocol with its own progress file and recovery rules.
+
+```
+ABORT (called from any non-terminal state)
+  AB0. read apply-progress.json (if it exists).
+       If present and phase ∈ {apply-pending, apply-writing, apply-committed, apply-finalized},
+       reject the abort: "apply in progress, run cliq tx status to recover".
+       Apply has either already touched files or is about to; the user must
+       complete or roll back the apply (via cliq checkpoint restore) before
+       a clean abort. This rejection is the primary defense against the
+       Stage-B-to-Stage-C race window.
+       (apply-finalized briefly exists between C5 and C6 if a process is
+       killed there; abort during that window is also rejected because the
+       apply is already terminal-bound.)
+  AB1. acquire session lock
+  AB2. acquire tx-store lock
+  AB3. read tx state.json. If already 'aborted' or 'applied', release locks
+       and exit no-op (idempotent).
+  AB4. write abort-progress.json:
+        { phase: 'aborting', reason, startedAt, ts }
+       fsync.
+  AB5. session-side terminal write (single fsync):
+        a. recordId = `txrec_abort_<txId>`.
+        b. scan session.records for that id; append if absent.
+        c. if Session.activeTxId === txId: clear it. Else leave alone.
+        d. fsync session file once.
+  AB6. transition tx state.json: <current> → 'aborted'. fsync.
+  AB7. transition abort-progress.json phase: 'aborting' → 'aborted'. fsync.
+       (The abort-progress.json is retained alongside the tx directory for
+       audit, deleted with the rest of the tx artifacts at retention end.)
+  AB8. release tx-store lock, release session lock
+  AB9. retain overlay/ per `transactions.abortRetention` (NOT cleaned eagerly,
+       unlike applied tx where overlay is purged immediately).
+```
+
+Crash recovery for abort is symmetric to apply (Section 16.4 lists the rules).
+
+#### 11.3.1 Why abort doesn't pre-acquire a ghost snapshot
+
+Abort makes no real-workspace mutation. The pre-apply ghost snapshot exists to bound a post-apply restore; abort needs no such bound because the workspace is unchanged from before the tx began. (The Phase 3 turn-start ghost snapshot still applies for any in-turn cliq state the user might want to revert.)
+
+### 11.4 Why pre-apply ghost snapshot
 
 A turn already triggers a Phase 3 ghost snapshot at its start. In tx mode (especially explicit multi-turn or headless deferred-apply), the time gap between that snapshot and the apply moment can be large. The pre-apply snapshot freezes the apply-time state so post-apply restore remains useful.
 
 Two ghost snapshots per applied tx is acceptable overhead: ghost snapshots are cheap Git objects and are eligible for normal Git GC.
 
-### 11.4 Layer responsibilities (do not blur)
+### 11.5 Layer responsibilities (do not blur)
 
 | Layer | Trigger | Purpose | Lifetime |
 |---|---|---|---|
@@ -949,7 +999,7 @@ The apply protocol releases the tx-store lock between Stage B and Stage C so it 
 |---|---|
 | Two `cliq` processes in the same session | The second process attempting to open a tx reads the session's `activeTxId` and fails with "session already has active tx tx_..."; user sees the conflict explicitly |
 | Two processes in different sessions, same workspace | Each session owns its own `Session.activeTxId`; both sessions can have an active tx simultaneously, with no cross-interference |
-| Two processes targeting the same `txId` (e.g., one runs `tx apply`, another runs `tx abort`) | Per-tx tx-store lock serializes inside any single stage. Cross-stage races (e.g., a recovery pass running Stage C while the original process is also running Stage C) are serialized inside Stage C and the second caller sees `apply-finalized` already set; it exits cleanly as a no-op |
+| Two processes targeting the same `txId` (e.g., one runs `tx apply`, another runs `tx abort`) | Per-tx tx-store lock serializes within a single stage. Cross-stage races are blocked at the protocol level: abort step AB0 rejects whenever `apply-progress.json` is non-terminal, so a concurrent abort cannot squeeze into the Stage-B-to-Stage-C lock-release window. Recovery passes use the same protocol entry points and the same idempotency checks as foreground operations. |
 | External `git checkout` during tx | `builtin:index-clean` recheck in Stage A2 detects index change; bulk `oldContent` preflight in Stage A3 detects file-content change; both reject the apply before any write. Stage B's per-file re-verification (B3a) catches a third-party that races between Stage A and Stage B |
 
 ### 16.3 Error paths
@@ -961,31 +1011,43 @@ The apply protocol releases the tx-store lock between Stage B and Stage C so it 
 | Stage A preflight fails (index changed or any oldContent mismatch) | Apply rejected before any file write. Tx returns to `approved` with a clear "external change detected at <path>" error. User can investigate and re-apply, re-validate, or abort. |
 | Stage B disk error mid-write (some files written, some not) | Tx transitions to `applied-partial`. `apply-progress.json` records exactly which files were written. Error output includes `ghostSnapshotId` and the restore command. Recovery is user-driven (Section 11.2). No automatic rollback. |
 | Stage B per-file re-verification (B3a) detects mid-write external change | Same as the row above. |
-| Process killed between Stage B and Stage C (`apply-committed` durable, no record) | Next cliq startup runs Stage C from scratch under the proper lock order (Section 16.4 idempotent reconciliation). Files are already on disk; only the session record append needs completion. |
-| Cliq process killed mid-tx (SIGKILL, power loss) | Tx state on disk is durable. Next invocation runs the crash recovery protocol (Section 16.4) for any tx in non-terminal apply phases. |
+| Process killed between Stage B and Stage C (`apply-committed` durable, no record) | Next cliq startup runs Stage C from scratch under the proper lock order (Section 16.4.1). Files are already on disk; the session record, `activeTxId` clear, and state transition all converge through Stage C's idempotent-by-deterministic-id design. |
+| Concurrent `tx abort` racing into the Stage-B-to-Stage-C window | Abort step AB0 rejects when `apply-progress.json` is non-terminal (including `apply-committed`). The window is closed at the protocol level, not via lock fencing. |
+| Process killed mid-abort | Next cliq startup runs the recovery rule from Section 16.4.2 based on `abort-progress.phase`. Same scan-or-append, same conditional `activeTxId` clear, same conditional state transition. |
+| Cliq process killed mid-tx (SIGKILL, power loss) | Tx state on disk is durable. Next invocation runs the crash recovery protocol (Section 16.4) for any tx in non-terminal apply or abort phases. |
 
 The `applied-partial` state is intentionally not on the main state diagram. It is reached only from `apply` errors and exits only via explicit user intervention (manual restore from `ghostSnapshotId`, then `tx abort`).
 
 ### 16.4 Crash Recovery Protocol
 
-At every cliq startup (and on demand via `cliq tx status --recover`), the tx-coordinator scans `$CLIQ_HOME/tx/` for any tx whose `state.json` is in a non-terminal state (`staging`, `finalized`, `validated`, `approved`, or `applied-partial`) and any tx with `apply-progress.json` whose phase is not `apply-finalized`.
+At every cliq startup (and on demand via `cliq tx status --recover`), the tx-coordinator scans `$CLIQ_HOME/tx/` for any tx whose `state.json` is in a non-terminal state (`staging`, `finalized`, `validated`, `approved`, or `applied-partial`), any tx with `apply-progress.json` whose phase is not `apply-finalized`, and any tx with `abort-progress.json` whose phase is not `aborted`.
 
-For each such tx, the recovery rule is determined by `apply-progress.json` if present, else by `state.json`:
+The recovery rule is selected by progress-file presence, in this priority order: `apply-progress.json` first, `abort-progress.json` second, neither third. (Only one progress file should ever exist for a given tx because abort is rejected when `apply-progress.json` is non-terminal — see Section 11.3 step AB0.)
 
-| `apply-progress.phase` (if present) | Action at startup |
+#### 16.4.1 Apply recovery
+
+| `apply-progress.phase` | Action at startup |
 |---|---|
 | absent | Tx never entered apply. Surface via `cliq tx status` for the affected session. No real-workspace damage possible. User decides to resume, apply, or abort. |
 | `apply-pending` | Intent was logged but no files were written. Mark tx state as `approved` (revert the implicit progression), discard `apply-progress.json`. User can retry `tx apply` cleanly. |
 | `apply-writing` | Some files were written. Move tx state to `applied-partial`. Write a warning record (not a session record) to `$CLIQ_HOME/tx/<txId>/recovery.json` describing the state. Surface prominently the next time the user invokes any `cliq` command in the affected workspace, including the `ghostSnapshotId` and the recommended `cliq checkpoint restore` command. **Do not automatically restore**; restore is user-initiated. |
-| `apply-committed` | All files were written and durable. Recovery **invokes Stage C as defined in Section 11.1** without modification (acquires session lock first, then tx-store lock, runs C3–C8). Stage C's deterministic-id scan in C4 makes it safe to rerun even if a previous attempt got partway through. Recovery does not implement its own session-write logic. The user is informed at the next invocation that recovery completed automatically; they may verify in `cliq tx show <txId>`. |
-| `apply-finalized` | tx state.json may not yet have transitioned. Idempotent: transition tx state to `applied`. |
+| `apply-committed` | All files were written and durable. Recovery **invokes Stage C as defined in Section 11.1** without modification (acquires session lock first, then tx-store lock, runs C3–C8). Stage C's deterministic-id scan and conditional `activeTxId` clear in C4 make it safe to rerun even if a previous attempt got partway through. Recovery does not implement its own session-write logic. The user is informed at the next invocation that recovery completed automatically; they may verify in `cliq tx show <txId>`. |
+| `apply-finalized` | Stage C reached C5 but did not finish C6. Recovery re-enters C from C3, sees record present and `activeTxId` already cleared, transitions tx state.json to `applied`. Idempotent. |
+
+#### 16.4.2 Abort recovery
+
+| `abort-progress.phase` | Action at startup |
+|---|---|
+| `aborting` | Abort started but did not finish. Recovery **invokes the abort protocol from Section 11.3 starting at AB1** (re-acquires locks; AB3 idempotency check covers the case where state.json was already flipped before crash; AB5 scan-or-append handles record idempotency; AB5c clears `activeTxId` only if it still equals txId). The protocol converges to the same `aborted` terminal state regardless of where the previous attempt died. |
+| `aborted` | The abort progress file phase says complete. If tx state.json is also `aborted` and the session record exists with id `txrec_abort_<txId>` and `Session.activeTxId` is not equal to txId, recovery is a no-op. Any of those checks failing means a partial abort that recovery completes via the same AB protocol from the missing step onward (idempotent). |
 
 The protocol's invariants:
 
 - A tx in `apply-writing` is **never** silently abandoned. The user is always notified.
-- A tx in `apply-committed` is **always** auto-reconciled because the only outstanding action (record append) is provably safe to retry.
-- No recovery action ever modifies real workspace files. Only `apply-progress.json`, `state.json`, and (in the `apply-committed` case) the session record file are written by the recovery protocol.
+- A tx in `apply-committed`, `apply-finalized`, or any abort phase is **always** auto-reconciled because the only outstanding actions (record append, `activeTxId` clear, state transition) are provably safe to retry by deterministic-id scan and conditional clear.
+- No recovery action ever modifies real workspace files. Only `apply-progress.json`, `abort-progress.json`, `state.json`, and (in the reconciliation cases) the session record file are written by the recovery protocol.
 - Recovery is idempotent. Running it twice produces the same result as running it once.
+- Abort recovery and apply recovery are mutually exclusive for any single tx because Section 11.3 AB0 rejects abort while apply is in flight.
 
 `cliq tx status` output annotates any tx that went through automatic recovery with a `recoveredAt` timestamp, both in human and JSON forms, so callers can audit.
 
@@ -999,10 +1061,15 @@ src/
       store.ts           # persistence, per-tx locking, list/get
       overlay.ts         # edit-tx overlay materialization
       diff.ts            # diff computation, JSON serialization
-      apply.ts           # phased apply protocol (Section 11)
-      recovery.ts        # crash recovery protocol (Section 16.4)
+      apply.ts           # phased apply protocol (Section 11.1, Stages A/B/C)
+      abort.ts           # abort termination protocol (Section 11.3, AB0..AB9)
+      recovery.ts        # crash recovery protocol (Section 16.4); shares the
+                         # session-write helper used by apply.ts Stage C and
+                         # abort.ts AB5 so terminal cleanup logic exists in
+                         # exactly one place
       staged-view.ts     # bind-path-aware staged view materialization
-      coordinator.ts     # state transitions, session record writes, ghost snapshot integration
+      coordinator.ts     # state transitions, session record writes,
+                         # activeTxId clearing, ghost snapshot integration
     snapshots.ts         # Phase 3, unchanged
   validators/
     types.ts             # Validator, ValidatorContext, ValidatorResult
@@ -1107,11 +1174,23 @@ Required tests grouped by concern:
 - Stage B disk error mid-write transitions to `applied-partial` with correct `apply-progress.filesWritten[]`
 - Stage B per-file re-verification (B3a) catches a mid-stage external change and transitions to `applied-partial` (not silently overwrite)
 - Apply failure includes ghost snapshot id in error output
-- Successful apply writes `tx-applied` session record with all `meta` fields
+- Successful apply writes `tx-applied` session record with deterministic id `txrec_apply_<txId>` (regression: no duplicates after simulated mid-Stage-C crash and recovery)
+- Successful apply clears `Session.activeTxId` (regression: subsequent `cliq tx open` succeeds in the same session)
 - Aborted apply writes `tx-aborted` session record
 - Session records never contain inlined full diffs
 - Apply releases tx-store lock between Stage B and Stage C; concurrent recovery in Stage C is idempotent (verified by spawning a second process during the window)
 - Lock acquisition order audit: no code path holds tx-store while attempting to acquire session lock (assertion in tests)
+- Concurrent `tx abort` is rejected with `tx-apply-conflict`-shaped error when `apply-progress.json` exists in any non-terminal phase (regression for the Stage-B-to-Stage-C race)
+
+**Abort termination protocol**
+- `tx abort` from `staging`/`finalized`/`validated`/`approved` writes one `tx-aborted` record (deterministic id `txrec_abort_<txId>`) and clears `Session.activeTxId`
+- Mid-abort crash with `abort-progress.phase: 'aborting'` is recovered by Section 16.4.2 to the same terminal state
+- Crash after AB5 (record appended) but before AB6 (state.json flip): recovery completes the state transition; no duplicate record
+- Crash after AB6 but before AB7: recovery converges to `aborted`; abort-progress phase reflects `aborted` after recovery
+- Abort during `apply-pending` rejected with clear error directing to `cliq tx status` recovery flow
+- Abort during `apply-writing` rejected (workspace already partially mutated; user must restore via ghost snapshot first)
+- Abort during `apply-committed` rejected (apply is bound for `applied`; let recovery finish it)
+- Abort overlay retained per `abortRetention`; not eagerly cleaned
 
 **Crash recovery (Section 16.4)**
 - Crash before `apply-progress.json` exists: tx remains in `approved`, no recovery action needed
