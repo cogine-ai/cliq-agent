@@ -127,23 +127,28 @@ test('acquireTxLock serializes concurrent operations on the same txId', async ()
   try {
     const root = resolveTxRoot(home);
     await createTx(root, { id: 'tx_lock', kind: 'edit', workspaceId: 'w', sessionId: 's', workspaceRealPath: '/tmp/ws' });
+    // Assert SERIALIZATION (no interleaving), not acquisition ORDER.
+    // The lock primitive does not promise FIFO/fairness, so under load `b`
+    // can win the race; what matters is that one critical section completes
+    // entirely before the other starts.
     const order: string[] = [];
-    const a = withTxLock(root, 'tx_lock', async () => {
-      order.push('a-start');
-      await new Promise((r) => setTimeout(r, 25));
-      order.push('a-end');
-    });
-    // Yield enough microtasks for `a` to enter withPathLock and create its lock dir
-    // before `b` starts, eliminating start-order races without coupling to internals.
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    const b = withTxLock(root, 'tx_lock', async () => {
-      order.push('b-start');
-      await new Promise((r) => setTimeout(r, 5));
-      order.push('b-end');
-    });
-    await Promise.all([a, b]);
-    assert.deepEqual(order, ['a-start', 'a-end', 'b-start', 'b-end']);
+    const work = (label: string, durationMs: number) =>
+      withTxLock(root, 'tx_lock', async () => {
+        order.push(`${label}-start`);
+        await new Promise((r) => setTimeout(r, durationMs));
+        order.push(`${label}-end`);
+      });
+    await Promise.all([work('a', 25), work('b', 5)]);
+    // Whichever side acquired first must have finished before the other started.
+    assert.equal(order.length, 4, 'both critical sections must run');
+    const [first0, first1, second0, second1] = order;
+    assert.ok(first0.endsWith('-start'));
+    assert.ok(first1.endsWith('-end'));
+    assert.equal(first0.split('-')[0], first1.split('-')[0], 'first holder must finish before second');
+    assert.ok(second0.endsWith('-start'));
+    assert.ok(second1.endsWith('-end'));
+    assert.equal(second0.split('-')[0], second1.split('-')[0], 'second holder must run as one block');
+    assert.notEqual(first0.split('-')[0], second0.split('-')[0], 'each holder runs once');
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -187,4 +192,29 @@ test('makeTxId returns lexicographically sortable IDs with tx_ prefix', () => {
   assert.match(a, /^tx_[0-9A-HJKMNP-TV-Z]{26}$/);
   assert.match(b, /^tx_[0-9A-HJKMNP-TV-Z]{26}$/);
   assert.ok(a < b);
+});
+
+test('txDir rejects path-traversal txIds and accepts well-formed ones', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-traversal-'));
+  try {
+    const root = resolveTxRoot(home);
+    // Each of these would, if passed through `path.join` unchecked, escape
+    // the per-tx directory or write to an attacker-chosen path.
+    assert.throws(() => txDir(root, 'tx_..'), /invalid tx id/i);
+    assert.throws(() => txDir(root, 'tx_../foo'), /invalid tx id/i);
+    assert.throws(() => txDir(root, '..'), /invalid tx id/i);
+    assert.throws(() => txDir(root, '/etc/passwd'), /invalid tx id/i);
+    assert.throws(() => txDir(root, 'tx_a/../b'), /invalid tx id/i);
+    assert.throws(() => txDir(root, 'tx_a\\b'), /invalid tx id/i);
+    assert.throws(() => txDir(root, 'tx_'), /invalid tx id/i); // empty body
+    assert.throws(() => txDir(root, 'no_prefix'), /invalid tx id/i);
+    assert.throws(() => txDir(root, ''), /invalid tx id/i);
+    // Production-shaped IDs and short test fixtures both pass.
+    const real = makeTxId();
+    assert.equal(txDir(root, real), path.join(root, real));
+    assert.equal(txDir(root, 'tx_a'), path.join(root, 'tx_a'));
+    assert.equal(txDir(root, 'tx_test_lock_01HX'), path.join(root, 'tx_test_lock_01HX'));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });

@@ -19,7 +19,17 @@ export type AbortContext = {
   session: Session;
   restoreConfirmed?: boolean;
   keepPartial?: boolean;
+  // The CONTROLLED protocol reason. Callers normally leave this undefined and
+  // let the protocol pick: 'user-abort' for normal aborts, 'apply-failed-partial-*'
+  // when the applied-partial flags are set. Internal/automation callers may
+  // override with a typed AbortReason value (e.g., 'validator-fail') when they
+  // know the reason. CLI free-text from `--reason` MUST NOT flow into this field;
+  // use `note` instead.
   reason?: AbortReason;
+  // Free-form operator text from `cliq tx abort --reason "..."`. Stored
+  // alongside the typed reason in audit/abort-progress and the session record's
+  // `meta.note` for human consumers, but never substituted for `meta.reason`.
+  note?: string;
 };
 
 export type AbortDecision = {
@@ -219,6 +229,7 @@ export async function runAbortWritePhase(
           txId: ctx.txId,
           txKind: 'edit',
           reason: decision.reason,
+          ...(ctx.note ? { note: ctx.note } : {}),
           ...(failedValidators ? { failedValidators } : {}),
           files,
           artifactRef: `tx/${ctx.txId}/`,

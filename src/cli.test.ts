@@ -414,17 +414,28 @@ test('parseArgs rejects cliq tx abort with both --restore-confirmed and --keep-p
   );
 });
 
-test('parseArgs accepts top-level --tx and --tx-apply flags', () => {
-  const a = parseArgs(['node', 'src/index.ts', '--tx', 'edit', '--tx-apply', 'auto-on-pass', 'tx', 'list']);
-  assert.equal(a.cmd, 'tx-list');
-  if (a.cmd === 'tx-list') {
-    assert.equal(a.txMode, 'edit');
-    assert.equal(a.txApply, 'auto-on-pass');
-  }
-});
-
-test('parseArgs --tx rejects invalid values', () => {
-  assert.throws(() => parseArgs(['node', 'src/index.ts', '--tx', 'bogus', 'tx', 'list']), /tx mode/i);
+test('parseArgs rejects --tx and --tx-apply with not-yet-wired error', () => {
+  // Top-level --tx / --tx-apply flags are reserved for runner integration
+  // (auto-open / auto-finalize / auto-apply per turn). Until that landing
+  // they are rejected loudly so users do not silently get unstaged edits.
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--tx', 'edit', 'tx', 'list']),
+    /not yet wired/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--tx-apply', 'auto-on-pass', 'tx', 'list']),
+    /not yet wired/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--tx=edit', 'tx', 'list']),
+    /not yet wired/i
+  );
+  // Even an "invalid" value falls into the same not-yet-wired path because
+  // the rejection happens before any value validation.
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--tx', 'bogus', 'tx', 'list']),
+    /not yet wired/i
+  );
 });
 
 test('parseArgs unknown tx subcommand throws', () => {

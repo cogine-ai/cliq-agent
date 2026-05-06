@@ -132,6 +132,7 @@ export function toSessionRecordView(record: SessionRecord): SessionRecordView {
         role: 'user',
         txId: record.meta.txId,
         reason: record.meta.reason,
+        ...(record.meta.note ? { note: record.meta.note } : {}),
         ...(record.meta.failedValidators ? { failedValidators: record.meta.failedValidators } : {}),
         artifactRef: record.meta.artifactRef,
         ...(record.meta.appliedPartial ? { appliedPartial: record.meta.appliedPartial } : {})

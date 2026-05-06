@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import crypto from 'node:crypto';
 
 import { withPathLock } from '../../lib/path-lock.js';
+import { assertValidTxId } from './types.js';
 import type { Transaction, TxKind, ApplyProgress, AbortProgress, AuditEntry, Diff } from './types.js';
 
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -26,6 +27,12 @@ export function resolveTxRoot(cliqHome: string): string {
 }
 
 export function txDir(root: string, txId: string): string {
+  // Defense-in-depth: validate the id shape before joining into the tx root.
+  // Prevents `path.join(root, '../../somewhere')` from reaching outside the
+  // tx directory when txId originates from CLI argv or other untrusted input.
+  // makeTxId() always produces a value that satisfies assertValidTxId, so
+  // legitimate flows pay only a regex match.
+  assertValidTxId(txId);
   return path.join(root, txId);
 }
 

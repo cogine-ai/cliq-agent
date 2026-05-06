@@ -15,7 +15,8 @@ import {
   applyTx as runApplyTx,
   ApplyRejected,
   ApplyConflict,
-  ApplyPartial
+  ApplyPartial,
+  StageCMetadataError
 } from './apply.js';
 import { abortTx as runAbortTx, AbortRejected } from './abort.js';
 import { openRecordId } from './types.js';
@@ -142,7 +143,11 @@ export async function listTx(ctx: CoordinatorContext): Promise<Transaction[]> {
 
 export type CoordinatorApplyResult =
   | { ok: true; txId: string; filesApplied: string[]; ghostSnapshotId: string }
-  | { ok: false; error: 'rejected' | 'conflict' | 'partial' | 'unknown'; message: string };
+  | {
+      ok: false;
+      error: 'rejected' | 'conflict' | 'partial' | 'metadata-missing' | 'unknown';
+      message: string;
+    };
 
 export async function applyTx(
   ctx: CoordinatorContext,
@@ -171,6 +176,9 @@ export async function applyTx(
     if (err instanceof ApplyConflict) return { ok: false, error: 'conflict', message: err.message };
     if (err instanceof ApplyPartial) return { ok: false, error: 'partial', message: err.message };
     if (err instanceof ApplyRejected) return { ok: false, error: 'rejected', message: err.message };
+    if (err instanceof StageCMetadataError) {
+      return { ok: false, error: 'metadata-missing', message: err.message };
+    }
     return {
       ok: false,
       error: 'unknown',
@@ -196,11 +204,12 @@ export async function abortTx(
       session: ctx.session,
       restoreConfirmed: opts.restoreConfirmed,
       keepPartial: opts.keepPartial,
-      // The CLI surface accepts a free-form reason; the underlying abort
-      // protocol uses a constrained AbortReason union. Cast through to allow
-      // operator-supplied strings (e.g., 'user-abort'); the abort orchestrator
-      // ultimately defaults to 'user-abort' if undefined.
-      reason: opts.reason as never
+      // The CLI's `--reason` is operator free-form text. It flows into the
+      // protocol's `note` field, NOT the typed `reason` field. The protocol
+      // computes the typed AbortReason internally from state + flags
+      // (defaults to 'user-abort'; promotes to 'apply-failed-partial-*' when
+      // an applied-partial flag is set).
+      ...(opts.reason !== undefined ? { note: opts.reason } : {})
     });
     return { ok: true, aborted: result.aborted, reason: result.reason };
   } catch (err) {

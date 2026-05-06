@@ -116,6 +116,19 @@ export class ApplyPartial extends Error {
   }
 }
 
+/**
+ * Stage C precondition failure: an approved tx reached Stage C without the
+ * `diffSummary` metadata that the tx-applied session record requires. Emitted
+ * to surface the broken finalize/approve invariant rather than silently
+ * marking the tx applied without an audit record.
+ */
+export class StageCMetadataError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StageCMetadataError';
+  }
+}
+
 export async function runStageB(ctx: ApplyContext, plan: PlanEntry[]): Promise<StageBOutcome> {
   return withTxLock(ctx.root, ctx.txId, async () => {
     // B1a defense: tx state must still be 'approved' -- if it changed, scrap
@@ -236,11 +249,17 @@ export async function runStageC(ctx: StageCContext, ghostSnapshotId: string): Pr
       };
     });
     if (!decision) return;
+    // diffSummary is REQUIRED at apply time. The finalize stage (out of scope
+    // of v0.8 Phase 7 but written by future runner integration or tests) must
+    // populate tx.diffSummary before Stage C runs. If it is missing here, fail
+    // the apply rather than producing an applied tx with no audit record.
+    if (!decision.diffSummary) {
+      throw new StageCMetadataError(
+        `tx ${ctx.txId} cannot be applied: diffSummary is missing on the approved tx (finalize stage did not populate it). Refusing to mark applied without a tx-applied session record.`
+      );
+    }
     const present = session.records.some((r) => r.id === decision.recordId);
-    // diffSummary may be undefined if validate/finalize stages (out of scope of
-    // v0.8 Phase 7) didn't compute it. Guard the record append; tests must set
-    // diffSummary explicitly before running Stage C.
-    if (!present && decision.diffSummary) {
+    if (!present) {
       const record: SessionRecord = {
         id: decision.recordId,
         ts: new Date().toISOString(),

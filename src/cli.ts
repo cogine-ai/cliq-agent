@@ -35,6 +35,7 @@ import {
   listTx as coordListTx,
   type CoordinatorContext
 } from './workspace/transactions/coordinator.js';
+import { isValidTxId } from './workspace/transactions/types.js';
 import { promises as fsPromises } from 'node:fs';
 
 const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
@@ -193,6 +194,9 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
       const txId = first !== undefined && !first.startsWith('--') ? first : undefined;
       if (txId !== undefined) {
         rest.shift();
+        if (!isValidTxId(txId)) {
+          throw new Error(`tx status: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
+        }
       }
       if (rest.length > 0) {
         throw new Error(`Unknown tx status argument: ${rest[0]}`);
@@ -222,6 +226,9 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
         throw new Error('tx apply requires <txId>');
       }
       rest.shift();
+      if (!isValidTxId(txId)) {
+        throw new Error(`tx apply: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
+      }
       const overrides = consumeRepeatable(rest, '--override');
       const reason = consumeOption(rest, '--reason');
       if (rest.length > 0) {
@@ -243,6 +250,9 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
         throw new Error('tx abort requires <txId>');
       }
       rest.shift();
+      if (!isValidTxId(txId)) {
+        throw new Error(`tx abort: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
+      }
       const restoreConfirmed = consumeFlag(rest, '--restore-confirmed');
       const keepPartial = consumeFlag(rest, '--keep-partial');
       if (restoreConfirmed && keepPartial) {
@@ -646,50 +656,24 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
   const args: string[] = [];
 
+  // The `--tx`/`--tx-apply` flags are reserved for the runner integration
+  // that wires the overlay writer + auto-open/auto-finalize/auto-apply into
+  // each turn. That integration is deferred to a follow-up release (see
+  // src/workspace/transactions/coordinator.ts header comment). Until then,
+  // accepting these flags silently would let the runner write straight to
+  // the real workspace despite the user opting in to staging. Reject loudly
+  // and point at the working manual surface instead.
+  const TX_FLAGS_NOT_WIRED =
+    '--tx and --tx-apply are not yet wired into the runner; use the manual surface: ' +
+    '`cliq tx open <name>`, `cliq tx list`, `cliq tx status <txId>`, `cliq tx apply <txId>`, `cliq tx abort <txId>`.';
+
   for (let i = 0; i < raw.length; i += 1) {
     const token = raw[i];
-    if (token.startsWith('--tx=')) {
-      const value = token.slice('--tx='.length);
-      if (!value) {
-        throw new Error('Missing value for --tx; expected one of: off, edit');
-      }
-      if (!isTxMode(value)) {
-        throw new Error(`Unknown tx mode: ${value}; expected one of: off, edit`);
-      }
-      txMode = value;
-      continue;
+    if (token === '--tx' || token.startsWith('--tx=')) {
+      throw new Error(TX_FLAGS_NOT_WIRED);
     }
-
-    if (token === '--tx') {
-      const value = readFlagValue(raw, i, '--tx');
-      if (!isTxMode(value)) {
-        throw new Error(`Unknown tx mode: ${value}; expected one of: off, edit`);
-      }
-      txMode = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith('--tx-apply=')) {
-      const value = token.slice('--tx-apply='.length);
-      if (!value) {
-        throw new Error('Missing value for --tx-apply; expected one of: interactive, auto-on-pass, manual-only');
-      }
-      if (!isTxApplyPolicy(value)) {
-        throw new Error(`Unknown tx-apply policy: ${value}; expected one of: interactive, auto-on-pass, manual-only`);
-      }
-      txApply = value;
-      continue;
-    }
-
-    if (token === '--tx-apply') {
-      const value = readFlagValue(raw, i, '--tx-apply');
-      if (!isTxApplyPolicy(value)) {
-        throw new Error(`Unknown tx-apply policy: ${value}; expected one of: interactive, auto-on-pass, manual-only`);
-      }
-      txApply = value;
-      i += 1;
-      continue;
+    if (token === '--tx-apply' || token.startsWith('--tx-apply=')) {
+      throw new Error(TX_FLAGS_NOT_WIRED);
     }
 
     if (token.startsWith('--policy=')) {

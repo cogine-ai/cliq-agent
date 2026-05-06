@@ -464,6 +464,35 @@ test('abortTx happy path: approved → aborted with one tx-aborted record', asyn
   });
 });
 
+test('abortTx threads operator note into meta.note without polluting meta.reason', async () => {
+  await setupHome(async (home) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-ws-'));
+    try {
+      await setupTxWithDiffSummary(home, ws, 'tx_orch_note');
+      const session = await setupSessionForAbort(ws, { activeTxId: 'tx_orch_note' });
+      await abortTx({
+        root: resolveTxRoot(home),
+        txId: 'tx_orch_note',
+        cwd: ws,
+        session,
+        // Free-form operator text, NOT an AbortReason value.
+        note: 'changed my mind, going to redo this differently'
+      });
+      const rec = session.records.find((r) => r.id === abortRecordId('tx_orch_note'));
+      assert.ok(rec && rec.kind === 'tx-aborted');
+      // reason stays in the controlled AbortReason union (defaulted to user-abort)
+      assert.equal((rec as { meta: { reason: string } }).meta.reason, 'user-abort');
+      // operator text lives separately
+      assert.equal(
+        (rec as { meta: { note?: string } }).meta.note,
+        'changed my mind, going to redo this differently'
+      );
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
 test('abortTx from applied-partial with --keep-partial preserves partial files (no ghost restore)', async () => {
   await setupHome(async (home) => {
     const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-ws-'));

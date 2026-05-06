@@ -77,6 +77,10 @@ export type SessionRecord =
         txId: string;
         txKind: 'edit';
         reason: import('../workspace/transactions/types.js').AbortReason;
+        // Operator-supplied free-text from `cliq tx abort --reason "..."`.
+        // Stored separately from the typed `reason` so consumers that switch
+        // on `reason` see only the controlled union.
+        note?: string;
         failedValidators?: string[];
         files: { wouldHaveCreated: string[]; wouldHaveModified: string[]; wouldHaveDeleted: string[] };
         artifactRef: string;

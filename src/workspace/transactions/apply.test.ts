@@ -13,7 +13,8 @@ import {
   applyTx,
   ApplyRejected,
   ApplyConflict,
-  ApplyPartial
+  ApplyPartial,
+  StageCMetadataError
 } from './apply.js';
 import {
   resolveTxRoot,
@@ -438,6 +439,39 @@ test('Stage C Phase C-tx is idempotent: state remains applied, no spurious chang
       assert.equal(tx?.state, 'applied');
       const ap = await readApplyProgress(root, 'tx_c_tx_idem');
       assert.equal(ap?.phase, 'apply-finalized');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('Stage C throws StageCMetadataError when diffSummary is missing on the approved tx', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      // setupApprovedTx (without WithDiffSummary) leaves tx.diffSummary undefined.
+      const root = await setupApprovedTx(home, ws, 'tx_no_diffsummary', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      const a = await runStageA({ root, txId: 'tx_no_diffsummary', cwd: ws });
+      await runStageB({ root, txId: 'tx_no_diffsummary', cwd: ws }, a.plan);
+      const { session } = await setupSessionForApply(ws, { activeTxId: 'tx_no_diffsummary' });
+      await assert.rejects(
+        runStageC({ root, txId: 'tx_no_diffsummary', cwd: ws, session }, a.ghostSnapshotId),
+        StageCMetadataError
+      );
+      // Critical: state must NOT have flipped to applied; activeTxId must stay set.
+      const tx = await readTxStateAgain(root, 'tx_no_diffsummary');
+      assert.notEqual(tx?.state, 'applied');
+      assert.equal(session.activeTxId, 'tx_no_diffsummary');
+      assert.equal(
+        session.records.some((r) => r.id === applyRecordId('tx_no_diffsummary')),
+        false,
+        'no tx-applied record should be appended'
+      );
     } finally {
       await rm(ws, { recursive: true, force: true });
     }
