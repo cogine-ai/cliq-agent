@@ -774,6 +774,53 @@ export async function ensureSession(cwd: string): Promise<Session> {
   });
 }
 
+async function sessionBelongsToWorkspace(session: Session, workspaceRealPath: string) {
+  try {
+    return (await fs.realpath(session.cwd)) === workspaceRealPath;
+  } catch {
+    return false;
+  }
+}
+
+async function sessionPathMatchesCanonical(session: Session, target: string) {
+  const expected = sessionFilePath(session);
+  try {
+    return (await fs.realpath(target)) === (await fs.realpath(expected));
+  } catch {
+    return path.resolve(target) === path.resolve(expected);
+  }
+}
+
+async function loadSessionForWorkspacePath(
+  target: string,
+  workspaceRealPath: string,
+  expectedSessionId?: string
+): Promise<Session | null> {
+  const session = await loadSessionFromPath(target);
+  if (!session) {
+    return null;
+  }
+  if (expectedSessionId && session.id !== expectedSessionId) {
+    return null;
+  }
+  if (!(await sessionBelongsToWorkspace(session, workspaceRealPath))) {
+    return null;
+  }
+  if (!(await sessionPathMatchesCanonical(session, target))) {
+    return null;
+  }
+  return session;
+}
+
+export async function loadActiveSession(cwd: string): Promise<Session | null> {
+  const state = await loadWorkspaceState(cwd);
+  if (!state.activeSessionPath) {
+    return null;
+  }
+
+  return await loadSessionForWorkspacePath(state.activeSessionPath, state.workspaceRealPath, state.activeSessionId);
+}
+
 export async function loadSessionById(cwd: string, sessionId: string): Promise<Session | null> {
   const state = await loadWorkspaceState(cwd);
   const match = state.recentSessions.find((entry) => entry.id === sessionId);
@@ -781,8 +828,7 @@ export async function loadSessionById(cwd: string, sessionId: string): Promise<S
     return null;
   }
 
-  const session = await loadSessionFromPath(match.path);
-  return session?.id === sessionId ? session : null;
+  return await loadSessionForWorkspacePath(match.path, state.workspaceRealPath, sessionId);
 }
 
 export async function ensureFresh(cwd: string): Promise<Session> {

@@ -1,13 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { exportHandoff } from '../handoff/export.js';
 import { createCheckpoint } from '../session/checkpoints.js';
 import { createCompaction } from '../session/compaction.js';
-import { createSession, ensureSession, saveSession } from '../session/store.js';
+import {
+  createSession,
+  ensureSession,
+  saveSession,
+  sessionFilePath,
+  workspaceStatePath
+} from '../session/store.js';
 import { getArtifactView, getArtifactViewForRequest, getSessionView, toSessionView } from './artifacts.js';
 
 const previousHome = process.env.CLIQ_HOME;
@@ -146,6 +152,49 @@ test('getSessionView rejects unknown session ids without creating raw file contr
   await assert.rejects(
     async () => await getSessionView(cwd, 'sess_missing'),
     /session not found: sess_missing/
+  );
+});
+
+test('getSessionView does not create storage state when no active session exists', async () => {
+  const { home, cwd } = await setupWorkspace();
+
+  await assert.rejects(async () => await getSessionView(cwd), /session not found: active/);
+
+  const homeEntries = (await readdir(home)).filter((entry) => !entry.startsWith('.'));
+  assert.deepEqual(homeEntries, []);
+});
+
+test('getSessionView rejects explicit ids whose stored path belongs to another workspace', async () => {
+  const { cwd: workspaceA } = await setupWorkspace();
+  const workspaceB = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-artifacts-other-workspace-'));
+  cleanupDirs.push(workspaceB);
+
+  await ensureSession(workspaceA);
+  const sessionB = await ensureSession(workspaceB);
+  const statePathA = await workspaceStatePath(workspaceA);
+  const stateA = JSON.parse(await readFile(statePathA, 'utf8')) as {
+    recentSessions: Array<{
+      id: string;
+      path: string;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+  };
+
+  stateA.recentSessions = [
+    {
+      id: sessionB.id,
+      path: sessionFilePath(sessionB),
+      createdAt: sessionB.createdAt,
+      updatedAt: sessionB.updatedAt
+    },
+    ...stateA.recentSessions.filter((entry) => entry.id !== sessionB.id)
+  ];
+  await writeFile(statePathA, JSON.stringify(stateA, null, 2), 'utf8');
+
+  await assert.rejects(
+    async () => await getSessionView(workspaceA, sessionB.id),
+    (error: unknown) => error instanceof Error && error.message === `session not found: ${sessionB.id}`
   );
 });
 
