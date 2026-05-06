@@ -520,13 +520,19 @@ STAGE A — preflight (tx-store lock only)
 
 STAGE B — write (tx-store lock only, re-acquired)
   B1. acquire tx-store lock
-  B1a. RE-VERIFY state under tx-store lock:
+  B1a. RE-VERIFY state under tx-store lock (defense-in-depth):
        - read tx state.json. If state !== 'approved', release lock and
-         transition apply-progress to a recovery-required marker; this
-         shouldn't happen because A6's release window only allows another
-         apply attempt (rejected by re-acquiring its own A1a) or recovery
-         (which honours apply-progress), never an abort (rejected by AB3a
-         when apply-progress is non-terminal). Defense in depth.
+         exit Stage B with an internal error. Leave apply-progress.json
+         in its current `apply-pending` phase; the leftover progress
+         file is then handled by startup recovery's apply-pending rule
+         (Section 16.4.1: revert tx state to `approved`, discard
+         apply-progress.json). No phase invention is needed here.
+       - This branch should never execute under the locking scheme:
+         A1a rejects a concurrent second apply (which would otherwise
+         flip apply-progress underneath us), and AB3a rejects abort
+         while apply-progress is in any in-flight phase. B1a exists to
+         catch implementation bugs or unforeseen races and fail safely
+         rather than write into an unexpected state.
   B2. transition phase: 'apply-pending' → 'apply-writing'
   B3. for each entry in the recorded plan:
         a. re-verify the real file fingerprint matches the planned fingerprint
@@ -1125,7 +1131,7 @@ workspace state lock > session lock > tx-store lock
 |---|---|---|
 | workspace state lock (existing) | Phase 3 callers; tx does not acquire this | `workspaces/<workspaceId>/state.json` |
 | session lock (existing) | runner during a turn; tx-coordinator during apply Stage C (session record append) | `sessions/.../<sessionId>.json` |
-| tx-store lock (new) | tx state transitions; apply Stages A and B; held briefly inside Stage C after the session lock | `tx/<txId>/state.json`, `tx/<txId>/apply-progress.json` |
+| tx-store lock (new) | tx state transitions; apply Stages A and B; held briefly inside Stage C after the session lock; abort Stages AB2..AB8 | `tx/<txId>/state.json`, `tx/<txId>/apply-progress.json`, `tx/<txId>/abort-progress.json` |
 
 The tx-store lock is per-tx (keyed on `txId`), not global. Different tx never contend with each other.
 
