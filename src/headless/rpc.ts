@@ -25,6 +25,11 @@ type JsonRpcRequest = {
   params?: unknown;
 };
 
+type JsonRpcResponder = {
+  result: (result: unknown) => void;
+  error: (code: number, message: string) => void;
+};
+
 type RunHeadless = (
   request: HeadlessRunRequest,
   options: HeadlessRunOptions
@@ -208,6 +213,24 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
     write({ jsonrpc: JSON_RPC_VERSION, id, error: { code, message } });
   };
 
+  const createResponder = (request: JsonRpcRequest): JsonRpcResponder => {
+    const isNotification = !Object.hasOwn(request, 'id');
+    const id = request.id ?? null;
+
+    return {
+      result(result: unknown) {
+        if (!isNotification) {
+          writeResult(id, result);
+        }
+      },
+      error(code: number, message: string) {
+        if (!isNotification) {
+          writeError(id, code, message);
+        }
+      }
+    };
+  };
+
   const writeEvent = (event: RuntimeEventEnvelope) => {
     write({ jsonrpc: JSON_RPC_VERSION, method: 'run.event', params: event });
   };
@@ -250,13 +273,13 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
     });
   };
 
-  const startRun = (id: JsonRpcId, params: unknown) => {
+  const startRun = (responder: JsonRpcResponder, params: unknown) => {
     if (!isObject(params)) {
-      writeError(id, INVALID_PARAMS, 'run.start params must be an object');
+      responder.error(INVALID_PARAMS, 'run.start params must be an object');
       return;
     }
     if (activeRun) {
-      writeError(id, ACTIVE_RUN_ERROR, 'an active run is already in progress');
+      responder.error(ACTIVE_RUN_ERROR, 'an active run is already in progress');
       return;
     }
 
@@ -287,60 +310,60 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
       promise: runPromise
     };
 
-    writeResult(id, { runId });
+    responder.result({ runId });
   };
 
-  const cancelRun = (id: JsonRpcId, params: unknown) => {
+  const cancelRun = (responder: JsonRpcResponder, params: unknown) => {
     if (!isObject(params) || typeof params.runId !== 'string') {
-      writeError(id, INVALID_PARAMS, 'run.cancel params must include runId');
+      responder.error(INVALID_PARAMS, 'run.cancel params must include runId');
       return;
     }
 
     const { runId } = params;
     if (activeRun?.runId === runId) {
       activeRun.controller.abort();
-      writeResult(id, { status: 'cancelled' });
+      responder.result({ status: 'cancelled' });
       return;
     }
 
     if (finishedRunIds.has(runId)) {
-      writeResult(id, { status: 'already-finished' });
+      responder.result({ status: 'already-finished' });
       return;
     }
 
-    writeResult(id, { status: 'not-found' });
+    responder.result({ status: 'not-found' });
   };
 
-  const handleSessionGet = async (id: JsonRpcId, params: unknown) => {
+  const handleSessionGet = async (responder: JsonRpcResponder, params: unknown) => {
     const parsed = asSessionGetParams(params);
     if (!parsed) {
-      writeError(id, INVALID_PARAMS, 'session.get params must include cwd and optional sessionId');
+      responder.error(INVALID_PARAMS, 'session.get params must include cwd and optional sessionId');
       return;
     }
 
     try {
-      writeResult(id, await getSessionView(parsed.cwd, parsed.sessionId));
+      responder.result(await getSessionView(parsed.cwd, parsed.sessionId));
     } catch (error) {
       if (isNotFoundError(error)) {
-        writeError(id, NOT_FOUND_ERROR, errorMessage(error));
+        responder.error(NOT_FOUND_ERROR, errorMessage(error));
         return;
       }
       throw error;
     }
   };
 
-  const handleArtifactGet = async (id: JsonRpcId, params: unknown) => {
+  const handleArtifactGet = async (responder: JsonRpcResponder, params: unknown) => {
     const parsed = asArtifactGetParams(params);
     if (!parsed) {
-      writeError(id, INVALID_PARAMS, 'artifact.get params must include cwd, artifactId, and optional sessionId');
+      responder.error(INVALID_PARAMS, 'artifact.get params must include cwd, artifactId, and optional sessionId');
       return;
     }
 
     try {
-      writeResult(id, await getArtifactView(parsed.cwd, parsed.artifactId, parsed.sessionId));
+      responder.result(await getArtifactView(parsed.cwd, parsed.artifactId, parsed.sessionId));
     } catch (error) {
       if (isNotFoundError(error)) {
-        writeError(id, NOT_FOUND_ERROR, errorMessage(error));
+        responder.error(NOT_FOUND_ERROR, errorMessage(error));
         return;
       }
       throw error;
@@ -348,23 +371,23 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
   };
 
   const dispatch = async (request: JsonRpcRequest) => {
-    const id = request.id ?? null;
+    const responder = createResponder(request);
 
     switch (request.method) {
       case 'run.start':
-        startRun(id, request.params);
+        startRun(responder, request.params);
         return;
       case 'run.cancel':
-        cancelRun(id, request.params);
+        cancelRun(responder, request.params);
         return;
       case 'session.get':
-        await handleSessionGet(id, request.params);
+        await handleSessionGet(responder, request.params);
         return;
       case 'artifact.get':
-        await handleArtifactGet(id, request.params);
+        await handleArtifactGet(responder, request.params);
         return;
       default:
-        writeError(id, METHOD_NOT_FOUND, `method not found: ${request.method}`);
+        responder.error(METHOD_NOT_FOUND, `method not found: ${request.method}`);
     }
   };
 
@@ -382,7 +405,7 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
         return;
       }
 
-      if (!isJsonRpcRequest(parsed) || !Object.hasOwn(parsed, 'id')) {
+      if (!isJsonRpcRequest(parsed)) {
         writeError(requestId(parsed), INVALID_REQUEST, 'invalid request');
         return;
       }
@@ -390,7 +413,7 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
       try {
         await dispatch(parsed);
       } catch {
-        writeError(parsed.id ?? null, INTERNAL_ERROR, 'internal error');
+        createResponder(parsed).error(INTERNAL_ERROR, 'internal error');
       }
     },
 

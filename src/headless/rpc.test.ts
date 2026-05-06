@@ -374,7 +374,7 @@ test('rpc async write failures abort the active run and close future writes', as
   assert.deepEqual(parseLines(writes), [{ jsonrpc: '2.0', id: 1, result: { runId: 'run_rpc_async_write_0' } }]);
 });
 
-test('rpc rejects notifications because request ids are required', async () => {
+test('rpc accepts notifications without writing request responses', async () => {
   const writes: string[] = [];
   const server = createRpcServer({
     writeLine(line) {
@@ -385,11 +385,52 @@ test('rpc rejects notifications because request ids are required', async () => {
   await server.handleLine(
     JSON.stringify({ jsonrpc: '2.0', method: 'run.cancel', params: { runId: 'run_missing' } })
   );
+  await server.handleLine(JSON.stringify({ jsonrpc: '2.0', method: 'missing.method' }));
 
-  const [response] = parseLines(writes);
-  assert.equal(response.jsonrpc, '2.0');
-  assert.equal(response.id, null);
-  assert.equal(response.error.code, -32600);
+  assert.deepEqual(writes, []);
+});
+
+test('rpc run.start notifications start a run and emit run events without result responses', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    },
+    makeRunId: () => 'run_rpc_notification',
+    async runHeadless(request: HeadlessRunRequest, options) {
+      const event: RuntimeEventEnvelope = {
+        schemaVersion: 1,
+        eventId: 'evt_rpc_notification',
+        runId: options.runId!,
+        timestamp: '2026-05-06T00:00:00.000Z',
+        type: 'run-start',
+        payload: {
+          cwd: request.cwd,
+          policy: request.policy ?? 'auto',
+          model: { provider: 'ollama', model: 'fake' }
+        }
+      };
+      await options.onEvent?.(event);
+      return completedOutput(options.runId!);
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'run.start',
+      params: { cwd: process.cwd(), prompt: 'hello notification' }
+    })
+  );
+  await server.waitForIdle();
+
+  const messages = parseLines(writes);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].jsonrpc, '2.0');
+  assert.equal(messages[0].method, 'run.event');
+  assert.equal(messages[0].params.runId, 'run_rpc_notification');
+  assert.equal(messages[0].params.type, 'run-start');
+  assert.equal(Object.hasOwn(messages[0], 'id'), false);
 });
 
 test('rpc session.get returns a stable session view', async () => {
