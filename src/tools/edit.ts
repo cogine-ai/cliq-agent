@@ -1,5 +1,4 @@
-import { promises as fs } from 'node:fs';
-
+import { createPassthroughWriter, type WorkspaceWriter } from '../runtime/workspace-writer.js';
 import type { EditModelAction, ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspacePath, WORKSPACE_PATH_ERROR } from './path.js';
 
@@ -10,10 +9,9 @@ export const editTool: ToolDefinition<EditModelAction> = {
     return typeof (action as { edit?: unknown }).edit === 'object' && !!(action as { edit?: unknown }).edit;
   },
   async execute(action, context): Promise<ToolResult> {
-    let targetRealPath: string;
     let relativePath: string;
     try {
-      ({ targetRealPath, relativePath } = await resolveWorkspacePath(context.cwd, action.edit.path));
+      ({ relativePath } = await resolveWorkspacePath(context.cwd, action.edit.path));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const displayError =
@@ -29,22 +27,10 @@ export const editTool: ToolDefinition<EditModelAction> = {
       };
     }
 
+    const writer: WorkspaceWriter = context.writer ?? createPassthroughWriter(context.cwd);
     try {
-      const current = await fs.readFile(targetRealPath, 'utf8');
-      const matches = current.split(action.edit.old_text).length - 1;
-      if (matches !== 1) {
-        const error = `expected old_text to match exactly once, but matched ${matches} times`;
-        const meta: ToolResult['meta'] = { path: relativePath, matches, error };
-        return {
-          tool: 'edit',
-          status: 'error',
-          meta,
-          content: `TOOL_RESULT edit ERROR\npath=${relativePath}\n${error}`
-        };
-      }
-
+      await writer.replaceText(relativePath, action.edit.old_text, action.edit.new_text);
       const meta: ToolResult['meta'] = { path: relativePath };
-      await fs.writeFile(targetRealPath, current.replace(action.edit.old_text, action.edit.new_text), 'utf8');
       return {
         tool: 'edit',
         status: 'ok',
@@ -53,7 +39,10 @@ export const editTool: ToolDefinition<EditModelAction> = {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const meta: ToolResult['meta'] = { path: relativePath, error: message };
+      const matchesMatch = /matched (\d+) times/.exec(message);
+      const meta: ToolResult['meta'] = matchesMatch
+        ? { path: relativePath, matches: Number(matchesMatch[1]), error: message }
+        : { path: relativePath, error: message };
       return {
         tool: 'edit',
         status: 'error',

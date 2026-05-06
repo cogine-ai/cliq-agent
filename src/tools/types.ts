@@ -1,5 +1,6 @@
 import type { EditAction, ModelAction } from '../protocol/actions.js';
 import type { ToolAccess } from '../policy/types.js';
+import type { WorkspaceWriter } from '../runtime/workspace-writer.js';
 import type { Session } from '../session/types.js';
 
 export type ToolStatus = 'ok' | 'error';
@@ -15,6 +16,7 @@ export type ToolContext = {
   cwd: string;
   session: Session;
   signal?: AbortSignal;
+  writer?: WorkspaceWriter;
 };
 
 export type ToolDefinition<TAction extends ModelAction = ModelAction> = {
