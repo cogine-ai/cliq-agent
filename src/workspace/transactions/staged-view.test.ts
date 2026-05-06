@@ -4,7 +4,7 @@ import { mkdtemp, rm, mkdir, writeFile, readFile, lstat, readlink, chmod } from 
 import os from 'node:os';
 import path from 'node:path';
 
-import { materializeStagedView } from './staged-view.js';
+import { cleanupStagedView, materializeStagedView } from './staged-view.js';
 
 test('materializeStagedView symlinks bindPaths and copies other files', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-bind-cwd-'));
@@ -147,4 +147,38 @@ test('materializeStagedView writes do not propagate to cwd', async () => {
     await rm(overlay, { recursive: true, force: true });
     await rm(target, { recursive: true, force: true });
   }
+});
+
+test('cleanupStagedView removes the target tree without following symlinks', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-clean-cwd-'));
+  const overlay = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-clean-ov-'));
+  const target = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-clean-tg-'));
+  try {
+    await mkdir(path.join(cwd, 'node_modules', 'foo'), { recursive: true });
+    await writeFile(path.join(cwd, 'node_modules', 'foo', 'idx.js'), 'dep', 'utf8');
+    await materializeStagedView({
+      cwd,
+      overlayRoot: overlay,
+      target,
+      bindPaths: ['node_modules'],
+      copyMode: 'copy'
+    });
+
+    await cleanupStagedView(target);
+
+    // target gone
+    await assert.rejects(() => lstat(target));
+    // cwd/node_modules untouched (symlink would have been followed if not unlinked)
+    assert.equal(await readFile(path.join(cwd, 'node_modules', 'foo', 'idx.js'), 'utf8'), 'dep');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(overlay, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
+test('cleanupStagedView is idempotent on missing target', async () => {
+  const target = path.join(os.tmpdir(), `cliq-sv-clean-missing-${process.pid}-${Date.now()}`);
+  // Should not throw on missing path
+  await cleanupStagedView(target);
 });

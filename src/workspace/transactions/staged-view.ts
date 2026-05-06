@@ -85,6 +85,10 @@ async function walkOverlay(overlayRoot: string, target: string): Promise<void> {
   }
 }
 
+export async function cleanupStagedView(target: string): Promise<void> {
+  await fs.rm(target, { recursive: true, force: true });
+}
+
 async function materializeFile(src: string, dst: string, mode: TxCopyMode): Promise<CopyResult> {
   if (mode === 'copy') {
     await fs.copyFile(src, dst);
