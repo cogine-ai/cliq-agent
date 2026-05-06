@@ -215,6 +215,20 @@ test('parseWorkspaceConfig rejects non-object transactions block', () => {
   );
 });
 
+test('parseWorkspaceConfig rejects null transactions block', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ transactions: null }),
+    /transactions must be an object/
+  );
+});
+
+test('parseWorkspaceConfig rejects array transactions block', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ transactions: [] }),
+    /transactions must be an object/
+  );
+});
+
 test('parseWorkspaceConfig rejects validators.shell entry with non-string name', () => {
   assert.throws(
     () => parseWorkspaceConfig({

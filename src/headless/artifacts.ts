@@ -102,15 +102,39 @@ export function toSessionRecordView(record: SessionRecord): SessionRecordView {
     case 'assistant':
       return actionType(record);
     case 'tx-opened':
+      return {
+        id: record.id,
+        ts: record.ts,
+        kind: 'tx-opened',
+        role: 'user',
+        txId: record.meta.txId,
+        ...(record.meta.name ? { name: record.meta.name } : {}),
+        explicit: true
+      };
     case 'tx-applied':
+      return {
+        id: record.id,
+        ts: record.ts,
+        kind: 'tx-applied',
+        role: 'user',
+        txId: record.meta.txId,
+        diffSummary: record.meta.diffSummary,
+        validators: record.meta.validators,
+        overrides: record.meta.overrides,
+        artifactRef: record.meta.artifactRef,
+        ...(record.meta.ghostSnapshotId ? { ghostSnapshotId: record.meta.ghostSnapshotId } : {})
+      };
     case 'tx-aborted':
       return {
         id: record.id,
         ts: record.ts,
-        kind: record.kind,
+        kind: 'tx-aborted',
         role: 'user',
-        text: record.content,
-        txId: record.meta.txId
+        txId: record.meta.txId,
+        reason: record.meta.reason,
+        ...(record.meta.failedValidators ? { failedValidators: record.meta.failedValidators } : {}),
+        artifactRef: record.meta.artifactRef,
+        ...(record.meta.appliedPartial ? { appliedPartial: record.meta.appliedPartial } : {})
       };
   }
 }

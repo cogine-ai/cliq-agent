@@ -168,11 +168,11 @@ function readAutoCompactConfig(record: Record<string, unknown>): AutoCompactConf
 }
 
 export function parseTransactions(input: unknown): TxConfig | undefined {
-  if (input === undefined || input === null) {
+  if (input === undefined) {
     return undefined;
   }
 
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error('transactions must be an object');
   }
 
