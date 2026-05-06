@@ -1,18 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
-import { scanForRecovery } from './recovery.js';
+import { recoverApply, scanForRecovery } from './recovery.js';
 import {
   resolveTxRoot,
   createTx,
   writeTxState,
+  readTxState,
   writeApplyProgress,
+  readApplyProgress,
   writeAbortProgress
 } from './store.js';
-import type { TxState } from './types.js';
+import { applyRecordId, type TxState } from './types.js';
+import { createSession, mutateSession } from '../../session/store.js';
+
+const execFileAsync = promisify(execFile);
 
 async function withFakeHome<T>(fn: (root: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-recovery-'));
@@ -158,5 +165,225 @@ test('scanForRecovery ignores entries that are not tx_-prefixed directories', as
     const actions = await scanForRecovery(root);
     assert.equal(actions.length, 1);
     assert.equal(actions[0].txId, 'tx_real');
+  });
+});
+
+// -- Task 37: recoverApply rules ----------------------------------------------
+
+async function setupGitWs(): Promise<string> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-ws-'));
+  await execFileAsync('git', ['init', '-b', 'main'], { cwd: dir });
+  await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+  await execFileAsync('git', ['config', 'user.name', 't'], { cwd: dir });
+  return dir;
+}
+
+async function setupHomeWithEnv<T>(
+  fn: (root: string, home: string) => Promise<T>
+): Promise<T> {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-home-'));
+  const prev = process.env.CLIQ_HOME;
+  process.env.CLIQ_HOME = home;
+  try {
+    return await fn(resolveTxRoot(home), home);
+  } finally {
+    if (prev === undefined) delete process.env.CLIQ_HOME;
+    else process.env.CLIQ_HOME = prev;
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
+test('recover apply-pending with state=approved: revert to approved (delete apply-progress)', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-ws-pending-'));
+    try {
+      await makeTx(root, 'tx_pending', 'approved');
+      await writeApplyProgress(root, 'tx_pending', {
+        phase: 'apply-pending',
+        ghostSnapshotId: 'snap',
+        startedAt: 'x',
+        filesPlanned: ['a.txt'],
+        filesWritten: []
+      });
+      const session = createSession(ws);
+      const action = {
+        txId: 'tx_pending',
+        tx: (await readTxState(root, 'tx_pending'))!,
+        kind: 'apply' as const,
+        phase: 'apply-pending' as const,
+        progress: (await readApplyProgress(root, 'tx_pending'))!
+      };
+      const outcome = await recoverApply(root, action, { cwd: ws, session });
+      assert.equal(outcome.action, 'apply-pending-reverted');
+      assert.equal(await readApplyProgress(root, 'tx_pending'), null);
+      const tx = await readTxState(root, 'tx_pending');
+      assert.equal(tx?.state, 'approved');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('recover apply-pending with state!=approved: discard orphan, leave state, emit warning', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-ws-orphan-'));
+    try {
+      await makeTx(root, 'tx_orphan', 'aborted');
+      await writeApplyProgress(root, 'tx_orphan', {
+        phase: 'apply-pending',
+        ghostSnapshotId: 'snap',
+        startedAt: 'x',
+        filesPlanned: ['a.txt'],
+        filesWritten: []
+      });
+      const session = createSession(ws);
+      const action = {
+        txId: 'tx_orphan',
+        tx: (await readTxState(root, 'tx_orphan'))!,
+        kind: 'apply' as const,
+        phase: 'apply-pending' as const,
+        progress: (await readApplyProgress(root, 'tx_orphan'))!
+      };
+      const outcome = await recoverApply(root, action, { cwd: ws, session });
+      assert.equal(outcome.action, 'apply-pending-orphan-discarded');
+      assert.match(outcome.warning ?? '', /orphan/);
+      assert.equal(await readApplyProgress(root, 'tx_orphan'), null);
+      const tx = await readTxState(root, 'tx_orphan');
+      assert.equal(tx?.state, 'aborted'); // unchanged
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('recover apply-writing: state→applied-partial, progress→apply-failed-partial, warning emitted', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-ws-writing-'));
+    try {
+      await makeTx(root, 'tx_writing', 'approved');
+      await writeApplyProgress(root, 'tx_writing', {
+        phase: 'apply-writing',
+        ghostSnapshotId: 'snap',
+        startedAt: 'x',
+        filesPlanned: ['a.txt', 'b.txt'],
+        filesWritten: ['a.txt']
+      });
+      const session = createSession(ws);
+      const action = {
+        txId: 'tx_writing',
+        tx: (await readTxState(root, 'tx_writing'))!,
+        kind: 'apply' as const,
+        phase: 'apply-writing' as const,
+        progress: (await readApplyProgress(root, 'tx_writing'))!
+      };
+      const outcome = await recoverApply(root, action, { cwd: ws, session });
+      assert.equal(outcome.action, 'apply-writing-partial');
+      assert.match(outcome.warning ?? '', /a\.txt/);
+      const tx = await readTxState(root, 'tx_writing');
+      assert.equal(tx?.state, 'applied-partial');
+      const ap = await readApplyProgress(root, 'tx_writing');
+      assert.equal(ap?.phase, 'apply-failed-partial');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('recover apply-finalized: state transitions to applied (idempotent)', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-ws-final-'));
+    try {
+      await makeTx(root, 'tx_final', 'approved');
+      await writeApplyProgress(root, 'tx_final', {
+        phase: 'apply-finalized',
+        ghostSnapshotId: 'snap_y',
+        startedAt: 'x',
+        filesPlanned: ['a.txt'],
+        filesWritten: ['a.txt']
+      });
+      const session = createSession(ws);
+      const action = {
+        txId: 'tx_final',
+        tx: (await readTxState(root, 'tx_final'))!,
+        kind: 'apply' as const,
+        phase: 'apply-finalized' as const,
+        progress: (await readApplyProgress(root, 'tx_final'))!
+      };
+      const outcome = await recoverApply(root, action, { cwd: ws, session });
+      assert.equal(outcome.action, 'apply-finalized-state');
+      const tx = await readTxState(root, 'tx_final');
+      assert.equal(tx?.state, 'applied');
+      assert.equal(tx?.ghostSnapshotId, 'snap_y');
+      // Re-run: idempotent
+      const outcome2 = await recoverApply(root, action, { cwd: ws, session });
+      assert.equal(outcome2.action, 'apply-finalized-state');
+      const tx2 = await readTxState(root, 'tx_final');
+      assert.equal(tx2?.state, 'applied');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('recover apply-committed: invokes Stage C (idempotent)', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await setupGitWs();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      // Build tx with diffSummary so Stage C can write the record.
+      const tx = await createTx(root, {
+        id: 'tx_committed',
+        kind: 'edit',
+        workspaceId: 'w',
+        sessionId: 's',
+        workspaceRealPath: ws
+      });
+      await writeTxState(root, {
+        ...tx,
+        state: 'approved',
+        diffSummary: {
+          filesChanged: 1,
+          additions: 0,
+          deletions: 0,
+          creates: [],
+          modifies: ['a.txt'],
+          deletes: []
+        }
+      });
+      await writeApplyProgress(root, 'tx_committed', {
+        phase: 'apply-committed',
+        ghostSnapshotId: 'snap_z',
+        startedAt: 'x',
+        filesPlanned: ['a.txt'],
+        filesWritten: ['a.txt']
+      });
+      const session = createSession(ws);
+      await mutateSession(ws, session, (s) => {
+        s.activeTxId = 'tx_committed';
+      });
+      const action = {
+        txId: 'tx_committed',
+        tx: (await readTxState(root, 'tx_committed'))!,
+        kind: 'apply' as const,
+        phase: 'apply-committed' as const,
+        progress: (await readApplyProgress(root, 'tx_committed'))!
+      };
+      const outcome = await recoverApply(root, action, { cwd: ws, session });
+      assert.equal(outcome.action, 'apply-committed-stage-c');
+      const txAfter = await readTxState(root, 'tx_committed');
+      assert.equal(txAfter?.state, 'applied');
+      const ap = await readApplyProgress(root, 'tx_committed');
+      assert.equal(ap?.phase, 'apply-finalized');
+      assert.equal(session.activeTxId, undefined);
+      // Verify record present
+      const rec = session.records.find(
+        (r) => r.id === applyRecordId('tx_committed')
+      );
+      assert.ok(rec);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
   });
 });
