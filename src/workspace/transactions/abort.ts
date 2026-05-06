@@ -9,6 +9,7 @@ import {
 import type { Transaction, AbortReason } from './types.js';
 import { abortRecordId } from './types.js';
 import { mutateSession } from '../../session/store.js';
+import { restoreWorkspaceCheckpoint } from '../../session/checkpoints.js';
 import type { Session, SessionRecord } from '../../session/types.js';
 
 export type AbortContext = {
@@ -248,4 +249,38 @@ export async function runAbortWritePhase(
       await writeTxState(ctx.root, { ...tx, state: 'aborted' });
     }
   });
+}
+
+export type AbortTxResult = {
+  aborted: boolean;
+  reason?: AbortReason;
+};
+
+/**
+ * Top-level abort orchestrator. Composes decideAbort + (optional) workspace
+ * restoration + runAbortWritePhase.
+ *
+ * Restoration semantics: when decision.reason === 'apply-failed-partial-restored',
+ * the workspace MUST be restored from the ghost snapshot BEFORE the write phase
+ * begins. If restoration throws, the error propagates and session/tx state are
+ * NOT mutated — the user can retry.
+ *
+ * Idempotency: when decideAbort returns null (already fully aborted), this
+ * returns { aborted: false } without doing any writes.
+ */
+export async function abortTx(ctx: AbortContext): Promise<AbortTxResult> {
+  const decision = await decideAbort(ctx);
+  if (!decision) {
+    return { aborted: false };
+  }
+  if (decision.reason === 'apply-failed-partial-restored') {
+    if (!decision.ghostSnapshotId) {
+      throw new AbortRejected('ghost snapshot id missing — cannot restore partial apply');
+    }
+    // Restore BEFORE the write phase. If this throws, propagate and leave
+    // session/tx unchanged so the user can retry.
+    await restoreWorkspaceCheckpoint(ctx.cwd, decision.ghostSnapshotId);
+  }
+  await runAbortWritePhase(ctx, decision);
+  return { aborted: true, reason: decision.reason };
 }

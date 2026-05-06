@@ -1,15 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import {
   decideAbort,
   runAbortWritePhase,
+  abortTx,
   AbortRejected,
   type AbortContext
 } from './abort.js';
+import { createCheckpoint } from '../../session/checkpoints.js';
+
+const execFileAsync = promisify(execFile);
 import {
   resolveTxRoot,
   createTx,
@@ -417,6 +423,115 @@ test('AB6/AB7 transitions are idempotent: rerunning yields same state', async ()
       assert.equal(progress?.phase, 'aborted');
       const rec = session.records.filter((r) => r.id === abortRecordId('tx_idem'));
       assert.equal(rec.length, 1, 'idempotent rerun must not duplicate the record');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- Task 35: top-level abortTx orchestrator tests ---
+
+async function setupGitWorkspace(): Promise<string> {
+  const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-git-'));
+  await execFileAsync('git', ['init', '-b', 'main'], { cwd: ws });
+  await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: ws });
+  await execFileAsync('git', ['config', 'user.name', 't'], { cwd: ws });
+  return ws;
+}
+
+test('abortTx happy path: approved → aborted with one tx-aborted record', async () => {
+  await setupHome(async (home) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-ws-'));
+    try {
+      await setupTxWithDiffSummary(home, ws, 'tx_orch_happy');
+      const session = await setupSessionForAbort(ws, { activeTxId: 'tx_orch_happy' });
+      const result = await abortTx({
+        root: resolveTxRoot(home),
+        txId: 'tx_orch_happy',
+        cwd: ws,
+        session,
+        reason: 'user-abort'
+      });
+      assert.equal(result.aborted, true);
+      assert.equal(result.reason, 'user-abort');
+      const tx = await readTxState(resolveTxRoot(home), 'tx_orch_happy');
+      assert.equal(tx?.state, 'aborted');
+      const recs = session.records.filter((r) => r.id === abortRecordId('tx_orch_happy'));
+      assert.equal(recs.length, 1);
+      assert.equal(session.activeTxId, undefined);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('abortTx from applied-partial with --keep-partial preserves partial files (no ghost restore)', async () => {
+  await setupHome(async (home) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-ws-'));
+    try {
+      // Set up workspace with the "applied-partial" file content already on disk.
+      await writeFile(path.join(ws, 'a.txt'), 'PARTIAL', 'utf8');
+      await setupTxWithDiffSummary(home, ws, 'tx_orch_keep', 'applied-partial');
+      await writeApplyProgress(resolveTxRoot(home), 'tx_orch_keep', {
+        phase: 'apply-failed-partial',
+        ghostSnapshotId: 'snap_x',
+        startedAt: 'x',
+        filesPlanned: ['a.txt'],
+        filesWritten: ['a.txt']
+      });
+      const session = await setupSessionForAbort(ws);
+      const result = await abortTx({
+        root: resolveTxRoot(home),
+        txId: 'tx_orch_keep',
+        cwd: ws,
+        session,
+        keepPartial: true
+      });
+      assert.equal(result.aborted, true);
+      assert.equal(result.reason, 'apply-failed-partial-kept');
+      // The file content must be unchanged (we said "keep partial"; no ghost restore).
+      assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'PARTIAL');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('abortTx with --restore-confirmed restores files from ghost snapshot', async () => {
+  await setupHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      // Create a workspace checkpoint that persists the artifact so it can be
+      // restored later. createApplyPreSnapshot doesn't persist on its own, so
+      // we use createCheckpoint here to get a fully restorable ghost snapshot.
+      const sessionForCk = await setupSessionForAbort(ws);
+      const ck = await createCheckpoint(ws, sessionForCk, { kind: 'manual' });
+      const ghostId = ck.workspaceCheckpointId!;
+      // Now mutate the file to simulate "partial apply".
+      await writeFile(path.join(ws, 'a.txt'), 'PARTIAL_BAD', 'utf8');
+      await setupTxWithDiffSummary(home, ws, 'tx_orch_restore', 'applied-partial');
+      await writeApplyProgress(resolveTxRoot(home), 'tx_orch_restore', {
+        phase: 'apply-failed-partial',
+        ghostSnapshotId: ghostId,
+        startedAt: 'x',
+        filesPlanned: ['a.txt'],
+        filesWritten: ['a.txt']
+      });
+      const session = await setupSessionForAbort(ws);
+      const result = await abortTx({
+        root: resolveTxRoot(home),
+        txId: 'tx_orch_restore',
+        cwd: ws,
+        session,
+        restoreConfirmed: true
+      });
+      assert.equal(result.aborted, true);
+      assert.equal(result.reason, 'apply-failed-partial-restored');
+      // The file should be restored to 'one' from the ghost snapshot.
+      assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'one');
     } finally {
       await rm(ws, { recursive: true, force: true });
     }
