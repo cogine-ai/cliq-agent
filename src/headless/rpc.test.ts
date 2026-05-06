@@ -482,3 +482,85 @@ test('rpc query methods map missing artifacts to application errors', async () =
   assert.equal(response.error.code, -32004);
   assert.match(response.error.message, /artifact not found/);
 });
+
+test('rpc query methods reject empty identifiers as invalid params', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine: (line) => {
+      writes.push(line);
+    },
+    async getSessionView() {
+      throw new Error('query provider should not run');
+    },
+    async getArtifactView() {
+      throw new Error('query provider should not run');
+    }
+  });
+
+  const requests = [
+    { method: 'session.get', params: { cwd: '' } },
+    { method: 'session.get', params: { cwd: '   ' } },
+    { method: 'session.get', params: { cwd: '/tmp/project', sessionId: '' } },
+    { method: 'artifact.get', params: { cwd: '/tmp/project', artifactId: '' } },
+    { method: 'artifact.get', params: { cwd: '/tmp/project', artifactId: 'cmp_1', sessionId: '   ' } }
+  ];
+
+  for (const [index, request] of requests.entries()) {
+    await server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: index + 1, ...request }));
+  }
+
+  const messages = parseLines(writes);
+  assert.equal(messages.length, requests.length);
+  for (const message of messages) {
+    assert.equal(message.error.code, -32602);
+  }
+});
+
+test('rpc query methods map missing sessions to application errors', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine: (line) => {
+      writes.push(line);
+    },
+    async getSessionView() {
+      throw new Error('session not found: sess_missing');
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'session.get',
+      params: { cwd: '/tmp/project', sessionId: 'sess_missing' }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.error.code, -32004);
+  assert.match(response.error.message, /session not found/);
+});
+
+test('rpc query dependency failures map to internal errors', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine: (line) => {
+      writes.push(line);
+    },
+    async getSessionView() {
+      throw new Error('database unavailable');
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'session.get',
+      params: { cwd: '/tmp/project', sessionId: 'sess_1' }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.error.code, -32603);
+});

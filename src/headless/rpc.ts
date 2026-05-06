@@ -96,28 +96,58 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function asNonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 function asSessionGetParams(params: unknown): { cwd: string; sessionId?: string } | null {
-  if (!isObject(params) || typeof params.cwd !== 'string') {
+  if (!isObject(params)) {
     return null;
   }
-  if (params.sessionId !== undefined && typeof params.sessionId !== 'string') {
+
+  const cwd = asNonEmptyString(params.cwd);
+  if (!cwd) {
     return null;
   }
-  return { cwd: params.cwd, ...(params.sessionId ? { sessionId: params.sessionId } : {}) };
+
+  if (!Object.hasOwn(params, 'sessionId')) {
+    return { cwd };
+  }
+
+  const sessionId = asNonEmptyString(params.sessionId);
+  if (!sessionId) {
+    return null;
+  }
+
+  return { cwd, sessionId };
 }
 
 function asArtifactGetParams(params: unknown): { cwd: string; artifactId: string; sessionId?: string } | null {
-  if (!isObject(params) || typeof params.cwd !== 'string' || typeof params.artifactId !== 'string') {
+  if (!isObject(params)) {
     return null;
   }
-  if (params.sessionId !== undefined && typeof params.sessionId !== 'string') {
+
+  const cwd = asNonEmptyString(params.cwd);
+  const artifactId = asNonEmptyString(params.artifactId);
+  if (!cwd || !artifactId) {
     return null;
   }
-  return {
-    cwd: params.cwd,
-    artifactId: params.artifactId,
-    ...(params.sessionId ? { sessionId: params.sessionId } : {})
-  };
+
+  if (!Object.hasOwn(params, 'sessionId')) {
+    return { cwd, artifactId };
+  }
+
+  const sessionId = asNonEmptyString(params.sessionId);
+  if (!sessionId) {
+    return null;
+  }
+
+  return { cwd, artifactId, sessionId };
 }
 
 function isNotFoundError(error: unknown) {
