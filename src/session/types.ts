@@ -33,6 +33,59 @@ export type SessionRecord =
       status: 'ok' | 'error';
       content: string;
       meta?: Record<string, string | number | boolean | null>;
+    }
+  | {
+      id: string;          // deterministic: txrec_open_<txId>
+      ts: string;
+      kind: 'tx-opened';
+      role: 'user';
+      content: string;     // e.g. "Transaction tx_01HX... opened (explicit)"
+      meta: {
+        txId: string;
+        txKind: 'edit';
+        name?: string;     // user-provided label from `cliq tx open <name>`
+        explicit: true;    // implicit per-turn tx do not write tx-opened records
+      };
+    }
+  | {
+      id: string;          // deterministic: txrec_apply_<txId>
+      ts: string;
+      kind: 'tx-applied';
+      role: 'user';
+      content: string;
+      meta: {
+        txId: string;
+        txKind: 'edit';
+        diffSummary: import('../workspace/transactions/types.js').DiffSummary;
+        files: { creates: string[]; modifies: string[]; deletes: string[] };
+        validators: {
+          blocking: { pass: number; fail: number };
+          advisory: { pass: number; fail: number; names: string[] };
+        };
+        overrides: import('../workspace/transactions/types.js').OverrideEntry[];
+        artifactRef: string;
+        ghostSnapshotId?: string;
+      };
+    }
+  | {
+      id: string;          // deterministic: txrec_abort_<txId>
+      ts: string;
+      kind: 'tx-aborted';
+      role: 'user';
+      content: string;
+      meta: {
+        txId: string;
+        txKind: 'edit';
+        reason: import('../workspace/transactions/types.js').AbortReason;
+        failedValidators?: string[];
+        files: { wouldHaveCreated: string[]; wouldHaveModified: string[]; wouldHaveDeleted: string[] };
+        artifactRef: string;
+        appliedPartial?: {
+          partialFiles: string[];
+          ghostSnapshotId: string;
+          restoreConfirmed: boolean;
+        };
+      };
     };
 
 export type SessionCheckpoint = {
@@ -114,6 +167,7 @@ export type Session = {
   name?: string;
   parentSessionId?: string;
   forkedFromCheckpointId?: string;
+  activeTxId?: string;
   model: SessionModelRef;
   cwd: string;
   createdAt: string;

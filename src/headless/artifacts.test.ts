@@ -118,3 +118,102 @@ test('getArtifactView resolves checkpoint, workspace checkpoint, compaction, and
   });
   await assert.rejects(() => getArtifactView(session, 'chk_missing_workspace'), /artifact not found/i);
 });
+
+test('toSessionView renders tx-opened with txId, name, explicit:true', async () => {
+  const { cwd } = await setupWorkspace();
+  const session = createSession(cwd);
+  session.records.push({
+    id: 'txrec_open_tx_01H',
+    ts: '2026-05-06T10:00:00.000Z',
+    kind: 'tx-opened',
+    role: 'user',
+    content: 'Transaction tx_01H opened (explicit)',
+    meta: { txId: 'tx_01H', txKind: 'edit', name: 'refactor', explicit: true }
+  });
+
+  const view = toSessionView(session);
+  const opened = view.records[0];
+  assert.equal(opened?.kind, 'tx-opened');
+  assert.equal((opened as { txId: string }).txId, 'tx_01H');
+  assert.equal((opened as { name?: string }).name, 'refactor');
+  assert.equal((opened as { explicit: true }).explicit, true);
+  assert.equal('text' in opened!, false);
+  assert.equal('content' in opened!, false);
+});
+
+test('toSessionView renders tx-applied with structured diffSummary, validators, overrides, artifactRef', async () => {
+  const { cwd } = await setupWorkspace();
+  const session = createSession(cwd);
+  session.records.push({
+    id: 'txrec_apply_tx_02H',
+    ts: '2026-05-06T10:01:00.000Z',
+    kind: 'tx-applied',
+    role: 'user',
+    content: 'Transaction tx_02H applied: 4 files changed (+12 -3)',
+    meta: {
+      txId: 'tx_02H',
+      txKind: 'edit',
+      diffSummary: { filesChanged: 4, additions: 12, deletions: 3, creates: [], modifies: ['a.ts', 'b.ts', 'c.ts', 'd.ts'], deletes: [] },
+      files: { creates: [], modifies: ['a.ts', 'b.ts', 'c.ts', 'd.ts'], deletes: [] },
+      validators: { blocking: { pass: 2, fail: 0 }, advisory: { pass: 1, fail: 1, names: ['shell:tests'] } },
+      overrides: [{ validatorName: 'shell:tsc', by: 'cli', ts: '2026-05-06T10:00:30.000Z' }],
+      artifactRef: 'tx/tx_02H/',
+      ghostSnapshotId: 'ws_chk_xyz'
+    }
+  });
+
+  const view = toSessionView(session);
+  const applied = view.records[0];
+  assert.equal(applied?.kind, 'tx-applied');
+  const a = applied as {
+    txId: string;
+    diffSummary: { filesChanged: number };
+    validators: { advisory: { names: string[] } };
+    overrides: Array<{ validatorName: string }>;
+    artifactRef: string;
+    ghostSnapshotId?: string;
+  };
+  assert.equal(a.txId, 'tx_02H');
+  assert.equal(a.diffSummary.filesChanged, 4);
+  assert.deepEqual(a.validators.advisory.names, ['shell:tests']);
+  assert.equal(a.overrides[0].validatorName, 'shell:tsc');
+  assert.equal(a.artifactRef, 'tx/tx_02H/');
+  assert.equal(a.ghostSnapshotId, 'ws_chk_xyz');
+  assert.equal('text' in applied!, false);
+});
+
+test('toSessionView renders tx-aborted with reason, artifactRef, optional appliedPartial', async () => {
+  const { cwd } = await setupWorkspace();
+  const session = createSession(cwd);
+  session.records.push({
+    id: 'txrec_abort_tx_03H',
+    ts: '2026-05-06T10:02:00.000Z',
+    kind: 'tx-aborted',
+    role: 'user',
+    content: 'Transaction tx_03H aborted: apply-failed-partial-kept',
+    meta: {
+      txId: 'tx_03H',
+      txKind: 'edit',
+      reason: 'apply-failed-partial-kept',
+      files: { wouldHaveCreated: [], wouldHaveModified: ['x.ts', 'y.ts'], wouldHaveDeleted: [] },
+      artifactRef: 'tx/tx_03H/',
+      appliedPartial: { partialFiles: ['x.ts'], ghostSnapshotId: 'ws_chk_abc', restoreConfirmed: false }
+    }
+  });
+
+  const view = toSessionView(session);
+  const aborted = view.records[0];
+  assert.equal(aborted?.kind, 'tx-aborted');
+  const a = aborted as {
+    txId: string;
+    reason: string;
+    artifactRef: string;
+    appliedPartial?: { partialFiles: string[]; restoreConfirmed: boolean };
+  };
+  assert.equal(a.txId, 'tx_03H');
+  assert.equal(a.reason, 'apply-failed-partial-kept');
+  assert.equal(a.artifactRef, 'tx/tx_03H/');
+  assert.deepEqual(a.appliedPartial?.partialFiles, ['x.ts']);
+  assert.equal(a.appliedPartial?.restoreConfirmed, false);
+  assert.equal('text' in aborted!, false);
+});

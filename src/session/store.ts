@@ -14,12 +14,12 @@ import {
   SESSION_FILE,
   SESSION_VERSION
 } from '../config.js';
+import { withPathLock } from '../lib/path-lock.js';
 import { isProviderName } from '../model/registry.js';
 import type { CompactionArtifact, Session, SessionCheckpoint, SessionModelRef, SessionRecord } from './types.js';
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_STATE_VERSION = 1;
-const LOCK_OWNER_FILE = 'owner';
 
 type LegacySession = {
   createdAt?: string;
@@ -72,18 +72,11 @@ type WorkspaceIdentity = {
 
 type WorkspaceIndexEntry = WorkspaceIndex['workspaces'][string];
 type SessionMutator<T> = (session: Session) => T | Promise<T>;
-type PathLock = {
-  assertCurrentOwner: () => Promise<void>;
-};
 type ReadJsonOptions = {
   tolerateSyntaxError?: boolean;
 };
 
-const LOCK_TIMEOUT_MS = 5000;
-const LOCK_RETRY_MS = 25;
-const LOCK_HEARTBEAT_MS = Math.max(LOCK_RETRY_MS, Math.floor(LOCK_TIMEOUT_MS / 3));
-
-function isSessionRecord(value: unknown): value is SessionRecord {
+export function isSessionRecord(value: unknown): value is SessionRecord {
   if (!value || typeof value !== 'object') {
     return false;
   }
@@ -107,6 +100,16 @@ function isSessionRecord(value: unknown): value is SessionRecord {
       typeof record.tool === 'string' &&
       (record.status === 'ok' || record.status === 'error') &&
       typeof record.content === 'string'
+    );
+  }
+
+  if (record.kind === 'tx-opened' || record.kind === 'tx-applied' || record.kind === 'tx-aborted') {
+    return (
+      record.role === 'user' &&
+      typeof record.content === 'string' &&
+      typeof record.meta === 'object' &&
+      record.meta !== null &&
+      typeof (record.meta as { txId?: unknown }).txId === 'string'
     );
   }
 
@@ -287,143 +290,8 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 function workspaceStateLockPath(cliqHome = resolveCliqHome()) {
   return path.join(cliqHome, 'workspace-state');
-}
-
-async function withPathLock<T>(target: string, callback: (lock: PathLock) => Promise<T>): Promise<T> {
-  const lockPath = `${target}.lock`;
-  const ownerToken = `${process.pid}:${crypto.randomUUID()}`;
-  const startedAt = Date.now();
-  await fs.mkdir(path.dirname(lockPath), { recursive: true });
-
-  while (true) {
-    try {
-      await fs.mkdir(lockPath);
-      try {
-        await writeLockOwner(lockPath, ownerToken);
-      } catch (error) {
-        await fs.rm(lockPath, { recursive: true, force: true });
-        throw error;
-      }
-      break;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EEXIST') {
-        throw error;
-      }
-      if (await removeStaleLock(lockPath)) {
-        continue;
-      }
-      if (Date.now() - startedAt > LOCK_TIMEOUT_MS) {
-        throw new Error(`timed out waiting for session store lock: ${lockPath}`);
-      }
-      await sleep(LOCK_RETRY_MS);
-    }
-  }
-
-  const heartbeat = startLockHeartbeat(lockPath, ownerToken);
-  const lock: PathLock = {
-    assertCurrentOwner: async () => {
-      await assertPathLockOwner(lockPath, ownerToken);
-    }
-  };
-  try {
-    return await callback(lock);
-  } finally {
-    clearInterval(heartbeat);
-    await releasePathLock(lockPath, ownerToken);
-  }
-}
-
-async function writeLockOwner(lockPath: string, ownerToken: string) {
-  await fs.writeFile(path.join(lockPath, LOCK_OWNER_FILE), ownerToken, { flag: 'wx' });
-}
-
-function startLockHeartbeat(lockPath: string, ownerToken: string) {
-  const heartbeat = setInterval(() => {
-    void refreshLockLease(lockPath, ownerToken).catch(() => {
-      // The next lock waiter will decide whether the lease is stale. Heartbeat
-      // failures should not mask the protected store operation.
-    });
-  }, LOCK_HEARTBEAT_MS);
-  heartbeat.unref?.();
-  return heartbeat;
-}
-
-async function refreshLockLease(lockPath: string, ownerToken: string) {
-  const ownerPath = path.join(lockPath, LOCK_OWNER_FILE);
-  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-  try {
-    handle = await fs.open(ownerPath, 'r+');
-    const currentOwner = await handle.readFile({ encoding: 'utf8' });
-    if (currentOwner !== ownerToken) {
-      return false;
-    }
-    const now = new Date();
-    await handle.utimes(now, now);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return false;
-    }
-    throw error;
-  } finally {
-    await handle?.close();
-  }
-}
-
-async function releasePathLock(lockPath: string, ownerToken: string) {
-  const currentOwner = await readLockOwner(lockPath);
-  if (currentOwner !== ownerToken) {
-    return;
-  }
-  await fs.rm(lockPath, { recursive: true, force: true });
-}
-
-async function assertPathLockOwner(lockPath: string, ownerToken: string) {
-  const currentOwner = await readLockOwner(lockPath);
-  if (currentOwner !== ownerToken) {
-    throw new Error(`lost session store lock: ${lockPath}`);
-  }
-  if (!(await refreshLockLease(lockPath, ownerToken))) {
-    throw new Error(`lost session store lock: ${lockPath}`);
-  }
-}
-
-async function readLockOwner(lockPath: string) {
-  try {
-    return await fs.readFile(path.join(lockPath, LOCK_OWNER_FILE), 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null;
-    }
-    throw error;
-  }
-}
-
-async function removeStaleLock(lockPath: string) {
-  try {
-    const ownerPath = path.join(lockPath, LOCK_OWNER_FILE);
-    const owner = await readLockOwner(lockPath);
-    const leaseStat = owner === null ? await fs.stat(lockPath) : await fs.stat(ownerPath);
-    if (Date.now() - leaseStat.mtimeMs <= LOCK_TIMEOUT_MS) {
-      return false;
-    }
-    await fs.rm(lockPath, { recursive: true, force: true });
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return true;
-    }
-    throw error;
-  }
 }
 
 async function atomicWriteFile(target: string, content: string, beforeRename?: () => Promise<void>) {

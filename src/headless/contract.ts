@@ -243,6 +243,45 @@ export type SessionRecordView =
       status: 'ok' | 'error';
       contentPreview: string;
       meta?: Record<string, string | number | boolean | null>;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'tx-opened';
+      role: 'user';
+      txId: string;
+      name?: string;
+      explicit: true;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'tx-applied';
+      role: 'user';
+      txId: string;
+      diffSummary: import('../workspace/transactions/types.js').DiffSummary;
+      validators: {
+        blocking: { pass: number; fail: number };
+        advisory: { pass: number; fail: number; names: string[] };
+      };
+      overrides: import('../workspace/transactions/types.js').OverrideEntry[];
+      artifactRef: string;
+      ghostSnapshotId?: string;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'tx-aborted';
+      role: 'user';
+      txId: string;
+      reason: import('../workspace/transactions/types.js').AbortReason;
+      failedValidators?: string[];
+      artifactRef: string;
+      appliedPartial?: {
+        partialFiles: string[];
+        ghostSnapshotId: string;
+        restoreConfirmed: boolean;
+      };
     };
 
 export type CheckpointView = {

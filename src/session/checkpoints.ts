@@ -159,7 +159,7 @@ async function createGitGhostCheckpoint(
   }
 }
 
-async function createWorkspaceCheckpoint(cwd: string): Promise<WorkspaceCheckpoint> {
+export async function createWorkspaceCheckpoint(cwd: string): Promise<WorkspaceCheckpoint> {
   const createdAt = nowIso();
   const id = makeId('wchk');
   const workspaceRealPath = await resolveWorkspaceRealPath(cwd);
