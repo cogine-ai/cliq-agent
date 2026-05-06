@@ -481,7 +481,7 @@ Apply sequence (called from `approved` state) is split into three lock-disjoint 
 ```
 STAGE A — preflight (tx-store lock only)
   A1. acquire tx-store lock
-  A1a. AUTHORITATIVE state-and-abort check under tx-store lock:
+  A1a. AUTHORITATIVE state, abort, AND in-flight apply check under tx-store lock:
        - read tx state.json. If state !== 'approved', release lock and
          reject: "tx state is <state>; cannot apply" (covers the case
          where a concurrent abort flipped the tx to 'aborted' between
@@ -490,9 +490,21 @@ STAGE A — preflight (tx-store lock only)
          and reject: "tx is being aborted; cannot apply" (covers the case
          where a concurrent abort wrote abort-progress before being
          interrupted, or where recovery is mid-stream).
+       - read apply-progress.json. If it exists in any phase, release
+         lock and reject: "apply already in flight (phase=<phase>); use
+         cliq tx status or wait for completion" — also reached if a
+         previous apply died and left a non-terminal phase, in which
+         case the message points the user at recovery via
+         `cliq tx status --recover`. This is the same-direction guard
+         that prevents two `tx apply` invocations from each writing
+         their own apply-progress and clobbering each other's plan.
+         (Terminal phases — apply-finalized and apply-failed-partial —
+         imply tx state is 'applied' or 'applied-partial' and would
+         already have been caught by the state check above.)
        - This re-check under lock is the symmetric counterpart of the
          abort protocol's AB3a: each side authoritatively verifies the
-         other has not started before proceeding.
+         other has not started before proceeding, and verifies its own
+         direction is not already in flight.
   A2. recheck builtin:index-clean (it may have changed since validate)
   A3. for each entry in diff.json (v0.8: all 'modify' entries):
         a. read current real file at <path>
@@ -636,11 +648,35 @@ ABORT (called from any non-terminal state)
         - The terminal phase `apply-failed-partial` does NOT block abort.
           That phase is set by recovery when the tx moves to `applied-partial`,
           signalling the apply has terminated unsuccessfully. The caller's
-          --restore-confirmed/--keep-partial choice from AB0a is what
-          governs the integrity meaning of the resulting record.
+          --restore-confirmed/--keep-partial choice (validated authoritatively
+          in AB3a.5) governs the integrity meaning of the resulting record.
         - This re-check under lock closes the window between AB0 and AB2:
           a concurrent apply that wrote apply-progress between AB0 and AB2
           is detected here.
+  AB3a.5 AUTHORITATIVE applied-partial flag re-check under tx-store lock:
+         re-read tx state.json (now under lock).
+         - If state.json.state === 'applied-partial':
+             - exactly one of --restore-confirmed or --keep-partial must
+               have been passed by the caller (validated at AB0a if state
+               was already applied-partial then; this re-check catches the
+               case where state changed from approved/etc. to applied-partial
+               between AB0a and AB2 because a concurrent recovery completed).
+             - if neither flag was passed: release locks, reject with
+               "tx state changed to applied-partial during abort; re-run
+               with --restore-confirmed (after cliq checkpoint restore)
+               or --keep-partial".
+             - if a flag was passed but the reason hadn't been promoted at
+               AB0a (because state was different then): override the
+               reason now to apply-failed-partial-restored or
+               apply-failed-partial-kept according to the flag, and load
+               the partial-write metadata (apply-progress.filesWritten,
+               ghostSnapshotId) for AB5b's `meta.appliedPartial` field.
+         - If state.json.state !== 'applied-partial' but the caller passed
+           --restore-confirmed or --keep-partial: release locks, reject
+           with "flag <name> only valid when tx is applied-partial".
+         This step ensures the integrity claim of the resulting tx-aborted
+         record reflects the tx state at the moment locks were acquired,
+         not at the moment the user typed the command.
   AB3b. terminal-state idempotency check (all markers, not just state.json):
         - sessionRecordPresent = scan session for record id `txrec_abort_<txId>`
         - activeTxIdCleared = (Session.activeTxId !== txId)
@@ -793,8 +829,23 @@ export type TxAppliedPayload = {
 
 export type TxAbortedPayload = {
   txId: string;
-  reason: 'validator-fail' | 'user-abort' | 'apply-error' | 'apply-conflict' | 'staging-error';
+  reason:
+    | 'validator-fail'
+    | 'user-abort'
+    | 'apply-error'
+    | 'apply-conflict'
+    | 'staging-error'
+    | 'apply-failed-partial-restored'
+    | 'apply-failed-partial-kept';
   failedValidators?: string[];
+  // Present iff reason ∈ {apply-failed-partial-restored, apply-failed-partial-kept}.
+  // Mirrors TxAbortedRecord.meta.appliedPartial so headless consumers see the
+  // same integrity distinction as session-record consumers.
+  appliedPartial?: {
+    partialFiles: string[];
+    ghostSnapshotId: string;
+    restoreConfirmed: boolean;
+  };
 };
 ```
 
@@ -1112,7 +1163,7 @@ At every cliq startup (and on demand via `cliq tx status --recover`), the tx-coo
 
 A tx in `applied-partial` with `apply-progress.phase = apply-failed-partial` is **not** auto-recovered. It is awaiting user action (typically `cliq checkpoint restore` followed by `cliq tx abort`). `cliq tx status` surfaces it prominently, but the runtime takes no further action without a user command.
 
-The recovery rule is selected by progress-file presence, in this priority order: `apply-progress.json` first, `abort-progress.json` second, neither third. (Only one progress file should ever exist for a given tx because abort is rejected when `apply-progress.json` is non-terminal — see Section 11.3 step AB0.)
+The recovery rule is selected by progress-file presence, in this priority order: `apply-progress.json` first, `abort-progress.json` second, neither third. (Only one progress file should ever exist for a given tx because the under-lock guards reject the conflicting direction: Section 11.3 AB3a rejects abort when `apply-progress.json` is in an in-flight phase, and Section 11.1 A1a rejects apply when `abort-progress.json` exists.)
 
 #### 16.4.1 Apply recovery
 
@@ -1137,7 +1188,7 @@ The protocol's invariants:
 - A tx in `apply-committed`, `apply-finalized`, or any abort phase is **always** auto-reconciled because the only outstanding actions (record append, `activeTxId` clear, state transition) are provably safe to retry by deterministic-id scan and conditional clear.
 - No recovery action ever modifies real workspace files. Only `apply-progress.json`, `abort-progress.json`, `state.json`, and (in the reconciliation cases) the session record file are written by the recovery protocol.
 - Recovery is idempotent. Running it twice produces the same result as running it once.
-- Abort recovery and apply recovery are mutually exclusive for any single tx because Section 11.3 AB0 rejects abort while apply is in flight.
+- Abort recovery and apply recovery are mutually exclusive for any single tx because the under-lock guards in Section 11.3 AB3a (rejects abort while apply is in flight) and Section 11.1 A1a (rejects apply while abort-progress exists or another apply-progress is in flight) ensure only one progress file is ever non-terminal at a time.
 
 `cliq tx status` output annotates any tx that went through automatic recovery with a `recoveredAt` timestamp, both in human and JSON forms, so callers can audit.
 
@@ -1273,6 +1324,7 @@ Required tests grouped by concern:
 - Concurrent `tx abort` is rejected with `tx-apply-conflict`-shaped error when `apply-progress.json` exists in any non-terminal phase (regression for the Stage-B-to-Stage-C race)
 - Apply Stage A1a rejects when tx state is no longer `approved` (e.g., a concurrent abort completed before A1 acquired the lock), without writing apply-progress.json or any file
 - Apply Stage A1a rejects when any `abort-progress.json` exists, regardless of phase
+- Apply Stage A1a rejects when `apply-progress.json` already exists in any phase (apply-vs-apply same-direction race; second invocation must use `cliq tx status` or wait)
 
 **Abort termination protocol**
 - `tx abort` from `staging`/`finalized`/`validated`/`approved` writes one `tx-aborted` record (deterministic id `txrec_abort_<txId>`) and clears `Session.activeTxId`
@@ -1287,6 +1339,9 @@ Required tests grouped by concern:
 - Abort during `apply-failed-partial` requires `--restore-confirmed` or `--keep-partial`; missing flag exits 1; passing both rejects as ambiguous
 - `--restore-confirmed` produces `tx-aborted` record with reason `apply-failed-partial-restored` and `meta.appliedPartial.restoreConfirmed: true`
 - `--keep-partial` produces `tx-aborted` record with reason `apply-failed-partial-kept` and `meta.appliedPartial.restoreConfirmed: false`; `meta.appliedPartial.partialFiles` matches `apply-progress.filesWritten`
+- AB3a.5 catches state-changed-mid-abort: if state was `approved` at AB0a but became `applied-partial` between AB0a and AB2 (concurrent recovery completed), abort is rejected with "tx state changed; re-run with --restore-confirmed or --keep-partial" — without writing any session record or progress file
+- AB3a.5 rejects `--restore-confirmed`/`--keep-partial` flags when tx state is NOT `applied-partial` at lock time (caller passed an inappropriate flag)
+- `tx-aborted` headless event payload (`TxAbortedPayload`) includes the same `reason` and `appliedPartial` fields as the session record (regression: parity between event stream and session record)
 - Abort during `apply-finalized` rejected (apply is bound for `applied`; let recovery finish it)
 - Abort overlay retained per `abortRetention`; not eagerly cleaned
 
