@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import { recoverApply, scanForRecovery } from './recovery.js';
+import { recoverAbort, recoverAll, recoverApply, scanForRecovery } from './recovery.js';
 import {
   resolveTxRoot,
   createTx,
@@ -14,9 +14,10 @@ import {
   readTxState,
   writeApplyProgress,
   readApplyProgress,
-  writeAbortProgress
+  writeAbortProgress,
+  readAbortProgress
 } from './store.js';
-import { applyRecordId, type TxState } from './types.js';
+import { abortRecordId, applyRecordId, type TxState } from './types.js';
 import { createSession, mutateSession } from '../../session/store.js';
 
 const execFileAsync = promisify(execFile);
@@ -382,6 +383,168 @@ test('recover apply-committed: invokes Stage C (idempotent)', async () => {
         (r) => r.id === applyRecordId('tx_committed')
       );
       assert.ok(rec);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+// -- Task 38: recoverAbort rules ----------------------------------------------
+
+test('recover abort-progress phase=aborting: completes via abort protocol (idempotent)', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-abort1-'));
+    try {
+      const tx = await createTx(root, {
+        id: 'tx_aborting',
+        kind: 'edit',
+        workspaceId: 'w',
+        sessionId: 's',
+        workspaceRealPath: ws
+      });
+      await writeTxState(root, {
+        ...tx,
+        state: 'approved',
+        diffSummary: {
+          filesChanged: 1,
+          additions: 0,
+          deletions: 0,
+          creates: [],
+          modifies: ['a.txt'],
+          deletes: []
+        }
+      });
+      await writeAbortProgress(root, 'tx_aborting', {
+        phase: 'aborting',
+        reason: 'user-abort',
+        startedAt: 'x',
+        ts: 'x'
+      });
+      const session = createSession(ws);
+      const action = {
+        txId: 'tx_aborting',
+        tx: (await readTxState(root, 'tx_aborting'))!,
+        kind: 'abort' as const,
+        phase: 'aborting' as const,
+        progress: (await readAbortProgress(root, 'tx_aborting'))!
+      };
+      const outcome = await recoverAbort(root, action, { cwd: ws, session });
+      assert.equal(outcome.action, 'abort-aborting-resumed');
+      const txAfter = await readTxState(root, 'tx_aborting');
+      assert.equal(txAfter?.state, 'aborted');
+      const ap = await readAbortProgress(root, 'tx_aborting');
+      assert.equal(ap?.phase, 'aborted');
+      const rec = session.records.find(
+        (r) => r.id === abortRecordId('tx_aborting')
+      );
+      assert.ok(rec, 'abort record should be present');
+      // Idempotent rerun: AB3b four-marker check inside decideAbort returns
+      // null, so recoverAbort returns no-op.
+      const outcome2 = await recoverAbort(root, action, { cwd: ws, session });
+      assert.equal(outcome2.action, 'no-op');
+      const recsAfter = session.records.filter(
+        (r) => r.id === abortRecordId('tx_aborting')
+      );
+      assert.equal(
+        recsAfter.length,
+        1,
+        'idempotent rerun must not duplicate the record'
+      );
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('recover abort-progress phase=aborted but state lagged: finalize tx state', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-abort2-'));
+    try {
+      await makeTx(root, 'tx_abf', 'approved');
+      await writeAbortProgress(root, 'tx_abf', {
+        phase: 'aborted',
+        reason: 'user-abort',
+        startedAt: 'x',
+        ts: 'x'
+      });
+      const session = createSession(ws);
+      const action = {
+        txId: 'tx_abf',
+        tx: (await readTxState(root, 'tx_abf'))!,
+        kind: 'abort' as const,
+        phase: 'aborted-finalize' as const,
+        progress: (await readAbortProgress(root, 'tx_abf'))!
+      };
+      const outcome = await recoverAbort(root, action, { cwd: ws, session });
+      assert.equal(outcome.action, 'abort-finalized-state');
+      const tx = await readTxState(root, 'tx_abf');
+      assert.equal(tx?.state, 'aborted');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('recoverAll handles a mix of apply and abort actions in one pass', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-all-'));
+    try {
+      // tx 1: apply-pending revertable
+      await makeTx(root, 'tx_pending2', 'approved');
+      await writeApplyProgress(root, 'tx_pending2', {
+        phase: 'apply-pending',
+        ghostSnapshotId: 'snap',
+        startedAt: 'x',
+        filesPlanned: ['a.txt'],
+        filesWritten: []
+      });
+      // tx 2: aborted-finalize
+      await makeTx(root, 'tx_abf2', 'approved');
+      await writeAbortProgress(root, 'tx_abf2', {
+        phase: 'aborted',
+        reason: 'user-abort',
+        startedAt: 'x',
+        ts: 'x'
+      });
+      const session = createSession(ws);
+      const outcomes = await recoverAll(root, { cwd: ws, session });
+      assert.equal(outcomes.length, 2);
+      const actionsSeen = outcomes.map((o) => o.action).sort();
+      assert.deepEqual(
+        actionsSeen,
+        ['abort-finalized-state', 'apply-pending-reverted'].sort()
+      );
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('recovery is idempotent: running twice yields same state', async () => {
+  await setupHomeWithEnv(async (root) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-rec-idem-'));
+    try {
+      await makeTx(root, 'tx_idem', 'approved');
+      await writeApplyProgress(root, 'tx_idem', {
+        phase: 'apply-finalized',
+        ghostSnapshotId: 'snap_z',
+        startedAt: 'x',
+        filesPlanned: ['a.txt'],
+        filesWritten: ['a.txt']
+      });
+      const session = createSession(ws);
+      const r1 = await recoverAll(root, { cwd: ws, session });
+      const r2 = await recoverAll(root, { cwd: ws, session });
+      assert.equal(r1.length, 1);
+      assert.equal(r1[0].action, 'apply-finalized-state');
+      // Second run: tx is now applied, but apply-progress.phase=apply-finalized
+      // is still considered non-terminal by the scanner. recoverApply sees
+      // state===applied and short-circuits the write — outcome is still
+      // 'apply-finalized-state' and tx remains applied.
+      assert.equal(r2.length, 1);
+      assert.equal(r2[0].action, 'apply-finalized-state');
+      const tx = await readTxState(root, 'tx_idem');
+      assert.equal(tx?.state, 'applied');
     } finally {
       await rm(ws, { recursive: true, force: true });
     }

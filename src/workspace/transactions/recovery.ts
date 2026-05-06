@@ -10,6 +10,7 @@ import {
   withTxLock
 } from './store.js';
 import { runStageC } from './apply.js';
+import { decideAbort, runAbortWritePhase } from './abort.js';
 import type { Transaction, ApplyProgress, AbortProgress } from './types.js';
 import type { Session } from '../../session/types.js';
 
@@ -131,6 +132,8 @@ export type RecoveryOutcomeAction =
   | 'apply-writing-partial'
   | 'apply-committed-stage-c'
   | 'apply-finalized-state'
+  | 'abort-aborting-resumed'
+  | 'abort-finalized-state'
   | 'no-op';
 
 export type RecoveryOutcome = {
@@ -248,4 +251,83 @@ export async function recoverApply(
       }
     }
   });
+}
+
+/**
+ * Abort recovery rules per Section 16.4.2 of the v0.8 design spec.
+ *
+ * - phase=aborting: re-invoke the abort protocol from AB1 onward via
+ *   decideAbort + runAbortWritePhase. The protocol is idempotent: the AB3b
+ *   four-marker check inside decideAbort returns null when the tx has
+ *   already converged, in which case this returns a no-op.
+ * - phase=aborted-finalize: abort-progress already says 'aborted' but the
+ *   tx state.json was never flipped to 'aborted'. Re-run AB6/AB7 by writing
+ *   tx state=aborted. Idempotent (re-read under lock confirms state).
+ *
+ * Locking: the 'aborting' branch delegates to decideAbort/runAbortWritePhase
+ * which manage their own session-then-tx locks. Calling those from within an
+ * outer withTxLock would deadlock the per-tx lock, so this branch runs
+ * WITHOUT an outer lock. The 'aborted-finalize' branch only mutates tx
+ * state.json, so it takes the per-tx lock for atomic re-read + write.
+ */
+export async function recoverAbort(
+  root: string,
+  action: RecoveryAction & { kind: 'abort' },
+  ctx: RecoveryContext
+): Promise<RecoveryOutcome> {
+  const ts = new Date().toISOString();
+  if (action.phase === 'aborting') {
+    // Re-run AB1..AB7 via the abort protocol. Both helpers manage their own
+    // locks; AB3b's four-marker idempotency check ensures convergence is
+    // detected as a no-op rather than re-doing work.
+    const decision = await decideAbort({
+      root,
+      txId: action.txId,
+      cwd: ctx.cwd,
+      session: ctx.session,
+      reason: action.progress.reason
+    });
+    if (!decision) {
+      // Already converged.
+      return { txId: action.txId, action: 'no-op', ts };
+    }
+    await runAbortWritePhase(
+      { root, txId: action.txId, cwd: ctx.cwd, session: ctx.session },
+      decision
+    );
+    return { txId: action.txId, action: 'abort-aborting-resumed', ts };
+  }
+  // phase === 'aborted-finalize': abort-progress already says aborted but tx
+  // state.json was never flipped. Just write state=aborted under the per-tx
+  // lock; idempotent.
+  return await withTxLock(root, action.txId, async () => {
+    const tx = await readTxState(root, action.txId);
+    if (!tx) return { txId: action.txId, action: 'no-op', ts };
+    if (tx.state !== 'aborted') {
+      await writeTxState(root, { ...tx, state: 'aborted' });
+    }
+    return { txId: action.txId, action: 'abort-finalized-state', ts };
+  });
+}
+
+/**
+ * Top-level recovery driver. Scans the tx-store for non-terminal transactions
+ * and runs the appropriate recovery action for each. Iterates serially: the
+ * session lock can't be held by two concurrent recovery operations, so this
+ * loop must not parallelise.
+ */
+export async function recoverAll(
+  root: string,
+  ctx: RecoveryContext
+): Promise<RecoveryOutcome[]> {
+  const actions = await scanForRecovery(root);
+  const outcomes: RecoveryOutcome[] = [];
+  for (const action of actions) {
+    if (action.kind === 'apply') {
+      outcomes.push(await recoverApply(root, action, ctx));
+    } else {
+      outcomes.push(await recoverAbort(root, action, ctx));
+    }
+  }
+  return outcomes;
 }
