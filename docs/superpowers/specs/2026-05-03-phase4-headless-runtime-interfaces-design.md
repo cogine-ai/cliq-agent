@@ -556,7 +556,7 @@ artifact.get(params: { cwd: string; artifactId: string; sessionId?: string }) ->
 Runtime events are emitted as server notifications:
 
 ```json
-{"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":1,"eventId":"evt_001","runId":"run_abc","sessionId":"ses_123","turn":4,"timestamp":"2026-05-03T00:00:00.000Z","type":"run-start","payload":{}}}
+{"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":1,"eventId":"evt_001","runId":"run_abc","sessionId":"ses_123","turn":4,"timestamp":"2026-05-03T00:00:00.000Z","type":"run-start","payload":{"cwd":"/repo","policy":"auto","model":{"provider":"openai","model":"example-model"}}}}
 ```
 
 Concurrency rule for the first RPC follow-up:
