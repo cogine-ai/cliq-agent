@@ -17,6 +17,10 @@ test('withPathLock serializes concurrent callbacks for the same target', async (
       await new Promise((r) => setTimeout(r, 25));
       order.push('a-end');
     });
+    // Yield enough microtasks for `a` to enter withPathLock and create its lock dir
+    // before `b` starts, eliminating start-order races without coupling to internals.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
     const b = withPathLock(target, async () => {
       order.push('b-start');
       await new Promise((r) => setTimeout(r, 5));
