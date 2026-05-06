@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
+import { withPathLock } from '../../lib/path-lock.js';
 import type { Transaction, TxKind, ApplyProgress, AbortProgress } from './types.js';
 
 export function resolveTxRoot(cliqHome: string): string {
@@ -37,6 +38,20 @@ export function overlayDir(root: string, txId: string): string {
 
 export function validatorsDir(root: string, txId: string): string {
   return path.join(txDir(root, txId), 'validators');
+}
+
+/**
+ * Acquire an exclusive per-tx file lock for the lifetime of `fn`. The lock
+ * directory lives inside the tx directory at `<txDir>/tx.lock`, so different
+ * `txId` values do not contend. Built on the shared owner-file lock primitive.
+ */
+export async function withTxLock<T>(root: string, txId: string, fn: () => Promise<T>): Promise<T> {
+  await fs.mkdir(txDir(root, txId), { recursive: true });
+  // `withPathLock(target)` creates `${target}.lock`, so passing `<txDir>/tx`
+  // yields `<txDir>/tx.lock` -- keeps the lock dir scoped inside the tx dir.
+  // The `tx` sentinel is never written; only the `.lock` directory is.
+  const target = path.join(txDir(root, txId), 'tx');
+  return withPathLock(target, () => fn());
 }
 
 export async function createTx(

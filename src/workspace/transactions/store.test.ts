@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { resolveTxRoot, txDir, applyProgressPath, abortProgressPath, stateJsonPath, auditJsonPath, readTxState, writeTxState, createTx, readApplyProgress, writeApplyProgress, deleteApplyProgress, readAbortProgress, writeAbortProgress, deleteAbortProgress } from './store.js';
+import { resolveTxRoot, txDir, applyProgressPath, abortProgressPath, stateJsonPath, auditJsonPath, readTxState, writeTxState, createTx, readApplyProgress, writeApplyProgress, deleteApplyProgress, readAbortProgress, writeAbortProgress, deleteAbortProgress, withTxLock } from './store.js';
 
 test('resolveTxRoot honors CLIQ_HOME', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-home-'));
@@ -117,6 +117,29 @@ test('deleteAbortProgress is idempotent on missing file', async () => {
     const txId = 'tx_delete_abort_01HX';
     // Should not throw even though file doesn't exist
     await deleteAbortProgress(root, txId);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('acquireTxLock serializes concurrent operations on the same txId', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-lock-'));
+  try {
+    const root = resolveTxRoot(home);
+    await createTx(root, { id: 'tx_lock', kind: 'edit', workspaceId: 'w', sessionId: 's', workspaceRealPath: '/tmp/ws' });
+    const order: string[] = [];
+    const a = withTxLock(root, 'tx_lock', async () => {
+      order.push('a-start');
+      await new Promise((r) => setTimeout(r, 25));
+      order.push('a-end');
+    });
+    const b = withTxLock(root, 'tx_lock', async () => {
+      order.push('b-start');
+      await new Promise((r) => setTimeout(r, 5));
+      order.push('b-end');
+    });
+    await Promise.all([a, b]);
+    assert.deepEqual(order, ['a-start', 'a-end', 'b-start', 'b-end']);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

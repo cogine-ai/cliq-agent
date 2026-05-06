@@ -251,7 +251,7 @@ test('mutateSession refuses to write after lock ownership is lost', async () => 
           await writeFile(otherOwnerPath, 'other-owner', 'utf8');
           current.name = 'mutated';
         }),
-      /lost session store lock/i
+      /lost path lock/i
     );
 
     assert.equal(await readFile(otherOwnerPath, 'utf8'), 'other-owner');
