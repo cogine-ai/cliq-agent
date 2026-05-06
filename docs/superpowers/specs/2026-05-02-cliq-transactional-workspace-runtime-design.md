@@ -521,12 +521,17 @@ STAGE A — preflight (tx-store lock only)
 STAGE B — write (tx-store lock only, re-acquired)
   B1. acquire tx-store lock
   B1a. RE-VERIFY state under tx-store lock (defense-in-depth):
-       - read tx state.json. If state !== 'approved', release lock and
-         exit Stage B with an internal error. Leave apply-progress.json
-         in its current `apply-pending` phase; the leftover progress
-         file is then handled by startup recovery's apply-pending rule
-         (Section 16.4.1: revert tx state to `approved`, discard
-         apply-progress.json). No phase invention is needed here.
+       - read tx state.json. If state !== 'approved':
+           a. delete apply-progress.json under the lock (we hold tx-store,
+              so this is safe and atomic). The current tx state is the
+              truth — whatever it is — and the apply-progress file is now
+              an orphan from a Stage A that should not have been allowed
+              to start. Removing it prevents startup recovery from acting
+              on stale plan data.
+           b. release lock and exit Stage B with an internal error
+              ("tx state changed during apply; aborting Stage B").
+           c. do NOT mutate state.json. The terminal state (whatever it
+              is) reflects the action that legitimately won.
        - This branch should never execute under the locking scheme:
          A1a rejects a concurrent second apply (which would otherwise
          flip apply-progress underneath us), and AB3a rejects abort
@@ -1176,7 +1181,7 @@ The recovery rule is selected by progress-file presence, in this priority order:
 | `apply-progress.phase` | Action at startup |
 |---|---|
 | absent | Tx never entered apply. Surface via `cliq tx status` for the affected session. No real-workspace damage possible. User decides to resume, apply, or abort. |
-| `apply-pending` | Intent was logged but no files were written. Mark tx state as `approved` (revert the implicit progression), discard `apply-progress.json`. User can retry `tx apply` cleanly. |
+| `apply-pending` | Intent was logged but no files were written. Recovery branches on the current tx state: (a) if state is `approved`, mark tx state as `approved` (idempotent — clarifies the implicit progression has been reverted), discard `apply-progress.json`, user retries `tx apply` cleanly. (b) if state is anything else (e.g., already `aborted` or `applied` because a legitimate terminal action won and B1a didn't get to clean up), do NOT mutate state.json; discard `apply-progress.json` only if it is safe to confirm it is a stale orphan (the current terminal state is canonical), and surface a `recovery.json` warning prominently for the user. The runtime never resurrects a non-`approved` state into `approved` based solely on a leftover `apply-pending` file. |
 | `apply-writing` | Some files were written. Move tx state to `applied-partial` AND transition `apply-progress.phase` to the terminal `apply-failed-partial` phase. Write a warning record (not a session record) to `$CLIQ_HOME/tx/<txId>/recovery.json` describing the state. Surface prominently the next time the user invokes any `cliq` command in the affected workspace, including the `ghostSnapshotId` and the two paths forward: (a) `cliq checkpoint restore <ghostSnapshotId>` then `cliq tx abort <txId> --restore-confirmed`, or (b) keep the partial writes and run `cliq tx abort <txId> --keep-partial` to record the deliberate choice. **Do not automatically restore**; the runtime takes no further action without the user's explicit flag. The `apply-failed-partial` phase is what allows the subsequent abort to proceed past Section 11.3 AB3a. |
 | `apply-committed` | All files were written and durable. Recovery **invokes Stage C as defined in Section 11.1** without modification (acquires session lock first, then tx-store lock, runs C3–C8). Stage C's deterministic-id scan and conditional `activeTxId` clear in C4 make it safe to rerun even if a previous attempt got partway through. Recovery does not implement its own session-write logic. The user is informed at the next invocation that recovery completed automatically; they may verify in `cliq tx show <txId>`. |
 | `apply-finalized` | Stage C reached C5 but did not finish C6. Recovery re-enters C from C3, sees record present and `activeTxId` already cleared, transitions tx state.json to `applied`. Idempotent. |
@@ -1331,6 +1336,8 @@ Required tests grouped by concern:
 - Apply Stage A1a rejects when tx state is no longer `approved` (e.g., a concurrent abort completed before A1 acquired the lock), without writing apply-progress.json or any file
 - Apply Stage A1a rejects when any `abort-progress.json` exists, regardless of phase
 - Apply Stage A1a rejects when `apply-progress.json` already exists in any phase (apply-vs-apply same-direction race; second invocation must use `cliq tx status` or wait)
+- Apply Stage B1a, when artificially induced to fire (e.g., test-only fault injection that flips tx state mid-stage), deletes `apply-progress.json` under the lock and does NOT mutate `state.json`; the previously-set terminal state is preserved
+- `apply-pending` recovery does NOT revert `state.json` to `approved` when current state is `aborted` or `applied`; it only discards the orphan `apply-progress.json` and emits a recovery warning
 
 **Abort termination protocol**
 - `tx abort` from `staging`/`finalized`/`validated`/`approved` writes one `tx-aborted` record (deterministic id `txrec_abort_<txId>`) and clears `Session.activeTxId`
