@@ -2,7 +2,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
 import { withPathLock } from '../../lib/path-lock.js';
-import type { Transaction, TxKind, ApplyProgress, AbortProgress } from './types.js';
+import type { Transaction, TxKind, ApplyProgress, AbortProgress, AuditEntry } from './types.js';
 
 export function resolveTxRoot(cliqHome: string): string {
   return path.join(cliqHome, 'tx');
@@ -159,5 +159,19 @@ export async function deleteAbortProgress(root: string, txId: string): Promise<v
     await fs.unlink(abortProgressPath(root, txId));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+export async function appendAudit(root: string, txId: string, entry: AuditEntry): Promise<void> {
+  await fs.appendFile(auditJsonPath(root, txId), JSON.stringify(entry) + '\n', 'utf8');
+}
+
+export async function readAudit(root: string, txId: string): Promise<AuditEntry[]> {
+  try {
+    const raw = await fs.readFile(auditJsonPath(root, txId), 'utf8');
+    return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l) as AuditEntry);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
   }
 }

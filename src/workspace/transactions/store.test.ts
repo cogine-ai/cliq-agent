@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { resolveTxRoot, txDir, applyProgressPath, abortProgressPath, stateJsonPath, auditJsonPath, readTxState, writeTxState, createTx, readApplyProgress, writeApplyProgress, deleteApplyProgress, readAbortProgress, writeAbortProgress, deleteAbortProgress, withTxLock } from './store.js';
+import { resolveTxRoot, txDir, applyProgressPath, abortProgressPath, stateJsonPath, auditJsonPath, readTxState, writeTxState, createTx, readApplyProgress, writeApplyProgress, deleteApplyProgress, readAbortProgress, writeAbortProgress, deleteAbortProgress, withTxLock, appendAudit, readAudit } from './store.js';
 
 test('resolveTxRoot honors CLIQ_HOME', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-home-'));
@@ -140,6 +140,21 @@ test('acquireTxLock serializes concurrent operations on the same txId', async ()
     });
     await Promise.all([a, b]);
     assert.deepEqual(order, ['a-start', 'a-end', 'b-start', 'b-end']);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('appendAudit writes JSONL entries in order', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-audit-'));
+  try {
+    const root = resolveTxRoot(home);
+    await createTx(root, { id: 'tx_a', kind: 'edit', workspaceId: 'w', sessionId: 's', workspaceRealPath: '/tmp' });
+    await appendAudit(root, 'tx_a', { ts: '2026-05-06T00:00:00Z', from: null, to: 'staging', by: 'cli' });
+    await appendAudit(root, 'tx_a', { ts: '2026-05-06T00:00:01Z', from: 'staging', to: 'finalized', by: 'cli' });
+    const entries = await readAudit(root, 'tx_a');
+    assert.equal(entries.length, 2);
+    assert.equal(entries[1].to, 'finalized');
   } finally {
     await rm(home, { recursive: true, force: true });
   }
