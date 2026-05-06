@@ -8,7 +8,8 @@ import { exportHandoff } from '../handoff/export.js';
 import { createCheckpoint } from '../session/checkpoints.js';
 import { createCompaction } from '../session/compaction.js';
 import { createSession } from '../session/store.js';
-import { getArtifactView, toSessionView } from './artifacts.js';
+import type { SessionRecord } from '../session/types.js';
+import { getArtifactView, toSessionRecordView, toSessionView } from './artifacts.js';
 
 const previousHome = process.env.CLIQ_HOME;
 const cleanupDirs: string[] = [];
@@ -216,4 +217,71 @@ test('toSessionView renders tx-aborted with reason, artifactRef, optional applie
   assert.deepEqual(a.appliedPartial?.partialFiles, ['x.ts']);
   assert.equal(a.appliedPartial?.restoreConfirmed, false);
   assert.equal('text' in aborted!, false);
+});
+
+test('toSessionRecordView renders tx-opened with txId, optional name, explicit:true', () => {
+  const rec: SessionRecord = {
+    id: 'txrec_open_tx_a',
+    ts: 'x',
+    kind: 'tx-opened',
+    role: 'user',
+    content: 'opened',
+    meta: { txId: 'tx_a', txKind: 'edit', name: 'feature', explicit: true }
+  };
+  const view = toSessionRecordView(rec);
+  assert.equal(view.kind, 'tx-opened');
+  if (view.kind === 'tx-opened') {
+    assert.equal(view.txId, 'tx_a');
+    assert.equal(view.name, 'feature');
+    assert.equal(view.explicit, true);
+  }
+});
+
+test('toSessionRecordView renders tx-applied with diffSummary and artifactRef', () => {
+  const rec: SessionRecord = {
+    id: 'txrec_apply_tx_b',
+    ts: 'x',
+    kind: 'tx-applied',
+    role: 'user',
+    content: 'applied',
+    meta: {
+      txId: 'tx_b',
+      txKind: 'edit',
+      diffSummary: { filesChanged: 1, additions: 0, deletions: 0, creates: [], modifies: ['a.txt'], deletes: [] },
+      files: { creates: [], modifies: ['a.txt'], deletes: [] },
+      validators: { blocking: { pass: 1, fail: 0 }, advisory: { pass: 0, fail: 0, names: [] } },
+      overrides: [],
+      artifactRef: 'tx/tx_b/'
+    }
+  };
+  const view = toSessionRecordView(rec);
+  assert.equal(view.kind, 'tx-applied');
+  if (view.kind === 'tx-applied') {
+    assert.equal(view.txId, 'tx_b');
+    assert.deepEqual(view.diffSummary.modifies, ['a.txt']);
+  }
+});
+
+test('toSessionRecordView renders tx-aborted with reason and optional appliedPartial', () => {
+  const rec: SessionRecord = {
+    id: 'txrec_abort_tx_c',
+    ts: 'x',
+    kind: 'tx-aborted',
+    role: 'user',
+    content: 'aborted',
+    meta: {
+      txId: 'tx_c',
+      txKind: 'edit',
+      reason: 'apply-failed-partial-restored',
+      files: { wouldHaveCreated: [], wouldHaveModified: ['a.txt'], wouldHaveDeleted: [] },
+      artifactRef: 'tx/tx_c/',
+      appliedPartial: { partialFiles: ['a.txt'], ghostSnapshotId: 'wchk_x', restoreConfirmed: true }
+    }
+  };
+  const view = toSessionRecordView(rec);
+  assert.equal(view.kind, 'tx-aborted');
+  if (view.kind === 'tx-aborted') {
+    assert.equal(view.txId, 'tx_c');
+    assert.equal(view.appliedPartial?.restoreConfirmed, true);
+  }
 });

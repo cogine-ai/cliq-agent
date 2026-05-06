@@ -105,7 +105,12 @@ export type HeadlessRuntimeEventType =
   | 'compact-error'
   | 'final'
   | 'error'
-  | 'run-end';
+  | 'run-end'
+  | 'tx-staging-start'
+  | 'tx-finalized'
+  | 'tx-validated'
+  | 'tx-applied'
+  | 'tx-aborted';
 
 export type RunStartPayload = {
   cwd: string;
@@ -177,6 +182,51 @@ export type RunEndPayload = {
   output: HeadlessRunOutput;
 };
 
+export type TxStagingStartPayload = {
+  txId: string;
+  txKind: 'edit';
+  trigger: 'auto-turn' | 'explicit-open';
+  name?: string;
+};
+
+export type TxFinalizedPayload = {
+  txId: string;
+  txKind: 'edit';
+  diffSummary: import('../workspace/transactions/types.js').DiffSummary;
+};
+
+export type TxValidatedPayload = {
+  txId: string;
+  txKind: 'edit';
+  validators: {
+    blocking: { pass: number; fail: number };
+    advisory: { pass: number; fail: number; names: string[] };
+  };
+  blockingFailures: string[];
+};
+
+export type TxAppliedPayload = {
+  txId: string;
+  txKind: 'edit';
+  diffSummary: import('../workspace/transactions/types.js').DiffSummary;
+  validators: {
+    blocking: { pass: number; fail: number };
+    advisory: { pass: number; fail: number; names: string[] };
+  };
+  overrides: import('../workspace/transactions/types.js').OverrideEntry[];
+  artifactRef: string;
+  ghostSnapshotId?: string;
+};
+
+export type TxAbortedPayload = {
+  txId: string;
+  txKind: 'edit';
+  reason: import('../workspace/transactions/types.js').AbortReason;
+  failedValidators?: string[];
+  artifactRef: string;
+  appliedPartial?: { partialFiles: string[]; ghostSnapshotId: string; restoreConfirmed: boolean };
+};
+
 export type HeadlessEventPayloadByType = {
   'run-start': RunStartPayload;
   'checkpoint-created': CheckpointCreatedPayload;
@@ -192,6 +242,11 @@ export type HeadlessEventPayloadByType = {
   final: FinalPayload;
   error: HeadlessRunError;
   'run-end': RunEndPayload;
+  'tx-staging-start': TxStagingStartPayload;
+  'tx-finalized': TxFinalizedPayload;
+  'tx-validated': TxValidatedPayload;
+  'tx-applied': TxAppliedPayload;
+  'tx-aborted': TxAbortedPayload;
 };
 
 export type RuntimeEventEnvelopeFor<TType extends HeadlessRuntimeEventType> = TType extends HeadlessRuntimeEventType
