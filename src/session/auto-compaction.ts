@@ -130,6 +130,48 @@ function safeBoundaryCandidates(records: SessionRecord[]) {
   return candidates.sort((a, b) => a - b);
 }
 
+type TxSpan = { openIndex: number; closeIndex: number };
+
+function findExplicitTxSpans(records: SessionRecord[]): TxSpan[] {
+  const spans: TxSpan[] = [];
+  const openByTxId = new Map<string, number>();
+  for (let i = 0; i < records.length; i += 1) {
+    const r = records[i];
+    if (!r) continue;
+    if (r.kind === 'tx-opened') {
+      openByTxId.set(r.meta.txId, i);
+    } else if (r.kind === 'tx-applied' || r.kind === 'tx-aborted') {
+      const open = openByTxId.get(r.meta.txId);
+      if (open !== undefined) {
+        spans.push({ openIndex: open, closeIndex: i });
+        openByTxId.delete(r.meta.txId);
+      }
+    }
+  }
+  // Unmatched tx-opened: span extends to records.length (still-open explicit tx).
+  for (const [, openIndex] of openByTxId) {
+    spans.push({ openIndex, closeIndex: records.length });
+  }
+  return spans;
+}
+
+function adjustCutForTxSpans(rawCutIndex: number, spans: TxSpan[]): number {
+  let cut = rawCutIndex;
+  let changed = true;
+  // Multiple passes in case adjusting into one span lands inside an earlier span.
+  while (changed) {
+    changed = false;
+    for (const span of spans) {
+      // Cut at openIndex is safe (cut before the tx); cut > closeIndex is also safe.
+      if (cut > span.openIndex && cut <= span.closeIndex) {
+        cut = span.openIndex;
+        changed = true;
+      }
+    }
+  }
+  return cut;
+}
+
 export function selectAutoCompactRange({
   session,
   keepRecentTokens,
@@ -161,6 +203,15 @@ export function selectAutoCompactRange({
   if (selected === null) {
     return null;
   }
+
+  // Move cut out of any explicit-tx span so we never split between
+  // tx-opened and its matching tx-applied/tx-aborted (or the still-open tail).
+  const spans = findExplicitTxSpans(session.records);
+  const adjusted = adjustCutForTxSpans(selected, spans);
+  if (adjusted <= previousEnd) {
+    return null;
+  }
+  selected = adjusted;
 
   const compactableNewTokens = estimateRecordsTokens(session.records.slice(previousEnd, selected));
   if (compactableNewTokens < minNewTokens) {

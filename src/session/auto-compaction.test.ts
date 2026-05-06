@@ -52,6 +52,63 @@ function tool(id: string, content: string) {
   };
 }
 
+function txOpened(id: string, txId: string, name?: string) {
+  return {
+    id,
+    ts: '2026-04-30T00:00:03.000Z',
+    kind: 'tx-opened' as const,
+    role: 'user' as const,
+    content: `Transaction ${txId} opened (explicit)`,
+    meta: { txId, txKind: 'edit' as const, explicit: true as const, ...(name !== undefined ? { name } : {}) }
+  };
+}
+
+function txApplied(id: string, txId: string) {
+  return {
+    id,
+    ts: '2026-04-30T00:00:04.000Z',
+    kind: 'tx-applied' as const,
+    role: 'user' as const,
+    content: `Transaction ${txId} applied`,
+    meta: {
+      txId,
+      txKind: 'edit' as const,
+      diffSummary: {
+        filesChanged: 1,
+        additions: 5,
+        deletions: 2,
+        creates: [],
+        modifies: ['src/foo.ts'],
+        deletes: []
+      },
+      files: { creates: [], modifies: ['src/foo.ts'], deletes: [] },
+      validators: {
+        blocking: { pass: 1, fail: 0 },
+        advisory: { pass: 0, fail: 0, names: [] }
+      },
+      overrides: [],
+      artifactRef: `~/.cliq/transactions/${txId}`
+    }
+  };
+}
+
+function txAborted(id: string, txId: string, reason: 'user-abort' | 'validator-fail' | 'apply-error' = 'user-abort') {
+  return {
+    id,
+    ts: '2026-04-30T00:00:05.000Z',
+    kind: 'tx-aborted' as const,
+    role: 'user' as const,
+    content: `Transaction ${txId} aborted: ${reason}`,
+    meta: {
+      txId,
+      txKind: 'edit' as const,
+      reason,
+      files: { wouldHaveCreated: [], wouldHaveModified: ['src/foo.ts'], wouldHaveDeleted: [] },
+      artifactRef: `~/.cliq/transactions/${txId}`
+    }
+  };
+}
+
 test('estimateRecordTokens is deterministic', () => {
   assert.equal(estimateRecordTokens(user('u1', 'abcd')).tokens, 5);
   assert.equal(estimateMessagesTokens([{ role: 'user', content: 'abcd' }]).tokens, 5);
@@ -100,6 +157,157 @@ test('serializeRecordForSummary includes tool metadata', () => {
   assert.match(serialized, /tool=bash/);
   assert.match(serialized, /status=ok/);
   assert.match(serialized, /TOOL_RESULT bash OK/);
+});
+
+test('selectAutoCompactRange does not split between tx-opened and matching tx-applied', () => {
+  const session = createSession('/tmp/workspace');
+  // Span: open=1, close=3. assistant at index 2 is a safe-split candidate that would split the span.
+  session.records.push(
+    user('u1', 'lead'),
+    txOpened('o1', 'tx_aa', 'refactor foo'),
+    assistant('a1', '{"message":"working"}'),
+    txApplied('p1', 'tx_aa'),
+    user('u2', 'tail')
+  );
+
+  const range = selectAutoCompactRange({
+    session,
+    // keepRecentTokens larger than any tail makes selected fall back to candidates[0],
+    // which is the assistant at index 2 — INSIDE the span. Adjust to openIndex=1.
+    keepRecentTokens: 10_000,
+    minNewTokens: 1
+  });
+
+  assert.equal(range?.endIndexExclusive, 1);
+  assert.equal(range?.firstKeptRecordId, 'o1');
+});
+
+test('selectAutoCompactRange does not split between tx-opened and matching tx-aborted', () => {
+  const session = createSession('/tmp/workspace');
+  // Span: open=1, close=3. assistant at index 2 is a safe-split candidate that would split.
+  session.records.push(
+    user('u1', 'lead'),
+    txOpened('o1', 'tx_bb'),
+    assistant('a1', '{"message":"working"}'),
+    txAborted('b1', 'tx_bb', 'user-abort'),
+    user('u2', 'tail')
+  );
+
+  const range = selectAutoCompactRange({
+    session,
+    keepRecentTokens: 10_000,
+    minNewTokens: 1
+  });
+
+  assert.equal(range?.endIndexExclusive, 1);
+  assert.equal(range?.firstKeptRecordId, 'o1');
+});
+
+test('selectAutoCompactRange splits normally when tx-applied has no preceding tx-opened (implicit per-turn tx)', () => {
+  const session = createSession('/tmp/workspace');
+  // No tx-opened: tx-applied represents an implicit per-turn tx and is not a span boundary.
+  session.records.push(
+    user('u1', 'old '.repeat(100)),
+    assistant('a1', '{"message":"old answer"}'),
+    txApplied('p1', 'tx_cc'),
+    user('u2', 'tail '.repeat(100)),
+    assistant('a2', '{"message":"tail answer"}')
+  );
+
+  const range = selectAutoCompactRange({
+    session,
+    keepRecentTokens: 60,
+    minNewTokens: 1
+  });
+
+  // user boundary at index 3 is selected normally (no span constraint).
+  assert.equal(range?.endIndexExclusive, 3);
+  assert.equal(range?.firstKeptRecordId, 'u2');
+});
+
+test('selectAutoCompactRange treats unmatched tx-opened as extending to records.length', () => {
+  const session = createSession('/tmp/workspace');
+  // tx-opened at index 3 with no matching apply/abort: span = [3, records.length=5].
+  // assistant safe-split at index 4 would land INSIDE that still-open span; must move to 3.
+  session.records.push(
+    user('u1', 'old '.repeat(100)),
+    assistant('a1', '{"message":"old answer"}'),
+    user('u2', 'tail '.repeat(100)),
+    txOpened('o1', 'tx_dd'),
+    assistant('a2', '{"message":"tail answer"}')
+  );
+
+  const range = selectAutoCompactRange({
+    session,
+    keepRecentTokens: 1,
+    minNewTokens: 1
+  });
+
+  // selected starts as the last candidate satisfying tail >= 1: assistant at index 4.
+  // Adjustment: 4 is inside still-open span (3, 5) → moved to openIndex=3.
+  assert.equal(range?.endIndexExclusive, 3);
+  assert.equal(range?.firstKeptRecordId, 'o1');
+});
+
+test('selectAutoCompactRange respects multiple non-overlapping explicit tx spans', () => {
+  const session = createSession('/tmp/workspace');
+  // Span A: indices 1..3 (open..apply); span B: indices 4..6 (open..apply, no user between).
+  // Best candidate by keepRecentTokens lands at index 5 (assistant inside span B); must move to 4.
+  // u_mid sits BEFORE span B (index 4) — at index 7 (after span B), but to land selection inside
+  // span B, we need an assistant safe-split inside it.
+  session.records.push(
+    user('u1', 'old '.repeat(100)),
+    txOpened('o1', 'tx_aa'),
+    assistant('a1', '{"message":"a1"}'),
+    txApplied('p1', 'tx_aa'),
+    txOpened('o2', 'tx_bb'),
+    assistant('a2', '{"message":"a2"}'),
+    txApplied('p2', 'tx_bb'),
+    user('u_tail', 'tail '.repeat(100))
+  );
+
+  const range = selectAutoCompactRange({
+    session,
+    keepRecentTokens: 60,
+    minNewTokens: 1
+  });
+
+  // Candidates would include assistant safe-split inside span B at index 5 and user at index 7.
+  // Both 5 (inside span B 4..6) and possibly 2 (inside span A 1..3) get moved.
+  // Best by tail-tokens is index 7 (user); 7 > 6 closeIndex of B, so 7 is OUTSIDE span B → no adjustment.
+  // Verify the cut respects both spans (it should land at 7, all spans on the compact side).
+  assert.equal(range?.endIndexExclusive, 7);
+  assert.equal(range?.firstKeptRecordId, 'u_tail');
+
+  // Now force a cut that WOULD split span B: shrink keepRecentTokens so the assistant inside span B
+  // becomes the chosen candidate. Use a session where index 5 is the only candidate keeping enough tail.
+  // Actually, easier: assert directly via the helper behavior — when cut would land inside span B,
+  // it gets moved to span B's openIndex. We test this via the unmatched-tx case above and the
+  // primary tx-opened/tx-applied test above. Here we additionally verify span A is not split:
+  // build a session whose best candidate lands inside span A.
+  const sessionB = createSession('/tmp/workspace');
+  sessionB.records.push(
+    user('u1', 'lead'),
+    txOpened('o1', 'tx_aa'),
+    assistant('a1', '{"message":"a1"}'),
+    txApplied('p1', 'tx_aa'),
+    txOpened('o2', 'tx_bb'),
+    assistant('a2', '{"message":"a2"}'),
+    txApplied('p2', 'tx_bb'),
+    user('u_tail', 'tail '.repeat(200))
+  );
+  const rangeB = selectAutoCompactRange({
+    session: sessionB,
+    // Force tail to be very large so candidates near the front are preferred.
+    // selected becomes the LAST candidate satisfying tailTokens >= keepRecentTokens.
+    keepRecentTokens: 10_000,
+    minNewTokens: 1
+  });
+  // No candidate has a tail >= 10000 tokens, so selected falls back to candidates[0].
+  // candidates[0] is the smallest safe split. Index 2 (assistant inside span A) is safe.
+  // Adjusted from 2 → 1 (span A's openIndex). previousEnd is 0, so 1 > 0 is fine.
+  assert.equal(rangeB?.endIndexExclusive, 1);
+  assert.equal(rangeB?.firstKeptRecordId, 'o1');
 });
 
 function fakeModel(outputs: string[]) {
