@@ -243,6 +243,44 @@ export function serializeRecordForSummary(record: SessionRecord, maxToolPayloadC
     ].join('\n');
   }
 
+  if (record.kind === 'tx-opened') {
+    const name = record.meta.name ? ` "${record.meta.name}"` : '';
+    const body = `[Transaction opened${name} (${record.meta.txId})]`;
+    return [
+      `<record id="${record.id}" kind="tx-opened" txId="${record.meta.txId}">`,
+      body,
+      '</record>'
+    ].join('\n');
+  }
+
+  if (record.kind === 'tx-applied') {
+    const ds = record.meta.diffSummary;
+    const blocking = record.meta.validators.blocking;
+    const blockingTotal = blocking.pass + blocking.fail;
+    const modifies = ds.modifies.join(', ');
+    const body = `[Transaction ${record.meta.txId} applied: ${ds.filesChanged} files changed (+${ds.additions} -${ds.deletions}); modifies: ${modifies}; validators: ${blocking.pass}/${blockingTotal} blocking pass]`;
+    return [
+      `<record id="${record.id}" kind="tx-applied" txId="${record.meta.txId}">`,
+      body,
+      '</record>'
+    ].join('\n');
+  }
+
+  if (record.kind === 'tx-aborted') {
+    const partial = record.meta.appliedPartial
+      ? `; partial: ${record.meta.appliedPartial.partialFiles.join(', ')} (restoreConfirmed=${record.meta.appliedPartial.restoreConfirmed})`
+      : '';
+    const failed = record.meta.failedValidators?.length
+      ? `; failedValidators: ${record.meta.failedValidators.join(', ')}`
+      : '';
+    const body = `[Transaction ${record.meta.txId} aborted: ${record.meta.reason}${failed}${partial}]`;
+    return [
+      `<record id="${record.id}" kind="tx-aborted" txId="${record.meta.txId}">`,
+      body,
+      '</record>'
+    ].join('\n');
+  }
+
   return [`<record id="${record.id}" kind="${record.kind}" role="${record.role}">`, record.content, '</record>'].join(
     '\n'
   );

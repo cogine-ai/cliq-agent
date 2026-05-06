@@ -249,6 +249,63 @@ test('selectAutoCompactRange treats unmatched tx-opened as extending to records.
   assert.equal(range?.firstKeptRecordId, 'o1');
 });
 
+test('serializeRecordForSummary surfaces meta.name and meta.txId for tx-opened records', () => {
+  const serialized = serializeRecordForSummary(txOpened('o1', 'tx_aa', 'refactor foo'), 10_000);
+
+  assert.match(serialized, /Transaction opened "refactor foo"/);
+  assert.match(serialized, /tx_aa/);
+  // Without a name, the rendering omits the quoted label.
+  const noName = serializeRecordForSummary(txOpened('o2', 'tx_bb'), 10_000);
+  assert.equal(/Transaction opened "/.test(noName), false);
+  assert.match(noName, /Transaction opened \(tx_bb\)/);
+});
+
+test('serializeRecordForSummary surfaces meta.diffSummary for tx-applied records', () => {
+  const serialized = serializeRecordForSummary(txApplied('p1', 'tx_aa'), 10_000);
+
+  assert.match(serialized, /tx_aa/);
+  assert.match(serialized, /1 files changed/);
+  assert.match(serialized, /\+5 -2/);
+  assert.match(serialized, /modifies: src\/foo\.ts/);
+  assert.match(serialized, /1\/1 blocking pass/);
+});
+
+test('serializeRecordForSummary surfaces meta.appliedPartial for tx-aborted records when present', () => {
+  const aborted = {
+    id: 'b1',
+    ts: '2026-04-30T00:00:05.000Z',
+    kind: 'tx-aborted' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_zz aborted: apply-error',
+    meta: {
+      txId: 'tx_zz',
+      txKind: 'edit' as const,
+      reason: 'apply-failed-partial-kept' as const,
+      failedValidators: ['typecheck', 'lint'],
+      files: { wouldHaveCreated: [], wouldHaveModified: ['src/a.ts', 'src/b.ts'], wouldHaveDeleted: [] },
+      artifactRef: '~/.cliq/transactions/tx_zz',
+      appliedPartial: {
+        partialFiles: ['src/a.ts'],
+        ghostSnapshotId: 'ghost_1',
+        restoreConfirmed: false
+      }
+    }
+  };
+  const serialized = serializeRecordForSummary(aborted, 10_000);
+
+  assert.match(serialized, /tx_zz/);
+  assert.match(serialized, /apply-failed-partial-kept/);
+  assert.match(serialized, /failedValidators: typecheck, lint/);
+  assert.match(serialized, /partial: src\/a\.ts/);
+  assert.match(serialized, /restoreConfirmed=false/);
+
+  // Without appliedPartial / failedValidators, those segments are absent.
+  const minimal = serializeRecordForSummary(txAborted('b2', 'tx_yy', 'user-abort'), 10_000);
+  assert.match(minimal, /Transaction tx_yy aborted: user-abort/);
+  assert.equal(/partial:/.test(minimal), false);
+  assert.equal(/failedValidators:/.test(minimal), false);
+});
+
 test('selectAutoCompactRange respects multiple non-overlapping explicit tx spans', () => {
   const session = createSession('/tmp/workspace');
   // Span A: indices 1..3 (open..apply); span B: indices 4..6 (open..apply, no user between).
