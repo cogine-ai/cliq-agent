@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
+import type { Readable, Writable } from 'node:stream';
 
 import {
   emptyHeadlessArtifacts,
@@ -15,6 +15,7 @@ import {
 } from './contract.js';
 import { getArtifactViewForRequest, getSessionView as defaultGetSessionView } from './artifacts.js';
 import { runHeadless as defaultRunHeadless } from './run.js';
+import { makeId } from '../session/store.js';
 
 type JsonRpcId = string | number | null;
 
@@ -46,6 +47,14 @@ export type RpcServerOptions = {
 export type RpcServer = {
   handleLine: (line: string) => Promise<void>;
   waitForIdle: () => Promise<void>;
+  abortActiveRun: () => void;
+  close: () => void;
+};
+
+export type RpcStdioServerOptions = {
+  input?: Readable;
+  output?: Writable;
+  serverOptions?: Omit<RpcServerOptions, 'writeLine'>;
 };
 
 type ActiveRun = {
@@ -89,14 +98,6 @@ function isJsonRpcRequest(value: unknown): value is JsonRpcRequest {
   );
 }
 
-function defaultMakeRunId() {
-  return `run_${randomUUID().replaceAll('-', '')}`;
-}
-
-function makeEventId() {
-  return `evt_${randomUUID().replaceAll('-', '')}`;
-}
-
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -106,6 +107,7 @@ function asCwd(value: unknown): string | null {
     return null;
   }
 
+  // Filesystem paths may legitimately contain surrounding whitespace.
   return value.trim() ? value : null;
 }
 
@@ -173,19 +175,23 @@ function isNotFoundError(error: unknown) {
 
 export function createRpcServer(options: RpcServerOptions): RpcServer {
   const runHeadless = options.runHeadless ?? defaultRunHeadless;
-  const makeRunId = options.makeRunId ?? defaultMakeRunId;
+  const makeRunId = options.makeRunId ?? (() => makeId('run'));
   const getSessionView = options.getSessionView ?? defaultGetSessionView;
   const getArtifactView = options.getArtifactView ?? getArtifactViewForRequest;
   const finishedRunIds = new Set<string>();
   let activeRun: ActiveRun | undefined;
   let transportClosed = false;
 
+  const abortActiveRun = () => {
+    activeRun?.controller.abort();
+  };
+
   const closeTransport = () => {
     if (transportClosed) {
       return;
     }
     transportClosed = true;
-    activeRun?.controller.abort();
+    abortActiveRun();
   };
 
   const write = (message: unknown) => {
@@ -253,7 +259,7 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
 
     writeEvent({
       schemaVersion: HEADLESS_SCHEMA_VERSION,
-      eventId: makeEventId(),
+      eventId: makeId('evt'),
       runId,
       timestamp,
       type: 'error',
@@ -261,7 +267,7 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
     });
     writeEvent({
       schemaVersion: HEADLESS_SCHEMA_VERSION,
-      eventId: makeEventId(),
+      eventId: makeId('evt'),
       runId,
       timestamp: new Date().toISOString(),
       type: 'run-end',
@@ -421,24 +427,71 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
       while (activeRun) {
         await activeRun.promise;
       }
-    }
+    },
+
+    abortActiveRun,
+    close: closeTransport
   };
 }
 
-export function runStdioJsonRpcServer() {
+export function runStdioJsonRpcServer(options: RpcStdioServerOptions = {}): Promise<void> {
+  const input = options.input ?? process.stdin;
+  const output = options.output ?? process.stdout;
   const server = createRpcServer({
+    ...options.serverOptions,
     writeLine(line) {
-      process.stdout.write(`${line}\n`);
+      output.write(`${line}\n`);
     }
   });
+  const pendingLines = new Set<Promise<void>>();
   const rl = createInterface({
-    input: process.stdin,
+    input,
     crlfDelay: Infinity
   });
-
-  rl.on('line', (line) => {
-    void server.handleLine(line);
+  let finished = false;
+  let resolveDone!: () => void;
+  const done = new Promise<void>((resolve) => {
+    resolveDone = resolve;
   });
 
-  return server;
+  const onLine = (line: string) => {
+    const pending = server.handleLine(line);
+    pendingLines.add(pending);
+    void pending.catch(() => undefined).finally(() => {
+      pendingLines.delete(pending);
+    });
+  };
+  const finish = (reason: 'input-closed' | 'output-error') => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    rl.off('line', onLine);
+    rl.off('close', onInputClosed);
+    if (reason === 'output-error') {
+      server.close();
+      rl.close();
+    } else {
+      server.abortActiveRun();
+    }
+
+    void (async () => {
+      await Promise.allSettled([...pendingLines]);
+      await server.waitForIdle();
+      output.off('error', onOutputError);
+      resolveDone();
+    })();
+  };
+  const onInputClosed = () => {
+    finish('input-closed');
+  };
+  const onOutputError = () => {
+    finish('output-error');
+  };
+
+  rl.on('line', onLine);
+  rl.once('close', onInputClosed);
+  output.on('error', onOutputError);
+
+  return done;
 }

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import type { HeadlessRunOutput, HeadlessRunRequest, RuntimeEventEnvelope } from './contract.js';
@@ -8,7 +9,7 @@ import {
   HEADLESS_EXIT_SUCCESS,
   emptyHeadlessArtifacts
 } from './contract.js';
-import { createRpcServer } from './rpc.js';
+import { createRpcServer, runStdioJsonRpcServer } from './rpc.js';
 
 function parseLines(lines: string[]) {
   return lines.map((line) => JSON.parse(line));
@@ -22,6 +23,34 @@ function completedOutput(runId: string): HeadlessRunOutput {
     finalMessage: 'done',
     artifacts: emptyHeadlessArtifacts()
   };
+}
+
+function cancelledOutput(runId: string): HeadlessRunOutput {
+  return {
+    runId,
+    status: 'cancelled',
+    exitCode: HEADLESS_EXIT_CANCELLED,
+    artifacts: emptyHeadlessArtifacts(),
+    error: { code: 'cancelled', stage: 'cancel', message: 'run cancelled', recoverable: false }
+  };
+}
+
+function collectStreamLines(stream: PassThrough) {
+  const chunks: Buffer[] = [];
+  stream.on('data', (chunk: Buffer) => {
+    chunks.push(chunk);
+  });
+  return () => Buffer.concat(chunks).toString('utf8').trim().split('\n').filter(Boolean);
+}
+
+async function waitForAbort(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    signal?.addEventListener('abort', () => resolve(), { once: true });
+  });
 }
 
 test('rpc returns parse errors for invalid JSON lines', async () => {
@@ -209,6 +238,88 @@ test('rpc run.cancel aborts the active run controller', async () => {
 
   const messages = parseLines(writes);
   assert.deepEqual(messages[1], { jsonrpc: '2.0', id: 2, result: { status: 'cancelled' } });
+});
+
+test('stdio rpc aborts the active run and resolves when stdin closes', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const outputLines = collectStreamLines(output);
+  let signalAborted = false;
+  const done = runStdioJsonRpcServer({
+    input,
+    output,
+    serverOptions: {
+      makeRunId: () => 'run_rpc_stdin_close',
+      async runHeadless(_request, options) {
+        await waitForAbort(options.signal);
+        signalAborted = options.signal?.aborted ?? false;
+        await options.onEvent?.({
+          schemaVersion: 1,
+          eventId: 'evt_rpc_stdin_close',
+          runId: options.runId!,
+          timestamp: '2026-05-06T00:00:00.000Z',
+          type: 'run-end',
+          payload: {
+            status: 'cancelled',
+            exitCode: HEADLESS_EXIT_CANCELLED,
+            output: cancelledOutput(options.runId!)
+          }
+        });
+        return cancelledOutput(options.runId!);
+      }
+    }
+  });
+
+  input.write(
+    `${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'run.start',
+      params: { cwd: process.cwd(), prompt: 'abort on stdin close' }
+    })}\n`
+  );
+  input.end();
+
+  await done;
+
+  const messages = parseLines(outputLines());
+  assert.equal(signalAborted, true);
+  assert.deepEqual(messages[0], { jsonrpc: '2.0', id: 1, result: { runId: 'run_rpc_stdin_close' } });
+  assert.equal(messages[1].method, 'run.event');
+  assert.equal(messages[1].params.type, 'run-end');
+  assert.equal(messages[1].params.runId, 'run_rpc_stdin_close');
+});
+
+test('stdio rpc aborts the active run when stdout errors', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let signalAborted = false;
+  const done = runStdioJsonRpcServer({
+    input,
+    output,
+    serverOptions: {
+      makeRunId: () => 'run_rpc_stdout_error',
+      async runHeadless(_request, options) {
+        await waitForAbort(options.signal);
+        signalAborted = options.signal?.aborted ?? false;
+        return cancelledOutput(options.runId!);
+      }
+    }
+  });
+
+  input.write(
+    `${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'run.start',
+      params: { cwd: process.cwd(), prompt: 'abort on stdout error' }
+    })}\n`
+  );
+  output.emit('error', new Error('EPIPE'));
+
+  await done;
+
+  assert.equal(signalAborted, true);
 });
 
 test('rpc emits terminal failure events when an accepted run rejects', async () => {
