@@ -107,6 +107,78 @@ test('exportHandoff reuses active compact summary without creating a new compact
   }
 });
 
+test('exportHandoff renders tx-opened/tx-applied/tx-aborted records in the markdown', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-handoff-tx-'));
+  try {
+    await withCliqHome(async () => {
+      const session = createSession(cwd);
+      session.records.push(
+        {
+          id: 'usr_1',
+          ts: '2026-04-29T00:00:00.000Z',
+          kind: 'user',
+          role: 'user',
+          content: 'kick off'
+        },
+        {
+          id: 'txrec_open_tx_aa',
+          ts: '2026-04-29T00:00:01.000Z',
+          kind: 'tx-opened',
+          role: 'user',
+          content: 'Transaction tx_aa opened (explicit)',
+          meta: { txId: 'tx_aa', txKind: 'edit', explicit: true, name: 'refactor foo' }
+        },
+        {
+          id: 'txrec_apply_tx_aa',
+          ts: '2026-04-29T00:00:02.000Z',
+          kind: 'tx-applied',
+          role: 'user',
+          content: 'Transaction tx_aa applied',
+          meta: {
+            txId: 'tx_aa',
+            txKind: 'edit',
+            diffSummary: {
+              filesChanged: 3,
+              additions: 12,
+              deletions: 4,
+              creates: [],
+              modifies: ['src/a.ts', 'src/b.ts', 'src/c.ts'],
+              deletes: []
+            },
+            files: { creates: [], modifies: ['src/a.ts', 'src/b.ts', 'src/c.ts'], deletes: [] },
+            validators: { blocking: { pass: 2, fail: 0 }, advisory: { pass: 0, fail: 0, names: [] } },
+            overrides: [],
+            artifactRef: '~/.cliq/transactions/tx_aa'
+          }
+        },
+        {
+          id: 'txrec_abort_tx_bb',
+          ts: '2026-04-29T00:00:03.000Z',
+          kind: 'tx-aborted',
+          role: 'user',
+          content: 'Transaction tx_bb aborted: validator-fail',
+          meta: {
+            txId: 'tx_bb',
+            txKind: 'edit',
+            reason: 'validator-fail',
+            files: { wouldHaveCreated: [], wouldHaveModified: ['src/x.ts'], wouldHaveDeleted: [] },
+            artifactRef: '~/.cliq/transactions/tx_bb'
+          }
+        }
+      );
+
+      const artifact = await exportHandoff(cwd, session);
+      const markdown = await readFile(path.join(handoffDirPath(artifact.id), 'HANDOFF.md'), 'utf8');
+
+      assert.match(markdown, /tx-opened "refactor foo" \(tx_aa\)/);
+      assert.match(markdown, /tx-applied \(tx_aa\): 3 files changed/);
+      assert.match(markdown, /tx-aborted \(tx_bb\): validator-fail/);
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('readHandoffArtifact rejects unsafe handoff ids before path access', async () => {
   await withCliqHome(async () => {
     await assert.rejects(() => readHandoffArtifact('../outside'), /invalid handoff id/i);

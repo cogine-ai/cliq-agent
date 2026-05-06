@@ -58,6 +58,16 @@ function recordLine(record: SessionRecord) {
   if (record.kind === 'tool') {
     return `- tool ${record.tool} ${record.status}: ${record.content}`;
   }
+  if (record.kind === 'tx-opened') {
+    const name = record.meta.name ? ` "${record.meta.name}"` : '';
+    return `- tx-opened${name} (${record.meta.txId})`;
+  }
+  if (record.kind === 'tx-applied') {
+    return `- tx-applied (${record.meta.txId}): ${record.meta.diffSummary.filesChanged} files changed`;
+  }
+  if (record.kind === 'tx-aborted') {
+    return `- tx-aborted (${record.meta.txId}): ${record.meta.reason}`;
+  }
   return `- ${record.role}: ${record.content}`;
 }
 
