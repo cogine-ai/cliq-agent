@@ -6,7 +6,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { runStageA, runStageB, ApplyRejected, ApplyConflict, ApplyPartial } from './apply.js';
+import {
+  runStageA,
+  runStageB,
+  runStageC,
+  ApplyRejected,
+  ApplyConflict,
+  ApplyPartial
+} from './apply.js';
 import {
   resolveTxRoot,
   createTx,
@@ -17,6 +24,9 @@ import {
   readApplyProgress,
   readTxState as readTxStateAgain
 } from './store.js';
+import { createSession, mutateSession } from '../../session/store.js';
+import type { Session } from '../../session/types.js';
+import { applyRecordId } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -317,3 +327,140 @@ test('Stage B records filesWritten incrementally so abort sees what was written'
     }
   });
 });
+
+// --- Stage C and applyTx orchestrator tests ---
+
+async function setupSessionForApply(
+  cwd: string,
+  opts?: { activeTxId?: string }
+): Promise<{ session: Session }> {
+  const session = createSession(cwd);
+  await mutateSession(cwd, session, (s) => {
+    s.activeTxId = opts?.activeTxId;
+  });
+  return { session };
+}
+
+async function setupApprovedTxWithDiffSummary(
+  home: string,
+  ws: string,
+  txId: string,
+  files: { path: string; oldContent: string; newContent: string }[]
+): Promise<string> {
+  const root = await setupApprovedTx(home, ws, txId, files);
+  // Set diffSummary so Stage C can build the session record.
+  const { readTxState, writeTxState } = await import('./store.js');
+  const tx = await readTxState(root, txId);
+  await writeTxState(root, {
+    ...tx!,
+    diffSummary: {
+      filesChanged: files.length,
+      additions: 0,
+      deletions: 0,
+      creates: [],
+      modifies: files.map((f) => f.path),
+      deletes: []
+    }
+  });
+  return root;
+}
+
+// TODO(Phase 9, Tasks 36-39): add a test for crash between Phase C-session and
+// Phase C-tx that exercises recovery convergence. Out of scope for Task 28-29.
+
+test('Stage C Phase C-session appends tx-applied record with deterministic id and clears activeTxId', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTxWithDiffSummary(home, ws, 'tx_c_session', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      const a = await runStageA({ root, txId: 'tx_c_session', cwd: ws });
+      await runStageB({ root, txId: 'tx_c_session', cwd: ws }, a.plan);
+      const { session } = await setupSessionForApply(ws, { activeTxId: 'tx_c_session' });
+      await runStageC({ root, txId: 'tx_c_session', cwd: ws, session }, a.ghostSnapshotId);
+      assert.equal(session.activeTxId, undefined);
+      const recId = applyRecordId('tx_c_session');
+      const rec = session.records.find((r) => r.id === recId);
+      assert.ok(rec, 'tx-applied record should be present');
+      assert.equal(rec?.kind, 'tx-applied');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('Stage C Phase C-session is idempotent on rerun: no duplicate record', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTxWithDiffSummary(home, ws, 'tx_c_idem', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      const a = await runStageA({ root, txId: 'tx_c_idem', cwd: ws });
+      await runStageB({ root, txId: 'tx_c_idem', cwd: ws }, a.plan);
+      const { session } = await setupSessionForApply(ws, { activeTxId: 'tx_c_idem' });
+      await runStageC({ root, txId: 'tx_c_idem', cwd: ws, session }, a.ghostSnapshotId);
+      await runStageC({ root, txId: 'tx_c_idem', cwd: ws, session }, a.ghostSnapshotId);
+      const recId = applyRecordId('tx_c_idem');
+      const matches = session.records.filter((r) => r.id === recId);
+      assert.equal(matches.length, 1, 'rerun must not duplicate the record');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('Stage C Phase C-tx is idempotent: state remains applied, no spurious changes', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTxWithDiffSummary(home, ws, 'tx_c_tx_idem', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      const a = await runStageA({ root, txId: 'tx_c_tx_idem', cwd: ws });
+      await runStageB({ root, txId: 'tx_c_tx_idem', cwd: ws }, a.plan);
+      const { session } = await setupSessionForApply(ws);
+      await runStageC({ root, txId: 'tx_c_tx_idem', cwd: ws, session }, a.ghostSnapshotId);
+      await runStageC({ root, txId: 'tx_c_tx_idem', cwd: ws, session }, a.ghostSnapshotId);
+      const { readTxState } = await import('./store.js');
+      const tx = await readTxState(root, 'tx_c_tx_idem');
+      assert.equal(tx?.state, 'applied');
+      const ap = await readApplyProgress(root, 'tx_c_tx_idem');
+      assert.equal(ap?.phase, 'apply-finalized');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('Stage C does not touch activeTxId if it points to a different tx', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTxWithDiffSummary(home, ws, 'tx_self', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      const a = await runStageA({ root, txId: 'tx_self', cwd: ws });
+      await runStageB({ root, txId: 'tx_self', cwd: ws }, a.plan);
+      const { session } = await setupSessionForApply(ws, { activeTxId: 'tx_other' });
+      await runStageC({ root, txId: 'tx_self', cwd: ws, session }, a.ghostSnapshotId);
+      assert.equal(session.activeTxId, 'tx_other');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+

@@ -13,6 +13,9 @@ import {
   readDiff
 } from './store.js';
 import { createApplyPreSnapshot } from './snapshot.js';
+import { mutateSession } from '../../session/store.js';
+import type { Session, SessionRecord } from '../../session/types.js';
+import { applyRecordId, validatorSummaryFromTx } from './types.js';
 
 export type ApplyContext = {
   root: string;
@@ -185,3 +188,99 @@ export async function runStageB(ctx: ApplyContext, plan: PlanEntry[]): Promise<S
     return { ghostSnapshotId: progress.ghostSnapshotId };
   });
 }
+
+export type StageCContext = ApplyContext & {
+  session: Session;
+};
+
+/**
+ * Stage C — finalize apply by writing the session record and tx-store transitions
+ * in two distinct lock-acquisition phases. The spec mandates session fsync MUST
+ * happen before tx state.json transitions so that crash recovery can reason about
+ * the four idempotency markers (session record presence, session.activeTxId,
+ * apply-progress.phase, tx.state) consistently.
+ *
+ * Phase C-session: take the session lock via mutateSession; inside, take the tx
+ * lock briefly to read authoritative state, snapshot the data needed to build
+ * the tx-applied record, then mutate the in-memory session. mutateSession
+ * fsyncs the session on return.
+ *
+ * Phase C-tx: re-acquire the tx-store lock and finalize the on-disk tx state
+ * (apply-progress.phase=apply-finalized, tx.state=applied).
+ */
+export async function runStageC(ctx: StageCContext, ghostSnapshotId: string): Promise<void> {
+  // Phase C-session: take session lock (via mutateSession). Inside, briefly take
+  // tx-store lock to read authoritative state, then mutate session in-memory.
+  // mutateSession fsyncs on return.
+  await mutateSession(ctx.cwd, ctx.session, async (session) => {
+    const decision = await withTxLock(ctx.root, ctx.txId, async () => {
+      const progress = await readApplyProgress(ctx.root, ctx.txId);
+      const tx = await readTxState(ctx.root, ctx.txId);
+      if (!progress || !tx) return null;
+      // Four-marker terminal idempotency: everything already done. Strengthened
+      // beyond the plan with the records-contains check so a fresh re-run is
+      // still allowed to append the record if it somehow went missing.
+      if (
+        progress.phase === 'apply-finalized' &&
+        tx.state === 'applied' &&
+        session.activeTxId !== ctx.txId &&
+        session.records.some((r) => r.id === applyRecordId(ctx.txId))
+      ) {
+        return null;
+      }
+      return {
+        recordId: applyRecordId(ctx.txId),
+        diffSummary: tx.diffSummary,
+        validators: validatorSummaryFromTx(tx),
+        overrides: tx.overridesApplied ?? []
+      };
+    });
+    if (!decision) return;
+    const present = session.records.some((r) => r.id === decision.recordId);
+    // diffSummary may be undefined if validate/finalize stages (out of scope of
+    // v0.8 Phase 7) didn't compute it. Guard the record append; tests must set
+    // diffSummary explicitly before running Stage C.
+    if (!present && decision.diffSummary) {
+      const record: SessionRecord = {
+        id: decision.recordId,
+        ts: new Date().toISOString(),
+        kind: 'tx-applied',
+        role: 'user',
+        content: `Transaction ${ctx.txId} applied: ${decision.diffSummary.filesChanged} files changed`,
+        meta: {
+          txId: ctx.txId,
+          txKind: 'edit',
+          diffSummary: decision.diffSummary,
+          files: {
+            creates: decision.diffSummary.creates,
+            modifies: decision.diffSummary.modifies,
+            deletes: decision.diffSummary.deletes
+          },
+          validators: decision.validators,
+          overrides: decision.overrides,
+          artifactRef: `tx/${ctx.txId}/`,
+          ghostSnapshotId
+        }
+      };
+      session.records.push(record);
+    }
+    if (session.activeTxId === ctx.txId) {
+      session.activeTxId = undefined;
+    }
+  });
+
+  // Phase C-tx: re-acquire tx-store lock; write apply-progress=apply-finalized
+  // first, then state=applied. Both writes are idempotent.
+  await withTxLock(ctx.root, ctx.txId, async () => {
+    const progress = await readApplyProgress(ctx.root, ctx.txId);
+    const tx = await readTxState(ctx.root, ctx.txId);
+    if (!progress || !tx) return;
+    if (progress.phase !== 'apply-finalized') {
+      await writeApplyProgress(ctx.root, ctx.txId, { ...progress, phase: 'apply-finalized' });
+    }
+    if (tx.state !== 'applied') {
+      await writeTxState(ctx.root, { ...tx, state: 'applied', ghostSnapshotId });
+    }
+  });
+}
+
