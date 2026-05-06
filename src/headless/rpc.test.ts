@@ -501,7 +501,10 @@ test('rpc query methods reject empty identifiers as invalid params', async () =>
     { method: 'session.get', params: { cwd: '' } },
     { method: 'session.get', params: { cwd: '   ' } },
     { method: 'session.get', params: { cwd: '/tmp/project', sessionId: '' } },
+    { method: 'session.get', params: { cwd: '/tmp/project', sessionId: ' sess_1 ' } },
     { method: 'artifact.get', params: { cwd: '/tmp/project', artifactId: '' } },
+    { method: 'artifact.get', params: { cwd: '/tmp/project', artifactId: ' cmp_1 ' } },
+    { method: 'artifact.get', params: { cwd: '/tmp/project', artifactId: 'cmp_1', sessionId: ' sess_1 ' } },
     { method: 'artifact.get', params: { cwd: '/tmp/project', artifactId: 'cmp_1', sessionId: '   ' } }
   ];
 
@@ -514,6 +517,44 @@ test('rpc query methods reject empty identifiers as invalid params', async () =>
   for (const message of messages) {
     assert.equal(message.error.code, -32602);
   }
+});
+
+test('rpc query methods preserve cwd surrounding spaces', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine: (line) => {
+      writes.push(line);
+    },
+    async getArtifactView(cwd, artifactId, sessionId) {
+      assert.equal(cwd, ' /tmp/project ');
+      assert.equal(artifactId, 'cmp_1');
+      assert.equal(sessionId, undefined);
+      return {
+        kind: 'compaction',
+        compaction: {
+          id: artifactId,
+          status: 'active',
+          createdAt: '2026-05-06T00:00:00.000Z',
+          coveredRange: { startIndexInclusive: 0, endIndexExclusive: 1 },
+          firstKeptRecordId: 'usr_1',
+          createdBy: { provider: 'ollama', model: 'fake' },
+          summaryMarkdown: 'summary'
+        }
+      };
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'artifact.get',
+      params: { cwd: ' /tmp/project ', artifactId: 'cmp_1' }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.result.kind, 'compaction');
 });
 
 test('rpc query methods map missing sessions to application errors', async () => {

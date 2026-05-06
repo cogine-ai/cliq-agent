@@ -96,13 +96,25 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function asNonEmptyString(value: unknown): string | null {
+function asCwd(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  return value.trim() ? value : null;
+}
+
+function asIdentifier(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
   }
 
   const trimmed = value.trim();
-  return trimmed ? trimmed : null;
+  if (!trimmed || value !== trimmed) {
+    return null;
+  }
+
+  return value;
 }
 
 function asSessionGetParams(params: unknown): { cwd: string; sessionId?: string } | null {
@@ -110,7 +122,7 @@ function asSessionGetParams(params: unknown): { cwd: string; sessionId?: string 
     return null;
   }
 
-  const cwd = asNonEmptyString(params.cwd);
+  const cwd = asCwd(params.cwd);
   if (!cwd) {
     return null;
   }
@@ -119,7 +131,7 @@ function asSessionGetParams(params: unknown): { cwd: string; sessionId?: string 
     return { cwd };
   }
 
-  const sessionId = asNonEmptyString(params.sessionId);
+  const sessionId = asIdentifier(params.sessionId);
   if (!sessionId) {
     return null;
   }
@@ -132,8 +144,8 @@ function asArtifactGetParams(params: unknown): { cwd: string; artifactId: string
     return null;
   }
 
-  const cwd = asNonEmptyString(params.cwd);
-  const artifactId = asNonEmptyString(params.artifactId);
+  const cwd = asCwd(params.cwd);
+  const artifactId = asIdentifier(params.artifactId);
   if (!cwd || !artifactId) {
     return null;
   }
@@ -142,7 +154,7 @@ function asArtifactGetParams(params: unknown): { cwd: string; artifactId: string
     return { cwd, artifactId };
   }
 
-  const sessionId = asNonEmptyString(params.sessionId);
+  const sessionId = asIdentifier(params.sessionId);
   if (!sessionId) {
     return null;
   }
