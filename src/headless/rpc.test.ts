@@ -391,3 +391,94 @@ test('rpc rejects notifications because request ids are required', async () => {
   assert.equal(response.id, null);
   assert.equal(response.error.code, -32600);
 });
+
+test('rpc session.get returns a stable session view', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine: (line) => {
+      writes.push(line);
+    },
+    async getSessionView(cwd, sessionId) {
+      return {
+        id: sessionId ?? 'sess_active',
+        cwd,
+        model: { provider: 'ollama', model: 'fake' },
+        lifecycle: { status: 'idle', turn: 0 },
+        records: [],
+        checkpoints: [],
+        compactions: []
+      };
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'session.get', params: { cwd: '/tmp/project', sessionId: 'sess_1' } })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.result.id, 'sess_1');
+  assert.equal(response.result.cwd, '/tmp/project');
+});
+
+test('rpc artifact.get returns a stable artifact view', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine: (line) => {
+      writes.push(line);
+    },
+    async getArtifactView(cwd, artifactId, sessionId) {
+      assert.equal(cwd, '/tmp/project');
+      assert.equal(sessionId, 'sess_1');
+      return {
+        kind: 'compaction',
+        compaction: {
+          id: artifactId,
+          status: 'active',
+          createdAt: '2026-05-06T00:00:00.000Z',
+          coveredRange: { startIndexInclusive: 0, endIndexExclusive: 1 },
+          firstKeptRecordId: 'usr_1',
+          createdBy: { provider: 'ollama', model: 'fake' },
+          summaryMarkdown: 'summary'
+        }
+      };
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'artifact.get',
+      params: { cwd: '/tmp/project', sessionId: 'sess_1', artifactId: 'cmp_1' }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.result.kind, 'compaction');
+  assert.equal(response.result.compaction.id, 'cmp_1');
+});
+
+test('rpc query methods map missing artifacts to application errors', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine: (line) => {
+      writes.push(line);
+    },
+    async getArtifactView() {
+      throw new Error('artifact not found: cmp_missing');
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'artifact.get',
+      params: { cwd: '/tmp/project', artifactId: 'cmp_missing' }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.error.code, -32004);
+  assert.match(response.error.message, /artifact not found/);
+});

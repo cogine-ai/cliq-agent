@@ -5,12 +5,15 @@ import {
   emptyHeadlessArtifacts,
   HEADLESS_EXIT_FAILURE,
   HEADLESS_SCHEMA_VERSION,
+  type ArtifactView,
   type HeadlessRunError,
   type HeadlessRunOptions,
   type HeadlessRunOutput,
   type HeadlessRunRequest,
-  type RuntimeEventEnvelope
+  type RuntimeEventEnvelope,
+  type SessionView
 } from './contract.js';
+import { getArtifactViewForRequest, getSessionView as defaultGetSessionView } from './artifacts.js';
 import { runHeadless as defaultRunHeadless } from './run.js';
 
 type JsonRpcId = string | number | null;
@@ -31,6 +34,8 @@ export type RpcServerOptions = {
   writeLine: (line: string) => void | Promise<void>;
   makeRunId?: () => string;
   runHeadless?: RunHeadless;
+  getSessionView?: (cwd: string, sessionId?: string) => Promise<SessionView>;
+  getArtifactView?: (cwd: string, artifactId: string, sessionId?: string) => Promise<ArtifactView>;
 };
 
 export type RpcServer = {
@@ -52,6 +57,7 @@ const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
 const ACTIVE_RUN_ERROR = -32001;
+const NOT_FOUND_ERROR = -32004;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -90,9 +96,39 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function asSessionGetParams(params: unknown): { cwd: string; sessionId?: string } | null {
+  if (!isObject(params) || typeof params.cwd !== 'string') {
+    return null;
+  }
+  if (params.sessionId !== undefined && typeof params.sessionId !== 'string') {
+    return null;
+  }
+  return { cwd: params.cwd, ...(params.sessionId ? { sessionId: params.sessionId } : {}) };
+}
+
+function asArtifactGetParams(params: unknown): { cwd: string; artifactId: string; sessionId?: string } | null {
+  if (!isObject(params) || typeof params.cwd !== 'string' || typeof params.artifactId !== 'string') {
+    return null;
+  }
+  if (params.sessionId !== undefined && typeof params.sessionId !== 'string') {
+    return null;
+  }
+  return {
+    cwd: params.cwd,
+    artifactId: params.artifactId,
+    ...(params.sessionId ? { sessionId: params.sessionId } : {})
+  };
+}
+
+function isNotFoundError(error: unknown) {
+  return error instanceof Error && /\b(session|artifact) not found\b/i.test(error.message);
+}
+
 export function createRpcServer(options: RpcServerOptions): RpcServer {
   const runHeadless = options.runHeadless ?? defaultRunHeadless;
   const makeRunId = options.makeRunId ?? defaultMakeRunId;
+  const getSessionView = options.getSessionView ?? defaultGetSessionView;
+  const getArtifactView = options.getArtifactView ?? getArtifactViewForRequest;
   const finishedRunIds = new Set<string>();
   let activeRun: ActiveRun | undefined;
   let transportClosed = false;
@@ -233,7 +269,43 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
     writeResult(id, { status: 'not-found' });
   };
 
-  const dispatch = (request: JsonRpcRequest) => {
+  const handleSessionGet = async (id: JsonRpcId, params: unknown) => {
+    const parsed = asSessionGetParams(params);
+    if (!parsed) {
+      writeError(id, INVALID_PARAMS, 'session.get params must include cwd and optional sessionId');
+      return;
+    }
+
+    try {
+      writeResult(id, await getSessionView(parsed.cwd, parsed.sessionId));
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        writeError(id, NOT_FOUND_ERROR, errorMessage(error));
+        return;
+      }
+      throw error;
+    }
+  };
+
+  const handleArtifactGet = async (id: JsonRpcId, params: unknown) => {
+    const parsed = asArtifactGetParams(params);
+    if (!parsed) {
+      writeError(id, INVALID_PARAMS, 'artifact.get params must include cwd, artifactId, and optional sessionId');
+      return;
+    }
+
+    try {
+      writeResult(id, await getArtifactView(parsed.cwd, parsed.artifactId, parsed.sessionId));
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        writeError(id, NOT_FOUND_ERROR, errorMessage(error));
+        return;
+      }
+      throw error;
+    }
+  };
+
+  const dispatch = async (request: JsonRpcRequest) => {
     const id = request.id ?? null;
 
     switch (request.method) {
@@ -242,6 +314,12 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
         return;
       case 'run.cancel':
         cancelRun(id, request.params);
+        return;
+      case 'session.get':
+        await handleSessionGet(id, request.params);
+        return;
+      case 'artifact.get':
+        await handleArtifactGet(id, request.params);
         return;
       default:
         writeError(id, METHOD_NOT_FOUND, `method not found: ${request.method}`);
@@ -268,7 +346,7 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
       }
 
       try {
-        dispatch(parsed);
+        await dispatch(parsed);
       } catch {
         writeError(parsed.id ?? null, INTERNAL_ERROR, 'internal error');
       }
