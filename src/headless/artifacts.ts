@@ -101,6 +101,17 @@ export function toSessionRecordView(record: SessionRecord): SessionRecordView {
       };
     case 'assistant':
       return actionType(record);
+    case 'tx-opened':
+    case 'tx-applied':
+    case 'tx-aborted':
+      return {
+        id: record.id,
+        ts: record.ts,
+        kind: record.kind,
+        role: 'user',
+        text: record.content,
+        txId: record.meta.txId
+      };
   }
 }
 

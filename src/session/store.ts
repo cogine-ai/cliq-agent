@@ -83,7 +83,7 @@ const LOCK_TIMEOUT_MS = 5000;
 const LOCK_RETRY_MS = 25;
 const LOCK_HEARTBEAT_MS = Math.max(LOCK_RETRY_MS, Math.floor(LOCK_TIMEOUT_MS / 3));
 
-function isSessionRecord(value: unknown): value is SessionRecord {
+export function isSessionRecord(value: unknown): value is SessionRecord {
   if (!value || typeof value !== 'object') {
     return false;
   }
@@ -107,6 +107,16 @@ function isSessionRecord(value: unknown): value is SessionRecord {
       typeof record.tool === 'string' &&
       (record.status === 'ok' || record.status === 'error') &&
       typeof record.content === 'string'
+    );
+  }
+
+  if (record.kind === 'tx-opened' || record.kind === 'tx-applied' || record.kind === 'tx-aborted') {
+    return (
+      record.role === 'user' &&
+      typeof record.content === 'string' &&
+      typeof record.meta === 'object' &&
+      record.meta !== null &&
+      typeof (record.meta as { txId?: unknown }).txId === 'string'
     );
   }
 

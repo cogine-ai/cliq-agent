@@ -243,6 +243,14 @@ export type SessionRecordView =
       status: 'ok' | 'error';
       contentPreview: string;
       meta?: Record<string, string | number | boolean | null>;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'tx-opened' | 'tx-applied' | 'tx-aborted';
+      role: 'user';
+      text: string;
+      txId: string;
     };
 
 export type CheckpointView = {

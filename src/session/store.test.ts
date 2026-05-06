@@ -8,7 +8,9 @@ import {
   createSession,
   ensureFresh,
   ensureSession,
+  isSessionRecord,
   mutateSession,
+  nowIso,
   resolveCliqHome,
   saveSession,
   sessionFilePath,
@@ -16,6 +18,7 @@ import {
   workspaceIdFromRealPath,
   workspaceStatePath
 } from './store.js';
+import { applyRecordId, abortRecordId, openRecordId } from '../workspace/transactions/types.js';
 
 let originalCliqHome: string | undefined;
 let fileCliqHome: string | undefined;
@@ -659,4 +662,59 @@ test('ensureSession migrates v3 string model to structured model ref', async () 
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+test('isSessionRecord accepts tx-applied records', () => {
+  const record = {
+    id: applyRecordId('tx_01H'),
+    ts: nowIso(),
+    kind: 'tx-applied' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_01H applied: 1 file changed (+1 -0)',
+    meta: {
+      txId: 'tx_01H',
+      txKind: 'edit' as const,
+      diffSummary: { filesChanged: 1, additions: 1, deletions: 0, creates: [], modifies: ['a.ts'], deletes: [] },
+      files: { creates: [], modifies: ['a.ts'], deletes: [] },
+      validators: { blocking: { pass: 1, fail: 0 }, advisory: { pass: 0, fail: 0, names: [] } },
+      overrides: [],
+      artifactRef: 'tx/tx_01H/'
+    }
+  };
+  assert.equal(isSessionRecord(record), true);
+});
+
+test('isSessionRecord accepts tx-opened records', () => {
+  const record = {
+    id: openRecordId('tx_02H'),
+    ts: nowIso(),
+    kind: 'tx-opened' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_02H opened (explicit)',
+    meta: { txId: 'tx_02H', txKind: 'edit' as const, name: 'refactor', explicit: true as const }
+  };
+  assert.equal(isSessionRecord(record), true);
+});
+
+test('isSessionRecord accepts tx-aborted records', () => {
+  const record = {
+    id: abortRecordId('tx_03H'),
+    ts: nowIso(),
+    kind: 'tx-aborted' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_03H aborted: validator-fail',
+    meta: {
+      txId: 'tx_03H',
+      txKind: 'edit' as const,
+      reason: 'validator-fail' as const,
+      files: { wouldHaveCreated: [], wouldHaveModified: [], wouldHaveDeleted: [] },
+      artifactRef: 'tx/tx_03H/'
+    }
+  };
+  assert.equal(isSessionRecord(record), true);
+});
+
+test('Session type permits activeTxId field', () => {
+  const session = createSession('/tmp/cliq-tx-types-active');
+  assert.equal((session as { activeTxId?: string }).activeTxId, undefined);
 });
