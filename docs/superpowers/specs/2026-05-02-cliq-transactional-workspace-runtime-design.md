@@ -114,7 +114,7 @@ $CLIQ_HOME/
 
 ### 6.1 `activeTxId` ownership
 
-`activeTxId` is owned by the session, not the workspace. It lives at `Session.activeTxId` in the session JSON.
+`activeTxId` is owned by the session, not the workspace. It lives at `Session.activeTxId` in the session JSON. This requires extending the `Session` type in `src/session/types.ts` with an `activeTxId?: string` field; the field is optional (absent when the session has no active tx) and additive (existing sessions deserialize unchanged with the field set to `undefined`).
 
 Implications:
 
@@ -465,7 +465,9 @@ type ApplyProgress = {
   startedAt: string;
   filesPlanned: string[];     // workspace-relative paths in apply order
   filesWritten: string[];     // append-only as each file fsyncs
-  sessionRecordId?: string;   // populated when phase reaches 'apply-committed'
+  // No sessionRecordId field: the record id is deterministic
+  // (`txrec_apply_<txId>` / `txrec_abort_<txId>`), so Stage C can scan-then-append
+  // idempotently without persisting the id separately.
   error?: { stage: string; path?: string; message: string };
 };
 ```
@@ -515,8 +517,13 @@ STAGE C — record (session lock, then tx-store lock; respects hierarchy)
   C3. read apply-progress.json. If phase is already 'apply-finalized',
       another process or a recovery pass already completed C; release
       both locks and exit (idempotent no-op).
-  C4. append session record (kind: 'tx-applied', Section 15). Record the
-      session record id in apply-progress.json.sessionRecordId. fsync both.
+  C4. compute the deterministic record id: recordId = `txrec_apply_<txId>`.
+      Scan session.records for a record with this exact id.
+        - If present: the record was already appended by a previous
+          attempt (e.g., a process killed between C5 and C6 of an earlier
+          run). Skip C5 and proceed to C6.
+        - If absent: append the session record (kind: 'tx-applied',
+          Section 15) with this exact id. fsync the session file.
   C5. transition phase: 'apply-committed' → 'apply-finalized'. fsync.
   C6. transition tx state.json: 'approved' → 'applied'. fsync.
   C7. release tx-store lock, release session lock
@@ -528,7 +535,7 @@ Why this split:
 - **Lock hierarchy is preserved.** No stage holds the tx-store lock while attempting to acquire the session lock. Stage C acquires session first, then tx-store, in the canonical order.
 - **External-change detection happens before any write.** Stage A's preflight verifies *every* file's `oldContent` against the real workspace before stage B writes the *first* byte. A file conflict at the third entry no longer leaves the first two entries written. This is what the test "external `git checkout` during validate→apply window detected and rejected before partial writes" actually means.
 - **Stage B's per-file re-verification (B3a)** narrows the race window between A's bulk preflight and B's writes. A truly malicious concurrent writer can still squeeze in between B3a and B3d for a single file, but this is materially harder than the previous "between sequential per-file checks" race, and the result is at most one stale-overwrite (not a cascading partial apply) which the user resolves via ghost snapshot restore.
-- **Stage C is idempotent.** If the process dies between B5 and C7, recovery (Section 16.4) detects `apply-committed` without `apply-finalized` and runs C from scratch; the `sessionRecordId` field guards against duplicate record append.
+- **Stage C is exactly-once via deterministic record id.** The record id is computed from the txId (`txrec_apply_<txId>`), not freshly generated each attempt. C4 is idempotent: it scans for the id and skips the append if it already exists. Tx-aborted records use `txrec_abort_<txId>` and follow the same scan-then-append rule. This removes the previous reliance on a `sessionRecordId` bookkeeping field that could itself be lost in a crash window between session-append-fsync and bookkeeping-fsync. Recovery from any crash inside Stage C reruns Stage C from scratch and converges to the same outcome.
 - **Crash before A5** leaves no `apply-progress.json` and no real-workspace mutation; the tx stays in `approved` and the user retries.
 
 ### 11.2 Apply failure handling
@@ -540,7 +547,7 @@ Why this split:
 | `apply-pending` (plan recorded, no writes started) | Next cliq startup reverts to `approved` and discards `apply-progress.json`. User retries cleanly. |
 | `apply-writing` (partial files written by stage B) | Next cliq startup moves tx to `applied-partial`, surfaces the list of files written from `apply-progress.filesWritten[]`, and recommends `cliq checkpoint restore <ghostSnapshotId>`. No automatic file restore. |
 | Stage B re-verification (B3a) detects mid-write external change | Same as the row above: tx transitions to `applied-partial`. |
-| `apply-committed` (all files written, no session record yet) | Next cliq startup runs Stage C from scratch under the proper lock order. The `sessionRecordId` field in `apply-progress.json` guards against duplicate record append. Idempotent. |
+| `apply-committed` (all files written, no session record yet) | Next cliq startup runs Stage C from scratch under the proper lock order. The deterministic record id (`txrec_apply_<txId>`) makes C4's append idempotent: if a previous attempt got as far as appending the record before crashing, the rerun finds it and skips. |
 | `apply-finalized` but tx state.json not yet flipped | Next cliq startup transitions tx state to `applied`. Idempotent. |
 | `applied` | Nothing to do. |
 
@@ -786,6 +793,7 @@ These are the `cliq tx` subcommand exit codes. Exit codes for `cliq run --jsonl`
     "applyPolicy": "interactive",
     "bashPolicy": "passthrough",
     "stagedView": {
+      "copyMode": "auto",
       "bindPaths": ["node_modules"]
     },
     "validators": {
@@ -807,7 +815,8 @@ These are the `cliq tx` subcommand exit codes. Exit codes for `cliq run --jsonl`
 | `auto` | `per-turn`, `manual` | `per-turn` | Implicit per-turn auto-open/finalize, or require explicit `tx open` |
 | `applyPolicy` | `interactive`, `auto-on-pass`, `manual-only` | `interactive` | Interactive prompts; auto-apply when blocking pass; never auto-apply |
 | `bashPolicy` | `passthrough`, `confirm`, `deny` | `passthrough` | Per-Section 9.4: passthrough preserves current cliq behavior; confirm prompts each `bash` (interactive only); deny rejects `bash` during a tx |
-| `stagedView.bindPaths` | array of workspace-relative paths | `["node_modules"]` | Paths symlinked from real workspace into staged-view (Section 9.3.1). Writes inside bind paths leak to real workspace; users tighten the list as needed. |
+| `stagedView.copyMode` | `auto`, `reflink`, `copy` | `auto` | How non-bound files are materialized into the staged view (Section 9.3.1). `auto` tries reflink (`clonefile`/`FICLONE`) and falls back to byte copy with a one-time warning; `reflink` requires CoW filesystem support; `copy` always byte-copies. Hardlinks are never used because they share inodes with the real workspace and would silently leak validator writes. |
+| `stagedView.bindPaths` | array of workspace-relative paths | `["node_modules"]` | Paths symlinked from real workspace into staged-view (Section 9.3.2). Writes inside bind paths leak to real workspace; users tighten the list as needed. |
 | `validators.shell` | array | `[]` | Shell-hook validators |
 | `validators.disabled` | array of validator names | `[]` | Disable specific built-ins or shell hooks |
 | `validators.serial` | boolean | `false` | Run validators serially instead of in parallel |
@@ -841,7 +850,7 @@ The boundary between tx and auto-compact remains: tx writes records into the ses
 ```ts
 // success path
 type TxAppliedRecord = {
-  id: string;
+  id: string;          // deterministic: `txrec_apply_<txId>` (Section 11.1 Stage C4)
   ts: string;
   kind: 'tx-applied';
   role: 'user';
@@ -863,7 +872,7 @@ type TxAppliedRecord = {
 
 // failure / cancellation path
 type TxAbortedRecord = {
-  id: string;
+  id: string;          // deterministic: `txrec_abort_<txId>`
   ts: string;
   kind: 'tx-aborted';
   role: 'user';
@@ -871,7 +880,7 @@ type TxAbortedRecord = {
   meta: {
     txId: string;
     txKind: TxKind;
-    reason: 'validator-fail' | 'user-abort' | 'apply-error' | 'staging-error';
+    reason: 'validator-fail' | 'user-abort' | 'apply-error' | 'apply-conflict' | 'staging-error';
     failedValidators?: string[];
     files: { wouldHaveCreated: string[]; wouldHaveModified: string[]; wouldHaveDeleted: string[] };
     artifactRef: string;
@@ -879,31 +888,40 @@ type TxAbortedRecord = {
 };
 ```
 
+The deterministic record ids are essential to Stage C's exactly-once guarantee (Section 11.1). Recovery passes use the same id formula and detect duplicates by scanning, not by writing extra bookkeeping.
+
 ### 15.2 Contract invariants
 
 Tx layer guarantees:
 
-- Exactly one `tx-applied` record is appended on a successful apply, ordered after the file writes by the phased apply protocol (Section 11.1). If the cliq process is interrupted between file writes and record append, the next cliq startup runs idempotent reconciliation (Section 11.2) to append the missing record.
-- Exactly one `tx-aborted` record is appended on terminal abort, with a structured `reason`.
+- Exactly one `tx-applied` record is appended on a successful apply, ordered after the file writes by the phased apply protocol (Section 11.1). The record id is deterministic (`txrec_apply_<txId>`); if the cliq process is interrupted between file writes and record append, recovery (Section 16.4) reruns Stage C, scans for the deterministic id, and either skips the append (if a previous attempt already wrote it) or appends it with that id.
+- Exactly one `tx-aborted` record is appended on terminal abort, with a structured `reason` and id `txrec_abort_<txId>`.
 - Full diff content is **never** inlined into a session record. Only the `meta.artifactRef` pointer.
 - `meta.diffSummary` and `meta.files` are stable, structured fields suitable for direct programmatic consumption (preferred by summarizers over `content`).
 - `content` is a human-readable sentence intended for model replay; it never contains base64 blobs, full validator output, or content larger than ~512 bytes.
+- Adding the tx record kinds to the `SessionRecord` union is an additive type extension. **It is not transparent to existing readers**: every consumer that does an exhaustive switch or validates record shapes by enumerating known kinds must be updated in this spec's PR (see Section 15.3). Without those updates, existing code rejects any session that contains a tx record.
 
-Required updates to existing modules (this spec's PR introduces them):
+### 15.3 Required consumer updates
 
-- **`src/session/types.ts`**: extend the `SessionRecord` discriminated union with `TxAppliedRecord` and `TxAbortedRecord` variants. The session store's existing append/replay paths handle them as opaque records; no change to `appendRecord`, `loadSession`, or migration logic is required because the existing schema treats unknown kinds as pass-through readable.
-- **`src/session/auto-compaction.ts`** range selector: extend the existing turn-boundary rule to also treat `tx-staging-start`/`tx-finalized` (or, equivalently, the open and apply/abort moments derived from `tx-applied`/`tx-aborted` records and the explicit-tx-open marker) as non-splittable boundaries, so a long explicit multi-turn tx is summarized as one unit. Implicit per-turn tx is contained inside a single turn and requires no special handling.
-- **Auto-compact summarizer hooks**: when the default summarizer encounters `tx-applied` or `tx-aborted` records, prefer `meta.diffSummary` and `meta.files` over `content` for the structured fields it surfaces in the compact summary. This is a default-summarizer change; the data shape and replay invariant are unchanged.
+The new record kinds extend the `SessionRecord` discriminated union in `src/session/types.ts`. The following modules in `origin/main` have exhaustive logic over record kinds and must be updated in the same PR:
 
-### 15.3 Coordination
+- **`src/session/types.ts`** — add `TxAppliedRecord` and `TxAbortedRecord` to the `SessionRecord` union; add `activeTxId?: string` to the `Session` type (Section 6.1).
+- **`src/session/store.ts`** — extend `isSessionRecord` (currently lines 86–113 on `cea4530`) so that records with `kind: 'tx-applied' | 'tx-aborted'` validate. Without this update, `isSession` returns `false` for any session containing a tx record, and `loadSession` rejects the file.
+- **`src/headless/contract.ts`** — extend the `SessionRecordView` union (currently around line 214) with view shapes for the two new kinds. Without this update, headless artifact-query commands fail for sessions with tx records.
+- **`src/runtime/context.ts`** `recordToMessage` — verify it routes tx records correctly. The current implementation routes any non-`tool` kind by `record.role`; tx records use `role: 'user'` so this works unmodified, but the assumption should be asserted by a regression test rather than left implicit.
+- **`src/handoff/export.ts`** and any history/inspection rendering code that switches on `record.kind` — extend to handle the new kinds (or mark them explicitly opaque/skipped).
+- **`src/session/auto-compaction.ts`** range selector — extend the existing turn-boundary rule so that the open-and-apply/abort moments of an explicit multi-turn tx form a non-splittable boundary, derived from the presence of `tx-applied`/`tx-aborted` records (and the explicit-tx-open marker, which is a property of the tx layer, not a session record). Implicit per-turn tx is contained inside a single turn and needs no special handling.
+- **Default summarizer** (whatever module hosts it in `cea4530` — `src/session/auto-compaction.ts` calls into it) — when summarizing windows that contain `tx-applied`/`tx-aborted` records, prefer `meta.diffSummary` and `meta.files` over `content` for the structured fields surfaced in the compact summary.
 
-The new session record kinds, the auto-compact range-selector extension, and the summarizer preference change land in this spec's PR. The work touches:
+### 15.4 SESSION_VERSION decision
 
-- `src/session/types.ts` (additive)
-- `src/session/auto-compaction.ts` (additive boundary rule)
-- the default summarizer module (preference logic only)
+`SESSION_VERSION` does **not** need to be bumped, but only because:
 
-No `SESSION_VERSION` bump is required because the addition is additive and existing consumers ignore unknown kinds. If a future migration is desired (e.g., to backfill `tx-*` records into pre-tx sessions for consistent display), that is a separate, optional follow-up.
+1. All readers that switch over record kinds are updated in this PR (Section 15.3). New sessions are loadable by the new binary.
+2. Old binaries do not need to read sessions written by the new binary (we accept "upgrade in place; downgrade requires session reset").
+3. Old sessions (which contain no tx records) remain readable by the new binary because the new code paths are additive.
+
+If a hard requirement to keep old binaries forward-compatible with new sessions emerges, a `SESSION_VERSION` bump and a migration that strips unknown kinds during downgrade would be required. This release does not commit to that promise.
 
 ## 16. Concurrency, Locks, and Errors
 
@@ -959,7 +977,7 @@ For each such tx, the recovery rule is determined by `apply-progress.json` if pr
 | absent | Tx never entered apply. Surface via `cliq tx status` for the affected session. No real-workspace damage possible. User decides to resume, apply, or abort. |
 | `apply-pending` | Intent was logged but no files were written. Mark tx state as `approved` (revert the implicit progression), discard `apply-progress.json`. User can retry `tx apply` cleanly. |
 | `apply-writing` | Some files were written. Move tx state to `applied-partial`. Write a warning record (not a session record) to `$CLIQ_HOME/tx/<txId>/recovery.json` describing the state. Surface prominently the next time the user invokes any `cliq` command in the affected workspace, including the `ghostSnapshotId` and the recommended `cliq checkpoint restore` command. **Do not automatically restore**; restore is user-initiated. |
-| `apply-committed` | All files were written and durable. Idempotent reconciliation: acquire tx-store and session locks, append the `tx-applied` session record, transition `apply-progress` to `apply-finalized` and tx state to `applied`. Schedule overlay cleanup. The user is informed at the next invocation that recovery completed automatically; they may verify in `cliq tx show <txId>`. |
+| `apply-committed` | All files were written and durable. Recovery **invokes Stage C as defined in Section 11.1** without modification (acquires session lock first, then tx-store lock, runs C3–C8). Stage C's deterministic-id scan in C4 makes it safe to rerun even if a previous attempt got partway through. Recovery does not implement its own session-write logic. The user is informed at the next invocation that recovery completed automatically; they may verify in `cliq tx show <txId>`. |
 | `apply-finalized` | tx state.json may not yet have transitioned. Idempotent: transition tx state to `applied`. |
 
 The protocol's invariants:
@@ -1144,7 +1162,7 @@ The Phase 3 spec's practice of citing source observations alongside design choic
 This release is purely additive at the user-visible level:
 
 - Existing users on `v0.7.0` who upgrade to the tx release see no behavior change. `transactions` config is absent; `mode` defaults to `off`; no tx code paths execute.
-- No `SESSION_VERSION` bump is required: the new `tx-applied` and `tx-aborted` record kinds are additive, and existing readers (the runner, the headless adapters, auto-compact's record consumers) treat unknown record kinds as pass-through.
+- No `SESSION_VERSION` bump is required *under the assumption that old binaries do not need to read sessions written by the new binary*. Existing readers do **not** treat unknown record kinds as pass-through (Section 15.3 enumerates the consumer updates required); they are updated in this spec's PR. Section 15.4 documents the trade-off.
 - No `HEADLESS_SCHEMA_VERSION` bump is required: the new event types extend `HeadlessRuntimeEventType`, the new artifact field extends `HeadlessArtifacts`, and the new error codes extend `HeadlessErrorCode`. All existing v1 consumers remain compatible because they iterate event types and artifact keys without exhaustive enumeration.
 - No changes to `.cliq/session.json` migration logic (Phase 3 already handled the workspace-local → global migration).
 - `$CLIQ_HOME/tx/` is created lazily on first tx open; does not exist for users who never enable tx.
