@@ -264,6 +264,10 @@ export async function getArtifactView(session: Session, artifactId: string): Pro
   }
 
   if (artifactId.startsWith('wchk_')) {
+    if (!session.checkpoints.some((candidate) => candidate.workspaceCheckpointId === artifactId)) {
+      artifactNotFound(artifactId);
+    }
+
     return {
       kind: 'workspace-checkpoint',
       workspaceCheckpoint: await getWorkspaceCheckpointView(artifactId)
@@ -279,9 +283,14 @@ export async function getArtifactView(session: Session, artifactId: string): Pro
   }
 
   if (artifactId.startsWith('handoff_')) {
+    const handoff = await getHandoffView(artifactId);
+    if (handoff.sessionId !== session.id) {
+      artifactNotFound(artifactId);
+    }
+
     return {
       kind: 'handoff',
-      handoff: await getHandoffView(artifactId)
+      handoff
     };
   }
 

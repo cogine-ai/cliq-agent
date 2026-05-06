@@ -36,6 +36,15 @@ async function setupWorkspace() {
   return { home, cwd };
 }
 
+async function setupSharedHomeWorkspaces() {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-artifacts-home-'));
+  const workspaceA = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-artifacts-workspace-a-'));
+  const workspaceB = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-artifacts-workspace-b-'));
+  cleanupDirs.push(home, workspaceA, workspaceB);
+  process.env.CLIQ_HOME = home;
+  return { home, workspaceA, workspaceB };
+}
+
 test('toSessionView exposes stable records without raw assistant JSON', async () => {
   const { cwd } = await setupWorkspace();
   const session = createSession(cwd);
@@ -215,4 +224,37 @@ test('getArtifactViewForRequest resolves artifacts through stable session lookup
 
   assert.equal(artifact.kind, 'checkpoint');
   assert.equal(artifact.checkpoint.id, checkpoint.id);
+});
+
+test('getArtifactViewForRequest rejects workspace checkpoint and handoff artifacts from another session', async () => {
+  const { workspaceA, workspaceB } = await setupSharedHomeWorkspaces();
+  const sessionA = await ensureSession(workspaceA);
+  sessionA.records.push({
+    id: 'usr_a_1',
+    ts: '2026-05-06T00:00:00.000Z',
+    kind: 'user',
+    role: 'user',
+    content: 'session a'
+  });
+  await saveSession(workspaceA, sessionA);
+
+  const sessionB = await ensureSession(workspaceB);
+  sessionB.records.push({
+    id: 'usr_b_1',
+    ts: '2026-05-06T00:00:00.000Z',
+    kind: 'user',
+    role: 'user',
+    content: 'session b'
+  });
+  const checkpointB = await createCheckpoint(workspaceB, sessionB, { kind: 'manual', name: 'session-b' });
+  const handoffB = await exportHandoff(workspaceB, sessionB, { checkpointId: checkpointB.id });
+
+  await assert.rejects(
+    async () => await getArtifactViewForRequest(workspaceA, checkpointB.workspaceCheckpointId!, sessionA.id),
+    new Error(`artifact not found: ${checkpointB.workspaceCheckpointId}`)
+  );
+  await assert.rejects(
+    async () => await getArtifactViewForRequest(workspaceA, handoffB.id, sessionA.id),
+    new Error(`artifact not found: ${handoffB.id}`)
+  );
 });
