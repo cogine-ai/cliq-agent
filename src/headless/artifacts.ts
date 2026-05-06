@@ -22,8 +22,38 @@ const TOOL_PREVIEW_CHARS = 240;
 const TRUNCATION_MARKER = '\n[cliq preview truncated]';
 const SAFE_ARTIFACT_ID = /^[A-Za-z0-9_-]+$/;
 
+export class ArtifactNotFoundError extends Error {
+  readonly artifactId: string;
+
+  constructor(artifactId: string, message = `artifact not found: ${artifactId}`) {
+    super(message);
+    this.name = 'ArtifactNotFoundError';
+    this.artifactId = artifactId;
+  }
+}
+
+export class SessionNotFoundError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string, message = `session not found: ${sessionId}`) {
+    super(message);
+    this.name = 'SessionNotFoundError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class WorkspaceNotFoundError extends Error {
+  readonly cwd: string;
+
+  constructor(cwd: string, message = `workspace not found: ${cwd}`) {
+    super(message);
+    this.name = 'WorkspaceNotFoundError';
+    this.cwd = cwd;
+  }
+}
+
 function artifactNotFound(artifactId: string): never {
-  throw new Error(`artifact not found: ${artifactId}`);
+  throw new ArtifactNotFoundError(artifactId);
 }
 
 function isMissingArtifactError(error: unknown) {
@@ -222,15 +252,26 @@ async function getHandoffView(artifactId: string) {
 }
 
 function sessionNotFound(sessionId: string): never {
-  throw new Error(`session not found: ${sessionId}`);
+  throw new SessionNotFoundError(sessionId);
+}
+
+function isMissingWorkspaceError(error: unknown) {
+  return !!error && typeof error === 'object' && (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
 async function sessionForView(cwd: string, sessionId?: string): Promise<Session> {
-  if (!sessionId) {
-    return (await loadActiveSession(cwd)) ?? sessionNotFound('active');
-  }
+  try {
+    if (!sessionId) {
+      return (await loadActiveSession(cwd)) ?? sessionNotFound('active');
+    }
 
-  return (await loadSessionById(cwd, sessionId)) ?? sessionNotFound(sessionId);
+    return (await loadSessionById(cwd, sessionId)) ?? sessionNotFound(sessionId);
+  } catch (error) {
+    if (isMissingWorkspaceError(error)) {
+      throw new WorkspaceNotFoundError(cwd);
+    }
+    throw error;
+  }
 }
 
 export async function getSessionView(cwd: string, sessionId?: string): Promise<SessionView> {

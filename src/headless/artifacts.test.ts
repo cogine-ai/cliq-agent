@@ -14,7 +14,14 @@ import {
   sessionFilePath,
   workspaceStatePath
 } from '../session/store.js';
-import { getArtifactView, getArtifactViewForRequest, getSessionView, toSessionView } from './artifacts.js';
+import {
+  ArtifactNotFoundError,
+  getArtifactView,
+  getArtifactViewForRequest,
+  getSessionView,
+  SessionNotFoundError,
+  toSessionView
+} from './artifacts.js';
 
 const previousHome = process.env.CLIQ_HOME;
 const cleanupDirs: string[] = [];
@@ -118,7 +125,7 @@ test('getArtifactView resolves checkpoint, workspace checkpoint, compaction, and
   assert.equal('paths' in handoffView.handoff, false);
   assert.match(handoffView.handoff.summaryMarkdown, /summary/);
   assert.match(handoffView.handoff.markdown, /# Handoff/);
-  await assert.rejects(() => getArtifactView(session, 'missing'), /artifact not found/i);
+  await assert.rejects(() => getArtifactView(session, 'missing'), ArtifactNotFoundError);
   await assert.rejects(() => getArtifactView(session, 'wchk_missing'), /artifact not found/i);
   await assert.rejects(() => getArtifactView(session, 'handoff_missing'), /artifact not found/i);
   await assert.rejects(() => getArtifactView(session, 'handoff_../../../outside'), /artifact not found/i);
@@ -160,14 +167,14 @@ test('getSessionView rejects unknown session ids without creating raw file contr
 
   await assert.rejects(
     async () => await getSessionView(cwd, 'sess_missing'),
-    /session not found: sess_missing/
+    SessionNotFoundError
   );
 });
 
 test('getSessionView does not create storage state when no active session exists', async () => {
   const { home, cwd } = await setupWorkspace();
 
-  await assert.rejects(async () => await getSessionView(cwd), /session not found: active/);
+  await assert.rejects(async () => await getSessionView(cwd), SessionNotFoundError);
 
   const homeEntries = (await readdir(home)).filter((entry) => !entry.startsWith('.'));
   assert.deepEqual(homeEntries, []);
@@ -203,7 +210,7 @@ test('getSessionView rejects explicit ids whose stored path belongs to another w
 
   await assert.rejects(
     async () => await getSessionView(workspaceA, sessionB.id),
-    (error: unknown) => error instanceof Error && error.message === `session not found: ${sessionB.id}`
+    (error: unknown) => error instanceof SessionNotFoundError && error.sessionId === sessionB.id
   );
 });
 
@@ -251,10 +258,11 @@ test('getArtifactViewForRequest rejects workspace checkpoint and handoff artifac
 
   await assert.rejects(
     async () => await getArtifactViewForRequest(workspaceA, checkpointB.workspaceCheckpointId!, sessionA.id),
-    new Error(`artifact not found: ${checkpointB.workspaceCheckpointId}`)
+    (error: unknown) =>
+      error instanceof ArtifactNotFoundError && error.artifactId === checkpointB.workspaceCheckpointId
   );
   await assert.rejects(
     async () => await getArtifactViewForRequest(workspaceA, handoffB.id, sessionA.id),
-    new Error(`artifact not found: ${handoffB.id}`)
+    (error: unknown) => error instanceof ArtifactNotFoundError && error.artifactId === handoffB.id
   );
 });
