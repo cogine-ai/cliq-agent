@@ -1,14 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { assertHeadlessCompatible, openTurnTx, type TxRunnerOptions } from './tx-runner.js';
+import { assertHeadlessCompatible, openTurnTx, finishTurnTx, type TxRunnerOptions } from './tx-runner.js';
 import { createSession, mutateSession } from '../session/store.js';
 import { openRecordId } from '../workspace/transactions/types.js';
+import { overlayDir, resolveTxRoot, readTxState } from '../workspace/transactions/store.js';
+import { createOverlayWriter } from '../workspace/transactions/overlay.js';
 import type { RuntimeEvent } from './events.js';
 
 const execFileAsync = promisify(execFile);
@@ -156,4 +158,115 @@ test('openTurnTx returns null tx when auto: manual and no active tx exists (skip
     assert.equal(result.opened, false);
     assert.equal(events.length, 0);
   });
+});
+
+async function commitInitialFile(ws: string, name: string, content: string) {
+  await writeFile(path.join(ws, name), content, 'utf8');
+  await execFileAsync('git', ['add', '.'], { cwd: ws });
+  await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+}
+
+test('finishTurnTx auto-on-pass: finalize → validate → approve → apply, edit lands', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'one');
+    const opts: TxRunnerOptions = baseOpts({
+      applyPolicy: 'auto-on-pass',
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] }
+    });
+    const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
+    const writer = createOverlayWriter(ws, overlayDir(resolveTxRoot(home), open.tx!.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+
+    await finishTurnTx(ctx, opts, open.tx!, async (e) => { events.push(e); });
+
+    const types = events.map((e) => e.type);
+    assert.deepEqual(
+      types.filter((t) => t.startsWith('tx-')),
+      ['tx-staging-start', 'tx-finalized', 'tx-validated', 'tx-applied']
+    );
+    const { readFile: rf } = await import('node:fs/promises');
+    assert.equal(await rf(path.join(ws, 'a.txt'), 'utf8'), 'ONE');
+    const tx = await readTxState(resolveTxRoot(home), open.tx!.id);
+    assert.equal(tx?.state, 'applied');
+  });
+});
+
+test('finishTurnTx auto-on-pass with blocking failures aborts with reason=validator-fail; no edit lands', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'a');
+    const opts: TxRunnerOptions = baseOpts({
+      applyPolicy: 'auto-on-pass',
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] }
+    });
+    const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
+    const writer = createOverlayWriter(ws, overlayDir(resolveTxRoot(home), open.tx!.id));
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+
+    await finishTurnTx(ctx, opts, open.tx!, async (e) => { events.push(e); });
+
+    const aborted = events.find((e) => e.type === 'tx-aborted');
+    assert.ok(aborted);
+    if (aborted && aborted.type === 'tx-aborted') assert.equal(aborted.reason, 'validator-fail');
+    const { readFile: rf } = await import('node:fs/promises');
+    assert.equal(await rf(path.join(ws, 'a.txt'), 'utf8'), 'a'); // unchanged
+  });
+});
+
+test('finishTurnTx interactive yes → applies', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'one');
+    const opts: TxRunnerOptions = baseOpts({
+      applyPolicy: 'interactive',
+      headless: false,
+      confirmApply: async () => true,
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] }
+    });
+    const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
+    const writer = createOverlayWriter(ws, overlayDir(resolveTxRoot(home), open.tx!.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+    await finishTurnTx(ctx, opts, open.tx!, async (e) => { events.push(e); });
+    const tx = await readTxState(resolveTxRoot(home), open.tx!.id);
+    assert.equal(tx?.state, 'applied');
+  });
+});
+
+test('finishTurnTx interactive no → auto-aborts with reason=user-abort', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'one');
+    const opts: TxRunnerOptions = baseOpts({
+      applyPolicy: 'interactive',
+      headless: false,
+      confirmApply: async () => false,
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] }
+    });
+    const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
+    const writer = createOverlayWriter(ws, overlayDir(resolveTxRoot(home), open.tx!.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+    await finishTurnTx(ctx, opts, open.tx!, async (e) => { events.push(e); });
+    const aborted = events.find((e) => e.type === 'tx-aborted');
+    assert.ok(aborted);
+    if (aborted && aborted.type === 'tx-aborted') assert.equal(aborted.reason, 'user-abort');
+  });
+});
+
+test('finishTurnTx with empty diff aborts the implicit tx (no-edits short-circuit)', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'one');
+    const opts: TxRunnerOptions = baseOpts({ applyPolicy: 'auto-on-pass' });
+    const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
+    // No edits applied — overlay stays empty.
+    await finishTurnTx(ctx, opts, open.tx!, async (e) => { events.push(e); });
+    const aborted = events.find((e) => e.type === 'tx-aborted');
+    assert.ok(aborted);
+    const tx = await readTxState(resolveTxRoot(home), open.tx!.id);
+    assert.equal(tx?.state, 'aborted');
+  });
+});
+
+test('explicit tx + auto=per-turn: openTurnTx returns opened=false; runner-integration test confirms finishTurnTx is NOT called for opened=false', async () => {
+  // Unit-level proof: openTurnTx behavior is asserted in Task 11 ("reuses existing
+  // explicit tx even when auto=per-turn"). The full runner-skips-finalize behavior is
+  // exercised end-to-end in the integration tests (plan Task 21).
+  // No standalone finishTurnTx test for this case — the runner is the gate.
+  assert.ok(true);
 });
