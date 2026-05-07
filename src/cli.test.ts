@@ -387,6 +387,29 @@ test('parseArgs rejects cliq tx apply without txId', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'apply']), /requires <txId>/);
 });
 
+test('parseArgs recognizes cliq tx validate <txId>', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'validate', 'tx_abc']);
+  assert.equal(a.cmd, 'tx-validate');
+  if (a.cmd === 'tx-validate') {
+    assert.equal(a.txId, 'tx_abc');
+  }
+});
+
+test('parseArgs rejects cliq tx validate without txId', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'validate']), /requires <txId>/);
+});
+
+test('parseArgs cliq tx validate accepts --json and --headless', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'validate', 'tx_x', '--json']);
+  if (a.cmd === 'tx-validate') {
+    assert.equal(a.json, true);
+  }
+  const b = parseArgs(['node', 'src/index.ts', 'tx', 'validate', 'tx_x', '--headless']);
+  if (b.cmd === 'tx-validate') {
+    assert.equal(b.headless, true);
+  }
+});
+
 test('parseArgs recognizes cliq tx abort with --restore-confirmed', () => {
   const a = parseArgs([
     'node',

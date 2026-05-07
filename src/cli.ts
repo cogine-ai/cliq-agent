@@ -33,8 +33,11 @@ import {
   abortTx as coordAbortTx,
   getTxStatus as coordGetTxStatus,
   listTx as coordListTx,
+  recoverAtStart as coordRecoverAtStart,
+  validateTx as coordValidateTx,
   type CoordinatorContext
 } from './workspace/transactions/coordinator.js';
+import { loadWorkspaceConfig } from './workspace/config.js';
 import { promises as fsPromises } from 'node:fs';
 
 const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
@@ -106,6 +109,7 @@ export type ParsedArgs = ParsedArgsBase & (
       headless?: boolean;
       prompt?: undefined;
     }
+  | { cmd: 'tx-validate'; txId: string; json?: boolean; headless?: boolean; prompt?: undefined }
 );
 
 function isPolicyMode(value: string): value is PolicyMode {
@@ -163,7 +167,7 @@ function consumeRepeatable(args: string[], name: string): string[] {
 function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   const sub = args[1];
   if (!sub) {
-    throw new Error('cliq tx requires a subcommand (open, status, list, apply, abort)');
+    throw new Error('cliq tx requires a subcommand (open, status, list, validate, apply, abort)');
   }
   const rest = args.slice(2);
   const json = consumeFlag(rest, '--json') || undefined;
@@ -212,6 +216,23 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
       return {
         ...base,
         cmd: 'tx-list',
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'validate': {
+      const txId = rest[0];
+      if (!txId || txId.startsWith('--')) {
+        throw new Error('tx validate requires <txId>');
+      }
+      rest.shift();
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx validate argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-validate',
+        txId,
         ...(json ? { json } : {}),
         ...(headless ? { headless } : {})
       };
@@ -1339,6 +1360,7 @@ export async function runCli(argv: string[]) {
     parsed.cmd === 'tx-open' ||
     parsed.cmd === 'tx-status' ||
     parsed.cmd === 'tx-list' ||
+    parsed.cmd === 'tx-validate' ||
     parsed.cmd === 'tx-apply' ||
     parsed.cmd === 'tx-abort'
   ) {
@@ -1426,6 +1448,41 @@ export async function runCli(argv: string[]) {
         process.stdout.write(`${status.tx.id} ${status.tx.state}\n`);
       }
       return;
+    }
+
+    if (parsed.cmd === 'tx-validate') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
+      const wsCfg = await loadWorkspaceConfig(cwd);
+      const validatorsConfig = wsCfg.transactions?.validators ?? {};
+      const stagedViewConfig = wsCfg.transactions?.stagedView ?? {
+        copyMode: 'auto' as const,
+        bindPaths: ['node_modules']
+      };
+      try {
+        const result = await coordValidateTx(ctx, parsed.txId, validatorsConfig, stagedViewConfig);
+        if (wantsJson) {
+          writeJson({
+            type: 'tx-validated',
+            txId: parsed.txId,
+            validators: result.validators,
+            blockingFailures: result.blockingFailures
+          });
+        } else {
+          process.stdout.write(
+            `tx ${parsed.txId} validated: ${result.validators.length} validators, ${result.blockingFailures.length} blocking failures\n`
+          );
+        }
+        return;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (wantsJson) {
+          writeJson({ type: 'error', message });
+        } else {
+          process.stderr.write(`tx validate error: ${message}\n`);
+        }
+        throw new ReportedCliError(message, { exitCode: 1 });
+      }
     }
 
     if (parsed.cmd === 'tx-apply') {
