@@ -16,12 +16,14 @@ import {
   finalizeTx,
   validateTx,
   approveTx,
+  recoverAtStart,
   type CoordinatorContext
 } from './coordinator.js';
 import { createSession, mutateSession } from '../../session/store.js';
 import type { Session } from '../../session/types.js';
 import { openRecordId } from './types.js';
 import { resolveTxRoot, writeTxState, writeDiff, readTxState, overlayDir } from './store.js';
+import { writeApplyProgress, createTx, writeTxState as writeTxStateRaw } from './store.js';
 import { createOverlayWriter } from './overlay.js';
 import type { TxValidatorsConfig, TxStagedViewConfig } from '../config.js';
 
@@ -361,5 +363,32 @@ test('approveTx with overrideAll covers every blocking failure', async () => {
     assert.equal(result.ok, true);
     const after = await readTxState(root, tx.id);
     assert.equal(after?.state, 'approved');
+  });
+});
+
+test('recoverAtStart processes own-session orphans and skips cross-session', async () => {
+  await withCoordinatorEnv(async ({ ctx, home }) => {
+    const root = resolveTxRoot(home);
+    // Own-session orphan in apply-pending state with state=approved.
+    const own = await createTx(root, { id: 'tx_own', kind: 'edit', workspaceId: ctx.workspaceId, sessionId: ctx.session.id, workspaceRealPath: ctx.workspaceRealPath });
+    await writeTxStateRaw(root, { ...own, state: 'approved' });
+    await writeApplyProgress(root, 'tx_own', { phase: 'apply-pending', ghostSnapshotId: 'snap', startedAt: 'x', filesPlanned: ['a.txt'], filesWritten: [] });
+    // Cross-session orphan in apply-pending with a different sessionId.
+    const cross = await createTx(root, { id: 'tx_cross', kind: 'edit', workspaceId: 'w', sessionId: 'other_session_id', workspaceRealPath: ctx.workspaceRealPath });
+    await writeTxStateRaw(root, { ...cross, state: 'approved' });
+    await writeApplyProgress(root, 'tx_cross', { phase: 'apply-pending', ghostSnapshotId: 'snap', startedAt: 'x', filesPlanned: ['b.txt'], filesWritten: [] });
+
+    const result = await recoverAtStart(ctx);
+    assert.equal(result.recovered.length, 1);
+    assert.equal(result.recovered[0].txId, 'tx_own');
+    assert.deepEqual(result.crossSessionSkipped, ['tx_cross']);
+  });
+});
+
+test('recoverAtStart returns empty results when no orphans exist', async () => {
+  await withCoordinatorEnv(async ({ ctx }) => {
+    const result = await recoverAtStart(ctx);
+    assert.deepEqual(result.recovered, []);
+    assert.deepEqual(result.crossSessionSkipped, []);
   });
 });

@@ -23,6 +23,13 @@ import {
 } from './apply.js';
 import { abortTx as runAbortTx, AbortRejected } from './abort.js';
 import { computeDiff, summarizeDiff } from './diff.js';
+import {
+  scanForRecovery,
+  recoverApply,
+  recoverAbort,
+  writeRecoveryRecord,
+  type RecoveryOutcome
+} from './recovery.js';
 import { openRecordId } from './types.js';
 import type { Transaction, DiffSummary, ValidatorResultSummary, OverrideEntry } from './types.js';
 import { buildValidatorRegistry } from '../../validators/registry.js';
@@ -356,4 +363,50 @@ export async function approveTx(
     overridesApplied: [...(tx.overridesApplied ?? []), ...overridesApplied]
   });
   return { ok: true };
+}
+
+/**
+ * Coordinator-level crash recovery entry point.
+ *
+ * Wraps `recoverAll` with a cross-session filter:
+ *   - Own-session orphans (tx.sessionId === ctx.session.id) → run normal
+ *     recoverApply/recoverAbort and write recovery.json for non-no-op outcomes.
+ *   - Cross-session orphans → write a recovery.json marked as no-op with a
+ *     'cross-session-skipped' warning; do NOT mutate state. The user can run
+ *     recovery from the original session to converge it.
+ *
+ * The cross-session filter is required because runStageC (called by
+ * recoverApply on apply-committed orphans) writes the tx-applied record into
+ * the *current* session — wrong session if the orphan came from another.
+ */
+export async function recoverAtStart(
+  ctx: CoordinatorContext
+): Promise<{ recovered: RecoveryOutcome[]; crossSessionSkipped: string[] }> {
+  const root = txRootFor(ctx);
+  const actions = await scanForRecovery(root);
+  const recovered: RecoveryOutcome[] = [];
+  const crossSessionSkipped: string[] = [];
+  const ts = new Date().toISOString();
+  for (const action of actions) {
+    if (action.tx.sessionId !== ctx.session.id) {
+      crossSessionSkipped.push(action.txId);
+      const skipOutcome: RecoveryOutcome = {
+        txId: action.txId,
+        action: 'no-op',
+        warning: `cross-session-skipped: tx originated in session ${action.tx.sessionId}, current session ${ctx.session.id}`,
+        ts
+      };
+      await writeRecoveryRecord(root, skipOutcome);
+      continue;
+    }
+    const outcome =
+      action.kind === 'apply'
+        ? await recoverApply(root, action, ctx)
+        : await recoverAbort(root, action, ctx);
+    if (outcome.action !== 'no-op') {
+      await writeRecoveryRecord(root, outcome);
+    }
+    recovered.push(outcome);
+  }
+  return { recovered, crossSessionSkipped };
 }
