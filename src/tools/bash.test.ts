@@ -69,7 +69,30 @@ test('bash tool with bashPolicy=passthrough records BashEffect after run', async
     assert.equal(recorded.length, 1);
     assert.equal(recorded[0].command, `echo new > ${path.join(dir, 'after.txt')}`);
     assert.equal(recorded[0].outOfBand, true);
+    assert.equal(recorded[0].exitCode, 0); // success preserved
     assert.ok(recorded[0].pathsChanged.some((p) => p.endsWith('after.txt')));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('bash tool with bashPolicy=passthrough preserves non-zero exit code in BashEffect', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-bash-exit-'));
+  try {
+    const recorded: BashEffect[] = [];
+    const ctx = makeCtx(dir, {
+      tx: {
+        mode: 'edit',
+        bashPolicy: 'passthrough',
+        txId: 'tx_exit',
+        headless: false,
+        recordBashEffect: async (eff: BashEffect) => { recorded.push(eff); }
+      }
+    });
+    const result = await bashTool.execute({ bash: 'exit 42' }, ctx);
+    assert.equal(result.status, 'error');
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0].exitCode, 42); // non-zero exit code preserved, not coerced to 1
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -106,9 +106,10 @@ export const bashTool: ToolDefinition<{ bash: string }> = {
       const result = await runBashChild(action, context);
       const after = await snapshotMtimes(context.cwd);
       const pathsChanged = diffMtimes(before, after);
+      const exitCode = typeof result.meta.exit === 'number' ? result.meta.exit : (result.status === 'ok' ? 0 : 1);
       const eff = buildBashEffect({
         command: action.bash,
-        exitCode: result.status === 'ok' ? 0 : 1,
+        exitCode,
         pathsChanged
       });
       await context.tx.recordBashEffect(eff);
