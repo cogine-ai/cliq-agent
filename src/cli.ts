@@ -31,6 +31,7 @@ import {
   openTx as coordOpenTx,
   applyTx as coordApplyTx,
   abortTx as coordAbortTx,
+  approveTx as coordApproveTx,
   getTxStatus as coordGetTxStatus,
   listTx as coordListTx,
   recoverAtStart as coordRecoverAtStart,
@@ -110,6 +111,17 @@ export type ParsedArgs = ParsedArgsBase & (
       prompt?: undefined;
     }
   | { cmd: 'tx-validate'; txId: string; json?: boolean; headless?: boolean; prompt?: undefined }
+  | {
+      cmd: 'tx-approve';
+      txId: string;
+      overrides: string[];
+      overrideAll?: boolean;
+      allowValidatorError: string[];
+      reason?: string;
+      json?: boolean;
+      headless?: boolean;
+      prompt?: undefined;
+    }
 );
 
 function isPolicyMode(value: string): value is PolicyMode {
@@ -167,7 +179,7 @@ function consumeRepeatable(args: string[], name: string): string[] {
 function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   const sub = args[1];
   if (!sub) {
-    throw new Error('cliq tx requires a subcommand (open, status, list, validate, apply, abort)');
+    throw new Error('cliq tx requires a subcommand (open, status, list, validate, approve, apply, abort)');
   }
   const rest = args.slice(2);
   const json = consumeFlag(rest, '--json') || undefined;
@@ -233,6 +245,31 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
         ...base,
         cmd: 'tx-validate',
         txId,
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'approve': {
+      const txId = rest[0];
+      if (!txId || txId.startsWith('--')) {
+        throw new Error('tx approve requires <txId>');
+      }
+      rest.shift();
+      const overrides = consumeRepeatable(rest, '--override');
+      const overrideAll = consumeFlag(rest, '--override-all');
+      const allowValidatorError = consumeRepeatable(rest, '--allow-validator-error');
+      const reason = consumeOption(rest, '--reason');
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx approve argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-approve',
+        txId,
+        overrides,
+        ...(overrideAll ? { overrideAll: true } : {}),
+        allowValidatorError,
+        ...(reason !== undefined ? { reason } : {}),
         ...(json ? { json } : {}),
         ...(headless ? { headless } : {})
       };
@@ -1361,6 +1398,7 @@ export async function runCli(argv: string[]) {
     parsed.cmd === 'tx-status' ||
     parsed.cmd === 'tx-list' ||
     parsed.cmd === 'tx-validate' ||
+    parsed.cmd === 'tx-approve' ||
     parsed.cmd === 'tx-apply' ||
     parsed.cmd === 'tx-abort'
   ) {
@@ -1480,6 +1518,43 @@ export async function runCli(argv: string[]) {
           writeJson({ type: 'error', message });
         } else {
           process.stderr.write(`tx validate error: ${message}\n`);
+        }
+        throw new ReportedCliError(message, { exitCode: 1 });
+      }
+    }
+
+    if (parsed.cmd === 'tx-approve') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
+      try {
+        const result = await coordApproveTx(ctx, parsed.txId, {
+          overrides: parsed.overrides,
+          ...(parsed.overrideAll ? { overrideAll: true } : {}),
+          allowValidatorError: parsed.allowValidatorError,
+          ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
+        });
+        if (result.ok) {
+          if (wantsJson) {
+            writeJson({ type: 'tx-approved', txId: parsed.txId });
+          } else {
+            process.stdout.write(`tx ${parsed.txId} approved\n`);
+          }
+          return;
+        }
+        const message = `uncovered blocking failures: ${result.uncoveredFailures.join(', ')} — pass --override <name> for each, or --override-all`;
+        if (wantsJson) {
+          writeJson({ type: 'error', message, uncoveredFailures: result.uncoveredFailures });
+        } else {
+          process.stderr.write(`tx approve blocked: ${message}\n`);
+        }
+        throw new ReportedCliError(message, { exitCode: 1 });
+      } catch (err) {
+        if (err instanceof ReportedCliError) throw err;
+        const message = err instanceof Error ? err.message : String(err);
+        if (wantsJson) {
+          writeJson({ type: 'error', message });
+        } else {
+          process.stderr.write(`tx approve error: ${message}\n`);
         }
         throw new ReportedCliError(message, { exitCode: 1 });
       }

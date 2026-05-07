@@ -410,6 +410,34 @@ test('parseArgs cliq tx validate accepts --json and --headless', () => {
   }
 });
 
+test('parseArgs recognizes cliq tx approve <txId> with overrides and reason', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'approve', 'tx_abc', '--override', 'tsc', '--override', 'eslint', '--reason', 'manual review']);
+  assert.equal(a.cmd, 'tx-approve');
+  if (a.cmd === 'tx-approve') {
+    assert.equal(a.txId, 'tx_abc');
+    assert.deepEqual(a.overrides, ['tsc', 'eslint']);
+    assert.equal(a.reason, 'manual review');
+  }
+});
+
+test('parseArgs cliq tx approve --override-all', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'approve', 'tx_abc', '--override-all', '--reason', 'mass']);
+  if (a.cmd === 'tx-approve') {
+    assert.equal(a.overrideAll, true);
+  }
+});
+
+test('parseArgs cliq tx approve --allow-validator-error', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'approve', 'tx_abc', '--allow-validator-error', 'eslint']);
+  if (a.cmd === 'tx-approve') {
+    assert.deepEqual(a.allowValidatorError, ['eslint']);
+  }
+});
+
+test('parseArgs rejects cliq tx approve without txId', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'approve']), /requires <txId>/);
+});
+
 test('parseArgs recognizes cliq tx abort with --restore-confirmed', () => {
   const a = parseArgs([
     'node',
