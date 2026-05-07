@@ -1733,7 +1733,9 @@ export async function runCli(argv: string[]) {
           prompt: prompt.trim(),
           policy,
           skills,
-          model: cliModel
+          model: cliModel,
+          txMode: parsed.txMode,
+          txApply: parsed.txApply
         },
         {
           onEvent(event) {
@@ -1758,7 +1760,9 @@ export async function runCli(argv: string[]) {
         prompt: prompt.trim(),
         policy,
         skills,
-        model: cliModel
+        model: cliModel,
+        txMode: parsed.txMode,
+        txApply: parsed.txApply
       },
       {
         hooks: createCliHooks(),

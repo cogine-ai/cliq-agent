@@ -20,6 +20,8 @@ export type HeadlessRunRequest = {
     mode?: 'active' | 'new';
   };
   metadata?: Record<string, string | number | boolean | null>;
+  txMode?: 'off' | 'edit';
+  txApply?: 'interactive' | 'auto-on-pass' | 'manual-only';
 };
 
 export type HeadlessRunOptions = {
