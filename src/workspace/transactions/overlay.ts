@@ -24,20 +24,35 @@ function resolveInsideLexical(root: string, rel: string): string {
 }
 
 /**
- * Defense-in-depth on top of {@link resolveInsideLexical}: realpath the
- * longest existing prefix of the resolved target and re-check that it is
- * still inside `root`. This catches the case where some ancestor on disk
- * is a symlink pointing outside the overlay/cwd; lexical normalisation
- * alone cannot detect that.
+ * Defense-in-depth on top of {@link resolveInsideLexical}, scoped to paths
+ * that resolve inside the **overlay** root: realpath the longest existing
+ * prefix of the resolved target and re-check that it is still inside the
+ * root. This catches the case where some ancestor inside the overlay is
+ * itself a symlink pointing outside; lexical normalisation cannot detect
+ * that.
+ *
+ * Why overlay-only: the overlay is cliq's private staging area and is only
+ * written to via this writer (and by the tx machinery itself, which never
+ * creates symlinks). Any symlink found there is therefore unexpected and a
+ * legitimate signal of tampering / a write that needs to be rejected.
+ *
+ * The cwd intentionally does **not** go through realpath. The cwd is the
+ * user's real workspace and routinely contains legitimate symlinks (pnpm
+ * `node_modules`, monorepo `packages/<x> -> ../<x>`, etc.). Forcing reads
+ * to stay strictly inside `realpath(cwd)` would break those workflows
+ * while not adding security: cwd reads here are read-only, and the
+ * overlay realpath check on the write side already prevents writes from
+ * escaping the staging area.
  *
  * Limitation: pure Node.js cannot do `openat(O_NOFOLLOW)` and an inherent
  * TOCTOU window remains between this check and the subsequent fs call. We
  * accept that — closing it would require native bindings — but the realpath
- * pass still raises the bar significantly above plain lexical validation.
+ * pass still raises the bar significantly above plain lexical validation
+ * for the overlay write surface.
  */
-async function resolveInside(root: string, rel: string): Promise<string> {
-  const target = resolveInsideLexical(root, rel);
-  const normalizedRoot = path.resolve(root);
+async function resolveInsideOverlay(overlayRoot: string, rel: string): Promise<string> {
+  const target = resolveInsideLexical(overlayRoot, rel);
+  const normalizedRoot = path.resolve(overlayRoot);
   // Walk upwards until we hit an existing path, then realpath it.
   let probe = target;
   while (true) {
@@ -46,15 +61,15 @@ async function resolveInside(root: string, rel: string): Promise<string> {
       const realRoot = await fs.realpath(normalizedRoot);
       const realRel = path.relative(realRoot, real);
       if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
-        throw new Error(`workspace path must stay inside root (symlink-resolved): ${rel}`);
+        throw new Error(`overlay path must stay inside overlay root (symlink-resolved): ${rel}`);
       }
       return target;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       const parent = path.dirname(probe);
-      // Reached the filesystem root — nothing to realpath; fall back to the
-      // lexical guarantee. This happens for fresh overlays that don't exist
-      // on disk yet.
+      // Reached the filesystem root — nothing to realpath; fall back to
+      // the lexical guarantee. This happens for fresh overlays that don't
+      // exist on disk yet.
       if (parent === probe) return target;
       probe = parent;
     }
@@ -64,22 +79,23 @@ async function resolveInside(root: string, rel: string): Promise<string> {
 export function createOverlayWriter(cwd: string, overlayRoot: string): WorkspaceWriter {
   return {
     async read(rel) {
-      const stagedPath = await resolveInside(overlayRoot, rel);
+      const stagedPath = await resolveInsideOverlay(overlayRoot, rel);
       try {
         return await fs.readFile(stagedPath, 'utf8');
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       }
-      return fs.readFile(await resolveInside(cwd, rel), 'utf8');
+      // cwd reads honour the user's symlinks (lexical guard only).
+      return fs.readFile(resolveInsideLexical(cwd, rel), 'utf8');
     },
     async replaceText(rel, oldText, newText) {
-      const stagedPath = await resolveInside(overlayRoot, rel);
+      const stagedPath = await resolveInsideOverlay(overlayRoot, rel);
       let current: string;
       try {
         current = await fs.readFile(stagedPath, 'utf8');
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        current = await fs.readFile(await resolveInside(cwd, rel), 'utf8');
+        current = await fs.readFile(resolveInsideLexical(cwd, rel), 'utf8');
       }
       const matches = current.split(oldText).length - 1;
       if (matches !== 1) {

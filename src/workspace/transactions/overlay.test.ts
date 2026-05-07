@@ -76,10 +76,11 @@ test('OverlayWriter rejects path-traversal inputs that would escape overlay or c
   }
 });
 
-test('OverlayWriter rejects symlink ancestors that escape the overlay root', async () => {
+test('OverlayWriter rejects overlay-side symlink ancestors that escape the overlay root', async () => {
   // Defense-in-depth: a lexically inside path can still reach outside the
-  // overlay if any ancestor on disk is a symlink. resolveInside realpaths
-  // the longest existing prefix and re-checks containment to catch this.
+  // overlay if any ancestor inside the overlay is a symlink.
+  // resolveInsideOverlay realpaths the longest existing prefix and
+  // re-checks containment to catch this on the write surface.
   const outer = await mkdtemp(path.join(os.tmpdir(), 'cliq-overlay-symlink-'));
   const cwd = path.join(outer, 'workspace');
   const overlay = path.join(outer, 'overlay');
@@ -96,14 +97,47 @@ test('OverlayWriter rejects symlink ancestors that escape the overlay root', asy
     const writer = createOverlayWriter(cwd, overlay);
     await assert.rejects(
       () => writer.read('link/secret.txt'),
-      /must stay inside root \(symlink-resolved\)/i
+      /must stay inside overlay root \(symlink-resolved\)/i
     );
     await assert.rejects(
       () => writer.replaceText('link/secret.txt', 'OUTSIDE', 'PWND'),
-      /must stay inside root \(symlink-resolved\)/i
+      /must stay inside overlay root \(symlink-resolved\)/i
     );
 
     assert.equal(await readFile(path.join(escape, 'secret.txt'), 'utf8'), 'OUTSIDE');
+  } finally {
+    await rm(outer, { recursive: true, force: true });
+  }
+});
+
+test('OverlayWriter still honours legitimate cwd-side symlinks (read fall-through)', async () => {
+  // Real-world workspaces frequently use symlinks (pnpm node_modules,
+  // monorepo `packages/<x> -> ../<x>`, framework conventions). The
+  // overlay reader must NOT reject those: cwd reads are read-only and
+  // the user is the source of truth for what their workspace looks like.
+  const outer = await mkdtemp(path.join(os.tmpdir(), 'cliq-overlay-cwd-symlink-'));
+  const cwd = path.join(outer, 'workspace');
+  const overlay = path.join(outer, 'overlay');
+  const sibling = path.join(outer, 'sibling-pkg');
+  try {
+    await mkdir(cwd, { recursive: true });
+    await mkdir(overlay, { recursive: true });
+    await mkdir(sibling, { recursive: true });
+    await writeFile(path.join(sibling, 'shared.ts'), 'export const X = 1;\n', 'utf8');
+    // cwd/packages/foo -> ../sibling-pkg (legit monorepo-ish layout).
+    await mkdir(path.join(cwd, 'packages'), { recursive: true });
+    await symlink(sibling, path.join(cwd, 'packages', 'foo'));
+
+    const writer = createOverlayWriter(cwd, overlay);
+    // Read should follow the user's symlink and succeed.
+    assert.equal(await writer.read('packages/foo/shared.ts'), 'export const X = 1;\n');
+    // Edit goes to overlay (not the symlink target).
+    await writer.replaceText('packages/foo/shared.ts', 'X = 1', 'X = 42');
+    assert.equal(await readFile(path.join(sibling, 'shared.ts'), 'utf8'), 'export const X = 1;\n');
+    assert.equal(
+      await readFile(path.join(overlay, 'packages', 'foo', 'shared.ts'), 'utf8'),
+      'export const X = 42;\n'
+    );
   } finally {
     await rm(outer, { recursive: true, force: true });
   }
