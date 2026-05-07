@@ -8,8 +8,11 @@ import {
   resolveTxRoot,
   createTx as createTxRow,
   readTxState,
+  writeTxState,
   txDir,
-  makeTxId
+  makeTxId,
+  overlayDir,
+  writeDiff
 } from './store.js';
 import {
   applyTx as runApplyTx,
@@ -18,8 +21,9 @@ import {
   ApplyPartial
 } from './apply.js';
 import { abortTx as runAbortTx, AbortRejected } from './abort.js';
+import { computeDiff, summarizeDiff } from './diff.js';
 import { openRecordId } from './types.js';
-import type { Transaction } from './types.js';
+import type { Transaction, DiffSummary } from './types.js';
 
 /**
  * Coordinator scope (v0.8 Phase 12 Task 48):
@@ -216,4 +220,21 @@ export async function abortTx(
       message: err instanceof Error ? err.message : String(err)
     };
   }
+}
+
+export async function finalizeTx(
+  ctx: CoordinatorContext,
+  txId: string
+): Promise<{ diffSummary: DiffSummary }> {
+  const root = txRootFor(ctx);
+  const tx = await readTxState(root, txId);
+  if (!tx) throw new Error(`tx not found: ${txId}`);
+  if (tx.state !== 'staging') {
+    throw new Error(`finalizeTx requires state=staging; got ${tx.state}`);
+  }
+  const diff = await computeDiff(ctx.cwd, overlayDir(root, txId));
+  const diffSummary = summarizeDiff(diff);
+  await writeDiff(root, txId, diff);
+  await writeTxState(root, { ...tx, state: 'finalized', diffSummary });
+  return { diffSummary };
 }
