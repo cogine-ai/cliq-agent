@@ -304,3 +304,54 @@ test('e2e: happy path through runner with scripted model emits tx events and lan
     assert.equal(session.activeTxId, undefined);
   });
 });
+
+test('e2e: validator failure aborts turn end with reason=validator-fail and leaves disk untouched', async () => {
+  await withEnv(async ({ home, ws, session }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+    // Edit produces NUL byte content. diff-sanity (NOT disabled below) blocks NUL bytes.
+    // Note: raw control chars are illegal in JSON strings; emit the JSON escape sequence
+    // \u0000 which JSON.parse decodes back to a real NUL byte.
+    const model = scriptedModel([
+      '{"edit":{"path":"a.txt","old_text":"a","new_text":"a\\u0000b"}}',
+      '{"message":"done"}'
+    ]);
+
+    const transactions: TxRunnerOptions = {
+      mode: 'edit',
+      auto: 'per-turn',
+      applyPolicy: 'auto-on-pass',
+      bashPolicy: 'passthrough',
+      headless: true,
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] },
+      stagedViewConfig: { copyMode: 'copy', bindPaths: [] },
+      workspaceId: 'ws_int',
+      workspaceRealPath: ws,
+      cliqHome: home
+    };
+
+    const events: RuntimeEvent[] = [];
+    const runner = createRunner({
+      model,
+      transactions,
+      onEvent: (e) => {
+        events.push(e);
+      }
+    });
+
+    await runner.runTurn(session, 'sneak a NUL byte into a.txt');
+
+    const aborted = events.find((e) => e.type === 'tx-aborted');
+    assert.ok(aborted, 'tx-aborted event expected');
+    if (aborted && aborted.type === 'tx-aborted') {
+      assert.equal(aborted.reason, 'validator-fail');
+    }
+    // No tx-applied event.
+    assert.equal(events.some((e) => e.type === 'tx-applied'), false);
+
+    // File on disk unchanged.
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'a');
+  });
+});
