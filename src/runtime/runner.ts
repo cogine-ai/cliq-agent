@@ -8,14 +8,25 @@ import { parseModelAction } from '../protocol/actions.js';
 import { resolveAutoCompactConfig, type AutoCompactConfig } from '../session/auto-compact-config.js';
 import { maybeAutoCompact, type AutoCompactState } from '../session/auto-compaction.js';
 import { createCheckpoint } from '../session/checkpoints.js';
-import { appendRecord, makeId, nowIso, saveSession } from '../session/store.js';
+import { appendRecord, makeId, nowIso, resolveCliqHome, saveSession } from '../session/store.js';
 import type { Session } from '../session/types.js';
 import { createToolRegistry } from '../tools/registry.js';
 import { normalizeToolResultForStorage } from '../tools/results.js';
-import type { ToolResult } from '../tools/types.js';
+import type { ToolContextTxFacade, ToolResult } from '../tools/types.js';
+import { appendBashEffect } from '../workspace/transactions/bash-effects.js';
+import { createOverlayWriter } from '../workspace/transactions/overlay.js';
+import { overlayDir, resolveTxRoot } from '../workspace/transactions/store.js';
 import { buildContextMessages } from './context.js';
 import type { RuntimeEventSink } from './events.js';
 import { runHooks, type RuntimeHook } from './hooks.js';
+import {
+  assertHeadlessCompatible,
+  finishTurnTx,
+  openTurnTx,
+  type CoordinatorCtx,
+  type TxRunnerOptions
+} from './tx-runner.js';
+import type { WorkspaceWriter } from './workspace-writer.js';
 
 type AutoCompactRunnerOptions = {
   config: AutoCompactConfig;
@@ -48,7 +59,8 @@ export function createRunner({
   instructions = async () => [],
   onEvent = async () => undefined,
   autoCompact,
-  signal
+  signal,
+  transactions
 }: {
   model: ModelClient;
   registry?: ReturnType<typeof createToolRegistry>;
@@ -58,7 +70,11 @@ export function createRunner({
   onEvent?: RuntimeEventSink;
   autoCompact?: AutoCompactRunnerOptions;
   signal?: AbortSignal;
+  transactions?: TxRunnerOptions;
 }) {
+  if (transactions) {
+    assertHeadlessCompatible(transactions);
+  }
   return {
     async runTurn(session: Session, userInput: string): Promise<string> {
       const cwd = session.cwd;
@@ -111,6 +127,27 @@ export function createRunner({
         });
         session.lifecycle.lastUserInputAt = ts;
         await saveSession(cwd, session);
+        await throwIfCancelled();
+
+        // Tx open at turn start (if tx mode is on).
+        let activeTxFromTxRunner: Awaited<ReturnType<typeof openTurnTx>>['tx'] = null;
+        let txOpenedThisTurn = false;
+        let coordinatorCtx: CoordinatorCtx | null = null;
+        if (transactions) {
+          coordinatorCtx = {
+            cwd,
+            session,
+            cliqHome: transactions.cliqHome,
+            workspaceId: transactions.workspaceId,
+            sessionId: session.id,
+            workspaceRealPath: transactions.workspaceRealPath
+          };
+          const opened = await openTurnTx(coordinatorCtx, transactions, async (e) => {
+            await onEvent(e);
+          });
+          activeTxFromTxRunner = opened.tx;
+          txOpenedThisTurn = opened.opened;
+        }
         await throwIfCancelled();
 
         await runHooks(hooks, 'beforeTurn', session, userInput);
@@ -344,6 +381,14 @@ export function createRunner({
           if ('message' in action) {
             const finalMessage = action.message.trim() || '(no content)';
             await runHooks(hooks, 'afterTurn', session, finalMessage);
+            // Only finalize/validate/apply when this turn auto-opened the tx. For
+            // reused explicit tx (txOpenedThisTurn === false), the user drives
+            // lifecycle via `cliq tx validate/approve/apply`.
+            if (transactions && activeTxFromTxRunner && txOpenedThisTurn && coordinatorCtx) {
+              await finishTurnTx(coordinatorCtx, transactions, activeTxFromTxRunner, async (e) => {
+                await onEvent(e);
+              });
+            }
             await onEvent({ type: 'final', message: finalMessage });
             return finalMessage;
           }
@@ -385,7 +430,29 @@ export function createRunner({
             await runHooks(hooks, 'beforeTool', session, action);
             await throwIfCancelled();
             try {
-              result = await definition.execute(action as never, { cwd, session, signal });
+              let writer: WorkspaceWriter | undefined;
+              let txFacade: ToolContextTxFacade | undefined;
+              if (transactions && activeTxFromTxRunner) {
+                const root = resolveTxRoot(transactions.cliqHome ?? resolveCliqHome());
+                const txId = activeTxFromTxRunner.id;
+                writer = createOverlayWriter(cwd, overlayDir(root, txId));
+                txFacade = {
+                  mode: transactions.mode,
+                  bashPolicy: transactions.bashPolicy,
+                  txId,
+                  headless: transactions.headless,
+                  recordBashEffect: async (eff) => {
+                    await appendBashEffect(root, txId, eff);
+                  }
+                };
+              }
+              result = await definition.execute(action as never, {
+                cwd,
+                session,
+                signal,
+                writer,
+                tx: txFacade
+              });
             } catch (error) {
               if (signal?.aborted || isAbortError(error)) {
                 await throwCancelled();

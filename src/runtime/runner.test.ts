@@ -4,11 +4,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import type { ModelClient } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { createSession } from '../session/store.js';
 import { createToolRegistry } from '../tools/registry.js';
 import type { EditModelAction, ToolDefinition } from '../tools/types.js';
 import { createRunner } from './runner.js';
+import type { TxRunnerOptions } from './tx-runner.js';
 
 function completion(content: string) {
   return {
@@ -894,4 +896,30 @@ test('runner retries once after recognized context overflow and successful compa
   assert.equal(final, 'done');
   assert.equal(normalCalls, 2);
   assert.equal(session.compactions.length, 1);
+});
+
+test('createRunner refuses applyPolicy=interactive + headless at construction', () => {
+  const stubModel = {} as ModelClient;
+  const transactions: TxRunnerOptions = {
+    mode: 'edit',
+    auto: 'per-turn',
+    applyPolicy: 'interactive',
+    bashPolicy: 'passthrough',
+    headless: true,
+    validatorsConfig: {},
+    stagedViewConfig: { copyMode: 'auto', bindPaths: [] },
+    workspaceId: 'ws',
+    workspaceRealPath: '/tmp/ws'
+  };
+  assert.throws(
+    () => createRunner({ model: stubModel, transactions }),
+    /interactive requires a TTY/
+  );
+});
+
+test('createRunner with transactions: undefined still works (tx-off)', () => {
+  const stubModel = {} as ModelClient;
+  const runner = createRunner({ model: stubModel });
+  assert.ok(runner);
+  assert.equal(typeof runner.runTurn, 'function');
 });
