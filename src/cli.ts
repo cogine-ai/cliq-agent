@@ -98,6 +98,7 @@ export type ParsedArgs = ParsedArgsBase & (
       cmd: 'tx-apply';
       txId: string;
       overrides: string[];
+      allowValidatorError: string[];
       reason?: string;
       json?: boolean;
       headless?: boolean;
@@ -284,6 +285,7 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
       }
       rest.shift();
       const overrides = consumeRepeatable(rest, '--override');
+      const allowValidatorError = consumeRepeatable(rest, '--allow-validator-error');
       const reason = consumeOption(rest, '--reason');
       if (rest.length > 0) {
         throw new Error(`Unknown tx apply argument: ${rest[0]}`);
@@ -293,6 +295,7 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
         cmd: 'tx-apply',
         txId,
         overrides,
+        allowValidatorError,
         ...(reason !== undefined ? { reason } : {}),
         ...(json ? { json } : {}),
         ...(headless ? { headless } : {})
@@ -1624,6 +1627,7 @@ export async function runCli(argv: string[]) {
         if (state === 'validated') {
           const approval = await coordApproveTx(ctx, parsed.txId, {
             overrides: parsed.overrides,
+            allowValidatorError: parsed.allowValidatorError,
             ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
           });
           if (!approval.ok) {

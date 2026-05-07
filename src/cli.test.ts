@@ -396,6 +396,13 @@ test('parseArgs cliq tx apply still accepts existing args (smart-pipeline lives 
   }
 });
 
+test('parseArgs cliq tx apply accepts --allow-validator-error', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'apply', 'tx_x', '--allow-validator-error', 'eslint', '--allow-validator-error', 'tsc']);
+  if (a.cmd === 'tx-apply') {
+    assert.deepEqual(a.allowValidatorError, ['eslint', 'tsc']);
+  }
+});
+
 test('parseArgs recognizes cliq tx validate <txId>', () => {
   const a = parseArgs(['node', 'src/index.ts', 'tx', 'validate', 'tx_abc']);
   assert.equal(a.cmd, 'tx-validate');

@@ -277,3 +277,23 @@ test('parseWorkspaceConfig refuses applyPolicy=manual-only when auto is unset (d
     /applyPolicy=manual-only requires .*auto=manual/
   );
 });
+
+test('parseWorkspaceConfig refuses bashPolicy=confirm in v0.8 (deferred to v0.9)', () => {
+  const raw = { transactions: { mode: 'edit', bashPolicy: 'confirm' } };
+  assert.throws(
+    () => parseWorkspaceConfig(raw),
+    /bashPolicy=confirm is not yet supported in v0\.8/
+  );
+});
+
+test('parseWorkspaceConfig accepts bashPolicy=passthrough', () => {
+  const raw = { transactions: { mode: 'edit', bashPolicy: 'passthrough' } };
+  const parsed = parseWorkspaceConfig(raw);
+  assert.equal(parsed.transactions?.bashPolicy, 'passthrough');
+});
+
+test('parseWorkspaceConfig accepts bashPolicy=deny', () => {
+  const raw = { transactions: { mode: 'edit', bashPolicy: 'deny' } };
+  const parsed = parseWorkspaceConfig(raw);
+  assert.equal(parsed.transactions?.bashPolicy, 'deny');
+});

@@ -317,6 +317,15 @@ export function parseTransactions(input: unknown): TxConfig | undefined {
     );
   }
 
+  // bashPolicy=confirm is not yet supported because the interactive prompt callback
+  // is not wired through ToolContext in v0.8. Refuse at config-load with a clear
+  // message; v0.9 will plumb confirmBash through ToolContextTxFacade.
+  if (result.bashPolicy === 'confirm') {
+    throw new Error(
+      'transactions.bashPolicy=confirm is not yet supported in v0.8 (the interactive prompt callback is not wired through ToolContext). Use bashPolicy=passthrough or bashPolicy=deny.'
+    );
+  }
+
   return result;
 }
 
