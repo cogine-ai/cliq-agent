@@ -53,23 +53,38 @@ function resolveInsideLexical(root: string, rel: string): string {
 async function resolveInsideOverlay(overlayRoot: string, rel: string): Promise<string> {
   const target = resolveInsideLexical(overlayRoot, rel);
   const normalizedRoot = path.resolve(overlayRoot);
+  // Resolve the root once. realpath(root) is invariant across the probe
+  // walk, and conflating its ENOENT with a missing probe component would
+  // make the loop body burn cycles on a meaningless symlink check.
+  let realRoot: string;
+  try {
+    realRoot = await fs.realpath(normalizedRoot);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    // overlayRoot itself doesn't exist on disk yet (fresh transaction). The
+    // lexical guard already enforced syntactic containment; with no root to
+    // anchor a symlink-resolved check we fall through and trust it.
+    return target;
+  }
+
   // Walk upwards until we hit an existing path, then realpath it.
   let probe = target;
   while (true) {
     try {
       const real = await fs.realpath(probe);
-      const realRoot = await fs.realpath(normalizedRoot);
       const realRel = path.relative(realRoot, real);
       if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
         throw new Error(`overlay path must stay inside overlay root (symlink-resolved): ${rel}`);
       }
       return target;
     } catch (err) {
+      // Only ENOENT from probing the current path is recoverable. Any other
+      // error (EACCES on an ancestor, EIO, ELOOP) must propagate.
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       const parent = path.dirname(probe);
-      // Reached the filesystem root — nothing to realpath; fall back to
-      // the lexical guarantee. This happens for fresh overlays that don't
-      // exist on disk yet.
+      // Reached the filesystem root without finding any existing ancestor
+      // (extremely defensive — normalizedRoot exists, so the walk should
+      // have terminated there). Fall back to the lexical guarantee.
       if (parent === probe) return target;
       probe = parent;
     }

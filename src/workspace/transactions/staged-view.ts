@@ -21,9 +21,19 @@ export async function materializeStagedView(opts: StagedViewOptions): Promise<{ 
   await fs.mkdir(opts.target, { recursive: true });
   const bindSet = new Set(opts.bindPaths);
   let usedCopyFallback = false;
+  // Once a reflink attempt falls back to byte copy in 'auto' mode we know
+  // the filesystem can't reflink between cwd and target. Latch into 'copy'
+  // for the rest of the walk so we don't pay the cp(1) spawn + failure
+  // cost (and the resulting noise in process tables) on every subsequent
+  // file. The original opts.copyMode is preserved for the final warning
+  // decision below.
+  let effectiveMode: TxCopyMode = opts.copyMode;
   await walkAndMaterialize(opts.cwd, opts.target, '', bindSet, async (src, dst) => {
-    const result = await materializeFile(src, dst, opts.copyMode);
-    if (result === 'copied' && opts.copyMode === 'auto') usedCopyFallback = true;
+    const result = await materializeFile(src, dst, effectiveMode);
+    if (result === 'copied' && opts.copyMode === 'auto' && effectiveMode === 'auto') {
+      usedCopyFallback = true;
+      effectiveMode = 'copy';
+    }
     return result;
   });
   // Apply overlay shadows. We pass the bindSet down so the overlay walk can
