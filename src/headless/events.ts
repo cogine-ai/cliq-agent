@@ -116,10 +116,10 @@ export function runtimeEventToHeadless(event: RuntimeEvent): RuntimeEventMapping
     return {
       type: 'error',
       payload: {
-        code: codeByRuntimeErrorStage[event.stage],
+        code: event.code ?? codeByRuntimeErrorStage[event.stage],
         stage: event.stage,
         message: event.message,
-        recoverable: false
+        recoverable: event.recoverable ?? false
       }
     };
   }
