@@ -308,6 +308,15 @@ export function parseTransactions(input: unknown): TxConfig | undefined {
     result.abortRetention = raw.abortRetention;
   }
 
+  // Cross-field validation: applyPolicy=manual-only with auto=per-turn would produce
+  // dangling tx artifacts every turn (auto-open then never apply). The default for
+  // auto is 'per-turn' per the runtime, so an unset auto must also be refused.
+  if (result.applyPolicy === 'manual-only' && (result.auto ?? 'per-turn') === 'per-turn') {
+    throw new Error(
+      'transactions.applyPolicy=manual-only requires transactions.auto=manual; per-turn auto-open with manual-only apply produces dangling transactions'
+    );
+  }
+
   return result;
 }
 
