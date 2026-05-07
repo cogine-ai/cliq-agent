@@ -110,6 +110,40 @@ test('OverlayWriter rejects overlay-side symlink ancestors that escape the overl
   }
 });
 
+test('OverlayWriter rejects in-overlay symlink redirections', async () => {
+  // overlay/link.ts -> other.ts is the canonical "internal redirect"
+  // case: the resolved path stays inside the overlay (so the existing
+  // containment check passes), but read/replaceText would silently
+  // operate on `other.ts` instead of the file the caller addressed.
+  // resolveInsideOverlay must spot the divergence and reject before we
+  // ever touch the filesystem.
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-overlay-redirect-cwd-'));
+  const overlay = await mkdtemp(path.join(os.tmpdir(), 'cliq-overlay-redirect-ov-'));
+  try {
+    await writeFile(path.join(overlay, 'other.ts'), 'real content', 'utf8');
+    // Relative symlink so the link target stays inside the overlay.
+    await symlink('other.ts', path.join(overlay, 'link.ts'));
+
+    const writer = createOverlayWriter(cwd, overlay);
+    await assert.rejects(
+      () => writer.read('link.ts'),
+      /must not be redirected by a symlink/i
+    );
+    await assert.rejects(
+      () => writer.replaceText('link.ts', 'real content', 'PWND'),
+      /must not be redirected by a symlink/i
+    );
+
+    // The underlying file must remain untouched — fs.writeFile on a
+    // symlink follows it by default, so without the redirect check
+    // replaceText would have rewritten other.ts.
+    assert.equal(await readFile(path.join(overlay, 'other.ts'), 'utf8'), 'real content');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(overlay, { recursive: true, force: true });
+  }
+});
+
 test('OverlayWriter refuses to operate when the overlay root itself is a symlink', async () => {
   // Tripwire: cliq always creates the overlay dir with fs.mkdir, so a
   // symlink AT THE LEAF (e.g., someone substituted <txDir>/overlay with

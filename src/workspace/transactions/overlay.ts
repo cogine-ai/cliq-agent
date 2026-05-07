@@ -88,6 +88,24 @@ async function resolveInsideOverlay(overlayRoot: string, rel: string): Promise<s
       if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
         throw new Error(`overlay path must stay inside overlay root (symlink-resolved): ${rel}`);
       }
+      // Refuse in-overlay redirections. The previous check rejects symlinks
+      // that escape the resolved root, but a symlink inside the overlay
+      // pointing to *another* file inside the overlay (e.g.
+      // `overlay/link.ts -> other.ts`) would still pass containment while
+      // silently rerouting reads and writes onto the wrong file. The
+      // probe's position relative to the lexical root must equal its
+      // position relative to the resolved root; any divergence means a
+      // symlink between root and probe rerouted the lookup.
+      //
+      // Note: this comparison is parallel-relative — we compare
+      // path.relative(normalizedRoot, probe) against
+      // path.relative(realRoot, real), so a legitimate symlink **above**
+      // the overlay root (e.g. a symlinked CLIQ_HOME) still passes,
+      // because the relative positions inside each tree stay aligned.
+      const lexicalRel = path.relative(normalizedRoot, probe);
+      if (realRel !== lexicalRel) {
+        throw new Error(`overlay path must not be redirected by a symlink: ${rel}`);
+      }
       return target;
     } catch (err) {
       // Only ENOENT from probing the current path is recoverable. Any other
