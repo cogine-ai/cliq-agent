@@ -10,17 +10,36 @@ import {
   openTx,
   applyTx as coordApply,
   abortTx as coordAbort,
+  finalizeTx as coordFinalize,
+  validateTx as coordValidate,
+  approveTx as coordApprove,
   type CoordinatorContext
 } from './coordinator.js';
 import {
   resolveTxRoot,
   readTxState,
   writeTxState,
-  writeDiff
+  writeDiff,
+  overlayDir
 } from './store.js';
 import { applyRecordId, abortRecordId, openRecordId } from './types.js';
+import { createOverlayWriter } from './overlay.js';
 import { createSession, mutateSession } from '../../session/store.js';
 import type { Session } from '../../session/types.js';
+import { createRunner } from '../../runtime/runner.js';
+import type { RuntimeEvent } from '../../runtime/events.js';
+import type { TxRunnerOptions } from '../../runtime/tx-runner.js';
+import type { ChatMessage, ModelClient, ModelCompleteOptions, ModelCompletion } from '../../model/types.js';
+
+function scriptedModel(actions: string[]): ModelClient {
+  let i = 0;
+  return {
+    async complete(_messages: ChatMessage[], _options?: ModelCompleteOptions): Promise<ModelCompletion> {
+      const text = actions[i++] ?? '{"message":"final"}';
+      return { content: text, provider: 'openrouter', model: 'test-model' };
+    }
+  };
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -229,5 +248,59 @@ test('concurrency: two concurrent applyTx serialize via withTxLock; only one win
     if (!failure.ok) {
       assert.match(failure.message, /already in flight|state is applied/i);
     }
+  });
+});
+
+test('e2e: happy path through runner with scripted model emits tx events and lands edit', async () => {
+  await withEnv(async ({ home, ws, session }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+    const model = scriptedModel([
+      '{"edit":{"path":"a.txt","old_text":"one","new_text":"ONE"}}',
+      '{"message":"done"}'
+    ]);
+
+    const transactions: TxRunnerOptions = {
+      mode: 'edit',
+      auto: 'per-turn',
+      applyPolicy: 'auto-on-pass',
+      bashPolicy: 'passthrough',
+      headless: true,
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] },
+      stagedViewConfig: { copyMode: 'copy', bindPaths: [] },
+      workspaceId: 'ws_int',
+      workspaceRealPath: ws,
+      cliqHome: home
+    };
+
+    const events: RuntimeEvent[] = [];
+    const runner = createRunner({
+      model,
+      transactions,
+      onEvent: (e) => {
+        events.push(e);
+      }
+    });
+
+    const finalMessage = await runner.runTurn(session, 'change a.txt');
+    assert.equal(finalMessage, 'done');
+
+    const eventTypes = events.map((e) => e.type);
+    assert.ok(eventTypes.includes('tx-staging-start'), 'tx-staging-start expected');
+    assert.ok(eventTypes.includes('tx-finalized'), 'tx-finalized expected');
+    assert.ok(eventTypes.includes('tx-validated'), 'tx-validated expected');
+    assert.ok(eventTypes.includes('tx-applied'), 'tx-applied expected');
+
+    // File on disk reflects the staged edit after apply.
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'ONE');
+
+    // Session has a tx-applied record.
+    const applied = session.records.find((r) => r.kind === 'tx-applied');
+    assert.ok(applied, 'tx-applied record expected in session');
+
+    // activeTxId cleared after auto-apply.
+    assert.equal(session.activeTxId, undefined);
   });
 });
