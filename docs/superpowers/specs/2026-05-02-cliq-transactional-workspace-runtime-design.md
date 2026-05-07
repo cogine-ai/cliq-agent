@@ -146,6 +146,13 @@ export type TxState =
 
 export type Severity = 'blocking' | 'advisory';
 
+export type Transition = {
+  from: TxState | null;   // null on the initial create (e.g., 'staging')
+  to: TxState;
+  ts: string;
+  by: string;             // 'cli' | 'auto:<turnId>' | '<callerId>'
+};
+
 export type Transaction = {
   id: string;
   kind: TxKind;
@@ -161,6 +168,10 @@ export type Transaction = {
   blockingFailures?: string[];          // derived from validators
   overridesApplied?: OverrideEntry[];   // populated at approve/apply
   ghostSnapshotId?: string;             // populated at apply
+  transitions?: Transition[];           // optional inline view of the
+                                        // audit log surfaced in `tx show
+                                        // --json` snapshots; the persistent
+                                        // form lives in `audit.json`
   error?: { stage: string; message: string };  // populated on failure paths
 };
 
@@ -478,7 +489,7 @@ type ApplyProgress = {
 
 Apply sequence (called from `approved` state) is split into three lock-disjoint stages so the global lock hierarchy `workspace > session > tx` is never violated:
 
-```
+```text
 STAGE A — preflight (tx-store lock only)
   A1. acquire tx-store lock
   A1a. AUTHORITATIVE state, abort, AND in-flight apply check under tx-store lock:
@@ -631,7 +642,7 @@ Abort accepts a `reason` argument from the caller. Most reasons are caller-suppl
 
 When tx state is `applied-partial`, exactly one of `--restore-confirmed` or `--keep-partial` is required. The flag selects the reason and is recorded in the audit log; without either flag, the abort fails with a clear error directing the user to choose. This makes the integrity claim of the resulting `tx-aborted` record unambiguous to downstream consumers.
 
-```
+```text
 ABORT (called from any non-terminal state)
   AB0. fast-fail pre-lock check (optimization only): read apply-progress.json
        if present; if phase ∈ {apply-pending, apply-writing, apply-committed,
@@ -896,7 +907,7 @@ Added to `HeadlessErrorCode`:
 
 When the run starts under `transactions.mode: edit`, the existing `cliq run --jsonl` adapter emits the new tx events interleaved with the existing event stream. A typical successful run looks like:
 
-```
+```text
 run-start
 checkpoint-created          ← Phase 3 ghost snapshot, Section 11
 tx-staging-start            ← NEW
@@ -912,7 +923,7 @@ run-end
 
 A failure example (validator blocking, no override):
 
-```
+```text
 run-start ... tx-validated
 error                       ← code: tx-validator-blocking, stage: tool, recoverable: true
 tx-aborted                  ← NEW; reason: validator-fail
@@ -1011,7 +1022,7 @@ When `transactions` is absent or `mode: "off"`, the entire feature is dormant; `
 
 ### 14.2 Configuration precedence
 
-```
+```text
 CLI flag > environment variable (CLIQ_TX_*) > workspace config > built-in default
 ```
 
@@ -1128,7 +1139,7 @@ If a hard requirement to keep old binaries forward-compatible with new sessions 
 
 Tx introduces one new lock (tx-store). Acquisition order is fixed to prevent deadlock:
 
-```
+```text
 workspace state lock > session lock > tx-store lock
 ```
 

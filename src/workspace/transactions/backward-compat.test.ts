@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { parseWorkspaceConfig } from '../config.js';
 import { isSessionRecord } from '../../session/store.js';
 import type { SessionRecord } from '../../session/types.js';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Backward-compat regression tests for v0.8.
@@ -32,11 +36,27 @@ test('workspace config with explicit transactions.mode=off parses through', () =
 });
 
 test('CLIQ_TX_MODE env defaults to undefined when unset', async () => {
-  // The constants module is loaded once with a snapshot of process.env, so we
-  // assert the type rather than a live value: the export must be either
-  // undefined (env unset at module load) or a string (env was set).
-  const { CLIQ_TX_MODE } = await import('../../config.js');
-  assert.ok(CLIQ_TX_MODE === undefined || typeof CLIQ_TX_MODE === 'string');
+  // The config module captures process.env once at import time, so reading
+  // the export inside the test process tells us nothing about a fresh boot:
+  // whatever value happened to be set when this suite started would already
+  // be baked in. Spawn an isolated `node` (with tsx loader so the .ts source
+  // is honoured without a build step) and import config.ts with CLIQ_TX_MODE
+  // explicitly removed. We assert strict equality with 'undefined' to verify
+  // the default-on-first-load behaviour, not just the type.
+  const env = { ...process.env };
+  delete env.CLIQ_TX_MODE;
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      '--input-type=module',
+      '-e',
+      "import('./src/config.ts').then(m => process.stdout.write(String(m.CLIQ_TX_MODE)))"
+    ],
+    { env, cwd: process.cwd() }
+  );
+  assert.equal(stdout, 'undefined');
 });
 
 test('Session records without tx kinds still pass isSessionRecord', () => {

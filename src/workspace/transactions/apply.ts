@@ -75,7 +75,15 @@ export async function runStageA(ctx: ApplyContext): Promise<StageAOutcome> {
     const plan: PlanEntry[] = [];
     for (const entry of diff.files) {
       if (entry.op !== 'modify') {
-        throw new Error(`unsupported diff op in v0.8: ${entry.op}`);
+        // v0.8 ships 'modify' only. 'create' / 'delete' are tracked for
+        // v0.9 in docs/superpowers/specs/2026-05-02-cliq-transactional-workspace-runtime-design.md.
+        // Surface the limitation explicitly so operators don't read a generic
+        // error and assume the tx system is broken.
+        throw new Error(
+          `unsupported diff op in v0.8: ${entry.op} ` +
+            "(only 'modify' is supported; 'create'/'delete' planned for v0.9 — see " +
+            'docs/superpowers/specs/2026-05-02-cliq-transactional-workspace-runtime-design.md)'
+        );
       }
       const real = await fs.readFile(path.join(tx.workspaceRealPath, entry.path), 'utf8');
       if (real !== entry.oldContent) {

@@ -215,11 +215,25 @@ export async function appendAudit(root: string, txId: string, entry: AuditEntry)
 }
 
 export async function readAudit(root: string, txId: string): Promise<AuditEntry[]> {
+  let raw: string;
   try {
-    const raw = await fs.readFile(auditJsonPath(root, txId), 'utf8');
-    return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l) as AuditEntry);
+    raw = await fs.readFile(auditJsonPath(root, txId), 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
   }
+  // appendAudit uses fs.appendFile (non-atomic). A crash mid-write can leave a
+  // truncated trailing JSON line. Tolerate that by skipping unparseable lines
+  // — readAudit must remain readable for recovery/inspection even when the
+  // last entry is corrupt.
+  const out: AuditEntry[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line) as AuditEntry);
+    } catch {
+      // skip corrupted line; intentional best-effort parse
+    }
+  }
+  return out;
 }

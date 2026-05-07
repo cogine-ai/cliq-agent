@@ -75,6 +75,13 @@ test('PassthroughWriter rejects path-traversal inputs (../, absolute, sneaky)', 
     );
     await assert.rejects(() => writer.read('a/../../secret.txt'), /must stay inside/i);
     await assert.rejects(() => writer.read('/etc/passwd'), /must be relative/i);
+    // replaceText must mirror read's absolute-path rejection. Without this,
+    // a writer-only path could escape via `replaceText('/etc/passwd', ...)`
+    // even though `read('/etc/passwd')` is blocked.
+    await assert.rejects(
+      () => writer.replaceText('/etc/passwd', 'OLD', 'NEW'),
+      /must be relative/i
+    );
     // Verify the outer file was never modified.
     assert.equal(await readFile(path.join(outer, 'secret.txt'), 'utf8'), 'TOP_SECRET');
   } finally {

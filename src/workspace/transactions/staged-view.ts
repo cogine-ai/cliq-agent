@@ -57,10 +57,23 @@ async function walkAndMaterialize(
     } else if (entry.isFile()) {
       await copyOne(srcPath, dstPath);
     }
+    // Other dirent types (symlinks, sockets, block/character devices) are
+    // intentionally skipped: a staged view is meant to mirror project source,
+    // not arbitrary filesystem objects. Symlinks specifically are handled via
+    // the explicit `bindPaths` opt-in above so the operator decides which
+    // paths get bound (see materializeStagedView). Sources outside that list
+    // are dropped to keep the staged view self-contained.
   }
 }
 
 async function walkOverlay(overlayRoot: string, target: string): Promise<void> {
+  // Overlay files are always copied via fs.copyFile (NOT materializeFile/reflink).
+  // Rationale: overlays only ever hold the agent's edited bytes for the current
+  // tx, which are small (handfuls of source files), and they are written to a
+  // different filesystem region than cwd in practice (cliq home vs. workspace).
+  // reflink across fs boundaries would just fall back to byte copy anyway, so
+  // skipping the cp(1) probe avoids spawning a child process per file with no
+  // payoff. Large binary overlays are out of scope for v0.8.
   const stack: string[] = [''];
   while (stack.length) {
     const prefix = stack.pop()!;

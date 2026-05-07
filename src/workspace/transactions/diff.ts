@@ -6,7 +6,23 @@ export async function computeDiff(cwd: string, overlayRoot: string): Promise<Dif
   const files: DiffEntry[] = [];
   await walk(overlayRoot, '', async (rel) => {
     const newContent = await fs.readFile(path.join(overlayRoot, rel), 'utf8');
-    const oldContent = await fs.readFile(path.join(cwd, rel), 'utf8');
+    let oldContent: string;
+    try {
+      oldContent = await fs.readFile(path.join(cwd, rel), 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // v0.8 only ships 'modify'. A file that exists in the overlay but not
+        // in cwd would be a 'create' op which apply.ts/diff-sanity reject
+        // anyway. Surface the constraint here with a clear message instead of
+        // letting an ENOENT bubble out from an apparently unrelated readFile.
+        // TODO(v0.9): support 'create' / 'delete' diff ops.
+        throw new Error(
+          `cannot diff ${rel}: file exists in overlay but not in workspace ` +
+            "('create' is not supported in v0.8; see docs/superpowers/specs/2026-05-02-cliq-transactional-workspace-runtime-design.md)"
+        );
+      }
+      throw err;
+    }
     files.push({ path: rel, op: 'modify', oldContent, newContent });
   });
   return { files, outOfBand: [] };

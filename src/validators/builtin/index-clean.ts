@@ -85,7 +85,12 @@ export const indexClean: Validator = {
       ({ stdout } = await execFileAsync(
         'git',
         ['status', '--porcelain=v2', '--renames', '-uno', '-z'],
-        { cwd: ctx.realCwd }
+        // Bound the git invocation: a hung pre-commit hook, a credential
+        // prompt, or an LFS network call would otherwise block the entire
+        // apply/abort pipeline because index-clean is a blocking validator.
+        // On timeout, Node kills the child with ETIMEDOUT and we land in the
+        // catch path with status='error', not a silent skip.
+        { cwd: ctx.realCwd, timeout: 10_000 }
       ));
     } catch (err) {
       // Only "not a git repository" should skip the check. Other failures

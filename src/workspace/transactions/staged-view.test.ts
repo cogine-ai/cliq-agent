@@ -108,7 +108,16 @@ test('materializeStagedView with reflink mode throws when copy is impossible', a
           target,
           bindPaths: [],
           copyMode: 'reflink'
-        })
+        }),
+        // Validate that the rejection is the specific cp(1) failure (EACCES /
+        // permission / cp exit code), not an unrelated bug in the walker. The
+        // exact wording of the cp error differs across macOS (`cp -c`) and
+        // Linux (`cp --reflink=always`); accept the union.
+        (err: unknown) => {
+          if (!(err instanceof Error)) return false;
+          const message = err.message;
+          return /EACCES|permission denied|Permission denied|cp\b/i.test(message);
+        }
       );
     } finally {
       // Restore writable perms so the cleanup `rm` can remove the tree.

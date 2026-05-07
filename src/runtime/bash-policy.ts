@@ -95,10 +95,17 @@ async function walk(root: string, prefix: string, out: MtimeMap, ignore: Set<str
     const abs = path.join(root, rel);
     if (entry.isDirectory()) {
       await walk(root, rel, out, ignore);
-    } else if (entry.isFile()) {
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      // Track symlinks via lstat so a bash command that adds, removes, or
+      // retargets a symlink is detected as a path change. Without this,
+      // `ln -sfn /new/target ./alias` would slip past mtime diffing because
+      // symlinks aren't reported as files. Use lstat for symlinks and stat
+      // for regular files so deref'd targets don't influence the timestamp.
       try {
-        const stat = await fs.stat(abs);
-        out.set(rel, stat.mtimeMs);
+        const st = entry.isSymbolicLink()
+          ? await fs.lstat(abs)
+          : await fs.stat(abs);
+        out.set(rel, st.mtimeMs);
       } catch (err) {
         // Race-condition tolerance: a file that vanished between readdir and
         // stat is acceptable to skip. Other errors (EACCES, EIO, EMFILE)

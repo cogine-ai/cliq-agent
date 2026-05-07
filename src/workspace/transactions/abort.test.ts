@@ -206,10 +206,50 @@ test('AB3a.5 promotes reason and loads partial metadata when flag is now applica
 });
 
 test('AB3a.5 rejects flags when state is not applied-partial at lock time', async () => {
-  // TODO: full coverage of this race requires injecting a state change between AB0a and AB3a.5
-  // (no injection hook exists today). The standalone assertion is exercised by
-  // 'AB0a rejects flags when state is not applied-partial' above; AB3a.5 reuses identical rules.
-  assert.ok(true);
+  // Cover the AB3a.5 under-lock branch deterministically by intercepting
+  // readTxState to return 'applied-partial' to AB0a (pre-lock) but 'approved'
+  // when called again under the lock. This simulates the race where the tx
+  // transitioned out of applied-partial after AB0a already accepted the flag.
+  await setupHome(async (home) => {
+    await setupTx(home, 'tx_ab3a5_under_lock', 'applied-partial');
+    const root = resolveTxRoot(home);
+    const real = (await readTxState(root, 'tx_ab3a5_under_lock'))!;
+
+    // Prepare a swapped variant so we can flip state after AB0a returns.
+    const stateFile = path.join(root, 'tx_ab3a5_under_lock', 'state.json');
+    let calls = 0;
+    const restore = (await import('node:fs')).promises;
+    const origReadFile = restore.readFile.bind(restore);
+    // Patch fs.promises.readFile only for this specific state.json: first
+    // call (AB0a, pre-lock) sees 'applied-partial'; subsequent calls
+    // (under-lock recheck) see 'approved'. Other fs reads pass through.
+    (restore as { readFile: typeof restore.readFile }).readFile = (async (
+      target: Parameters<typeof restore.readFile>[0],
+      ...rest: unknown[]
+    ) => {
+      if (typeof target === 'string' && target === stateFile) {
+        calls += 1;
+        if (calls === 1) {
+          return JSON.stringify({ ...real, state: 'applied-partial' });
+        }
+        return JSON.stringify({ ...real, state: 'approved' });
+      }
+      return origReadFile(target as Parameters<typeof origReadFile>[0], ...(rest as []));
+    }) as typeof restore.readFile;
+
+    try {
+      // restoreConfirmed flag is accepted by AB0a (state='applied-partial')
+      // but the under-lock recheck sees state='approved' and must reject.
+      await assert.rejects(
+        decideAbort(buildCtx(home, 'tx_ab3a5_under_lock', { restoreConfirmed: true })),
+        (err: unknown) =>
+          err instanceof AbortRejected &&
+          /only apply when state is applied-partial.*under-lock/.test((err as Error).message)
+      );
+    } finally {
+      (restore as { readFile: typeof restore.readFile }).readFile = origReadFile;
+    }
+  });
 });
 
 test('AB3b exits no-op when all four terminal markers are set', async () => {

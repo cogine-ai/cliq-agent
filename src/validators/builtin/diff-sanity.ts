@@ -12,9 +12,30 @@ export const diffSanity: Validator = {
     const findings: Array<{ path?: string; message: string }> = [];
     const root = resolveTxRoot(resolveCliqHome());
     const diffPath = diffJsonPath(root, ctx.txId);
-    // Defensive parse: a malformed or hand-edited diff.json must produce a
-    // structured fail (not a TypeError that crashes the validator runner).
-    const parsed: unknown = JSON.parse(await fs.readFile(diffPath, 'utf8'));
+    // Defensive parse: a missing, unreadable, or malformed diff.json must produce
+    // a structured fail (not a TypeError/ENOENT that crashes the validator runner
+    // and skips downstream validators). The runner converts thrown errors into
+    // status='error' but keeping the failure self-typed as 'fail' surfaces the
+    // diff problem in the validator-fail summary alongside other diff issues.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await fs.readFile(diffPath, 'utf8'));
+    } catch (err) {
+      const errCode =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as { code: unknown }).code)
+          : err instanceof SyntaxError
+            ? 'invalid-json'
+            : 'unknown';
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        name: 'builtin:diff-sanity',
+        severity: 'blocking',
+        status: 'fail',
+        durationMs: Date.now() - start,
+        findings: [{ message: `invalid diff (${errCode}): ${message}` }]
+      };
+    }
     const files = (parsed as { files?: unknown })?.files;
     if (!Array.isArray(files)) {
       return {

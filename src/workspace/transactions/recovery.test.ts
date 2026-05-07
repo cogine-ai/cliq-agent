@@ -321,8 +321,18 @@ test('recover apply-finalized: state transitions to applied (idempotent)', async
       const tx = await readTxState(root, 'tx_final');
       assert.equal(tx?.state, 'applied');
       assert.equal(tx?.ghostSnapshotId, 'snap_y');
-      // Re-run: idempotent
-      const outcome2 = await recoverApply(root, action, { cwd: ws, session });
+      // Re-run: must exercise the persisted state, not the in-memory copy
+      // that was captured before the first recovery. A fresh process would
+      // re-scan disk; mirror that by re-reading tx + apply-progress so the
+      // second invocation is a true idempotency check.
+      const action2 = {
+        txId: 'tx_final',
+        tx: (await readTxState(root, 'tx_final'))!,
+        kind: 'apply' as const,
+        phase: 'apply-finalized' as const,
+        progress: (await readApplyProgress(root, 'tx_final'))!
+      };
+      const outcome2 = await recoverApply(root, action2, { cwd: ws, session });
       assert.equal(outcome2.action, 'apply-finalized-state');
       const tx2 = await readTxState(root, 'tx_final');
       assert.equal(tx2?.state, 'applied');
@@ -444,9 +454,21 @@ test('recover abort-progress phase=aborting: completes via abort protocol (idemp
         (r) => r.id === abortRecordId('tx_aborting')
       );
       assert.ok(rec, 'abort record should be present');
-      // Idempotent rerun: AB3b four-marker check inside decideAbort returns
-      // null, so recoverAbort returns no-op.
-      const outcome2 = await recoverAbort(root, action, { cwd: ws, session });
+      // Idempotent rerun: simulate a fresh process by re-reading on-disk tx
+      // and abort-progress instead of reusing the original `action` (whose
+      // fields were captured before recoverAbort flipped state to 'aborted').
+      // We keep phase: 'aborting' because that's how a recovery scanner would
+      // re-enter the path -- decideAbort then sees the four terminal markers
+      // (state, abort-progress, activeTxId cleared, tx-aborted record present)
+      // and returns null, making recoverAbort report no-op.
+      const action2 = {
+        txId: 'tx_aborting',
+        tx: (await readTxState(root, 'tx_aborting'))!,
+        kind: 'abort' as const,
+        phase: 'aborting' as const,
+        progress: (await readAbortProgress(root, 'tx_aborting'))!
+      };
+      const outcome2 = await recoverAbort(root, action2, { cwd: ws, session });
       assert.equal(outcome2.action, 'no-op');
       const recsAfter = session.records.filter(
         (r) => r.id === abortRecordId('tx_aborting')

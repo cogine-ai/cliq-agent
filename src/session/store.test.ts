@@ -714,7 +714,19 @@ test('isSessionRecord accepts tx-aborted records', () => {
   assert.equal(isSessionRecord(record), true);
 });
 
-test('Session type permits activeTxId field', () => {
-  const session = createSession('/tmp/cliq-tx-types-active');
-  assert.equal((session as { activeTxId?: string }).activeTxId, undefined);
+test('Session.activeTxId round-trips through saveSession/load', async () => {
+  // Confirms (a) activeTxId is part of the persisted Session shape, not a
+  // typing-only field, and (b) it survives a save/reload cycle. The previous
+  // form just cast createSession() to a different type and re-read undefined,
+  // which would have stayed green even if activeTxId were stripped at write.
+  const cwd = await realpath(fileCliqHome!);
+  const session = createSession(cwd);
+  session.activeTxId = 'tx_round_trip_active';
+  await saveSession(cwd, session);
+
+  const target = sessionFilePath(session);
+  const onDisk = JSON.parse(await readFile(target, 'utf8')) as {
+    activeTxId?: string;
+  };
+  assert.equal(onDisk.activeTxId, 'tx_round_trip_active');
 });
