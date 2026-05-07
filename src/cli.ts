@@ -17,6 +17,7 @@ import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './runtime/events.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
+import type { TxRunnerOptions } from './runtime/tx-runner.js';
 import {
   assertWorkspaceCheckpointRestorable,
   createCheckpoint,
@@ -1805,6 +1806,57 @@ export async function runCli(argv: string[]) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
   const eventSink = createCliEventSink();
   let turnSawRuntimeError = false;
+
+  // §A.6: build CoordinatorContext, run crash recovery before constructing the
+  // interactive runner so own-session orphans converge and cross-session
+  // orphans get filtered (with a warning to stderr).
+  const cliqHome = resolveCliqHome();
+  const wsCfg = await loadWorkspaceConfig(cwd);
+  let chatWorkspaceRealPath = cwd;
+  try {
+    chatWorkspaceRealPath = await fsPromises.realpath(cwd);
+  } catch {
+    // fall back to cwd verbatim
+  }
+  const chatCoordinatorCtx: CoordinatorContext = {
+    cwd,
+    session,
+    cliqHome,
+    workspaceId: workspaceIdFromRealPath(chatWorkspaceRealPath),
+    sessionId: session.id,
+    workspaceRealPath: chatWorkspaceRealPath
+  };
+  const chatRecoveryResult = await coordRecoverAtStart(chatCoordinatorCtx);
+  for (const skippedTxId of chatRecoveryResult.crossSessionSkipped) {
+    process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
+  }
+
+  // Build TxRunnerOptions when transactions mode is active. Interactive arm
+  // uses a TTY confirm prompt via the existing readline interface.
+  const chatTxMode = parsed.txMode ?? wsCfg.transactions?.mode ?? 'off';
+  let chatTransactions: TxRunnerOptions | undefined;
+  if (chatTxMode === 'edit') {
+    const applyPolicy = parsed.txApply ?? wsCfg.transactions?.applyPolicy ?? 'interactive';
+    chatTransactions = {
+      mode: 'edit',
+      auto: wsCfg.transactions?.auto ?? 'per-turn',
+      applyPolicy,
+      bashPolicy: wsCfg.transactions?.bashPolicy ?? 'passthrough',
+      headless: false,
+      validatorsConfig: wsCfg.transactions?.validators ?? {},
+      stagedViewConfig: wsCfg.transactions?.stagedView ?? { copyMode: 'auto', bindPaths: ['node_modules'] },
+      workspaceId: chatCoordinatorCtx.workspaceId,
+      workspaceRealPath: chatCoordinatorCtx.workspaceRealPath,
+      cliqHome,
+      confirmApply: async () => {
+        const answer = await new Promise<string>((resolve) =>
+          rl.question('Apply transaction? [y/N] ', resolve)
+        );
+        return answer.trim().toLowerCase() === 'y';
+      }
+    };
+  }
+
   const runner = createRunner({
     model: modelClient,
     hooks: [...assembly.hooks, ...createCliHooks()],
@@ -1814,6 +1866,7 @@ export async function runCli(argv: string[]) {
       config: assembly.workspaceConfig.autoCompact,
       modelConfig
     },
+    ...(chatTransactions ? { transactions: chatTransactions } : {}),
     async onEvent(event) {
       if (event.type === 'error') {
         turnSawRuntimeError = true;
