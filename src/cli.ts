@@ -25,19 +25,21 @@ import {
 } from './session/checkpoints.js';
 import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
-import { ensureFresh, ensureSession, saveSession, workspaceIdFromRealPath } from './session/store.js';
+import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
 import type { ToolResult } from './tools/types.js';
 import {
   openTx as coordOpenTx,
   applyTx as coordApplyTx,
   abortTx as coordAbortTx,
   approveTx as coordApproveTx,
+  finalizeTx as coordFinalizeTx,
   getTxStatus as coordGetTxStatus,
   listTx as coordListTx,
   recoverAtStart as coordRecoverAtStart,
   validateTx as coordValidateTx,
   type CoordinatorContext
 } from './workspace/transactions/coordinator.js';
+import { readTxState as coordReadTxState, resolveTxRoot } from './workspace/transactions/store.js';
 import { loadWorkspaceConfig } from './workspace/config.js';
 import { promises as fsPromises } from 'node:fs';
 
@@ -1425,6 +1427,8 @@ export async function runCli(argv: string[]) {
     };
 
     if (parsed.cmd === 'tx-open') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
       const tx = await coordOpenTx(ctx, { explicit: true, name: parsed.name });
       if (wantsJson) {
         writeJson({ type: 'tx-opened', txId: tx.id, ...(parsed.name ? { name: parsed.name } : {}) });
@@ -1435,6 +1439,8 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-list') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
       const list = await coordListTx(ctx);
       if (wantsJson) {
         writeJson({
@@ -1450,6 +1456,8 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-status') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
       if (!parsed.txId) {
         // No id provided: behave like list (matches operator expectations).
         const list = await coordListTx(ctx);
@@ -1561,32 +1569,131 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-apply') {
-      const result = await coordApplyTx(ctx, parsed.txId, {
-        overrides: parsed.overrides,
-        ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
-      });
-      if (result.ok) {
-        if (wantsJson) {
-          writeJson({
-            type: 'tx-applied',
-            txId: result.txId,
-            filesApplied: result.filesApplied,
-            ghostSnapshotId: result.ghostSnapshotId
-          });
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
+
+      const wsCfg = await loadWorkspaceConfig(cwd);
+      const validatorsConfig = wsCfg.transactions?.validators ?? {};
+      const stagedViewConfig = wsCfg.transactions?.stagedView ?? {
+        copyMode: 'auto' as const,
+        bindPaths: ['node_modules']
+      };
+
+      // Refuse interactive applyPolicy under headless at handler entry.
+      const applyPolicy = parsed.txApply ?? wsCfg.transactions?.applyPolicy ?? 'interactive';
+      if (applyPolicy === 'interactive' && (parsed.headless || parsed.json)) {
+        const msg =
+          '--tx-apply interactive requires a TTY; use --tx-apply manual-only or auto-on-pass for headless runs';
+        if (parsed.headless || parsed.json) {
+          writeJson({ type: 'error', message: msg });
         } else {
-          process.stdout.write(`tx applied: ${result.txId} (${result.filesApplied.length} files)\n`);
+          process.stderr.write(`${msg}\n`);
         }
-        return;
+        throw new ReportedCliError(msg, { exitCode: 2 });
       }
-      if (wantsJson) {
-        writeJson({ type: 'error', code: result.error, message: result.message });
-      } else {
-        process.stderr.write(`tx apply ${result.error}: ${result.message}\n`);
+
+      try {
+        const cliqHome = ctx.cliqHome ?? resolveCliqHome();
+        const tx = await coordReadTxState(resolveTxRoot(cliqHome), parsed.txId);
+        if (!tx) throw new Error(`tx not found: ${parsed.txId}`);
+
+        let state = tx.state;
+
+        if (state === 'staging') {
+          await coordFinalizeTx(ctx, parsed.txId);
+          state = 'finalized';
+        }
+        if (state === 'finalized') {
+          const v = await coordValidateTx(ctx, parsed.txId, validatorsConfig, stagedViewConfig);
+          state = 'validated';
+          if (v.blockingFailures.length > 0 && parsed.overrides.length === 0) {
+            const msg = `tx has blocking failures: ${v.blockingFailures.join(', ')} — run \`cliq tx approve ${parsed.txId} --override <name>\` to override`;
+            if (parsed.headless || parsed.json) {
+              writeJson({
+                type: 'error',
+                message: msg,
+                uncoveredFailures: v.blockingFailures
+              });
+            } else {
+              process.stderr.write(`${msg}\n`);
+            }
+            throw new ReportedCliError(msg, { exitCode: 1 });
+          }
+        }
+        if (state === 'validated') {
+          const approval = await coordApproveTx(ctx, parsed.txId, {
+            overrides: parsed.overrides,
+            ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
+          });
+          if (!approval.ok) {
+            const msg = `uncovered blocking failures: ${approval.uncoveredFailures.join(', ')}`;
+            if (parsed.headless || parsed.json) {
+              writeJson({
+                type: 'error',
+                message: msg,
+                uncoveredFailures: approval.uncoveredFailures
+              });
+            } else {
+              process.stderr.write(`${msg}\n`);
+            }
+            throw new ReportedCliError(msg, { exitCode: 1 });
+          }
+          state = 'approved';
+        }
+        if (state === 'approved') {
+          const result = await coordApplyTx(ctx, parsed.txId, {
+            overrides: parsed.overrides,
+            ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
+          });
+          if (result.ok) {
+            if (parsed.headless || parsed.json) {
+              writeJson({
+                type: 'tx-applied',
+                txId: parsed.txId,
+                filesApplied: result.filesApplied
+              });
+            } else {
+              process.stdout.write(`tx ${parsed.txId} applied: ${result.filesApplied.length} files\n`);
+            }
+          } else {
+            const code =
+              result.error === 'partial'
+                ? 'tx-apply-partial'
+                : result.error === 'conflict'
+                  ? 'tx-apply-conflict'
+                  : 'tx-overlay-error';
+            if (parsed.headless || parsed.json) {
+              writeJson({ type: 'error', code, message: result.message });
+            } else {
+              process.stderr.write(`tx apply ${result.error}: ${result.message}\n`);
+            }
+            throw new ReportedCliError(result.message, { exitCode: 1 });
+          }
+        } else {
+          const msg = `tx ${parsed.txId} is in state=${state}, not applyable (already terminal or partial)`;
+          if (parsed.headless || parsed.json) {
+            writeJson({ type: 'error', message: msg });
+          } else {
+            process.stderr.write(`${msg}\n`);
+          }
+          throw new ReportedCliError(msg, { exitCode: 1 });
+        }
+      } catch (err) {
+        if (err instanceof ReportedCliError) throw err;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (parsed.headless || parsed.json) {
+          writeJson({ type: 'error', message: msg });
+        } else {
+          process.stderr.write(`tx apply error: ${msg}\n`);
+        }
+        throw new ReportedCliError(msg, { exitCode: 1 });
       }
-      throw new ReportedCliError(result.message, { exitCode: 1 });
+      return;
     }
 
     if (parsed.cmd === 'tx-abort') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
       const result = await coordAbortTx(ctx, parsed.txId, {
         restoreConfirmed: parsed.restoreConfirmed,
         keepPartial: parsed.keepPartial,

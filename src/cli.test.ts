@@ -387,6 +387,15 @@ test('parseArgs rejects cliq tx apply without txId', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'apply']), /requires <txId>/);
 });
 
+test('parseArgs cliq tx apply still accepts existing args (smart-pipeline lives in handler)', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'apply', 'tx_abc', '--override', 'foo', '--reason', 'r']);
+  if (a.cmd === 'tx-apply') {
+    assert.equal(a.txId, 'tx_abc');
+    assert.deepEqual(a.overrides, ['foo']);
+    assert.equal(a.reason, 'r');
+  }
+});
+
 test('parseArgs recognizes cliq tx validate <txId>', () => {
   const a = parseArgs(['node', 'src/index.ts', 'tx', 'validate', 'tx_abc']);
   assert.equal(a.cmd, 'tx-validate');
