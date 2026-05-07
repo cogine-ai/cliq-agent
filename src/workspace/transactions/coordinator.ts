@@ -12,7 +12,8 @@ import {
   txDir,
   makeTxId,
   overlayDir,
-  writeDiff
+  writeDiff,
+  validatorsDir
 } from './store.js';
 import {
   applyTx as runApplyTx,
@@ -23,7 +24,12 @@ import {
 import { abortTx as runAbortTx, AbortRejected } from './abort.js';
 import { computeDiff, summarizeDiff } from './diff.js';
 import { openRecordId } from './types.js';
-import type { Transaction, DiffSummary } from './types.js';
+import type { Transaction, DiffSummary, ValidatorResultSummary } from './types.js';
+import { buildValidatorRegistry } from '../../validators/registry.js';
+import { runValidators } from '../../validators/runner.js';
+import { materializeStagedView, cleanupStagedView } from './staged-view.js';
+import type { TxValidatorsConfig, TxStagedViewConfig } from '../config.js';
+import type { ValidatorResult } from '../../validators/types.js';
 
 /**
  * Coordinator scope (v0.8 Phase 12 Task 48):
@@ -237,4 +243,63 @@ export async function finalizeTx(
   await writeDiff(root, txId, diff);
   await writeTxState(root, { ...tx, state: 'finalized', diffSummary });
   return { diffSummary };
+}
+
+export async function validateTx(
+  ctx: CoordinatorContext,
+  txId: string,
+  validatorsConfig: TxValidatorsConfig,
+  stagedViewConfig: TxStagedViewConfig
+): Promise<{ validators: ValidatorResultSummary[]; blockingFailures: string[] }> {
+  const root = txRootFor(ctx);
+  const tx = await readTxState(root, txId);
+  if (!tx) throw new Error(`tx not found: ${txId}`);
+  if (tx.state !== 'finalized') {
+    throw new Error(`validateTx requires state=finalized; got ${tx.state}`);
+  }
+
+  const registry = buildValidatorRegistry(validatorsConfig);
+  const stagedTarget = path.join(txDir(root, txId), 'staged-view');
+  await materializeStagedView({
+    cwd: ctx.cwd,
+    overlayRoot: overlayDir(root, txId),
+    target: stagedTarget,
+    bindPaths: stagedViewConfig.bindPaths ?? ['node_modules'],
+    copyMode: stagedViewConfig.copyMode ?? 'auto'
+  });
+
+  const results: ValidatorResult[] = [];
+  try {
+    await runValidators({
+      txId,
+      registry,
+      workspaceView: stagedTarget,
+      realCwd: ctx.cwd,
+      onResult: async (r) => {
+        results.push(r);
+        await persistValidatorResult(root, txId, r);
+      }
+    });
+  } finally {
+    await cleanupStagedView(stagedTarget);
+  }
+
+  const summaries: ValidatorResultSummary[] = results.map((r) => ({
+    name: r.name,
+    severity: r.severity,
+    status: r.status,
+    durationMs: r.durationMs
+  }));
+  const blockingFailures = results
+    .filter((r) => r.severity === 'blocking' && (r.status === 'fail' || r.status === 'error'))
+    .map((r) => r.name);
+
+  await writeTxState(root, { ...tx, state: 'validated', validators: summaries, blockingFailures });
+  return { validators: summaries, blockingFailures };
+}
+
+async function persistValidatorResult(root: string, txId: string, r: ValidatorResult): Promise<void> {
+  await fs.mkdir(validatorsDir(root, txId), { recursive: true });
+  const sanitized = r.name.replace(/[^A-Za-z0-9_.-]/g, '_');
+  await fs.writeFile(path.join(validatorsDir(root, txId), `${sanitized}.json`), JSON.stringify(r, null, 2), 'utf8');
 }

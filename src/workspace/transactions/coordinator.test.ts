@@ -13,12 +13,16 @@ import {
   getTxStatus,
   listTx,
   getActiveTx,
+  finalizeTx,
+  validateTx,
   type CoordinatorContext
 } from './coordinator.js';
 import { createSession, mutateSession } from '../../session/store.js';
 import type { Session } from '../../session/types.js';
 import { openRecordId } from './types.js';
-import { resolveTxRoot, writeTxState, writeDiff, readTxState } from './store.js';
+import { resolveTxRoot, writeTxState, writeDiff, readTxState, overlayDir } from './store.js';
+import { createOverlayWriter } from './overlay.js';
+import type { TxValidatorsConfig, TxStagedViewConfig } from '../config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -244,5 +248,46 @@ test('finalizeTx with empty overlay produces zero-file diff', async () => {
     assert.equal(result.diffSummary.filesChanged, 0);
     const after = await readTxState(root, tx.id);
     assert.equal(after?.state, 'finalized');
+  });
+});
+
+test('validateTx runs validators on staged view, persists results, transitions state to validated', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+    await finalizeTx(ctx, tx.id);
+
+    const validatorsConfig: TxValidatorsConfig = { disabled: ['builtin:index-clean', 'builtin:size-limit'] }; // only diff-sanity
+    const stagedViewConfig: TxStagedViewConfig = { copyMode: 'copy', bindPaths: [] };
+    const result = await validateTx(ctx, tx.id, validatorsConfig, stagedViewConfig);
+    assert.equal(result.validators.length, 1);
+    assert.equal(result.validators[0].name, 'builtin:diff-sanity');
+    assert.deepEqual(result.blockingFailures, []); // diff-sanity passes on a clean modify
+
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'validated');
+    assert.equal(after?.validators?.length, 1);
+  });
+});
+
+test('validateTx flags blocking failures when a validator fails', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    // NUL byte triggers diff-sanity binary heuristic.
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+    await finalizeTx(ctx, tx.id);
+
+    const result = await validateTx(ctx, tx.id, { disabled: ['builtin:index-clean', 'builtin:size-limit'] }, { copyMode: 'copy', bindPaths: [] });
+    assert.deepEqual(result.blockingFailures, ['builtin:diff-sanity']);
+
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'validated');
+    assert.deepEqual(after?.blockingFailures, ['builtin:diff-sanity']);
   });
 });
