@@ -140,6 +140,11 @@ export async function listTx(ctx: CoordinatorContext): Promise<Transaction[]> {
   return txs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+export async function getActiveTx(ctx: CoordinatorContext): Promise<Transaction | null> {
+  if (!ctx.session.activeTxId) return null;
+  return readTxState(txRootFor(ctx), ctx.session.activeTxId);
+}
+
 export type CoordinatorApplyResult =
   | { ok: true; txId: string; filesApplied: string[]; ghostSnapshotId: string }
   | { ok: false; error: 'rejected' | 'conflict' | 'partial' | 'unknown'; message: string };

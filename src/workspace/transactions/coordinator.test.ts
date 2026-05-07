@@ -12,6 +12,7 @@ import {
   abortTx,
   getTxStatus,
   listTx,
+  getActiveTx,
   type CoordinatorContext
 } from './coordinator.js';
 import { createSession, mutateSession } from '../../session/store.js';
@@ -179,5 +180,30 @@ test('coordinator.abortTx happy path: tx in approved state aborts cleanly', asyn
     }
     const recs = session.records.filter((r) => r.kind === 'tx-aborted');
     assert.equal(recs.length, 1);
+  });
+});
+
+test('getActiveTx returns null when session.activeTxId is undefined', async () => {
+  await withCoordinatorEnv(async ({ ctx }) => {
+    ctx.session.activeTxId = undefined;
+    const tx = await getActiveTx(ctx);
+    assert.equal(tx, null);
+  });
+});
+
+test('getActiveTx returns the Transaction for session.activeTxId', async () => {
+  await withCoordinatorEnv(async ({ ctx }) => {
+    const created = await openTx(ctx, { explicit: false });
+    const got = await getActiveTx(ctx);
+    assert.ok(got);
+    assert.equal(got?.id, created.id);
+  });
+});
+
+test('getActiveTx returns null when activeTxId points to a missing tx (defensive)', async () => {
+  await withCoordinatorEnv(async ({ ctx }) => {
+    ctx.session.activeTxId = 'tx_does_not_exist';
+    const tx = await getActiveTx(ctx);
+    assert.equal(tx, null);
   });
 });
