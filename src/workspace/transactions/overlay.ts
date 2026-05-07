@@ -56,8 +56,20 @@ async function resolveInsideOverlay(overlayRoot: string, rel: string): Promise<s
   // Resolve the root once. realpath(root) is invariant across the probe
   // walk, and conflating its ENOENT with a missing probe component would
   // make the loop body burn cycles on a meaningless symlink check.
+  //
+  // Before realpath, lstat the root and refuse to operate if the root
+  // itself is a symlink. cliq always creates overlay dirs with
+  // fs.mkdir, so a symlink at the leaf is unexpected and would
+  // silently redirect every overlay write to wherever the link
+  // points. (Ancestor symlinks above the leaf — e.g., a symlinked
+  // CLIQ_HOME — are still honoured: realpath resolves them
+  // transparently and the containment check uses the resolved root.)
   let realRoot: string;
   try {
+    const rootStat = await fs.lstat(normalizedRoot);
+    if (rootStat.isSymbolicLink()) {
+      throw new Error(`overlay root must not be a symlink: ${normalizedRoot}`);
+    }
     realRoot = await fs.realpath(normalizedRoot);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;

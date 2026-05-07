@@ -110,6 +110,60 @@ test('OverlayWriter rejects overlay-side symlink ancestors that escape the overl
   }
 });
 
+test('OverlayWriter refuses to operate when the overlay root itself is a symlink', async () => {
+  // Tripwire: cliq always creates the overlay dir with fs.mkdir, so a
+  // symlink AT THE LEAF (e.g., someone substituted <txDir>/overlay with
+  // a redirect) is anomalous. Fail loud rather than silently redirecting
+  // every write into the link target.
+  const outer = await mkdtemp(path.join(os.tmpdir(), 'cliq-overlay-rootsym-'));
+  const cwd = path.join(outer, 'workspace');
+  const realOverlay = path.join(outer, 'real-overlay');
+  const overlayLink = path.join(outer, 'overlay');
+  try {
+    await mkdir(cwd, { recursive: true });
+    await mkdir(realOverlay, { recursive: true });
+    await symlink(realOverlay, overlayLink);
+
+    const writer = createOverlayWriter(cwd, overlayLink);
+    await assert.rejects(
+      () => writer.replaceText('foo.ts', 'OLD', 'NEW'),
+      /overlay root must not be a symlink/i
+    );
+    await assert.rejects(() => writer.read('foo.ts'), /overlay root must not be a symlink/i);
+  } finally {
+    await rm(outer, { recursive: true, force: true });
+  }
+});
+
+test('OverlayWriter accepts an ancestor symlink above the overlay root', async () => {
+  // Counterpart to the leaf-rejection above: a symlink ABOVE the overlay
+  // root (e.g., $CLIQ_HOME itself being symlinked, common on machines
+  // that put cliq home on a separate volume) is fine — realpath resolves
+  // it and the containment check uses the resolved root.
+  const outer = await mkdtemp(path.join(os.tmpdir(), 'cliq-overlay-ancestor-'));
+  const realHome = path.join(outer, 'real-home');
+  const homeLink = path.join(outer, 'home');
+  const cwd = path.join(outer, 'workspace');
+  try {
+    await mkdir(cwd, { recursive: true });
+    await mkdir(path.join(realHome, 'tx_x', 'overlay'), { recursive: true });
+    await symlink(realHome, homeLink);
+    // overlayRoot is path-via-symlink-ancestor; the leaf itself is a real dir.
+    const overlay = path.join(homeLink, 'tx_x', 'overlay');
+    await writeFile(path.join(cwd, 'a.txt'), 'hi', 'utf8');
+
+    const writer = createOverlayWriter(cwd, overlay);
+    // Read fall-through to cwd works.
+    assert.equal(await writer.read('a.txt'), 'hi');
+    // Write into overlay-via-ancestor-symlink succeeds and writes through to
+    // the real home.
+    await writer.replaceText('a.txt', 'hi', 'HI');
+    assert.equal(await readFile(path.join(realHome, 'tx_x', 'overlay', 'a.txt'), 'utf8'), 'HI');
+  } finally {
+    await rm(outer, { recursive: true, force: true });
+  }
+});
+
 test('OverlayWriter still honours legitimate cwd-side symlinks (read fall-through)', async () => {
   // Real-world workspaces frequently use symlinks (pnpm node_modules,
   // monorepo `packages/<x> -> ../<x>`, framework conventions). The
