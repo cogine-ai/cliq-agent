@@ -16,7 +16,13 @@ export function createSizeLimit(thresholdLines = DEFAULT_SIZE_LIMIT_LINES): Vali
       const diff = JSON.parse(await fs.readFile(diffJsonPath(root, ctx.txId), 'utf8'));
       for (const entry of diff.files) {
         const content: string = entry.newContent ?? '';
-        const lineCount = content.split('\n').length;
+        // Empty content has 0 lines (not 1). A trailing newline does not
+        // create an empty extra line. `split('\n').length` would miscount
+        // both edges: '' → 1, 'a\nb\n' → 3.
+        const lineCount =
+          content.length === 0
+            ? 0
+            : content.split(/\r?\n/).length - (content.endsWith('\n') ? 1 : 0);
         if (lineCount > thresholdLines) {
           findings.push({ path: entry.path, message: `${lineCount} lines exceeds ${thresholdLines}-line limit` });
         }

@@ -12,13 +12,33 @@ export const indexClean: Validator = {
     let stdout: string;
     try {
       ({ stdout } = await execFileAsync('git', ['status', '--porcelain=v2', '--renames', '-uno'], { cwd: ctx.realCwd }));
-    } catch {
+    } catch (err) {
+      // Only "not a git repository" should skip the check. Other failures
+      // (git missing, hung, killed, permission denied, hook crash, etc.)
+      // must surface as `status: 'error'` so they do not silently bypass
+      // a blocking validator.
+      const stderr =
+        typeof (err as { stderr?: unknown }).stderr === 'string'
+          ? ((err as { stderr: string }).stderr)
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      const notGitRepo = /not a git repository/i.test(stderr);
+      if (notGitRepo) {
+        return {
+          name: 'builtin:index-clean',
+          severity: 'blocking',
+          status: 'pass',
+          durationMs: Date.now() - start,
+          message: 'not a git repository — index check skipped'
+        };
+      }
       return {
         name: 'builtin:index-clean',
         severity: 'blocking',
-        status: 'pass',
+        status: 'error',
         durationMs: Date.now() - start,
-        message: 'not a git repository — index check skipped'
+        message: `git status failed: ${stderr.slice(0, 256)}`
       };
     }
     const findings: Finding[] = [];

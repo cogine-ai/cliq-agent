@@ -188,15 +188,26 @@ export async function runAbortWritePhase(
     txInitial?.blockingFailures && txInitial.blockingFailures.length > 0
       ? txInitial.blockingFailures
       : undefined;
-  const appliedPartial =
+  // For applied-partial-derived reasons, ghostSnapshotId MUST exist on the
+  // decision (it was loaded from apply-progress in AB3a.5). Refuse to write
+  // an empty string into the audit record — that would silently corrupt the
+  // restore reference. The downstream `abortTx` orchestrator already throws
+  // if ghostSnapshotId is missing on these reasons; this is defense-in-depth.
+  const appliedPartialReason =
     decision.reason === 'apply-failed-partial-restored' ||
-    decision.reason === 'apply-failed-partial-kept'
-      ? {
-          partialFiles: decision.partialFiles ?? [],
-          ghostSnapshotId: decision.ghostSnapshotId ?? '',
-          restoreConfirmed: decision.restoreConfirmed
-        }
-      : undefined;
+    decision.reason === 'apply-failed-partial-kept';
+  if (appliedPartialReason && !decision.ghostSnapshotId) {
+    throw new Error(
+      `abort decision for reason=${decision.reason} requires ghostSnapshotId; got falsy`
+    );
+  }
+  const appliedPartial = appliedPartialReason
+    ? {
+        partialFiles: decision.partialFiles ?? [],
+        ghostSnapshotId: decision.ghostSnapshotId as string,
+        restoreConfirmed: decision.restoreConfirmed
+      }
+    : undefined;
 
   // Phase abort-session: take session lock, briefly take tx-store lock to write
   // abort-progress=aborting, then append the deterministic record and clear

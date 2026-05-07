@@ -17,7 +17,12 @@ export const diffSanity: Validator = {
       if (entry.op !== 'modify') {
         findings.push({ path: entry.path, message: `op=${entry.op} not allowed in v0.8` });
       }
-      if (entry.path.includes('..') || path.isAbsolute(entry.path)) {
+      // Check by path SEGMENTS, not substring: `entry.path.includes('..')`
+      // would false-positive `foo..bar.ts`. We split on either separator and
+      // look for an exact `..` segment, then catch absolute paths separately.
+      const segments = entry.path.split(/[\\/]/);
+      const hasParentSegment = segments.some((seg: string) => seg === '..');
+      if (hasParentSegment || path.isAbsolute(entry.path)) {
         findings.push({ path: entry.path, message: 'path escapes workspace' });
       }
       const text = (entry.oldContent ?? '') + (entry.newContent ?? '');

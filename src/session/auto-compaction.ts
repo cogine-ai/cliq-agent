@@ -138,7 +138,12 @@ function findExplicitTxSpans(records: SessionRecord[]): TxSpan[] {
   for (let i = 0; i < records.length; i += 1) {
     const r = records[i];
     if (!r) continue;
-    if (r.kind === 'tx-opened') {
+    // Only EXPLICIT tx-opened markers form a non-splittable span. Implicit
+    // per-turn tx are contained within a single turn and the existing
+    // turn-boundary rule already protects them — including them here would
+    // make compact too conservative and could cause `no-safe-range` for
+    // long sessions.
+    if (r.kind === 'tx-opened' && r.meta.explicit === true) {
       openByTxId.set(r.meta.txId, i);
     } else if (r.kind === 'tx-applied' || r.kind === 'tx-aborted') {
       const open = openByTxId.get(r.meta.txId);

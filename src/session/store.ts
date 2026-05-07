@@ -104,12 +104,39 @@ export function isSessionRecord(value: unknown): value is SessionRecord {
   }
 
   if (record.kind === 'tx-opened' || record.kind === 'tx-applied' || record.kind === 'tx-aborted') {
+    if (
+      record.role !== 'user' ||
+      typeof record.content !== 'string' ||
+      typeof record.meta !== 'object' ||
+      record.meta === null ||
+      typeof (record.meta as { txId?: unknown }).txId !== 'string'
+    ) {
+      return false;
+    }
+    const meta = record.meta as Record<string, unknown>;
+    // Per-kind required-field validation: downstream code (handoff/headless
+    // export, summarizer, recovery) reads diffSummary.filesChanged, reason,
+    // artifactRef, etc., directly. A too-permissive guard here lets a
+    // partially-written or hand-edited session.json pass isSession() and
+    // crash later with an `undefined` deref. Validate the required shape now.
+    if (record.kind === 'tx-opened') {
+      // tx-opened needs only txId on meta; the rest (name, explicit) is
+      // optional or has well-known defaults. No further required fields.
+      return true;
+    }
+    if (record.kind === 'tx-applied') {
+      const diffSummary = meta.diffSummary as { filesChanged?: unknown } | undefined;
+      return (
+        typeof meta.artifactRef === 'string' &&
+        !!diffSummary &&
+        typeof diffSummary === 'object' &&
+        typeof (diffSummary as { filesChanged?: unknown }).filesChanged === 'number'
+      );
+    }
+    // tx-aborted
     return (
-      record.role === 'user' &&
-      typeof record.content === 'string' &&
-      typeof record.meta === 'object' &&
-      record.meta !== null &&
-      typeof (record.meta as { txId?: unknown }).txId === 'string'
+      typeof meta.reason === 'string' &&
+      typeof meta.artifactRef === 'string'
     );
   }
 

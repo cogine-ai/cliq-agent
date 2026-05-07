@@ -51,3 +51,27 @@ test('OverlayWriter.replaceText accumulates multiple edits to the same path', as
     await rm(overlay, { recursive: true, force: true });
   }
 });
+
+test('OverlayWriter rejects path-traversal inputs that would escape overlay or cwd', async () => {
+  const outer = await mkdtemp(path.join(os.tmpdir(), 'cliq-overlay-traversal-'));
+  const cwd = path.join(outer, 'workspace');
+  const overlay = path.join(outer, 'overlay');
+  try {
+    await writeFile(path.join(outer, 'secret.txt'), 'OUTSIDE', 'utf8');
+    await mkdir(cwd, { recursive: true });
+    await mkdir(overlay, { recursive: true });
+    const writer = createOverlayWriter(cwd, overlay);
+    // ../foo / a/../../foo would otherwise resolve outside overlay or cwd.
+    await assert.rejects(() => writer.read('../secret.txt'), /must stay inside/i);
+    await assert.rejects(
+      () => writer.replaceText('../secret.txt', 'OUT', 'PWND'),
+      /must stay inside/i
+    );
+    await assert.rejects(() => writer.read('a/../../secret.txt'), /must stay inside/i);
+    await assert.rejects(() => writer.read('/etc/passwd'), /must be relative/i);
+    // Outer file untouched.
+    assert.equal(await readFile(path.join(outer, 'secret.txt'), 'utf8'), 'OUTSIDE');
+  } finally {
+    await rm(outer, { recursive: true, force: true });
+  }
+});

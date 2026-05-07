@@ -136,7 +136,9 @@ export async function listTx(ctx: CoordinatorContext): Promise<Transaction[]> {
   for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.startsWith('tx_')) continue;
     const tx = await readTxState(root, entry.name);
-    if (tx) txs.push(tx);
+    // Filter by workspaceId so users do not see tx from other workspaces
+    // sharing the same CLIQ_HOME (e.g., $HOME/.cliq used across repos).
+    if (tx && tx.workspaceId === ctx.workspaceId) txs.push(tx);
   }
   return txs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
