@@ -24,7 +24,7 @@ import {
 import { abortTx as runAbortTx, AbortRejected } from './abort.js';
 import { computeDiff, summarizeDiff } from './diff.js';
 import { openRecordId } from './types.js';
-import type { Transaction, DiffSummary, ValidatorResultSummary } from './types.js';
+import type { Transaction, DiffSummary, ValidatorResultSummary, OverrideEntry } from './types.js';
 import { buildValidatorRegistry } from '../../validators/registry.js';
 import { runValidators } from '../../validators/runner.js';
 import { materializeStagedView, cleanupStagedView } from './staged-view.js';
@@ -302,4 +302,58 @@ async function persistValidatorResult(root: string, txId: string, r: ValidatorRe
   await fs.mkdir(validatorsDir(root, txId), { recursive: true });
   const sanitized = r.name.replace(/[^A-Za-z0-9_.-]/g, '_');
   await fs.writeFile(path.join(validatorsDir(root, txId), `${sanitized}.json`), JSON.stringify(r, null, 2), 'utf8');
+}
+
+export type ApproveTxOptions = {
+  overrides?: string[];
+  overrideAll?: boolean;
+  allowValidatorError?: string[];
+  reason?: string;
+  by?: string;
+};
+
+export async function approveTx(
+  ctx: CoordinatorContext,
+  txId: string,
+  opts: ApproveTxOptions
+): Promise<{ ok: true } | { ok: false; uncoveredFailures: string[] }> {
+  const root = txRootFor(ctx);
+  const tx = await readTxState(root, txId);
+  if (!tx) throw new Error(`tx not found: ${txId}`);
+  if (tx.state !== 'validated') {
+    throw new Error(`approveTx requires state=validated; got ${tx.state}`);
+  }
+
+  const blockingFailures = tx.blockingFailures ?? [];
+  const overrides = new Set(opts.overrides ?? []);
+  const allowError = new Set(opts.allowValidatorError ?? []);
+
+  const uncovered = blockingFailures.filter((name) => {
+    if (opts.overrideAll) return false;
+    if (overrides.has(name)) return false;
+    // Status-error failures are covered only when --allow-validator-error names them explicitly.
+    const v = tx.validators?.find((x) => x.name === name);
+    if (v?.status === 'error' && allowError.has(name)) return false;
+    return true;
+  });
+  if (uncovered.length > 0) {
+    return { ok: false, uncoveredFailures: uncovered };
+  }
+
+  const ts = new Date().toISOString();
+  const overridesApplied: OverrideEntry[] = blockingFailures
+    .filter((name) => opts.overrideAll || overrides.has(name) || allowError.has(name))
+    .map((name) => ({
+      validatorName: name,
+      reason: opts.reason,
+      by: opts.by ?? 'cli',
+      ts
+    }));
+
+  await writeTxState(root, {
+    ...tx,
+    state: 'approved',
+    overridesApplied: [...(tx.overridesApplied ?? []), ...overridesApplied]
+  });
+  return { ok: true };
 }

@@ -15,6 +15,7 @@ import {
   getActiveTx,
   finalizeTx,
   validateTx,
+  approveTx,
   type CoordinatorContext
 } from './coordinator.js';
 import { createSession, mutateSession } from '../../session/store.js';
@@ -289,5 +290,76 @@ test('validateTx flags blocking failures when a validator fails', async () => {
     const after = await readTxState(root, tx.id);
     assert.equal(after?.state, 'validated');
     assert.deepEqual(after?.blockingFailures, ['builtin:diff-sanity']);
+  });
+});
+
+test('approveTx transitions state to approved when no blocking failures', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+    await finalizeTx(ctx, tx.id);
+    await validateTx(ctx, tx.id, { disabled: ['builtin:index-clean', 'builtin:size-limit'] }, { copyMode: 'copy', bindPaths: [] });
+
+    const result = await approveTx(ctx, tx.id, {});
+    assert.equal(result.ok, true);
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'approved');
+  });
+});
+
+test('approveTx blocks on uncovered blocking failures and returns the list', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+    await finalizeTx(ctx, tx.id);
+    await validateTx(ctx, tx.id, { disabled: ['builtin:index-clean', 'builtin:size-limit'] }, { copyMode: 'copy', bindPaths: [] });
+
+    const result = await approveTx(ctx, tx.id, {});
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.deepEqual(result.uncoveredFailures, ['builtin:diff-sanity']);
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'validated'); // unchanged
+  });
+});
+
+test('approveTx allows transition when all failures are covered by overrides', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+    await finalizeTx(ctx, tx.id);
+    await validateTx(ctx, tx.id, { disabled: ['builtin:index-clean', 'builtin:size-limit'] }, { copyMode: 'copy', bindPaths: [] });
+
+    const result = await approveTx(ctx, tx.id, { overrides: ['builtin:diff-sanity'], reason: 'bin file is intentional' });
+    assert.equal(result.ok, true);
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'approved');
+    assert.equal(after?.overridesApplied?.length, 1);
+    assert.equal(after?.overridesApplied?.[0].validatorName, 'builtin:diff-sanity');
+  });
+});
+
+test('approveTx with overrideAll covers every blocking failure', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+    await finalizeTx(ctx, tx.id);
+    await validateTx(ctx, tx.id, { disabled: ['builtin:index-clean', 'builtin:size-limit'] }, { copyMode: 'copy', bindPaths: [] });
+
+    const result = await approveTx(ctx, tx.id, { overrideAll: true, reason: 'mass override' });
+    assert.equal(result.ok, true);
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'approved');
   });
 });
