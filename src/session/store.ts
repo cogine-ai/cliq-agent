@@ -126,11 +126,24 @@ export function isSessionRecord(value: unknown): value is SessionRecord {
     }
     if (record.kind === 'tx-applied') {
       const diffSummary = meta.diffSummary as { filesChanged?: unknown } | undefined;
+      const validators = meta.validators as
+        | { blocking?: unknown; advisory?: unknown }
+        | undefined;
+      // toSessionRecordView (src/headless/artifacts.ts) and the auto-compaction
+      // summarizer dereference meta.validators.blocking and meta.overrides
+      // unconditionally. A hand-edited or partially-written session.json that
+      // omits these fields would otherwise pass isSession() and crash on
+      // export/summary; tighten the guard to fail fast instead.
       return (
         typeof meta.artifactRef === 'string' &&
         !!diffSummary &&
         typeof diffSummary === 'object' &&
-        typeof (diffSummary as { filesChanged?: unknown }).filesChanged === 'number'
+        typeof (diffSummary as { filesChanged?: unknown }).filesChanged === 'number' &&
+        !!validators &&
+        typeof validators === 'object' &&
+        !!validators.blocking &&
+        typeof validators.blocking === 'object' &&
+        Array.isArray(meta.overrides)
       );
     }
     // tx-aborted

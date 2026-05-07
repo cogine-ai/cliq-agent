@@ -26,8 +26,12 @@ export async function materializeStagedView(opts: StagedViewOptions): Promise<{ 
     if (result === 'copied' && opts.copyMode === 'auto') usedCopyFallback = true;
     return result;
   });
-  // Apply overlay shadows
-  await walkOverlay(opts.overlayRoot, opts.target);
+  // Apply overlay shadows. We pass the bindSet down so the overlay walk can
+  // refuse to write through a bind-mounted symlink — without this guard,
+  // copying overlay/<bindPath>/foo would follow the symlink we just wrote
+  // for that bindPath and silently mutate the real workspace, defeating the
+  // staged-view isolation contract.
+  await walkOverlay(opts.overlayRoot, opts.target, bindSet);
   if (usedCopyFallback && opts.onWarn) {
     opts.onWarn('staged-view falling back to byte copy; reflink unsupported on this filesystem');
   }
@@ -66,7 +70,7 @@ async function walkAndMaterialize(
   }
 }
 
-async function walkOverlay(overlayRoot: string, target: string): Promise<void> {
+async function walkOverlay(overlayRoot: string, target: string, bindSet: Set<string>): Promise<void> {
   // Overlay files are always copied via fs.copyFile (NOT materializeFile/reflink).
   // Rationale: overlays only ever hold the agent's edited bytes for the current
   // tx, which are small (handfuls of source files), and they are written to a
@@ -86,6 +90,17 @@ async function walkOverlay(overlayRoot: string, target: string): Promise<void> {
     }
     for (const entry of entries) {
       const rel = prefix ? path.join(prefix, entry.name) : entry.name;
+      if (overlapsBind(rel, bindSet)) {
+        // bindPaths are materialized as symlinks pointing back into cwd, so a
+        // copy under one would follow the symlink and write into the real
+        // workspace. Refuse loudly — an overlay file under a bind-mounted
+        // path is a contract violation by the caller (the writer/coordinator
+        // should not have produced such a path) and silently dropping it
+        // would mask data loss.
+        throw new Error(
+          `overlay path overlaps bind-mounted path: ${rel} (bindPaths must not also be staged via overlay)`
+        );
+      }
       if (entry.isDirectory()) {
         stack.push(rel);
         continue;
@@ -96,6 +111,14 @@ async function walkOverlay(overlayRoot: string, target: string): Promise<void> {
       await fs.copyFile(overlayPath, targetPath);
     }
   }
+}
+
+function overlapsBind(rel: string, bindSet: Set<string>): boolean {
+  for (const bind of bindSet) {
+    if (rel === bind) return true;
+    if (rel.startsWith(`${bind}${path.sep}`)) return true;
+  }
+  return false;
 }
 
 export async function cleanupStagedView(target: string): Promise<void> {

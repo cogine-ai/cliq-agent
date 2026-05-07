@@ -158,6 +158,41 @@ test('materializeStagedView writes do not propagate to cwd', async () => {
   }
 });
 
+test('materializeStagedView rejects overlay paths that overlap a bindPath', async () => {
+  // Regression: bindPaths are materialized as symlinks back into cwd, so an
+  // overlay file under a bindPath would follow the symlink and write into
+  // the real workspace. The overlay walk must refuse such paths.
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-bindov-cwd-'));
+  const overlay = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-bindov-ov-'));
+  const target = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-bindov-tg-'));
+  try {
+    await mkdir(path.join(cwd, 'node_modules', 'foo'), { recursive: true });
+    await writeFile(path.join(cwd, 'node_modules', 'foo', 'idx.js'), 'pristine', 'utf8');
+    // Overlay attempts to shadow a file inside the bindPath subtree.
+    await mkdir(path.join(overlay, 'node_modules', 'foo'), { recursive: true });
+    await writeFile(path.join(overlay, 'node_modules', 'foo', 'idx.js'), 'tainted', 'utf8');
+
+    await assert.rejects(
+      () =>
+        materializeStagedView({
+          cwd,
+          overlayRoot: overlay,
+          target,
+          bindPaths: ['node_modules'],
+          copyMode: 'copy'
+        }),
+      /overlay path overlaps bind-mounted path/i
+    );
+
+    // The real workspace must remain untouched.
+    assert.equal(await readFile(path.join(cwd, 'node_modules', 'foo', 'idx.js'), 'utf8'), 'pristine');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(overlay, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
 test('cleanupStagedView removes the target tree without following symlinks', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-clean-cwd-'));
   const overlay = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-clean-ov-'));

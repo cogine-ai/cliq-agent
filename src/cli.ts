@@ -130,12 +130,16 @@ function consumeFlag(args: string[], name: string): boolean {
 function consumeOption(args: string[], name: string): string | undefined {
   const idx = args.indexOf(name);
   if (idx === -1) return undefined;
-  if (idx === args.length - 1) {
+  // Refuse to swallow the next token if it looks like another flag.
+  // Without this check, `cliq tx apply <id> --override --reason foo`
+  // would parse `--override` as the value of `--reason`'s neighbour and
+  // surface a misleading `Unknown ... argument` error downstream.
+  const next = args[idx + 1];
+  if (next === undefined || next.startsWith('--')) {
     throw new Error(`${name} requires a value`);
   }
-  const value = args[idx + 1]!;
   args.splice(idx, 2);
-  return value;
+  return next;
 }
 
 function consumeRepeatable(args: string[], name: string): string[] {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, mkdir, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -71,6 +71,39 @@ test('OverlayWriter rejects path-traversal inputs that would escape overlay or c
     await assert.rejects(() => writer.read('/etc/passwd'), /must be relative/i);
     // Outer file untouched.
     assert.equal(await readFile(path.join(outer, 'secret.txt'), 'utf8'), 'OUTSIDE');
+  } finally {
+    await rm(outer, { recursive: true, force: true });
+  }
+});
+
+test('OverlayWriter rejects symlink ancestors that escape the overlay root', async () => {
+  // Defense-in-depth: a lexically inside path can still reach outside the
+  // overlay if any ancestor on disk is a symlink. resolveInside realpaths
+  // the longest existing prefix and re-checks containment to catch this.
+  const outer = await mkdtemp(path.join(os.tmpdir(), 'cliq-overlay-symlink-'));
+  const cwd = path.join(outer, 'workspace');
+  const overlay = path.join(outer, 'overlay');
+  const escape = path.join(outer, 'escape');
+  try {
+    await mkdir(cwd, { recursive: true });
+    await mkdir(overlay, { recursive: true });
+    await mkdir(escape, { recursive: true });
+    await writeFile(path.join(escape, 'secret.txt'), 'OUTSIDE', 'utf8');
+    // overlay/link -> ../escape; lexical guard alone would let
+    // overlay/link/secret.txt through.
+    await symlink(escape, path.join(overlay, 'link'));
+
+    const writer = createOverlayWriter(cwd, overlay);
+    await assert.rejects(
+      () => writer.read('link/secret.txt'),
+      /must stay inside root \(symlink-resolved\)/i
+    );
+    await assert.rejects(
+      () => writer.replaceText('link/secret.txt', 'OUTSIDE', 'PWND'),
+      /must stay inside root \(symlink-resolved\)/i
+    );
+
+    assert.equal(await readFile(path.join(escape, 'secret.txt'), 'utf8'), 'OUTSIDE');
   } finally {
     await rm(outer, { recursive: true, force: true });
   }

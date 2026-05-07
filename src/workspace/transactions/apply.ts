@@ -170,7 +170,7 @@ export async function runStageB(ctx: ApplyContext, plan: PlanEntry[]): Promise<S
           progress.ghostSnapshotId
         );
       }
-      // B3b-d: write tmp + fsync + rename
+      // B3b-d: write tmp + fsync + rename + parent-dir fsync
       const target = path.join(tx.workspaceRealPath, planned.path);
       const tmp = `${target}.cliq-tx-tmp`;
       try {
@@ -182,6 +182,26 @@ export async function runStageB(ctx: ApplyContext, plan: PlanEntry[]): Promise<S
           await fh.close();
         }
         await fs.rename(tmp, target);
+        // Durability: rename() updates the directory entry but the new entry
+        // is only persisted once the parent directory itself is synced. If
+        // the host crashes between rename() and that fsync, recovery would
+        // see filesWritten contain `planned.path` (next line) while the on-
+        // disk directory still points at the old inode. Fsync the parent
+        // here so the apply protocol's "wrote it" assertion stays honest.
+        // Best-effort: some platforms (notably Windows) reject opening a
+        // directory for read; treat that specifically as a no-op so we don't
+        // turn the success into a partial failure on those hosts.
+        try {
+          const dir = await fs.open(path.dirname(target), 'r');
+          try {
+            await dir.sync();
+          } finally {
+            await dir.close();
+          }
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== 'EISDIR' && code !== 'EPERM' && code !== 'EACCES') throw err;
+        }
       } catch (err) {
         // Disk error mid-write: tx -> applied-partial; progress records the failure.
         await writeTxState(ctx.root, { ...tx, state: 'applied-partial' });

@@ -684,6 +684,47 @@ test('isSessionRecord accepts tx-applied records', () => {
   assert.equal(isSessionRecord(record), true);
 });
 
+test('isSessionRecord rejects tx-applied records missing validators', () => {
+  // toSessionRecordView dereferences meta.validators.blocking unconditionally.
+  // The guard must reject records that omit it, otherwise loadSession will
+  // happily return a Session that crashes on headless export.
+  const record = {
+    id: applyRecordId('tx_01H'),
+    ts: nowIso(),
+    kind: 'tx-applied' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_01H applied: 1 file changed (+1 -0)',
+    meta: {
+      txId: 'tx_01H',
+      txKind: 'edit' as const,
+      diffSummary: { filesChanged: 1, additions: 1, deletions: 0, creates: [], modifies: ['a.ts'], deletes: [] },
+      files: { creates: [], modifies: ['a.ts'], deletes: [] },
+      overrides: [],
+      artifactRef: 'tx/tx_01H/'
+    }
+  };
+  assert.equal(isSessionRecord(record), false);
+});
+
+test('isSessionRecord rejects tx-applied records missing overrides', () => {
+  const record = {
+    id: applyRecordId('tx_01H'),
+    ts: nowIso(),
+    kind: 'tx-applied' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_01H applied: 1 file changed (+1 -0)',
+    meta: {
+      txId: 'tx_01H',
+      txKind: 'edit' as const,
+      diffSummary: { filesChanged: 1, additions: 1, deletions: 0, creates: [], modifies: ['a.ts'], deletes: [] },
+      files: { creates: [], modifies: ['a.ts'], deletes: [] },
+      validators: { blocking: { pass: 1, fail: 0 }, advisory: { pass: 0, fail: 0, names: [] } },
+      artifactRef: 'tx/tx_01H/'
+    }
+  };
+  assert.equal(isSessionRecord(record), false);
+});
+
 test('isSessionRecord accepts tx-opened records', () => {
   const record = {
     id: openRecordId('tx_02H'),

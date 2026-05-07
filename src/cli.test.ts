@@ -397,6 +397,16 @@ test('parseArgs rejects cliq tx apply without txId', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'apply']), /requires <txId>/);
 });
 
+test('parseArgs rejects --reason without an actual value when followed by another flag', () => {
+  // Regression: consumeOption used to greedily eat the next token, so this
+  // would mis-parse with reason="--override" and surface a misleading
+  // "Unknown tx apply argument" further down the pipeline.
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', 'tx', 'apply', 'tx_abc', '--reason', '--override', 'size-limit']),
+    /--reason requires a value/
+  );
+});
+
 test('parseArgs recognizes cliq tx abort with --restore-confirmed', () => {
   const a = parseArgs([
     'node',
