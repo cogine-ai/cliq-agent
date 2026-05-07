@@ -4,6 +4,77 @@ import type { Validator, Finding } from '../types.js';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Parses git's `--porcelain=v2 -z` output. Records are NUL-terminated;
+ * rename/copy records carry an extra NUL-terminated origPath right after
+ * the new path. We use `-z` instead of textual output to avoid C-quoting
+ * ambiguities (paths with spaces, tabs, quotes, backslashes are all
+ * unambiguous under -z).
+ *
+ * Record types we care about:
+ *   1 <XY> ...8 fields... <path>            ordinary changed
+ *   2 <XY> ...9 fields... <path>\0<origPath> renamed/copied
+ *   u <xy> ...10 fields... <path>           unmerged (merge conflict)
+ *
+ * `XY` first char is `.` when the index is unchanged at this stage. Anything
+ * else means the index is dirty for that path. Unmerged entries are always
+ * a dirty-index condition; their `xy` field encodes conflict types.
+ */
+type StagedEntry = { path: string; xy: string; kind: 'ordinary' | 'rename' | 'unmerged' };
+
+function parsePorcelainV2Z(output: string): StagedEntry[] {
+  const entries: StagedEntry[] = [];
+  // Buffer is a NUL-separated sequence of records. The TRAILING NUL after
+  // the last record produces an empty final segment we want to skip.
+  // For renamed records we consume an extra segment (origPath).
+  const segments = output.split('\0');
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (!seg) continue;
+    if (seg.startsWith('# ')) continue; // header lines (branch info)
+    if (seg.startsWith('? ')) continue; // untracked (we run with -uno; defensive)
+    if (seg.startsWith('! ')) continue; // ignored
+    if (seg.startsWith('1 ')) {
+      // ordinary: "1 XY sub mH mI mW hH hI path"
+      const xy = seg.slice(2, 4);
+      if (xy[0] === '.') continue;
+      const path = nthFieldRest(seg, 8);
+      if (path) entries.push({ path, xy, kind: 'ordinary' });
+    } else if (seg.startsWith('2 ')) {
+      // renamed/copied: "2 XY sub mH mI mW hH hI X-score path"
+      // The next NUL-terminated segment is origPath; consume it so we don't
+      // re-parse origPath as a record on the next iteration.
+      const xy = seg.slice(2, 4);
+      const path = nthFieldRest(seg, 9);
+      i += 1; // skip origPath
+      if (xy[0] === '.') continue;
+      if (path) entries.push({ path, xy, kind: 'rename' });
+    } else if (seg.startsWith('u ')) {
+      // unmerged: "u xy sub m1 m2 m3 mW h1 h2 h3 path" — always dirty index
+      const xy = seg.slice(2, 4);
+      const path = nthFieldRest(seg, 10);
+      if (path) entries.push({ path, xy, kind: 'unmerged' });
+    }
+    // unknown record types are ignored; new git versions may add some.
+  }
+  return entries;
+}
+
+/**
+ * Returns the substring of `seg` after the Nth space-delimited field. The
+ * path field is treated as the rest-of-line (it may itself contain spaces,
+ * which `-z` allows because record separation is by NUL not space).
+ */
+function nthFieldRest(seg: string, n: number): string {
+  let pos = 0;
+  for (let f = 0; f < n; f++) {
+    const idx = seg.indexOf(' ', pos);
+    if (idx === -1) return '';
+    pos = idx + 1;
+  }
+  return seg.slice(pos);
+}
+
 export const indexClean: Validator = {
   name: 'builtin:index-clean',
   defaultSeverity: 'blocking',
@@ -11,7 +82,11 @@ export const indexClean: Validator = {
     const start = Date.now();
     let stdout: string;
     try {
-      ({ stdout } = await execFileAsync('git', ['status', '--porcelain=v2', '--renames', '-uno'], { cwd: ctx.realCwd }));
+      ({ stdout } = await execFileAsync(
+        'git',
+        ['status', '--porcelain=v2', '--renames', '-uno', '-z'],
+        { cwd: ctx.realCwd }
+      ));
     } catch (err) {
       // Only "not a git repository" should skip the check. Other failures
       // (git missing, hung, killed, permission denied, hook crash, etc.)
@@ -42,25 +117,14 @@ export const indexClean: Validator = {
       };
     }
     const findings: Finding[] = [];
-    for (const line of stdout.split('\n')) {
-      if (!line) continue;
-      if (line.startsWith('1 ')) {
-        // 1 XY sub mH mI mW hH hI path
-        const xy = line.slice(2, 4);
-        if (xy[0] !== '.') {
-          const fields = line.split(' ');
-          const p = fields[fields.length - 1];
-          findings.push({ path: p, message: `staged: ${xy}` });
-        }
-      } else if (line.startsWith('2 ')) {
-        const xy = line.slice(2, 4);
-        if (xy[0] !== '.') {
-          const fields = line.split(' ');
-          // For renames: ... origPath\tnewPath; the path field contains a tab
-          const last = fields[fields.length - 1];
-          findings.push({ path: last.split('\t')[0], message: `staged rename: ${xy}` });
-        }
-      }
+    for (const entry of parsePorcelainV2Z(stdout)) {
+      const message =
+        entry.kind === 'rename'
+          ? `staged rename: ${entry.xy}`
+          : entry.kind === 'unmerged'
+            ? `unmerged: ${entry.xy}`
+            : `staged: ${entry.xy}`;
+      findings.push({ path: entry.path, message });
     }
     return {
       name: 'builtin:index-clean',

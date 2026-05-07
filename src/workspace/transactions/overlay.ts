@@ -48,7 +48,9 @@ export function createOverlayWriter(cwd: string, overlayRoot: string): Workspace
         throw new Error(`expected old_text to match exactly once, but matched ${matches} times`);
       }
       await fs.mkdir(path.dirname(stagedPath), { recursive: true });
-      await fs.writeFile(stagedPath, current.replace(oldText, newText), 'utf8');
+      // Use the function form of replace() so `$&`, `` $` ``, `$'`, `$$`,
+      // `$n` in newText are written literally (e.g., `$VAR`, `$@`).
+      await fs.writeFile(stagedPath, current.replace(oldText, () => newText), 'utf8');
     }
   };
 }

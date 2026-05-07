@@ -36,7 +36,12 @@ export function createPassthroughWriter(cwd: string): WorkspaceWriter {
       if (matches !== 1) {
         throw new Error(`expected old_text to match exactly once, but matched ${matches} times`);
       }
-      await fs.writeFile(target, current.replace(oldText, newText), 'utf8');
+      // Use the function form of replace() to bypass `$&`, `` $` ``, `$'`,
+      // `$$`, `$n` substitution that would otherwise apply when newText
+      // contains shell variables (`$VAR`), Makefile targets (`$@`), or any
+      // literal `$`-prefixed sequence the user is editing into the file.
+      // The function form is exempt from that interpretation.
+      await fs.writeFile(target, current.replace(oldText, () => newText), 'utf8');
     }
   };
 }

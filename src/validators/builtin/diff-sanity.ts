@@ -12,8 +12,30 @@ export const diffSanity: Validator = {
     const findings: Array<{ path?: string; message: string }> = [];
     const root = resolveTxRoot(resolveCliqHome());
     const diffPath = diffJsonPath(root, ctx.txId);
-    const diff = JSON.parse(await fs.readFile(diffPath, 'utf8'));
-    for (const entry of diff.files) {
+    // Defensive parse: a malformed or hand-edited diff.json must produce a
+    // structured fail (not a TypeError that crashes the validator runner).
+    const parsed: unknown = JSON.parse(await fs.readFile(diffPath, 'utf8'));
+    const files = (parsed as { files?: unknown })?.files;
+    if (!Array.isArray(files)) {
+      return {
+        name: 'builtin:diff-sanity',
+        severity: 'blocking',
+        status: 'fail',
+        durationMs: Date.now() - start,
+        findings: [{ message: 'invalid diff: files must be an array' }]
+      };
+    }
+    for (const rawEntry of files) {
+      if (
+        !rawEntry ||
+        typeof rawEntry !== 'object' ||
+        typeof (rawEntry as { path?: unknown }).path !== 'string' ||
+        typeof (rawEntry as { op?: unknown }).op !== 'string'
+      ) {
+        findings.push({ message: 'invalid diff entry shape: missing string path or op' });
+        continue;
+      }
+      const entry = rawEntry as { path: string; op: string; oldContent?: string; newContent?: string };
       if (entry.op !== 'modify') {
         findings.push({ path: entry.path, message: `op=${entry.op} not allowed in v0.8` });
       }

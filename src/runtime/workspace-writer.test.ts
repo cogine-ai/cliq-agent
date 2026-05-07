@@ -40,6 +40,26 @@ test('PassthroughWriter.replaceText rejects non-unique match', async () => {
   }
 });
 
+test('PassthroughWriter writes $-prefixed replacement text literally (no $& expansion)', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-writer-dollar-'));
+  try {
+    // Edit a Makefile-shaped file: replace `target:` with `$@: $$VAR` literally.
+    // Naive `replace(old, new)` would expand `$&` etc. and silently corrupt content.
+    await writeFile(path.join(cwd, 'Makefile'), 'target:\n\techo done\n', 'utf8');
+    const writer = createPassthroughWriter(cwd);
+    await writer.replaceText('Makefile', 'target:', '$@: $$VAR');
+    const out = await readFile(path.join(cwd, 'Makefile'), 'utf8');
+    assert.equal(out, '$@: $$VAR\n\techo done\n');
+    // Also verify `$&` (whole match) is not expanded.
+    await writeFile(path.join(cwd, 'sh.sh'), 'great\n', 'utf8');
+    await writer.replaceText('sh.sh', 'great', '$&-end');
+    const out2 = await readFile(path.join(cwd, 'sh.sh'), 'utf8');
+    assert.equal(out2, '$&-end\n');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('PassthroughWriter rejects path-traversal inputs (../, absolute, sneaky)', async () => {
   const outer = await mkdtemp(path.join(os.tmpdir(), 'cliq-writer-traversal-'));
   const cwd = path.join(outer, 'workspace');
