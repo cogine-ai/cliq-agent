@@ -355,3 +355,60 @@ test('e2e: validator failure aborts turn end with reason=validator-fail and leav
     assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'a');
   });
 });
+
+test('e2e: multi-turn explicit tx accumulates edits then applies via state-aware pipeline', async () => {
+  await withEnv(async ({ home, ws, ctx, session }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    await writeFile(path.join(ws, 'b.txt'), 'two', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+    // Step 1: User opens an explicit tx (precedes any runner turns).
+    const tx = await openTx(ctx, { explicit: true, name: 'multi-turn-test' });
+    assert.equal(session.activeTxId, tx.id);
+
+    const root = resolveTxRoot(home);
+    const overlayWriter = createOverlayWriter(ws, overlayDir(root, tx.id));
+
+    // Step 2: Simulate two turns by writing into the overlay directly. Each
+    // turn's runner would skip end-of-turn finalize because the explicit tx
+    // is reused (opened === false), so edits accumulate across turns.
+    // Turn 1.
+    await overlayWriter.replaceText('a.txt', 'one', 'ONE');
+    // Turn 2.
+    await overlayWriter.replaceText('b.txt', 'two', 'TWO');
+
+    // Step 3: Drive the same stage chain `cliq tx apply` uses for an explicit tx
+    // in state=staging: finalize → validate → approve → apply.
+    const validatorsConfig = { disabled: ['builtin:index-clean', 'builtin:size-limit'] };
+    const stagedViewConfig = { copyMode: 'copy' as const, bindPaths: [] };
+
+    await coordFinalize(ctx, tx.id);
+    const validated = await coordValidate(ctx, tx.id, validatorsConfig, stagedViewConfig);
+    assert.deepEqual(validated.blockingFailures, []);
+
+    const approval = await coordApprove(ctx, tx.id, {});
+    assert.equal(approval.ok, true);
+
+    const applyResult = await coordApply(ctx, tx.id);
+    assert.equal(applyResult.ok, true);
+
+    // Step 4: Both edits land on disk.
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'ONE');
+    assert.equal(await readFile(path.join(ws, 'b.txt'), 'utf8'), 'TWO');
+
+    // Single tx-applied record paired with the original tx-opened by meta.txId.
+    const opened = session.records.find((r) => r.id === openRecordId(tx.id));
+    const appliedRecords = session.records.filter((r) => r.id === applyRecordId(tx.id));
+    assert.ok(opened, 'tx-opened record expected');
+    assert.equal(appliedRecords.length, 1, 'exactly one tx-applied record expected');
+    const applied = appliedRecords[0];
+    if (opened?.kind === 'tx-opened' && applied?.kind === 'tx-applied') {
+      assert.equal(opened.meta.txId, applied.meta.txId);
+      assert.equal(opened.meta.name, 'multi-turn-test');
+    }
+
+    // activeTxId cleared after apply.
+    assert.equal(session.activeTxId, undefined);
+  });
+});
