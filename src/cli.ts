@@ -6,6 +6,7 @@ import { DEFAULT_POLICY_MODE } from './config.js';
 import { exportHandoff } from './handoff/export.js';
 import type { HeadlessRunStatus, RuntimeEventEnvelope } from './headless/contract.js';
 import { writeJsonlEvent } from './headless/jsonl.js';
+import { runStdioJsonRpcServer } from './headless/rpc.js';
 import { runHeadless } from './headless/run.js';
 import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
@@ -43,20 +44,14 @@ const POLICY_MODE_LIST = POLICY_MODES.join(', ');
 const STREAMING_MODES = ['auto', 'on', 'off'] as const;
 const RESTORE_SCOPES = ['session', 'files', 'both'] as const;
 const HELP_TOPICS = ['checkpoint', 'compact', 'handoff'] as const;
-const TX_MODES = ['off', 'edit'] as const;
-const TX_APPLY_POLICIES = ['interactive', 'auto-on-pass', 'manual-only'] as const;
 
 type RestoreScope = (typeof RESTORE_SCOPES)[number];
 type HelpTopic = (typeof HELP_TOPICS)[number];
-type TxMode = (typeof TX_MODES)[number];
-type TxApplyPolicy = (typeof TX_APPLY_POLICIES)[number];
 
 type ParsedArgsBase = {
   policy: PolicyMode;
   skills: string[];
   model: PartialModelConfig;
-  txMode?: TxMode;
-  txApply?: TxApplyPolicy;
 };
 
 export type ParsedArgs = ParsedArgsBase & (
@@ -83,7 +78,7 @@ export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'compact-create'; summaryMarkdown: string; beforeCheckpointId?: string; prompt?: undefined }
   | { cmd: 'compact-list'; prompt?: undefined }
   | { cmd: 'handoff-create'; checkpointId?: string; prompt?: undefined }
-  | { cmd: 'reset' | 'history'; prompt?: undefined }
+  | { cmd: 'reset' | 'history' | 'rpc'; prompt?: undefined }
   | { cmd: 'help'; topic?: HelpTopic; prompt?: undefined }
   | { cmd: 'tx-open'; name?: string; explicit: true; json?: boolean; headless?: boolean; prompt?: undefined }
   | { cmd: 'tx-status'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
@@ -123,14 +118,6 @@ function isRestoreScope(value: string): value is RestoreScope {
 
 function isHelpTopic(value: string): value is HelpTopic {
   return (HELP_TOPICS as readonly string[]).includes(value);
-}
-
-function isTxMode(value: string): value is TxMode {
-  return (TX_MODES as readonly string[]).includes(value);
-}
-
-function isTxApplyPolicy(value: string): value is TxApplyPolicy {
-  return (TX_APPLY_POLICIES as readonly string[]).includes(value);
 }
 
 function consumeFlag(args: string[], name: string): boolean {
@@ -632,6 +619,7 @@ function isKnownCommand(cmd: string | undefined) {
     cmd === 'restore' ||
     cmd === 'reset' ||
     cmd === 'history' ||
+    cmd === 'rpc' ||
     cmd === 'help' ||
     cmd === 'tx' ||
     cmd === '--help' ||
@@ -644,8 +632,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let policy: PolicyMode = DEFAULT_POLICY_MODE;
   const skills: string[] = [];
   const model: PartialModelConfig = {};
-  let txMode: TxMode | undefined;
-  let txApply: TxApplyPolicy | undefined;
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
@@ -795,20 +781,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const base: ParsedArgsBase = {
     policy,
     skills,
-    model,
-    ...(txMode !== undefined ? { txMode } : {}),
-    ...(txApply !== undefined ? { txApply } : {})
-  };
-  const baseExtras = {
-    ...(txMode !== undefined ? { txMode } : {}),
-    ...(txApply !== undefined ? { txApply } : {})
+    model
   };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
   if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
     throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
   }
   if (!cmd || cmd === 'chat') {
-    return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model, ...baseExtras };
+    return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
   }
   if (cmd === 'run') return parseRunArgs(args, base);
   if (cmd === 'ask') return parseAskArgs(args, base);
@@ -828,21 +808,25 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (cmd === 'restore') {
     throw new Error('Command changed. Use "cliq checkpoint restore <checkpoint-id> --scope session|files|both".');
   }
-  if (cmd === 'reset') return { cmd, policy, skills, model, ...baseExtras };
-  if (cmd === 'history') return { cmd, policy, skills, model, ...baseExtras };
+  if (cmd === 'reset') return { cmd, policy, skills, model };
+  if (cmd === 'history') return { cmd, policy, skills, model };
+  if (cmd === 'rpc') {
+    ensureNoExtraArgs(args, 1, 'rpc');
+    return { cmd, policy, skills, model };
+  }
   if (cmd === 'help') {
     const topic = args[1];
     if (topic === undefined) {
-      return { cmd: 'help', policy, skills, model, ...baseExtras };
+      return { cmd: 'help', policy, skills, model };
     }
     if (!isHelpTopic(topic)) {
       throw new Error(`Unknown help topic: ${topic}. Expected one of: ${HELP_TOPICS.join(', ')}`);
     }
     ensureNoExtraArgs(args, 2, 'help');
-    return { cmd: 'help', topic, policy, skills, model, ...baseExtras };
+    return { cmd: 'help', topic, policy, skills, model };
   }
-  if (cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model, ...baseExtras };
-  return { cmd: 'chat', prompt: args.join(' '), policy, skills, model, ...baseExtras };
+  if (cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model };
+  return { cmd: 'chat', prompt: args.join(' '), policy, skills, model };
 }
 
 function printCheckpointHelp() {
@@ -920,6 +904,7 @@ Usage:
   cliq chat                Start interactive chat in the current directory
   cliq reset               Clear persisted conversation for this directory
   cliq history             Print persisted session for this directory
+  cliq rpc                 Start stdio JSON-RPC mode
   cliq checkpoint create   Create a manual checkpoint
   cliq checkpoint list     Print session checkpoints
   cliq checkpoint restore  Restore session or files from a checkpoint
@@ -954,6 +939,9 @@ Streaming modes:
   auto                     Use provider default; compatible endpoints may fall back
   on                       Request streaming when supported
   off                      Force non-streaming responses
+
+RPC:
+  cliq rpc                 Reads newline-delimited JSON-RPC 2.0 requests from stdin and writes protocol messages to stdout
 
 Examples:
   cliq --policy read-only "inspect this repo"
@@ -1205,6 +1193,11 @@ export async function runCli(argv: string[]) {
 
   if (cmd === 'history') {
     console.log(JSON.stringify(await ensureSession(cwd), null, 2));
+    return;
+  }
+
+  if (cmd === 'rpc') {
+    await runStdioJsonRpcServer();
     return;
   }
 

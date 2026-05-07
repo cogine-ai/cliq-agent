@@ -23,6 +23,7 @@ export type HeadlessRunRequest = {
 };
 
 export type HeadlessRunOptions = {
+  runId?: string;
   signal?: AbortSignal;
   onEvent?: (event: RuntimeEventEnvelope) => void | Promise<void>;
 };
