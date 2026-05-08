@@ -389,6 +389,7 @@ test('parseArgs rejects cliq tx apply without txId', () => {
 
 test('parseArgs cliq tx apply still accepts existing args (smart-pipeline lives in handler)', () => {
   const a = parseArgs(['node', 'src/index.ts', 'tx', 'apply', 'tx_abc', '--override', 'foo', '--reason', 'r']);
+  assert.equal(a.cmd, 'tx-apply');
   if (a.cmd === 'tx-apply') {
     assert.equal(a.txId, 'tx_abc');
     assert.deepEqual(a.overrides, ['foo']);
@@ -398,6 +399,7 @@ test('parseArgs cliq tx apply still accepts existing args (smart-pipeline lives 
 
 test('parseArgs cliq tx apply accepts --allow-validator-error', () => {
   const a = parseArgs(['node', 'src/index.ts', 'tx', 'apply', 'tx_x', '--allow-validator-error', 'eslint', '--allow-validator-error', 'tsc']);
+  assert.equal(a.cmd, 'tx-apply');
   if (a.cmd === 'tx-apply') {
     assert.deepEqual(a.allowValidatorError, ['eslint', 'tsc']);
   }
@@ -417,10 +419,12 @@ test('parseArgs rejects cliq tx validate without txId', () => {
 
 test('parseArgs cliq tx validate accepts --json and --headless', () => {
   const a = parseArgs(['node', 'src/index.ts', 'tx', 'validate', 'tx_x', '--json']);
+  assert.equal(a.cmd, 'tx-validate');
   if (a.cmd === 'tx-validate') {
     assert.equal(a.json, true);
   }
   const b = parseArgs(['node', 'src/index.ts', 'tx', 'validate', 'tx_x', '--headless']);
+  assert.equal(b.cmd, 'tx-validate');
   if (b.cmd === 'tx-validate') {
     assert.equal(b.headless, true);
   }
@@ -438,6 +442,7 @@ test('parseArgs recognizes cliq tx approve <txId> with overrides and reason', ()
 
 test('parseArgs cliq tx approve --override-all', () => {
   const a = parseArgs(['node', 'src/index.ts', 'tx', 'approve', 'tx_abc', '--override-all', '--reason', 'mass']);
+  assert.equal(a.cmd, 'tx-approve');
   if (a.cmd === 'tx-approve') {
     assert.equal(a.overrideAll, true);
   }
@@ -445,6 +450,7 @@ test('parseArgs cliq tx approve --override-all', () => {
 
 test('parseArgs cliq tx approve --allow-validator-error', () => {
   const a = parseArgs(['node', 'src/index.ts', 'tx', 'approve', 'tx_abc', '--allow-validator-error', 'eslint']);
+  assert.equal(a.cmd, 'tx-approve');
   if (a.cmd === 'tx-approve') {
     assert.deepEqual(a.allowValidatorError, ['eslint']);
   }
