@@ -1000,6 +1000,7 @@ Usage:
   cliq chat                Start interactive chat in the current directory
   cliq reset               Clear persisted conversation for this directory
   cliq history             Print persisted session for this directory
+  cliq tx <subcommand>     Manage transactional workspace state (see below)
   cliq checkpoint create   Create a manual checkpoint
   cliq checkpoint list     Print session checkpoints
   cliq checkpoint restore  Restore session or files from a checkpoint
@@ -1014,6 +1015,17 @@ Usage:
   cliq help TOPIC          Print help for checkpoint, compact, or handoff
   -h, --help               Print this help
 
+Transaction subcommands:
+  cliq tx open [name]               Open an explicit transaction (optional friendly name)
+  cliq tx status [<txId>]           Show transaction status (or list all if no id)
+  cliq tx list                      List all transactions in the workspace
+  cliq tx validate <txId>           Run validators against the transaction's staged view
+  cliq tx approve  <txId> [opts]    Approve a validated transaction
+                                    (--override <name> | --override-all | --allow-validator-error <name> | --reason "...")
+  cliq tx apply    <txId> [opts]    Apply a transaction; chains finalize -> validate -> approve -> apply as needed
+  cliq tx abort    <txId> [opts]    Abort a transaction
+                                    (use --restore-confirmed or --keep-partial for applied-partial)
+
 Options:
   --policy MODE            auto | confirm-write | read-only | confirm-bash | confirm-all
   --skill NAME             Activate a local skill; repeat to load multiple skills
@@ -1022,6 +1034,8 @@ Options:
   --base-url URL           Required for openai-compatible; optional provider override
   --streaming MODE         auto | on | off
   --jsonl                  With cliq run only, write structured JSONL events to stdout
+  --tx <off|edit>          Override workspace config transactions.mode for this run
+  --tx-apply <policy>      Override transactions.applyPolicy (interactive | auto-on-pass | manual-only)
 
 Policy modes:
   auto                     Execute registered tools without confirmation
