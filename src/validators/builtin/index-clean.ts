@@ -12,13 +12,28 @@ export const indexClean: Validator = {
     let stdout: string;
     try {
       ({ stdout } = await execFileAsync('git', ['status', '--porcelain=v2', '--renames', '-uno'], { cwd: ctx.realCwd }));
-    } catch {
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
+      const stderr = (e.stderr ?? '').toString();
+      const isNotRepo = /not a git repository/i.test(stderr) || /not a git repository/i.test(e.message ?? '');
+      if (isNotRepo) {
+        return {
+          name: 'builtin:index-clean',
+          severity: 'blocking',
+          status: 'pass',
+          durationMs: Date.now() - start,
+          message: 'not a git repository — index check skipped'
+        };
+      }
+      // Real failure (git binary missing, permission denied, corrupted repo, etc.).
+      // Surface it as a blocking failure so the operator can investigate rather
+      // than silently masking it as a "skipped" pass.
       return {
         name: 'builtin:index-clean',
         severity: 'blocking',
-        status: 'pass',
+        status: 'fail',
         durationMs: Date.now() - start,
-        message: 'not a git repository — index check skipped'
+        message: `git status failed: ${e.message ?? String(err)}${stderr ? ` (stderr: ${stderr.trim()})` : ''}`
       };
     }
     const findings: Finding[] = [];

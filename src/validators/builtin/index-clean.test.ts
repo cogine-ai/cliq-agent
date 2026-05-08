@@ -77,3 +77,12 @@ test('index-clean preserves spaces in staged paths (porcelain v2 parsing)', asyn
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('index-clean returns blocking fail when git execution fails for reasons other than not-a-repo', async () => {
+  // Point at a path that doesn't exist as cwd; execFile errors with ENOENT,
+  // which is not a "not a git repository" error. Should surface as fail rather
+  // than the not-a-repo skip path.
+  const result = await indexClean.run(ctx('/nonexistent/path/that/does/not/exist'));
+  assert.equal(result.status, 'fail');
+  assert.match(result.message ?? '', /git status failed/);
+});
