@@ -128,15 +128,17 @@ test('acquireTxLock serializes concurrent operations on the same txId', async ()
     const root = resolveTxRoot(home);
     await createTx(root, { id: 'tx_lock', kind: 'edit', workspaceId: 'w', sessionId: 's', workspaceRealPath: '/tmp/ws' });
     const order: string[] = [];
+    let aEnteredResolve!: () => void;
+    const aEntered = new Promise<void>((r) => { aEnteredResolve = r; });
     const a = withTxLock(root, 'tx_lock', async () => {
       order.push('a-start');
+      aEnteredResolve();
       await new Promise((r) => setTimeout(r, 25));
       order.push('a-end');
     });
-    // Yield enough microtasks for `a` to enter withPathLock and create its lock dir
-    // before `b` starts, eliminating start-order races without coupling to internals.
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
+    // Deterministic barrier: wait until `a` has actually acquired the lock and pushed
+    // 'a-start' before we even start `b`. This eliminates the setImmediate-yield race.
+    await aEntered;
     const b = withTxLock(root, 'tx_lock', async () => {
       order.push('b-start');
       await new Promise((r) => setTimeout(r, 5));
