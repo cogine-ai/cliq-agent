@@ -85,6 +85,13 @@ export async function scanForRecovery(root: string): Promise<RecoveryAction[]> {
         applyProgress.phase === 'apply-committed' ||
         applyProgress.phase === 'apply-finalized'
       ) {
+        // apply-finalized + tx.state==='applied' is the post-Stage-C terminal
+        // state. The four-marker invariant has already converged, so there is
+        // nothing for recovery to do; re-enqueueing would trigger a no-op
+        // recovery loop on every startup.
+        if (applyProgress.phase === 'apply-finalized' && tx.state === 'applied') {
+          continue;
+        }
         actions.push({
           txId,
           tx,

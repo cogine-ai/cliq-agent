@@ -543,12 +543,11 @@ test('recovery is idempotent: running twice yields same state', async () => {
       const r2 = await recoverAll(root, { cwd: ws, session });
       assert.equal(r1.length, 1);
       assert.equal(r1[0].action, 'apply-finalized-state');
-      // Second run: tx is now applied, but apply-progress.phase=apply-finalized
-      // is still considered non-terminal by the scanner. recoverApply sees
-      // state===applied and short-circuits the write — outcome is still
-      // 'apply-finalized-state' and tx remains applied.
-      assert.equal(r2.length, 1);
-      assert.equal(r2[0].action, 'apply-finalized-state');
+      // Second run: tx state is now 'applied' AND apply-progress.phase is
+      // 'apply-finalized', so the four-marker terminal invariant has
+      // converged. The scanner must skip — re-enqueueing would trigger a
+      // pointless no-op recovery loop on every startup.
+      assert.equal(r2.length, 0);
       const tx = await readTxState(root, 'tx_idem');
       assert.equal(tx?.state, 'applied');
     } finally {
