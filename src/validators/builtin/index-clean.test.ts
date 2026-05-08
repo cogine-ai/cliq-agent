@@ -86,3 +86,37 @@ test('index-clean returns blocking fail when git execution fails for reasons oth
   assert.equal(result.status, 'fail');
   assert.match(result.message ?? '', /git status failed/);
 });
+
+test('index-clean reports unmerged conflict files (porcelain v2 "u " records)', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-unmerged-'));
+  try {
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: dir });
+    await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+    await execFileAsync('git', ['config', 'user.name', 't'], { cwd: dir });
+    await writeFile(path.join(dir, 'a.txt'), 'one', 'utf8');
+    await execFileAsync('git', ['add', 'a.txt'], { cwd: dir });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: dir });
+    await execFileAsync('git', ['checkout', '-b', 'feat'], { cwd: dir });
+    await writeFile(path.join(dir, 'a.txt'), 'feat', 'utf8');
+    await execFileAsync('git', ['commit', '-am', 'feat'], { cwd: dir });
+    await execFileAsync('git', ['checkout', 'main'], { cwd: dir });
+    await writeFile(path.join(dir, 'a.txt'), 'main', 'utf8');
+    await execFileAsync('git', ['commit', '-am', 'main'], { cwd: dir });
+    // Trigger the conflict; merge will exit non-zero but leave the index in
+    // an unmerged state — exactly the porcelain v2 `u ` record we exercise.
+    try {
+      await execFileAsync('git', ['merge', 'feat'], { cwd: dir });
+    } catch {
+      // expected — conflict
+    }
+    const result = await indexClean.run(ctx(dir));
+    assert.equal(result.status, 'fail');
+    assert.ok(
+      result.findings?.some((f) => /^unmerged:/.test(f.message)),
+      `expected an "unmerged:" finding, got ${JSON.stringify(result.findings)}`
+    );
+    assert.ok(result.findings?.some((f) => f.path === 'a.txt'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

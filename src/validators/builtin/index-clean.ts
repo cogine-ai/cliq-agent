@@ -62,6 +62,18 @@ export const indexClean: Validator = {
           const newPath = tail.split('\t')[0];
           findings.push({ path: newPath, message: `staged rename: ${xy}` });
         }
+      } else if (line.startsWith('u ')) {
+        // Porcelain v2 unmerged: `u XY sub m1 m2 m3 mW h1 h2 h3 path`. Ten
+        // whitespace separators precede the path. XY is always non-dot for
+        // unmerged entries, but we keep the guard for symmetry with the
+        // modified/rename branches above.
+        const xy = line.slice(2, 4);
+        if (xy[0] !== '.') {
+          const idx = nthSpaceIndex(line, 10);
+          if (idx === -1) continue;
+          const p = line.slice(idx + 1);
+          findings.push({ path: p, message: `unmerged: ${xy}` });
+        }
       }
     }
     return {
