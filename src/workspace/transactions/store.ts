@@ -207,7 +207,14 @@ export async function writeDiff(root: string, txId: string, diff: Diff): Promise
 }
 
 export async function appendAudit(root: string, txId: string, entry: AuditEntry): Promise<void> {
-  await fs.appendFile(auditJsonPath(root, txId), JSON.stringify(entry) + '\n', 'utf8');
+  const target = auditJsonPath(root, txId);
+  const fh = await fs.open(target, 'a');
+  try {
+    await fh.write(JSON.stringify(entry) + '\n', null, 'utf8');
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
 }
 
 export async function readAudit(root: string, txId: string): Promise<AuditEntry[]> {
