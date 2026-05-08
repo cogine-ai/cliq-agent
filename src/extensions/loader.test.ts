@@ -42,10 +42,17 @@ test('loadExtensions rejects duplicate extension names', async () => {
 });
 
 test('loadExtensions reports the failing specifier on import failure', async () => {
-  await assert.rejects(
-    () => loadExtensions('/tmp/workspace', ['./.cliq/extensions/missing.js']),
-    /missing\.js/i
-  );
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-extension-missing-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq', 'extensions'), { recursive: true });
+
+    await assert.rejects(
+      () => loadExtensions(cwd, ['./.cliq/extensions/missing.js']),
+      /missing\.js/i
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test('loadExtensions rejects invalid instructionSources values', async () => {
