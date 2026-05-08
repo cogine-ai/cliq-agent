@@ -526,6 +526,37 @@ test('parseArgs unknown tx subcommand throws', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'frobnicate']), /unknown tx subcommand/);
 });
 
+test('parseArgs accepts transaction help spellings', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'tx', 'help']), {
+    cmd: 'help',
+    topic: 'tx',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'tx', '--help']), {
+    cmd: 'help',
+    topic: 'tx',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'help', 'tx']), {
+    cmd: 'help',
+    topic: 'tx',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'tx', 'apply', 'tx_abc', '--help']), {
+    cmd: 'help',
+    topic: 'tx',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+});
+
 test('parseArgs rejects old workflow asset command spellings with migration hints', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'checkpoints']), /cliq checkpoint list/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'compactions']), /cliq compact list/i);
@@ -596,6 +627,7 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /cliq compact create/);
   assert.match(output, /cliq compact list/);
   assert.match(output, /cliq handoff create/);
+  assert.match(output, /cliq tx help/);
   assert.doesNotMatch(output, /cliq checkpoint \[name\]/);
   assert.doesNotMatch(output, /cliq checkpoints/);
   assert.doesNotMatch(output, /cliq compactions/);
