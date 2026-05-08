@@ -246,6 +246,16 @@ export async function finalizeTx(
     throw new Error(`finalizeTx requires state=staging; got ${tx.state}`);
   }
   const diff = await computeDiff(ctx.cwd, overlayDir(root, txId));
+  // v0.8 supports only file modifications; reject any other op at finalize
+  // time so the user sees a clear error before approval rather than a crash
+  // mid-apply (defense-in-depth: apply.ts also enforces this).
+  for (const entry of diff.files) {
+    if (entry.op !== 'modify') {
+      throw new Error(
+        `v0.8 supports only file modifications; encountered op='${entry.op}' at ${entry.path}. Creating new files or deleting files is not yet supported.`
+      );
+    }
+  }
   const diffSummary = summarizeDiff(diff);
   await writeDiff(root, txId, diff);
   await writeTxState(root, { ...tx, state: 'finalized', diffSummary });
