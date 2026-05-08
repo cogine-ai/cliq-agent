@@ -6,7 +6,17 @@ export async function computeDiff(cwd: string, overlayRoot: string): Promise<Dif
   const files: DiffEntry[] = [];
   await walk(overlayRoot, '', async (rel) => {
     const newContent = await fs.readFile(path.join(overlayRoot, rel), 'utf8');
-    const oldContent = await fs.readFile(path.join(cwd, rel), 'utf8');
+    let oldContent: string;
+    try {
+      oldContent = await fs.readFile(path.join(cwd, rel), 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(
+          `Creating new files in the overlay is not supported in v0.8 (overlay has '${rel}' but it does not exist in the workspace). Use bash to create the file outside the transaction.`
+        );
+      }
+      throw err;
+    }
     files.push({ path: rel, op: 'modify', oldContent, newContent });
   });
   return { files, outOfBand: [] };
