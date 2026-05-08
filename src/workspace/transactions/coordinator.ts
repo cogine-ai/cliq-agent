@@ -13,7 +13,8 @@ import {
   makeTxId,
   overlayDir,
   writeDiff,
-  validatorsDir
+  validatorsDir,
+  withTxLock
 } from './store.js';
 import {
   applyTx as runApplyTx,
@@ -258,7 +259,21 @@ export async function finalizeTx(
   }
   const diffSummary = summarizeDiff(diff);
   await writeDiff(root, txId, diff);
-  await writeTxState(root, { ...tx, state: 'finalized', diffSummary });
+
+  // Critical section: re-read state under lock, verify it's still 'staging',
+  // then merge with new fields and write. Closes a TOCTOU race where a
+  // concurrent abort or recovery could move the tx to a terminal state mid-
+  // computeDiff; without this guard, we'd resurrect it from a stale snapshot.
+  await withTxLock(root, txId, async () => {
+    const cur = await readTxState(root, txId);
+    if (!cur) throw new Error(`tx vanished mid-finalize: ${txId}`);
+    if (cur.state !== 'staging') {
+      throw new Error(
+        `finalizeTx race: tx state changed from staging to ${cur.state} during finalize`
+      );
+    }
+    await writeTxState(root, { ...cur, state: 'finalized', diffSummary });
+  });
   return { diffSummary };
 }
 
@@ -311,7 +326,23 @@ export async function validateTx(
     .filter((r) => r.severity === 'blocking' && (r.status === 'fail' || r.status === 'error'))
     .map((r) => r.name);
 
-  await writeTxState(root, { ...tx, state: 'validated', validators: summaries, blockingFailures });
+  // Critical section: re-read state under lock to close TOCTOU race against
+  // concurrent abort/recovery during the long-running validator pipeline.
+  await withTxLock(root, txId, async () => {
+    const cur = await readTxState(root, txId);
+    if (!cur) throw new Error(`tx vanished mid-validate: ${txId}`);
+    if (cur.state !== 'finalized') {
+      throw new Error(
+        `validateTx race: tx state changed from finalized to ${cur.state} during validation`
+      );
+    }
+    await writeTxState(root, {
+      ...cur,
+      state: 'validated',
+      validators: summaries,
+      blockingFailures
+    });
+  });
   return { validators: summaries, blockingFailures };
 }
 
@@ -367,10 +398,22 @@ export async function approveTx(
       ts
     }));
 
-  await writeTxState(root, {
-    ...tx,
-    state: 'approved',
-    overridesApplied: [...(tx.overridesApplied ?? []), ...overridesApplied]
+  // Critical section: re-read state under lock, verify still 'validated',
+  // merge using the fresh read (NOT the stale `tx` snapshot from the top of
+  // the function). Closes a TOCTOU race against concurrent abort/recovery.
+  await withTxLock(root, txId, async () => {
+    const cur = await readTxState(root, txId);
+    if (!cur) throw new Error(`tx vanished mid-approve: ${txId}`);
+    if (cur.state !== 'validated') {
+      throw new Error(
+        `approveTx race: tx state changed from validated to ${cur.state} during approval`
+      );
+    }
+    await writeTxState(root, {
+      ...cur,
+      state: 'approved',
+      overridesApplied: [...(cur.overridesApplied ?? []), ...overridesApplied]
+    });
   });
   return { ok: true };
 }
