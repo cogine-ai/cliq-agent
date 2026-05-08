@@ -1,0 +1,406 @@
+name: 飞书通知
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+    types: [opened, synchronize, closed]
+  release:
+    types: [published]
+
+jobs:
+  notify-feishu:
+    runs-on: ubuntu-latest
+    env:
+      FEISHU_WEBHOOK: ${{ secrets.FEISHU_BOT_WEBHOOK }}
+      FEISHU_BOT_SIGNKEY: ${{ secrets.FEISHU_BOT_SIGNKEY }}
+
+    steps:
+      - name: 生成飞书签名
+        id: feishu-sign
+        run: |
+          TIMESTAMP=""
+          SIGN=""
+          if [ -n "$FEISHU_BOT_SIGNKEY" ]; then
+            TIMESTAMP=$(date +%s)
+            STRING_TO_SIGN=$(printf '%s\n%s' "$TIMESTAMP" "$FEISHU_BOT_SIGNKEY")
+            SIGN=$(printf '' | openssl dgst -sha256 -binary -mac HMAC -macopt "key:$STRING_TO_SIGN" | openssl base64 -A)
+          fi
+
+          echo "timestamp=$TIMESTAMP" >> "$GITHUB_OUTPUT"
+          echo "sign=$SIGN" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout code
+        if: github.event_name == 'push'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 发送推送通知（交互卡片）
+        if: github.event_name == 'push' && github.event.head_commit != null && github.event.deleted != true
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          COMMIT_URL: ${{ github.event.head_commit.url }}
+          COMPARE_URL: ${{ github.event.compare }}
+          COMMITS_JSON: ${{ toJSON(github.event.commits) }}
+          BEFORE_SHA: ${{ github.event.before }}
+          FORCED: ${{ github.event.forced }}
+          TIMESTAMP: ${{ steps.feishu-sign.outputs.timestamp }}
+          SIGN: ${{ steps.feishu-sign.outputs.sign }}
+        run: |
+          if [ -z "$FEISHU_WEBHOOK" ]; then
+            echo "::warning::FEISHU_BOT_WEBHOOK secret is not set, skipping notification."
+            exit 0
+          fi
+
+          SAFE_MSG=$(echo "$COMMIT_MESSAGE" | tr '\n' ' ' | cut -c1-100)
+          COMMIT_COUNT=$(echo "$COMMITS_JSON" | jq 'length')
+
+          if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            DIFF_STAT=$(git diff --shortstat "$BEFORE_SHA" HEAD 2>/dev/null || echo "")
+          else
+            DIFF_STAT=""
+          fi
+
+          if [ -n "$DIFF_STAT" ]; then
+            FILES_CHANGED=$(echo "$DIFF_STAT" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
+            INSERTIONS=$(echo "$DIFF_STAT" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
+            DELETIONS=$(echo "$DIFF_STAT" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
+          else
+            FILES_CHANGED="0"
+            INSERTIONS="0"
+            DELETIONS="0"
+          fi
+
+          PUSH_TITLE="🚀 代码推送"
+          HEADER_COLOR="blue"
+          if [ "$FORCED" = "true" ]; then
+            PUSH_TITLE="⚠️ 强制推送"
+            HEADER_COLOR="red"
+          fi
+
+          jq -n \
+            --arg push_title "$PUSH_TITLE" \
+            --arg header_color "$HEADER_COLOR" \
+            --arg repo "$REPOSITORY" \
+            --arg branch "$BRANCH" \
+            --arg actor "$ACTOR" \
+            --arg msg "$SAFE_MSG" \
+            --arg compare_url "$COMPARE_URL" \
+            --arg commit_url "$COMMIT_URL" \
+            --arg files_changed "$FILES_CHANGED" \
+            --arg insertions "$INSERTIONS" \
+            --arg deletions "$DELETIONS" \
+            --arg timestamp "$TIMESTAMP" \
+            --arg sign "$SIGN" \
+            --argjson commit_count "$COMMIT_COUNT" \
+            '{
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "title": { "tag": "plain_text", "content": $push_title },
+                  "template": $header_color
+                },
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "lark_md",
+                      "content": ("**仓库**: " + $repo + "\n**分支**: " + $branch + "\n**推送者**: " + $actor)
+                    }
+                  },
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "lark_md",
+                      "content": ("**提交信息**: " + $msg)
+                    }
+                  },
+                  {
+                    "tag": "div",
+                    "fields": [
+                      {
+                        "is_short": true,
+                        "text": { "tag": "lark_md", "content": ("**提交数**\n" + ($commit_count | tostring) + " 个提交") }
+                      },
+                      {
+                        "is_short": true,
+                        "text": { "tag": "lark_md", "content": ("**代码变更**\n+" + $insertions + " / -" + $deletions) }
+                      },
+                      {
+                        "is_short": true,
+                        "text": { "tag": "lark_md", "content": ("**变更文件**\n" + $files_changed + " 个文件") }
+                      }
+                    ]
+                  },
+                  { "tag": "hr" },
+                  {
+                    "tag": "action",
+                    "actions": [
+                      {
+                        "tag": "button",
+                        "text": { "tag": "plain_text", "content": "查看变更对比" },
+                        "url": $compare_url,
+                        "type": "primary"
+                      },
+                      {
+                        "tag": "button",
+                        "text": { "tag": "plain_text", "content": "查看最新提交" },
+                        "url": $commit_url,
+                        "type": "default"
+                      }
+                    ]
+                  }
+                ]
+              }
+            } + (if $timestamp != "" and $sign != "" then { "timestamp": $timestamp, "sign": $sign } else {} end)' | curl --fail --show-error --max-time 10 -s -X POST \
+            -H "Content-Type: application/json" \
+            -d @- \
+            "$FEISHU_WEBHOOK"
+
+      - name: 发送 PR 合并通知（交互卡片）
+        if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+          PR_MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPOSITORY: ${{ github.repository }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+          PR_ADDITIONS: ${{ github.event.pull_request.additions }}
+          PR_DELETIONS: ${{ github.event.pull_request.deletions }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          TIMESTAMP: ${{ steps.feishu-sign.outputs.timestamp }}
+          SIGN: ${{ steps.feishu-sign.outputs.sign }}
+        run: |
+          if [ -z "$FEISHU_WEBHOOK" ]; then
+            echo "::warning::FEISHU_BOT_WEBHOOK secret is not set (possibly a fork PR), skipping notification."
+            exit 0
+          fi
+
+          if [ -z "$PR_MERGED_BY" ]; then
+            PR_MERGED_BY="$PR_USER"
+          fi
+
+          SAFE_PR_TITLE=$(echo "$PR_TITLE" | tr '\n' ' ' | cut -c1-100)
+
+          jq -n \
+            --arg title "✅ 合并 Pull Request" \
+            --arg repo "$REPOSITORY" \
+            --arg pr_title "$SAFE_PR_TITLE" \
+            --arg pr_user "$PR_USER" \
+            --arg merged_by "$PR_MERGED_BY" \
+            --arg branch "$PR_HEAD_REF → $PR_BASE_REF" \
+            --arg url "$PR_URL" \
+            --arg additions "$PR_ADDITIONS" \
+            --arg deletions "$PR_DELETIONS" \
+            --argjson commits "$PR_COMMITS" \
+            --arg files "$PR_CHANGED_FILES" \
+            --arg timestamp "$TIMESTAMP" \
+            --arg sign "$SIGN" \
+            '{
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "title": { "tag": "plain_text", "content": $title },
+                  "template": "green"
+                },
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "lark_md",
+                      "content": ("**" + $pr_title + "**")
+                    }
+                  },
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "lark_md",
+                      "content": ("**仓库**: " + $repo + "\n**分支**: " + $branch)
+                    }
+                  },
+                  {
+                    "tag": "div",
+                    "fields": [
+                      {
+                        "is_short": true,
+                        "text": { "tag": "lark_md", "content": ("**创建者**\n" + $pr_user) }
+                      },
+                      {
+                        "is_short": true,
+                        "text": { "tag": "lark_md", "content": ("**合并者**\n" + $merged_by) }
+                      },
+                      {
+                        "is_short": true,
+                        "text": { "tag": "lark_md", "content": ("**提交数**\n" + ($commits | tostring) + " 个提交") }
+                      },
+                      {
+                        "is_short": true,
+                        "text": { "tag": "lark_md", "content": ("**代码变更**\n+" + $additions + " / -" + $deletions) }
+                      },
+                      {
+                        "is_short": true,
+                        "text": { "tag": "lark_md", "content": ("**变更文件**\n" + $files + " 个文件") }
+                      }
+                    ]
+                  },
+                  { "tag": "hr" },
+                  {
+                    "tag": "action",
+                    "actions": [
+                      {
+                        "tag": "button",
+                        "text": { "tag": "plain_text", "content": "查看 Pull Request" },
+                        "url": $url,
+                        "type": "primary"
+                      }
+                    ]
+                  }
+                ]
+              }
+            } + (if $timestamp != "" and $sign != "" then { "timestamp": $timestamp, "sign": $sign } else {} end)' | curl --fail --show-error --max-time 10 -s -X POST \
+            -H "Content-Type: application/json" \
+            -d @- \
+            "$FEISHU_WEBHOOK"
+
+      - name: 发送 PR 通知（交互卡片）
+        if: github.event_name == 'pull_request' && !(github.event.action == 'closed' && github.event.pull_request.merged == true)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPOSITORY: ${{ github.repository }}
+          PR_ACTION: ${{ github.event.action }}
+          TIMESTAMP: ${{ steps.feishu-sign.outputs.timestamp }}
+          SIGN: ${{ steps.feishu-sign.outputs.sign }}
+        run: |
+          if [ -z "$FEISHU_WEBHOOK" ]; then
+            echo "::warning::FEISHU_BOT_WEBHOOK secret is not set (possibly a fork PR), skipping notification."
+            exit 0
+          fi
+
+          SAFE_PR_TITLE=$(echo "$PR_TITLE" | tr '\n' ' ' | cut -c1-200)
+
+          ACTION_TEXT=""
+          HEADER_COLOR="blue"
+          if [ "$PR_ACTION" = "opened" ]; then
+            ACTION_TEXT="🔄 新建 Pull Request"
+          elif [ "$PR_ACTION" = "synchronize" ]; then
+            ACTION_TEXT="🔄 更新 Pull Request"
+            HEADER_COLOR="wathet"
+          elif [ "$PR_ACTION" = "closed" ]; then
+            ACTION_TEXT="❌ 关闭 Pull Request"
+            HEADER_COLOR="grey"
+          fi
+
+          jq -n \
+            --arg title "$ACTION_TEXT" \
+            --arg header_color "$HEADER_COLOR" \
+            --arg repo "$REPOSITORY" \
+            --arg branch "$PR_HEAD_REF → $PR_BASE_REF" \
+            --arg user "$PR_USER" \
+            --arg pr_title "$SAFE_PR_TITLE" \
+            --arg url "$PR_URL" \
+            --arg timestamp "$TIMESTAMP" \
+            --arg sign "$SIGN" \
+            '{
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "title": { "tag": "plain_text", "content": $title },
+                  "template": $header_color
+                },
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "lark_md",
+                      "content": ("**仓库**: " + $repo + "\n**分支**: " + $branch + "\n**创建者**: " + $user + "\n**标题**: " + $pr_title)
+                    }
+                  },
+                  { "tag": "hr" },
+                  {
+                    "tag": "action",
+                    "actions": [
+                      {
+                        "tag": "button",
+                        "text": { "tag": "plain_text", "content": "查看详情" },
+                        "url": $url,
+                        "type": "primary"
+                      }
+                    ]
+                  }
+                ]
+              }
+            } + (if $timestamp != "" and $sign != "" then { "timestamp": $timestamp, "sign": $sign } else {} end)' | curl --fail --show-error --max-time 10 -s -X POST \
+            -H "Content-Type: application/json" \
+            -d @- \
+            "$FEISHU_WEBHOOK"
+
+      - name: 发送发布通知（交互卡片）
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_NAME: ${{ github.event.release.name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+          REPOSITORY: ${{ github.repository }}
+          TIMESTAMP: ${{ steps.feishu-sign.outputs.timestamp }}
+          SIGN: ${{ steps.feishu-sign.outputs.sign }}
+        run: |
+          if [ -z "$FEISHU_WEBHOOK" ]; then
+            echo "::warning::FEISHU_BOT_WEBHOOK secret is not set, skipping notification."
+            exit 0
+          fi
+
+          SAFE_RELEASE_NAME=$(echo "$RELEASE_NAME" | tr '\n' ' ' | cut -c1-200)
+
+          jq -n \
+            --arg title "🎉 新版本发布" \
+            --arg repo "$REPOSITORY" \
+            --arg tag "$RELEASE_TAG" \
+            --arg name "$SAFE_RELEASE_NAME" \
+            --arg url "$RELEASE_URL" \
+            --arg timestamp "$TIMESTAMP" \
+            --arg sign "$SIGN" \
+            '{
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "title": { "tag": "plain_text", "content": $title },
+                  "template": "purple"
+                },
+                "elements": [
+                  {
+                    "tag": "div",
+                    "text": {
+                      "tag": "lark_md",
+                      "content": ("**仓库**: " + $repo + "\n**版本**: " + $tag + "\n**发布说明**: " + $name)
+                    }
+                  },
+                  { "tag": "hr" },
+                  {
+                    "tag": "action",
+                    "actions": [
+                      {
+                        "tag": "button",
+                        "text": { "tag": "plain_text", "content": "查看详情" },
+                        "url": $url,
+                        "type": "primary"
+                      }
+                    ]
+                  }
+                ]
+              }
+            } + (if $timestamp != "" and $sign != "" then { "timestamp": $timestamp, "sign": $sign } else {} end)' | curl --fail --show-error --max-time 10 -s -X POST \
+            -H "Content-Type: application/json" \
+            -d @- \
+            "$FEISHU_WEBHOOK"
