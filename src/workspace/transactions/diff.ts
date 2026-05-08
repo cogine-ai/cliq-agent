@@ -11,14 +11,8 @@ export async function computeDiff(cwd: string, overlayRoot: string): Promise<Dif
       oldContent = await fs.readFile(path.join(cwd, rel), 'utf8');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        // v0.8 only ships 'modify'. A file that exists in the overlay but not
-        // in cwd would be a 'create' op which apply.ts/diff-sanity reject
-        // anyway. Surface the constraint here with a clear message instead of
-        // letting an ENOENT bubble out from an apparently unrelated readFile.
-        // TODO(v0.9): support 'create' / 'delete' diff ops.
         throw new Error(
-          `cannot diff ${rel}: file exists in overlay but not in workspace ` +
-            "('create' is not supported in v0.8; see docs/superpowers/specs/2026-05-02-cliq-transactional-workspace-runtime-design.md)"
+          `Creating new files in the overlay is not supported in v0.8 (overlay has '${rel}' but it does not exist in the workspace). Use bash to create the file outside the transaction.`
         );
       }
       throw err;
@@ -46,6 +40,16 @@ async function walk(root: string, prefix: string, visit: (rel: string) => Promis
   }
 }
 
+/**
+ * Compute a coarse summary of a Diff.
+ *
+ * NOTE: `additions` and `deletions` are computed from line-count deltas
+ * (max(0, newLines.length - oldLines.length) and max(0, oldLines.length -
+ * newLines.length)). This is an approximation — a full-line replacement is
+ * reported as 0 additions and 0 deletions. Use a real LCS-based diff if
+ * exact line-level change counts are required; the schema (DiffSummary)
+ * accommodates either implementation without breaking consumers.
+ */
 export function summarizeDiff(diff: Diff): DiffSummary {
   const summary: DiffSummary = {
     filesChanged: diff.files.length,

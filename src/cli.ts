@@ -18,6 +18,7 @@ import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './runtime/events.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
+import type { TxRunnerOptions } from './runtime/tx-runner.js';
 import {
   assertWorkspaceCheckpointRestorable,
   createCheckpoint,
@@ -26,16 +27,22 @@ import {
 } from './session/checkpoints.js';
 import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
-import { ensureFresh, ensureSession, saveSession, workspaceIdFromRealPath } from './session/store.js';
+import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
 import type { ToolResult } from './tools/types.js';
 import {
   openTx as coordOpenTx,
   applyTx as coordApplyTx,
   abortTx as coordAbortTx,
+  approveTx as coordApproveTx,
+  finalizeTx as coordFinalizeTx,
   getTxStatus as coordGetTxStatus,
   listTx as coordListTx,
+  recoverAtStart as coordRecoverAtStart,
+  validateTx as coordValidateTx,
   type CoordinatorContext
 } from './workspace/transactions/coordinator.js';
+import { readTxState as coordReadTxState, resolveTxRoot } from './workspace/transactions/store.js';
+import { loadWorkspaceConfig } from './workspace/config.js';
 import { isValidTxId } from './workspace/transactions/types.js';
 import { promises as fsPromises } from 'node:fs';
 
@@ -44,14 +51,20 @@ const POLICY_MODE_LIST = POLICY_MODES.join(', ');
 const STREAMING_MODES = ['auto', 'on', 'off'] as const;
 const RESTORE_SCOPES = ['session', 'files', 'both'] as const;
 const HELP_TOPICS = ['checkpoint', 'compact', 'handoff'] as const;
+const TX_MODES = ['off', 'edit'] as const;
+const TX_APPLY_POLICIES = ['interactive', 'auto-on-pass', 'manual-only'] as const;
 
 type RestoreScope = (typeof RESTORE_SCOPES)[number];
 type HelpTopic = (typeof HELP_TOPICS)[number];
+type TxMode = (typeof TX_MODES)[number];
+type TxApplyPolicy = (typeof TX_APPLY_POLICIES)[number];
 
 type ParsedArgsBase = {
   policy: PolicyMode;
   skills: string[];
   model: PartialModelConfig;
+  txMode?: TxMode;
+  txApply?: TxApplyPolicy;
 };
 
 export type ParsedArgs = ParsedArgsBase & (
@@ -87,6 +100,7 @@ export type ParsedArgs = ParsedArgsBase & (
       cmd: 'tx-apply';
       txId: string;
       overrides: string[];
+      allowValidatorError: string[];
       reason?: string;
       json?: boolean;
       headless?: boolean;
@@ -97,6 +111,18 @@ export type ParsedArgs = ParsedArgsBase & (
       txId: string;
       restoreConfirmed?: boolean;
       keepPartial?: boolean;
+      reason?: string;
+      json?: boolean;
+      headless?: boolean;
+      prompt?: undefined;
+    }
+  | { cmd: 'tx-validate'; txId: string; json?: boolean; headless?: boolean; prompt?: undefined }
+  | {
+      cmd: 'tx-approve';
+      txId: string;
+      overrides: string[];
+      overrideAll?: boolean;
+      allowValidatorError: string[];
       reason?: string;
       json?: boolean;
       headless?: boolean;
@@ -118,6 +144,14 @@ function isRestoreScope(value: string): value is RestoreScope {
 
 function isHelpTopic(value: string): value is HelpTopic {
   return (HELP_TOPICS as readonly string[]).includes(value);
+}
+
+function isTxMode(value: string): value is TxMode {
+  return (TX_MODES as readonly string[]).includes(value);
+}
+
+function isTxApplyPolicy(value: string): value is TxApplyPolicy {
+  return (TX_APPLY_POLICIES as readonly string[]).includes(value);
 }
 
 function consumeFlag(args: string[], name: string): boolean {
@@ -155,7 +189,7 @@ function consumeRepeatable(args: string[], name: string): string[] {
 function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   const sub = args[1];
   if (!sub) {
-    throw new Error('cliq tx requires a subcommand (open, status, list, apply, abort)');
+    throw new Error('cliq tx requires a subcommand (open, status, list, validate, approve, apply, abort)');
   }
   const rest = args.slice(2);
   const json = consumeFlag(rest, '--json') || undefined;
@@ -211,6 +245,48 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
         ...(headless ? { headless } : {})
       };
     }
+    case 'validate': {
+      const txId = rest[0];
+      if (!txId || txId.startsWith('--')) {
+        throw new Error('tx validate requires <txId>');
+      }
+      rest.shift();
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx validate argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-validate',
+        txId,
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'approve': {
+      const txId = rest[0];
+      if (!txId || txId.startsWith('--')) {
+        throw new Error('tx approve requires <txId>');
+      }
+      rest.shift();
+      const overrides = consumeRepeatable(rest, '--override');
+      const overrideAll = consumeFlag(rest, '--override-all');
+      const allowValidatorError = consumeRepeatable(rest, '--allow-validator-error');
+      const reason = consumeOption(rest, '--reason');
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx approve argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-approve',
+        txId,
+        overrides,
+        ...(overrideAll ? { overrideAll: true } : {}),
+        allowValidatorError,
+        ...(reason !== undefined ? { reason } : {}),
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
     case 'apply': {
       const txId = rest[0];
       if (!txId || txId.startsWith('--')) {
@@ -221,6 +297,7 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
         throw new Error(`tx apply: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
       }
       const overrides = consumeRepeatable(rest, '--override');
+      const allowValidatorError = consumeRepeatable(rest, '--allow-validator-error');
       const reason = consumeOption(rest, '--reason');
       if (rest.length > 0) {
         throw new Error(`Unknown tx apply argument: ${rest[0]}`);
@@ -230,6 +307,7 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
         cmd: 'tx-apply',
         txId,
         overrides,
+        allowValidatorError,
         ...(reason !== undefined ? { reason } : {}),
         ...(json ? { json } : {}),
         ...(headless ? { headless } : {})
@@ -636,6 +714,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let policy: PolicyMode = DEFAULT_POLICY_MODE;
   const skills: string[] = [];
   const model: PartialModelConfig = {};
+  let txMode: TxMode | undefined;
+  let txApply: TxApplyPolicy | undefined;
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
@@ -646,24 +726,50 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
   const args: string[] = [];
 
-  // The `--tx`/`--tx-apply` flags are reserved for the runner integration
-  // that wires the overlay writer + auto-open/auto-finalize/auto-apply into
-  // each turn. That integration is deferred to a follow-up release (see
-  // src/workspace/transactions/coordinator.ts header comment). Until then,
-  // accepting these flags silently would let the runner write straight to
-  // the real workspace despite the user opting in to staging. Reject loudly
-  // and point at the working manual surface instead.
-  const TX_FLAGS_NOT_WIRED =
-    '--tx and --tx-apply are not yet wired into the runner; use the manual surface: ' +
-    '`cliq tx open <name>`, `cliq tx list`, `cliq tx status <txId>`, `cliq tx apply <txId>`, `cliq tx abort <txId>`.';
-
   for (let i = 0; i < raw.length; i += 1) {
     const token = raw[i];
-    if (token === '--tx' || token.startsWith('--tx=')) {
-      throw new Error(TX_FLAGS_NOT_WIRED);
+    if (token.startsWith('--tx=')) {
+      const value = token.slice('--tx='.length);
+      if (!value) {
+        throw new Error('Missing value for --tx; expected one of: off, edit');
+      }
+      if (!isTxMode(value)) {
+        throw new Error(`Unknown tx mode: ${value}; expected one of: off, edit`);
+      }
+      txMode = value;
+      continue;
     }
-    if (token === '--tx-apply' || token.startsWith('--tx-apply=')) {
-      throw new Error(TX_FLAGS_NOT_WIRED);
+
+    if (token === '--tx') {
+      const value = readFlagValue(raw, i, '--tx');
+      if (!isTxMode(value)) {
+        throw new Error(`Unknown tx mode: ${value}; expected one of: off, edit`);
+      }
+      txMode = value;
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith('--tx-apply=')) {
+      const value = token.slice('--tx-apply='.length);
+      if (!value) {
+        throw new Error('Missing value for --tx-apply; expected one of: interactive, auto-on-pass, manual-only');
+      }
+      if (!isTxApplyPolicy(value)) {
+        throw new Error(`Unknown tx-apply policy: ${value}; expected one of: interactive, auto-on-pass, manual-only`);
+      }
+      txApply = value;
+      continue;
+    }
+
+    if (token === '--tx-apply') {
+      const value = readFlagValue(raw, i, '--tx-apply');
+      if (!isTxApplyPolicy(value)) {
+        throw new Error(`Unknown tx-apply policy: ${value}; expected one of: interactive, auto-on-pass, manual-only`);
+      }
+      txApply = value;
+      i += 1;
+      continue;
     }
 
     if (token.startsWith('--policy=')) {
@@ -785,14 +891,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const base: ParsedArgsBase = {
     policy,
     skills,
-    model
+    model,
+    ...(txMode !== undefined ? { txMode } : {}),
+    ...(txApply !== undefined ? { txApply } : {})
+  };
+  const baseExtras = {
+    ...(txMode !== undefined ? { txMode } : {}),
+    ...(txApply !== undefined ? { txApply } : {})
   };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
   if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
     throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
   }
   if (!cmd || cmd === 'chat') {
-    return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model };
+    return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model, ...baseExtras };
   }
   if (cmd === 'run') return parseRunArgs(args, base);
   if (cmd === 'ask') return parseAskArgs(args, base);
@@ -909,6 +1021,7 @@ Usage:
   cliq reset               Clear persisted conversation for this directory
   cliq history             Print persisted session for this directory
   cliq rpc                 Start stdio JSON-RPC mode
+  cliq tx <subcommand>     Manage transactional workspace state (see below)
   cliq checkpoint create   Create a manual checkpoint
   cliq checkpoint list     Print session checkpoints
   cliq checkpoint restore  Restore session or files from a checkpoint
@@ -923,6 +1036,17 @@ Usage:
   cliq help TOPIC          Print help for checkpoint, compact, or handoff
   -h, --help               Print this help
 
+Transaction subcommands:
+  cliq tx open [name]               Open an explicit transaction (optional friendly name)
+  cliq tx status [<txId>]           Show transaction status (or list all if no id)
+  cliq tx list                      List all transactions in the workspace
+  cliq tx validate <txId>           Run validators against the transaction's staged view
+  cliq tx approve  <txId> [opts]    Approve a validated transaction
+                                    (--override <name> | --override-all | --allow-validator-error <name> | --reason "...")
+  cliq tx apply    <txId> [opts]    Apply a transaction; chains finalize -> validate -> approve -> apply as needed
+  cliq tx abort    <txId> [opts]    Abort a transaction
+                                    (use --restore-confirmed or --keep-partial for applied-partial)
+
 Options:
   --policy MODE            auto | confirm-write | read-only | confirm-bash | confirm-all
   --skill NAME             Activate a local skill; repeat to load multiple skills
@@ -931,6 +1055,8 @@ Options:
   --base-url URL           Required for openai-compatible; optional provider override
   --streaming MODE         auto | on | off
   --jsonl                  With cliq run only, write structured JSONL events to stdout
+  --tx <off|edit>          Override workspace config transactions.mode for this run
+  --tx-apply <policy>      Override transactions.applyPolicy (interactive | auto-on-pass | manual-only)
 
 Policy modes:
   auto                     Execute registered tools without confirmation
@@ -1320,6 +1446,8 @@ export async function runCli(argv: string[]) {
     parsed.cmd === 'tx-open' ||
     parsed.cmd === 'tx-status' ||
     parsed.cmd === 'tx-list' ||
+    parsed.cmd === 'tx-validate' ||
+    parsed.cmd === 'tx-approve' ||
     parsed.cmd === 'tx-apply' ||
     parsed.cmd === 'tx-abort'
   ) {
@@ -1346,6 +1474,8 @@ export async function runCli(argv: string[]) {
     };
 
     if (parsed.cmd === 'tx-open') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
       const tx = await coordOpenTx(ctx, { explicit: true, name: parsed.name });
       if (wantsJson) {
         writeJson({ type: 'tx-opened', txId: tx.id, ...(parsed.name ? { name: parsed.name } : {}) });
@@ -1356,6 +1486,8 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-list') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
       const list = await coordListTx(ctx);
       if (wantsJson) {
         writeJson({
@@ -1371,6 +1503,8 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-status') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
       if (!parsed.txId) {
         // No id provided: behave like list (matches operator expectations).
         const list = await coordListTx(ctx);
@@ -1409,33 +1543,205 @@ export async function runCli(argv: string[]) {
       return;
     }
 
-    if (parsed.cmd === 'tx-apply') {
-      const result = await coordApplyTx(ctx, parsed.txId, {
-        overrides: parsed.overrides,
-        ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
-      });
-      if (result.ok) {
+    if (parsed.cmd === 'tx-validate') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
+      const wsCfg = await loadWorkspaceConfig(cwd);
+      const validatorsConfig = wsCfg.transactions?.validators ?? {};
+      const stagedViewConfig = wsCfg.transactions?.stagedView ?? {
+        copyMode: 'auto' as const,
+        bindPaths: ['node_modules']
+      };
+      try {
+        const result = await coordValidateTx(ctx, parsed.txId, validatorsConfig, stagedViewConfig);
         if (wantsJson) {
           writeJson({
-            type: 'tx-applied',
-            txId: result.txId,
-            filesApplied: result.filesApplied,
-            ghostSnapshotId: result.ghostSnapshotId
+            type: 'tx-validated',
+            txId: parsed.txId,
+            validators: result.validators,
+            blockingFailures: result.blockingFailures
           });
         } else {
-          process.stdout.write(`tx applied: ${result.txId} (${result.filesApplied.length} files)\n`);
+          process.stdout.write(
+            `tx ${parsed.txId} validated: ${result.validators.length} validators, ${result.blockingFailures.length} blocking failures\n`
+          );
         }
         return;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (wantsJson) {
+          writeJson({ type: 'error', message });
+        } else {
+          process.stderr.write(`tx validate error: ${message}\n`);
+        }
+        throw new ReportedCliError(message, { exitCode: 1 });
       }
-      if (wantsJson) {
-        writeJson({ type: 'error', code: result.error, message: result.message });
-      } else {
-        process.stderr.write(`tx apply ${result.error}: ${result.message}\n`);
+    }
+
+    if (parsed.cmd === 'tx-approve') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
+      try {
+        const result = await coordApproveTx(ctx, parsed.txId, {
+          overrides: parsed.overrides,
+          ...(parsed.overrideAll ? { overrideAll: true } : {}),
+          allowValidatorError: parsed.allowValidatorError,
+          ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
+        });
+        if (result.ok) {
+          if (wantsJson) {
+            writeJson({ type: 'tx-approved', txId: parsed.txId });
+          } else {
+            process.stdout.write(`tx ${parsed.txId} approved\n`);
+          }
+          return;
+        }
+        const message = `uncovered blocking failures: ${result.uncoveredFailures.join(', ')} — pass --override <name> for each, or --override-all`;
+        if (wantsJson) {
+          writeJson({ type: 'error', message, uncoveredFailures: result.uncoveredFailures });
+        } else {
+          process.stderr.write(`tx approve blocked: ${message}\n`);
+        }
+        throw new ReportedCliError(message, { exitCode: 1 });
+      } catch (err) {
+        if (err instanceof ReportedCliError) throw err;
+        const message = err instanceof Error ? err.message : String(err);
+        if (wantsJson) {
+          writeJson({ type: 'error', message });
+        } else {
+          process.stderr.write(`tx approve error: ${message}\n`);
+        }
+        throw new ReportedCliError(message, { exitCode: 1 });
       }
-      throw new ReportedCliError(result.message, { exitCode: 1 });
+    }
+
+    if (parsed.cmd === 'tx-apply') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
+
+      const wsCfg = await loadWorkspaceConfig(cwd);
+      const validatorsConfig = wsCfg.transactions?.validators ?? {};
+      const stagedViewConfig = wsCfg.transactions?.stagedView ?? {
+        copyMode: 'auto' as const,
+        bindPaths: ['node_modules']
+      };
+
+      // Refuse interactive applyPolicy under headless at handler entry.
+      const applyPolicy = parsed.txApply ?? wsCfg.transactions?.applyPolicy ?? 'interactive';
+      if (applyPolicy === 'interactive' && (parsed.headless || parsed.json)) {
+        const msg =
+          '--tx-apply interactive requires a TTY; use --tx-apply manual-only or auto-on-pass for headless runs';
+        if (parsed.headless || parsed.json) {
+          writeJson({ type: 'error', message: msg });
+        } else {
+          process.stderr.write(`${msg}\n`);
+        }
+        throw new ReportedCliError(msg, { exitCode: 2 });
+      }
+
+      try {
+        const cliqHome = ctx.cliqHome ?? resolveCliqHome();
+        const tx = await coordReadTxState(resolveTxRoot(cliqHome), parsed.txId);
+        if (!tx) throw new Error(`tx not found: ${parsed.txId}`);
+
+        let state = tx.state;
+
+        if (state === 'staging') {
+          await coordFinalizeTx(ctx, parsed.txId);
+          state = 'finalized';
+        }
+        if (state === 'finalized') {
+          const v = await coordValidateTx(ctx, parsed.txId, validatorsConfig, stagedViewConfig);
+          state = 'validated';
+          if (v.blockingFailures.length > 0 && parsed.overrides.length === 0) {
+            const msg = `tx has blocking failures: ${v.blockingFailures.join(', ')} — run \`cliq tx approve ${parsed.txId} --override <name>\` to override`;
+            if (parsed.headless || parsed.json) {
+              writeJson({
+                type: 'error',
+                message: msg,
+                uncoveredFailures: v.blockingFailures
+              });
+            } else {
+              process.stderr.write(`${msg}\n`);
+            }
+            throw new ReportedCliError(msg, { exitCode: 1 });
+          }
+        }
+        if (state === 'validated') {
+          const approval = await coordApproveTx(ctx, parsed.txId, {
+            overrides: parsed.overrides,
+            allowValidatorError: parsed.allowValidatorError,
+            ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
+          });
+          if (!approval.ok) {
+            const msg = `uncovered blocking failures: ${approval.uncoveredFailures.join(', ')}`;
+            if (parsed.headless || parsed.json) {
+              writeJson({
+                type: 'error',
+                message: msg,
+                uncoveredFailures: approval.uncoveredFailures
+              });
+            } else {
+              process.stderr.write(`${msg}\n`);
+            }
+            throw new ReportedCliError(msg, { exitCode: 1 });
+          }
+          state = 'approved';
+        }
+        if (state === 'approved') {
+          const result = await coordApplyTx(ctx, parsed.txId, {
+            overrides: parsed.overrides,
+            ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
+          });
+          if (result.ok) {
+            if (parsed.headless || parsed.json) {
+              writeJson({
+                type: 'tx-applied',
+                txId: parsed.txId,
+                filesApplied: result.filesApplied
+              });
+            } else {
+              process.stdout.write(`tx ${parsed.txId} applied: ${result.filesApplied.length} files\n`);
+            }
+          } else {
+            const code =
+              result.error === 'partial'
+                ? 'tx-apply-partial'
+                : result.error === 'conflict'
+                  ? 'tx-apply-conflict'
+                  : 'tx-overlay-error';
+            if (parsed.headless || parsed.json) {
+              writeJson({ type: 'error', code, message: result.message });
+            } else {
+              process.stderr.write(`tx apply ${result.error}: ${result.message}\n`);
+            }
+            throw new ReportedCliError(result.message, { exitCode: 1 });
+          }
+        } else {
+          const msg = `tx ${parsed.txId} is in state=${state}, not applyable (already terminal or partial)`;
+          if (parsed.headless || parsed.json) {
+            writeJson({ type: 'error', message: msg });
+          } else {
+            process.stderr.write(`${msg}\n`);
+          }
+          throw new ReportedCliError(msg, { exitCode: 1 });
+        }
+      } catch (err) {
+        if (err instanceof ReportedCliError) throw err;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (parsed.headless || parsed.json) {
+          writeJson({ type: 'error', message: msg });
+        } else {
+          process.stderr.write(`tx apply error: ${msg}\n`);
+        }
+        throw new ReportedCliError(msg, { exitCode: 1 });
+      }
+      return;
     }
 
     if (parsed.cmd === 'tx-abort') {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
       const result = await coordAbortTx(ctx, parsed.txId, {
         restoreConfirmed: parsed.restoreConfirmed,
         keepPartial: parsed.keepPartial,
@@ -1475,7 +1781,9 @@ export async function runCli(argv: string[]) {
           prompt: prompt.trim(),
           policy,
           skills,
-          model: cliModel
+          model: cliModel,
+          txMode: parsed.txMode,
+          txApply: parsed.txApply
         },
         {
           onEvent(event) {
@@ -1500,7 +1808,9 @@ export async function runCli(argv: string[]) {
         prompt: prompt.trim(),
         policy,
         skills,
-        model: cliModel
+        model: cliModel,
+        txMode: parsed.txMode,
+        txApply: parsed.txApply
       },
       {
         hooks: createCliHooks(),
@@ -1543,6 +1853,57 @@ export async function runCli(argv: string[]) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
   const eventSink = createCliEventSink();
   let turnSawRuntimeError = false;
+
+  // §A.6: build CoordinatorContext, run crash recovery before constructing the
+  // interactive runner so own-session orphans converge and cross-session
+  // orphans get filtered (with a warning to stderr).
+  const cliqHome = resolveCliqHome();
+  const wsCfg = await loadWorkspaceConfig(cwd);
+  let chatWorkspaceRealPath = cwd;
+  try {
+    chatWorkspaceRealPath = await fsPromises.realpath(cwd);
+  } catch {
+    // fall back to cwd verbatim
+  }
+  const chatCoordinatorCtx: CoordinatorContext = {
+    cwd,
+    session,
+    cliqHome,
+    workspaceId: workspaceIdFromRealPath(chatWorkspaceRealPath),
+    sessionId: session.id,
+    workspaceRealPath: chatWorkspaceRealPath
+  };
+  const chatRecoveryResult = await coordRecoverAtStart(chatCoordinatorCtx);
+  for (const skippedTxId of chatRecoveryResult.crossSessionSkipped) {
+    process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
+  }
+
+  // Build TxRunnerOptions when transactions mode is active. Interactive arm
+  // uses a TTY confirm prompt via the existing readline interface.
+  const chatTxMode = parsed.txMode ?? wsCfg.transactions?.mode ?? 'off';
+  let chatTransactions: TxRunnerOptions | undefined;
+  if (chatTxMode === 'edit') {
+    const applyPolicy = parsed.txApply ?? wsCfg.transactions?.applyPolicy ?? 'interactive';
+    chatTransactions = {
+      mode: 'edit',
+      auto: wsCfg.transactions?.auto ?? 'per-turn',
+      applyPolicy,
+      bashPolicy: wsCfg.transactions?.bashPolicy ?? 'passthrough',
+      headless: false,
+      validatorsConfig: wsCfg.transactions?.validators ?? {},
+      stagedViewConfig: wsCfg.transactions?.stagedView ?? { copyMode: 'auto', bindPaths: ['node_modules'] },
+      workspaceId: chatCoordinatorCtx.workspaceId,
+      workspaceRealPath: chatCoordinatorCtx.workspaceRealPath,
+      cliqHome,
+      confirmApply: async () => {
+        const answer = await new Promise<string>((resolve) =>
+          rl.question('Apply transaction? [y/N] ', resolve)
+        );
+        return answer.trim().toLowerCase() === 'y';
+      }
+    };
+  }
+
   const runner = createRunner({
     model: modelClient,
     hooks: [...assembly.hooks, ...createCliHooks()],
@@ -1552,6 +1913,7 @@ export async function runCli(argv: string[]) {
       config: assembly.workspaceConfig.autoCompact,
       modelConfig
     },
+    ...(chatTransactions ? { transactions: chatTransactions } : {}),
     async onEvent(event) {
       if (event.type === 'error') {
         turnSawRuntimeError = true;

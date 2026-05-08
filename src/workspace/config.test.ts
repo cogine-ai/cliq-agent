@@ -237,3 +237,63 @@ test('parseWorkspaceConfig rejects validators.shell entry with non-string name',
     /transactions\.validators\.shell/
   );
 });
+
+test('parseWorkspaceConfig refuses applyPolicy=manual-only paired with auto=per-turn', () => {
+  const raw = {
+    transactions: { mode: 'edit', auto: 'per-turn', applyPolicy: 'manual-only' }
+  };
+  assert.throws(
+    () => parseWorkspaceConfig(raw),
+    /applyPolicy=manual-only requires .*auto=manual/
+  );
+});
+
+test('parseWorkspaceConfig accepts applyPolicy=manual-only with auto=manual', () => {
+  const raw = {
+    transactions: { mode: 'edit', auto: 'manual', applyPolicy: 'manual-only' }
+  };
+  // Should not throw.
+  const parsed = parseWorkspaceConfig(raw);
+  assert.equal(parsed.transactions?.applyPolicy, 'manual-only');
+  assert.equal(parsed.transactions?.auto, 'manual');
+});
+
+test('parseWorkspaceConfig accepts applyPolicy=auto-on-pass with auto=per-turn', () => {
+  const raw = {
+    transactions: { mode: 'edit', auto: 'per-turn', applyPolicy: 'auto-on-pass' }
+  };
+  const parsed = parseWorkspaceConfig(raw);
+  assert.equal(parsed.transactions?.applyPolicy, 'auto-on-pass');
+});
+
+test('parseWorkspaceConfig refuses applyPolicy=manual-only when auto is unset (defaults to per-turn)', () => {
+  const raw = {
+    transactions: { mode: 'edit', applyPolicy: 'manual-only' }
+  };
+  // The default for auto is 'per-turn' per the existing TxConfig — refuse the combo
+  // even when auto is left implicit.
+  assert.throws(
+    () => parseWorkspaceConfig(raw),
+    /applyPolicy=manual-only requires .*auto=manual/
+  );
+});
+
+test('parseWorkspaceConfig refuses bashPolicy=confirm in v0.8 (deferred to v0.9)', () => {
+  const raw = { transactions: { mode: 'edit', bashPolicy: 'confirm' } };
+  assert.throws(
+    () => parseWorkspaceConfig(raw),
+    /bashPolicy=confirm is not yet supported in v0\.8/
+  );
+});
+
+test('parseWorkspaceConfig accepts bashPolicy=passthrough', () => {
+  const raw = { transactions: { mode: 'edit', bashPolicy: 'passthrough' } };
+  const parsed = parseWorkspaceConfig(raw);
+  assert.equal(parsed.transactions?.bashPolicy, 'passthrough');
+});
+
+test('parseWorkspaceConfig accepts bashPolicy=deny', () => {
+  const raw = { transactions: { mode: 'edit', bashPolicy: 'deny' } };
+  const parsed = parseWorkspaceConfig(raw);
+  assert.equal(parsed.transactions?.bashPolicy, 'deny');
+});

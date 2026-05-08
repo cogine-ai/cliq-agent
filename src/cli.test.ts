@@ -397,6 +397,79 @@ test('parseArgs rejects cliq tx apply without txId', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'apply']), /requires <txId>/);
 });
 
+test('parseArgs cliq tx apply still accepts existing args (smart-pipeline lives in handler)', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'apply', 'tx_abc', '--override', 'foo', '--reason', 'r']);
+  assert.equal(a.cmd, 'tx-apply');
+  if (a.cmd === 'tx-apply') {
+    assert.equal(a.txId, 'tx_abc');
+    assert.deepEqual(a.overrides, ['foo']);
+    assert.equal(a.reason, 'r');
+  }
+});
+
+test('parseArgs cliq tx apply accepts --allow-validator-error', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'apply', 'tx_x', '--allow-validator-error', 'eslint', '--allow-validator-error', 'tsc']);
+  assert.equal(a.cmd, 'tx-apply');
+  if (a.cmd === 'tx-apply') {
+    assert.deepEqual(a.allowValidatorError, ['eslint', 'tsc']);
+  }
+});
+
+test('parseArgs recognizes cliq tx validate <txId>', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'validate', 'tx_abc']);
+  assert.equal(a.cmd, 'tx-validate');
+  if (a.cmd === 'tx-validate') {
+    assert.equal(a.txId, 'tx_abc');
+  }
+});
+
+test('parseArgs rejects cliq tx validate without txId', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'validate']), /requires <txId>/);
+});
+
+test('parseArgs cliq tx validate accepts --json and --headless', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'validate', 'tx_x', '--json']);
+  assert.equal(a.cmd, 'tx-validate');
+  if (a.cmd === 'tx-validate') {
+    assert.equal(a.json, true);
+  }
+  const b = parseArgs(['node', 'src/index.ts', 'tx', 'validate', 'tx_x', '--headless']);
+  assert.equal(b.cmd, 'tx-validate');
+  if (b.cmd === 'tx-validate') {
+    assert.equal(b.headless, true);
+  }
+});
+
+test('parseArgs recognizes cliq tx approve <txId> with overrides and reason', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'approve', 'tx_abc', '--override', 'tsc', '--override', 'eslint', '--reason', 'manual review']);
+  assert.equal(a.cmd, 'tx-approve');
+  if (a.cmd === 'tx-approve') {
+    assert.equal(a.txId, 'tx_abc');
+    assert.deepEqual(a.overrides, ['tsc', 'eslint']);
+    assert.equal(a.reason, 'manual review');
+  }
+});
+
+test('parseArgs cliq tx approve --override-all', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'approve', 'tx_abc', '--override-all', '--reason', 'mass']);
+  assert.equal(a.cmd, 'tx-approve');
+  if (a.cmd === 'tx-approve') {
+    assert.equal(a.overrideAll, true);
+  }
+});
+
+test('parseArgs cliq tx approve --allow-validator-error', () => {
+  const a = parseArgs(['node', 'src/index.ts', 'tx', 'approve', 'tx_abc', '--allow-validator-error', 'eslint']);
+  assert.equal(a.cmd, 'tx-approve');
+  if (a.cmd === 'tx-approve') {
+    assert.deepEqual(a.allowValidatorError, ['eslint']);
+  }
+});
+
+test('parseArgs rejects cliq tx approve without txId', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'approve']), /requires <txId>/);
+});
+
 test('parseArgs rejects --reason without an actual value when followed by another flag', () => {
   // Regression: consumeOption used to greedily eat the next token, so this
   // would mis-parse with reason="--override" and surface a misleading
@@ -434,28 +507,19 @@ test('parseArgs rejects cliq tx abort with both --restore-confirmed and --keep-p
   );
 });
 
-test('parseArgs rejects --tx and --tx-apply with not-yet-wired error', () => {
-  // Top-level --tx / --tx-apply flags are reserved for runner integration
-  // (auto-open / auto-finalize / auto-apply per turn). Until that landing
-  // they are rejected loudly so users do not silently get unstaged edits.
-  assert.throws(
-    () => parseArgs(['node', 'src/index.ts', '--tx', 'edit', 'tx', 'list']),
-    /not yet wired/i
-  );
-  assert.throws(
-    () => parseArgs(['node', 'src/index.ts', '--tx-apply', 'auto-on-pass', 'tx', 'list']),
-    /not yet wired/i
-  );
-  assert.throws(
-    () => parseArgs(['node', 'src/index.ts', '--tx=edit', 'tx', 'list']),
-    /not yet wired/i
-  );
-  // Even an "invalid" value falls into the same not-yet-wired path because
-  // the rejection happens before any value validation.
-  assert.throws(
-    () => parseArgs(['node', 'src/index.ts', '--tx', 'bogus', 'tx', 'list']),
-    /not yet wired/i
-  );
+test('parseArgs accepts top-level --tx and --tx-apply flags', () => {
+  // The v0.8 runner integration wires these flags into the runner; they
+  // override workspace config transactions.mode / transactions.applyPolicy.
+  const a = parseArgs(['node', 'src/index.ts', '--tx', 'edit', '--tx-apply', 'auto-on-pass', 'tx', 'list']);
+  assert.equal(a.cmd, 'tx-list');
+  if (a.cmd === 'tx-list') {
+    assert.equal(a.txMode, 'edit');
+    assert.equal(a.txApply, 'auto-on-pass');
+  }
+});
+
+test('parseArgs --tx rejects invalid values', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', '--tx', 'bogus', 'tx', 'list']), /tx mode/i);
 });
 
 test('parseArgs unknown tx subcommand throws', () => {

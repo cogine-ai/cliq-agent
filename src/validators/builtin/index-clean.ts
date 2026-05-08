@@ -89,22 +89,19 @@ export const indexClean: Validator = {
         // prompt, or an LFS network call would otherwise block the entire
         // apply/abort pipeline because index-clean is a blocking validator.
         // On timeout, Node kills the child with ETIMEDOUT and we land in the
-        // catch path with status='error', not a silent skip.
+        // catch path with a blocking fail, not a silent skip.
         { cwd: ctx.realCwd, timeout: 10_000 }
       ));
     } catch (err) {
       // Only "not a git repository" should skip the check. Other failures
       // (git missing, hung, killed, permission denied, hook crash, etc.)
-      // must surface as `status: 'error'` so they do not silently bypass
+      // must surface as a blocking fail so they do not silently bypass
       // a blocking validator.
-      const stderr =
-        typeof (err as { stderr?: unknown }).stderr === 'string'
-          ? ((err as { stderr: string }).stderr)
-          : err instanceof Error
-            ? err.message
-            : String(err);
-      const notGitRepo = /not a git repository/i.test(stderr);
-      if (notGitRepo) {
+      const e = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
+      const stderr = (e.stderr ?? '').toString();
+      const errMsg = e.message ?? String(err);
+      const isNotRepo = /not a git repository/i.test(stderr) || /not a git repository/i.test(errMsg);
+      if (isNotRepo) {
         return {
           name: 'builtin:index-clean',
           severity: 'blocking',
@@ -113,12 +110,16 @@ export const indexClean: Validator = {
           message: 'not a git repository — index check skipped'
         };
       }
+      // Real failure (git binary missing, permission denied, corrupted repo,
+      // hung hook, etc.). Surface it as a blocking failure so the operator
+      // can investigate rather than silently masking it as a "skipped" pass.
+      const detail = stderr.trim() ? ` (stderr: ${stderr.trim().slice(0, 256)})` : '';
       return {
         name: 'builtin:index-clean',
         severity: 'blocking',
-        status: 'error',
+        status: 'fail',
         durationMs: Date.now() - start,
-        message: `git status failed: ${stderr.slice(0, 256)}`
+        message: `git status failed: ${errMsg}${detail}`
       };
     }
     const findings: Finding[] = [];

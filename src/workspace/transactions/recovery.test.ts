@@ -157,6 +157,33 @@ test('scanForRecovery skips apply-failed-partial (terminal — user must abort)'
   });
 });
 
+test('scanForRecovery picks up abort-progress even when apply-failed-partial coexists', async () => {
+  // User ran `cliq tx abort --restore-confirmed` against an applied-partial tx.
+  // The abort wrote abort-progress=aborting and then crashed before completing
+  // the protocol. Recovery must see the abort action despite the terminal
+  // apply-progress; otherwise the abort is permanently stuck.
+  await withFakeHome(async (root) => {
+    await makeTx(root, 'tx_partial_aborting', 'applied-partial');
+    await writeApplyProgress(root, 'tx_partial_aborting', {
+      phase: 'apply-failed-partial',
+      ghostSnapshotId: 'snap_x',
+      startedAt: 'x',
+      filesPlanned: ['a.txt', 'b.txt'],
+      filesWritten: ['a.txt']
+    });
+    await writeAbortProgress(root, 'tx_partial_aborting', {
+      phase: 'aborting',
+      reason: 'apply-failed-partial-restored',
+      startedAt: 'y',
+      ts: 'y'
+    });
+    const actions = await scanForRecovery(root);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0].kind, 'abort');
+    assert.equal(actions[0].phase, 'aborting');
+  });
+});
+
 test('scanForRecovery ignores entries that are not tx_-prefixed directories', async () => {
   await withFakeHome(async (root) => {
     await mkdir(path.join(root, 'not_a_tx'), { recursive: true });
@@ -565,12 +592,11 @@ test('recovery is idempotent: running twice yields same state', async () => {
       const r2 = await recoverAll(root, { cwd: ws, session });
       assert.equal(r1.length, 1);
       assert.equal(r1[0].action, 'apply-finalized-state');
-      // Second run: tx is now applied, but apply-progress.phase=apply-finalized
-      // is still considered non-terminal by the scanner. recoverApply sees
-      // state===applied and short-circuits the write — outcome is still
-      // 'apply-finalized-state' and tx remains applied.
-      assert.equal(r2.length, 1);
-      assert.equal(r2[0].action, 'apply-finalized-state');
+      // Second run: tx state is now 'applied' AND apply-progress.phase is
+      // 'apply-finalized', so the four-marker terminal invariant has
+      // converged. The scanner must skip — re-enqueueing would trigger a
+      // pointless no-op recovery loop on every startup.
+      assert.equal(r2.length, 0);
       const tx = await readTxState(root, 'tx_idem');
       assert.equal(tx?.state, 'applied');
     } finally {

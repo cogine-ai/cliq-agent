@@ -18,6 +18,17 @@ export type StagedViewOptions = {
 };
 
 export async function materializeStagedView(opts: StagedViewOptions): Promise<{ usedCopyFallback: boolean }> {
+  // Refuse to materialize when target is cwd itself or a descendant. Otherwise
+  // walkAndMaterialize would re-enter the target tree it is currently writing,
+  // producing infinite recursion / unbounded copying. This is a safety net for
+  // misconfiguration; legitimate callers always point target outside cwd.
+  const cwdResolved = path.resolve(opts.cwd);
+  const targetResolved = path.resolve(opts.target);
+  if (targetResolved === cwdResolved || targetResolved.startsWith(cwdResolved + path.sep)) {
+    throw new Error(
+      `materializeStagedView: target ${opts.target} is inside cwd ${opts.cwd}; refusing to recursively copy`
+    );
+  }
   await fs.mkdir(opts.target, { recursive: true });
   const bindSet = new Set(opts.bindPaths);
   let usedCopyFallback = false;
@@ -61,6 +72,18 @@ async function walkAndMaterialize(
     const rel = prefix ? path.join(prefix, entry.name) : entry.name;
     const srcPath = path.join(cwd, rel);
     const dstPath = path.join(target, rel);
+    // Materialization rules for `walkAndMaterialize`:
+    //   - Entries whose path is in `bindPaths` (held in `bindSet`) are surfaced
+    //     as symlinks pointing back into the live `cwd` (e.g. `node_modules`,
+    //     `.git`) so validators see the workspace's existing state without
+    //     paying the cost of a full copy.
+    //   - Directories are walked recursively; intermediate dirs are created
+    //     under `target` before descending.
+    //   - Regular files are copied via `copyOne` (which dispatches to reflink
+    //     or byte-copy depending on the configured `copyMode`).
+    //   - Symlinks NOT listed in `bindPaths` are intentionally skipped
+    //     (entry.isFile()/isDirectory() are both false for them); we do not
+    //     follow them, to avoid escaping the workspace root.
     if (bindSet.has(rel)) {
       await fs.symlink(srcPath, dstPath);
       continue;
@@ -117,10 +140,38 @@ async function walkOverlay(overlayRoot: string, target: string, bindSet: Set<str
       }
       const overlayPath = path.join(overlayRoot, rel);
       const targetPath = path.join(target, rel);
+      // Defensive: if any ancestor of targetPath is a symlink (a bindPath
+      // pointing back into cwd), writing through it would land in the real
+      // workspace and break staged-view isolation. WorkspaceWriter does not
+      // emit overlay entries under bindPaths today, but the check guards
+      // against future drift.
+      if (await ancestorIsSymlink(target, rel)) {
+        continue;
+      }
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.copyFile(overlayPath, targetPath);
     }
   }
+}
+
+async function ancestorIsSymlink(root: string, rel: string): Promise<boolean> {
+  const segments = rel.split(path.sep);
+  // Walk root → root/seg0 → root/seg0/seg1 → ... up to but excluding the leaf.
+  // If any intermediate is a symlink, the write path crosses into something
+  // outside the staged-view target tree.
+  let current = root;
+  for (let i = 0; i < segments.length - 1; i++) {
+    current = path.join(current, segments[i]);
+    try {
+      const stat = await fs.lstat(current);
+      if (stat.isSymbolicLink()) return true;
+    } catch {
+      // ENOENT etc. — the ancestor doesn't exist yet, mkdir will create it
+      // as a regular directory below; not a symlink, safe to proceed.
+      return false;
+    }
+  }
+  return false;
 }
 
 function overlapsBind(rel: string, bindSet: Set<string>): boolean {

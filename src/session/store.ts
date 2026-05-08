@@ -103,57 +103,124 @@ export function isSessionRecord(value: unknown): value is SessionRecord {
     );
   }
 
-  if (record.kind === 'tx-opened' || record.kind === 'tx-applied' || record.kind === 'tx-aborted') {
-    if (
-      record.role !== 'user' ||
-      typeof record.content !== 'string' ||
-      typeof record.meta !== 'object' ||
-      record.meta === null ||
-      typeof (record.meta as { txId?: unknown }).txId !== 'string'
-    ) {
-      return false;
-    }
-    const meta = record.meta as Record<string, unknown>;
-    // Per-kind required-field validation: downstream code (handoff/headless
-    // export, summarizer, recovery) reads diffSummary.filesChanged, reason,
-    // artifactRef, etc., directly. A too-permissive guard here lets a
-    // partially-written or hand-edited session.json pass isSession() and
-    // crash later with an `undefined` deref. Validate the required shape now.
-    if (record.kind === 'tx-opened') {
-      // tx-opened needs only txId on meta; the rest (name, explicit) is
-      // optional or has well-known defaults. No further required fields.
-      return true;
-    }
-    if (record.kind === 'tx-applied') {
-      const diffSummary = meta.diffSummary as { filesChanged?: unknown } | undefined;
-      const validators = meta.validators as
-        | { blocking?: unknown; advisory?: unknown }
-        | undefined;
-      // toSessionRecordView (src/headless/artifacts.ts) and the auto-compaction
-      // summarizer dereference meta.validators.blocking and meta.overrides
-      // unconditionally. A hand-edited or partially-written session.json that
-      // omits these fields would otherwise pass isSession() and crash on
-      // export/summary; tighten the guard to fail fast instead.
-      return (
-        typeof meta.artifactRef === 'string' &&
-        !!diffSummary &&
-        typeof diffSummary === 'object' &&
-        typeof (diffSummary as { filesChanged?: unknown }).filesChanged === 'number' &&
-        !!validators &&
-        typeof validators === 'object' &&
-        !!validators.blocking &&
-        typeof validators.blocking === 'object' &&
-        Array.isArray(meta.overrides)
-      );
-    }
-    // tx-aborted
+  if (record.kind === 'tx-opened') {
     return (
-      typeof meta.reason === 'string' &&
-      typeof meta.artifactRef === 'string'
+      record.role === 'user' &&
+      typeof record.content === 'string' &&
+      isTxOpenedMeta((record as { meta?: unknown }).meta)
+    );
+  }
+
+  if (record.kind === 'tx-applied') {
+    return (
+      record.role === 'user' &&
+      typeof record.content === 'string' &&
+      isTxAppliedMeta((record as { meta?: unknown }).meta)
+    );
+  }
+
+  if (record.kind === 'tx-aborted') {
+    return (
+      record.role === 'user' &&
+      typeof record.content === 'string' &&
+      isTxAbortedMeta((record as { meta?: unknown }).meta)
     );
   }
 
   return false;
+}
+
+function isTxOpenedMeta(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const meta = value as { txId?: unknown; txKind?: unknown; explicit?: unknown; name?: unknown };
+  return (
+    typeof meta.txId === 'string' &&
+    meta.txKind === 'edit' &&
+    meta.explicit === true &&
+    (meta.name === undefined || typeof meta.name === 'string')
+  );
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+function isTxAppliedMeta(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const meta = value as {
+    txId?: unknown;
+    txKind?: unknown;
+    diffSummary?: unknown;
+    files?: unknown;
+    validators?: unknown;
+    overrides?: unknown;
+    artifactRef?: unknown;
+    ghostSnapshotId?: unknown;
+  };
+  if (typeof meta.txId !== 'string') return false;
+  if (meta.txKind !== 'edit') return false;
+  if (!meta.diffSummary || typeof meta.diffSummary !== 'object') return false;
+  if (!meta.files || typeof meta.files !== 'object') return false;
+  const files = meta.files as { creates?: unknown; modifies?: unknown; deletes?: unknown };
+  if (!isStringArray(files.creates) || !isStringArray(files.modifies) || !isStringArray(files.deletes)) {
+    return false;
+  }
+  if (!meta.validators || typeof meta.validators !== 'object') return false;
+  const validators = meta.validators as { blocking?: unknown; advisory?: unknown };
+  if (!validators.blocking || typeof validators.blocking !== 'object') return false;
+  const blocking = validators.blocking as { pass?: unknown; fail?: unknown };
+  if (typeof blocking.pass !== 'number' || typeof blocking.fail !== 'number') return false;
+  if (!validators.advisory || typeof validators.advisory !== 'object') return false;
+  const advisory = validators.advisory as { pass?: unknown; fail?: unknown; names?: unknown };
+  if (typeof advisory.pass !== 'number' || typeof advisory.fail !== 'number') return false;
+  if (!isStringArray(advisory.names)) return false;
+  if (!Array.isArray(meta.overrides)) return false;
+  if (typeof meta.artifactRef !== 'string') return false;
+  if (meta.ghostSnapshotId !== undefined && typeof meta.ghostSnapshotId !== 'string') return false;
+  return true;
+}
+
+function isTxAbortedMeta(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const meta = value as {
+    txId?: unknown;
+    txKind?: unknown;
+    reason?: unknown;
+    files?: unknown;
+    artifactRef?: unknown;
+    failedValidators?: unknown;
+    appliedPartial?: unknown;
+  };
+  if (typeof meta.txId !== 'string') return false;
+  if (meta.txKind !== 'edit') return false;
+  if (typeof meta.reason !== 'string') return false;
+  if (!meta.files || typeof meta.files !== 'object') return false;
+  const files = meta.files as {
+    wouldHaveCreated?: unknown;
+    wouldHaveModified?: unknown;
+    wouldHaveDeleted?: unknown;
+  };
+  if (
+    !isStringArray(files.wouldHaveCreated) ||
+    !isStringArray(files.wouldHaveModified) ||
+    !isStringArray(files.wouldHaveDeleted)
+  ) {
+    return false;
+  }
+  if (typeof meta.artifactRef !== 'string') return false;
+  if (meta.failedValidators !== undefined && !isStringArray(meta.failedValidators)) return false;
+  if (meta.appliedPartial !== undefined) {
+    if (!meta.appliedPartial || typeof meta.appliedPartial !== 'object') return false;
+    const ap = meta.appliedPartial as {
+      partialFiles?: unknown;
+      ghostSnapshotId?: unknown;
+      restoreConfirmed?: unknown;
+    };
+    if (!isStringArray(ap.partialFiles)) return false;
+    if (typeof ap.ghostSnapshotId !== 'string') return false;
+    if (typeof ap.restoreConfirmed !== 'boolean') return false;
+  }
+  return true;
 }
 
 function isSessionCheckpoint(value: unknown): value is SessionCheckpoint {

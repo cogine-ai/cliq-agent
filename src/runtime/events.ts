@@ -1,6 +1,7 @@
 import type { ProviderName } from '../model/types.js';
 import type { AutoCompactSkipReason } from '../session/auto-compaction.js';
 import type { SessionCheckpoint } from '../session/types.js';
+import type { HeadlessErrorCode } from '../headless/contract.js';
 
 export type RuntimeEvent =
   | { type: 'model-start'; provider: ProviderName; model: string; streaming: boolean }
@@ -21,7 +22,13 @@ export type RuntimeEvent =
   | { type: 'tool-start'; tool: string; preview?: string }
   | { type: 'tool-end'; tool: string; status: 'ok' | 'error' }
   | { type: 'final'; message: string }
-  | { type: 'error'; stage: 'model' | 'protocol' | 'policy' | 'tool' | 'cancel'; message: string }
+  | {
+      type: 'error';
+      stage: 'model' | 'protocol' | 'policy' | 'tool' | 'cancel';
+      message: string;
+      code?: HeadlessErrorCode;
+      recoverable?: boolean;
+    }
   | { type: 'tx-staging-start'; txId: string; trigger: 'auto-turn' | 'explicit-open'; name?: string }
   | { type: 'tx-finalized'; txId: string; diffSummary: import('../workspace/transactions/types.js').DiffSummary }
   | {

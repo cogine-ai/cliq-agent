@@ -154,8 +154,29 @@ export async function runStageB(ctx: ApplyContext, plan: PlanEntry[]): Promise<S
     await writeApplyProgress(ctx.root, ctx.txId, progress);
 
     for (const planned of plan) {
-      // B3a: re-verify fingerprint right before write
-      const real = await fs.readFile(path.join(tx.workspaceRealPath, planned.path), 'utf8');
+      // B3a: re-verify fingerprint right before write. IO errors here (e.g.,
+      // file deleted between Stage A and Stage B) must converge to
+      // applied-partial just like a fingerprint mismatch -- otherwise the
+      // failure crashes the runner and leaves the tx in apply-writing forever.
+      let real: string;
+      try {
+        real = await fs.readFile(path.join(tx.workspaceRealPath, planned.path), 'utf8');
+      } catch (err) {
+        await writeTxState(ctx.root, { ...tx, state: 'applied-partial' });
+        await writeApplyProgress(ctx.root, ctx.txId, {
+          ...progress,
+          phase: 'apply-failed-partial',
+          error: {
+            stage: 'B3a',
+            path: planned.path,
+            message: err instanceof Error ? err.message : String(err)
+          }
+        });
+        throw new ApplyPartial(
+          `mid-stage IO error at ${planned.path}`,
+          progress.ghostSnapshotId
+        );
+      }
       const fp = createHash('sha256').update(real).digest('hex');
       if (fp !== planned.fingerprint) {
         // partial: tx -> applied-partial, progress -> apply-failed-partial

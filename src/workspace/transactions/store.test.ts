@@ -132,23 +132,24 @@ test('acquireTxLock serializes concurrent operations on the same txId', async ()
     // can win the race; what matters is that one critical section completes
     // entirely before the other starts.
     const order: string[] = [];
-    const work = (label: string, durationMs: number) =>
-      withTxLock(root, 'tx_lock', async () => {
-        order.push(`${label}-start`);
-        await new Promise((r) => setTimeout(r, durationMs));
-        order.push(`${label}-end`);
-      });
-    await Promise.all([work('a', 25), work('b', 5)]);
-    // Whichever side acquired first must have finished before the other started.
-    assert.equal(order.length, 4, 'both critical sections must run');
-    const [first0, first1, second0, second1] = order;
-    assert.ok(first0.endsWith('-start'));
-    assert.ok(first1.endsWith('-end'));
-    assert.equal(first0.split('-')[0], first1.split('-')[0], 'first holder must finish before second');
-    assert.ok(second0.endsWith('-start'));
-    assert.ok(second1.endsWith('-end'));
-    assert.equal(second0.split('-')[0], second1.split('-')[0], 'second holder must run as one block');
-    assert.notEqual(first0.split('-')[0], second0.split('-')[0], 'each holder runs once');
+    let aEnteredResolve!: () => void;
+    const aEntered = new Promise<void>((r) => { aEnteredResolve = r; });
+    const a = withTxLock(root, 'tx_lock', async () => {
+      order.push('a-start');
+      aEnteredResolve();
+      await new Promise((r) => setTimeout(r, 25));
+      order.push('a-end');
+    });
+    // Deterministic barrier: wait until `a` has actually acquired the lock and pushed
+    // 'a-start' before we even start `b`. This eliminates the setImmediate-yield race.
+    await aEntered;
+    const b = withTxLock(root, 'tx_lock', async () => {
+      order.push('b-start');
+      await new Promise((r) => setTimeout(r, 5));
+      order.push('b-end');
+    });
+    await Promise.all([a, b]);
+    assert.deepEqual(order, ['a-start', 'a-end', 'b-start', 'b-end']);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

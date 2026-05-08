@@ -127,3 +127,41 @@ test('runtimeEventToHeadless maps tx-aborted including appliedPartial when prese
     assert.equal(mapped.payload.appliedPartial?.restoreConfirmed, true);
   }
 });
+
+test('runtimeEventToHeadless honors event.code override on error variants', () => {
+  const mapped = runtimeEventToHeadless({
+    type: 'error',
+    stage: 'tool',
+    message: 'apply conflicted with external change',
+    code: 'tx-apply-conflict',
+    recoverable: true
+  });
+  assert.equal(mapped.type, 'error');
+  if (mapped.type === 'error') {
+    assert.equal(mapped.payload.code, 'tx-apply-conflict');
+    assert.equal(mapped.payload.recoverable, true);
+    assert.equal(mapped.payload.stage, 'tool');
+  }
+});
+
+test('runtimeEventToHeadless maps tx-apply-partial as not recoverable', () => {
+  const mapped = runtimeEventToHeadless({
+    type: 'error',
+    stage: 'tool',
+    message: 'mid-stage external change',
+    code: 'tx-apply-partial',
+    recoverable: false
+  });
+  if (mapped.type === 'error') {
+    assert.equal(mapped.payload.code, 'tx-apply-partial');
+    assert.equal(mapped.payload.recoverable, false);
+  }
+});
+
+test('runtimeEventToHeadless preserves existing default for plain errors without code/recoverable', () => {
+  const mapped = runtimeEventToHeadless({ type: 'error', stage: 'model', message: 'boom' });
+  if (mapped.type === 'error') {
+    assert.equal(mapped.payload.code, 'model-error');
+    assert.equal(mapped.payload.recoverable, false);
+  }
+});

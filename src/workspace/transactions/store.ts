@@ -14,7 +14,10 @@ export function makeTxId(now = Date.now()): string {
     .map((b) => b.toString(2).padStart(8, '0'))
     .join('')
     .slice(0, 80);
-  const bits = time + rand;
+  // 26 Crockford characters encode 26*5=130 bits, but time+rand only provides
+  // 48+80=128 bits. Pad to 130 so the final character receives 5 random bits
+  // of entropy rather than only 3 effective bits.
+  const bits = (time + rand).padEnd(130, '0');
   let out = 'tx_';
   for (let i = 0; i < 26; i++) {
     out += CROCKFORD[parseInt(bits.slice(i * 5, i * 5 + 5), 2)];
@@ -108,11 +111,19 @@ export async function readTxState(root: string, txId: string): Promise<Transacti
   }
 }
 
-export async function writeTxState(root: string, tx: Transaction): Promise<void> {
-  await fs.mkdir(txDir(root, tx.id), { recursive: true });
-  const target = stateJsonPath(root, tx.id);
+/**
+ * Atomic JSON write helper used by every tx-store state file. Writes the JSON
+ * to `${target}.tmp`, fsyncs the tmp file, renames it onto `target`, then
+ * fsyncs the parent directory so the rename itself is durable across crashes.
+ *
+ * fsync of a directory is supported on POSIX (Linux/macOS) but not Windows;
+ * the catch tolerates EISDIR/EPERM/ENOTSUP returned there.
+ */
+async function atomicWriteJsonAndFsyncDir(target: string, data: unknown): Promise<void> {
+  const dir = path.dirname(target);
   const tmp = `${target}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(tx, null, 2), 'utf8');
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
   const fh = await fs.open(tmp, 'r+');
   try {
     await fh.sync();
@@ -120,6 +131,24 @@ export async function writeTxState(root: string, tx: Transaction): Promise<void>
     await fh.close();
   }
   await fs.rename(tmp, target);
+  // Fsync the parent dir so the rename is persisted; without this, a crash
+  // immediately after rename can lose the directory entry on some filesystems.
+  try {
+    const dh = await fs.open(dir, 'r');
+    try {
+      await dh.sync();
+    } finally {
+      await dh.close();
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'EISDIR' && code !== 'EPERM' && code !== 'ENOTSUP') throw err;
+  }
+}
+
+export async function writeTxState(root: string, tx: Transaction): Promise<void> {
+  await fs.mkdir(txDir(root, tx.id), { recursive: true });
+  await atomicWriteJsonAndFsyncDir(stateJsonPath(root, tx.id), tx);
 }
 
 export async function readApplyProgress(root: string, txId: string): Promise<ApplyProgress | null> {
@@ -134,16 +163,7 @@ export async function readApplyProgress(root: string, txId: string): Promise<App
 
 export async function writeApplyProgress(root: string, txId: string, progress: ApplyProgress): Promise<void> {
   await fs.mkdir(txDir(root, txId), { recursive: true });
-  const target = applyProgressPath(root, txId);
-  const tmp = `${target}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(progress, null, 2), 'utf8');
-  const fh = await fs.open(tmp, 'r+');
-  try {
-    await fh.sync();
-  } finally {
-    await fh.close();
-  }
-  await fs.rename(tmp, target);
+  await atomicWriteJsonAndFsyncDir(applyProgressPath(root, txId), progress);
 }
 
 export async function deleteApplyProgress(root: string, txId: string): Promise<void> {
@@ -166,16 +186,7 @@ export async function readAbortProgress(root: string, txId: string): Promise<Abo
 
 export async function writeAbortProgress(root: string, txId: string, progress: AbortProgress): Promise<void> {
   await fs.mkdir(txDir(root, txId), { recursive: true });
-  const target = abortProgressPath(root, txId);
-  const tmp = `${target}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(progress, null, 2), 'utf8');
-  const fh = await fs.open(tmp, 'r+');
-  try {
-    await fh.sync();
-  } finally {
-    await fh.close();
-  }
-  await fs.rename(tmp, target);
+  await atomicWriteJsonAndFsyncDir(abortProgressPath(root, txId), progress);
 }
 
 export async function deleteAbortProgress(root: string, txId: string): Promise<void> {
@@ -198,20 +209,18 @@ export async function readDiff(root: string, txId: string): Promise<Diff | null>
 
 export async function writeDiff(root: string, txId: string, diff: Diff): Promise<void> {
   await fs.mkdir(txDir(root, txId), { recursive: true });
-  const target = diffJsonPath(root, txId);
-  const tmp = `${target}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(diff, null, 2), 'utf8');
-  const fh = await fs.open(tmp, 'r+');
+  await atomicWriteJsonAndFsyncDir(diffJsonPath(root, txId), diff);
+}
+
+export async function appendAudit(root: string, txId: string, entry: AuditEntry): Promise<void> {
+  const target = auditJsonPath(root, txId);
+  const fh = await fs.open(target, 'a');
   try {
+    await fh.write(JSON.stringify(entry) + '\n', null, 'utf8');
     await fh.sync();
   } finally {
     await fh.close();
   }
-  await fs.rename(tmp, target);
-}
-
-export async function appendAudit(root: string, txId: string, entry: AuditEntry): Promise<void> {
-  await fs.appendFile(auditJsonPath(root, txId), JSON.stringify(entry) + '\n', 'utf8');
 }
 
 export async function readAudit(root: string, txId: string): Promise<AuditEntry[]> {

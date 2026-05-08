@@ -12,12 +12,28 @@ import {
   abortTx,
   getTxStatus,
   listTx,
+  getActiveTx,
+  finalizeTx,
+  validateTx,
+  approveTx,
+  recoverAtStart,
   type CoordinatorContext
 } from './coordinator.js';
 import { createSession, mutateSession } from '../../session/store.js';
 import type { Session } from '../../session/types.js';
 import { openRecordId } from './types.js';
-import { resolveTxRoot, writeTxState, writeDiff, readTxState } from './store.js';
+import {
+  resolveTxRoot,
+  writeTxState,
+  writeDiff,
+  readTxState,
+  readDiff,
+  overlayDir,
+  writeApplyProgress,
+  createTx
+} from './store.js';
+import { createOverlayWriter } from './overlay.js';
+import type { TxValidatorsConfig, TxStagedViewConfig } from '../config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -179,5 +195,203 @@ test('coordinator.abortTx happy path: tx in approved state aborts cleanly', asyn
     }
     const recs = session.records.filter((r) => r.kind === 'tx-aborted');
     assert.equal(recs.length, 1);
+  });
+});
+
+test('getActiveTx returns null when session.activeTxId is undefined', async () => {
+  await withCoordinatorEnv(async ({ ctx }) => {
+    ctx.session.activeTxId = undefined;
+    const tx = await getActiveTx(ctx);
+    assert.equal(tx, null);
+  });
+});
+
+test('getActiveTx returns the Transaction for session.activeTxId', async () => {
+  await withCoordinatorEnv(async ({ ctx }) => {
+    const created = await openTx(ctx, { explicit: false });
+    const got = await getActiveTx(ctx);
+    assert.ok(got);
+    assert.equal(got?.id, created.id);
+  });
+});
+
+test('getActiveTx returns null when activeTxId points to a missing tx (defensive)', async () => {
+  await withCoordinatorEnv(async ({ ctx }) => {
+    ctx.session.activeTxId = 'tx_does_not_exist';
+    const tx = await getActiveTx(ctx);
+    assert.equal(tx, null);
+  });
+});
+
+test('finalizeTx writes diff.json, sets diffSummary, transitions state to finalized', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    // Stage an overlay edit to simulate runner-driven write.
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+
+    const result = await finalizeTx(ctx, tx.id);
+    assert.equal(result.diffSummary.filesChanged, 1);
+    assert.deepEqual(result.diffSummary.modifies, ['a.txt']);
+
+    const diff = await readDiff(root, tx.id);
+    assert.ok(diff);
+    assert.equal(diff?.files.length, 1);
+
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'finalized');
+    assert.equal(after?.diffSummary?.filesChanged, 1);
+  });
+});
+
+test('finalizeTx with empty overlay produces zero-file diff', async () => {
+  await withCoordinatorEnv(async ({ ctx, home }) => {
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const result = await finalizeTx(ctx, tx.id);
+    assert.equal(result.diffSummary.filesChanged, 0);
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'finalized');
+  });
+});
+
+test('validateTx runs validators on staged view, persists results, transitions state to validated', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+    await finalizeTx(ctx, tx.id);
+
+    const validatorsConfig: TxValidatorsConfig = { disabled: ['builtin:index-clean', 'builtin:size-limit'] }; // only diff-sanity
+    const stagedViewConfig: TxStagedViewConfig = { copyMode: 'copy', bindPaths: [] };
+    const result = await validateTx(ctx, tx.id, validatorsConfig, stagedViewConfig);
+    assert.equal(result.validators.length, 1);
+    assert.equal(result.validators[0].name, 'builtin:diff-sanity');
+    assert.deepEqual(result.blockingFailures, []); // diff-sanity passes on a clean modify
+
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'validated');
+    assert.equal(after?.validators?.length, 1);
+  });
+});
+
+test('validateTx flags blocking failures when a validator fails', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    // NUL byte triggers diff-sanity binary heuristic.
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+    await finalizeTx(ctx, tx.id);
+
+    const result = await validateTx(ctx, tx.id, { disabled: ['builtin:index-clean', 'builtin:size-limit'] }, { copyMode: 'copy', bindPaths: [] });
+    assert.deepEqual(result.blockingFailures, ['builtin:diff-sanity']);
+
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'validated');
+    assert.deepEqual(after?.blockingFailures, ['builtin:diff-sanity']);
+  });
+});
+
+test('approveTx transitions state to approved when no blocking failures', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+    await finalizeTx(ctx, tx.id);
+    await validateTx(ctx, tx.id, { disabled: ['builtin:index-clean', 'builtin:size-limit'] }, { copyMode: 'copy', bindPaths: [] });
+
+    const result = await approveTx(ctx, tx.id, {});
+    assert.equal(result.ok, true);
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'approved');
+  });
+});
+
+test('approveTx blocks on uncovered blocking failures and returns the list', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+    await finalizeTx(ctx, tx.id);
+    await validateTx(ctx, tx.id, { disabled: ['builtin:index-clean', 'builtin:size-limit'] }, { copyMode: 'copy', bindPaths: [] });
+
+    const result = await approveTx(ctx, tx.id, {});
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.deepEqual(result.uncoveredFailures, ['builtin:diff-sanity']);
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'validated'); // unchanged
+  });
+});
+
+test('approveTx allows transition when all failures are covered by overrides', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+    await finalizeTx(ctx, tx.id);
+    await validateTx(ctx, tx.id, { disabled: ['builtin:index-clean', 'builtin:size-limit'] }, { copyMode: 'copy', bindPaths: [] });
+
+    const result = await approveTx(ctx, tx.id, { overrides: ['builtin:diff-sanity'], reason: 'bin file is intentional' });
+    assert.equal(result.ok, true);
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'approved');
+    assert.equal(after?.overridesApplied?.length, 1);
+    assert.equal(after?.overridesApplied?.[0].validatorName, 'builtin:diff-sanity');
+  });
+});
+
+test('approveTx with overrideAll covers every blocking failure', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+    await finalizeTx(ctx, tx.id);
+    await validateTx(ctx, tx.id, { disabled: ['builtin:index-clean', 'builtin:size-limit'] }, { copyMode: 'copy', bindPaths: [] });
+
+    const result = await approveTx(ctx, tx.id, { overrideAll: true, reason: 'mass override' });
+    assert.equal(result.ok, true);
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'approved');
+  });
+});
+
+test('recoverAtStart processes own-session orphans and skips cross-session', async () => {
+  await withCoordinatorEnv(async ({ ctx, home }) => {
+    const root = resolveTxRoot(home);
+    // Own-session orphan in apply-pending state with state=approved.
+    const own = await createTx(root, { id: 'tx_own', kind: 'edit', workspaceId: ctx.workspaceId, sessionId: ctx.session.id, workspaceRealPath: ctx.workspaceRealPath });
+    await writeTxState(root, { ...own, state: 'approved' });
+    await writeApplyProgress(root, 'tx_own', { phase: 'apply-pending', ghostSnapshotId: 'snap', startedAt: 'x', filesPlanned: ['a.txt'], filesWritten: [] });
+    // Cross-session orphan in apply-pending with a different sessionId.
+    const cross = await createTx(root, { id: 'tx_cross', kind: 'edit', workspaceId: 'w', sessionId: 'other_session_id', workspaceRealPath: ctx.workspaceRealPath });
+    await writeTxState(root, { ...cross, state: 'approved' });
+    await writeApplyProgress(root, 'tx_cross', { phase: 'apply-pending', ghostSnapshotId: 'snap', startedAt: 'x', filesPlanned: ['b.txt'], filesWritten: [] });
+
+    const result = await recoverAtStart(ctx);
+    assert.equal(result.recovered.length, 1);
+    assert.equal(result.recovered[0].txId, 'tx_own');
+    assert.deepEqual(result.crossSessionSkipped, ['tx_cross']);
+  });
+});
+
+test('recoverAtStart returns empty results when no orphans exist', async () => {
+  await withCoordinatorEnv(async ({ ctx }) => {
+    const result = await recoverAtStart(ctx);
+    assert.deepEqual(result.recovered, []);
+    assert.deepEqual(result.crossSessionSkipped, []);
   });
 });

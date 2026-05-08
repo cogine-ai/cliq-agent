@@ -17,21 +17,22 @@ export async function runValidators(opts: {
   };
   async function runOne(v: Validator): Promise<ValidatorResult> {
     const start = Date.now();
+    let result: ValidatorResult;
     try {
-      const result = await v.run(ctx);
-      if (opts.onResult) await opts.onResult(result);
-      return result;
+      result = await v.run(ctx);
     } catch (err) {
-      const result: ValidatorResult = {
+      result = {
         name: v.name,
         severity: v.defaultSeverity,
         status: 'error',
         durationMs: Date.now() - start,
         message: err instanceof Error ? err.message : String(err)
       };
-      if (opts.onResult) await opts.onResult(result);
-      return result;
     }
+    // onResult failures bubble up; they are the caller's bug rather than a
+    // validator failure, so we must not silently downgrade them to status='error'.
+    if (opts.onResult) await opts.onResult(result);
+    return result;
   }
   if (opts.serial) {
     const results: ValidatorResult[] = [];

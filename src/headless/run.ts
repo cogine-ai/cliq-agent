@@ -1,4 +1,4 @@
-import { stat } from 'node:fs/promises';
+import { stat, realpath } from 'node:fs/promises';
 
 import { DEFAULT_POLICY_MODE } from '../config.js';
 import { resolveModelConfig } from '../model/config.js';
@@ -10,8 +10,10 @@ import type { PolicyConfirm, PolicyMode } from '../policy/types.js';
 import { createRuntimeAssembly } from '../runtime/assembly.js';
 import type { RuntimeHook } from '../runtime/hooks.js';
 import { createRunner } from '../runtime/runner.js';
-import { ensureFresh, ensureSession, makeId } from '../session/store.js';
+import type { TxRunnerOptions } from '../runtime/tx-runner.js';
+import { ensureFresh, ensureSession, makeId, resolveCliqHome, workspaceIdFromRealPath } from '../session/store.js';
 import type { Session } from '../session/types.js';
+import { recoverAtStart, type CoordinatorContext } from '../workspace/transactions/coordinator.js';
 import {
   emptyHeadlessArtifacts,
   HEADLESS_EXIT_CANCELLED,
@@ -229,6 +231,60 @@ export async function runHeadless(
       )
     );
 
+    // §A.6: build CoordinatorContext, run crash recovery before constructing
+    // the runner so cross-session orphans get filtered and own-session orphans
+    // converge before the new turn starts.
+    const cliqHome = resolveCliqHome();
+    let workspaceRealPath = request.cwd;
+    try {
+      workspaceRealPath = await realpath(request.cwd);
+    } catch {
+      // fall back to cwd verbatim
+    }
+    const coordinatorCtx: CoordinatorContext = {
+      cwd: request.cwd,
+      session,
+      cliqHome,
+      workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+      sessionId: session.id,
+      workspaceRealPath
+    };
+
+    const recoveryResult = await recoverAtStart(coordinatorCtx);
+    for (const skippedTxId of recoveryResult.crossSessionSkipped) {
+      await emit(
+        createEvent(
+          'error',
+          {
+            code: 'tx-overlay-error',
+            stage: 'tool',
+            message: `recovery skipped cross-session orphan ${skippedTxId}`,
+            recoverable: true
+          },
+          { sessionId: session.id, turn: runScope.intendedTurn }
+        )
+      );
+    }
+
+    // Build TxRunnerOptions when transactions mode is active.
+    const txMode = request.txMode ?? workspaceConfig.transactions?.mode ?? 'off';
+    let transactions: TxRunnerOptions | undefined;
+    if (txMode === 'edit') {
+      const applyPolicy = request.txApply ?? workspaceConfig.transactions?.applyPolicy ?? 'auto-on-pass';
+      transactions = {
+        mode: 'edit',
+        auto: workspaceConfig.transactions?.auto ?? 'per-turn',
+        applyPolicy,
+        bashPolicy: workspaceConfig.transactions?.bashPolicy ?? 'passthrough',
+        headless: true,
+        validatorsConfig: workspaceConfig.transactions?.validators ?? {},
+        stagedViewConfig: workspaceConfig.transactions?.stagedView ?? { copyMode: 'auto', bindPaths: ['node_modules'] },
+        workspaceId: coordinatorCtx.workspaceId,
+        workspaceRealPath: coordinatorCtx.workspaceRealPath,
+        cliqHome
+      };
+    }
+
     const modelClient = options.modelClient ?? options.createModelClient?.(modelConfig) ?? createModelClient(modelConfig);
     const runner = createRunner({
       model: modelClient,
@@ -240,6 +296,7 @@ export async function runHeadless(
         config: workspaceConfig.autoCompact,
         modelConfig
       },
+      ...(transactions ? { transactions } : {}),
       async onEvent(runtimeEvent) {
         const mapped = runtimeEventToHeadless(runtimeEvent);
         if (mapped.type === 'error') {

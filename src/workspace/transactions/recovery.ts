@@ -71,29 +71,39 @@ export async function scanForRecovery(root: string): Promise<RecoveryAction[]> {
     const tx = await readTxState(root, txId);
     if (!tx) continue;
 
-    // Apply-progress wins if present and non-terminal.
+    // Apply-progress wins if present and non-terminal -- but we still fall
+    // through to check abort-progress afterwards. Otherwise, a tx that landed
+    // in apply-failed-partial *and* was then sent through `cliq tx abort
+    // --restore-confirmed`/`--keep-partial` could end up with both an
+    // apply-progress (terminal) and an abort-progress (non-terminal). If we
+    // `continue`d here, the abort would never be picked up by recovery.
     const applyProgress = await readApplyProgress(root, txId);
     if (applyProgress) {
-      if (applyProgress.phase === 'apply-failed-partial') {
-        // Terminal — user must run `cliq tx abort` with the appropriate
-        // --restore-confirmed/--keep-partial flag. Skip.
-        continue;
-      }
       if (
         applyProgress.phase === 'apply-pending' ||
         applyProgress.phase === 'apply-writing' ||
         applyProgress.phase === 'apply-committed' ||
         applyProgress.phase === 'apply-finalized'
       ) {
-        actions.push({
-          txId,
-          tx,
-          kind: 'apply',
-          phase: applyProgress.phase,
-          progress: applyProgress
-        });
-        continue;
+        // apply-finalized + tx.state==='applied' is the post-Stage-C terminal
+        // state. The four-marker invariant has already converged, so there is
+        // nothing for recovery to do; we still fall through to the abort
+        // check defensively in case both progress files coexist.
+        if (!(applyProgress.phase === 'apply-finalized' && tx.state === 'applied')) {
+          actions.push({
+            txId,
+            tx,
+            kind: 'apply',
+            phase: applyProgress.phase,
+            progress: applyProgress
+          });
+        }
       }
+      // applyProgress.phase === 'apply-failed-partial' is terminal: the user
+      // must run `cliq tx abort` with --restore-confirmed/--keep-partial.
+      // Don't enqueue an apply action, but DO fall through to the
+      // abort-progress check below in case the user's abort crashed
+      // mid-protocol.
     }
 
     // Abort-progress in non-terminal phase, or aborted-but-state-not-yet-aborted.
@@ -282,12 +292,23 @@ export async function recoverAbort(
     // Re-run AB1..AB7 via the abort protocol. Both helpers manage their own
     // locks; AB3b's four-marker idempotency check ensures convergence is
     // detected as a no-op rather than re-doing work.
+    //
+    // For applied-partial transactions, AB0a (and the AB3a.5 under-lock
+    // recheck) requires --restore-confirmed/--keep-partial. The original
+    // operator-supplied flag is recoverable from the persisted
+    // abort-progress.reason: 'apply-failed-partial-restored' implies
+    // restoreConfirmed=true and 'apply-failed-partial-kept' implies
+    // keepPartial=true. Reconstruct them so AB0a doesn't reject the resume.
+    const restoreConfirmed = action.progress.reason === 'apply-failed-partial-restored' ? true : undefined;
+    const keepPartial = action.progress.reason === 'apply-failed-partial-kept' ? true : undefined;
     const decision = await decideAbort({
       root,
       txId: action.txId,
       cwd: ctx.cwd,
       session: ctx.session,
-      reason: action.progress.reason
+      reason: action.progress.reason,
+      restoreConfirmed,
+      keepPartial
     });
     if (!decision) {
       // Already converged.

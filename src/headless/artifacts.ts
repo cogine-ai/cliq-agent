@@ -142,7 +142,7 @@ export function toSessionRecordView(record: SessionRecord): SessionRecordView {
         role: 'user',
         txId: record.meta.txId,
         ...(record.meta.name ? { name: record.meta.name } : {}),
-        explicit: true
+        explicit: record.meta.explicit
       };
     case 'tx-applied':
       return {
