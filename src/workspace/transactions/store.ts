@@ -13,7 +13,10 @@ export function makeTxId(now = Date.now()): string {
     .map((b) => b.toString(2).padStart(8, '0'))
     .join('')
     .slice(0, 80);
-  const bits = time + rand;
+  // 26 Crockford characters encode 26*5=130 bits, but time+rand only provides
+  // 48+80=128 bits. Pad to 130 so the final character receives 5 random bits
+  // of entropy rather than only 3 effective bits.
+  const bits = (time + rand).padEnd(130, '0');
   let out = 'tx_';
   for (let i = 0; i < 26; i++) {
     out += CROCKFORD[parseInt(bits.slice(i * 5, i * 5 + 5), 2)];
