@@ -17,7 +17,14 @@ export const diffSanity: Validator = {
       if (entry.op !== 'modify') {
         findings.push({ path: entry.path, message: `op=${entry.op} not allowed in v0.8` });
       }
-      if (entry.path.includes('..') || path.isAbsolute(entry.path)) {
+      // Use path.normalize so paths like 'folder..name' (legitimate file with
+      // two consecutive dots in the middle of a name) do not trigger a false
+      // positive. After normalization, a real escape leaves '..' as its own
+      // path segment.
+      const normalized = path.normalize(entry.path);
+      const isAbsolute = path.isAbsolute(normalized);
+      const isOutsideWorkspace = normalized.split(path.sep).includes('..');
+      if (isOutsideWorkspace || isAbsolute) {
         findings.push({ path: entry.path, message: 'path escapes workspace' });
       }
       const text = (entry.oldContent ?? '') + (entry.newContent ?? '');
