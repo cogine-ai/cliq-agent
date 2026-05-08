@@ -40,6 +40,16 @@ async function walk(root: string, prefix: string, visit: (rel: string) => Promis
   }
 }
 
+/**
+ * Compute a coarse summary of a Diff.
+ *
+ * NOTE: `additions` and `deletions` are computed from line-count deltas
+ * (max(0, newLines.length - oldLines.length) and max(0, oldLines.length -
+ * newLines.length)). This is an approximation — a full-line replacement is
+ * reported as 0 additions and 0 deletions. Use a real LCS-based diff if
+ * exact line-level change counts are required; the schema (DiffSummary)
+ * accommodates either implementation without breaking consumers.
+ */
 export function summarizeDiff(diff: Diff): DiffSummary {
   const summary: DiffSummary = {
     filesChanged: diff.files.length,
