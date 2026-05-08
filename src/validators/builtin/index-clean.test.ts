@@ -56,3 +56,24 @@ test('index-clean returns pass with skip message when not a git repo', async () 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('index-clean preserves spaces in staged paths (porcelain v2 parsing)', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-spaces-'));
+  try {
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: dir });
+    await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+    await execFileAsync('git', ['config', 'user.name', 't'], { cwd: dir });
+    const fileName = 'name with spaces.txt';
+    await writeFile(path.join(dir, fileName), 'a', 'utf8');
+    await execFileAsync('git', ['add', '--', fileName], { cwd: dir });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: dir });
+    await writeFile(path.join(dir, fileName), 'b', 'utf8');
+    await execFileAsync('git', ['add', '--', fileName], { cwd: dir });
+    const result = await indexClean.run(ctx(dir));
+    assert.equal(result.status, 'fail');
+    assert.ok(result.findings && result.findings.length > 0);
+    assert.equal(result.findings![0].path, fileName);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

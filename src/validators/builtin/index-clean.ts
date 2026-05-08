@@ -25,20 +25,27 @@ export const indexClean: Validator = {
     for (const line of stdout.split('\n')) {
       if (!line) continue;
       if (line.startsWith('1 ')) {
-        // 1 XY sub mH mI mW hH hI path
+        // Porcelain v2: `1 XY sub mH mI mW hH hI path`. Path is the trailing
+        // field and may contain spaces, so we count the eight whitespace
+        // separators rather than splitting and taking the tail.
         const xy = line.slice(2, 4);
         if (xy[0] !== '.') {
-          const fields = line.split(' ');
-          const p = fields[fields.length - 1];
+          const idx = nthSpaceIndex(line, 8);
+          if (idx === -1) continue;
+          const p = line.slice(idx + 1);
           findings.push({ path: p, message: `staged: ${xy}` });
         }
       } else if (line.startsWith('2 ')) {
+        // Porcelain v2 rename/copy: `2 XY sub mH mI mW hH hI X<score> path\torigPath`.
+        // Nine whitespace separators precede the path; the path itself may
+        // contain spaces, and `\t` separates the new path from the original.
         const xy = line.slice(2, 4);
         if (xy[0] !== '.') {
-          const fields = line.split(' ');
-          // For renames: ... origPath\tnewPath; the path field contains a tab
-          const last = fields[fields.length - 1];
-          findings.push({ path: last.split('\t')[0], message: `staged rename: ${xy}` });
+          const idx = nthSpaceIndex(line, 9);
+          if (idx === -1) continue;
+          const tail = line.slice(idx + 1);
+          const newPath = tail.split('\t')[0];
+          findings.push({ path: newPath, message: `staged rename: ${xy}` });
         }
       }
     }
@@ -51,3 +58,14 @@ export const indexClean: Validator = {
     };
   }
 };
+
+function nthSpaceIndex(s: string, n: number): number {
+  let count = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === ' ') {
+      count++;
+      if (count === n) return i;
+    }
+  }
+  return -1;
+}
