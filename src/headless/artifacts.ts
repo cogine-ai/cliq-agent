@@ -1,3 +1,5 @@
+import { promises as fs } from 'node:fs';
+
 import { readHandoffArtifact } from '../handoff/export.js';
 import { getWorkspaceCheckpoint } from '../session/checkpoints.js';
 import { loadActiveSession, loadSessionById } from '../session/store.js';
@@ -291,8 +293,17 @@ function sessionNotFound(sessionId: string): never {
   throw new SessionNotFoundError(sessionId);
 }
 
-function isMissingWorkspaceError(error: unknown) {
+function isEnoentError(error: unknown) {
   return !!error && typeof error === 'object' && (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+async function workspaceDirectoryExists(cwd: string): Promise<boolean> {
+  try {
+    const stats = await fs.stat(cwd);
+    return stats.isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 async function sessionForView(cwd: string, sessionId?: string): Promise<Session> {
@@ -303,7 +314,11 @@ async function sessionForView(cwd: string, sessionId?: string): Promise<Session>
 
     return (await loadSessionById(cwd, sessionId)) ?? sessionNotFound(sessionId);
   } catch (error) {
-    if (isMissingWorkspaceError(error)) {
+    // Only translate ENOENT to WorkspaceNotFoundError when the workspace
+    // directory itself is missing. ENOENT from a missing session/index file
+    // (or any other inner path) is rethrown so callers can surface the
+    // specific failure instead of being told the workspace is gone.
+    if (isEnoentError(error) && !(await workspaceDirectoryExists(cwd))) {
       throw new WorkspaceNotFoundError(cwd);
     }
     throw error;
