@@ -292,12 +292,23 @@ export async function recoverAbort(
     // Re-run AB1..AB7 via the abort protocol. Both helpers manage their own
     // locks; AB3b's four-marker idempotency check ensures convergence is
     // detected as a no-op rather than re-doing work.
+    //
+    // For applied-partial transactions, AB0a (and the AB3a.5 under-lock
+    // recheck) requires --restore-confirmed/--keep-partial. The original
+    // operator-supplied flag is recoverable from the persisted
+    // abort-progress.reason: 'apply-failed-partial-restored' implies
+    // restoreConfirmed=true and 'apply-failed-partial-kept' implies
+    // keepPartial=true. Reconstruct them so AB0a doesn't reject the resume.
+    const restoreConfirmed = action.progress.reason === 'apply-failed-partial-restored' ? true : undefined;
+    const keepPartial = action.progress.reason === 'apply-failed-partial-kept' ? true : undefined;
     const decision = await decideAbort({
       root,
       txId: action.txId,
       cwd: ctx.cwd,
       session: ctx.session,
-      reason: action.progress.reason
+      reason: action.progress.reason,
+      restoreConfirmed,
+      keepPartial
     });
     if (!decision) {
       // Already converged.
