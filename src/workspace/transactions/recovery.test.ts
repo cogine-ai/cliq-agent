@@ -157,6 +157,33 @@ test('scanForRecovery skips apply-failed-partial (terminal — user must abort)'
   });
 });
 
+test('scanForRecovery picks up abort-progress even when apply-failed-partial coexists', async () => {
+  // User ran `cliq tx abort --restore-confirmed` against an applied-partial tx.
+  // The abort wrote abort-progress=aborting and then crashed before completing
+  // the protocol. Recovery must see the abort action despite the terminal
+  // apply-progress; otherwise the abort is permanently stuck.
+  await withFakeHome(async (root) => {
+    await makeTx(root, 'tx_partial_aborting', 'applied-partial');
+    await writeApplyProgress(root, 'tx_partial_aborting', {
+      phase: 'apply-failed-partial',
+      ghostSnapshotId: 'snap_x',
+      startedAt: 'x',
+      filesPlanned: ['a.txt', 'b.txt'],
+      filesWritten: ['a.txt']
+    });
+    await writeAbortProgress(root, 'tx_partial_aborting', {
+      phase: 'aborting',
+      reason: 'apply-failed-partial-restored',
+      startedAt: 'y',
+      ts: 'y'
+    });
+    const actions = await scanForRecovery(root);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0].kind, 'abort');
+    assert.equal(actions[0].phase, 'aborting');
+  });
+});
+
 test('scanForRecovery ignores entries that are not tx_-prefixed directories', async () => {
   await withFakeHome(async (root) => {
     await mkdir(path.join(root, 'not_a_tx'), { recursive: true });

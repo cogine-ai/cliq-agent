@@ -71,14 +71,14 @@ export async function scanForRecovery(root: string): Promise<RecoveryAction[]> {
     const tx = await readTxState(root, txId);
     if (!tx) continue;
 
-    // Apply-progress wins if present and non-terminal.
+    // Apply-progress wins if present and non-terminal -- but we still fall
+    // through to check abort-progress afterwards. Otherwise, a tx that landed
+    // in apply-failed-partial *and* was then sent through `cliq tx abort
+    // --restore-confirmed`/`--keep-partial` could end up with both an
+    // apply-progress (terminal) and an abort-progress (non-terminal). If we
+    // `continue`d here, the abort would never be picked up by recovery.
     const applyProgress = await readApplyProgress(root, txId);
     if (applyProgress) {
-      if (applyProgress.phase === 'apply-failed-partial') {
-        // Terminal — user must run `cliq tx abort` with the appropriate
-        // --restore-confirmed/--keep-partial flag. Skip.
-        continue;
-      }
       if (
         applyProgress.phase === 'apply-pending' ||
         applyProgress.phase === 'apply-writing' ||
@@ -87,20 +87,23 @@ export async function scanForRecovery(root: string): Promise<RecoveryAction[]> {
       ) {
         // apply-finalized + tx.state==='applied' is the post-Stage-C terminal
         // state. The four-marker invariant has already converged, so there is
-        // nothing for recovery to do; re-enqueueing would trigger a no-op
-        // recovery loop on every startup.
-        if (applyProgress.phase === 'apply-finalized' && tx.state === 'applied') {
-          continue;
+        // nothing for recovery to do; we still fall through to the abort
+        // check defensively in case both progress files coexist.
+        if (!(applyProgress.phase === 'apply-finalized' && tx.state === 'applied')) {
+          actions.push({
+            txId,
+            tx,
+            kind: 'apply',
+            phase: applyProgress.phase,
+            progress: applyProgress
+          });
         }
-        actions.push({
-          txId,
-          tx,
-          kind: 'apply',
-          phase: applyProgress.phase,
-          progress: applyProgress
-        });
-        continue;
       }
+      // applyProgress.phase === 'apply-failed-partial' is terminal: the user
+      // must run `cliq tx abort` with --restore-confirmed/--keep-partial.
+      // Don't enqueue an apply action, but DO fall through to the
+      // abort-progress check below in case the user's abort crashed
+      // mid-protocol.
     }
 
     // Abort-progress in non-terminal phase, or aborted-but-state-not-yet-aborted.
