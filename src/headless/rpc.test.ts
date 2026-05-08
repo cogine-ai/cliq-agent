@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
+import { ArtifactNotFoundError, SessionNotFoundError } from './artifacts.js';
 import type { HeadlessRunOutput, HeadlessRunRequest, RuntimeEventEnvelope } from './contract.js';
 import {
   HEADLESS_EXIT_CANCELLED,
@@ -617,7 +621,7 @@ test('rpc query methods map missing artifacts to application errors', async () =
       writes.push(line);
     },
     async getArtifactView() {
-      throw new Error('artifact not found: cmp_missing');
+      throw new ArtifactNotFoundError('cmp_missing', 'artifact lookup missed');
     }
   });
 
@@ -632,7 +636,7 @@ test('rpc query methods map missing artifacts to application errors', async () =
 
   const [response] = parseLines(writes);
   assert.equal(response.error.code, -32004);
-  assert.match(response.error.message, /artifact not found/);
+  assert.equal(response.error.message, 'artifact lookup missed');
 });
 
 test('rpc query methods reject empty identifiers as invalid params', async () => {
@@ -716,7 +720,7 @@ test('rpc query methods map missing sessions to application errors', async () =>
       writes.push(line);
     },
     async getSessionView() {
-      throw new Error('session not found: sess_missing');
+      throw new SessionNotFoundError('sess_missing', 'session lookup missed');
     }
   });
 
@@ -731,7 +735,35 @@ test('rpc query methods map missing sessions to application errors', async () =>
 
   const [response] = parseLines(writes);
   assert.equal(response.error.code, -32004);
-  assert.match(response.error.message, /session not found/);
+  assert.equal(response.error.message, 'session lookup missed');
+});
+
+test('rpc query methods map missing cwd to invalid params', async () => {
+  const writes: string[] = [];
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'cliq-rpc-missing-cwd-'));
+  const missingCwd = path.join(parent, 'missing-workspace');
+  const server = createRpcServer({
+    writeLine: (line) => {
+      writes.push(line);
+    }
+  });
+
+  try {
+    await server.handleLine(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'session.get',
+        params: { cwd: missingCwd }
+      })
+    );
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+
+  const [response] = parseLines(writes);
+  assert.equal(response.error.code, -32602);
+  assert.match(response.error.message, /workspace not found/);
 });
 
 test('rpc query dependency failures map to internal errors', async () => {
