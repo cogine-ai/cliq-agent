@@ -203,6 +203,38 @@ test('materializeStagedView refuses target equal to cwd', async () => {
   }
 });
 
+test('materializeStagedView walkOverlay skips entries whose ancestor is a bind-symlink (isolation defense)', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-symlink-cwd-'));
+  const overlay = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-symlink-ov-'));
+  const target = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-symlink-tg-'));
+  try {
+    // cwd has a node_modules dir — bind-mounted into target as a symlink.
+    await mkdir(path.join(cwd, 'node_modules', 'pkg'), { recursive: true });
+    await writeFile(path.join(cwd, 'node_modules', 'pkg', 'orig.js'), 'real', 'utf8');
+    // Overlay accidentally has an entry under node_modules. If walkOverlay
+    // wrote it through the symlink, it would land in real cwd/node_modules.
+    await mkdir(path.join(overlay, 'node_modules', 'pkg'), { recursive: true });
+    await writeFile(path.join(overlay, 'node_modules', 'pkg', 'leak.js'), 'overlay-leak', 'utf8');
+
+    await materializeStagedView({
+      cwd,
+      overlayRoot: overlay,
+      target,
+      bindPaths: ['node_modules'],
+      copyMode: 'copy'
+    });
+
+    // The leak file must not have been written into cwd's real node_modules.
+    await assert.rejects(() => readFile(path.join(cwd, 'node_modules', 'pkg', 'leak.js'), 'utf8'));
+    // And the original cwd file remains intact.
+    assert.equal(await readFile(path.join(cwd, 'node_modules', 'pkg', 'orig.js'), 'utf8'), 'real');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(overlay, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
 test('materializeStagedView refuses target nested inside cwd', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-target-in-cwd-'));
   const overlay = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-target-in-ov-'));

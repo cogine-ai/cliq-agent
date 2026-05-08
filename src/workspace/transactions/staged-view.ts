@@ -102,10 +102,38 @@ async function walkOverlay(overlayRoot: string, target: string): Promise<void> {
       }
       const overlayPath = path.join(overlayRoot, rel);
       const targetPath = path.join(target, rel);
+      // Defensive: if any ancestor of targetPath is a symlink (a bindPath
+      // pointing back into cwd), writing through it would land in the real
+      // workspace and break staged-view isolation. WorkspaceWriter does not
+      // emit overlay entries under bindPaths today, but the check guards
+      // against future drift.
+      if (await ancestorIsSymlink(target, rel)) {
+        continue;
+      }
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.copyFile(overlayPath, targetPath);
     }
   }
+}
+
+async function ancestorIsSymlink(root: string, rel: string): Promise<boolean> {
+  const segments = rel.split(path.sep);
+  // Walk root → root/seg0 → root/seg0/seg1 → ... up to but excluding the leaf.
+  // If any intermediate is a symlink, the write path crosses into something
+  // outside the staged-view target tree.
+  let current = root;
+  for (let i = 0; i < segments.length - 1; i++) {
+    current = path.join(current, segments[i]);
+    try {
+      const stat = await fs.lstat(current);
+      if (stat.isSymbolicLink()) return true;
+    } catch {
+      // ENOENT etc. — the ancestor doesn't exist yet, mkdir will create it
+      // as a regular directory below; not a symlink, safe to proceed.
+      return false;
+    }
+  }
+  return false;
 }
 
 export async function cleanupStagedView(target: string): Promise<void> {
