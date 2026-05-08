@@ -182,3 +182,44 @@ test('cleanupStagedView is idempotent on missing target', async () => {
   // Should not throw on missing path
   await cleanupStagedView(target);
 });
+
+test('materializeStagedView refuses target equal to cwd', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-target-eq-cwd-'));
+  const overlay = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-target-eq-ov-'));
+  try {
+    await assert.rejects(
+      materializeStagedView({
+        cwd,
+        overlayRoot: overlay,
+        target: cwd,
+        bindPaths: [],
+        copyMode: 'copy'
+      }),
+      /refusing to recursively copy/
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(overlay, { recursive: true, force: true });
+  }
+});
+
+test('materializeStagedView refuses target nested inside cwd', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-target-in-cwd-'));
+  const overlay = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-target-in-ov-'));
+  try {
+    const target = path.join(cwd, 'staged');
+    await assert.rejects(
+      materializeStagedView({
+        cwd,
+        overlayRoot: overlay,
+        target,
+        bindPaths: [],
+        copyMode: 'copy'
+      }),
+      /refusing to recursively copy/
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(overlay, { recursive: true, force: true });
+  }
+});

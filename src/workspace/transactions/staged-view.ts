@@ -18,6 +18,17 @@ export type StagedViewOptions = {
 };
 
 export async function materializeStagedView(opts: StagedViewOptions): Promise<{ usedCopyFallback: boolean }> {
+  // Refuse to materialize when target is cwd itself or a descendant. Otherwise
+  // walkAndMaterialize would re-enter the target tree it is currently writing,
+  // producing infinite recursion / unbounded copying. This is a safety net for
+  // misconfiguration; legitimate callers always point target outside cwd.
+  const cwdResolved = path.resolve(opts.cwd);
+  const targetResolved = path.resolve(opts.target);
+  if (targetResolved === cwdResolved || targetResolved.startsWith(cwdResolved + path.sep)) {
+    throw new Error(
+      `materializeStagedView: target ${opts.target} is inside cwd ${opts.cwd}; refusing to recursively copy`
+    );
+  }
   await fs.mkdir(opts.target, { recursive: true });
   const bindSet = new Set(opts.bindPaths);
   let usedCopyFallback = false;
