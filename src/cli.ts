@@ -50,7 +50,7 @@ const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'con
 const POLICY_MODE_LIST = POLICY_MODES.join(', ');
 const STREAMING_MODES = ['auto', 'on', 'off'] as const;
 const RESTORE_SCOPES = ['session', 'files', 'both'] as const;
-const HELP_TOPICS = ['checkpoint', 'compact', 'handoff'] as const;
+const HELP_TOPICS = ['checkpoint', 'compact', 'handoff', 'tx'] as const;
 const TX_MODES = ['off', 'edit'] as const;
 const TX_APPLY_POLICIES = ['interactive', 'auto-on-pass', 'manual-only'] as const;
 
@@ -188,10 +188,17 @@ function consumeRepeatable(args: string[], name: string): string[] {
 
 function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   const sub = args[1];
+  if (sub === 'help' || sub === '--help' || sub === '-h') {
+    ensureNoExtraArgs(args, 2, 'tx help');
+    return { ...base, cmd: 'help', topic: 'tx' };
+  }
   if (!sub) {
     throw new Error('cliq tx requires a subcommand (open, status, list, validate, approve, apply, abort)');
   }
   const rest = args.slice(2);
+  if (hasHelpFlag(rest)) {
+    return { ...base, cmd: 'help', topic: 'tx' };
+  }
   const json = consumeFlag(rest, '--json') || undefined;
   const headless = consumeFlag(rest, '--headless') || undefined;
 
@@ -994,6 +1001,31 @@ Notes:
 `);
 }
 
+function printTxHelp() {
+  console.log(`cliq tx - manage transactional workspace state
+
+Usage:
+  cliq tx open [name]               Open an explicit transaction
+  cliq tx status [<txId>]           Show transaction status, or list all when no id is provided
+  cliq tx list                      List all transactions in the workspace
+  cliq tx validate <txId>           Run validators against the transaction's staged view
+  cliq tx approve  <txId> [opts]    Approve a validated transaction
+  cliq tx apply    <txId> [opts]    Apply a transaction, chaining finalize -> validate -> approve -> apply as needed
+  cliq tx abort    <txId> [opts]    Abort a transaction
+  cliq tx help                      Print this help
+
+Options:
+  --json                            Print machine-readable JSON where supported
+  --headless                        Use headless output semantics where supported
+  --override <name>                 Override a blocking validator on approve/apply
+  --override-all                    Override all blocking validators on approve
+  --allow-validator-error <name>    Allow an advisory validator error on approve/apply
+  --reason "..."                    Record a reason on approve/apply/abort
+  --restore-confirmed               Confirm restoring real files when aborting an applied-partial tx
+  --keep-partial                    Keep partially applied file changes when aborting an applied-partial tx
+`);
+}
+
 export function printHelp(topic?: HelpTopic) {
   if (topic === 'checkpoint') {
     printCheckpointHelp();
@@ -1007,6 +1039,11 @@ export function printHelp(topic?: HelpTopic) {
 
   if (topic === 'handoff') {
     printHandoffHelp();
+    return;
+  }
+
+  if (topic === 'tx') {
+    printTxHelp();
     return;
   }
 
@@ -1029,11 +1066,12 @@ Usage:
   cliq compact create      Create a manual compaction summary
   cliq compact list        Print session compactions
   cliq handoff create      Export a handoff artifact
+  cliq tx help             Print transaction command help
   cliq checkpoint help     Print checkpoint command help
   cliq compact help        Print compact command help
   cliq handoff help        Print handoff command help
   cliq help                Print this help
-  cliq help TOPIC          Print help for checkpoint, compact, or handoff
+  cliq help TOPIC          Print help for checkpoint, compact, handoff, or tx
   -h, --help               Print this help
 
 Transaction subcommands:
