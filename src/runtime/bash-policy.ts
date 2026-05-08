@@ -39,7 +39,20 @@ export async function enforceBashPolicy(opts: EnforceBashPolicyOptions): Promise
           message: 'bashPolicy=confirm requires an interactive prompt callback'
         };
       }
-      const confirmed = await opts.confirm();
+      // The prompt callback may throw (closed stdin, broken pipe, user-supplied
+      // function bug). Convert any failure into a structured deny instead of
+      // letting the exception escape and bypass the BashPolicyDecision contract.
+      let confirmed = false;
+      try {
+        confirmed = await opts.confirm();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          decision: 'deny',
+          code: 'tx-overlay-error',
+          message: `bashPolicy=confirm prompt failed: ${message}; promoted to deny`
+        };
+      }
       if (confirmed) return { decision: 'allow' };
       return {
         decision: 'deny',
@@ -69,8 +82,12 @@ async function walk(root: string, prefix: string, out: MtimeMap, ignore: Set<str
   let entries: Dirent[];
   try {
     entries = (await fs.readdir(path.join(root, prefix), { withFileTypes: true })) as Dirent[];
-  } catch {
-    return;
+  } catch (err) {
+    // Only swallow ENOENT (directory disappeared between snapshot calls).
+    // Permission, I/O, and other errors must surface so an incomplete snapshot
+    // is never silently used as the "before" of a BashEffect diff.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
   }
   for (const entry of entries) {
     if (ignore.has(entry.name)) continue;
@@ -78,12 +95,22 @@ async function walk(root: string, prefix: string, out: MtimeMap, ignore: Set<str
     const abs = path.join(root, rel);
     if (entry.isDirectory()) {
       await walk(root, rel, out, ignore);
-    } else if (entry.isFile()) {
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      // Track symlinks via lstat so a bash command that adds, removes, or
+      // retargets a symlink is detected as a path change. Without this,
+      // `ln -sfn /new/target ./alias` would slip past mtime diffing because
+      // symlinks aren't reported as files. Use lstat for symlinks and stat
+      // for regular files so deref'd targets don't influence the timestamp.
       try {
-        const stat = await fs.stat(abs);
-        out.set(rel, stat.mtimeMs);
-      } catch {
-        // skip vanished entries
+        const st = entry.isSymbolicLink()
+          ? await fs.lstat(abs)
+          : await fs.stat(abs);
+        out.set(rel, st.mtimeMs);
+      } catch (err) {
+        // Race-condition tolerance: a file that vanished between readdir and
+        // stat is acceptable to skip. Other errors (EACCES, EIO, EMFILE)
+        // must propagate.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       }
     }
   }

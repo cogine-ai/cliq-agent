@@ -138,7 +138,12 @@ function findExplicitTxSpans(records: SessionRecord[]): TxSpan[] {
   for (let i = 0; i < records.length; i += 1) {
     const r = records[i];
     if (!r) continue;
-    if (r.kind === 'tx-opened') {
+    // Only EXPLICIT tx-opened markers form a non-splittable span. Implicit
+    // per-turn tx are contained within a single turn and the existing
+    // turn-boundary rule already protects them — including them here would
+    // make compact too conservative and could cause `no-safe-range` for
+    // long sessions.
+    if (r.kind === 'tx-opened' && r.meta.explicit === true) {
       openByTxId.set(r.meta.txId, i);
     } else if (r.kind === 'tx-applied' || r.kind === 'tx-aborted') {
       const open = openByTxId.get(r.meta.txId);
@@ -254,28 +259,48 @@ export function serializeRecordForSummary(record: SessionRecord, maxToolPayloadC
   }
 
   if (record.kind === 'tx-applied') {
-    const ds = record.meta.diffSummary;
-    const blocking = record.meta.validators.blocking;
-    const blockingTotal = blocking.pass + blocking.fail;
-    const modifies = ds.modifies.join(', ');
-    const body = `[Transaction ${record.meta.txId} applied: ${ds.filesChanged} files changed (+${ds.additions} -${ds.deletions}); modifies: ${modifies}; validators: ${blocking.pass}/${blockingTotal} blocking pass]`;
+    // Defensive: tx records that pre-date a schema migration, or were
+    // hand-edited, may be missing nested fields. isSessionRecord enforces
+    // the v0.8 contract going forward, but the summarizer should never crash
+    // on a partial record — the cost is just a less-detailed compact body.
+    const meta = record.meta as {
+      txId: string;
+      diffSummary?: { filesChanged?: number; additions?: number; deletions?: number; modifies?: string[] };
+      validators?: { blocking?: { pass?: number; fail?: number } };
+    };
+    const ds = meta.diffSummary;
+    const blocking = meta.validators?.blocking;
+    const filesChanged = typeof ds?.filesChanged === 'number' ? ds.filesChanged : 0;
+    const additions = typeof ds?.additions === 'number' ? ds.additions : 0;
+    const deletions = typeof ds?.deletions === 'number' ? ds.deletions : 0;
+    const modifies = Array.isArray(ds?.modifies) ? ds.modifies.join(', ') : '';
+    const blockingPass = typeof blocking?.pass === 'number' ? blocking.pass : 0;
+    const blockingFail = typeof blocking?.fail === 'number' ? blocking.fail : 0;
+    const blockingTotal = blockingPass + blockingFail;
+    const body = `[Transaction ${meta.txId} applied: ${filesChanged} files changed (+${additions} -${deletions}); modifies: ${modifies}; validators: ${blockingPass}/${blockingTotal} blocking pass]`;
     return [
-      `<record id="${record.id}" kind="tx-applied" txId="${record.meta.txId}">`,
+      `<record id="${record.id}" kind="tx-applied" txId="${meta.txId}">`,
       body,
       '</record>'
     ].join('\n');
   }
 
   if (record.kind === 'tx-aborted') {
-    const partial = record.meta.appliedPartial
-      ? `; partial: ${record.meta.appliedPartial.partialFiles.join(', ')} (restoreConfirmed=${record.meta.appliedPartial.restoreConfirmed})`
+    const meta = record.meta as {
+      txId: string;
+      reason: string;
+      failedValidators?: string[];
+      appliedPartial?: { partialFiles?: string[]; restoreConfirmed?: boolean };
+    };
+    const partial = meta.appliedPartial
+      ? `; partial: ${(meta.appliedPartial.partialFiles ?? []).join(', ')} (restoreConfirmed=${meta.appliedPartial.restoreConfirmed === true})`
       : '';
-    const failed = record.meta.failedValidators?.length
-      ? `; failedValidators: ${record.meta.failedValidators.join(', ')}`
+    const failed = Array.isArray(meta.failedValidators) && meta.failedValidators.length > 0
+      ? `; failedValidators: ${meta.failedValidators.join(', ')}`
       : '';
-    const body = `[Transaction ${record.meta.txId} aborted: ${record.meta.reason}${failed}${partial}]`;
+    const body = `[Transaction ${meta.txId} aborted: ${meta.reason}${failed}${partial}]`;
     return [
-      `<record id="${record.id}" kind="tx-aborted" txId="${record.meta.txId}">`,
+      `<record id="${record.id}" kind="tx-aborted" txId="${meta.txId}">`,
       body,
       '</record>'
     ].join('\n');

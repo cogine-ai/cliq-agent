@@ -684,6 +684,47 @@ test('isSessionRecord accepts tx-applied records', () => {
   assert.equal(isSessionRecord(record), true);
 });
 
+test('isSessionRecord rejects tx-applied records missing validators', () => {
+  // toSessionRecordView dereferences meta.validators.blocking unconditionally.
+  // The guard must reject records that omit it, otherwise loadSession will
+  // happily return a Session that crashes on headless export.
+  const record = {
+    id: applyRecordId('tx_01H'),
+    ts: nowIso(),
+    kind: 'tx-applied' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_01H applied: 1 file changed (+1 -0)',
+    meta: {
+      txId: 'tx_01H',
+      txKind: 'edit' as const,
+      diffSummary: { filesChanged: 1, additions: 1, deletions: 0, creates: [], modifies: ['a.ts'], deletes: [] },
+      files: { creates: [], modifies: ['a.ts'], deletes: [] },
+      overrides: [],
+      artifactRef: 'tx/tx_01H/'
+    }
+  };
+  assert.equal(isSessionRecord(record), false);
+});
+
+test('isSessionRecord rejects tx-applied records missing overrides', () => {
+  const record = {
+    id: applyRecordId('tx_01H'),
+    ts: nowIso(),
+    kind: 'tx-applied' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_01H applied: 1 file changed (+1 -0)',
+    meta: {
+      txId: 'tx_01H',
+      txKind: 'edit' as const,
+      diffSummary: { filesChanged: 1, additions: 1, deletions: 0, creates: [], modifies: ['a.ts'], deletes: [] },
+      files: { creates: [], modifies: ['a.ts'], deletes: [] },
+      validators: { blocking: { pass: 1, fail: 0 }, advisory: { pass: 0, fail: 0, names: [] } },
+      artifactRef: 'tx/tx_01H/'
+    }
+  };
+  assert.equal(isSessionRecord(record), false);
+});
+
 test('isSessionRecord accepts tx-opened records', () => {
   const record = {
     id: openRecordId('tx_02H'),
@@ -714,7 +755,122 @@ test('isSessionRecord accepts tx-aborted records', () => {
   assert.equal(isSessionRecord(record), true);
 });
 
-test('Session type permits activeTxId field', () => {
-  const session = createSession('/tmp/cliq-tx-types-active');
-  assert.equal((session as { activeTxId?: string }).activeTxId, undefined);
+// Negative guards for tx-opened. The guard's contract is that any field
+// dereferenced unconditionally by a downstream consumer must cause
+// isSessionRecord -> false when missing. For tx-opened, that consumer is
+// toSessionRecordView (src/headless/artifacts.ts) which only reads
+// `meta.txId` (and the optional `meta.name`). `txKind` is intentionally
+// NOT covered here: it is a TypeScript discriminant on the SessionRecord
+// union and never dereferenced at runtime, so a missing `txKind` does
+// not cause downstream crashes — adding a guard for it would be scope
+// creep without a real bug to back it. Same rationale applies to
+// `meta.explicit` (callers default to `true` for any persisted
+// tx-opened record).
+test('isSessionRecord rejects tx-opened records missing meta.txId', () => {
+  const record = {
+    id: openRecordId('tx_02H'),
+    ts: nowIso(),
+    kind: 'tx-opened' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_02H opened (explicit)',
+    // txId omitted; toSessionRecordView would otherwise emit txId: undefined
+    // and downstream view validators (headless contract) would crash.
+    meta: { txKind: 'edit' as const, name: 'refactor', explicit: true as const }
+  };
+  assert.equal(isSessionRecord(record), false);
+});
+
+test('isSessionRecord rejects tx-opened records missing meta entirely', () => {
+  // Mirrors the existing `accepts tx-opened` shape but drops meta wholesale.
+  // The base guard rejects this on `typeof record.meta !== 'object'`; the
+  // assertion locks in that the per-kind branch never gets reached for a
+  // record that has no meta at all.
+  const record = {
+    id: openRecordId('tx_02H'),
+    ts: nowIso(),
+    kind: 'tx-opened' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_02H opened (explicit)'
+  } as unknown as { kind: 'tx-opened' };
+  assert.equal(isSessionRecord(record), false);
+});
+
+// Negative guards for tx-aborted. Mirror the tx-applied negative tests.
+// Skipped fields (with reasons): `txKind` is a TS-only discriminant, and
+// `meta.files` is not currently dereferenced by any runtime consumer
+// (toSessionRecordView for tx-aborted does not surface it, and the
+// headless contract's TxAbortedRecordView does not include it either).
+// Adding guards for them would be tightening past the actual contract;
+// see the parallel comment on the tx-opened block above.
+test('isSessionRecord rejects tx-aborted records missing meta.txId', () => {
+  const record = {
+    id: abortRecordId('tx_03H'),
+    ts: nowIso(),
+    kind: 'tx-aborted' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_03H aborted: validator-fail',
+    meta: {
+      txKind: 'edit' as const,
+      reason: 'validator-fail' as const,
+      files: { wouldHaveCreated: [], wouldHaveModified: [], wouldHaveDeleted: [] },
+      artifactRef: 'tx/tx_03H/'
+    }
+  };
+  assert.equal(isSessionRecord(record), false);
+});
+
+test('isSessionRecord rejects tx-aborted records missing meta.reason', () => {
+  // toSessionRecordView for tx-aborted reads `record.meta.reason`
+  // unconditionally; missing it would surface as `reason: undefined` in
+  // the headless view and break consumers that switch on the structured
+  // AbortReason union.
+  const record = {
+    id: abortRecordId('tx_03H'),
+    ts: nowIso(),
+    kind: 'tx-aborted' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_03H aborted: validator-fail',
+    meta: {
+      txId: 'tx_03H',
+      txKind: 'edit' as const,
+      files: { wouldHaveCreated: [], wouldHaveModified: [], wouldHaveDeleted: [] },
+      artifactRef: 'tx/tx_03H/'
+    }
+  };
+  assert.equal(isSessionRecord(record), false);
+});
+
+test('isSessionRecord rejects tx-aborted records missing meta.artifactRef', () => {
+  // toSessionRecordView reads `record.meta.artifactRef` unconditionally.
+  const record = {
+    id: abortRecordId('tx_03H'),
+    ts: nowIso(),
+    kind: 'tx-aborted' as const,
+    role: 'user' as const,
+    content: 'Transaction tx_03H aborted: validator-fail',
+    meta: {
+      txId: 'tx_03H',
+      txKind: 'edit' as const,
+      reason: 'validator-fail' as const,
+      files: { wouldHaveCreated: [], wouldHaveModified: [], wouldHaveDeleted: [] }
+    }
+  };
+  assert.equal(isSessionRecord(record), false);
+});
+
+test('Session.activeTxId round-trips through saveSession/load', async () => {
+  // Confirms (a) activeTxId is part of the persisted Session shape, not a
+  // typing-only field, and (b) it survives a save/reload cycle. The previous
+  // form just cast createSession() to a different type and re-read undefined,
+  // which would have stayed green even if activeTxId were stripped at write.
+  const cwd = await realpath(fileCliqHome!);
+  const session = createSession(cwd);
+  session.activeTxId = 'tx_round_trip_active';
+  await saveSession(cwd, session);
+
+  const target = sessionFilePath(session);
+  const onDisk = JSON.parse(await readFile(target, 'utf8')) as {
+    activeTxId?: string;
+  };
+  assert.equal(onDisk.activeTxId, 'tx_round_trip_active');
 });

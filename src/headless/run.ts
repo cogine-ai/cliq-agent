@@ -156,7 +156,7 @@ export async function runHeadless(
   request: HeadlessRunRequest,
   options: HeadlessRunOptions & RunHeadlessDependencies = {}
 ): Promise<HeadlessRunOutput> {
-  const runId = makeId('run');
+  const runId = options.runId ?? makeId('run');
   const artifacts = emptyHeadlessArtifacts();
   const createEvent = createHeadlessEventFactory({ runId });
   let scope: RunScope | undefined;

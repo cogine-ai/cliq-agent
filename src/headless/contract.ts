@@ -25,6 +25,7 @@ export type HeadlessRunRequest = {
 };
 
 export type HeadlessRunOptions = {
+  runId?: string;
   signal?: AbortSignal;
   onEvent?: (event: RuntimeEventEnvelope) => void | Promise<void>;
 };
@@ -230,6 +231,7 @@ export type TxAbortedPayload = {
   txId: string;
   txKind: 'edit';
   reason: import('../workspace/transactions/types.js').AbortReason;
+  note?: string;
   failedValidators?: string[];
   artifactRef: string;
   appliedPartial?: { partialFiles: string[]; ghostSnapshotId: string; restoreConfirmed: boolean };
@@ -338,6 +340,7 @@ export type SessionRecordView =
       role: 'user';
       txId: string;
       reason: import('../workspace/transactions/types.js').AbortReason;
+      note?: string;
       failedValidators?: string[];
       artifactRef: string;
       appliedPartial?: {

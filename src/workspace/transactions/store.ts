@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import crypto from 'node:crypto';
 
 import { withPathLock } from '../../lib/path-lock.js';
+import { assertValidTxId } from './types.js';
 import type { Transaction, TxKind, ApplyProgress, AbortProgress, AuditEntry, Diff } from './types.js';
 
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -29,6 +30,12 @@ export function resolveTxRoot(cliqHome: string): string {
 }
 
 export function txDir(root: string, txId: string): string {
+  // Defense-in-depth: validate the id shape before joining into the tx root.
+  // Prevents `path.join(root, '../../somewhere')` from reaching outside the
+  // tx directory when txId originates from CLI argv or other untrusted input.
+  // makeTxId() always produces a value that satisfies assertValidTxId, so
+  // legitimate flows pay only a regex match.
+  assertValidTxId(txId);
   return path.join(root, txId);
 }
 
@@ -217,11 +224,25 @@ export async function appendAudit(root: string, txId: string, entry: AuditEntry)
 }
 
 export async function readAudit(root: string, txId: string): Promise<AuditEntry[]> {
+  let raw: string;
   try {
-    const raw = await fs.readFile(auditJsonPath(root, txId), 'utf8');
-    return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l) as AuditEntry);
+    raw = await fs.readFile(auditJsonPath(root, txId), 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
   }
+  // appendAudit uses fs.appendFile (non-atomic). A crash mid-write can leave a
+  // truncated trailing JSON line. Tolerate that by skipping unparseable lines
+  // — readAudit must remain readable for recovery/inspection even when the
+  // last entry is corrupt.
+  const out: AuditEntry[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line) as AuditEntry);
+    } catch {
+      // skip corrupted line; intentional best-effort parse
+    }
+  }
+  return out;
 }

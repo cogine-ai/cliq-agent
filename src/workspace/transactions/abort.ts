@@ -19,7 +19,17 @@ export type AbortContext = {
   session: Session;
   restoreConfirmed?: boolean;
   keepPartial?: boolean;
+  // The CONTROLLED protocol reason. Callers normally leave this undefined and
+  // let the protocol pick: 'user-abort' for normal aborts, 'apply-failed-partial-*'
+  // when the applied-partial flags are set. Internal/automation callers may
+  // override with a typed AbortReason value (e.g., 'validator-fail') when they
+  // know the reason. CLI free-text from `--reason` MUST NOT flow into this field;
+  // use `note` instead.
   reason?: AbortReason;
+  // Free-form operator text from `cliq tx abort --reason "..."`. Stored
+  // alongside the typed reason in audit/abort-progress and the session record's
+  // `meta.note` for human consumers, but never substituted for `meta.reason`.
+  note?: string;
 };
 
 export type AbortDecision = {
@@ -178,15 +188,26 @@ export async function runAbortWritePhase(
     txInitial?.blockingFailures && txInitial.blockingFailures.length > 0
       ? txInitial.blockingFailures
       : undefined;
-  const appliedPartial =
+  // For applied-partial-derived reasons, ghostSnapshotId MUST exist on the
+  // decision (it was loaded from apply-progress in AB3a.5). Refuse to write
+  // an empty string into the audit record — that would silently corrupt the
+  // restore reference. The downstream `abortTx` orchestrator already throws
+  // if ghostSnapshotId is missing on these reasons; this is defense-in-depth.
+  const appliedPartialReason =
     decision.reason === 'apply-failed-partial-restored' ||
-    decision.reason === 'apply-failed-partial-kept'
-      ? {
-          partialFiles: decision.partialFiles ?? [],
-          ghostSnapshotId: decision.ghostSnapshotId ?? '',
-          restoreConfirmed: decision.restoreConfirmed
-        }
-      : undefined;
+    decision.reason === 'apply-failed-partial-kept';
+  if (appliedPartialReason && !decision.ghostSnapshotId) {
+    throw new Error(
+      `abort decision for reason=${decision.reason} requires ghostSnapshotId; got falsy`
+    );
+  }
+  const appliedPartial = appliedPartialReason
+    ? {
+        partialFiles: decision.partialFiles ?? [],
+        ghostSnapshotId: decision.ghostSnapshotId as string,
+        restoreConfirmed: decision.restoreConfirmed
+      }
+    : undefined;
 
   // Phase abort-session: take session lock, briefly take tx-store lock to write
   // abort-progress=aborting, then append the deterministic record and clear
@@ -219,6 +240,7 @@ export async function runAbortWritePhase(
           txId: ctx.txId,
           txKind: 'edit',
           reason: decision.reason,
+          ...(ctx.note ? { note: ctx.note } : {}),
           ...(failedValidators ? { failedValidators } : {}),
           files,
           artifactRef: `tx/${ctx.txId}/`,

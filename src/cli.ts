@@ -6,6 +6,7 @@ import { DEFAULT_POLICY_MODE } from './config.js';
 import { exportHandoff } from './handoff/export.js';
 import type { HeadlessRunStatus, RuntimeEventEnvelope } from './headless/contract.js';
 import { writeJsonlEvent } from './headless/jsonl.js';
+import { runStdioJsonRpcServer } from './headless/rpc.js';
 import { runHeadless } from './headless/run.js';
 import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
@@ -42,6 +43,7 @@ import {
 } from './workspace/transactions/coordinator.js';
 import { readTxState as coordReadTxState, resolveTxRoot } from './workspace/transactions/store.js';
 import { loadWorkspaceConfig } from './workspace/config.js';
+import { isValidTxId } from './workspace/transactions/types.js';
 import { promises as fsPromises } from 'node:fs';
 
 const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
@@ -89,7 +91,7 @@ export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'compact-create'; summaryMarkdown: string; beforeCheckpointId?: string; prompt?: undefined }
   | { cmd: 'compact-list'; prompt?: undefined }
   | { cmd: 'handoff-create'; checkpointId?: string; prompt?: undefined }
-  | { cmd: 'reset' | 'history'; prompt?: undefined }
+  | { cmd: 'reset' | 'history' | 'rpc'; prompt?: undefined }
   | { cmd: 'help'; topic?: HelpTopic; prompt?: undefined }
   | { cmd: 'tx-open'; name?: string; explicit: true; json?: boolean; headless?: boolean; prompt?: undefined }
   | { cmd: 'tx-status'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
@@ -162,12 +164,16 @@ function consumeFlag(args: string[], name: string): boolean {
 function consumeOption(args: string[], name: string): string | undefined {
   const idx = args.indexOf(name);
   if (idx === -1) return undefined;
-  if (idx === args.length - 1) {
+  // Refuse to swallow the next token if it looks like another flag.
+  // Without this check, `cliq tx apply <id> --override --reason foo`
+  // would parse `--override` as the value of `--reason`'s neighbour and
+  // surface a misleading `Unknown ... argument` error downstream.
+  const next = args[idx + 1];
+  if (next === undefined || next.startsWith('--')) {
     throw new Error(`${name} requires a value`);
   }
-  const value = args[idx + 1]!;
   args.splice(idx, 2);
-  return value;
+  return next;
 }
 
 function consumeRepeatable(args: string[], name: string): string[] {
@@ -213,6 +219,9 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
       const txId = first !== undefined && !first.startsWith('--') ? first : undefined;
       if (txId !== undefined) {
         rest.shift();
+        if (!isValidTxId(txId)) {
+          throw new Error(`tx status: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
+        }
       }
       if (rest.length > 0) {
         throw new Error(`Unknown tx status argument: ${rest[0]}`);
@@ -284,6 +293,9 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
         throw new Error('tx apply requires <txId>');
       }
       rest.shift();
+      if (!isValidTxId(txId)) {
+        throw new Error(`tx apply: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
+      }
       const overrides = consumeRepeatable(rest, '--override');
       const allowValidatorError = consumeRepeatable(rest, '--allow-validator-error');
       const reason = consumeOption(rest, '--reason');
@@ -307,6 +319,9 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
         throw new Error('tx abort requires <txId>');
       }
       rest.shift();
+      if (!isValidTxId(txId)) {
+        throw new Error(`tx abort: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
+      }
       const restoreConfirmed = consumeFlag(rest, '--restore-confirmed');
       const keepPartial = consumeFlag(rest, '--keep-partial');
       if (restoreConfirmed && keepPartial) {
@@ -686,6 +701,7 @@ function isKnownCommand(cmd: string | undefined) {
     cmd === 'restore' ||
     cmd === 'reset' ||
     cmd === 'history' ||
+    cmd === 'rpc' ||
     cmd === 'help' ||
     cmd === 'tx' ||
     cmd === '--help' ||
@@ -908,21 +924,25 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (cmd === 'restore') {
     throw new Error('Command changed. Use "cliq checkpoint restore <checkpoint-id> --scope session|files|both".');
   }
-  if (cmd === 'reset') return { cmd, policy, skills, model, ...baseExtras };
-  if (cmd === 'history') return { cmd, policy, skills, model, ...baseExtras };
+  if (cmd === 'reset') return { cmd, policy, skills, model };
+  if (cmd === 'history') return { cmd, policy, skills, model };
+  if (cmd === 'rpc') {
+    ensureNoExtraArgs(args, 1, 'rpc');
+    return { cmd, policy, skills, model };
+  }
   if (cmd === 'help') {
     const topic = args[1];
     if (topic === undefined) {
-      return { cmd: 'help', policy, skills, model, ...baseExtras };
+      return { cmd: 'help', policy, skills, model };
     }
     if (!isHelpTopic(topic)) {
       throw new Error(`Unknown help topic: ${topic}. Expected one of: ${HELP_TOPICS.join(', ')}`);
     }
     ensureNoExtraArgs(args, 2, 'help');
-    return { cmd: 'help', topic, policy, skills, model, ...baseExtras };
+    return { cmd: 'help', topic, policy, skills, model };
   }
-  if (cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model, ...baseExtras };
-  return { cmd: 'chat', prompt: args.join(' '), policy, skills, model, ...baseExtras };
+  if (cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model };
+  return { cmd: 'chat', prompt: args.join(' '), policy, skills, model };
 }
 
 function printCheckpointHelp() {
@@ -1000,6 +1020,7 @@ Usage:
   cliq chat                Start interactive chat in the current directory
   cliq reset               Clear persisted conversation for this directory
   cliq history             Print persisted session for this directory
+  cliq rpc                 Start stdio JSON-RPC mode
   cliq tx <subcommand>     Manage transactional workspace state (see below)
   cliq checkpoint create   Create a manual checkpoint
   cliq checkpoint list     Print session checkpoints
@@ -1048,6 +1069,9 @@ Streaming modes:
   auto                     Use provider default; compatible endpoints may fall back
   on                       Request streaming when supported
   off                      Force non-streaming responses
+
+RPC:
+  cliq rpc                 Reads newline-delimited JSON-RPC 2.0 requests from stdin and writes protocol messages to stdout
 
 Examples:
   cliq --policy read-only "inspect this repo"
@@ -1299,6 +1323,11 @@ export async function runCli(argv: string[]) {
 
   if (cmd === 'history') {
     console.log(JSON.stringify(await ensureSession(cwd), null, 2));
+    return;
+  }
+
+  if (cmd === 'rpc') {
+    await runStdioJsonRpcServer();
     return;
   }
 

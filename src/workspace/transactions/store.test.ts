@@ -127,6 +127,10 @@ test('acquireTxLock serializes concurrent operations on the same txId', async ()
   try {
     const root = resolveTxRoot(home);
     await createTx(root, { id: 'tx_lock', kind: 'edit', workspaceId: 'w', sessionId: 's', workspaceRealPath: '/tmp/ws' });
+    // Assert SERIALIZATION (no interleaving), not acquisition ORDER.
+    // The lock primitive does not promise FIFO/fairness, so under load `b`
+    // can win the race; what matters is that one critical section completes
+    // entirely before the other starts.
     const order: string[] = [];
     let aEnteredResolve!: () => void;
     const aEntered = new Promise<void>((r) => { aEnteredResolve = r; });
@@ -189,4 +193,29 @@ test('makeTxId returns lexicographically sortable IDs with tx_ prefix', () => {
   assert.match(a, /^tx_[0-9A-HJKMNP-TV-Z]{26}$/);
   assert.match(b, /^tx_[0-9A-HJKMNP-TV-Z]{26}$/);
   assert.ok(a < b);
+});
+
+test('txDir rejects path-traversal txIds and accepts well-formed ones', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-tx-traversal-'));
+  try {
+    const root = resolveTxRoot(home);
+    // Each of these would, if passed through `path.join` unchecked, escape
+    // the per-tx directory or write to an attacker-chosen path.
+    assert.throws(() => txDir(root, 'tx_..'), /invalid tx id/i);
+    assert.throws(() => txDir(root, 'tx_../foo'), /invalid tx id/i);
+    assert.throws(() => txDir(root, '..'), /invalid tx id/i);
+    assert.throws(() => txDir(root, '/etc/passwd'), /invalid tx id/i);
+    assert.throws(() => txDir(root, 'tx_a/../b'), /invalid tx id/i);
+    assert.throws(() => txDir(root, 'tx_a\\b'), /invalid tx id/i);
+    assert.throws(() => txDir(root, 'tx_'), /invalid tx id/i); // empty body
+    assert.throws(() => txDir(root, 'no_prefix'), /invalid tx id/i);
+    assert.throws(() => txDir(root, ''), /invalid tx id/i);
+    // Production-shaped IDs and short test fixtures both pass.
+    const real = makeTxId();
+    assert.equal(txDir(root, real), path.join(root, real));
+    assert.equal(txDir(root, 'tx_a'), path.join(root, 'tx_a'));
+    assert.equal(txDir(root, 'tx_test_lock_01HX'), path.join(root, 'tx_test_lock_01HX'));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });

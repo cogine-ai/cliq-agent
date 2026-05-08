@@ -10,25 +10,27 @@ test('withPathLock serializes concurrent callbacks for the same target', async (
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-path-lock-'));
   try {
     const target = path.join(dir, 'shared-resource');
+    // Assert SERIALIZATION (no interleaving), not acquisition ORDER.
+    // The lock primitive does not promise FIFO/fairness, so under load `b`
+    // can win the race; what matters is that one critical section completes
+    // entirely before the other starts.
     const order: string[] = [];
-
-    const a = withPathLock(target, async () => {
-      order.push('a-start');
-      await new Promise((r) => setTimeout(r, 25));
-      order.push('a-end');
-    });
-    // Yield enough microtasks for `a` to enter withPathLock and create its lock dir
-    // before `b` starts, eliminating start-order races without coupling to internals.
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    const b = withPathLock(target, async () => {
-      order.push('b-start');
-      await new Promise((r) => setTimeout(r, 5));
-      order.push('b-end');
-    });
-
-    await Promise.all([a, b]);
-    assert.deepEqual(order, ['a-start', 'a-end', 'b-start', 'b-end']);
+    const work = (label: string, durationMs: number) =>
+      withPathLock(target, async () => {
+        order.push(`${label}-start`);
+        await new Promise((r) => setTimeout(r, durationMs));
+        order.push(`${label}-end`);
+      });
+    await Promise.all([work('a', 25), work('b', 5)]);
+    assert.equal(order.length, 4, 'both critical sections must run');
+    const [first0, first1, second0, second1] = order;
+    assert.ok(first0.endsWith('-start'));
+    assert.ok(first1.endsWith('-end'));
+    assert.equal(first0.split('-')[0], first1.split('-')[0], 'first holder must finish before second');
+    assert.ok(second0.endsWith('-start'));
+    assert.ok(second1.endsWith('-end'));
+    assert.equal(second0.split('-')[0], second1.split('-')[0], 'second holder must run as one block');
+    assert.notEqual(first0.split('-')[0], second0.split('-')[0], 'each holder runs once');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

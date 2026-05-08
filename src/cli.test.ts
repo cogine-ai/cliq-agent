@@ -64,6 +64,16 @@ test('parseArgs keeps --jsonl in the prompt after the first prompt token', () =>
   });
 });
 
+test('parseArgs accepts rpc as a no-prompt command and rejects extra args', () => {
+  assert.deepEqual(parseArgs(['node', 'cliq', 'rpc']), {
+    cmd: 'rpc',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.throws(() => parseArgs(['node', 'cliq', 'rpc', 'extra']), /Unknown rpc argument: extra/i);
+});
+
 test('parseArgs accepts ask as a prompt-only run alias', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'ask', '--literal', 'prompt']), {
     cmd: 'chat',
@@ -460,6 +470,16 @@ test('parseArgs rejects cliq tx approve without txId', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'tx', 'approve']), /requires <txId>/);
 });
 
+test('parseArgs rejects --reason without an actual value when followed by another flag', () => {
+  // Regression: consumeOption used to greedily eat the next token, so this
+  // would mis-parse with reason="--override" and surface a misleading
+  // "Unknown tx apply argument" further down the pipeline.
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', 'tx', 'apply', 'tx_abc', '--reason', '--override', 'size-limit']),
+    /--reason requires a value/
+  );
+});
+
 test('parseArgs recognizes cliq tx abort with --restore-confirmed', () => {
   const a = parseArgs([
     'node',
@@ -488,6 +508,8 @@ test('parseArgs rejects cliq tx abort with both --restore-confirmed and --keep-p
 });
 
 test('parseArgs accepts top-level --tx and --tx-apply flags', () => {
+  // The v0.8 runner integration wires these flags into the runner; they
+  // override workspace config transactions.mode / transactions.applyPolicy.
   const a = parseArgs(['node', 'src/index.ts', '--tx', 'edit', '--tx-apply', 'auto-on-pass', 'tx', 'list']);
   assert.equal(a.cmd, 'tx-list');
   if (a.cmd === 'tx-list') {
@@ -568,6 +590,7 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /cliq run "task"/);
   assert.match(output, /cliq run --jsonl "task"/);
   assert.match(output, /cliq ask "task"/);
+  assert.match(output, /cliq rpc\s+Start stdio JSON-RPC mode/);
   assert.match(output, /cliq checkpoint create/);
   assert.match(output, /cliq checkpoint list/);
   assert.match(output, /cliq compact create/);
@@ -586,6 +609,10 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /repeat/i);
   assert.match(output, /--streaming MODE/);
   assert.match(output, /--jsonl/);
+  assert.match(
+    output,
+    /cliq rpc\s+Reads newline-delimited JSON-RPC 2\.0 requests from stdin and writes protocol messages to stdout/
+  );
   assert.match(output, /auto \| on \| off/);
   assert.match(output, /openai-compatible/);
   assert.match(output, /--base-url URL/);

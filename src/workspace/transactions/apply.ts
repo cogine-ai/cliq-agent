@@ -75,7 +75,15 @@ export async function runStageA(ctx: ApplyContext): Promise<StageAOutcome> {
     const plan: PlanEntry[] = [];
     for (const entry of diff.files) {
       if (entry.op !== 'modify') {
-        throw new Error(`unsupported diff op in v0.8: ${entry.op}`);
+        // v0.8 ships 'modify' only. 'create' / 'delete' are tracked for
+        // v0.9 in docs/superpowers/specs/2026-05-02-cliq-transactional-workspace-runtime-design.md.
+        // Surface the limitation explicitly so operators don't read a generic
+        // error and assume the tx system is broken.
+        throw new Error(
+          `unsupported diff op in v0.8: ${entry.op} ` +
+            "(only 'modify' is supported; 'create'/'delete' planned for v0.9 — see " +
+            'docs/superpowers/specs/2026-05-02-cliq-transactional-workspace-runtime-design.md)'
+        );
       }
       const real = await fs.readFile(path.join(tx.workspaceRealPath, entry.path), 'utf8');
       if (real !== entry.oldContent) {
@@ -113,6 +121,19 @@ export class ApplyPartial extends Error {
   constructor(message: string, public ghostSnapshotId: string) {
     super(message);
     this.name = 'ApplyPartial';
+  }
+}
+
+/**
+ * Stage C precondition failure: an approved tx reached Stage C without the
+ * `diffSummary` metadata that the tx-applied session record requires. Emitted
+ * to surface the broken finalize/approve invariant rather than silently
+ * marking the tx applied without an audit record.
+ */
+export class StageCMetadataError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StageCMetadataError';
   }
 }
 
@@ -170,7 +191,7 @@ export async function runStageB(ctx: ApplyContext, plan: PlanEntry[]): Promise<S
           progress.ghostSnapshotId
         );
       }
-      // B3b-d: write tmp + fsync + rename
+      // B3b-d: write tmp + fsync + rename + parent-dir fsync
       const target = path.join(tx.workspaceRealPath, planned.path);
       const tmp = `${target}.cliq-tx-tmp`;
       try {
@@ -182,6 +203,26 @@ export async function runStageB(ctx: ApplyContext, plan: PlanEntry[]): Promise<S
           await fh.close();
         }
         await fs.rename(tmp, target);
+        // Durability: rename() updates the directory entry but the new entry
+        // is only persisted once the parent directory itself is synced. If
+        // the host crashes between rename() and that fsync, recovery would
+        // see filesWritten contain `planned.path` (next line) while the on-
+        // disk directory still points at the old inode. Fsync the parent
+        // here so the apply protocol's "wrote it" assertion stays honest.
+        // Best-effort: some platforms (notably Windows) reject opening a
+        // directory for read; treat that specifically as a no-op so we don't
+        // turn the success into a partial failure on those hosts.
+        try {
+          const dir = await fs.open(path.dirname(target), 'r');
+          try {
+            await dir.sync();
+          } finally {
+            await dir.close();
+          }
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== 'EISDIR' && code !== 'EPERM' && code !== 'EACCES') throw err;
+        }
       } catch (err) {
         // Disk error mid-write: tx -> applied-partial; progress records the failure.
         await writeTxState(ctx.root, { ...tx, state: 'applied-partial' });
@@ -257,11 +298,17 @@ export async function runStageC(ctx: StageCContext, ghostSnapshotId: string): Pr
       };
     });
     if (!decision) return;
+    // diffSummary is REQUIRED at apply time. The finalize stage (out of scope
+    // of v0.8 Phase 7 but written by future runner integration or tests) must
+    // populate tx.diffSummary before Stage C runs. If it is missing here, fail
+    // the apply rather than producing an applied tx with no audit record.
+    if (!decision.diffSummary) {
+      throw new StageCMetadataError(
+        `tx ${ctx.txId} cannot be applied: diffSummary is missing on the approved tx (finalize stage did not populate it). Refusing to mark applied without a tx-applied session record.`
+      );
+    }
     const present = session.records.some((r) => r.id === decision.recordId);
-    // diffSummary may be undefined if validate/finalize stages (out of scope of
-    // v0.8 Phase 7) didn't compute it. Guard the record append; tests must set
-    // diffSummary explicitly before running Stage C.
-    if (!present && decision.diffSummary) {
+    if (!present) {
       const record: SessionRecord = {
         id: decision.recordId,
         ts: new Date().toISOString(),

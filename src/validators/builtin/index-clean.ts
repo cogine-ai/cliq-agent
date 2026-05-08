@@ -4,6 +4,77 @@ import type { Validator, Finding } from '../types.js';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Parses git's `--porcelain=v2 -z` output. Records are NUL-terminated;
+ * rename/copy records carry an extra NUL-terminated origPath right after
+ * the new path. We use `-z` instead of textual output to avoid C-quoting
+ * ambiguities (paths with spaces, tabs, quotes, backslashes are all
+ * unambiguous under -z).
+ *
+ * Record types we care about:
+ *   1 <XY> ...8 fields... <path>            ordinary changed
+ *   2 <XY> ...9 fields... <path>\0<origPath> renamed/copied
+ *   u <xy> ...10 fields... <path>           unmerged (merge conflict)
+ *
+ * `XY` first char is `.` when the index is unchanged at this stage. Anything
+ * else means the index is dirty for that path. Unmerged entries are always
+ * a dirty-index condition; their `xy` field encodes conflict types.
+ */
+type StagedEntry = { path: string; xy: string; kind: 'ordinary' | 'rename' | 'unmerged' };
+
+function parsePorcelainV2Z(output: string): StagedEntry[] {
+  const entries: StagedEntry[] = [];
+  // Buffer is a NUL-separated sequence of records. The TRAILING NUL after
+  // the last record produces an empty final segment we want to skip.
+  // For renamed records we consume an extra segment (origPath).
+  const segments = output.split('\0');
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (!seg) continue;
+    if (seg.startsWith('# ')) continue; // header lines (branch info)
+    if (seg.startsWith('? ')) continue; // untracked (we run with -uno; defensive)
+    if (seg.startsWith('! ')) continue; // ignored
+    if (seg.startsWith('1 ')) {
+      // ordinary: "1 XY sub mH mI mW hH hI path"
+      const xy = seg.slice(2, 4);
+      if (xy[0] === '.') continue;
+      const path = nthFieldRest(seg, 8);
+      if (path) entries.push({ path, xy, kind: 'ordinary' });
+    } else if (seg.startsWith('2 ')) {
+      // renamed/copied: "2 XY sub mH mI mW hH hI X-score path"
+      // The next NUL-terminated segment is origPath; consume it so we don't
+      // re-parse origPath as a record on the next iteration.
+      const xy = seg.slice(2, 4);
+      const path = nthFieldRest(seg, 9);
+      i += 1; // skip origPath
+      if (xy[0] === '.') continue;
+      if (path) entries.push({ path, xy, kind: 'rename' });
+    } else if (seg.startsWith('u ')) {
+      // unmerged: "u xy sub m1 m2 m3 mW h1 h2 h3 path" — always dirty index
+      const xy = seg.slice(2, 4);
+      const path = nthFieldRest(seg, 10);
+      if (path) entries.push({ path, xy, kind: 'unmerged' });
+    }
+    // unknown record types are ignored; new git versions may add some.
+  }
+  return entries;
+}
+
+/**
+ * Returns the substring of `seg` after the Nth space-delimited field. The
+ * path field is treated as the rest-of-line (it may itself contain spaces,
+ * which `-z` allows because record separation is by NUL not space).
+ */
+function nthFieldRest(seg: string, n: number): string {
+  let pos = 0;
+  for (let f = 0; f < n; f++) {
+    const idx = seg.indexOf(' ', pos);
+    if (idx === -1) return '';
+    pos = idx + 1;
+  }
+  return seg.slice(pos);
+}
+
 export const indexClean: Validator = {
   name: 'builtin:index-clean',
   defaultSeverity: 'blocking',
@@ -11,11 +82,25 @@ export const indexClean: Validator = {
     const start = Date.now();
     let stdout: string;
     try {
-      ({ stdout } = await execFileAsync('git', ['status', '--porcelain=v2', '--renames', '-uno'], { cwd: ctx.realCwd }));
+      ({ stdout } = await execFileAsync(
+        'git',
+        ['status', '--porcelain=v2', '--renames', '-uno', '-z'],
+        // Bound the git invocation: a hung pre-commit hook, a credential
+        // prompt, or an LFS network call would otherwise block the entire
+        // apply/abort pipeline because index-clean is a blocking validator.
+        // On timeout, Node kills the child with ETIMEDOUT and we land in the
+        // catch path with a blocking fail, not a silent skip.
+        { cwd: ctx.realCwd, timeout: 10_000 }
+      ));
     } catch (err) {
+      // Only "not a git repository" should skip the check. Other failures
+      // (git missing, hung, killed, permission denied, hook crash, etc.)
+      // must surface as a blocking fail so they do not silently bypass
+      // a blocking validator.
       const e = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
       const stderr = (e.stderr ?? '').toString();
-      const isNotRepo = /not a git repository/i.test(stderr) || /not a git repository/i.test(e.message ?? '');
+      const errMsg = e.message ?? String(err);
+      const isNotRepo = /not a git repository/i.test(stderr) || /not a git repository/i.test(errMsg);
       if (isNotRepo) {
         return {
           name: 'builtin:index-clean',
@@ -25,56 +110,27 @@ export const indexClean: Validator = {
           message: 'not a git repository — index check skipped'
         };
       }
-      // Real failure (git binary missing, permission denied, corrupted repo, etc.).
-      // Surface it as a blocking failure so the operator can investigate rather
-      // than silently masking it as a "skipped" pass.
+      // Real failure (git binary missing, permission denied, corrupted repo,
+      // hung hook, etc.). Surface it as a blocking failure so the operator
+      // can investigate rather than silently masking it as a "skipped" pass.
+      const detail = stderr.trim() ? ` (stderr: ${stderr.trim().slice(0, 256)})` : '';
       return {
         name: 'builtin:index-clean',
         severity: 'blocking',
         status: 'fail',
         durationMs: Date.now() - start,
-        message: `git status failed: ${e.message ?? String(err)}${stderr ? ` (stderr: ${stderr.trim()})` : ''}`
+        message: `git status failed: ${errMsg}${detail}`
       };
     }
     const findings: Finding[] = [];
-    for (const line of stdout.split('\n')) {
-      if (!line) continue;
-      if (line.startsWith('1 ')) {
-        // Porcelain v2: `1 XY sub mH mI mW hH hI path`. Path is the trailing
-        // field and may contain spaces, so we count the eight whitespace
-        // separators rather than splitting and taking the tail.
-        const xy = line.slice(2, 4);
-        if (xy[0] !== '.') {
-          const idx = nthSpaceIndex(line, 8);
-          if (idx === -1) continue;
-          const p = line.slice(idx + 1);
-          findings.push({ path: p, message: `staged: ${xy}` });
-        }
-      } else if (line.startsWith('2 ')) {
-        // Porcelain v2 rename/copy: `2 XY sub mH mI mW hH hI X<score> path\torigPath`.
-        // Nine whitespace separators precede the path; the path itself may
-        // contain spaces, and `\t` separates the new path from the original.
-        const xy = line.slice(2, 4);
-        if (xy[0] !== '.') {
-          const idx = nthSpaceIndex(line, 9);
-          if (idx === -1) continue;
-          const tail = line.slice(idx + 1);
-          const newPath = tail.split('\t')[0];
-          findings.push({ path: newPath, message: `staged rename: ${xy}` });
-        }
-      } else if (line.startsWith('u ')) {
-        // Porcelain v2 unmerged: `u XY sub m1 m2 m3 mW h1 h2 h3 path`. Ten
-        // whitespace separators precede the path. XY is always non-dot for
-        // unmerged entries, but we keep the guard for symmetry with the
-        // modified/rename branches above.
-        const xy = line.slice(2, 4);
-        if (xy[0] !== '.') {
-          const idx = nthSpaceIndex(line, 10);
-          if (idx === -1) continue;
-          const p = line.slice(idx + 1);
-          findings.push({ path: p, message: `unmerged: ${xy}` });
-        }
-      }
+    for (const entry of parsePorcelainV2Z(stdout)) {
+      const message =
+        entry.kind === 'rename'
+          ? `staged rename: ${entry.xy}`
+          : entry.kind === 'unmerged'
+            ? `unmerged: ${entry.xy}`
+            : `staged: ${entry.xy}`;
+      findings.push({ path: entry.path, message });
     }
     return {
       name: 'builtin:index-clean',
@@ -85,14 +141,3 @@ export const indexClean: Validator = {
     };
   }
 };
-
-function nthSpaceIndex(s: string, n: number): number {
-  let count = 0;
-  for (let i = 0; i < s.length; i++) {
-    if (s[i] === ' ') {
-      count++;
-      if (count === n) return i;
-    }
-  }
-  return -1;
-}

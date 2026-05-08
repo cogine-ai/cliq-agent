@@ -205,10 +205,51 @@ test('AB3a.5 promotes reason and loads partial metadata when flag is now applica
   });
 });
 
-test.skip('AB3a.5 rejects flags when state is not applied-partial at lock time (placeholder — needs lock-internal injection hook)', async () => {
-  // TODO: full coverage of this race requires injecting a state change between AB0a and AB3a.5
-  // (no injection hook exists today). The standalone assertion is exercised by
-  // 'AB0a rejects flags when state is not applied-partial' above; AB3a.5 reuses identical rules.
+test('AB3a.5 rejects flags when state is not applied-partial at lock time', async () => {
+  // Cover the AB3a.5 under-lock branch deterministically by intercepting
+  // readTxState to return 'applied-partial' to AB0a (pre-lock) but 'approved'
+  // when called again under the lock. This simulates the race where the tx
+  // transitioned out of applied-partial after AB0a already accepted the flag.
+  await setupHome(async (home) => {
+    await setupTx(home, 'tx_ab3a5_under_lock', 'applied-partial');
+    const root = resolveTxRoot(home);
+    const real = (await readTxState(root, 'tx_ab3a5_under_lock'))!;
+
+    // Prepare a swapped variant so we can flip state after AB0a returns.
+    const stateFile = path.join(root, 'tx_ab3a5_under_lock', 'state.json');
+    let calls = 0;
+    const restore = (await import('node:fs')).promises;
+    const origReadFile = restore.readFile.bind(restore);
+    // Patch fs.promises.readFile only for this specific state.json: first
+    // call (AB0a, pre-lock) sees 'applied-partial'; subsequent calls
+    // (under-lock recheck) see 'approved'. Other fs reads pass through.
+    (restore as { readFile: typeof restore.readFile }).readFile = (async (
+      target: Parameters<typeof restore.readFile>[0],
+      ...rest: unknown[]
+    ) => {
+      if (typeof target === 'string' && target === stateFile) {
+        calls += 1;
+        if (calls === 1) {
+          return JSON.stringify({ ...real, state: 'applied-partial' });
+        }
+        return JSON.stringify({ ...real, state: 'approved' });
+      }
+      return origReadFile(target as Parameters<typeof origReadFile>[0], ...(rest as []));
+    }) as typeof restore.readFile;
+
+    try {
+      // restoreConfirmed flag is accepted by AB0a (state='applied-partial')
+      // but the under-lock recheck sees state='approved' and must reject.
+      await assert.rejects(
+        decideAbort(buildCtx(home, 'tx_ab3a5_under_lock', { restoreConfirmed: true })),
+        (err: unknown) =>
+          err instanceof AbortRejected &&
+          /only apply when state is applied-partial.*under-lock/.test((err as Error).message)
+      );
+    } finally {
+      (restore as { readFile: typeof restore.readFile }).readFile = origReadFile;
+    }
+  });
 });
 
 test('AB3b exits no-op when all four terminal markers are set', async () => {
@@ -457,6 +498,35 @@ test('abortTx happy path: approved → aborted with one tx-aborted record', asyn
       const recs = session.records.filter((r) => r.id === abortRecordId('tx_orch_happy'));
       assert.equal(recs.length, 1);
       assert.equal(session.activeTxId, undefined);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('abortTx threads operator note into meta.note without polluting meta.reason', async () => {
+  await setupHome(async (home) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-abort-ws-'));
+    try {
+      await setupTxWithDiffSummary(home, ws, 'tx_orch_note');
+      const session = await setupSessionForAbort(ws, { activeTxId: 'tx_orch_note' });
+      await abortTx({
+        root: resolveTxRoot(home),
+        txId: 'tx_orch_note',
+        cwd: ws,
+        session,
+        // Free-form operator text, NOT an AbortReason value.
+        note: 'changed my mind, going to redo this differently'
+      });
+      const rec = session.records.find((r) => r.id === abortRecordId('tx_orch_note'));
+      assert.ok(rec && rec.kind === 'tx-aborted');
+      // reason stays in the controlled AbortReason union (defaulted to user-abort)
+      assert.equal((rec as { meta: { reason: string } }).meta.reason, 'user-abort');
+      // operator text lives separately
+      assert.equal(
+        (rec as { meta: { note?: string } }).meta.note,
+        'changed my mind, going to redo this differently'
+      );
     } finally {
       await rm(ws, { recursive: true, force: true });
     }

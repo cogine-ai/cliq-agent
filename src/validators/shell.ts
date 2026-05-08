@@ -62,6 +62,7 @@ export function createShellValidator(opts: ShellValidatorOptions): Validator {
       child.stderr?.on('data', (chunk: Buffer) => appendCapped('stderr', chunk));
 
       let timedOut = false;
+      let processError: Error | undefined;
       const timer = setTimeout(() => {
         timedOut = true;
         try {
@@ -73,7 +74,10 @@ export function createShellValidator(opts: ShellValidatorOptions): Validator {
 
       const exitCode: number | null = await new Promise((resolve) => {
         child.on('close', (code) => resolve(code));
-        child.on('error', () => resolve(null));
+        child.on('error', (err: Error) => {
+          processError = err;
+          resolve(null);
+        });
       });
       clearTimeout(timer);
 
@@ -86,6 +90,21 @@ export function createShellValidator(opts: ShellValidatorOptions): Validator {
           status: 'error',
           durationMs,
           message: `timed out after ${timeoutMs}ms`
+        };
+      }
+
+      // Process spawn failures (command not found, ENOENT, AbortError) are
+      // INFRASTRUCTURE failures, not validator-fail signals. They must be
+      // reported as status:'error' so callers can distinguish "the validator
+      // ran and reported a problem" from "the validator could not run".
+      if (processError) {
+        const msg = processError.message || processError.name || 'process error';
+        return {
+          name: opts.name,
+          severity: opts.severity,
+          status: 'error',
+          durationMs,
+          message: msg.slice(0, MESSAGE_LIMIT)
         };
       }
 

@@ -146,6 +146,13 @@ export type TxState =
 
 export type Severity = 'blocking' | 'advisory';
 
+export type Transition = {
+  from: TxState | null;   // null on the initial create (e.g., 'staging')
+  to: TxState;
+  ts: string;
+  by: string;             // 'cli' | 'auto:<turnId>' | '<callerId>'
+};
+
 export type Transaction = {
   id: string;
   kind: TxKind;
@@ -161,6 +168,10 @@ export type Transaction = {
   blockingFailures?: string[];          // derived from validators
   overridesApplied?: OverrideEntry[];   // populated at approve/apply
   ghostSnapshotId?: string;             // populated at apply
+  transitions?: Transition[];           // optional inline view of the
+                                        // audit log surfaced in `tx show
+                                        // --json` snapshots; the persistent
+                                        // form lives in `audit.json`
   error?: { stage: string; message: string };  // populated on failure paths
 };
 
@@ -1095,6 +1106,7 @@ The deterministic record ids are essential to Stage C's exactly-once guarantee (
 
 Tx layer guarantees:
 
+- Exactly one `tx-opened` record is appended at the moment an explicit transaction is opened (operator `cliq tx open` or an explicit agent open). The id is `txrec_open_<txId>`; implicit per-turn transactions do not write this record. Auto-compaction treats explicit `tx-opened` as the lower bound of a non-splittable span that ends at the matching `tx-applied`/`tx-aborted` record (or extends to the end of the records list if neither is present yet).
 - Exactly one `tx-applied` record is appended on a successful apply, ordered after the file writes by the phased apply protocol (Section 11.1). The record id is deterministic (`txrec_apply_<txId>`); if the cliq process is interrupted between file writes and record append, recovery (Section 16.4) reruns Stage C, scans for the deterministic id, and either skips the append (if a previous attempt already wrote it) or appends it with that id.
 - Exactly one `tx-aborted` record is appended on terminal abort, with a structured `reason` and id `txrec_abort_<txId>`.
 - Full diff content is **never** inlined into a session record. Only the `meta.artifactRef` pointer.
@@ -1106,9 +1118,9 @@ Tx layer guarantees:
 
 The new record kinds extend the `SessionRecord` discriminated union in `src/session/types.ts`. The following modules in `origin/main` have exhaustive logic over record kinds and must be updated in the same PR:
 
-- **`src/session/types.ts`** — add `TxAppliedRecord` and `TxAbortedRecord` to the `SessionRecord` union; add `activeTxId?: string` to the `Session` type (Section 6.1).
-- **`src/session/store.ts`** — extend `isSessionRecord` (currently lines 86–113 on `cea4530`) so that records with `kind: 'tx-applied' | 'tx-aborted'` validate. Without this update, `isSession` returns `false` for any session containing a tx record, and `loadSession` rejects the file.
-- **`src/headless/contract.ts`** — extend the `SessionRecordView` union (currently around line 214) with view shapes for the two new kinds. Without this update, headless artifact-query commands fail for sessions with tx records.
+- **`src/session/types.ts`** — add `TxOpenedRecord`, `TxAppliedRecord`, and `TxAbortedRecord` to the `SessionRecord` union; add `activeTxId?: string` to the `Session` type (Section 6.1). `TxOpenedRecord` is **only emitted for explicit transactions** (operator-driven `cliq tx open` and explicitly-opened agent transactions); implicit per-turn tx never write a `tx-opened` record. Its `meta` shape is `{ txId: string; txKind: 'edit'; name?: string; explicit: true }`. The deterministic record id is `txrec_open_<txId>`.
+- **`src/session/store.ts`** — extend `isSessionRecord` (currently lines 86–113 on `cea4530`) so that records with `kind: 'tx-opened' | 'tx-applied' | 'tx-aborted'` validate. Each kind has different required fields on `meta`; the guard validates them per-kind so downstream consumers can safely deref `diffSummary.filesChanged`, `validators.blocking`, `overrides`, `reason`, and `artifactRef`. Without this update, `isSession` returns `false` for any session containing a tx record, and `loadSession` rejects the file.
+- **`src/headless/contract.ts`** — extend the `SessionRecordView` union (currently around line 214) with view shapes for the three new kinds. Without this update, headless artifact-query commands fail for sessions with tx records.
 - **`src/runtime/context.ts`** `recordToMessage` — verify it routes tx records correctly. The current implementation routes any non-`tool` kind by `record.role`; tx records use `role: 'user'` so this works unmodified, but the assumption should be asserted by a regression test rather than left implicit.
 - **`src/handoff/export.ts`** and any history/inspection rendering code that switches on `record.kind` — extend to handle the new kinds (or mark them explicitly opaque/skipped).
 - **`src/session/auto-compaction.ts`** range selector — extend the existing turn-boundary rule so that the open-and-apply/abort moments of an explicit multi-turn tx form a non-splittable boundary, derived from the presence of `tx-applied`/`tx-aborted` records (and the explicit-tx-open marker, which is a property of the tx layer, not a session record). Implicit per-turn tx is contained inside a single turn and needs no special handling.

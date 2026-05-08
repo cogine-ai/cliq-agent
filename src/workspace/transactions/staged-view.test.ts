@@ -108,7 +108,16 @@ test('materializeStagedView with reflink mode throws when copy is impossible', a
           target,
           bindPaths: [],
           copyMode: 'reflink'
-        })
+        }),
+        // Validate that the rejection is the specific cp(1) failure (EACCES /
+        // permission / cp exit code), not an unrelated bug in the walker. The
+        // exact wording of the cp error differs across macOS (`cp -c`) and
+        // Linux (`cp --reflink=always`); accept the union.
+        (err: unknown) => {
+          if (!(err instanceof Error)) return false;
+          const message = err.message;
+          return /EACCES|permission denied|Permission denied|cp\b/i.test(message);
+        }
       );
     } finally {
       // Restore writable perms so the cleanup `rm` can remove the tree.
@@ -142,6 +151,41 @@ test('materializeStagedView writes do not propagate to cwd', async () => {
 
     // cwd unchanged
     assert.equal(await readFile(path.join(cwd, 'src', 'a.ts'), 'utf8'), '1');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(overlay, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
+test('materializeStagedView rejects overlay paths that overlap a bindPath', async () => {
+  // Regression: bindPaths are materialized as symlinks back into cwd, so an
+  // overlay file under a bindPath would follow the symlink and write into
+  // the real workspace. The overlay walk must refuse such paths.
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-bindov-cwd-'));
+  const overlay = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-bindov-ov-'));
+  const target = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-bindov-tg-'));
+  try {
+    await mkdir(path.join(cwd, 'node_modules', 'foo'), { recursive: true });
+    await writeFile(path.join(cwd, 'node_modules', 'foo', 'idx.js'), 'pristine', 'utf8');
+    // Overlay attempts to shadow a file inside the bindPath subtree.
+    await mkdir(path.join(overlay, 'node_modules', 'foo'), { recursive: true });
+    await writeFile(path.join(overlay, 'node_modules', 'foo', 'idx.js'), 'tainted', 'utf8');
+
+    await assert.rejects(
+      () =>
+        materializeStagedView({
+          cwd,
+          overlayRoot: overlay,
+          target,
+          bindPaths: ['node_modules'],
+          copyMode: 'copy'
+        }),
+      /overlay path overlaps bind-mounted path/i
+    );
+
+    // The real workspace must remain untouched.
+    assert.equal(await readFile(path.join(cwd, 'node_modules', 'foo', 'idx.js'), 'utf8'), 'pristine');
   } finally {
     await rm(cwd, { recursive: true, force: true });
     await rm(overlay, { recursive: true, force: true });
@@ -203,7 +247,7 @@ test('materializeStagedView refuses target equal to cwd', async () => {
   }
 });
 
-test('materializeStagedView walkOverlay skips entries whose ancestor is a bind-symlink (isolation defense)', async () => {
+test('materializeStagedView walkOverlay rejects overlay entries that overlap a bind-mounted path (isolation defense)', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-symlink-cwd-'));
   const overlay = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-symlink-ov-'));
   const target = await mkdtemp(path.join(os.tmpdir(), 'cliq-sv-symlink-tg-'));
@@ -213,18 +257,25 @@ test('materializeStagedView walkOverlay skips entries whose ancestor is a bind-s
     await writeFile(path.join(cwd, 'node_modules', 'pkg', 'orig.js'), 'real', 'utf8');
     // Overlay accidentally has an entry under node_modules. If walkOverlay
     // wrote it through the symlink, it would land in real cwd/node_modules.
+    // The writer/coordinator must never produce overlay entries that overlap
+    // a bindPath: walkOverlay rejects loudly to surface the contract violation
+    // rather than silently dropping the file (which would mask data loss).
     await mkdir(path.join(overlay, 'node_modules', 'pkg'), { recursive: true });
     await writeFile(path.join(overlay, 'node_modules', 'pkg', 'leak.js'), 'overlay-leak', 'utf8');
 
-    await materializeStagedView({
-      cwd,
-      overlayRoot: overlay,
-      target,
-      bindPaths: ['node_modules'],
-      copyMode: 'copy'
-    });
+    await assert.rejects(
+      materializeStagedView({
+        cwd,
+        overlayRoot: overlay,
+        target,
+        bindPaths: ['node_modules'],
+        copyMode: 'copy'
+      }),
+      /overlay path overlaps bind-mounted path/
+    );
 
-    // The leak file must not have been written into cwd's real node_modules.
+    // Belt-and-braces: the leak file must not have been written into cwd's
+    // real node_modules even when the call rejected.
     await assert.rejects(() => readFile(path.join(cwd, 'node_modules', 'pkg', 'leak.js'), 'utf8'));
     // And the original cwd file remains intact.
     assert.equal(await readFile(path.join(cwd, 'node_modules', 'pkg', 'orig.js'), 'utf8'), 'real');

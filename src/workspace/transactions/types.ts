@@ -119,6 +119,54 @@ export const OPEN_RECORD_ID_PREFIX = 'txrec_open_';
 export const APPLY_RECORD_ID_PREFIX = 'txrec_apply_';
 export const ABORT_RECORD_ID_PREFIX = 'txrec_abort_';
 
+// txIds produced by makeTxId() match `tx_<26 Crockford32 chars>` exactly.
+// CLI- or test-supplied ids may use slightly less restrictive shapes (e.g.,
+// `tx_lock`, `tx_x`) but must still:
+//   - start with the `tx_` prefix
+//   - contain only [A-Za-z0-9_-] (no path separators, no `.`, no `..`,
+//     no NUL, no whitespace)
+//   - be 4..128 chars total
+// This is the minimum that blocks the path-traversal attack vector
+// (`tx_..` or `tx_../../foo`) while keeping test fixtures workable.
+// Production code paths still call makeTxId() which produces the full
+// strict 26-char Crockford32 shape.
+const TX_ID_STRICT_PATTERN = /^tx_[0-9A-HJKMNP-TV-Z]{26}$/;
+const TX_ID_LENIENT_PATTERN = /^tx_[A-Za-z0-9_-]{1,124}$/;
+
+export function isValidTxId(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  return TX_ID_LENIENT_PATTERN.test(value);
+}
+
+export function isStrictTxId(value: unknown): value is string {
+  return typeof value === 'string' && TX_ID_STRICT_PATTERN.test(value);
+}
+
+/**
+ * Validates a txId against the lenient shape that prevents path traversal.
+ * Throws InvalidTxIdError if the value contains `..`, `/`, `\`, or any other
+ * character outside `[A-Za-z0-9_-]`, or if the prefix or length is wrong.
+ *
+ * Call this at every external trust boundary BEFORE the value flows into
+ * `path.join(txRoot, txId)` to prevent `tx_../../foo` from escaping the
+ * per-tx directory.
+ */
+export function assertValidTxId(value: unknown): asserts value is string {
+  if (!isValidTxId(value)) {
+    throw new InvalidTxIdError(value);
+  }
+}
+
+export class InvalidTxIdError extends Error {
+  constructor(value: unknown) {
+    const display = typeof value === 'string' ? JSON.stringify(value) : String(value);
+    super(
+      `invalid tx id: ${display} (expected tx_ prefix + [A-Za-z0-9_-]{1,124}, no path separators)`
+    );
+    this.name = 'InvalidTxIdError';
+  }
+}
+
 export function openRecordId(txId: string): string {
   return `${OPEN_RECORD_ID_PREFIX}${txId}`;
 }
