@@ -32,7 +32,7 @@ export function workspaceCheckpointFilePath(workspaceCheckpointId: string, cliqH
   return path.join(cliqHome, 'checkpoints', `${workspaceCheckpointId}.json`);
 }
 
-async function writeWorkspaceCheckpoint(checkpoint: WorkspaceCheckpoint) {
+export async function writeWorkspaceCheckpoint(checkpoint: WorkspaceCheckpoint) {
   const target = workspaceCheckpointFilePath(checkpoint.id);
   await atomicWriteJson(target, checkpoint);
 }
@@ -159,7 +159,7 @@ async function createGitGhostCheckpoint(
   }
 }
 
-async function createWorkspaceCheckpoint(cwd: string): Promise<WorkspaceCheckpoint> {
+export async function createWorkspaceCheckpoint(cwd: string): Promise<WorkspaceCheckpoint> {
   const createdAt = nowIso();
   const id = makeId('wchk');
   const workspaceRealPath = await resolveWorkspaceRealPath(cwd);

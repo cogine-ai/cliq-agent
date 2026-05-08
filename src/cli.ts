@@ -26,8 +26,18 @@ import {
 } from './session/checkpoints.js';
 import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
-import { ensureFresh, ensureSession, saveSession } from './session/store.js';
+import { ensureFresh, ensureSession, saveSession, workspaceIdFromRealPath } from './session/store.js';
 import type { ToolResult } from './tools/types.js';
+import {
+  openTx as coordOpenTx,
+  applyTx as coordApplyTx,
+  abortTx as coordAbortTx,
+  getTxStatus as coordGetTxStatus,
+  listTx as coordListTx,
+  type CoordinatorContext
+} from './workspace/transactions/coordinator.js';
+import { isValidTxId } from './workspace/transactions/types.js';
+import { promises as fsPromises } from 'node:fs';
 
 const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
 const POLICY_MODE_LIST = POLICY_MODES.join(', ');
@@ -70,6 +80,28 @@ export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'handoff-create'; checkpointId?: string; prompt?: undefined }
   | { cmd: 'reset' | 'history' | 'rpc'; prompt?: undefined }
   | { cmd: 'help'; topic?: HelpTopic; prompt?: undefined }
+  | { cmd: 'tx-open'; name?: string; explicit: true; json?: boolean; headless?: boolean; prompt?: undefined }
+  | { cmd: 'tx-status'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
+  | { cmd: 'tx-list'; json?: boolean; headless?: boolean; prompt?: undefined }
+  | {
+      cmd: 'tx-apply';
+      txId: string;
+      overrides: string[];
+      reason?: string;
+      json?: boolean;
+      headless?: boolean;
+      prompt?: undefined;
+    }
+  | {
+      cmd: 'tx-abort';
+      txId: string;
+      restoreConfirmed?: boolean;
+      keepPartial?: boolean;
+      reason?: string;
+      json?: boolean;
+      headless?: boolean;
+      prompt?: undefined;
+    }
 );
 
 function isPolicyMode(value: string): value is PolicyMode {
@@ -86,6 +118,155 @@ function isRestoreScope(value: string): value is RestoreScope {
 
 function isHelpTopic(value: string): value is HelpTopic {
   return (HELP_TOPICS as readonly string[]).includes(value);
+}
+
+function consumeFlag(args: string[], name: string): boolean {
+  const idx = args.indexOf(name);
+  if (idx === -1) return false;
+  args.splice(idx, 1);
+  return true;
+}
+
+function consumeOption(args: string[], name: string): string | undefined {
+  const idx = args.indexOf(name);
+  if (idx === -1) return undefined;
+  // Refuse to swallow the next token if it looks like another flag.
+  // Without this check, `cliq tx apply <id> --override --reason foo`
+  // would parse `--override` as the value of `--reason`'s neighbour and
+  // surface a misleading `Unknown ... argument` error downstream.
+  const next = args[idx + 1];
+  if (next === undefined || next.startsWith('--')) {
+    throw new Error(`${name} requires a value`);
+  }
+  args.splice(idx, 2);
+  return next;
+}
+
+function consumeRepeatable(args: string[], name: string): string[] {
+  const out: string[] = [];
+  while (true) {
+    const value = consumeOption(args, name);
+    if (value === undefined) break;
+    out.push(value);
+  }
+  return out;
+}
+
+function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  const sub = args[1];
+  if (!sub) {
+    throw new Error('cliq tx requires a subcommand (open, status, list, apply, abort)');
+  }
+  const rest = args.slice(2);
+  const json = consumeFlag(rest, '--json') || undefined;
+  const headless = consumeFlag(rest, '--headless') || undefined;
+
+  switch (sub) {
+    case 'open': {
+      const first = rest[0];
+      const name = first !== undefined && !first.startsWith('--') ? first : undefined;
+      if (name !== undefined) {
+        rest.shift();
+      }
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx open argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-open',
+        explicit: true as const,
+        ...(name !== undefined ? { name } : {}),
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'status': {
+      const first = rest[0];
+      const txId = first !== undefined && !first.startsWith('--') ? first : undefined;
+      if (txId !== undefined) {
+        rest.shift();
+        if (!isValidTxId(txId)) {
+          throw new Error(`tx status: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
+        }
+      }
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx status argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-status',
+        ...(txId !== undefined ? { txId } : {}),
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'list': {
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx list argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-list',
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'apply': {
+      const txId = rest[0];
+      if (!txId || txId.startsWith('--')) {
+        throw new Error('tx apply requires <txId>');
+      }
+      rest.shift();
+      if (!isValidTxId(txId)) {
+        throw new Error(`tx apply: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
+      }
+      const overrides = consumeRepeatable(rest, '--override');
+      const reason = consumeOption(rest, '--reason');
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx apply argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-apply',
+        txId,
+        overrides,
+        ...(reason !== undefined ? { reason } : {}),
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'abort': {
+      const txId = rest[0];
+      if (!txId || txId.startsWith('--')) {
+        throw new Error('tx abort requires <txId>');
+      }
+      rest.shift();
+      if (!isValidTxId(txId)) {
+        throw new Error(`tx abort: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
+      }
+      const restoreConfirmed = consumeFlag(rest, '--restore-confirmed');
+      const keepPartial = consumeFlag(rest, '--keep-partial');
+      if (restoreConfirmed && keepPartial) {
+        throw new Error('--restore-confirmed and --keep-partial are mutually exclusive');
+      }
+      const reason = consumeOption(rest, '--reason');
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx abort argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: 'tx-abort',
+        txId,
+        ...(restoreConfirmed ? { restoreConfirmed: true } : {}),
+        ...(keepPartial ? { keepPartial: true } : {}),
+        ...(reason !== undefined ? { reason } : {}),
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    default:
+      throw new Error(`unknown tx subcommand: ${sub}`);
+  }
 }
 
 function isHelpToken(value: string | undefined) {
@@ -444,6 +625,7 @@ function isKnownCommand(cmd: string | undefined) {
     cmd === 'history' ||
     cmd === 'rpc' ||
     cmd === 'help' ||
+    cmd === 'tx' ||
     cmd === '--help' ||
     cmd === '-h'
   );
@@ -464,8 +646,26 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
   const args: string[] = [];
 
+  // The `--tx`/`--tx-apply` flags are reserved for the runner integration
+  // that wires the overlay writer + auto-open/auto-finalize/auto-apply into
+  // each turn. That integration is deferred to a follow-up release (see
+  // src/workspace/transactions/coordinator.ts header comment). Until then,
+  // accepting these flags silently would let the runner write straight to
+  // the real workspace despite the user opting in to staging. Reject loudly
+  // and point at the working manual surface instead.
+  const TX_FLAGS_NOT_WIRED =
+    '--tx and --tx-apply are not yet wired into the runner; use the manual surface: ' +
+    '`cliq tx open <name>`, `cliq tx list`, `cliq tx status <txId>`, `cliq tx apply <txId>`, `cliq tx abort <txId>`.';
+
   for (let i = 0; i < raw.length; i += 1) {
     const token = raw[i];
+    if (token === '--tx' || token.startsWith('--tx=')) {
+      throw new Error(TX_FLAGS_NOT_WIRED);
+    }
+    if (token === '--tx-apply' || token.startsWith('--tx-apply=')) {
+      throw new Error(TX_FLAGS_NOT_WIRED);
+    }
+
     if (token.startsWith('--policy=')) {
       const value = token.slice('--policy='.length);
       if (!value) {
@@ -582,7 +782,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   const cmd = args[0];
-  const base: ParsedArgsBase = { policy, skills, model };
+  const base: ParsedArgsBase = {
+    policy,
+    skills,
+    model
+  };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
   if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
     throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
@@ -595,6 +799,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (cmd === 'checkpoint') return parseCheckpointArgs(args, base);
   if (cmd === 'compact') return parseCompactGroupArgs(args, base);
   if (cmd === 'handoff') return parseHandoffGroupArgs(args, base);
+  if (cmd === 'tx') return parseTxArgs(args, base);
   if (cmd === 'checkpoints') {
     throw new Error('Command changed. Use "cliq checkpoint list".');
   }
@@ -1109,6 +1314,157 @@ export async function runCli(argv: string[]) {
     const artifact = await exportHandoff(cwd, session, { checkpointId: parsed.checkpointId });
     console.log(`created handoff ${artifact.id} at ${artifact.paths.markdown}`);
     return;
+  }
+
+  if (
+    parsed.cmd === 'tx-open' ||
+    parsed.cmd === 'tx-status' ||
+    parsed.cmd === 'tx-list' ||
+    parsed.cmd === 'tx-apply' ||
+    parsed.cmd === 'tx-abort'
+  ) {
+    const session = await ensureSession(cwd);
+    const wantsJson = Boolean(parsed.json || parsed.headless);
+    // workspaceRealPath: prefer the OS-level real path so it is stable across
+    // symlinked invocations; fall back to cwd if realpath fails.
+    let workspaceRealPath = cwd;
+    try {
+      workspaceRealPath = await fsPromises.realpath(cwd);
+    } catch {
+      // ignore, use cwd verbatim.
+    }
+    const ctx: CoordinatorContext = {
+      cwd,
+      session,
+      workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+      sessionId: session.id,
+      workspaceRealPath
+    };
+
+    const writeJson = (payload: unknown) => {
+      process.stdout.write(`${JSON.stringify(payload)}\n`);
+    };
+
+    if (parsed.cmd === 'tx-open') {
+      const tx = await coordOpenTx(ctx, { explicit: true, name: parsed.name });
+      if (wantsJson) {
+        writeJson({ type: 'tx-opened', txId: tx.id, ...(parsed.name ? { name: parsed.name } : {}) });
+      } else {
+        process.stdout.write(`tx opened: ${tx.id}${parsed.name ? ` (${parsed.name})` : ''}\n`);
+      }
+      return;
+    }
+
+    if (parsed.cmd === 'tx-list') {
+      const list = await coordListTx(ctx);
+      if (wantsJson) {
+        writeJson({
+          type: 'tx-list',
+          transactions: list.map((t) => ({ id: t.id, state: t.state, createdAt: t.createdAt }))
+        });
+      } else if (list.length === 0) {
+        process.stdout.write('no transactions\n');
+      } else {
+        for (const t of list) process.stdout.write(`${t.id} ${t.state}\n`);
+      }
+      return;
+    }
+
+    if (parsed.cmd === 'tx-status') {
+      if (!parsed.txId) {
+        // No id provided: behave like list (matches operator expectations).
+        const list = await coordListTx(ctx);
+        if (wantsJson) {
+          writeJson({
+            type: 'tx-list',
+            transactions: list.map((t) => ({ id: t.id, state: t.state, createdAt: t.createdAt }))
+          });
+        } else if (list.length === 0) {
+          process.stdout.write('no transactions\n');
+        } else {
+          for (const t of list) process.stdout.write(`${t.id} ${t.state}\n`);
+        }
+        return;
+      }
+      const status = await coordGetTxStatus(ctx, parsed.txId);
+      if (!status) {
+        const message = `tx not found: ${parsed.txId}`;
+        if (wantsJson) {
+          writeJson({ type: 'error', code: 'tx-not-found', message });
+        } else {
+          process.stderr.write(`${message}\n`);
+        }
+        throw new ReportedCliError(message, { exitCode: 2 });
+      }
+      if (wantsJson) {
+        writeJson({
+          type: 'tx-status',
+          tx: status.tx,
+          hasApplyProgress: status.hasApplyProgress,
+          hasAbortProgress: status.hasAbortProgress
+        });
+      } else {
+        process.stdout.write(`${status.tx.id} ${status.tx.state}\n`);
+      }
+      return;
+    }
+
+    if (parsed.cmd === 'tx-apply') {
+      const result = await coordApplyTx(ctx, parsed.txId, {
+        overrides: parsed.overrides,
+        ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
+      });
+      if (result.ok) {
+        if (wantsJson) {
+          writeJson({
+            type: 'tx-applied',
+            txId: result.txId,
+            filesApplied: result.filesApplied,
+            ghostSnapshotId: result.ghostSnapshotId
+          });
+        } else {
+          process.stdout.write(`tx applied: ${result.txId} (${result.filesApplied.length} files)\n`);
+        }
+        return;
+      }
+      if (wantsJson) {
+        writeJson({ type: 'error', code: result.error, message: result.message });
+      } else {
+        process.stderr.write(`tx apply ${result.error}: ${result.message}\n`);
+      }
+      throw new ReportedCliError(result.message, { exitCode: 1 });
+    }
+
+    if (parsed.cmd === 'tx-abort') {
+      const result = await coordAbortTx(ctx, parsed.txId, {
+        restoreConfirmed: parsed.restoreConfirmed,
+        keepPartial: parsed.keepPartial,
+        ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
+      });
+      if (result.ok) {
+        if (wantsJson) {
+          writeJson({
+            type: 'tx-aborted',
+            txId: parsed.txId,
+            aborted: result.aborted,
+            ...(result.reason !== undefined ? { reason: result.reason } : {})
+          });
+        } else if (result.aborted) {
+          process.stdout.write(
+            `tx aborted: ${parsed.txId}${result.reason ? ` (${result.reason})` : ''}\n`
+          );
+        } else {
+          process.stdout.write(`tx already terminal: ${parsed.txId}\n`);
+        }
+        return;
+      }
+      if (wantsJson) {
+        writeJson({ type: 'error', code: result.error, message: result.message });
+      } else {
+        process.stderr.write(`tx abort ${result.error}: ${result.message}\n`);
+      }
+      throw new ReportedCliError(result.message, { exitCode: 1 });
+    }
   }
 
   if (prompt && prompt.trim()) {

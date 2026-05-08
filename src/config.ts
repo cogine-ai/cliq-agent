@@ -20,3 +20,15 @@ export const FIND_MAX_RESULTS = 200;
 export const FIND_MAX_DEPTH = 12;
 export const GREP_MAX_MATCHES = 200;
 export const GREP_MAX_FILE_BYTES = 64_000;
+
+// Transactional workspace runtime env overrides (v0.8). Resolution precedence:
+// CLI flag > env var > workspace config > built-in default.
+// Each env constant preserves the unset state (undefined) so that an unset
+// var does NOT override a workspace-config value with a hard-coded default.
+export const CLIQ_TX_MODE = process.env.CLIQ_TX_MODE;
+export const CLIQ_TX_APPLY_POLICY = process.env.CLIQ_TX_APPLY_POLICY;
+export const CLIQ_TX_BASH_POLICY = process.env.CLIQ_TX_BASH_POLICY;
+export const CLIQ_TX_HEADLESS: boolean | undefined =
+  process.env.CLIQ_TX_HEADLESS === undefined
+    ? undefined
+    : process.env.CLIQ_TX_HEADLESS === '1';
