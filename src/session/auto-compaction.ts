@@ -130,6 +130,53 @@ function safeBoundaryCandidates(records: SessionRecord[]) {
   return candidates.sort((a, b) => a - b);
 }
 
+type TxSpan = { openIndex: number; closeIndex: number };
+
+function findExplicitTxSpans(records: SessionRecord[]): TxSpan[] {
+  const spans: TxSpan[] = [];
+  const openByTxId = new Map<string, number>();
+  for (let i = 0; i < records.length; i += 1) {
+    const r = records[i];
+    if (!r) continue;
+    // Only EXPLICIT tx-opened markers form a non-splittable span. Implicit
+    // per-turn tx are contained within a single turn and the existing
+    // turn-boundary rule already protects them — including them here would
+    // make compact too conservative and could cause `no-safe-range` for
+    // long sessions.
+    if (r.kind === 'tx-opened' && r.meta.explicit === true) {
+      openByTxId.set(r.meta.txId, i);
+    } else if (r.kind === 'tx-applied' || r.kind === 'tx-aborted') {
+      const open = openByTxId.get(r.meta.txId);
+      if (open !== undefined) {
+        spans.push({ openIndex: open, closeIndex: i });
+        openByTxId.delete(r.meta.txId);
+      }
+    }
+  }
+  // Unmatched tx-opened: span extends to records.length (still-open explicit tx).
+  for (const [, openIndex] of openByTxId) {
+    spans.push({ openIndex, closeIndex: records.length });
+  }
+  return spans;
+}
+
+function adjustCutForTxSpans(rawCutIndex: number, spans: TxSpan[]): number {
+  let cut = rawCutIndex;
+  let changed = true;
+  // Multiple passes in case adjusting into one span lands inside an earlier span.
+  while (changed) {
+    changed = false;
+    for (const span of spans) {
+      // Cut at openIndex is safe (cut before the tx); cut > closeIndex is also safe.
+      if (cut > span.openIndex && cut <= span.closeIndex) {
+        cut = span.openIndex;
+        changed = true;
+      }
+    }
+  }
+  return cut;
+}
+
 export function selectAutoCompactRange({
   session,
   keepRecentTokens,
@@ -162,6 +209,15 @@ export function selectAutoCompactRange({
     return null;
   }
 
+  // Move cut out of any explicit-tx span so we never split between
+  // tx-opened and its matching tx-applied/tx-aborted (or the still-open tail).
+  const spans = findExplicitTxSpans(session.records);
+  const adjusted = adjustCutForTxSpans(selected, spans);
+  if (adjusted <= previousEnd) {
+    return null;
+  }
+  selected = adjusted;
+
   const compactableNewTokens = estimateRecordsTokens(session.records.slice(previousEnd, selected));
   if (compactableNewTokens < minNewTokens) {
     return null;
@@ -188,6 +244,64 @@ export function serializeRecordForSummary(record: SessionRecord, maxToolPayloadC
       `tool=${record.tool}`,
       `status=${record.status}`,
       clipped,
+      '</record>'
+    ].join('\n');
+  }
+
+  if (record.kind === 'tx-opened') {
+    const name = record.meta.name ? ` "${record.meta.name}"` : '';
+    const body = `[Transaction opened${name} (${record.meta.txId})]`;
+    return [
+      `<record id="${record.id}" kind="tx-opened" txId="${record.meta.txId}">`,
+      body,
+      '</record>'
+    ].join('\n');
+  }
+
+  if (record.kind === 'tx-applied') {
+    // Defensive: tx records that pre-date a schema migration, or were
+    // hand-edited, may be missing nested fields. isSessionRecord enforces
+    // the v0.8 contract going forward, but the summarizer should never crash
+    // on a partial record — the cost is just a less-detailed compact body.
+    const meta = record.meta as {
+      txId: string;
+      diffSummary?: { filesChanged?: number; additions?: number; deletions?: number; modifies?: string[] };
+      validators?: { blocking?: { pass?: number; fail?: number } };
+    };
+    const ds = meta.diffSummary;
+    const blocking = meta.validators?.blocking;
+    const filesChanged = typeof ds?.filesChanged === 'number' ? ds.filesChanged : 0;
+    const additions = typeof ds?.additions === 'number' ? ds.additions : 0;
+    const deletions = typeof ds?.deletions === 'number' ? ds.deletions : 0;
+    const modifies = Array.isArray(ds?.modifies) ? ds.modifies.join(', ') : '';
+    const blockingPass = typeof blocking?.pass === 'number' ? blocking.pass : 0;
+    const blockingFail = typeof blocking?.fail === 'number' ? blocking.fail : 0;
+    const blockingTotal = blockingPass + blockingFail;
+    const body = `[Transaction ${meta.txId} applied: ${filesChanged} files changed (+${additions} -${deletions}); modifies: ${modifies}; validators: ${blockingPass}/${blockingTotal} blocking pass]`;
+    return [
+      `<record id="${record.id}" kind="tx-applied" txId="${meta.txId}">`,
+      body,
+      '</record>'
+    ].join('\n');
+  }
+
+  if (record.kind === 'tx-aborted') {
+    const meta = record.meta as {
+      txId: string;
+      reason: string;
+      failedValidators?: string[];
+      appliedPartial?: { partialFiles?: string[]; restoreConfirmed?: boolean };
+    };
+    const partial = meta.appliedPartial
+      ? `; partial: ${(meta.appliedPartial.partialFiles ?? []).join(', ')} (restoreConfirmed=${meta.appliedPartial.restoreConfirmed === true})`
+      : '';
+    const failed = Array.isArray(meta.failedValidators) && meta.failedValidators.length > 0
+      ? `; failedValidators: ${meta.failedValidators.join(', ')}`
+      : '';
+    const body = `[Transaction ${meta.txId} aborted: ${meta.reason}${failed}${partial}]`;
+    return [
+      `<record id="${record.id}" kind="tx-aborted" txId="${meta.txId}">`,
+      body,
       '</record>'
     ].join('\n');
   }

@@ -187,5 +187,70 @@ export function runtimeEventToHeadless(event: RuntimeEvent): RuntimeEventMapping
     };
   }
 
+  if (event.type === 'tx-staging-start') {
+    return {
+      type: 'tx-staging-start',
+      payload: {
+        txId: event.txId,
+        txKind: 'edit',
+        trigger: event.trigger,
+        ...(event.name ? { name: event.name } : {})
+      },
+      artifacts: artifactsWith({ transactions: [event.txId] })
+    };
+  }
+
+  if (event.type === 'tx-finalized') {
+    return {
+      type: 'tx-finalized',
+      payload: { txId: event.txId, txKind: 'edit', diffSummary: event.diffSummary },
+      artifacts: artifactsWith({ transactions: [event.txId] })
+    };
+  }
+
+  if (event.type === 'tx-validated') {
+    return {
+      type: 'tx-validated',
+      payload: {
+        txId: event.txId,
+        txKind: 'edit',
+        validators: event.validators,
+        blockingFailures: event.blockingFailures
+      },
+      artifacts: artifactsWith({ transactions: [event.txId] })
+    };
+  }
+
+  if (event.type === 'tx-applied') {
+    return {
+      type: 'tx-applied',
+      payload: {
+        txId: event.txId,
+        txKind: 'edit',
+        diffSummary: event.diffSummary,
+        validators: event.validators,
+        overrides: event.overrides,
+        artifactRef: event.artifactRef,
+        ...(event.ghostSnapshotId ? { ghostSnapshotId: event.ghostSnapshotId } : {})
+      },
+      artifacts: artifactsWith({ transactions: [event.txId] })
+    };
+  }
+
+  if (event.type === 'tx-aborted') {
+    return {
+      type: 'tx-aborted',
+      payload: {
+        txId: event.txId,
+        txKind: 'edit',
+        reason: event.reason,
+        ...(event.failedValidators ? { failedValidators: event.failedValidators } : {}),
+        artifactRef: event.artifactRef,
+        ...(event.appliedPartial ? { appliedPartial: event.appliedPartial } : {})
+      },
+      artifacts: artifactsWith({ transactions: [event.txId] })
+    };
+  }
+
   return assertNever(event);
 }

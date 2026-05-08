@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { loadWorkspaceConfig } from './config.js';
+import { loadWorkspaceConfig, parseWorkspaceConfig } from './config.js';
 
 test('loadWorkspaceConfig returns empty defaults when config is missing', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-workspace-config-'));
@@ -148,4 +148,92 @@ test('loadWorkspaceConfig reads autoCompact config', async () => {
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+test('parseWorkspaceConfig accepts transactions block with full settings', () => {
+  const parsed = parseWorkspaceConfig({
+    transactions: {
+      mode: 'edit',
+      auto: 'per-turn',
+      applyPolicy: 'interactive',
+      bashPolicy: 'passthrough',
+      stagedView: { copyMode: 'auto', bindPaths: ['node_modules'] },
+      validators: {
+        shell: [
+          { name: 'tsc', command: 'npm run typecheck', severity: 'blocking', timeoutMs: 60000 }
+        ],
+        disabled: [],
+        serial: false
+      },
+      abortRetention: '7d'
+    }
+  });
+  assert.equal(parsed.transactions?.mode, 'edit');
+  assert.equal(parsed.transactions?.auto, 'per-turn');
+  assert.equal(parsed.transactions?.applyPolicy, 'interactive');
+  assert.equal(parsed.transactions?.bashPolicy, 'passthrough');
+  assert.equal(parsed.transactions?.stagedView?.copyMode, 'auto');
+  assert.deepEqual(parsed.transactions?.stagedView?.bindPaths, ['node_modules']);
+  assert.equal(parsed.transactions?.validators?.shell?.[0].name, 'tsc');
+  assert.equal(parsed.transactions?.validators?.shell?.[0].command, 'npm run typecheck');
+  assert.equal(parsed.transactions?.validators?.shell?.[0].severity, 'blocking');
+  assert.equal(parsed.transactions?.validators?.shell?.[0].timeoutMs, 60000);
+  assert.equal(parsed.transactions?.validators?.serial, false);
+  assert.equal(parsed.transactions?.abortRetention, '7d');
+});
+
+test('parseWorkspaceConfig leaves transactions undefined when block is absent', () => {
+  const parsed = parseWorkspaceConfig({});
+  assert.equal(parsed.transactions, undefined);
+});
+
+test('parseWorkspaceConfig rejects invalid transactions.mode', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ transactions: { mode: 'worktree' } }),
+    /transactions\.mode/
+  );
+});
+
+test('parseWorkspaceConfig rejects invalid transactions.bashPolicy', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ transactions: { bashPolicy: 'sandbox' } }),
+    /transactions\.bashPolicy/
+  );
+});
+
+test('parseWorkspaceConfig rejects invalid stagedView.copyMode', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ transactions: { stagedView: { copyMode: 'fast' } } }),
+    /transactions\.stagedView\.copyMode/
+  );
+});
+
+test('parseWorkspaceConfig rejects non-object transactions block', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ transactions: 'edit' }),
+    /transactions must be an object/
+  );
+});
+
+test('parseWorkspaceConfig rejects null transactions block', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ transactions: null }),
+    /transactions must be an object/
+  );
+});
+
+test('parseWorkspaceConfig rejects array transactions block', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ transactions: [] }),
+    /transactions must be an object/
+  );
+});
+
+test('parseWorkspaceConfig rejects validators.shell entry with non-string name', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({
+      transactions: { validators: { shell: [{ name: 42, command: 'x', severity: 'blocking' }] } }
+    }),
+    /transactions\.validators\.shell/
+  );
 });

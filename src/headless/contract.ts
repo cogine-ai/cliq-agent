@@ -43,7 +43,11 @@ export type HeadlessErrorCode =
   | 'session-store-error'
   | 'artifact-not-found'
   | 'cancelled'
-  | 'internal-error';
+  | 'internal-error'
+  | 'tx-validator-blocking'
+  | 'tx-apply-conflict'
+  | 'tx-apply-partial'
+  | 'tx-overlay-error';
 
 export type HeadlessErrorStage =
   | 'input'
@@ -69,6 +73,7 @@ export type HeadlessArtifacts = {
   workspaceCheckpoints: string[];
   compactions: string[];
   handoffs: string[];
+  transactions: string[];
 };
 
 export function emptyHeadlessArtifacts(): HeadlessArtifacts {
@@ -76,7 +81,8 @@ export function emptyHeadlessArtifacts(): HeadlessArtifacts {
     checkpoints: [],
     workspaceCheckpoints: [],
     compactions: [],
-    handoffs: []
+    handoffs: [],
+    transactions: []
   };
 }
 
@@ -106,7 +112,12 @@ export type HeadlessRuntimeEventType =
   | 'compact-error'
   | 'final'
   | 'error'
-  | 'run-end';
+  | 'run-end'
+  | 'tx-staging-start'
+  | 'tx-finalized'
+  | 'tx-validated'
+  | 'tx-applied'
+  | 'tx-aborted';
 
 export type RunStartPayload = {
   cwd: string;
@@ -178,6 +189,52 @@ export type RunEndPayload = {
   output: HeadlessRunOutput;
 };
 
+export type TxStagingStartPayload = {
+  txId: string;
+  txKind: 'edit';
+  trigger: 'auto-turn' | 'explicit-open';
+  name?: string;
+};
+
+export type TxFinalizedPayload = {
+  txId: string;
+  txKind: 'edit';
+  diffSummary: import('../workspace/transactions/types.js').DiffSummary;
+};
+
+export type TxValidatedPayload = {
+  txId: string;
+  txKind: 'edit';
+  validators: {
+    blocking: { pass: number; fail: number };
+    advisory: { pass: number; fail: number; names: string[] };
+  };
+  blockingFailures: string[];
+};
+
+export type TxAppliedPayload = {
+  txId: string;
+  txKind: 'edit';
+  diffSummary: import('../workspace/transactions/types.js').DiffSummary;
+  validators: {
+    blocking: { pass: number; fail: number };
+    advisory: { pass: number; fail: number; names: string[] };
+  };
+  overrides: import('../workspace/transactions/types.js').OverrideEntry[];
+  artifactRef: string;
+  ghostSnapshotId?: string;
+};
+
+export type TxAbortedPayload = {
+  txId: string;
+  txKind: 'edit';
+  reason: import('../workspace/transactions/types.js').AbortReason;
+  note?: string;
+  failedValidators?: string[];
+  artifactRef: string;
+  appliedPartial?: { partialFiles: string[]; ghostSnapshotId: string; restoreConfirmed: boolean };
+};
+
 export type HeadlessEventPayloadByType = {
   'run-start': RunStartPayload;
   'checkpoint-created': CheckpointCreatedPayload;
@@ -193,6 +250,11 @@ export type HeadlessEventPayloadByType = {
   final: FinalPayload;
   error: HeadlessRunError;
   'run-end': RunEndPayload;
+  'tx-staging-start': TxStagingStartPayload;
+  'tx-finalized': TxFinalizedPayload;
+  'tx-validated': TxValidatedPayload;
+  'tx-applied': TxAppliedPayload;
+  'tx-aborted': TxAbortedPayload;
 };
 
 export type RuntimeEventEnvelopeFor<TType extends HeadlessRuntimeEventType> = TType extends HeadlessRuntimeEventType
@@ -244,6 +306,46 @@ export type SessionRecordView =
       status: 'ok' | 'error';
       contentPreview: string;
       meta?: Record<string, string | number | boolean | null>;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'tx-opened';
+      role: 'user';
+      txId: string;
+      name?: string;
+      explicit: true;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'tx-applied';
+      role: 'user';
+      txId: string;
+      diffSummary: import('../workspace/transactions/types.js').DiffSummary;
+      validators: {
+        blocking: { pass: number; fail: number };
+        advisory: { pass: number; fail: number; names: string[] };
+      };
+      overrides: import('../workspace/transactions/types.js').OverrideEntry[];
+      artifactRef: string;
+      ghostSnapshotId?: string;
+    }
+  | {
+      id: string;
+      ts: string;
+      kind: 'tx-aborted';
+      role: 'user';
+      txId: string;
+      reason: import('../workspace/transactions/types.js').AbortReason;
+      note?: string;
+      failedValidators?: string[];
+      artifactRef: string;
+      appliedPartial?: {
+        partialFiles: string[];
+        ghostSnapshotId: string;
+        restoreConfirmed: boolean;
+      };
     };
 
 export type CheckpointView = {
