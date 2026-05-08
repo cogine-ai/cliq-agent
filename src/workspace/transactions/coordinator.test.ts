@@ -27,6 +27,7 @@ import {
   writeTxState,
   writeDiff,
   readTxState,
+  readDiff,
   overlayDir,
   writeApplyProgress,
   createTx
@@ -228,17 +229,13 @@ test('finalizeTx writes diff.json, sets diffSummary, transitions state to finali
     const tx = await openTx(ctx, { explicit: false });
     const root = resolveTxRoot(home);
     // Stage an overlay edit to simulate runner-driven write.
-    const { createOverlayWriter } = await import('./overlay.js');
-    const { overlayDir } = await import('./store.js');
     const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
     await writer.replaceText('a.txt', 'one', 'ONE');
 
-    const { finalizeTx } = await import('./coordinator.js');
     const result = await finalizeTx(ctx, tx.id);
     assert.equal(result.diffSummary.filesChanged, 1);
     assert.deepEqual(result.diffSummary.modifies, ['a.txt']);
 
-    const { readDiff } = await import('./store.js');
     const diff = await readDiff(root, tx.id);
     assert.ok(diff);
     assert.equal(diff?.files.length, 1);
@@ -253,7 +250,6 @@ test('finalizeTx with empty overlay produces zero-file diff', async () => {
   await withCoordinatorEnv(async ({ ctx, home }) => {
     const tx = await openTx(ctx, { explicit: false });
     const root = resolveTxRoot(home);
-    const { finalizeTx } = await import('./coordinator.js');
     const result = await finalizeTx(ctx, tx.id);
     assert.equal(result.diffSummary.filesChanged, 0);
     const after = await readTxState(root, tx.id);
