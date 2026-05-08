@@ -47,6 +47,18 @@ async function walkAndMaterialize(
     const rel = prefix ? path.join(prefix, entry.name) : entry.name;
     const srcPath = path.join(cwd, rel);
     const dstPath = path.join(target, rel);
+    // Materialization rules for `walkAndMaterialize`:
+    //   - Entries whose path is in `bindPaths` (held in `bindSet`) are surfaced
+    //     as symlinks pointing back into the live `cwd` (e.g. `node_modules`,
+    //     `.git`) so validators see the workspace's existing state without
+    //     paying the cost of a full copy.
+    //   - Directories are walked recursively; intermediate dirs are created
+    //     under `target` before descending.
+    //   - Regular files are copied via `copyOne` (which dispatches to reflink
+    //     or byte-copy depending on the configured `copyMode`).
+    //   - Symlinks NOT listed in `bindPaths` are intentionally skipped
+    //     (entry.isFile()/isDirectory() are both false for them); we do not
+    //     follow them, to avoid escaping the workspace root.
     if (bindSet.has(rel)) {
       await fs.symlink(srcPath, dstPath);
       continue;
