@@ -193,13 +193,9 @@ export async function finishTurnTx(
       code: 'tx-apply-conflict',
       recoverable: true
     });
-    await emit({
-      type: 'tx-aborted',
-      txId: tx.id,
-      reason: 'apply-conflict',
-      artifactRef: `tx/${tx.id}/`,
-      failedValidators: undefined
-    });
+    // NOTE: tx stays in 'approved' state — user can retry `cliq tx apply <id>` after
+    // resolving the external change. We intentionally do NOT emit tx-aborted here:
+    // emitting it would imply the tx is now in aborted state, which is incorrect.
   } else if (applyResult.error === 'partial') {
     await emit({
       type: 'error',
