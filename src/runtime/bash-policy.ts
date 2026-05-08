@@ -23,7 +23,7 @@ export async function enforceBashPolicy(opts: EnforceBashPolicyOptions): Promise
   switch (opts.policy) {
     case 'passthrough':
       return { decision: 'allow' };
-    case 'confirm':
+    case 'confirm': {
       if (opts.headless) {
         return {
           decision: 'deny',
@@ -46,6 +46,7 @@ export async function enforceBashPolicy(opts: EnforceBashPolicyOptions): Promise
         code: 'tx-overlay-error',
         message: 'bash invocation rejected by user'
       };
+    }
     case 'deny':
       return {
         decision: 'deny',
