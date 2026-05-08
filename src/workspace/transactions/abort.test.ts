@@ -205,11 +205,10 @@ test('AB3a.5 promotes reason and loads partial metadata when flag is now applica
   });
 });
 
-test('AB3a.5 rejects flags when state is not applied-partial at lock time', async () => {
+test.skip('AB3a.5 rejects flags when state is not applied-partial at lock time (placeholder — needs lock-internal injection hook)', async () => {
   // TODO: full coverage of this race requires injecting a state change between AB0a and AB3a.5
   // (no injection hook exists today). The standalone assertion is exercised by
   // 'AB0a rejects flags when state is not applied-partial' above; AB3a.5 reuses identical rules.
-  assert.ok(true);
 });
 
 test('AB3b exits no-op when all four terminal markers are set', async () => {
