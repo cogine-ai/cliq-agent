@@ -653,7 +653,7 @@ Validator naming rule:
 1. Hooks must be disabled by default unless explicitly configured.
 2. Hook commands must run with timeout.
 3. Hook stdin and stdout/stderr must be size-limited.
-4. Oversized hook input must be truncated as valid JSON with an explicit `_truncated: true` marker.
+4. Oversized hook input must be truncated as valid JSON with an explicit `_truncated: true` marker. In v1, only fields present on `HookInput` are truncation targets: `toolResult.content`, `action`, `approvalSubject`, `tx.diffSummary`, and `tx.validators`.
 5. Hook command path resolution must stay inside workspace unless explicitly absolute.
 6. Hook infrastructure errors must be visible in events.
 7. Core deny decisions cannot be overridden by hooks.
