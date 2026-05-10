@@ -24,6 +24,8 @@ export type GrepAction = {
   pattern: string;
 };
 
+import { repairJsonStrings } from './json-repair.js';
+
 export type ModelAction =
   | { bash: string }
   | { edit: EditAction }
@@ -39,9 +41,13 @@ export function parseModelAction(content: string): ModelAction {
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid JSON from model: ${message}\n${content}`);
+  } catch (firstError) {
+    try {
+      parsed = JSON.parse(repairJsonStrings(content));
+    } catch {
+      const message = firstError instanceof Error ? firstError.message : String(firstError);
+      throw new Error(`Invalid JSON from model: ${message}\n${content}`);
+    }
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {

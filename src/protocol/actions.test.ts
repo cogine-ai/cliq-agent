@@ -50,3 +50,24 @@ test('rejects unknown top-level keys', () => {
 test('rejects malformed json', () => {
   assert.throws(() => parseModelAction('{"bash":"pwd"'), /invalid json|unexpected token/i);
 });
+
+test('repairs invalid \\; escape and parses as bash action', () => {
+  const raw = '{"bash":"find .git/worktrees/ -type f -name \'HEAD\' -mtime +30 -exec dirname {} \\;"}';
+  assert.deepEqual(parseModelAction(raw), {
+    bash: "find .git/worktrees/ -type f -name 'HEAD' -mtime +30 -exec dirname {} \\;"
+  });
+});
+
+test('repaired JSON still rejects multiple top-level keys', () => {
+  assert.throws(
+    () => parseModelAction('{"bash":"a\\;","message":"done"}'),
+    /exactly one top-level key/i
+  );
+});
+
+test('does not extract JSON from code fences', () => {
+  assert.throws(
+    () => parseModelAction('```json\n{"bash":"pwd"}\n```'),
+    /invalid json|unexpected token/i
+  );
+});
