@@ -245,9 +245,15 @@ All fields are optional. If the file is missing, Cliq uses no repo-local prompt,
 
 ## Transactions (preview)
 
-Cliq's transactional workspace runtime is being landed across multiple releases. The pre-mutation gate, structured diff, validators, apply/abort/recovery protocols, and headless event types are all in place. **What is *not* yet wired:** the runner does not auto-stage edits via the overlay during normal `cliq "..."` runs — `edit` still writes directly to the real workspace. Auto-open/auto-finalize/auto-apply through the runner is deferred to a follow-up release. See `src/workspace/transactions/coordinator.ts` for the explicit deferred surface.
+Cliq's transactional workspace runtime is available as an opt-in preview. When tx mode is enabled, `edit` actions are staged into a transaction overlay, validators run against the staged view, and the staged diff is applied to the real workspace only after the tx passes the apply policy.
 
-What works today (manual operator surface):
+Enable per run:
+
+```bash
+cliq --tx edit --tx-apply auto-on-pass "fix the failing parser test"
+```
+
+Useful tx commands:
 
 ```bash
 # Open an explicit tx. The positional argument is an optional human-readable
@@ -261,23 +267,26 @@ cliq tx list
 # Inspect a specific tx (use the auto-generated tx_… id from `tx open`/`tx list`)
 cliq tx status <txId>
 
-# Apply an already-approved tx
+# Run validators against the staged view
+cliq tx validate <txId>
+
+# Approve a validated tx, optionally overriding a blocking validator
+cliq tx approve <txId> --override tsc --reason "known flaky check"
+
+# Apply a tx; this walks through missing finalize -> validate -> approve stages
 cliq tx apply <txId>
 
 # Abort a tx in any non-terminal state
 cliq tx abort <txId>
 ```
 
-> **Manual staging caveat.** In v0.8 the runner does not auto-stage edits into
-> the overlay — `cliq "..."` and the `edit` tool still write directly into the
-> real workspace. Between `cliq tx open` and `cliq tx apply` the transaction
-> therefore sees an empty overlay; `tx apply` will validate and finalize that
-> empty diff, which is mostly useful as an end-to-end smoke check of the
-> apply/abort/recovery protocols. Callers that need to stage real edits today
-> have to drive `WorkspaceWriter` programmatically against the tx overlay
-> (`src/workspace/transactions/overlay.ts`); auto-staging via `edit` is wired
-> up in a follow-up release. See `src/workspace/transactions/coordinator.ts`
-> for the deferred runner surface.
+Current preview limits:
+
+- `cliq tx diff`, `cliq tx show`, and `cliq tx validators` are not implemented yet.
+- `edit-tx` stages text replacements in existing files. File creation, deletion, rename, mode changes, and shell-driven mutations are still outside the staged diff.
+- `bash` runs against the real workspace. Its side effects are recorded as `BashEffect`s for review, but they are not rolled back if the tx is aborted.
+- Validator override names must match the validator result name exactly. Shell validators use the configured `name` as-is, for example `tsc`; Cliq does not add a `shell:` prefix.
+- `transactions.bashPolicy=confirm` is intentionally rejected in v0.8; use `passthrough` or `deny` until the interactive confirm callback is wired.
 
 When a transaction's apply leaves files partially written (e.g., a disk error mid-write), aborting requires an explicit `--restore-confirmed` (rolls back via the pre-apply ghost snapshot) or `--keep-partial` (leaves the partial state in place).
 
@@ -358,10 +367,11 @@ The current version is an early open source starting point. It does **not** yet 
 
 Near-term priorities are:
 
-1. minimal stdio JSON-RPC on top of the headless contract
-2. observability, audit export, and debug/replay
+1. TX review polish: `tx diff/show/validators` and clearer apply review
+2. payload-aware approvals and reusable hook control-plane
 3. cost and token governance
-4. richer local UX on top of the same runtime interfaces
+4. observability, audit export, and debug/replay
+5. richer local UX, worktree isolation, and automation on top of the same runtime interfaces
 
 ## Contributing
 
