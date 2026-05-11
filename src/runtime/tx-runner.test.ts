@@ -218,7 +218,7 @@ test('finishTurnTx interactive yes → applies', async () => {
     const opts: TxRunnerOptions = baseOpts({
       applyPolicy: 'interactive',
       headless: false,
-      confirmApply: async () => true,
+      confirmApply: async (_review) => true,
       validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] }
     });
     const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
@@ -230,13 +230,47 @@ test('finishTurnTx interactive yes → applies', async () => {
   });
 });
 
+test('finishTurnTx interactive confirm receives rich apply review', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'one');
+    let review:
+      | Awaited<Parameters<NonNullable<TxRunnerOptions['confirmApply']>>[0]>
+      | undefined;
+    const opts: TxRunnerOptions = baseOpts({
+      applyPolicy: 'interactive',
+      headless: false,
+      confirmApply: async (received) => {
+        review = received;
+        return true;
+      },
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] }
+    });
+    const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
+    const writer = createOverlayWriter(ws, overlayDir(resolveTxRoot(home), open.tx!.id));
+    await writer.replaceText('a.txt', 'one', 'ONE\ntwo');
+
+    await finishTurnTx(ctx, opts, open.tx!, async (e) => { events.push(e); });
+
+    assert.ok(review);
+    assert.equal(review.txId, open.tx!.id);
+    assert.match(review.prompt, /Files changed: 1/);
+    assert.match(review.prompt, /Validators:/);
+    assert.match(review.prompt, /Artifact: tx\//);
+    assert.equal(review.diffSummary.filesChanged, 1);
+    assert.equal(review.validators.length > 0, true);
+    assert.deepEqual(review.blockingFailures, []);
+    assert.equal(review.bashEffects.length, 0);
+    assert.equal(review.artifactRef, `tx/${open.tx!.id}/`);
+  });
+});
+
 test('finishTurnTx interactive no → auto-aborts with reason=user-abort', async () => {
   await withTrEnv(async ({ ctx, ws, home, events }) => {
     await commitInitialFile(ws, 'a.txt', 'one');
     const opts: TxRunnerOptions = baseOpts({
       applyPolicy: 'interactive',
       headless: false,
-      confirmApply: async () => false,
+      confirmApply: async (_review) => false,
       validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] }
     });
     const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });

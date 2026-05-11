@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,17 +9,27 @@ import { promisify } from 'node:util';
 
 import {
   cliExitCode,
+  formatTxRuntimeEventLine,
   formatToolResultLine,
   isReportedCliError,
   parseArgs,
   printHelp,
   renderUnhandledError,
+  resolveTxIdForReview,
   ReportedCliError,
   runCli
 } from './cli.js';
 import { createCheckpoint } from './session/checkpoints.js';
 import { createSession, ensureSession, saveSession, sessionFilePath } from './session/store.js';
 import type { ToolResult } from './tools/types.js';
+import { appendBashEffect } from './workspace/transactions/bash-effects.js';
+import {
+  createTx,
+  resolveTxRoot,
+  validatorsDir,
+  writeDiff,
+  writeTxState
+} from './workspace/transactions/store.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -371,6 +381,41 @@ test('parseArgs recognizes cliq tx list', () => {
   assert.equal(a.cmd, 'tx-list');
 });
 
+test('parseArgs recognizes cliq tx review inspection commands', () => {
+  const diff = parseArgs(['node', 'src/index.ts', 'tx', 'diff', 'tx_example']);
+  assert.equal(diff.cmd, 'tx-diff');
+  if (diff.cmd === 'tx-diff') {
+    assert.equal(diff.txId, 'tx_example');
+  }
+
+  const show = parseArgs(['node', 'src/index.ts', 'tx', 'show', 'tx_example', '--json']);
+  assert.equal(show.cmd, 'tx-show');
+  if (show.cmd === 'tx-show') {
+    assert.equal(show.txId, 'tx_example');
+    assert.equal(show.json, true);
+  }
+
+  const validators = parseArgs([
+    'node',
+    'src/index.ts',
+    'tx',
+    'validators',
+    'tx_example',
+    '--json'
+  ]);
+  assert.equal(validators.cmd, 'tx-validators');
+  if (validators.cmd === 'tx-validators') {
+    assert.equal(validators.txId, 'tx_example');
+    assert.equal(validators.json, true);
+  }
+
+  const activeDiff = parseArgs(['node', 'src/index.ts', 'tx', 'diff']);
+  assert.equal(activeDiff.cmd, 'tx-diff');
+  if (activeDiff.cmd === 'tx-diff') {
+    assert.equal(activeDiff.txId, undefined);
+  }
+});
+
 test('parseArgs recognizes cliq tx apply with --override and --reason', () => {
   const a = parseArgs([
     'node',
@@ -628,6 +673,9 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /cliq compact list/);
   assert.match(output, /cliq handoff create/);
   assert.match(output, /cliq tx help/);
+  assert.match(output, /cliq tx diff \[<txId>\]/);
+  assert.match(output, /cliq tx show \[<txId>\] \[--json\]/);
+  assert.match(output, /cliq tx validators \[<txId>\]/);
   assert.doesNotMatch(output, /cliq checkpoint \[name\]/);
   assert.doesNotMatch(output, /cliq checkpoints/);
   assert.doesNotMatch(output, /cliq compactions/);
@@ -697,6 +745,133 @@ test('formatToolResultLine surfaces tool error reason alongside path', () => {
   assert.equal(
     formatToolResultLine(result),
     '[read error] /etc/passwd - path must stay inside the workspace and be workspace-relative'
+  );
+});
+
+test('formatTxRuntimeEventLine renders human-readable tx lifecycle lines', () => {
+  const base = {
+    schemaVersion: 1 as const,
+    eventId: 'evt_1',
+    runId: 'run_1',
+    timestamp: '2026-05-11T00:00:00.000Z'
+  };
+
+  assert.equal(
+    formatTxRuntimeEventLine({
+      ...base,
+      type: 'tx-staging-start',
+      payload: { txId: 'tx_123', txKind: 'edit', trigger: 'auto-turn' }
+    }),
+    '[tx tx_123] staging started'
+  );
+  assert.equal(
+    formatTxRuntimeEventLine({
+      ...base,
+      type: 'tx-finalized',
+      payload: {
+        txId: 'tx_123',
+        txKind: 'edit',
+        diffSummary: {
+          filesChanged: 2,
+          additions: 10,
+          deletions: 3,
+          creates: [],
+          modifies: ['a.ts', 'b.ts'],
+          deletes: []
+        }
+      }
+    }),
+    '[tx tx_123] finalized: 2 files changed (net +10/-3)'
+  );
+  assert.equal(
+    formatTxRuntimeEventLine({
+      ...base,
+      type: 'tx-validated',
+      payload: {
+        txId: 'tx_123',
+        txKind: 'edit',
+        validators: {
+          blocking: { pass: 2, fail: 0 },
+          advisory: { pass: 1, fail: 1, names: ['size-limit'] }
+        },
+        blockingFailures: []
+      }
+    }),
+    '[tx tx_123] validated: blocking 2 pass / 0 fail, advisory 1 pass / 1 fail'
+  );
+  assert.equal(
+    formatTxRuntimeEventLine({
+      ...base,
+      type: 'tx-applied',
+      payload: {
+        txId: 'tx_123',
+        txKind: 'edit',
+        diffSummary: {
+          filesChanged: 2,
+          additions: 10,
+          deletions: 3,
+          creates: [],
+          modifies: ['a.ts', 'b.ts'],
+          deletes: []
+        },
+        validators: {
+          blocking: { pass: 2, fail: 0 },
+          advisory: { pass: 1, fail: 1, names: ['size-limit'] }
+        },
+        overrides: [],
+        artifactRef: 'tx/tx_123/'
+      }
+    }),
+    '[tx tx_123] applied: 2 files changed'
+  );
+  assert.equal(
+    formatTxRuntimeEventLine({
+      ...base,
+      type: 'tx-aborted',
+      payload: {
+        txId: 'tx_123',
+        txKind: 'edit',
+        reason: 'validator-fail',
+        artifactRef: 'tx/tx_123/'
+      }
+    }),
+    '[tx tx_123] aborted: validator-fail'
+  );
+  assert.equal(
+    formatTxRuntimeEventLine({
+      ...base,
+      type: 'model-progress',
+      payload: { chunks: 1, chars: 2 }
+    }),
+    null
+  );
+});
+
+test('resolveTxIdForReview uses provided tx id, then active tx id', () => {
+  assert.equal(
+    resolveTxIdForReview({
+      providedTxId: 'tx_provided',
+      sessionActiveTxId: 'tx_active',
+      command: 'tx diff'
+    }),
+    'tx_provided'
+  );
+  assert.equal(
+    resolveTxIdForReview({
+      providedTxId: undefined,
+      sessionActiveTxId: 'tx_active',
+      command: 'tx diff'
+    }),
+    'tx_active'
+  );
+  assert.throws(
+    () =>
+      resolveTxIdForReview({
+        providedTxId: undefined,
+        sessionActiveTxId: undefined,
+        command: 'tx diff'
+      }),
+    /tx diff requires <txId> because there is no active transaction/
   );
 });
 
@@ -858,6 +1033,7 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
   const previousLog = console.log;
+  const previousStdoutWrite = process.stdout.write;
   const previousStderrWrite = process.stderr.write;
   const output: string[] = [];
   const stderr: string[] = [];
@@ -866,6 +1042,10 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
   console.log = (value?: unknown) => {
     output.push(String(value));
   };
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    output.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
   process.stderr.write = ((chunk: string | Uint8Array) => {
     stderr.push(String(chunk));
     return true;
@@ -883,6 +1063,7 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
     });
   } finally {
     console.log = previousLog;
+    process.stdout.write = previousStdoutWrite;
     process.stderr.write = previousStderrWrite;
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
@@ -894,6 +1075,91 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
     await rm(home, { recursive: true, force: true });
   }
 }
+
+async function createCliTxFixture(env: CliTestEnv) {
+  const session = createSession(env.cwd);
+  const root = resolveTxRoot(env.home);
+  const txId = 'tx_cli_review';
+  const tx = await createTx(root, {
+    id: txId,
+    kind: 'edit',
+    workspaceId: 'ws_cli',
+    sessionId: session.id,
+    workspaceRealPath: env.cwd
+  });
+  await writeDiff(root, txId, {
+    files: [
+      {
+        path: 'a.txt',
+        op: 'modify',
+        oldContent: 'one\n',
+        newContent: 'one\ntwo\n'
+      }
+    ],
+    outOfBand: []
+  });
+  await appendBashEffect(root, txId, {
+    command: 'npm test',
+    exitCode: 0,
+    ts: '2026-05-11T00:00:00Z',
+    pathsChanged: ['package-lock.json'],
+    outOfBand: true
+  });
+  await mkdir(validatorsDir(root, txId), { recursive: true });
+  await writeFile(
+    path.join(validatorsDir(root, txId), 'tsc.json'),
+    JSON.stringify({
+      name: 'tsc',
+      severity: 'blocking',
+      status: 'pass',
+      durationMs: 42
+    }),
+    'utf8'
+  );
+  await writeTxState(root, {
+    ...tx,
+    state: 'validated',
+    diffSummary: {
+      filesChanged: 1,
+      additions: 1,
+      deletions: 0,
+      creates: [],
+      modifies: ['a.txt'],
+      deletes: []
+    },
+    validators: [{ name: 'tsc', severity: 'blocking', status: 'pass', durationMs: 42 }],
+    blockingFailures: []
+  });
+  session.activeTxId = txId;
+  await saveSession(env.cwd, session);
+  return txId;
+}
+
+test('runCli tx review commands inspect the provided or active transaction', async () => {
+  await withCliTestEnv('tx-review', async (env) => {
+    const txId = await createCliTxFixture(env);
+
+    await runCli(['node', 'src/index.ts', 'tx', 'diff']);
+    assert.match(env.outputText(), /M a\.txt \(net \+1\/-0\)/);
+
+    env.output.length = 0;
+    await runCli(['node', 'src/index.ts', 'tx', 'show', txId, '--json']);
+    const show = JSON.parse(env.outputText()) as {
+      type: string;
+      txId: string;
+      artifactRef: string;
+      bashEffects: unknown[];
+    };
+    assert.equal(show.type, 'tx-show');
+    assert.equal(show.txId, txId);
+    assert.equal(show.artifactRef, `tx/${txId}/`);
+    assert.equal(show.bashEffects.length, 1);
+
+    env.output.length = 0;
+    await runCli(['node', 'src/index.ts', 'tx', 'validators', txId]);
+    assert.match(env.outputText(), /PASS blocking tsc 42ms/);
+  });
+});
 
 test('runCli reset creates a global active session without referencing workspace .cliq', async () => {
   await withCliTestEnv('reset', async ({ outputText }) => {

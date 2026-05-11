@@ -184,7 +184,7 @@ export function abortRecordId(txId: string): string {
 // session-record schema (Section 15) which only has pass/fail buckets.
 // Callers that need to distinguish errored from failed validators should
 // walk tx.validators directly.
-export function validatorSummaryFromTx(tx: Transaction): {
+export function validatorSummaryFromResults(validators: ValidatorResultSummary[] = []): {
   blocking: { pass: number; fail: number };
   advisory: { pass: number; fail: number; names: string[] };
 } {
@@ -192,7 +192,7 @@ export function validatorSummaryFromTx(tx: Transaction): {
     blocking: { pass: 0, fail: 0 },
     advisory: { pass: 0, fail: 0, names: [] as string[] }
   };
-  for (const v of tx.validators ?? []) {
+  for (const v of validators) {
     if (v.severity === 'blocking') {
       if (v.status === 'pass') summary.blocking.pass++;
       else summary.blocking.fail++;
@@ -206,4 +206,11 @@ export function validatorSummaryFromTx(tx: Transaction): {
     }
   }
   return summary;
+}
+
+export function validatorSummaryFromTx(tx: Transaction): {
+  blocking: { pass: number; fail: number };
+  advisory: { pass: number; fail: number; names: string[] };
+} {
+  return validatorSummaryFromResults(tx.validators ?? []);
 }

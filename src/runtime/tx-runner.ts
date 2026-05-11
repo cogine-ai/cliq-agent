@@ -1,4 +1,5 @@
 import type { TxBashPolicy, TxValidatorsConfig, TxStagedViewConfig } from '../workspace/config.js';
+import { formatTxApplyReview, readTxReviewSnapshot } from '../workspace/transactions/inspect.js';
 import {
   openTx,
   getActiveTx,
@@ -8,9 +9,26 @@ import {
   applyTx,
   abortTx
 } from '../workspace/transactions/coordinator.js';
-import type { Transaction, ValidatorResultSummary } from '../workspace/transactions/types.js';
+import type {
+  BashEffect,
+  DiffSummary,
+  Transaction,
+  ValidatorResultSummary
+} from '../workspace/transactions/types.js';
+import { resolveTxRoot } from '../workspace/transactions/store.js';
+import { resolveCliqHome } from '../session/store.js';
 import type { Session } from '../session/types.js';
 import type { RuntimeEvent } from '../protocol/runtime/events.js';
+
+export type TxApplyReview = {
+  txId: string;
+  prompt: string;
+  diffSummary: DiffSummary;
+  validators: ValidatorResultSummary[];
+  blockingFailures: string[];
+  bashEffects: BashEffect[];
+  artifactRef: string;
+};
 
 export type TxRunnerOptions = {
   mode: 'edit';
@@ -23,7 +41,7 @@ export type TxRunnerOptions = {
   workspaceId: string;
   workspaceRealPath: string;
   cliqHome?: string;
-  confirmApply?: () => Promise<boolean>;
+  confirmApply?: (review: TxApplyReview) => Promise<boolean>;
 };
 
 export type CoordinatorCtx = {
@@ -144,7 +162,20 @@ export async function finishTurnTx(
         'applyPolicy=interactive requires confirmApply callback (should have been refused at construction for headless)'
       );
     }
-    const ok = await opts.confirmApply();
+    const snapshot = await readTxReviewSnapshot({
+      root: resolveTxRoot(ctx.cliqHome ?? opts.cliqHome ?? resolveCliqHome()),
+      txId: tx.id
+    });
+    const review: TxApplyReview = {
+      txId: tx.id,
+      prompt: formatTxApplyReview(snapshot),
+      diffSummary: snapshot.tx.diffSummary ?? finalized.diffSummary,
+      validators: snapshot.validatorResults,
+      blockingFailures: snapshot.tx.blockingFailures ?? validated.blockingFailures,
+      bashEffects: snapshot.bashEffects,
+      artifactRef: snapshot.artifactRef
+    };
+    const ok = await opts.confirmApply(review);
     if (!ok) {
       await abortTx(ctx, tx.id, { reason: 'user-abort' });
       await emit({
