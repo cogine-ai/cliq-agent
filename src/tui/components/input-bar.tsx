@@ -1,16 +1,73 @@
-import { Box, Text, useInput } from 'ink';
-import TextInput from 'ink-text-input';
-import { useState } from 'react';
+import { Box, Text, useInput, type Key } from 'ink';
 
-// ink-text-input forwards every byte ink sends it, so Ctrl combinations
-// (Ctrl+O = \x0f, Ctrl+G = \x07, etc.) end up inserted into the buffer
-// before the App-level keybinding handler can claim them. Filter at the
-// onChange seam so these never reach the controlled value. Carriage return
-// and tab are real input characters and are exempt.
-const CONTROL_CHARS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+// ink-text-input v6 inserts the bare letter for Ctrl+<letter> combinations
+// (its source only filters Ctrl+C explicitly), so Ctrl+O / Ctrl+G / Ctrl+L /
+// etc. end up in the controlled buffer before the App-level keybinding
+// handler can claim them. Rather than chase that with a swallow-ref against
+// the in-renderer ordering of useInput callbacks, we use a tiny purpose-built
+// single-line input that skips ALL modifier combinations.
 
-function sanitizeInput(value: string): string {
-  return value.replace(CONTROL_CHARS, '');
+// Pasted content still goes through this filter as defence — any embedded
+// control bytes are dropped before they reach the controlled value.
+const CONTROL_CHARS_IN_PASTE = /[\x00-\x1f\x7f]/g;
+
+function MiniTextInput({
+  value,
+  onChange,
+  onSubmit,
+  focus = true
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  onSubmit?: (text: string) => void;
+  focus?: boolean;
+}) {
+  useInput(
+    (input: string, key: Key) => {
+      if (!focus) return;
+      // App-level useKeybindings owns these. Returning here prevents the
+      // letter component of a Ctrl combination (e.g. Ctrl+O → 'o') from
+      // sneaking into the buffer.
+      if (key.ctrl || key.meta) return;
+      // Tab / Shift+Tab are reserved for slash completion and policy
+      // rotation respectively — the parent's useInput claims both.
+      if (key.tab) return;
+      if (key.return) {
+        onSubmit?.(value);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        if (value.length === 0) return;
+        onChange(value.slice(0, -1));
+        return;
+      }
+      // No cursor / scrollback navigation yet. Ignore movement keys so they
+      // don't accidentally insert their escape-sequence bytes.
+      if (
+        key.upArrow ||
+        key.downArrow ||
+        key.leftArrow ||
+        key.rightArrow ||
+        key.escape ||
+        key.pageUp ||
+        key.pageDown
+      ) {
+        return;
+      }
+      if (input.length === 0) return;
+      const printable = input.replace(CONTROL_CHARS_IN_PASTE, '');
+      if (printable.length === 0) return;
+      onChange(value + printable);
+    },
+    { isActive: focus }
+  );
+
+  return (
+    <Text>
+      {value}
+      {focus ? <Text inverse>{' '}</Text> : null}
+    </Text>
+  );
 }
 
 export function InputBar({
@@ -26,31 +83,20 @@ export function InputBar({
   disabled?: boolean;
   completion?: string | null;
 }) {
-  // ink-text-input keeps its cursor in internal state initialized at mount
-  // time. When we replace value externally (Tab completion), the cursor
-  // sticks where it was — the user types and it lands mid-buffer. Force a
-  // remount on each external rewrite so the cursor re-initializes to the
-  // end of the new value.
-  const [externalRev, setExternalRev] = useState(0);
-
   useInput(
     (_input, key) => {
       if (disabled) return;
-      if (key.tab && completion && completion !== value) {
+      // Plain Tab completes; Shift+Tab is reserved for the App-level
+      // policy-rotation handler and must not also trigger completion.
+      if (key.tab && !key.shift && completion && completion !== value) {
         onChange(completion);
-        setExternalRev((r) => r + 1);
       }
     },
     { isActive: !disabled }
   );
 
-  function handleChange(next: string) {
-    const cleaned = sanitizeInput(next);
-    if (cleaned !== value) onChange(cleaned);
-  }
-
   function handleSubmit(text: string) {
-    const trimmed = sanitizeInput(text).trim();
+    const trimmed = text.trim();
     if (!trimmed) return;
     onSubmit(trimmed);
   }
@@ -61,12 +107,7 @@ export function InputBar({
       {disabled ? (
         <Text dimColor>{value}</Text>
       ) : (
-        <TextInput
-          key={externalRev}
-          value={value}
-          onChange={handleChange}
-          onSubmit={handleSubmit}
-        />
+        <MiniTextInput value={value} onChange={onChange} onSubmit={handleSubmit} />
       )}
     </Box>
   );
