@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createPolicyEngine } from './engine.js';
-import { buildToolApprovalSubject } from './subjects.js';
+import { buildToolApprovalSubject, buildTxApplyApprovalSubject } from './subjects.js';
 import type { ApprovalSubject, ToolAccess } from './types.js';
 import type { ModelAction } from '../protocol/model/actions.js';
+import type { TxReviewSnapshot } from '../workspace/transactions/inspect.js';
 
 function toolSubject(
   name: string,
@@ -18,21 +19,37 @@ function toolSubject(
 }
 
 function txApplySubject(): ApprovalSubject {
-  return {
-    kind: 'tx-apply',
-    txId: 'tx_123',
-    diffSummary: {
-      filesChanged: 1,
-      additions: 2,
-      deletions: 1,
-      creates: [],
-      modifies: ['src/index.ts'],
-      deletes: []
+  const snapshot = {
+    tx: {
+      id: 'tx_123',
+      kind: 'edit',
+      state: 'validated',
+      workspaceId: 'ws',
+      sessionId: 'sess',
+      workspaceRealPath: '/tmp/ws',
+      createdAt: '2026-05-12T00:00:00Z',
+      updatedAt: '2026-05-12T00:00:01Z',
+      diffSummary: {
+        filesChanged: 1,
+        additions: 2,
+        deletions: 1,
+        creates: [],
+        modifies: ['src/index.ts'],
+        deletes: []
+      },
+      validators: [{ name: 'tsc', severity: 'blocking', status: 'pass', durationMs: 12 }],
+      blockingFailures: []
     },
-    validators: [{ name: 'tsc', severity: 'blocking', status: 'pass', durationMs: 12 }],
-    blockingFailures: [],
+    diff: null,
+    audit: [],
+    bashEffects: [],
+    validatorResults: [],
+    validatorArtifactResults: [],
+    validatorArtifactErrors: [],
     artifactRef: 'tx/tx_123/'
-  };
+  } satisfies TxReviewSnapshot;
+
+  return buildTxApplyApprovalSubject(snapshot);
 }
 
 function permissionRequestSubject(): ApprovalSubject {
