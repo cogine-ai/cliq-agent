@@ -184,6 +184,181 @@ test('createUiStore notifies subscribers on dispatch and supports unsubscribe', 
   assert.equal(store.getState().transcript.length, 3); // store still mutates
 });
 
+test('runtime-event tool-start opens a running tool entry; tool-end finalizes it', () => {
+  let s = baseInit();
+  s = reduce(s, { type: 'runtime-event', event: { type: 'tool-start', tool: 'bash', preview: 'ls' } });
+  assert.equal(s.transcript.length, 1);
+  const opened = s.transcript[0]!;
+  assert.equal(opened.kind, 'tool');
+  if (opened.kind !== 'tool') return;
+  assert.equal(opened.tool, 'bash');
+  assert.equal(opened.status, 'running');
+
+  s = reduce(s, { type: 'runtime-event', event: { type: 'tool-end', tool: 'bash', status: 'ok' } });
+  const closed = s.transcript[0]!;
+  assert.equal(closed.kind, 'tool');
+  if (closed.kind !== 'tool') return;
+  assert.equal(closed.status, 'ok');
+});
+
+test('tool-hook-start enriches the running entry with the action preview', () => {
+  let s = baseInit();
+  s = reduce(s, { type: 'runtime-event', event: { type: 'tool-start', tool: 'edit', preview: '' } });
+  s = reduce(s, {
+    type: 'tool-hook-start',
+    action: { edit: { path: 'src/foo.ts', old_text: 'a', new_text: 'b' } }
+  });
+  const entry = s.transcript[0]!;
+  assert.equal(entry.kind, 'tool');
+  if (entry.kind !== 'tool') return;
+  assert.equal(entry.summary, 'src/foo.ts');
+  assert.equal(entry.status, 'running');
+});
+
+test('tool-hook-end finalizes the entry with formatToolResultSummary and bash body', () => {
+  let s = baseInit();
+  s = reduce(s, { type: 'runtime-event', event: { type: 'tool-start', tool: 'bash', preview: '' } });
+  s = reduce(s, { type: 'tool-hook-start', action: { bash: 'echo hi' } });
+  s = reduce(s, {
+    type: 'tool-hook-end',
+    result: {
+      tool: 'bash',
+      status: 'ok',
+      content: 'TOOL_RESULT bash success\n$ echo hi\nhi\n',
+      meta: {}
+    }
+  });
+  const entry = s.transcript[0]!;
+  assert.equal(entry.kind, 'tool');
+  if (entry.kind !== 'tool') return;
+  assert.equal(entry.status, 'ok');
+  assert.equal(entry.body, 'hi\n');
+});
+
+test('tool-hook-end with no prior running entry synthesizes a finalized entry', () => {
+  // Covers the deny-then-after-tool path where tool-hook-start never fires.
+  let s = baseInit();
+  s = reduce(s, {
+    type: 'tool-hook-end',
+    result: {
+      tool: 'edit',
+      status: 'error',
+      content: 'TOOL_RESULT edit ERROR\npolicy=read-only\nblocked',
+      meta: { policy: 'read-only', reason: 'blocked' }
+    }
+  });
+  assert.equal(s.transcript.length, 1);
+  const entry = s.transcript[0]!;
+  assert.equal(entry.kind, 'tool');
+  if (entry.kind !== 'tool') return;
+  assert.equal(entry.status, 'error');
+  assert.equal(entry.summary, 'policy=read-only blocked');
+});
+
+test('tx-* events push system entries with diff and validator summaries', () => {
+  let s = baseInit();
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'tx-staging-start', txId: 'tx_1', trigger: 'auto-turn' }
+  });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: {
+      type: 'tx-finalized',
+      txId: 'tx_1',
+      diffSummary: {
+        filesChanged: 3,
+        additions: 10,
+        deletions: 4,
+        creates: [],
+        modifies: [],
+        deletes: []
+      }
+    }
+  });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: {
+      type: 'tx-validated',
+      txId: 'tx_1',
+      validators: {
+        blocking: { pass: 2, fail: 1 },
+        advisory: { pass: 0, fail: 0, names: [] }
+      },
+      blockingFailures: ['tsc']
+    }
+  });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: {
+      type: 'tx-applied',
+      txId: 'tx_1',
+      diffSummary: {
+        filesChanged: 3,
+        additions: 10,
+        deletions: 4,
+        creates: [],
+        modifies: [],
+        deletes: []
+      },
+      validators: {
+        blocking: { pass: 2, fail: 1 },
+        advisory: { pass: 0, fail: 0, names: [] }
+      },
+      overrides: [],
+      artifactRef: 'tx_1'
+    }
+  });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'tx-aborted', txId: 'tx_2', reason: 'validator-fail', artifactRef: 'tx_2' }
+  });
+
+  const systemTexts = s.transcript
+    .filter((e): e is Extract<typeof e, { kind: 'system' }> => e.kind === 'system')
+    .map((e) => e.text);
+  assert.equal(systemTexts.length, 5);
+  assert.match(systemTexts[0]!, /tx_1 staging started/);
+  assert.match(systemTexts[1]!, /tx_1 finalized: 3 files \(\+10\/-4\)/);
+  assert.match(systemTexts[2]!, /tx_1 validated: blocking 2\/3, advisory 0\/0 — failures: tsc/);
+  assert.match(systemTexts[3]!, /tx_1 applied: \+10\/-4 over 3 files/);
+  assert.match(systemTexts[4]!, /tx_2 aborted: validator-fail/);
+});
+
+test('compact-* and checkpoint-created events produce system entries', () => {
+  let s = baseInit();
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: {
+      type: 'checkpoint-created',
+      checkpointId: 'cp_1',
+      kind: 'manual',
+      workspaceSnapshotStatus: 'available'
+    }
+  });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'compact-start', trigger: 'threshold', phase: 'pre-model' }
+  });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: {
+      type: 'compact-end',
+      artifactId: 'a1',
+      estimatedTokensBefore: 9000,
+      estimatedTokensAfter: 3000
+    }
+  });
+
+  const systemTexts = s.transcript
+    .filter((e): e is Extract<typeof e, { kind: 'system' }> => e.kind === 'system')
+    .map((e) => e.text);
+  assert.equal(systemTexts.length, 3);
+  assert.match(systemTexts[0]!, /checkpoint cp_1 created \(manual\)/);
+  assert.match(systemTexts[1]!, /compaction started \(threshold, pre-model\)/);
+  assert.match(systemTexts[2]!, /compaction completed: 9000 → 3000 tokens/);
+});
+
 test('end-to-end: user input, thinking, final assistant message', () => {
   const store = createUiStore(baseInit());
   store.dispatch({ type: 'user-input', text: 'what time is it?' });

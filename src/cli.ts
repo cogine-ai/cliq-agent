@@ -2301,9 +2301,23 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     })
   );
 
+  // TUI-owned hook bridge: beforeTool / afterTool flow into the UiStore so
+  // <Transcript> can render rich tool entries. Replaces createCliHooks in the
+  // TUI path (createCliHooks writes to stdout, which would fight Ink).
+  const tuiHooks: RuntimeHook[] = [
+    {
+      beforeTool(_session, action) {
+        store.dispatch({ type: 'tool-hook-start', action });
+      },
+      afterTool(_session, result) {
+        store.dispatch({ type: 'tool-hook-end', result });
+      }
+    }
+  ];
+
   const runner = createRunner({
     model: opts.modelClient,
-    hooks: [...opts.assembly.hooks, ...createCliHooks()],
+    hooks: [...opts.assembly.hooks, ...tuiHooks],
     policy: createPolicyEngine({ mode: policy }),
     // Confirms only fire when the policy returns 'ask'; we refused those
     // setups above, so this branch is unreachable in Stage 1.4.

@@ -1,12 +1,28 @@
 import type { ProviderName } from '../model/types.js';
 import type { ApprovalSubject, PolicyMode } from '../policy/types.js';
+import type { ModelAction } from '../protocol/model/actions.js';
 import type { RuntimeEvent } from '../protocol/runtime/events.js';
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
+import type { ToolResult } from '../tools/types.js';
+import {
+  extractBashBody,
+  formatToolResultSummary,
+  previewFromAction,
+  toolNameFromAction
+} from './format.js';
 
 export type TranscriptEntry =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'assistant'; id: string; text: string }
-  | { kind: 'tool'; id: string; tool: string; status: 'running' | 'ok' | 'error'; preview?: string }
+  | {
+      kind: 'tool';
+      id: string;
+      tool: string;
+      status: 'running' | 'ok' | 'error';
+      summary: string;
+      body?: string;
+      expanded?: boolean;
+    }
   | { kind: 'system'; id: string; text: string };
 
 export type ErrorEntry = {
@@ -42,6 +58,8 @@ export type UiState = {
 
 export type UiAction =
   | { type: 'runtime-event'; event: RuntimeEvent }
+  | { type: 'tool-hook-start'; action: ModelAction }
+  | { type: 'tool-hook-end'; result: ToolResult }
   | { type: 'user-input'; text: string }
   | { type: 'approval-resolve'; decision: UiApprovalDecision }
   | { type: 'session-reset' }
@@ -78,6 +96,10 @@ export function reduce(state: UiState, action: UiAction): UiState {
   switch (action.type) {
     case 'runtime-event':
       return reduceRuntimeEvent(state, action.event);
+    case 'tool-hook-start':
+      return reduceToolHookStart(state, action.action);
+    case 'tool-hook-end':
+      return reduceToolHookEnd(state, action.result);
     case 'user-input': {
       const { id, nextEntryId } = mintId(state, 'u');
       return {
@@ -103,6 +125,85 @@ export function reduce(state: UiState, action: UiAction): UiState {
     default:
       return assertNever(action);
   }
+}
+
+function findLastRunningToolIndex(transcript: TranscriptEntry[], tool: string): number {
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    const entry = transcript[i]!;
+    if (entry.kind === 'tool' && entry.tool === tool && entry.status === 'running') {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function updateToolEntry(
+  state: UiState,
+  index: number,
+  patch: Partial<Extract<TranscriptEntry, { kind: 'tool' }>>
+): UiState {
+  const next = [...state.transcript];
+  const existing = next[index];
+  if (!existing || existing.kind !== 'tool') return state;
+  next[index] = { ...existing, ...patch };
+  return { ...state, transcript: next };
+}
+
+function reduceToolHookStart(state: UiState, action: ModelAction): UiState {
+  const tool = toolNameFromAction(action);
+  const summary = previewFromAction(action);
+  const idx = findLastRunningToolIndex(state.transcript, tool);
+  if (idx !== -1) {
+    return updateToolEntry(state, idx, { summary });
+  }
+  // Fallback: tool-start RuntimeEvent didn't fire (e.g. test driving hooks
+  // alone). Create the running entry now.
+  const { id, nextEntryId } = mintId(state, 't');
+  return {
+    ...state,
+    nextEntryId,
+    transcript: [...state.transcript, { kind: 'tool', id, tool, status: 'running', summary }],
+  };
+}
+
+function reduceToolHookEnd(state: UiState, result: ToolResult): UiState {
+  const summary = formatToolResultSummary(result);
+  const body = extractBashBody(result);
+  const idx = findLastRunningToolIndex(state.transcript, result.tool);
+  const patch: Partial<Extract<TranscriptEntry, { kind: 'tool' }>> = {
+    status: result.status,
+    summary,
+    ...(body !== undefined ? { body } : {}),
+  };
+  if (idx !== -1) {
+    return updateToolEntry(state, idx, patch);
+  }
+  // Fallback: no running entry — synthesize one in its final state.
+  const { id, nextEntryId } = mintId(state, 't');
+  return {
+    ...state,
+    nextEntryId,
+    transcript: [
+      ...state.transcript,
+      {
+        kind: 'tool',
+        id,
+        tool: result.tool,
+        status: result.status,
+        summary,
+        ...(body !== undefined ? { body } : {}),
+      },
+    ],
+  };
+}
+
+function pushSystem(state: UiState, text: string): UiState {
+  const { id, nextEntryId } = mintId(state, 's');
+  return {
+    ...state,
+    nextEntryId,
+    transcript: [...state.transcript, { kind: 'system', id, text }],
+  };
 }
 
 function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
@@ -146,21 +247,81 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
         errors: [...state.errors, entry].slice(-MAX_ERROR_HISTORY),
       };
     }
-    // Variants below land in later stages; explicit no-op cases keep
-    // assertNever exhaustiveness so a new RuntimeEvent variant fails to compile.
-    case 'tool-start':
-    case 'tool-end':
+    case 'tool-start': {
+      // Create the entry up-front; the beforeTool hook (tool-hook-start)
+      // enriches it with the action preview, and afterTool (tool-hook-end)
+      // finalizes status + body.
+      const { id, nextEntryId } = mintId(state, 't');
+      return {
+        ...state,
+        nextEntryId,
+        transcript: [
+          ...state.transcript,
+          { kind: 'tool', id, tool: event.tool, status: 'running', summary: '' },
+        ],
+      };
+    }
+    case 'tool-end': {
+      // Backstop finalization for setups that drive RuntimeEvent without the
+      // hook bridge (e.g. tests). When the bridge is wired, the entry is
+      // already non-running by the time this fires and the lookup misses.
+      const idx = findLastRunningToolIndex(state.transcript, event.tool);
+      if (idx === -1) return state;
+      return updateToolEntry(state, idx, { status: event.status });
+    }
     case 'checkpoint-created':
+      return pushSystem(
+        state,
+        `checkpoint ${event.checkpointId} created (${event.kind})${
+          event.workspaceSnapshotStatus !== 'available'
+            ? ` — workspace snapshot ${event.workspaceSnapshotStatus}`
+            : ''
+        }`
+      );
     case 'compact-start':
+      return pushSystem(state, `compaction started (${event.trigger}, ${event.phase})`);
     case 'compact-end':
+      return pushSystem(
+        state,
+        `compaction completed: ${event.estimatedTokensBefore} → ${event.estimatedTokensAfter} tokens`
+      );
     case 'compact-skip':
+      return pushSystem(state, `compaction skipped: ${event.reason}`);
     case 'compact-error':
+      return pushSystem(
+        state,
+        `compaction error (${event.trigger}): ${event.message}`
+      );
     case 'tx-staging-start':
-    case 'tx-finalized':
-    case 'tx-validated':
-    case 'tx-applied':
+      return pushSystem(
+        state,
+        `tx ${event.txId} staging started${event.name ? ` — ${event.name}` : ''}`
+      );
+    case 'tx-finalized': {
+      const d = event.diffSummary;
+      return pushSystem(
+        state,
+        `tx ${event.txId} finalized: ${d.filesChanged} files (+${d.additions}/-${d.deletions})`
+      );
+    }
+    case 'tx-validated': {
+      const v = event.validators;
+      const blocking = `blocking ${v.blocking.pass}/${v.blocking.pass + v.blocking.fail}`;
+      const advisory = `advisory ${v.advisory.pass}/${v.advisory.pass + v.advisory.fail}`;
+      const failures = event.blockingFailures.length
+        ? ` — failures: ${event.blockingFailures.join(', ')}`
+        : '';
+      return pushSystem(state, `tx ${event.txId} validated: ${blocking}, ${advisory}${failures}`);
+    }
+    case 'tx-applied': {
+      const d = event.diffSummary;
+      return pushSystem(
+        state,
+        `tx ${event.txId} applied: +${d.additions}/-${d.deletions} over ${d.filesChanged} files`
+      );
+    }
     case 'tx-aborted':
-      return state;
+      return pushSystem(state, `tx ${event.txId} aborted: ${event.reason}`);
     default:
       return assertNever(event);
   }
