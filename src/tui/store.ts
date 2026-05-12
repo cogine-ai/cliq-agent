@@ -42,6 +42,10 @@ export type UiApprovalDecision = 'allow' | 'deny' | 'allow-turn';
 export type PendingApproval = {
   id: string;
   subject: ApprovalSubject;
+  // Bridge owns the Promise; the modal calls resolve directly when the user
+  // picks a decision, and then dispatches `approval-resolve` to clear state.
+  // The reducer never invokes resolve — keep reduce() pure.
+  resolve: (decision: UiApprovalDecision) => void;
 };
 
 export type UiState = {
@@ -63,7 +67,8 @@ export type UiAction =
   | { type: 'user-input'; text: string }
   | { type: 'system-message'; text: string }
   | { type: 'toggle-tool-body' }
-  | { type: 'approval-resolve'; decision: UiApprovalDecision }
+  | { type: 'approval-request'; pending: PendingApproval }
+  | { type: 'approval-resolve' }
   | { type: 'session-reset' }
   | { type: 'policy-change'; mode: PolicyMode };
 
@@ -124,9 +129,15 @@ export function reduce(state: UiState, action: UiAction): UiState {
       }
       return state;
     }
+    case 'approval-request':
+      // Replaces any prior pending entry. In the runner, only one approval
+      // can be in flight per turn, so this collision should be rare; if it
+      // does happen, the older pending stays unresolved and the bridge will
+      // hang. That is loud enough to surface a wiring bug.
+      return { ...state, pendingApproval: action.pending };
     case 'approval-resolve':
-      // The bridge that owns the Promise resolves it before dispatching this
-      // action; the reducer only clears UI state. Stage 3.3 wires the bridge.
+      // The bridge that owns the Promise resolves it before dispatching this;
+      // the reducer only clears UI state to keep reduce() pure.
       return state.pendingApproval ? { ...state, pendingApproval: null } : state;
     case 'session-reset':
       return {

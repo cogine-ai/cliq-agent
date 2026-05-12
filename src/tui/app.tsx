@@ -2,6 +2,7 @@ import { Box, useApp } from 'ink';
 import { useState } from 'react';
 
 import type { PolicyMode } from '../policy/types.js';
+import { ApprovalModal } from './components/approval-modal.js';
 import { InputBar } from './components/input-bar.js';
 import { SlashPalette } from './components/slash-palette.js';
 import { StatusBar } from './components/status-bar.js';
@@ -9,7 +10,7 @@ import { Transcript } from './components/transcript.js';
 import { useKeybindings } from './hooks/use-keybindings.js';
 import { useUiStore } from './hooks/use-ui-store.js';
 import { buildHelpText, completeSlash, parseSlash } from './slash.js';
-import type { UiStore } from './store.js';
+import type { UiApprovalDecision, UiStore } from './store.js';
 
 export type AppProps = {
   store: UiStore;
@@ -109,17 +110,34 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
     }
   });
 
+  function handleApprovalDecide(decision: UiApprovalDecision) {
+    const pending = state.pendingApproval;
+    if (!pending) return;
+    pending.resolve(decision);
+    store.dispatch({ type: 'approval-resolve' });
+  }
+
   return (
     <Box flexDirection="column">
       <Transcript entries={state.transcript} activeTurn={state.activeTurn} />
-      {input.startsWith('/') ? <SlashPalette query={input} /> : null}
-      <InputBar
-        value={input}
-        onChange={setInput}
-        onSubmit={handleSubmit}
-        disabled={inputDisabled}
-        completion={completion}
-      />
+      {state.pendingApproval ? (
+        <ApprovalModal
+          subject={state.pendingApproval.subject}
+          policy={state.policy}
+          onDecide={handleApprovalDecide}
+        />
+      ) : (
+        <>
+          {input.startsWith('/') ? <SlashPalette query={input} /> : null}
+          <InputBar
+            value={input}
+            onChange={setInput}
+            onSubmit={handleSubmit}
+            disabled={inputDisabled}
+            completion={completion}
+          />
+        </>
+      )}
       <StatusBar state={state} />
     </Box>
   );

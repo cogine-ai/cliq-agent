@@ -48,7 +48,9 @@ cliq --tui
 cliq chat --tui
 ```
 
-The TUI renders an inline three-zone layout — scrolling transcript, input bar, and status line — and stays compatible with shell scrollback (no alt-screen). It will eventually become the default; until then the readline REPL remains default and `--tui` is opt-in. The approval modal lands in Stage 3, so `--tui` currently refuses `--policy confirm-*` and `--tx-apply interactive`.
+The TUI renders an inline three-zone layout — scrolling transcript, input bar, and status line — and stays compatible with shell scrollback (no alt-screen). It will eventually become the default; until then the readline REPL remains default and `--tui` is opt-in.
+
+Inside the TUI: slash commands (`/exit`, `/quit`, `/reset`, `/help`, `/policy <mode>`) with palette popover and Tab completion; Ctrl+C cancels an active turn or clears the input; Ctrl+D exits on empty input; Ctrl+O folds/unfolds the most recent bash output; an approval modal handles `--policy confirm-*` and interactive `--tx-apply` decisions.
 
 ## Current scope
 

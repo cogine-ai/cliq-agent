@@ -132,10 +132,11 @@ test('policy-change updates the policy mode and leaves transcript intact', () =>
   assert.equal(after.transcript.length, 1);
 });
 
-test('approval-resolve clears pendingApproval when one exists, no-op otherwise', () => {
-  const noPending = reduce(baseInit(), { type: 'approval-resolve', decision: 'allow' });
-  assert.equal(noPending.pendingApproval, null);
+test('approval-request sets pendingApproval; approval-resolve clears it', () => {
+  const noop = reduce(baseInit(), { type: 'approval-resolve' });
+  assert.equal(noop.pendingApproval, null);
 
+  let resolvedWith: string | null = null;
   const pending: PendingApproval = {
     id: 'pa_1',
     subject: {
@@ -143,12 +144,21 @@ test('approval-resolve clears pendingApproval when one exists, no-op otherwise',
       toolName: 'bash',
       access: 'exec',
       action: { bash: 'ls' } as never,
-      display: { title: 'Allow bash command?', command: 'ls' },
+      display: { title: 'Allow bash command?', command: 'ls' }
     },
+    resolve: (d) => {
+      resolvedWith = d;
+    }
   };
-  const withPending: UiState = { ...baseInit(), pendingApproval: pending };
-  const cleared = reduce(withPending, { type: 'approval-resolve', decision: 'deny' });
+  const requested = reduce(baseInit(), { type: 'approval-request', pending });
+  assert.equal(requested.pendingApproval, pending);
+
+  // Bridge calls resolve before dispatching the clear action — reducer must
+  // not call it itself.
+  pending.resolve('allow');
+  const cleared = reduce(requested, { type: 'approval-resolve' });
   assert.equal(cleared.pendingApproval, null);
+  assert.equal(resolvedWith, 'allow');
 });
 
 test('reducer is pure: input state is not mutated', () => {

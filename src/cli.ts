@@ -2226,8 +2226,6 @@ export async function runCli(argv: string[]) {
   await saveSession(cwd, session);
 }
 
-const TUI_REFUSED_POLICIES = new Set<PolicyMode>(['confirm-write', 'confirm-bash', 'confirm-all']);
-
 type RunChatTuiSessionOpts = {
   cwd: string;
   session: Session;
@@ -2245,30 +2243,53 @@ type RunChatTuiSessionOpts = {
 async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   const { policy, wsCfg, session, cwd } = opts;
 
-  // Stage 1.4 ships the TUI without the approval modal (lands in Stage 3).
-  // Refuse setups that would surface an approval prompt with no UI to render
-  // it, rather than silently denying the requested actions.
-  if (TUI_REFUSED_POLICIES.has(policy)) {
-    process.stderr.write(
-      `--tui (beta) does not yet support --policy ${policy}; the approval modal lands in Stage 3. ` +
-        `Use --policy auto or --policy read-only with --tui, or omit --tui for confirm-* modes.\n`
-    );
-    throw new ReportedCliError(`--tui does not yet support --policy ${policy}`, { exitCode: 1 });
+  // Lazy-import the TUI surface so headless / RPC / one-shot paths never
+  // pay the Ink + React module load cost. Enforced by import-isolation test.
+  const [{ mountTui }, storeMod] = await Promise.all([
+    import('./tui/index.js'),
+    import('./tui/store.js')
+  ]);
+  const { createInitialState, createUiStore } = storeMod;
+  type PendingApproval = import('./tui/store.js').PendingApproval;
+  type UiApprovalDecision = import('./tui/store.js').UiApprovalDecision;
+
+  const store = createUiStore(
+    createInitialState({
+      policy,
+      model: { provider: opts.modelConfig.provider, model: opts.modelConfig.model },
+      session: { id: session.id, cwd: session.cwd }
+    })
+  );
+
+  // Modal bridge: pushes a PendingApproval into the store and resolves the
+  // Promise when <ApprovalModal> calls pending.resolve(decision).
+  let pendingCounter = 0;
+  function requestModalApproval(subject: ApprovalSubject): Promise<UiApprovalDecision> {
+    return new Promise((resolve) => {
+      pendingCounter += 1;
+      const pending: PendingApproval = {
+        id: `pa_${pendingCounter}`,
+        subject,
+        resolve
+      };
+      store.dispatch({ type: 'approval-request', pending });
+    });
   }
+
+  // Live policy proxy:
+  //   * /policy <mode> swaps the inner engine mid-session.
+  //   * 'ask' decisions get routed through the modal instead of falling
+  //     through to runner.confirm (which only takes a string prompt).
+  //   * `allow-for-this-turn` short-circuits subsequent 'ask' decisions in
+  //     the same turn; reset by livePolicy.resetTurn() at each onSubmit.
+  // tx.applyPolicy stays bound to construction-time value (per spec open
+  // question 3) — that is enforced inside tuiTransactions.confirmApply below.
+  const livePolicy = createTuiLivePolicyEngine(policy, requestModalApproval);
 
   const tuiTxMode = opts.txMode ?? wsCfg.transactions?.mode ?? 'off';
   let tuiTransactions: TxRunnerOptions | undefined;
   if (tuiTxMode === 'edit') {
     const applyPolicy = opts.txApply ?? wsCfg.transactions?.applyPolicy ?? 'interactive';
-    if (applyPolicy === 'interactive') {
-      process.stderr.write(
-        `--tui (beta) cannot use --tx-apply interactive yet; the approval modal lands in Stage 3. ` +
-          `Use --tx-apply auto-on-pass or --tx-apply manual-only with --tui.\n`
-      );
-      throw new ReportedCliError(`--tui does not yet support --tx-apply interactive`, {
-        exitCode: 1
-      });
-    }
     tuiTransactions = {
       mode: 'edit',
       auto: wsCfg.transactions?.auto ?? 'per-turn',
@@ -2282,24 +2303,24 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       },
       workspaceId: opts.coordinatorCtx.workspaceId,
       workspaceRealPath: opts.coordinatorCtx.workspaceRealPath,
-      cliqHome: opts.cliqHome
+      cliqHome: opts.cliqHome,
+      // Interactive tx apply now flows through the same modal as tool
+      // approvals, with a tx-apply subject. allow-for-this-turn does not
+      // apply (tx apply happens at end-of-turn after all tools).
+      confirmApply: async (review) => {
+        const subject: ApprovalSubject = {
+          kind: 'tx-apply',
+          txId: review.txId,
+          diffSummary: review.diffSummary,
+          validators: review.validators,
+          blockingFailures: review.blockingFailures,
+          artifactRef: review.artifactRef
+        };
+        const decision = await requestModalApproval(subject);
+        return decision === 'allow' || decision === 'allow-turn';
+      }
     };
   }
-
-  // Lazy-import the TUI surface so headless / RPC / one-shot paths never
-  // pay the Ink + React module load cost. Enforced by import-isolation test.
-  const [{ mountTui }, { createInitialState, createUiStore }] = await Promise.all([
-    import('./tui/index.js'),
-    import('./tui/store.js')
-  ]);
-
-  const store = createUiStore(
-    createInitialState({
-      policy,
-      model: { provider: opts.modelConfig.provider, model: opts.modelConfig.model },
-      session: { id: session.id, cwd: session.cwd }
-    })
-  );
 
   // TUI-owned hook bridge: beforeTool / afterTool flow into the UiStore so
   // <Transcript> can render rich tool entries. Replaces createCliHooks in the
@@ -2315,17 +2336,12 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     }
   ];
 
-  // Live policy proxy lets /policy <mode> swap the engine mid-session without
-  // recreating the runner. tx.applyPolicy stays bound to construction-time
-  // value (set on tuiTransactions above) — see spec open question 3.
-  const livePolicy = createLivePolicyEngine(policy);
-
   const runner = createRunner({
     model: opts.modelClient,
     hooks: [...opts.assembly.hooks, ...tuiHooks],
     policy: livePolicy.engine,
-    // Confirms only fire when the policy returns 'ask'; we refused those
-    // setups above so this is unreachable until Stage 3 lands the modal.
+    // The modal owns 'ask' resolution; runner.confirm is only invoked if the
+    // wrapped engine ever returns 'ask' (it shouldn't), so this is a defense.
     confirm: async () => false,
     instructions: opts.assembly.instructions,
     autoCompact: {
@@ -2348,6 +2364,9 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     onSubmit: async (text) => {
       const controller = new AbortController();
       currentTurn = controller;
+      // Spec A.6: allow-for-this-turn is scoped to one turn — reset before
+      // every fresh prompt so the user has to re-grant on the next one.
+      livePolicy.resetTurn();
       try {
         await runner.runTurn(session, text, { signal: controller.signal });
       } catch (error) {
@@ -2373,16 +2392,6 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       };
     },
     onPolicyChange: async (mode) => {
-      if (TUI_REFUSED_POLICIES.has(mode)) {
-        // Same refusal as session entry: no <ApprovalModal> until Stage 3.
-        // Surfacing this as a thrown error lets <App> push the explanation
-        // into the transcript instead of silently swapping into a broken
-        // state.
-        throw new Error(
-          `policy mode "${mode}" needs the approval modal (Stage 3); ` +
-            `stay on auto / read-only with --tui or relaunch without --tui.`
-        );
-      }
       livePolicy.setMode(mode);
     }
   });
@@ -2391,21 +2400,46 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   await saveSession(cwd, session);
 }
 
-function createLivePolicyEngine(initialMode: PolicyMode) {
+function createTuiLivePolicyEngine(
+  initialMode: PolicyMode,
+  requestApproval: (subject: ApprovalSubject) => Promise<'allow' | 'deny' | 'allow-turn'>
+) {
   let inner = createPolicyEngine({ mode: initialMode });
-  // Proxy so `runner.policy.mode` and `runner.policy.decide(...)` pick up the
-  // latest engine after setMode. Mode is exposed as a getter to keep the
-  // structural type compatible with createPolicyEngine's plain-property shape.
+  let allowTurn = false;
+
   const engine = {
     get mode() {
       return inner.mode;
     },
-    decide: (subject: ApprovalSubject) => inner.decide(subject)
+    decide: async (subject: ApprovalSubject) => {
+      const decision = await inner.decide(subject);
+      if (decision.behavior !== 'ask') return decision;
+      if (allowTurn) {
+        return { behavior: 'allow', decidedBy: 'user' as const };
+      }
+      const userChoice = await requestApproval(subject);
+      if (userChoice === 'allow') {
+        return { behavior: 'allow', decidedBy: 'user' as const };
+      }
+      if (userChoice === 'allow-turn') {
+        allowTurn = true;
+        return { behavior: 'allow', decidedBy: 'user' as const };
+      }
+      return {
+        behavior: 'deny' as const,
+        reason: 'user denied via TUI approval modal',
+        decidedBy: 'user' as const
+      };
+    }
   };
+
   return {
     engine: engine as ReturnType<typeof createPolicyEngine>,
     setMode(mode: PolicyMode) {
       inner = createPolicyEngine({ mode });
+    },
+    resetTurn() {
+      allowTurn = false;
     }
   };
 }
