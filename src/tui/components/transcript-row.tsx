@@ -58,7 +58,10 @@ export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
 }
 
 function ToolBody({ body, expanded }: { body: string; expanded: boolean }) {
-  const lines = body.split('\n');
+  // Bash output usually ends with a trailing newline; without trimming it the
+  // split produces a phantom empty line that inflates the "N more lines" count
+  // and renders a blank row when expanded.
+  const lines = body.replace(/\n$/, '').split('\n');
   const visible = expanded ? lines : lines.slice(0, FOLDED_BODY_LINES);
   const remaining = lines.length - visible.length;
   return (

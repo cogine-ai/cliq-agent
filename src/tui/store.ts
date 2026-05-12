@@ -75,7 +75,10 @@ export type UiAction =
   | { type: 'system-message'; text: string }
   | { type: 'toggle-tool-body' }
   | { type: 'approval-request'; pending: PendingApproval }
-  | { type: 'approval-resolve' }
+  // approval-resolve carries the id of the pending it resolves so a stale
+  // late-firing resolve cannot clear a freshly-installed pending. The
+  // reducer no-ops on id mismatch.
+  | { type: 'approval-resolve'; id: string }
   | { type: 'session-reset' }
   | { type: 'policy-change'; mode: PolicyMode };
 
@@ -138,15 +141,18 @@ export function reduce(state: UiState, action: UiAction): UiState {
       return state;
     }
     case 'approval-request':
-      // Replaces any prior pending entry. In the runner, only one approval
-      // can be in flight per turn, so this collision should be rare; if it
-      // does happen, the older pending stays unresolved and the bridge will
-      // hang. That is loud enough to surface a wiring bug.
+      // The bridge guarantees one in-flight pending at a time by force-denying
+      // the previous one before dispatching this; if a caller bypassed the
+      // bridge, this replace would still keep the UI consistent (older
+      // Promise stays unresolved and surfaces as a stuck modal).
       return { ...state, pendingApproval: action.pending };
     case 'approval-resolve':
       // The bridge that owns the Promise resolves it before dispatching this;
-      // the reducer only clears UI state to keep reduce() pure.
-      return state.pendingApproval ? { ...state, pendingApproval: null } : state;
+      // the reducer only clears UI state to keep reduce() pure. Mismatched
+      // ids are ignored so stale resolves cannot clobber a newer pending.
+      return state.pendingApproval && state.pendingApproval.id === action.id
+        ? { ...state, pendingApproval: null }
+        : state;
     case 'session-reset':
       return {
         ...state,

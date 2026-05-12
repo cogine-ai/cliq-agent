@@ -17,6 +17,17 @@ export function createApprovalBridge(store: UiStore): ApprovalBridge {
 
   function requestApproval(subject: ApprovalSubject): Promise<UiApprovalDecision> {
     return new Promise((resolve) => {
+      // If a previous request is still in flight (caller bypassed normal
+      // turn serialization, e.g. mid-flight reentry), force-deny it so its
+      // Promise resolves before we install a new pending. Without this the
+      // old caller awaits forever.
+      if (current) {
+        const stale = current;
+        current = null;
+        stale.resolve('deny');
+        store.dispatch({ type: 'approval-resolve', id: stale.id });
+      }
+
       counter += 1;
       const id = `pa_${counter}`;
       const wrappedResolve = (decision: UiApprovalDecision) => {
@@ -31,8 +42,10 @@ export function createApprovalBridge(store: UiStore): ApprovalBridge {
 
   function cancelPending(): void {
     if (!current) return;
-    current.resolve('deny');
-    store.dispatch({ type: 'approval-resolve' });
+    const stale = current;
+    current = null;
+    stale.resolve('deny');
+    store.dispatch({ type: 'approval-resolve', id: stale.id });
   }
 
   return { requestApproval, cancelPending };

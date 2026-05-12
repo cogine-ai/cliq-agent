@@ -114,7 +114,7 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
     const pending = state.pendingApproval;
     if (!pending) return;
     pending.resolve(decision);
-    store.dispatch({ type: 'approval-resolve' });
+    store.dispatch({ type: 'approval-resolve', id: pending.id });
   }
 
   return (

@@ -2087,7 +2087,10 @@ export async function runCli(argv: string[]) {
     envOptOut: process.env.CLIQ_TUI === '0',
     isTTY
   });
-  if (parsed.tui && !isTTY) {
+  if (parsed.tui && !parsed.classic && !isTTY) {
+    // --classic is allowed to coexist with --tui and silently win, so the
+    // refusal only fires when the user actually asked the TUI to launch
+    // without a TTY.
     process.stderr.write(
       `--tui requires a TTY on both stdin and stdout. ` +
         `Drop --tui for the readline REPL or use \`cliq run --jsonl\` for non-TTY workflows.\n`

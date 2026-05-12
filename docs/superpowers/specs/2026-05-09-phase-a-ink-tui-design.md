@@ -162,7 +162,7 @@ Slash command palette UI: typing `/` opens a small popover with fuzzy filter. Ta
 
 ### A.8 — Layout: three vertical zones, no panels
 
-```
+```text
 ┌──────────────────────────────────────────────────────┐
 │ Transcript (scrolling, inline above input)           │
 │   user> ...                                          │
@@ -209,7 +209,7 @@ Cost guard / token-budget bar is **not** in Phase A — depends on token governa
 
 Add to main `package.json` `dependencies`:
 
-```
+```text
 ink                ^5
 react              ^18
 ink-text-input     ^6 (or build a tiny one if breakage risk is high)
@@ -289,7 +289,7 @@ Total: ≈ 2 calendar weeks at one engineer's focus, with the option to ship Sta
 
 ## Appendix — file-level deltas
 
-```
+```text
 new:
   src/tui/index.tsx                      Ink entry, mounts <App>
   src/tui/app.tsx                        top-level layout

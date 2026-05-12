@@ -60,6 +60,17 @@ test('renders bash body folded to 20 lines with a "more lines" marker', () => {
   assert.match(frame, /5 more lines/);
 });
 
+test('a trailing newline in bash body does not inflate the "more lines" count', () => {
+  // 5 real lines plus a trailing newline — the fold should report 0 more.
+  const body = ['a', 'b', 'c', 'd', 'e'].join('\n') + '\n';
+  const { lastFrame } = render(
+    <TranscriptRow
+      entry={{ kind: 'tool', id: 't1', tool: 'bash', status: 'ok', summary: 'cmd', body }}
+    />
+  );
+  assert.doesNotMatch(lastFrame() ?? '', /more line/);
+});
+
 test('renders the full bash body when entry.expanded is true', () => {
   const lines = Array.from({ length: 25 }, (_, i) => `row-${i + 1}`).join('\n');
   const { lastFrame } = render(

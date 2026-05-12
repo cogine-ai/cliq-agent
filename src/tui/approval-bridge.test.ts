@@ -22,23 +22,23 @@ const newStore = () =>
     })
   );
 
-test('requestApproval dispatches approval-request with a unique id', async () => {
+test('reentrant requestApproval force-denies the prior in-flight request', async () => {
   const store = newStore();
   const bridge = createApprovalBridge(store);
 
   const p1 = bridge.requestApproval(subject);
   const p2 = bridge.requestApproval(subject);
 
-  // Second dispatch overrides the pending entry (reducer replaces, see store).
+  // p1 must settle as 'deny' synchronously when p2 replaces it — otherwise
+  // the caller that started p1 would await forever.
+  assert.equal(await p1, 'deny');
+
+  // p2 is now the live pending.
   const pending = store.getState().pendingApproval;
   assert.ok(pending);
   assert.match(pending.id, /^pa_/);
-  // The first promise stays unresolved (and the bridge no longer tracks it).
   pending.resolve('allow');
   assert.equal(await p2, 'allow');
-  // The orphaned p1 stays pending forever in this contrived case; the runner
-  // serializes approvals in practice so this collision shouldn't occur.
-  void p1;
 });
 
 test('resolving the pending entry through the wrapped resolve clears bridge state', async () => {

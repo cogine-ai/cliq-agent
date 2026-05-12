@@ -14,7 +14,8 @@ export function toolNameFromAction(action: ModelAction): string {
   if ('find' in action) return 'find';
   if ('grep' in action) return 'grep';
   if ('message' in action) return 'message';
-  return 'unknown';
+  const _exhaustive: never = action;
+  return _exhaustive;
 }
 
 export function previewFromAction(action: ModelAction): string {
@@ -38,8 +39,14 @@ export function previewFromAction(action: ModelAction): string {
     const g = action.grep;
     return `${g.pattern}${g.path ? ` in ${g.path}` : ''}`;
   }
-  // 'message' isn't a tool action; should not reach here
-  return '';
+  if ('message' in action) {
+    // 'message' is not a tool action; if it slipped past the runner's
+    // dispatch into a preview, render empty rather than crash. The
+    // exhaustiveness check below still catches new variants at compile time.
+    return '';
+  }
+  const _exhaustive: never = action;
+  return _exhaustive;
 }
 
 export function formatToolResultSummary(result: ToolResult): string {

@@ -132,8 +132,8 @@ test('policy-change updates the policy mode and leaves transcript intact', () =>
   assert.equal(after.transcript.length, 1);
 });
 
-test('approval-request sets pendingApproval; approval-resolve clears it', () => {
-  const noop = reduce(baseInit(), { type: 'approval-resolve' });
+test('approval-request sets pendingApproval; approval-resolve clears it by id', () => {
+  const noop = reduce(baseInit(), { type: 'approval-resolve', id: 'pa_unknown' });
   assert.equal(noop.pendingApproval, null);
 
   let resolvedWith: string | null = null;
@@ -156,9 +156,27 @@ test('approval-request sets pendingApproval; approval-resolve clears it', () => 
   // Bridge calls resolve before dispatching the clear action — reducer must
   // not call it itself.
   pending.resolve('allow');
-  const cleared = reduce(requested, { type: 'approval-resolve' });
+  const cleared = reduce(requested, { type: 'approval-resolve', id: pending.id });
   assert.equal(cleared.pendingApproval, null);
   assert.equal(resolvedWith, 'allow');
+});
+
+test('approval-resolve with a mismatched id leaves a newer pending intact', () => {
+  const newer: PendingApproval = {
+    id: 'pa_new',
+    subject: {
+      kind: 'tool',
+      toolName: 'bash',
+      access: 'exec',
+      action: { bash: 'ls' } as never,
+      display: { title: 'Allow bash command?', command: 'ls' }
+    },
+    resolve: () => undefined
+  };
+  const withNewer = reduce(baseInit(), { type: 'approval-request', pending: newer });
+  // A stale resolve for an older pending must not clobber the newer one.
+  const stale = reduce(withNewer, { type: 'approval-resolve', id: 'pa_old' });
+  assert.equal(stale.pendingApproval, newer);
 });
 
 test('reducer is pure: input state is not mutated', () => {
