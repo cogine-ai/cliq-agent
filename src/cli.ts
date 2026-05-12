@@ -11,9 +11,9 @@ import { runHeadless } from './headless/run.js';
 import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
-import type { ProviderName } from './model/types.js';
+import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
 import { createPolicyEngine } from './policy/engine.js';
-import type { PolicyMode } from './policy/types.js';
+import type { ApprovalSubject, PolicyMode } from './policy/types.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './protocol/runtime/events.js';
 import { createRunner } from './runtime/runner.js';
@@ -28,6 +28,7 @@ import {
 import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
 import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
+import type { Session } from './session/types.js';
 import type { ToolResult } from './tools/types.js';
 import {
   openTx as coordOpenTx,
@@ -48,7 +49,7 @@ import {
   readTxReviewSnapshot
 } from './workspace/transactions/inspect.js';
 import { readTxState as coordReadTxState, resolveTxRoot } from './workspace/transactions/store.js';
-import { loadWorkspaceConfig } from './workspace/config.js';
+import { loadWorkspaceConfig, type WorkspaceConfig } from './workspace/config.js';
 import { isValidTxId } from './workspace/transactions/types.js';
 import { promises as fsPromises } from 'node:fs';
 
@@ -71,6 +72,8 @@ type ParsedArgsBase = {
   model: PartialModelConfig;
   txMode?: TxMode;
   txApply?: TxApplyPolicy;
+  tui?: boolean;
+  classic?: boolean;
 };
 
 export type ParsedArgs = ParsedArgsBase & (
@@ -764,6 +767,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const model: PartialModelConfig = {};
   let txMode: TxMode | undefined;
   let txApply: TxApplyPolicy | undefined;
+  let tui = false;
+  let classic = false;
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
@@ -818,6 +823,24 @@ export function parseArgs(argv: string[]): ParsedArgs {
       txApply = value;
       i += 1;
       continue;
+    }
+
+    if (token === '--tui') {
+      tui = true;
+      continue;
+    }
+
+    if (token.startsWith('--tui=')) {
+      throw new Error('--tui does not accept a value');
+    }
+
+    if (token === '--classic') {
+      classic = true;
+      continue;
+    }
+
+    if (token.startsWith('--classic=')) {
+      throw new Error('--classic does not accept a value');
     }
 
     if (token.startsWith('--policy=')) {
@@ -941,11 +964,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
     skills,
     model,
     ...(txMode !== undefined ? { txMode } : {}),
-    ...(txApply !== undefined ? { txApply } : {})
+    ...(txApply !== undefined ? { txApply } : {}),
+    ...(tui ? { tui } : {}),
+    ...(classic ? { classic } : {})
   };
   const baseExtras = {
     ...(txMode !== undefined ? { txMode } : {}),
-    ...(txApply !== undefined ? { txApply } : {})
+    ...(txApply !== undefined ? { txApply } : {}),
+    ...(tui ? { tui } : {}),
+    ...(classic ? { classic } : {})
   };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
   if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
@@ -1142,6 +1169,8 @@ Options:
   --jsonl                  With cliq run only, write structured JSONL events to stdout
   --tx <off|edit>          Override workspace config transactions.mode for this run
   --tx-apply <policy>      Override transactions.applyPolicy (interactive | auto-on-pass | manual-only)
+  --tui                    Force the Ink TUI (already the default on a TTY; overrides CLIQ_TUI=0)
+  --classic                Force the legacy readline REPL instead of the TUI
 
 Policy modes:
   auto                     Execute registered tools without confirmation
@@ -1170,6 +1199,7 @@ Env:
   OPENAI_COMPATIBLE_API_KEY Optional for openai-compatible
   CLIQ_MODEL_*              Optional provider/model/base URL/streaming defaults
   CLIQ_POLICY_MODE          Optional default policy mode
+  CLIQ_TUI                  Set to "0" to fall back to the legacy readline REPL
 `);
 }
 
@@ -2050,6 +2080,24 @@ export async function runCli(argv: string[]) {
     return;
   }
 
+  const isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const wantsTui = resolveTuiPreference({
+    classic: parsed.classic === true,
+    tui: parsed.tui === true,
+    envOptOut: process.env.CLIQ_TUI === '0',
+    isTTY
+  });
+  if (parsed.tui && !parsed.classic && !isTTY) {
+    // --classic is allowed to coexist with --tui and silently win, so the
+    // refusal only fires when the user actually asked the TUI to launch
+    // without a TTY.
+    process.stderr.write(
+      `--tui requires a TTY on both stdin and stdout. ` +
+        `Drop --tui for the readline REPL or use \`cliq run --jsonl\` for non-TTY workflows.\n`
+    );
+    throw new ReportedCliError('--tui requires a TTY', { exitCode: 1 });
+  }
+
   const session = await ensureSession(cwd);
   const assembly = await createRuntimeAssembly({
     cwd,
@@ -2064,10 +2112,6 @@ export async function runCli(argv: string[]) {
     model: modelConfig.model,
     baseUrl: modelConfig.baseUrl
   };
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
-  const eventSink = createCliEventSink();
-  let turnSawRuntimeError = false;
 
   // §A.6: build CoordinatorContext, run crash recovery before constructing the
   // interactive runner so own-session orphans converge and cross-session
@@ -2092,6 +2136,30 @@ export async function runCli(argv: string[]) {
   for (const skippedTxId of chatRecoveryResult.crossSessionSkipped) {
     process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
   }
+
+  // TUI is the default on TTY. Forks BEFORE creating the readline interface
+  // so Ink owns stdin/stdout exclusively. The readline path below is the
+  // explicit opt-out via --classic, CLIQ_TUI=0, or non-TTY contexts.
+  if (wantsTui) {
+    await runChatTuiSession({
+      cwd,
+      session,
+      assembly,
+      modelClient,
+      modelConfig,
+      policy,
+      wsCfg,
+      txMode: parsed.txMode,
+      txApply: parsed.txApply,
+      coordinatorCtx: chatCoordinatorCtx,
+      cliqHome
+    });
+    return;
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
+  const eventSink = createCliEventSink();
+  let turnSawRuntimeError = false;
 
   // Build TxRunnerOptions when transactions mode is active. Interactive arm
   // uses a TTY confirm prompt via the existing readline interface.
@@ -2182,4 +2250,229 @@ export async function runCli(argv: string[]) {
 
   rl.close();
   await saveSession(cwd, session);
+}
+
+// Precedence: explicit CLI flags win over env, which wins over the default.
+// --classic is the conservative override (wins over --tui) so a hand-edited
+// shell function with both flags falls back to readline.
+export function resolveTuiPreference(opts: {
+  classic: boolean;
+  tui: boolean;
+  envOptOut: boolean;
+  isTTY: boolean;
+}): boolean {
+  if (opts.classic) return false;
+  if (opts.tui) return true;
+  if (opts.envOptOut) return false;
+  return opts.isTTY;
+}
+
+type RunChatTuiSessionOpts = {
+  cwd: string;
+  session: Session;
+  assembly: Awaited<ReturnType<typeof createRuntimeAssembly>>;
+  modelClient: ModelClient;
+  modelConfig: ResolvedModelConfig;
+  policy: PolicyMode;
+  wsCfg: WorkspaceConfig;
+  txMode?: TxMode;
+  txApply?: TxApplyPolicy;
+  coordinatorCtx: CoordinatorContext;
+  cliqHome: string;
+};
+
+async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
+  const { policy, wsCfg, session, cwd } = opts;
+
+  // Lazy-import the TUI runtime surface so headless / RPC / one-shot paths
+  // never pay the Ink + React module load cost. Enforced by the
+  // import-isolation test under src/tui/. Types come from the top-level
+  // type-only import (erased at compile time).
+  const [{ mountTui }, { createInitialState, createUiStore }, { createApprovalBridge }] =
+    await Promise.all([
+      import('./tui/index.js'),
+      import('./tui/store.js'),
+      import('./tui/approval-bridge.js')
+    ]);
+
+  const store = createUiStore(
+    createInitialState({
+      policy,
+      model: { provider: opts.modelConfig.provider, model: opts.modelConfig.model },
+      session: { id: session.id, cwd: session.cwd }
+    })
+  );
+
+  const approvalBridge = createApprovalBridge(store);
+
+  // Live policy proxy:
+  //   * /policy <mode> swaps the inner engine mid-session.
+  //   * 'ask' decisions get routed through the modal instead of falling
+  //     through to runner.confirm (which only takes a string prompt).
+  //   * `allow-for-this-turn` short-circuits subsequent 'ask' decisions in
+  //     the same turn; reset by livePolicy.resetTurn() at each onSubmit.
+  // tx.applyPolicy stays bound to construction-time value (per spec open
+  // question 3) — that is enforced inside tuiTransactions.confirmApply below.
+  const livePolicy = createTuiLivePolicyEngine(policy, approvalBridge.requestApproval);
+
+  const tuiTxMode = opts.txMode ?? wsCfg.transactions?.mode ?? 'off';
+  let tuiTransactions: TxRunnerOptions | undefined;
+  if (tuiTxMode === 'edit') {
+    const applyPolicy = opts.txApply ?? wsCfg.transactions?.applyPolicy ?? 'interactive';
+    tuiTransactions = {
+      mode: 'edit',
+      auto: wsCfg.transactions?.auto ?? 'per-turn',
+      applyPolicy,
+      bashPolicy: wsCfg.transactions?.bashPolicy ?? 'passthrough',
+      headless: false,
+      validatorsConfig: wsCfg.transactions?.validators ?? {},
+      stagedViewConfig: wsCfg.transactions?.stagedView ?? {
+        copyMode: 'auto',
+        bindPaths: ['node_modules']
+      },
+      workspaceId: opts.coordinatorCtx.workspaceId,
+      workspaceRealPath: opts.coordinatorCtx.workspaceRealPath,
+      cliqHome: opts.cliqHome,
+      // Interactive tx apply now flows through the same modal as tool
+      // approvals, with a tx-apply subject. allow-for-this-turn does not
+      // apply (tx apply happens at end-of-turn after all tools).
+      confirmApply: async (review) => {
+        const subject: ApprovalSubject = {
+          kind: 'tx-apply',
+          txId: review.txId,
+          diffSummary: review.diffSummary,
+          validators: review.validators,
+          blockingFailures: review.blockingFailures,
+          artifactRef: review.artifactRef
+        };
+        const decision = await approvalBridge.requestApproval(subject);
+        return decision === 'allow' || decision === 'allow-turn';
+      }
+    };
+  }
+
+  // TUI-owned hook bridge: beforeTool / afterTool flow into the UiStore so
+  // <Transcript> can render rich tool entries. Replaces createCliHooks in the
+  // TUI path (createCliHooks writes to stdout, which would fight Ink).
+  const tuiHooks: RuntimeHook[] = [
+    {
+      beforeTool(_session, action) {
+        store.dispatch({ type: 'tool-hook-start', action });
+      },
+      afterTool(_session, result) {
+        store.dispatch({ type: 'tool-hook-end', result });
+      }
+    }
+  ];
+
+  const runner = createRunner({
+    model: opts.modelClient,
+    hooks: [...opts.assembly.hooks, ...tuiHooks],
+    policy: livePolicy.engine,
+    // The modal owns 'ask' resolution; runner.confirm is only invoked if the
+    // wrapped engine ever returns 'ask' (it shouldn't), so this is a defense.
+    confirm: async () => false,
+    instructions: opts.assembly.instructions,
+    autoCompact: {
+      config: opts.assembly.workspaceConfig.autoCompact,
+      modelConfig: opts.modelConfig
+    },
+    ...(tuiTransactions ? { transactions: tuiTransactions } : {}),
+    async onEvent(event) {
+      store.dispatch({ type: 'runtime-event', event });
+    }
+  });
+
+  // Per-turn AbortController so Ctrl+C can cancel an in-flight turn without
+  // poisoning subsequent turns. The runner's per-turn opts.signal channel
+  // (added in this stage) takes precedence over construction-time signal.
+  let currentTurn: AbortController | null = null;
+
+  const tui = mountTui({
+    store,
+    onSubmit: async (text) => {
+      const controller = new AbortController();
+      currentTurn = controller;
+      // allow-for-this-turn is scoped to one turn (spec A.6) — reset before
+      // every fresh prompt so the user has to re-grant on the next one.
+      livePolicy.resetTurn();
+      try {
+        await runner.runTurn(session, text, { signal: controller.signal });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        store.dispatch({
+          type: 'runtime-event',
+          event: { type: 'error', stage: 'model', message }
+        });
+      } finally {
+        if (currentTurn === controller) currentTurn = null;
+      }
+    },
+    onCancelTurn: () => {
+      currentTurn?.abort();
+      // Promises don't observe AbortSignal, so a pending approval would hang
+      // policy.decide() forever after abort. Force-deny the modal alongside
+      // the abort so the runner can exit its action loop cleanly.
+      approvalBridge.cancelPending();
+    },
+    onReset: async () => {
+      const fresh = await ensureFresh(session.cwd);
+      Object.assign(session, fresh);
+      session.model = {
+        provider: opts.modelConfig.provider,
+        model: opts.modelConfig.model,
+        baseUrl: opts.modelConfig.baseUrl
+      };
+    },
+    onPolicyChange: async (mode) => {
+      livePolicy.setMode(mode);
+    }
+  });
+
+  await tui.waitUntilExit();
+  await saveSession(cwd, session);
+}
+
+function createTuiLivePolicyEngine(
+  initialMode: PolicyMode,
+  requestApproval: (subject: ApprovalSubject) => Promise<'allow' | 'deny' | 'allow-turn'>
+) {
+  let inner = createPolicyEngine({ mode: initialMode });
+  let allowTurn = false;
+
+  const engine = {
+    get mode() {
+      return inner.mode;
+    },
+    decide: async (subject: ApprovalSubject) => {
+      const decision = await inner.decide(subject);
+      if (decision.behavior !== 'ask') return decision;
+      if (allowTurn) {
+        return { behavior: 'allow', decidedBy: 'user' as const };
+      }
+      const userChoice = await requestApproval(subject);
+      if (userChoice === 'allow') {
+        return { behavior: 'allow', decidedBy: 'user' as const };
+      }
+      if (userChoice === 'allow-turn') {
+        allowTurn = true;
+        return { behavior: 'allow', decidedBy: 'user' as const };
+      }
+      return {
+        behavior: 'deny' as const,
+        reason: 'user denied via TUI approval modal',
+        decidedBy: 'user' as const
+      };
+    }
+  };
+
+  return {
+    engine: engine as ReturnType<typeof createPolicyEngine>,
+    setMode(mode: PolicyMode) {
+      inner = createPolicyEngine({ mode });
+    },
+    resetTurn() {
+      allowTurn = false;
+    }
+  };
 }

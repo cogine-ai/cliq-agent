@@ -33,7 +33,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public"
@@ -42,11 +42,17 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "node --test --import tsx \"src/**/*.test.ts\""
+    "test": "node --test --import tsx \"src/**/*.test.ts\" \"src/**/*.test.tsx\""
   },
-  "dependencies": {},
+  "dependencies": {
+    "ink": "7.0.2",
+    "ink-text-input": "6.0.0",
+    "react": "19.2.6"
+  },
   "devDependencies": {
     "@types/node": "^24.5.2",
+    "@types/react": "19.2.14",
+    "ink-testing-library": "4.0.0",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   }

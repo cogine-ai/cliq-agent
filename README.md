@@ -16,7 +16,7 @@ Cliq is a tiny local coding agent harness built around a minimal, provider-agnos
 
 ## Quick start
 
-Requirements: Node.js 20 or newer.
+Requirements: Node.js 22 or newer.
 
 ```bash
 npm install -g @cogineai/cliq
@@ -38,6 +38,21 @@ Run a one-shot task:
 ```bash
 cliq "inspect this repo and summarize the architecture"
 ```
+
+### Interactive UI
+
+When you launch `cliq` (or `cliq chat`) on a TTY, you enter the Ink-based TUI by default. It renders an inline three-zone layout — scrolling transcript, input bar, and status line — and stays compatible with shell scrollback (no alt-screen).
+
+Inside the TUI: slash commands (`/exit`, `/quit`, `/reset`, `/help`, `/policy <mode>`) with palette popover and Tab completion; Ctrl+C cancels an active turn or clears the input; Ctrl+D exits on empty input; Ctrl+O folds/unfolds the most recent bash output; an approval modal handles `--policy confirm-*` and interactive `--tx-apply` decisions.
+
+Opt out of the TUI with `--classic` or `CLIQ_TUI=0` to fall back to the legacy readline REPL:
+
+```bash
+cliq --classic
+CLIQ_TUI=0 cliq chat
+```
+
+One-shot runs (`cliq "task"`) and headless modes (`cliq run --jsonl`) are unaffected.
 
 ## Current scope
 

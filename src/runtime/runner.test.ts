@@ -124,6 +124,31 @@ test('runner emits checkpoint-created after automatic checkpoint creation', asyn
   assert.equal(session.checkpoints.length, 1);
 });
 
+test('per-turn signal in runTurn opts cancels the turn without poisoning the runner', async () => {
+  const session = await createTempSession();
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    }
+  });
+
+  // First turn: pre-aborted per-turn signal must reject without affecting
+  // the runner's ability to run a fresh turn afterwards.
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(
+    () => runner.runTurn(session, 'first turn', { signal: aborted.signal }),
+    /cancelled/i
+  );
+
+  // Second turn: a fresh signal lets the runner make progress.
+  const fresh = new AbortController();
+  const finalMessage = await runner.runTurn(session, 'second turn', { signal: fresh.signal });
+  assert.equal(finalMessage, 'done');
+});
+
 test('runner cancellation before checkpoint leaves session records unchanged', async () => {
   const session = await createTempSession();
   const controller = new AbortController();

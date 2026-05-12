@@ -61,7 +61,7 @@ export function createRunner({
   instructions = async () => [],
   onEvent = async () => undefined,
   autoCompact,
-  signal,
+  signal: defaultSignal,
   transactions,
   confirm
 }: {
@@ -80,7 +80,15 @@ export function createRunner({
     assertHeadlessCompatible(transactions);
   }
   return {
-    async runTurn(session: Session, userInput: string): Promise<string> {
+    async runTurn(
+      session: Session,
+      userInput: string,
+      opts: { signal?: AbortSignal } = {}
+    ): Promise<string> {
+      // Per-turn signal takes precedence so the TUI can abort an active turn
+      // without poisoning subsequent turns. Falls back to the construction-
+      // time signal for callers that pre-date the per-turn channel.
+      const signal = opts.signal ?? defaultSignal;
       const cwd = session.cwd;
       const throwCancelled = async (): Promise<never> => {
         await onEvent({ type: 'error', stage: 'cancel', message: 'run cancelled' });

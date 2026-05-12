@@ -24,6 +24,17 @@ npm run dev -- "your task here"
 node dist/index.js chat
 ```
 
+## TUI development (Phase A)
+
+The Ink TUI lives at `src/tui/` and is the default interactive surface on a TTY (escape hatches: `--classic` or `CLIQ_TUI=0`). It is loaded with `await import('./tui/index.js')` on the dispatch path so headless / RPC code never pulls in Ink or React.
+
+- Components: `src/tui/components/*.tsx` — each pairs with a `*.test.tsx` driven by `ink-testing-library`.
+- Pure store: `src/tui/store.ts` — reducer is exhaustive on `UiAction` and on `RuntimeEvent` via `assertNever`. New variants on either side fail to compile here first.
+- Isolation: `src/tui/import-isolation.test.ts` walks `src/headless/`, `src/runtime/`, and `src/protocol/` and fails if any file imports `react`, `ink`, `ink-text-input`, or anything under `src/tui/`. Do not break this — it is the contract that lets headless users avoid the TUI dependency footprint.
+- Run TUI tests: `npm test` (the TUI test files are picked up by the existing glob). Build: `npm run build`.
+
+When you add a new `RuntimeEvent` variant in `src/protocol/runtime/events.ts`, you also need to update `src/tui/store.ts` (and `src/headless/events.ts`) — both rely on `assertNever` for compile-time exhaustiveness.
+
 ## Contribution scope
 
 At this stage, the most useful contributions are:

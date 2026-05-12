@@ -15,6 +15,7 @@ import {
   parseArgs,
   printHelp,
   renderUnhandledError,
+  resolveTuiPreference,
   resolveTxIdForReview,
   ReportedCliError,
   runCli
@@ -1546,4 +1547,37 @@ test('runCli checkpoint fork --restore-files creates a restore-safety checkpoint
       ['manual', 'restore-safety']
     );
   });
+});
+
+test('resolveTuiPreference precedence: --classic > --tui > CLIQ_TUI=0 > TTY default', () => {
+  // Default on a TTY: TUI on.
+  assert.equal(
+    resolveTuiPreference({ classic: false, tui: false, envOptOut: false, isTTY: true }),
+    true
+  );
+  // Default off a TTY: legacy readline.
+  assert.equal(
+    resolveTuiPreference({ classic: false, tui: false, envOptOut: false, isTTY: false }),
+    false
+  );
+  // CLIQ_TUI=0 overrides the TTY default.
+  assert.equal(
+    resolveTuiPreference({ classic: false, tui: false, envOptOut: true, isTTY: true }),
+    false
+  );
+  // --tui overrides CLIQ_TUI=0 (explicit CLI flag wins over env).
+  assert.equal(
+    resolveTuiPreference({ classic: false, tui: true, envOptOut: true, isTTY: true }),
+    true
+  );
+  // --classic wins over --tui (most conservative explicit choice).
+  assert.equal(
+    resolveTuiPreference({ classic: true, tui: true, envOptOut: false, isTTY: true }),
+    false
+  );
+  // --classic wins on non-TTY too (redundant but consistent).
+  assert.equal(
+    resolveTuiPreference({ classic: true, tui: false, envOptOut: false, isTTY: false }),
+    false
+  );
 });
