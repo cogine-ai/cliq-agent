@@ -5,7 +5,7 @@ import type { RuntimeEvent } from '../protocol/runtime/events.js';
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
 import type { ToolResult } from '../tools/types.js';
 import {
-  extractBashBody,
+  extractToolBody,
   formatToolResultSummary,
   previewFromAction,
   toolNameFromAction
@@ -209,7 +209,7 @@ function reduceToolHookStart(state: UiState, action: ModelAction): UiState {
 
 function reduceToolHookEnd(state: UiState, result: ToolResult): UiState {
   const summary = formatToolResultSummary(result);
-  const body = extractBashBody(result);
+  const body = extractToolBody(result);
   const idx = findLastRunningToolIndex(state.transcript, result.tool);
   const patch: Partial<Extract<TranscriptEntry, { kind: 'tool' }>> = {
     status: result.status,
@@ -311,23 +311,18 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
       return updateToolEntry(state, idx, { status: event.status });
     }
     case 'checkpoint-created':
-      return pushSystem(
-        state,
-        `checkpoint ${event.checkpointId} created (${event.kind})${
-          event.workspaceSnapshotStatus !== 'available'
-            ? ` — workspace snapshot ${event.workspaceSnapshotStatus}`
-            : ''
-        }`
-      );
     case 'compact-start':
-      return pushSystem(state, `compaction started (${event.trigger}, ${event.phase})`);
+    case 'compact-skip':
+      // Bookkeeping events that fire on (almost) every turn. Surfacing them
+      // in the transcript drowns the actual conversation in noise; the data
+      // is preserved in the on-disk session record. Only meaningful state
+      // changes (compact-end, compact-error) reach the user.
+      return state;
     case 'compact-end':
       return pushSystem(
         state,
         `compaction completed: ${event.estimatedTokensBefore} → ${event.estimatedTokensAfter} tokens`
       );
-    case 'compact-skip':
-      return pushSystem(state, `compaction skipped: ${event.reason}`);
     case 'compact-error':
       return pushSystem(
         state,

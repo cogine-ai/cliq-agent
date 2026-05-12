@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  extractBashBody,
+  extractToolBody,
   formatToolResultSummary,
   previewFromAction,
   toolNameFromAction
@@ -83,21 +83,39 @@ test('formatToolResultSummary prefers path; falls back to policy/error', () => {
   );
 });
 
-test('extractBashBody strips the TOOL_RESULT header and skips empty bodies', () => {
-  const sample = `TOOL_RESULT bash success
+test('extractToolBody strips the TOOL_RESULT header for bash and the file tools', () => {
+  const bash = `TOOL_RESULT bash success
 $ echo hi
 hi
 done`;
-  assert.equal(extractBashBody({ tool: 'bash', status: 'ok', content: sample, meta: {} }), 'hi\ndone');
+  assert.equal(extractToolBody({ tool: 'bash', status: 'ok', content: bash, meta: {} }), 'hi\ndone');
+
+  // ls, read, find, grep all share the `TOOL_RESULT <tool>\npath=...` header.
+  const ls = `TOOL_RESULT ls OK
+path=.
+a.txt
+b.txt`;
+  assert.equal(extractToolBody({ tool: 'ls', status: 'ok', content: ls, meta: {} }), 'a.txt\nb.txt');
+
+  const read = `TOOL_RESULT read OK
+path=src/foo.ts
+line 1
+line 2`;
+  assert.equal(
+    extractToolBody({ tool: 'read', status: 'ok', content: read, meta: {} }),
+    'line 1\nline 2'
+  );
 
   const empty = `TOOL_RESULT bash success
 $ true
 `;
-  assert.equal(extractBashBody({ tool: 'bash', status: 'ok', content: empty, meta: {} }), undefined);
+  assert.equal(extractToolBody({ tool: 'bash', status: 'ok', content: empty, meta: {} }), undefined);
 
-  // Non-bash tools never produce a body.
+  // Content that has no body past the header returns undefined (not empty string).
+  const headerOnly = `TOOL_RESULT ls OK
+path=.`;
   assert.equal(
-    extractBashBody({ tool: 'read', status: 'ok', content: 'whatever', meta: {} }),
+    extractToolBody({ tool: 'ls', status: 'ok', content: headerOnly, meta: {} }),
     undefined
   );
 });

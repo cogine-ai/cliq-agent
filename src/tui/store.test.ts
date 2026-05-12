@@ -426,7 +426,7 @@ test('tx-* events push system entries with diff and validator summaries', () => 
   assert.match(systemTexts[4]!, /tx_2 aborted: validator-fail/);
 });
 
-test('compact-* and checkpoint-created events produce system entries', () => {
+test('checkpoint-created / compact-start / compact-skip do not pollute the transcript', () => {
   let s = baseInit();
   s = reduce(s, {
     type: 'runtime-event',
@@ -443,6 +443,17 @@ test('compact-* and checkpoint-created events produce system entries', () => {
   });
   s = reduce(s, {
     type: 'runtime-event',
+    event: { type: 'compact-skip', reason: 'too-small' }
+  });
+  // None of the bookkeeping events should leave a system entry — they fire
+  // (almost) every turn and would drown actual conversation in noise.
+  assert.equal(s.transcript.length, 0);
+});
+
+test('compact-end and compact-error still surface as system entries (state changes)', () => {
+  let s = baseInit();
+  s = reduce(s, {
+    type: 'runtime-event',
     event: {
       type: 'compact-end',
       artifactId: 'a1',
@@ -450,14 +461,16 @@ test('compact-* and checkpoint-created events produce system entries', () => {
       estimatedTokensAfter: 3000
     }
   });
-
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'compact-error', trigger: 'threshold', message: 'oom' }
+  });
   const systemTexts = s.transcript
     .filter((e): e is Extract<typeof e, { kind: 'system' }> => e.kind === 'system')
     .map((e) => e.text);
-  assert.equal(systemTexts.length, 3);
-  assert.match(systemTexts[0]!, /checkpoint cp_1 created \(manual\)/);
-  assert.match(systemTexts[1]!, /compaction started \(threshold, pre-model\)/);
-  assert.match(systemTexts[2]!, /compaction completed: 9000 → 3000 tokens/);
+  assert.equal(systemTexts.length, 2);
+  assert.match(systemTexts[0]!, /compaction completed: 9000 → 3000 tokens/);
+  assert.match(systemTexts[1]!, /compaction error \(threshold\): oom/);
 });
 
 test('toggle-tool-body flips expanded on the latest tool entry that has a body', () => {
