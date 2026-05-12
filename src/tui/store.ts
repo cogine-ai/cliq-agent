@@ -48,6 +48,12 @@ export type PendingApproval = {
   resolve: (decision: UiApprovalDecision) => void;
 };
 
+// Lightweight subset of the runtime tx lifecycle for status-bar rendering;
+// finer-grained transitions stay in src/workspace/transactions/types.ts.
+export type UiTxState = 'staging' | 'finalized' | 'validated';
+
+export type UiTx = { txId: string; state: UiTxState };
+
 export type UiState = {
   transcript: TranscriptEntry[];
   activeTurn: ActiveTurn | null;
@@ -55,6 +61,7 @@ export type UiState = {
   policy: PolicyMode;
   model: { provider: ProviderName; model: string };
   session: { id: string; cwd: string };
+  tx: UiTx | null;
   errors: ErrorEntry[];
   // Monotonic counter for entry ids; kept in state so reduce() stays pure.
   nextEntryId: number;
@@ -94,6 +101,7 @@ export function createInitialState(opts: {
     policy: opts.policy,
     model: opts.model,
     session: opts.session,
+    tx: null,
     errors: [],
     nextEntryId: 1,
   };
@@ -319,17 +327,20 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
         state,
         `compaction error (${event.trigger}): ${event.message}`
       );
-    case 'tx-staging-start':
-      return pushSystem(
+    case 'tx-staging-start': {
+      const next = pushSystem(
         state,
         `tx ${event.txId} staging started${event.name ? ` — ${event.name}` : ''}`
       );
+      return { ...next, tx: { txId: event.txId, state: 'staging' } };
+    }
     case 'tx-finalized': {
       const d = event.diffSummary;
-      return pushSystem(
+      const next = pushSystem(
         state,
         `tx ${event.txId} finalized: ${d.filesChanged} files (+${d.additions}/-${d.deletions})`
       );
+      return { ...next, tx: { txId: event.txId, state: 'finalized' } };
     }
     case 'tx-validated': {
       const v = event.validators;
@@ -338,17 +349,21 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
       const failures = event.blockingFailures.length
         ? ` — failures: ${event.blockingFailures.join(', ')}`
         : '';
-      return pushSystem(state, `tx ${event.txId} validated: ${blocking}, ${advisory}${failures}`);
+      const next = pushSystem(state, `tx ${event.txId} validated: ${blocking}, ${advisory}${failures}`);
+      return { ...next, tx: { txId: event.txId, state: 'validated' } };
     }
     case 'tx-applied': {
       const d = event.diffSummary;
-      return pushSystem(
+      const next = pushSystem(
         state,
         `tx ${event.txId} applied: +${d.additions}/-${d.deletions} over ${d.filesChanged} files`
       );
+      return { ...next, tx: null };
     }
-    case 'tx-aborted':
-      return pushSystem(state, `tx ${event.txId} aborted: ${event.reason}`);
+    case 'tx-aborted': {
+      const next = pushSystem(state, `tx ${event.txId} aborted: ${event.reason}`);
+      return { ...next, tx: null };
+    }
     default:
       return assertNever(event);
   }

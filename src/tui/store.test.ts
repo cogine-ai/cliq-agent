@@ -265,6 +265,79 @@ test('tool-hook-end with no prior running entry synthesizes a finalized entry', 
   assert.equal(entry.summary, 'policy=read-only blocked');
 });
 
+test('tx-* events update state.tx through the staging → finalized → validated → null lifecycle', () => {
+  let s = baseInit();
+  assert.equal(s.tx, null);
+
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'tx-staging-start', txId: 'tx_abc', trigger: 'auto-turn' }
+  });
+  assert.deepEqual(s.tx, { txId: 'tx_abc', state: 'staging' });
+
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: {
+      type: 'tx-finalized',
+      txId: 'tx_abc',
+      diffSummary: {
+        filesChanged: 1,
+        additions: 1,
+        deletions: 0,
+        creates: [],
+        modifies: ['x.ts'],
+        deletes: []
+      }
+    }
+  });
+  assert.deepEqual(s.tx, { txId: 'tx_abc', state: 'finalized' });
+
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: {
+      type: 'tx-validated',
+      txId: 'tx_abc',
+      validators: { blocking: { pass: 1, fail: 0 }, advisory: { pass: 0, fail: 0, names: [] } },
+      blockingFailures: []
+    }
+  });
+  assert.deepEqual(s.tx, { txId: 'tx_abc', state: 'validated' });
+
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: {
+      type: 'tx-applied',
+      txId: 'tx_abc',
+      diffSummary: {
+        filesChanged: 1,
+        additions: 1,
+        deletions: 0,
+        creates: [],
+        modifies: ['x.ts'],
+        deletes: []
+      },
+      validators: { blocking: { pass: 1, fail: 0 }, advisory: { pass: 0, fail: 0, names: [] } },
+      overrides: [],
+      artifactRef: 'tx_abc'
+    }
+  });
+  assert.equal(s.tx, null);
+});
+
+test('tx-aborted clears state.tx', () => {
+  let s = baseInit();
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'tx-staging-start', txId: 'tx_x', trigger: 'auto-turn' }
+  });
+  assert.notEqual(s.tx, null);
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'tx-aborted', txId: 'tx_x', reason: 'user-abort', artifactRef: 'tx_x' }
+  });
+  assert.equal(s.tx, null);
+});
+
 test('tx-* events push system entries with diff and validator summaries', () => {
   let s = baseInit();
   s = reduce(s, {

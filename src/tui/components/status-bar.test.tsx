@@ -39,3 +39,12 @@ test('reflects updated policy mode', () => {
   const { lastFrame } = render(<StatusBar state={init({ policy: 'read-only' })} />);
   assert.match(lastFrame() ?? '', /read-only/);
 });
+
+test('renders the active tx state when state.tx is set', () => {
+  const { lastFrame } = render(
+    <StatusBar state={init({ tx: { txId: 'tx_abc123def', state: 'validated' } })} />
+  );
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /tx tx_abc123 validated/);
+  assert.doesNotMatch(frame, /tx idle/);
+});

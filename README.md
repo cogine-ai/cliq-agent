@@ -39,18 +39,20 @@ Run a one-shot task:
 cliq "inspect this repo and summarize the architecture"
 ```
 
-### Beta: Ink TUI (`--tui`)
+### Interactive UI
 
-A new Ink-based TUI for interactive chat is in beta as of v0.9. Opt in with `--tui`:
-
-```bash
-cliq --tui
-cliq chat --tui
-```
-
-The TUI renders an inline three-zone layout — scrolling transcript, input bar, and status line — and stays compatible with shell scrollback (no alt-screen). It will eventually become the default; until then the readline REPL remains default and `--tui` is opt-in.
+When you launch `cliq` (or `cliq chat`) on a TTY, you enter the Ink-based TUI by default. It renders an inline three-zone layout — scrolling transcript, input bar, and status line — and stays compatible with shell scrollback (no alt-screen).
 
 Inside the TUI: slash commands (`/exit`, `/quit`, `/reset`, `/help`, `/policy <mode>`) with palette popover and Tab completion; Ctrl+C cancels an active turn or clears the input; Ctrl+D exits on empty input; Ctrl+O folds/unfolds the most recent bash output; an approval modal handles `--policy confirm-*` and interactive `--tx-apply` decisions.
+
+Opt out of the TUI with `--classic` or `CLIQ_TUI=0` to fall back to the legacy readline REPL:
+
+```bash
+cliq --classic
+CLIQ_TUI=0 cliq chat
+```
+
+One-shot runs (`cliq "task"`) and headless modes (`cliq run --jsonl`) are unaffected.
 
 ## Current scope
 

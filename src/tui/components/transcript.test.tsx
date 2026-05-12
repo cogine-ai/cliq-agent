@@ -28,8 +28,19 @@ test('renders an active-turn thinking row when activeTurn is present', () => {
 });
 
 test('omits the thinking row when activeTurn is null', () => {
-  const { lastFrame } = render(<Transcript entries={[]} activeTurn={null} />);
+  const { lastFrame } = render(
+    <Transcript entries={[{ kind: 'user', id: 'u1', text: 'hi' }]} activeTurn={null} />
+  );
   assert.doesNotMatch(lastFrame() ?? '', /thinking/);
+});
+
+test('renders the empty-state welcome when there are no entries and no active turn', () => {
+  const { lastFrame } = render(<Transcript entries={[]} activeTurn={null} />);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /Welcome to cliq/);
+  assert.match(frame, /\/help/);
+  assert.match(frame, /Ctrl\+D/);
+  assert.match(frame, /Ctrl\+C/);
 });
 
 test('caps visible entries at 200 (older entries fall to shell scrollback)', () => {

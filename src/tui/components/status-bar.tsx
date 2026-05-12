@@ -10,7 +10,7 @@ export function StatusBar({ state }: { state: UiState }) {
     state.policy,
     shortSessionId(state.session.id),
     `/${path.basename(state.session.cwd)}`,
-    'tx idle',
+    formatTxStatus(state.tx)
   ];
   const hasError = state.errors.length > 0;
   return (
@@ -23,6 +23,17 @@ export function StatusBar({ state }: { state: UiState }) {
       <Text dimColor>{segments.join(' · ')}</Text>
     </Box>
   );
+}
+
+function formatTxStatus(tx: UiState['tx']): string {
+  if (!tx) return 'tx idle';
+  return `tx ${shortTxId(tx.txId)} ${tx.state}`;
+}
+
+function shortTxId(id: string): string {
+  // tx_abc123def... → tx_abc123 for compactness in the status bar
+  if (id.length <= 9) return id;
+  return id.slice(0, 9);
 }
 
 function shortSessionId(id: string): string {

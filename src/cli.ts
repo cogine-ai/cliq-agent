@@ -73,6 +73,7 @@ type ParsedArgsBase = {
   txMode?: TxMode;
   txApply?: TxApplyPolicy;
   tui?: boolean;
+  classic?: boolean;
 };
 
 export type ParsedArgs = ParsedArgsBase & (
@@ -767,6 +768,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let txMode: TxMode | undefined;
   let txApply: TxApplyPolicy | undefined;
   let tui = false;
+  let classic = false;
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
@@ -830,6 +832,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
     if (token.startsWith('--tui=')) {
       throw new Error('--tui does not accept a value');
+    }
+
+    if (token === '--classic') {
+      classic = true;
+      continue;
+    }
+
+    if (token.startsWith('--classic=')) {
+      throw new Error('--classic does not accept a value');
     }
 
     if (token.startsWith('--policy=')) {
@@ -954,12 +965,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
     model,
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
-    ...(tui ? { tui } : {})
+    ...(tui ? { tui } : {}),
+    ...(classic ? { classic } : {})
   };
   const baseExtras = {
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
-    ...(tui ? { tui } : {})
+    ...(tui ? { tui } : {}),
+    ...(classic ? { classic } : {})
   };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
   if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
@@ -1156,7 +1169,8 @@ Options:
   --jsonl                  With cliq run only, write structured JSONL events to stdout
   --tx <off|edit>          Override workspace config transactions.mode for this run
   --tx-apply <policy>      Override transactions.applyPolicy (interactive | auto-on-pass | manual-only)
-  --tui                    Beta: enter the Ink TUI for interactive chat (Phase A; opt-in until Stage 4)
+  --tui                    Force the Ink TUI (already the default on a TTY; overrides CLIQ_TUI=0)
+  --classic                Force the legacy readline REPL instead of the TUI
 
 Policy modes:
   auto                     Execute registered tools without confirmation
@@ -1185,6 +1199,7 @@ Env:
   OPENAI_COMPATIBLE_API_KEY Optional for openai-compatible
   CLIQ_MODEL_*              Optional provider/model/base URL/streaming defaults
   CLIQ_POLICY_MODE          Optional default policy mode
+  CLIQ_TUI                  Set to "0" to fall back to the legacy readline REPL
 `);
 }
 
@@ -2065,7 +2080,14 @@ export async function runCli(argv: string[]) {
     return;
   }
 
-  if (parsed.tui && (!process.stdin.isTTY || !process.stdout.isTTY)) {
+  const isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const wantsTui = resolveTuiPreference({
+    classic: parsed.classic === true,
+    tui: parsed.tui === true,
+    envOptOut: process.env.CLIQ_TUI === '0',
+    isTTY
+  });
+  if (parsed.tui && !isTTY) {
     process.stderr.write(
       `--tui requires a TTY on both stdin and stdout. ` +
         `Drop --tui for the readline REPL or use \`cliq run --jsonl\` for non-TTY workflows.\n`
@@ -2112,9 +2134,10 @@ export async function runCli(argv: string[]) {
     process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
   }
 
-  // Stage 1.4: --tui forks BEFORE creating the readline interface so Ink
-  // owns stdin/stdout exclusively. The readline path below is unchanged.
-  if (parsed.tui) {
+  // Stage 4d: TUI is the default on TTY. Forks BEFORE creating the readline
+  // interface so Ink owns stdin/stdout exclusively. The readline path below
+  // is the explicit opt-out via --classic, CLIQ_TUI=0, or non-TTY contexts.
+  if (wantsTui) {
     await runChatTuiSession({
       cwd,
       session,
@@ -2224,6 +2247,21 @@ export async function runCli(argv: string[]) {
 
   rl.close();
   await saveSession(cwd, session);
+}
+
+// Stage 4d precedence: explicit CLI flags win over env, which wins over the
+// default. --classic is treated as the conservative override (wins over --tui)
+// so a hand-edited shell function with both flags falls back to readline.
+export function resolveTuiPreference(opts: {
+  classic: boolean;
+  tui: boolean;
+  envOptOut: boolean;
+  isTTY: boolean;
+}): boolean {
+  if (opts.classic) return false;
+  if (opts.tui) return true;
+  if (opts.envOptOut) return false;
+  return opts.isTTY;
 }
 
 type RunChatTuiSessionOpts = {

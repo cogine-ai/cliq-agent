@@ -26,7 +26,7 @@ node dist/index.js chat
 
 ## TUI development (Phase A)
 
-The Ink TUI lives at `src/tui/` and is wired in via the `--tui` opt-in flag through `cli.ts`. It is loaded with `await import('./tui/index.js')` on the dispatch path so headless / RPC code never pulls in Ink or React.
+The Ink TUI lives at `src/tui/` and is the default interactive surface on a TTY (escape hatches: `--classic` or `CLIQ_TUI=0`). It is loaded with `await import('./tui/index.js')` on the dispatch path so headless / RPC code never pulls in Ink or React.
 
 - Components: `src/tui/components/*.tsx` — each pairs with a `*.test.tsx` driven by `ink-testing-library`.
 - Pure store: `src/tui/store.ts` — reducer is exhaustive on `UiAction` and on `RuntimeEvent` via `assertNever`. New variants on either side fail to compile here first.
