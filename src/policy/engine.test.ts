@@ -2,88 +2,195 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createPolicyEngine } from './engine.js';
-import type { ToolAccess } from './types.js';
+import { buildToolApprovalSubject, buildTxApplyApprovalSubject } from './subjects.js';
+import type { ApprovalSubject, ToolAccess } from './types.js';
+import type { ModelAction } from '../protocol/model/actions.js';
+import type { TxReviewSnapshot } from '../workspace/transactions/inspect.js';
 
-function definition(name: string, access: ToolAccess) {
-  return { name, access };
+function toolSubject(
+  name: string,
+  access: ToolAccess,
+  action: ModelAction = { read: { path: 'README.md' } }
+): ApprovalSubject {
+  return buildToolApprovalSubject({
+    definition: { name, access },
+    action
+  });
 }
 
-test('read-only denies write and exec access', async () => {
+function txApplySubject(): ApprovalSubject {
+  const snapshot = {
+    tx: {
+      id: 'tx_123',
+      kind: 'edit',
+      state: 'validated',
+      workspaceId: 'ws',
+      sessionId: 'sess',
+      workspaceRealPath: '/tmp/ws',
+      createdAt: '2026-05-12T00:00:00Z',
+      updatedAt: '2026-05-12T00:00:01Z',
+      diffSummary: {
+        filesChanged: 1,
+        additions: 2,
+        deletions: 1,
+        creates: [],
+        modifies: ['src/index.ts'],
+        deletes: []
+      },
+      validators: [{ name: 'tsc', severity: 'blocking', status: 'pass', durationMs: 12 }],
+      blockingFailures: []
+    },
+    diff: null,
+    audit: [],
+    bashEffects: [],
+    validatorResults: [],
+    validatorArtifactResults: [],
+    validatorArtifactErrors: [],
+    artifactRef: 'tx/tx_123/'
+  } satisfies TxReviewSnapshot;
+
+  return buildTxApplyApprovalSubject(snapshot);
+}
+
+function permissionRequestSubject(): ApprovalSubject {
+  return {
+    kind: 'permission-request',
+    source: 'tool',
+    toolName: 'bash',
+    reason: 'needs network access',
+    requestedCapabilities: ['network']
+  };
+}
+
+test('auto allows registered tool subjects that passed core validation', async () => {
+  const policy = createPolicyEngine({ mode: 'auto' });
+
+  assert.deepEqual(await policy.decide(toolSubject('edit', 'write')), {
+    behavior: 'allow',
+    decidedBy: 'policy'
+  });
+});
+
+test('permission requests follow policy modes', async () => {
+  const subject = permissionRequestSubject();
+
+  assert.deepEqual(await createPolicyEngine({ mode: 'auto' }).decide(subject), {
+    behavior: 'allow',
+    decidedBy: 'policy'
+  });
+  assert.deepEqual(await createPolicyEngine({ mode: 'read-only' }).decide(subject), {
+    behavior: 'deny',
+    reason: 'policy mode read-only blocks permission requests',
+    decidedBy: 'policy'
+  });
+
+  for (const mode of ['confirm-write', 'confirm-bash', 'confirm-all'] as const) {
+    const decision = await createPolicyEngine({ mode }).decide(subject);
+    assert.equal(decision.behavior, 'ask');
+    assert.equal(decision.decidedBy, 'policy');
+    if (decision.behavior === 'ask') {
+      assert.match(decision.prompt, /Allow permission request\?/);
+      assert.match(decision.prompt, /network/);
+      assert.match(decision.prompt, new RegExp(`policy: ${mode}`));
+    }
+  }
+});
+
+test('read-only denies write, exec, and tx-apply subjects', async () => {
   const policy = createPolicyEngine({ mode: 'read-only' });
 
-  assert.deepEqual(await policy.authorize(definition('read', 'read')), { allowed: true });
-  assert.deepEqual(await policy.authorize(definition('edit', 'write')), {
-    allowed: false,
-    reason: 'policy mode read-only blocks write tools'
+  assert.deepEqual(await policy.decide(toolSubject('read', 'read')), {
+    behavior: 'allow',
+    decidedBy: 'policy'
   });
-  assert.deepEqual(await policy.authorize(definition('bash', 'exec')), {
-    allowed: false,
-    reason: 'policy mode read-only blocks exec tools'
+  assert.deepEqual(await policy.decide(toolSubject('edit', 'write')), {
+    behavior: 'deny',
+    reason: 'policy mode read-only blocks write tools',
+    decidedBy: 'policy'
+  });
+  assert.deepEqual(await policy.decide(toolSubject('bash', 'exec')), {
+    behavior: 'deny',
+    reason: 'policy mode read-only blocks exec tools',
+    decidedBy: 'policy'
+  });
+  assert.deepEqual(await policy.decide(txApplySubject()), {
+    behavior: 'deny',
+    reason: 'policy mode read-only blocks transaction apply',
+    decidedBy: 'policy'
   });
 });
 
-test('confirm-write only prompts for write tools', async () => {
-  const prompts: string[] = [];
-  const policy = createPolicyEngine({
-    mode: 'confirm-write',
-    confirm: async (prompt) => {
-      prompts.push(prompt);
-      return false;
-    }
-  });
-
-  assert.deepEqual(await policy.authorize(definition('read', 'read')), { allowed: true });
-  assert.deepEqual(await policy.authorize(definition('edit', 'write')), {
-    allowed: false,
-    reason: 'user declined confirmation'
-  });
-  assert.equal(prompts.length, 1);
-  assert.match(prompts[0] ?? '', /edit/i);
-});
-
-test('confirm-bash prompts for exec tools and allows write tools without prompting', async () => {
-  const prompts: string[] = [];
-  const policy = createPolicyEngine({
-    mode: 'confirm-bash',
-    confirm: async (prompt) => {
-      prompts.push(prompt);
-      return false;
-    }
-  });
-
-  assert.deepEqual(await policy.authorize(definition('edit', 'write')), { allowed: true });
-  assert.deepEqual(await policy.authorize(definition('shell', 'exec')), {
-    allowed: false,
-    reason: 'user declined confirmation'
-  });
-  assert.equal(prompts.length, 1);
-  assert.match(prompts[0] ?? '', /shell/i);
-});
-
-test('confirm-all prompts for both write and exec tools', async () => {
-  const prompts: string[] = [];
-  const decisions = [true, false];
-  const policy = createPolicyEngine({
-    mode: 'confirm-all',
-    confirm: async (prompt) => {
-      prompts.push(prompt);
-      return decisions.shift() ?? false;
-    }
-  });
-
-  assert.deepEqual(await policy.authorize(definition('edit', 'write')), { allowed: true });
-  assert.deepEqual(await policy.authorize(definition('bash', 'exec')), {
-    allowed: false,
-    reason: 'user declined confirmation'
-  });
-  assert.equal(prompts.length, 2);
-});
-
-test('confirm-write denies safely when no confirmer is available', async () => {
+test('confirm-write asks for write tool subjects and allows read and exec', async () => {
   const policy = createPolicyEngine({ mode: 'confirm-write' });
+  const edit = buildToolApprovalSubject({
+    definition: { name: 'edit', access: 'write' },
+    action: { edit: { path: 'src/index.ts', old_text: 'old', new_text: 'new' } },
+    tx: { enabled: true, txId: 'tx_123', mode: 'edit' }
+  });
 
-  assert.deepEqual(await policy.authorize(definition('edit', 'write')), {
-    allowed: false,
-    reason: 'confirmation required but no confirmer is available'
+  assert.deepEqual(await policy.decide(toolSubject('read', 'read')), {
+    behavior: 'allow',
+    decidedBy: 'policy'
+  });
+  assert.deepEqual(await policy.decide(toolSubject('bash', 'exec', { bash: 'npm test' })), {
+    behavior: 'allow',
+    decidedBy: 'policy'
+  });
+
+  const decision = await policy.decide(edit);
+  assert.equal(decision.behavior, 'ask');
+  assert.equal(decision.decidedBy, 'policy');
+  if (decision.behavior === 'ask') {
+    assert.match(decision.prompt, /Allow staged edit\?/);
+    assert.match(decision.prompt, /src\/index\.ts/);
+    assert.match(decision.prompt, /policy: confirm-write/);
+    assert.match(decision.prompt, /tx: tx_123/);
+  }
+});
+
+test('confirm-bash asks for exec tool subjects with command payload and allows write', async () => {
+  const policy = createPolicyEngine({ mode: 'confirm-bash' });
+
+  assert.deepEqual(await policy.decide(toolSubject('edit', 'write')), {
+    behavior: 'allow',
+    decidedBy: 'policy'
+  });
+
+  const decision = await policy.decide(toolSubject('bash', 'exec', { bash: 'npm test' }));
+  assert.equal(decision.behavior, 'ask');
+  assert.equal(decision.decidedBy, 'policy');
+  if (decision.behavior === 'ask') {
+    assert.match(decision.prompt, /Allow bash command\?/);
+    assert.match(decision.prompt, /npm test/);
+    assert.match(decision.prompt, /policy: confirm-bash/);
+  }
+});
+
+test('confirm-all asks for every tool subject', async () => {
+  const policy = createPolicyEngine({ mode: 'confirm-all' });
+
+  assert.equal((await policy.decide(toolSubject('read', 'read'))).behavior, 'ask');
+  assert.equal((await policy.decide(toolSubject('edit', 'write'))).behavior, 'ask');
+  assert.equal((await policy.decide(toolSubject('bash', 'exec', { bash: 'npm test' }))).behavior, 'ask');
+});
+
+test('tx-apply asks in confirm-write and confirm-all modes', async () => {
+  const confirmWrite = createPolicyEngine({ mode: 'confirm-write' });
+  const confirmAll = createPolicyEngine({ mode: 'confirm-all' });
+  const confirmBash = createPolicyEngine({ mode: 'confirm-bash' });
+
+  const writeDecision = await confirmWrite.decide(txApplySubject());
+  assert.equal(writeDecision.behavior, 'ask');
+  if (writeDecision.behavior === 'ask') {
+    assert.match(writeDecision.prompt, /Apply transaction\?/);
+    assert.match(writeDecision.prompt, /tx_123/);
+    assert.match(writeDecision.prompt, /1 files changed/);
+    assert.match(writeDecision.prompt, /policy: confirm-write/);
+  }
+
+  assert.equal((await confirmAll.decide(txApplySubject())).behavior, 'ask');
+  assert.deepEqual(await confirmBash.decide(txApplySubject()), {
+    behavior: 'allow',
+    decidedBy: 'policy'
   });
 });
