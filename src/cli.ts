@@ -13,7 +13,7 @@ import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
 import { createPolicyEngine } from './policy/engine.js';
-import type { PolicyMode } from './policy/types.js';
+import type { ApprovalSubject, PolicyMode } from './policy/types.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './protocol/runtime/events.js';
 import { createRunner } from './runtime/runner.js';
@@ -2315,12 +2315,17 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     }
   ];
 
+  // Live policy proxy lets /policy <mode> swap the engine mid-session without
+  // recreating the runner. tx.applyPolicy stays bound to construction-time
+  // value (set on tuiTransactions above) — see spec open question 3.
+  const livePolicy = createLivePolicyEngine(policy);
+
   const runner = createRunner({
     model: opts.modelClient,
     hooks: [...opts.assembly.hooks, ...tuiHooks],
-    policy: createPolicyEngine({ mode: policy }),
+    policy: livePolicy.engine,
     // Confirms only fire when the policy returns 'ask'; we refused those
-    // setups above, so this branch is unreachable in Stage 1.4.
+    // setups above so this is unreachable until Stage 3 lands the modal.
     confirm: async () => false,
     instructions: opts.assembly.instructions,
     autoCompact: {
@@ -2345,9 +2350,50 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
           event: { type: 'error', stage: 'model', message }
         });
       }
+    },
+    onReset: async () => {
+      const fresh = await ensureFresh(session.cwd);
+      Object.assign(session, fresh);
+      session.model = {
+        provider: opts.modelConfig.provider,
+        model: opts.modelConfig.model,
+        baseUrl: opts.modelConfig.baseUrl
+      };
+    },
+    onPolicyChange: async (mode) => {
+      if (TUI_REFUSED_POLICIES.has(mode)) {
+        // Same refusal as session entry: no <ApprovalModal> until Stage 3.
+        // Surfacing this as a thrown error lets <App> push the explanation
+        // into the transcript instead of silently swapping into a broken
+        // state.
+        throw new Error(
+          `policy mode "${mode}" needs the approval modal (Stage 3); ` +
+            `stay on auto / read-only with --tui or relaunch without --tui.`
+        );
+      }
+      livePolicy.setMode(mode);
     }
   });
 
   await tui.waitUntilExit();
   await saveSession(cwd, session);
+}
+
+function createLivePolicyEngine(initialMode: PolicyMode) {
+  let inner = createPolicyEngine({ mode: initialMode });
+  // Proxy so `runner.policy.mode` and `runner.policy.decide(...)` pick up the
+  // latest engine after setMode. Mode is exposed as a getter to keep the
+  // structural type compatible with createPolicyEngine's plain-property shape.
+  const engine = {
+    get mode() {
+      return inner.mode;
+    },
+    decide: (subject: ApprovalSubject) => inner.decide(subject)
+  };
+  return {
+    engine: engine as ReturnType<typeof createPolicyEngine>,
+    setMode(mode: PolicyMode) {
+      inner = createPolicyEngine({ mode });
+    }
+  };
 }

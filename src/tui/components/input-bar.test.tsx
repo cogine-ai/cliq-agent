@@ -6,21 +6,29 @@ import { render } from 'ink-testing-library';
 import { InputBar } from './input-bar.js';
 
 test('renders an active prompt glyph by default', () => {
-  const { lastFrame } = render(<InputBar onSubmit={() => {}} />);
+  const { lastFrame } = render(<InputBar value="" onChange={() => {}} onSubmit={() => {}} />);
   assert.match(lastFrame() ?? '', />/);
 });
 
 test('renders a dimmed waiting glyph when disabled', () => {
-  const { lastFrame } = render(<InputBar onSubmit={() => {}} disabled />);
+  const { lastFrame } = render(
+    <InputBar value="" onChange={() => {}} onSubmit={() => {}} disabled />
+  );
   const frame = lastFrame() ?? '';
   assert.match(frame, /…/);
   assert.doesNotMatch(frame, /^>/m);
 });
 
-test('typing into the field accumulates and submit fires onSubmit with trimmed text', async () => {
+test('typing into the field invokes onChange and submit fires onSubmit with trimmed text', async () => {
+  let value = '';
+  const onChange = (next: string) => {
+    value = next;
+  };
   const submitted: string[] = [];
-  const { stdin, lastFrame } = render(
+  const { stdin, rerender } = render(
     <InputBar
+      value={value}
+      onChange={onChange}
       onSubmit={(text) => {
         submitted.push(text);
       }}
@@ -28,11 +36,19 @@ test('typing into the field accumulates and submit fires onSubmit with trimmed t
   );
 
   stdin.write('  hello world  ');
-  // Allow Ink's input pipeline to flush.
   await new Promise((r) => setTimeout(r, 10));
-  assert.match(lastFrame() ?? '', /hello world/);
+  // Re-render with the latest value so ink-text-input picks up the controlled state.
+  rerender(
+    <InputBar
+      value={value}
+      onChange={onChange}
+      onSubmit={(text) => {
+        submitted.push(text);
+      }}
+    />
+  );
 
-  stdin.write('\r'); // Enter
+  stdin.write('\r');
   await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(submitted, ['hello world']);
 });
@@ -41,6 +57,8 @@ test('empty submit is a no-op', async () => {
   const submitted: string[] = [];
   const { stdin } = render(
     <InputBar
+      value=""
+      onChange={() => {}}
       onSubmit={(text) => {
         submitted.push(text);
       }}
@@ -49,4 +67,36 @@ test('empty submit is a no-op', async () => {
   stdin.write('   \r');
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(submitted.length, 0);
+});
+
+test('Tab key applies the completion when one is provided', async () => {
+  let value = '/p';
+  const changes: string[] = [];
+  const onChange = (next: string) => {
+    value = next;
+    changes.push(next);
+  };
+  const { stdin } = render(
+    <InputBar value={value} onChange={onChange} onSubmit={() => {}} completion="/policy " />
+  );
+  stdin.write('\t');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(changes[changes.length - 1], '/policy ');
+});
+
+test('Tab is a no-op when completion equals current value', async () => {
+  const changes: string[] = [];
+  const { stdin } = render(
+    <InputBar
+      value="/policy"
+      onChange={(next) => {
+        changes.push(next);
+      }}
+      onSubmit={() => {}}
+      completion="/policy"
+    />
+  );
+  stdin.write('\t');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(changes.length, 0);
 });

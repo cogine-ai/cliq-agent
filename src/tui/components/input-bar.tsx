@@ -1,20 +1,32 @@
-import { Box, Text } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
-import { useState } from 'react';
 
 export function InputBar({
+  value,
+  onChange,
   onSubmit,
   disabled = false,
+  completion = null
 }: {
+  value: string;
+  onChange: (next: string) => void;
   onSubmit: (text: string) => void;
   disabled?: boolean;
+  completion?: string | null;
 }) {
-  const [value, setValue] = useState('');
+  useInput(
+    (_input, key) => {
+      if (disabled) return;
+      if (key.tab && completion && completion !== value) {
+        onChange(completion);
+      }
+    },
+    { isActive: !disabled }
+  );
 
   function handleSubmit(text: string) {
     const trimmed = text.trim();
     if (!trimmed) return;
-    setValue('');
     onSubmit(trimmed);
   }
 
@@ -24,7 +36,7 @@ export function InputBar({
       {disabled ? (
         <Text dimColor>{value}</Text>
       ) : (
-        <TextInput value={value} onChange={setValue} onSubmit={handleSubmit} />
+        <TextInput value={value} onChange={onChange} onSubmit={handleSubmit} />
       )}
     </Box>
   );

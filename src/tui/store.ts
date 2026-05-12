@@ -61,6 +61,7 @@ export type UiAction =
   | { type: 'tool-hook-start'; action: ModelAction }
   | { type: 'tool-hook-end'; result: ToolResult }
   | { type: 'user-input'; text: string }
+  | { type: 'system-message'; text: string }
   | { type: 'approval-resolve'; decision: UiApprovalDecision }
   | { type: 'session-reset' }
   | { type: 'policy-change'; mode: PolicyMode };
@@ -108,6 +109,8 @@ export function reduce(state: UiState, action: UiAction): UiState {
         transcript: [...state.transcript, { kind: 'user', id, text: action.text }],
       };
     }
+    case 'system-message':
+      return pushSystem(state, action.text);
     case 'approval-resolve':
       // The bridge that owns the Promise resolves it before dispatching this
       // action; the reducer only clears UI state. Stage 3.3 wires the bridge.
