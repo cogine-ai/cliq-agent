@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { RuntimeEvent } from '../runtime/events.js';
+import type { RuntimeEvent } from '../protocol/runtime/events.js';
 import { emptyHeadlessArtifacts } from './contract.js';
 import { createHeadlessEventFactory, mergeArtifacts, runtimeEventToHeadless } from './events.js';
 

@@ -1,0 +1,18 @@
+export type RuntimeErrorCode =
+  | 'invalid-input'
+  | 'config-error'
+  | 'model-auth-error'
+  | 'model-error'
+  | 'context-overflow'
+  | 'protocol-error'
+  | 'policy-denied'
+  | 'tool-error'
+  | 'compact-error'
+  | 'session-store-error'
+  | 'artifact-not-found'
+  | 'cancelled'
+  | 'internal-error'
+  | 'tx-validator-blocking'
+  | 'tx-apply-conflict'
+  | 'tx-apply-partial'
+  | 'tx-overlay-error';

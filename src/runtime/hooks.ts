@@ -1,4 +1,4 @@
-import type { ModelAction } from '../protocol/actions.js';
+import type { ModelAction } from '../protocol/model/actions.js';
 import type { Session } from '../session/types.js';
 import type { ToolResult } from '../tools/types.js';
 

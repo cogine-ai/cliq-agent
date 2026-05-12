@@ -1,5 +1,5 @@
 import type { ProviderName } from '../model/types.js';
-import type { ModelAction } from '../protocol/actions.js';
+import type { ModelAction } from '../protocol/model/actions.js';
 import type { AutoCompactContextWindowSource } from './auto-compact-config.js';
 
 export type SessionModelRef = {

@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 
 import { LIST_MAX_ENTRIES } from '../config.js';
-import type { LsAction } from '../protocol/actions.js';
+import type { LsAction } from '../protocol/model/actions.js';
 import type { ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspacePath } from './path.js';
 

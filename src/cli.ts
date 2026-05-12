@@ -15,7 +15,7 @@ import type { ProviderName } from './model/types.js';
 import { createPolicyEngine } from './policy/engine.js';
 import type { PolicyMode } from './policy/types.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
-import type { RuntimeEvent } from './runtime/events.js';
+import type { RuntimeEvent } from './protocol/runtime/events.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
 import type { TxRunnerOptions } from './runtime/tx-runner.js';

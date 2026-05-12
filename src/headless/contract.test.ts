@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
 import { emptyHeadlessArtifacts } from './contract.js';
 import type {
-  HeadlessErrorCode,
   TxStagingStartPayload,
   TxAppliedPayload,
   TxAbortedPayload
@@ -45,9 +45,9 @@ test('emptyHeadlessArtifacts initializes transactions: []', () => {
   assert.deepEqual(a.transactions, []);
 });
 
-test('HeadlessErrorCode union includes the tx error codes', () => {
+test('RuntimeErrorCode union includes the tx error codes', () => {
   // Type-level assertion via assignment.
-  const codes: HeadlessErrorCode[] = [
+  const codes: RuntimeErrorCode[] = [
     'tx-validator-blocking',
     'tx-apply-conflict',
     'tx-apply-partial',

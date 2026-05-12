@@ -4,6 +4,8 @@
 **Status:** Draft
 **Target Release:** `v0.8.0` (edit-tx) / `v0.9.0` (worktree-tx, deferred)
 
+> **Note (2026-05-12):** Type-name references below were updated to reflect the protocol-seam refactor of 2026-05-12. The historical `HeadlessErrorCode` type was renamed to `RuntimeErrorCode` and now lives in `src/protocol/runtime/errors.ts`. See [`docs/migrations/2026-05-12-protocol-seam.md`](../../migrations/2026-05-12-protocol-seam.md) for the full mapping.
+
 ## 1. Summary
 
 Cliq today applies tool mutations directly to the working tree. Phase 3 added Git-backed ghost snapshots so users can recover from bad turns after the fact. This release adds the inverse: a pre-mutation gate that lets the agent stage **declarative file edits**, generate a structured diff, run validators, and require approval before those edits land in the real workspace.
@@ -30,14 +32,14 @@ This release sits between Phase 4 (Headless Runtime Interfaces, shipped in `v0.7
 It builds on shipped foundations:
 
 - Phase 3 (`v0.6.0`): `$CLIQ_HOME` global storage, workspace identity, ghost snapshot mechanism (used as apply-pre safety net), session record append model
-- Phase 4 (`v0.7.0`): the `src/headless/` contract, `RuntimeEventEnvelope` event shape, `HeadlessRunOutput.artifacts`, `HeadlessErrorCode` taxonomy, `cliq run --jsonl` adapter
+- Phase 4 (`v0.7.0`): the `src/headless/` contract, `RuntimeEventEnvelope` event shape, `HeadlessRunOutput.artifacts`, `RuntimeErrorCode` taxonomy, `cliq run --jsonl` adapter
 - Auto-compact (shipped alongside Phase 4): `compact-start/end/skip/error` events, `AutoCompactConfig`, `compaction` artifact id surface
 
 This spec **extends** those contracts rather than parallel-defining new ones. Specifically:
 
 - New runtime events (`tx-staging-start`, `tx-finalized`, `tx-validated`, `tx-applied`, `tx-aborted`) plug into the existing `HeadlessRuntimeEventType` union and reuse `RuntimeEventEnvelope`'s envelope fields (`schemaVersion`, `eventId`, `runId`, `sessionId`, `turn`, `timestamp`).
 - A new `transactions: string[]` field is added to `HeadlessArtifacts` so headless callers learn which tx ids a run produced.
-- New `HeadlessErrorCode` values (`tx-validator-blocking`, `tx-apply-conflict`, `tx-apply-partial`, `tx-overlay-error`) extend the existing taxonomy.
+- New `RuntimeErrorCode` values (`tx-validator-blocking`, `tx-apply-conflict`, `tx-apply-partial`, `tx-overlay-error`) extend the existing taxonomy.
 - New session record kinds (`'tx-applied'`, `'tx-aborted'`) extend the existing `SessionRecord` enum and slot into auto-compact's range-selection rules (Section 15).
 
 It does not implement, defer to later phases:
@@ -892,7 +894,7 @@ export type HeadlessArtifacts = {
 
 ### 13.3 New error codes
 
-Added to `HeadlessErrorCode`:
+Added to `RuntimeErrorCode`:
 
 | Code | Stage | Triggered by |
 |---|---|---|
@@ -1396,7 +1398,7 @@ Required tests grouped by concern:
 - Missing `<txId>` and missing `Session.activeTxId` produces clear error message
 - `cliq run --jsonl` with tx mode on emits new event types interleaved at correct lifecycle points (start before model-start, finalized at turn end, validated before apply, applied after pre-apply checkpoint)
 - `HeadlessArtifacts.transactions[]` is populated for every applied/aborted tx in a run
-- New `HeadlessErrorCode` values appear in error events with correct stage and recoverable flag
+- New `RuntimeErrorCode` values appear in error events with correct stage and recoverable flag
 - Phase 4 `RuntimeEventEnvelope` shape (envelope fields, schemaVersion) is unchanged for existing event types (regression)
 
 **Coexistence with existing cliq behavior**
@@ -1422,7 +1424,7 @@ This release is purely additive at the user-visible level:
 
 - Existing users on `v0.7.0` who upgrade to the tx release see no behavior change. `transactions` config is absent; `mode` defaults to `off`; no tx code paths execute.
 - No `SESSION_VERSION` bump is required *under the assumption that old binaries do not need to read sessions written by the new binary*. Existing readers do **not** treat unknown record kinds as pass-through (Section 15.3 enumerates the consumer updates required); they are updated in this spec's PR. Section 15.4 documents the trade-off.
-- No `HEADLESS_SCHEMA_VERSION` bump is required: the new event types extend `HeadlessRuntimeEventType`, the new artifact field extends `HeadlessArtifacts`, and the new error codes extend `HeadlessErrorCode`. All existing v1 consumers remain compatible because they iterate event types and artifact keys without exhaustive enumeration.
+- No `HEADLESS_SCHEMA_VERSION` bump is required: the new event types extend `HeadlessRuntimeEventType`, the new artifact field extends `HeadlessArtifacts`, and the new error codes extend `RuntimeErrorCode`. All existing v1 consumers remain compatible because they iterate event types and artifact keys without exhaustive enumeration.
 - No changes to `.cliq/session.json` migration logic (Phase 3 already handled the workspace-local → global migration).
 - `$CLIQ_HOME/tx/` is created lazily on first tx open; does not exist for users who never enable tx.
 

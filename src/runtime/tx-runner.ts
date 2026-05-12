@@ -10,7 +10,7 @@ import {
 } from '../workspace/transactions/coordinator.js';
 import type { Transaction, ValidatorResultSummary } from '../workspace/transactions/types.js';
 import type { Session } from '../session/types.js';
-import type { RuntimeEvent } from './events.js';
+import type { RuntimeEvent } from '../protocol/runtime/events.js';
 
 export type TxRunnerOptions = {
   mode: 'edit';
