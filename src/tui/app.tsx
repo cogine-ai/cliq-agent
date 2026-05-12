@@ -88,8 +88,14 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
   const completion = completeSlash(input);
 
   async function rotatePolicy() {
-    const next = nextPolicyMode(state.policy);
-    if (next === state.policy) return;
+    // Read the current policy from the store rather than the rendered state
+    // snapshot — if the user mashes Shift+Tab faster than React commits the
+    // last policy-change, the closure-captured state.policy would be stale
+    // and successive presses would all compute the same `next` from the old
+    // value. Going through the store dispenses fresh state per keystroke.
+    const current = store.getState().policy;
+    const next = nextPolicyMode(current);
+    if (next === current) return;
     try {
       await onPolicyChange?.(next);
       store.dispatch({ type: 'policy-change', mode: next });

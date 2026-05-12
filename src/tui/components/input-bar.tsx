@@ -36,11 +36,16 @@ function MiniTextInput({
         onSubmit?.(value);
         return;
       }
-      if (key.backspace || key.delete) {
+      if (key.backspace) {
         if (value.length === 0) return;
         onChange(value.slice(0, -1));
         return;
       }
+      // Forward Delete is a no-op: the cursor sits implicitly at the end of
+      // the buffer, so there is nothing past it to delete. Bundling Delete
+      // with Backspace would surprise users who lean on `fn+backspace`
+      // (= Delete on mac) to delete forward.
+      if (key.delete) return;
       // No cursor / scrollback navigation yet. Ignore movement keys so they
       // don't accidentally insert their escape-sequence bytes.
       if (

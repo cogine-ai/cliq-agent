@@ -168,6 +168,10 @@ export function reduce(state: UiState, action: UiAction): UiState {
         activeTurn: null,
         pendingApproval: null,
         errors: [],
+        // The token bar reflects "this session" — once /reset cuts a fresh
+        // session, the previous count is stale. Hide the segment until the
+        // first turn of the new session writes a fresh estimate.
+        sessionTokens: null
       };
     case 'policy-change':
       return { ...state, policy: action.mode };
