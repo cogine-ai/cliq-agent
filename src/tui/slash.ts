@@ -84,7 +84,7 @@ export function matchSlash(query: string): SlashCommandSpec[] {
 export function completeSlash(query: string): string | null {
   if (!query.startsWith('/')) return null;
   const head = query.split(/\s+/)[0]!;
-  // Only complete the head; arg values are out of scope for Stage 2.2.
+  // Only complete the head; arg values are out of scope.
   if (query.length > head.length) return null;
   const matches = SLASH_COMMANDS.filter((c) => c.name.startsWith(head));
   if (matches.length !== 1) return null;

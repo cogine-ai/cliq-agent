@@ -2134,9 +2134,9 @@ export async function runCli(argv: string[]) {
     process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
   }
 
-  // Stage 4d: TUI is the default on TTY. Forks BEFORE creating the readline
-  // interface so Ink owns stdin/stdout exclusively. The readline path below
-  // is the explicit opt-out via --classic, CLIQ_TUI=0, or non-TTY contexts.
+  // TUI is the default on TTY. Forks BEFORE creating the readline interface
+  // so Ink owns stdin/stdout exclusively. The readline path below is the
+  // explicit opt-out via --classic, CLIQ_TUI=0, or non-TTY contexts.
   if (wantsTui) {
     await runChatTuiSession({
       cwd,
@@ -2249,9 +2249,9 @@ export async function runCli(argv: string[]) {
   await saveSession(cwd, session);
 }
 
-// Stage 4d precedence: explicit CLI flags win over env, which wins over the
-// default. --classic is treated as the conservative override (wins over --tui)
-// so a hand-edited shell function with both flags falls back to readline.
+// Precedence: explicit CLI flags win over env, which wins over the default.
+// --classic is the conservative override (wins over --tui) so a hand-edited
+// shell function with both flags falls back to readline.
 export function resolveTuiPreference(opts: {
   classic: boolean;
   tui: boolean;
@@ -2281,15 +2281,16 @@ type RunChatTuiSessionOpts = {
 async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   const { policy, wsCfg, session, cwd } = opts;
 
-  // Lazy-import the TUI surface so headless / RPC / one-shot paths never
-  // pay the Ink + React module load cost. Enforced by import-isolation test.
-  const [{ mountTui }, storeMod] = await Promise.all([
-    import('./tui/index.js'),
-    import('./tui/store.js')
-  ]);
-  const { createInitialState, createUiStore } = storeMod;
-  type PendingApproval = import('./tui/store.js').PendingApproval;
-  type UiApprovalDecision = import('./tui/store.js').UiApprovalDecision;
+  // Lazy-import the TUI runtime surface so headless / RPC / one-shot paths
+  // never pay the Ink + React module load cost. Enforced by the
+  // import-isolation test under src/tui/. Types come from the top-level
+  // type-only import (erased at compile time).
+  const [{ mountTui }, { createInitialState, createUiStore }, { createApprovalBridge }] =
+    await Promise.all([
+      import('./tui/index.js'),
+      import('./tui/store.js'),
+      import('./tui/approval-bridge.js')
+    ]);
 
   const store = createUiStore(
     createInitialState({
@@ -2299,20 +2300,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     })
   );
 
-  // Modal bridge: pushes a PendingApproval into the store and resolves the
-  // Promise when <ApprovalModal> calls pending.resolve(decision).
-  let pendingCounter = 0;
-  function requestModalApproval(subject: ApprovalSubject): Promise<UiApprovalDecision> {
-    return new Promise((resolve) => {
-      pendingCounter += 1;
-      const pending: PendingApproval = {
-        id: `pa_${pendingCounter}`,
-        subject,
-        resolve
-      };
-      store.dispatch({ type: 'approval-request', pending });
-    });
-  }
+  const approvalBridge = createApprovalBridge(store);
 
   // Live policy proxy:
   //   * /policy <mode> swaps the inner engine mid-session.
@@ -2322,7 +2310,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   //     the same turn; reset by livePolicy.resetTurn() at each onSubmit.
   // tx.applyPolicy stays bound to construction-time value (per spec open
   // question 3) — that is enforced inside tuiTransactions.confirmApply below.
-  const livePolicy = createTuiLivePolicyEngine(policy, requestModalApproval);
+  const livePolicy = createTuiLivePolicyEngine(policy, approvalBridge.requestApproval);
 
   const tuiTxMode = opts.txMode ?? wsCfg.transactions?.mode ?? 'off';
   let tuiTransactions: TxRunnerOptions | undefined;
@@ -2354,7 +2342,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
           blockingFailures: review.blockingFailures,
           artifactRef: review.artifactRef
         };
-        const decision = await requestModalApproval(subject);
+        const decision = await approvalBridge.requestApproval(subject);
         return decision === 'allow' || decision === 'allow-turn';
       }
     };
@@ -2402,7 +2390,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     onSubmit: async (text) => {
       const controller = new AbortController();
       currentTurn = controller;
-      // Spec A.6: allow-for-this-turn is scoped to one turn — reset before
+      // allow-for-this-turn is scoped to one turn (spec A.6) — reset before
       // every fresh prompt so the user has to re-grant on the next one.
       livePolicy.resetTurn();
       try {
@@ -2419,6 +2407,10 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     },
     onCancelTurn: () => {
       currentTurn?.abort();
+      // Promises don't observe AbortSignal, so a pending approval would hang
+      // policy.decide() forever after abort. Force-deny the modal alongside
+      // the abort so the runner can exit its action loop cleanly.
+      approvalBridge.cancelPending();
     },
     onReset: async () => {
       const fresh = await ensureFresh(session.cwd);

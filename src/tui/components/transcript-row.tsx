@@ -72,7 +72,7 @@ function ToolBody({ body, expanded }: { body: string; expanded: boolean }) {
       ))}
       {remaining > 0 ? (
         <Text dimColor italic>
-          {`… ${remaining} more line${remaining === 1 ? '' : 's'} (focus to expand — Stage 2.3)`}
+          {`… ${remaining} more line${remaining === 1 ? '' : 's'} (Ctrl+O to expand)`}
         </Text>
       ) : null}
     </Box>
