@@ -2123,7 +2123,8 @@ export async function runCli(argv: string[]) {
   const runner = createRunner({
     model: modelClient,
     hooks: [...assembly.hooks, ...createCliHooks()],
-    policy: createPolicyEngine({ mode: policy, confirm: createConfirmTool(rl) }),
+    policy: createPolicyEngine({ mode: policy }),
+    confirm: createConfirmTool(rl),
     instructions: assembly.instructions,
     autoCompact: {
       config: assembly.workspaceConfig.autoCompact,

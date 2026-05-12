@@ -289,7 +289,8 @@ export async function runHeadless(
     const runner = createRunner({
       model: modelClient,
       hooks: [...assembly.hooks, ...(options.hooks ?? [])],
-      policy: createPolicyEngine({ mode: policy, confirm: options.confirm }),
+      policy: createPolicyEngine({ mode: policy }),
+      confirm: options.confirm,
       instructions: assembly.instructions,
       signal: options.signal,
       autoCompact: {

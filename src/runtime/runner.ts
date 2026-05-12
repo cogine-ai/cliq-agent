@@ -4,6 +4,8 @@ import { classifyContextOverflow } from '../model/errors.js';
 import { findKnownModelDescriptor } from '../model/registry.js';
 import type { ChatMessage, ModelClient, ModelCompletion, ResolvedModelConfig } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
+import { buildToolApprovalSubject } from '../policy/subjects.js';
+import type { ApprovalDecision, PolicyConfirm } from '../policy/types.js';
 import { parseModelAction } from '../protocol/model/actions.js';
 import { resolveAutoCompactConfig, type AutoCompactConfig } from '../session/auto-compact-config.js';
 import { maybeAutoCompact, type AutoCompactState } from '../session/auto-compaction.js';
@@ -60,12 +62,14 @@ export function createRunner({
   onEvent = async () => undefined,
   autoCompact,
   signal,
-  transactions
+  transactions,
+  confirm
 }: {
   model: ModelClient;
   registry?: ReturnType<typeof createToolRegistry>;
   hooks?: RuntimeHook[];
   policy?: ReturnType<typeof createPolicyEngine>;
+  confirm?: PolicyConfirm;
   instructions?: (session: Session) => Promise<InstructionMessage[]>;
   onEvent?: RuntimeEventSink;
   autoCompact?: AutoCompactRunnerOptions;
@@ -397,11 +401,38 @@ export function createRunner({
           await onEvent({ type: 'tool-start', tool: definition.name, preview: rawContent.slice(0, 120) });
           await throwIfCancelled();
           let result: ToolResult | null = null;
-          let authorization: Awaited<ReturnType<typeof policy.authorize>> | null = null;
+          let decision: ApprovalDecision | null = null;
 
           await throwIfCancelled();
           try {
-            authorization = await policy.authorize(definition);
+            const subject = buildToolApprovalSubject({
+              definition,
+              action,
+              ...(transactions
+                ? {
+                    tx: {
+                      enabled: true,
+                      ...(activeTxFromTxRunner ? { txId: activeTxFromTxRunner.id } : {}),
+                      mode: transactions.mode
+                    }
+                  }
+                : {})
+            });
+            decision = await policy.decide(subject);
+            if (decision.behavior === 'ask') {
+              if (!confirm) {
+                decision = {
+                  behavior: 'deny',
+                  reason: 'confirmation required but no confirmer is available',
+                  decidedBy: 'policy'
+                };
+              } else {
+                const approved = await confirm(decision.prompt);
+                decision = approved
+                  ? { behavior: 'allow', decidedBy: 'user' }
+                  : { behavior: 'deny', reason: 'user declined confirmation', decidedBy: 'user' };
+              }
+            }
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             result = {
@@ -415,17 +446,17 @@ export function createRunner({
             };
           }
 
-          if (result === null && authorization !== null && !authorization.allowed) {
+          if (result === null && decision !== null && decision.behavior === 'deny') {
             result = {
               tool: definition.name,
               status: 'error',
-              content: `TOOL_RESULT ${definition.name} ERROR\npolicy=${policy.mode}\n${authorization.reason}`,
+              content: `TOOL_RESULT ${definition.name} ERROR\npolicy=${policy.mode}\n${decision.reason}`,
               meta: {
                 policy: policy.mode,
-                reason: authorization.reason
+                reason: decision.reason
               }
             };
-          } else if (result === null && authorization !== null) {
+          } else if (result === null && decision !== null) {
             await throwIfCancelled();
             await runHooks(hooks, 'beforeTool', session, action);
             await throwIfCancelled();

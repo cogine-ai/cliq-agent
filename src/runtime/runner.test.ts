@@ -565,6 +565,7 @@ test('runner converts tool exceptions into tool error records and still calls af
 test('runner records a denied bash action when mode is read-only', async () => {
   const session = await createTempSession();
   const outputs: string[] = [];
+  let confirmCalls = 0;
   const runner = createRunner({
     model: {
       async complete() {
@@ -572,6 +573,10 @@ test('runner records a denied bash action when mode is read-only', async () => {
       }
     },
     policy: createPolicyEngine({ mode: 'read-only' }),
+    confirm: async () => {
+      confirmCalls += 1;
+      return true;
+    },
     hooks: [
       {
         afterTool(_session, result) {
@@ -588,9 +593,10 @@ test('runner records a denied bash action when mode is read-only', async () => {
   assert.match(outputs[0] ?? '', /policy mode read-only blocks exec tools/);
   assert.equal(toolRecord?.status, 'error');
   assert.equal(toolRecord?.meta?.reason, 'policy mode read-only blocks exec tools');
+  assert.equal(confirmCalls, 0);
 });
 
-test('runner records policy authorization failures as tool errors', async () => {
+test('runner records policy decision failures as tool errors', async () => {
   const session = await createTempSession();
   const afterToolEvents: string[] = [];
   let calls = 0;
@@ -604,7 +610,7 @@ test('runner records policy authorization failures as tool errors', async () => 
     },
     policy: {
       mode: 'confirm-all',
-      async authorize() {
+      async decide() {
         throw new Error('confirmation backend unavailable');
       }
     },
@@ -629,7 +635,7 @@ test('runner records policy authorization failures as tool errors', async () => 
 
 test('runner executes edit only after confirmation in confirm-write mode', async () => {
   const session = await createTempSession();
-  let prompted = 0;
+  const prompts: string[] = [];
   const editExecutions: string[] = [];
   const editDefinition: ToolDefinition<EditModelAction> = {
     name: 'edit',
@@ -659,20 +665,51 @@ test('runner executes edit only after confirmation in confirm-write mode', async
       }
     },
     policy: createPolicyEngine({
-      mode: 'confirm-write',
-      confirm: async () => {
-        prompted += 1;
-        return true;
-      }
+      mode: 'confirm-write'
     }),
+    confirm: async (prompt) => {
+      prompts.push(prompt);
+      return true;
+    },
     registry: createToolRegistry([editDefinition])
   });
 
   const finalMessage = await runner.runTurn(session, 'apply edit');
 
   assert.equal(finalMessage, 'done');
-  assert.equal(prompted, 1);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0] ?? '', /Allow edit\?/);
+  assert.match(prompts[0] ?? '', /file\.txt/);
+  assert.match(prompts[0] ?? '', /policy: confirm-write/);
   assert.deepEqual(editExecutions, ['file.txt']);
+});
+
+test('runner confirmation prompt for bash includes the actual command', async () => {
+  const session = await createTempSession();
+  const prompts: string[] = [];
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"npm test"}' : '{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    confirm: async (prompt) => {
+      prompts.push(prompt);
+      return true;
+    }
+  });
+
+  const finalMessage = await runner.runTurn(session, 'run tests');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0] ?? '', /Allow bash command\?/);
+  assert.match(prompts[0] ?? '', /npm test/);
+  assert.match(prompts[0] ?? '', /policy: confirm-bash/);
 });
 
 test('runner emits model lifecycle events without raw deltas', async () => {
