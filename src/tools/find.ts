@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { FIND_MAX_DEPTH, FIND_MAX_RESULTS } from '../config.js';
-import type { FindAction } from '../protocol/actions.js';
+import type { FindAction } from '../protocol/model/actions.js';
 import type { ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspaceEntry, resolveWorkspacePath } from './path.js';
 

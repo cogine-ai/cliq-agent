@@ -7,6 +7,7 @@ import { createModelClient } from '../model/index.js';
 import type { ModelClient, ResolvedModelConfig } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import type { PolicyConfirm, PolicyMode } from '../policy/types.js';
+import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
 import { createRuntimeAssembly } from '../runtime/assembly.js';
 import type { RuntimeHook } from '../runtime/hooks.js';
 import { createRunner } from '../runtime/runner.js';
@@ -19,7 +20,6 @@ import {
   HEADLESS_EXIT_CANCELLED,
   HEADLESS_EXIT_FAILURE,
   HEADLESS_EXIT_SUCCESS,
-  type HeadlessErrorCode,
   type HeadlessErrorStage,
   type HeadlessRunError,
   type HeadlessRunOptions,
@@ -46,7 +46,7 @@ type RunScope = {
 const POLICY_MODES = new Set<PolicyMode>(['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all']);
 
 function errorFrom(
-  code: HeadlessErrorCode,
+  code: RuntimeErrorCode,
   stage: HeadlessErrorStage,
   message: string,
   recoverable = false

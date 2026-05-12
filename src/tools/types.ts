@@ -1,4 +1,4 @@
-import type { EditAction, ModelAction } from '../protocol/actions.js';
+import type { EditAction, ModelAction } from '../protocol/model/actions.js';
 import type { ToolAccess } from '../policy/types.js';
 import type { WorkspaceWriter } from '../runtime/workspace-writer.js';
 import type { Session } from '../session/types.js';

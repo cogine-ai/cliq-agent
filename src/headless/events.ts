@@ -1,12 +1,12 @@
 import { makeId, nowIso } from '../session/store.js';
-import type { RuntimeEvent } from '../runtime/events.js';
+import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
+import type { RuntimeEvent } from '../protocol/runtime/events.js';
 import {
   emptyHeadlessArtifacts,
   HEADLESS_SCHEMA_VERSION,
   type CheckpointCreatedPayload,
   type HeadlessEventPayloadByType,
   type HeadlessArtifacts,
-  type HeadlessErrorCode,
   type HeadlessRuntimeEventType,
   type RuntimeEventEnvelopeFor
 } from './contract.js';
@@ -35,7 +35,7 @@ const codeByRuntimeErrorStage = {
   policy: 'policy-denied',
   tool: 'tool-error',
   cancel: 'cancelled'
-} as const satisfies Record<Extract<RuntimeEvent, { type: 'error' }>['stage'], HeadlessErrorCode>;
+} as const satisfies Record<Extract<RuntimeEvent, { type: 'error' }>['stage'], RuntimeErrorCode>;
 
 function artifactsWith(values: Partial<HeadlessArtifacts>): HeadlessArtifacts {
   return {

@@ -1,7 +1,7 @@
-import type { ProviderName } from '../model/types.js';
-import type { AutoCompactSkipReason } from '../session/auto-compaction.js';
-import type { SessionCheckpoint } from '../session/types.js';
-import type { HeadlessErrorCode } from '../headless/contract.js';
+import type { ProviderName } from '../../model/types.js';
+import type { AutoCompactSkipReason } from '../../session/auto-compaction.js';
+import type { SessionCheckpoint } from '../../session/types.js';
+import type { RuntimeErrorCode } from './errors.js';
 
 export type RuntimeEvent =
   | { type: 'model-start'; provider: ProviderName; model: string; streaming: boolean }
@@ -26,11 +26,11 @@ export type RuntimeEvent =
       type: 'error';
       stage: 'model' | 'protocol' | 'policy' | 'tool' | 'cancel';
       message: string;
-      code?: HeadlessErrorCode;
+      code?: RuntimeErrorCode;
       recoverable?: boolean;
     }
   | { type: 'tx-staging-start'; txId: string; trigger: 'auto-turn' | 'explicit-open'; name?: string }
-  | { type: 'tx-finalized'; txId: string; diffSummary: import('../workspace/transactions/types.js').DiffSummary }
+  | { type: 'tx-finalized'; txId: string; diffSummary: import('../../workspace/transactions/types.js').DiffSummary }
   | {
       type: 'tx-validated';
       txId: string;
@@ -40,16 +40,16 @@ export type RuntimeEvent =
   | {
       type: 'tx-applied';
       txId: string;
-      diffSummary: import('../workspace/transactions/types.js').DiffSummary;
+      diffSummary: import('../../workspace/transactions/types.js').DiffSummary;
       validators: { blocking: { pass: number; fail: number }; advisory: { pass: number; fail: number; names: string[] } };
-      overrides: import('../workspace/transactions/types.js').OverrideEntry[];
+      overrides: import('../../workspace/transactions/types.js').OverrideEntry[];
       artifactRef: string;
       ghostSnapshotId?: string;
     }
   | {
       type: 'tx-aborted';
       txId: string;
-      reason: import('../workspace/transactions/types.js').AbortReason;
+      reason: import('../../workspace/transactions/types.js').AbortReason;
       failedValidators?: string[];
       artifactRef: string;
       appliedPartial?: { partialFiles: string[]; ghostSnapshotId: string; restoreConfirmed: boolean };

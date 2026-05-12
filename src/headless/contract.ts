@@ -1,6 +1,7 @@
 import type { PartialModelConfig } from '../model/config.js';
 import type { ProviderName } from '../model/types.js';
 import type { PolicyMode } from '../policy/types.js';
+import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
 import type { AutoCompactConfig } from '../session/auto-compact-config.js';
 import type { SessionModelRef } from '../session/types.js';
 
@@ -32,25 +33,6 @@ export type HeadlessRunOptions = {
 
 export type HeadlessRunStatus = 'completed' | 'failed' | 'cancelled';
 
-export type HeadlessErrorCode =
-  | 'invalid-input'
-  | 'config-error'
-  | 'model-auth-error'
-  | 'model-error'
-  | 'context-overflow'
-  | 'protocol-error'
-  | 'policy-denied'
-  | 'tool-error'
-  | 'compact-error'
-  | 'session-store-error'
-  | 'artifact-not-found'
-  | 'cancelled'
-  | 'internal-error'
-  | 'tx-validator-blocking'
-  | 'tx-apply-conflict'
-  | 'tx-apply-partial'
-  | 'tx-overlay-error';
-
 export type HeadlessErrorStage =
   | 'input'
   | 'assembly'
@@ -64,7 +46,7 @@ export type HeadlessErrorStage =
   | 'cancel';
 
 export type HeadlessRunError = {
-  code: HeadlessErrorCode;
+  code: RuntimeErrorCode;
   stage: HeadlessErrorStage;
   message: string;
   recoverable: boolean;

@@ -11,7 +11,7 @@ import { createSession, mutateSession } from '../session/store.js';
 import { openRecordId } from '../workspace/transactions/types.js';
 import { overlayDir, resolveTxRoot, readTxState } from '../workspace/transactions/store.js';
 import { createOverlayWriter } from '../workspace/transactions/overlay.js';
-import type { RuntimeEvent } from './events.js';
+import type { RuntimeEvent } from '../protocol/runtime/events.js';
 
 const execFileAsync = promisify(execFile);
 

@@ -27,7 +27,7 @@ import { createOverlayWriter } from './overlay.js';
 import { createSession, mutateSession } from '../../session/store.js';
 import type { Session } from '../../session/types.js';
 import { createRunner } from '../../runtime/runner.js';
-import type { RuntimeEvent } from '../../runtime/events.js';
+import type { RuntimeEvent } from '../../protocol/runtime/events.js';
 import type { TxRunnerOptions } from '../../runtime/tx-runner.js';
 import type { ChatMessage, ModelClient, ModelCompleteOptions, ModelCompletion } from '../../model/types.js';
 

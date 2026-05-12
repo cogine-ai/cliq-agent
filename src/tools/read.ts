@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 
 import { READ_MAX_BYTES } from '../config.js';
-import type { ReadAction } from '../protocol/actions.js';
+import type { ReadAction } from '../protocol/model/actions.js';
 import type { ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspacePath } from './path.js';
 

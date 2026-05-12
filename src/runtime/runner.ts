@@ -4,7 +4,7 @@ import { classifyContextOverflow } from '../model/errors.js';
 import { findKnownModelDescriptor } from '../model/registry.js';
 import type { ChatMessage, ModelClient, ModelCompletion, ResolvedModelConfig } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
-import { parseModelAction } from '../protocol/actions.js';
+import { parseModelAction } from '../protocol/model/actions.js';
 import { resolveAutoCompactConfig, type AutoCompactConfig } from '../session/auto-compact-config.js';
 import { maybeAutoCompact, type AutoCompactState } from '../session/auto-compaction.js';
 import { createCheckpoint } from '../session/checkpoints.js';
@@ -17,7 +17,7 @@ import { appendBashEffect } from '../workspace/transactions/bash-effects.js';
 import { createOverlayWriter } from '../workspace/transactions/overlay.js';
 import { overlayDir, resolveTxRoot } from '../workspace/transactions/store.js';
 import { buildContextMessages } from './context.js';
-import type { RuntimeEventSink } from './events.js';
+import type { RuntimeEventSink } from '../protocol/runtime/events.js';
 import { runHooks, type RuntimeHook } from './hooks.js';
 import {
   assertHeadlessCompatible,

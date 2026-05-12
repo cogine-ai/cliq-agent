@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { GREP_MAX_FILE_BYTES, GREP_MAX_MATCHES } from '../config.js';
-import type { GrepAction } from '../protocol/actions.js';
+import type { GrepAction } from '../protocol/model/actions.js';
 import type { ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspaceEntry, resolveWorkspacePath } from './path.js';
 

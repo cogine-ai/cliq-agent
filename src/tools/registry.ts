@@ -1,4 +1,4 @@
-import type { ModelAction } from '../protocol/actions.js';
+import type { ModelAction } from '../protocol/model/actions.js';
 import { bashTool } from './bash.js';
 import { editTool } from './edit.js';
 import { findTool } from './find.js';
