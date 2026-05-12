@@ -67,6 +67,29 @@ process.stdin.on('end', () => {
   });
 });
 
+test('runHookCommand denies non-object JSON stdout', async () => {
+  await withTempDir(async (dir) => {
+    for (const stdout of ['null', '["array"]', '"text"']) {
+      const result = await runHookCommand(
+        {
+          type: 'command',
+          command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+            `process.stdout.write(${JSON.stringify(stdout)});`
+          )}`
+        },
+        baseInput(),
+        { cwd: dir }
+      );
+
+      assert.equal(result.status, 'denied');
+      assert.deepEqual(result.decision, { behavior: 'deny', reason: 'invalid hook output: non-object JSON' });
+      assert.equal(result.stdout, stdout);
+      assert.equal(result.exitCode, 0);
+      assert.equal(result.timedOut, false);
+    }
+  });
+});
+
 test('runHookCommand treats empty stdout on exit zero as continue', async () => {
   await withTempDir(async (dir) => {
     const result = await runHookCommand(

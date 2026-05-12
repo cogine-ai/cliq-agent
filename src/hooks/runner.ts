@@ -139,7 +139,19 @@ function resultFromExit(
     }
 
     try {
-      const output = JSON.parse(trimmed) as HookOutput;
+      const output = JSON.parse(trimmed) as unknown;
+      if (!isHookOutput(output)) {
+        return {
+          status: 'denied',
+          command,
+          decision: { behavior: 'deny', reason: 'invalid hook output: non-object JSON' },
+          output: null,
+          stdout,
+          stderr,
+          exitCode: 0,
+          timedOut: false
+        };
+      }
       if (output.decision === 'deny') {
         return {
           status: 'denied',
@@ -195,6 +207,10 @@ function resultFromExit(
     exitCode,
     timedOut: false
   };
+}
+
+function isHookOutput(output: unknown): output is HookOutput {
+  return typeof output === 'object' && output !== null && !Array.isArray(output);
 }
 
 function serializeHookInput(input: HookInput): string {
