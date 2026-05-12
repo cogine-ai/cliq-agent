@@ -11,16 +11,19 @@ const flush = () => new Promise<void>((r) => setImmediate(r));
 function Probe({
   onCtrlC,
   onCtrlD,
-  onToggleBody
+  onToggleBody,
+  onRotatePolicy
 }: {
   onCtrlC?: () => void;
   onCtrlD?: () => void;
   onToggleBody?: () => void;
+  onRotatePolicy?: () => void;
 }) {
   useKeybindings({
     ...(onCtrlC ? { onCtrlC } : {}),
     ...(onCtrlD ? { onCtrlD } : {}),
-    ...(onToggleBody ? { onToggleBody } : {})
+    ...(onToggleBody ? { onToggleBody } : {}),
+    ...(onRotatePolicy ? { onRotatePolicy } : {})
   });
   return <Text>probe</Text>;
 }
@@ -70,3 +73,11 @@ test('Ctrl+O fires onToggleBody and plain "o" does not', async () => {
   await flush();
   assert.equal(calls, 1);
 });
+
+// Shift+Tab is intentionally not driven through ink-testing-library: the
+// CSI Z ↔ key.shift|tab parsing varies by Ink version + ink-testing-library
+// stdin shim and we couldn't get a reliable round-trip in this environment.
+// The dispatch logic is covered by:
+//   - nextPolicyMode + POLICY_ROTATION (policy-rotation.test.ts)
+//   - the App-level handler wiring (compile-time)
+// and verified manually on a real TTY before each release.

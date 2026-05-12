@@ -15,6 +15,7 @@ import {
   parseArgs,
   printHelp,
   renderUnhandledError,
+  resolveTuiInitialPolicy,
   resolveTuiPreference,
   resolveTxIdForReview,
   ReportedCliError,
@@ -39,6 +40,7 @@ test('parseArgs accepts --policy=read-only', () => {
     cmd: 'chat',
     prompt: '',
     policy: 'read-only',
+    policyExplicit: true,
     skills: [],
     model: {}
   });
@@ -49,6 +51,7 @@ test('parseArgs accepts --policy confirm-all for one-shot prompt', () => {
     cmd: 'chat',
     prompt: 'fix tests',
     policy: 'confirm-all',
+    policyExplicit: true,
     skills: [],
     model: {}
   });
@@ -1547,6 +1550,38 @@ test('runCli checkpoint fork --restore-files creates a restore-safety checkpoint
       ['manual', 'restore-safety']
     );
   });
+});
+
+test('parseArgs marks policy as explicit when --policy is set', () => {
+  const explicit = parseArgs(['node', 'index.js', '--policy', 'auto']);
+  assert.equal(explicit.policy, 'auto');
+  assert.equal(explicit.policyExplicit, true);
+
+  const equals = parseArgs(['node', 'index.js', '--policy=read-only']);
+  assert.equal(equals.policy, 'read-only');
+  assert.equal(equals.policyExplicit, true);
+
+  const implicit = parseArgs(['node', 'index.js']);
+  assert.equal(implicit.policy, 'auto'); // global default
+  assert.notEqual(implicit.policyExplicit, true);
+});
+
+test('resolveTuiInitialPolicy overrides the global default with confirm-all unless explicit', () => {
+  // No --policy → confirm-all (TUI safer default).
+  assert.equal(
+    resolveTuiInitialPolicy({ policy: 'auto', policyExplicit: false }),
+    'confirm-all'
+  );
+  // Explicit --policy auto wins.
+  assert.equal(
+    resolveTuiInitialPolicy({ policy: 'auto', policyExplicit: true }),
+    'auto'
+  );
+  // Explicit --policy read-only also passes through.
+  assert.equal(
+    resolveTuiInitialPolicy({ policy: 'read-only', policyExplicit: true }),
+    'read-only'
+  );
 });
 
 test('resolveTuiPreference precedence: --classic > --tui > CLIQ_TUI=0 > TTY default', () => {

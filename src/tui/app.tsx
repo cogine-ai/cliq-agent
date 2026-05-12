@@ -9,6 +9,7 @@ import { StatusBar } from './components/status-bar.js';
 import { Transcript } from './components/transcript.js';
 import { useKeybindings } from './hooks/use-keybindings.js';
 import { useUiStore } from './hooks/use-ui-store.js';
+import { nextPolicyMode } from './policy-rotation.js';
 import { buildHelpText, completeSlash, parseSlash } from './slash.js';
 import type { UiApprovalDecision, UiStore } from './store.js';
 
@@ -86,6 +87,20 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
   const inputDisabled = state.activeTurn !== null;
   const completion = completeSlash(input);
 
+  async function rotatePolicy() {
+    const next = nextPolicyMode(state.policy);
+    if (next === state.policy) return;
+    try {
+      await onPolicyChange?.(next);
+      store.dispatch({ type: 'policy-change', mode: next });
+      pushSystem(`policy → ${next}`);
+    } catch (error) {
+      pushSystem(
+        `policy rotation failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   useKeybindings({
     onCtrlC: () => {
       if (state.activeTurn) {
@@ -107,6 +122,9 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
     },
     onToggleBody: () => {
       store.dispatch({ type: 'toggle-tool-body' });
+    },
+    onRotatePolicy: () => {
+      void rotatePolicy();
     }
   });
 

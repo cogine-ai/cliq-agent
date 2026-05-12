@@ -473,6 +473,15 @@ test('compact-end and compact-error still surface as system entries (state chang
   assert.match(systemTexts[1]!, /compaction error \(threshold\): oom/);
 });
 
+test('session-tokens-update sets sessionTokens; null until first dispatch', () => {
+  const initial = baseInit();
+  assert.equal(initial.sessionTokens, null);
+  const after = reduce(initial, { type: 'session-tokens-update', tokens: 1234 });
+  assert.equal(after.sessionTokens, 1234);
+  const refreshed = reduce(after, { type: 'session-tokens-update', tokens: 5678 });
+  assert.equal(refreshed.sessionTokens, 5678);
+});
+
 test('toggle-tool-body flips expanded on the latest tool entry that has a body', () => {
   let s = baseInit();
   s = reduce(s, { type: 'runtime-event', event: { type: 'tool-start', tool: 'bash', preview: '' } });

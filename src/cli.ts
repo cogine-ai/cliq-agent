@@ -25,6 +25,7 @@ import {
   restoreWorkspaceCheckpoint,
   type CreatedSessionCheckpoint
 } from './session/checkpoints.js';
+import { estimateRecordTokens } from './session/auto-compaction.js';
 import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
 import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
@@ -68,6 +69,10 @@ type TxApplyPolicy = (typeof TX_APPLY_POLICIES)[number];
 
 type ParsedArgsBase = {
   policy: PolicyMode;
+  // True when the user explicitly set --policy or CLIQ_POLICY_MODE; lets the
+  // TUI dispatch override the global default with a more cautious default
+  // (confirm-all) without overruling explicit choices.
+  policyExplicit?: boolean;
   skills: string[];
   model: PartialModelConfig;
   txMode?: TxMode;
@@ -769,12 +774,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let txApply: TxApplyPolicy | undefined;
   let tui = false;
   let classic = false;
+  let policyExplicit = false;
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
       throw new Error(`Invalid CLIQ_POLICY_MODE: ${envPolicy}; expected one of: ${POLICY_MODE_LIST}`);
     }
     policy = envPolicy;
+    policyExplicit = true;
   }
 
   const args: string[] = [];
@@ -852,6 +859,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
         throw new Error(`Unknown policy mode: ${value}`);
       }
       policy = value;
+      policyExplicit = true;
       continue;
     }
 
@@ -861,6 +869,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
         throw new Error(`Unknown policy mode: ${value}`);
       }
       policy = value;
+      policyExplicit = true;
       i += 1;
       continue;
     }
@@ -961,6 +970,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const cmd = args[0];
   const base: ParsedArgsBase = {
     policy,
+    ...(policyExplicit ? { policyExplicit } : {}),
     skills,
     model,
     ...(txMode !== undefined ? { txMode } : {}),
@@ -969,6 +979,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(classic ? { classic } : {})
   };
   const baseExtras = {
+    ...(policyExplicit ? { policyExplicit } : {}),
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
     ...(tui ? { tui } : {}),
@@ -1017,7 +1028,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     return { cmd: 'help', topic, policy, skills, model };
   }
   if (cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model };
-  return { cmd: 'chat', prompt: args.join(' '), policy, skills, model };
+  // Fallback: any unrecognized first token gets treated as part of a chat
+  // prompt. baseExtras carry --tui/--classic/--policy explicit flags so the
+  // dispatch layer sees the same surface here as in the explicit `chat` path.
+  return { cmd: 'chat', prompt: args.join(' '), policy, skills, model, ...baseExtras };
 }
 
 function printCheckpointHelp() {
@@ -2148,6 +2162,7 @@ export async function runCli(argv: string[]) {
       modelClient,
       modelConfig,
       policy,
+      policyExplicit: parsed.policyExplicit === true,
       wsCfg,
       txMode: parsed.txMode,
       txApply: parsed.txApply,
@@ -2274,6 +2289,7 @@ type RunChatTuiSessionOpts = {
   modelClient: ModelClient;
   modelConfig: ResolvedModelConfig;
   policy: PolicyMode;
+  policyExplicit: boolean;
   wsCfg: WorkspaceConfig;
   txMode?: TxMode;
   txApply?: TxApplyPolicy;
@@ -2281,8 +2297,25 @@ type RunChatTuiSessionOpts = {
   cliqHome: string;
 };
 
+// The TUI defaults to the most cautious mode that still lets the agent do
+// useful work — confirm-all asks before every tool call. Users who passed
+// --policy or set CLIQ_POLICY_MODE keep their choice; readline (--classic)
+// keeps the global DEFAULT_POLICY_MODE behaviour.
+const TUI_DEFAULT_POLICY: PolicyMode = 'confirm-all';
+
+export function resolveTuiInitialPolicy(opts: {
+  policy: PolicyMode;
+  policyExplicit: boolean;
+}): PolicyMode {
+  return opts.policyExplicit ? opts.policy : TUI_DEFAULT_POLICY;
+}
+
 async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
-  const { policy, wsCfg, session, cwd } = opts;
+  const { wsCfg, session, cwd } = opts;
+  const policy = resolveTuiInitialPolicy({
+    policy: opts.policy,
+    policyExplicit: opts.policyExplicit
+  });
 
   // Lazy-import the TUI runtime surface so headless / RPC / one-shot paths
   // never pay the Ink + React module load cost. Enforced by the
@@ -2354,6 +2387,9 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   // TUI-owned hook bridge: beforeTool / afterTool flow into the UiStore so
   // <Transcript> can render rich tool entries. Replaces createCliHooks in the
   // TUI path (createCliHooks writes to stdout, which would fight Ink).
+  // afterTurn refreshes the cumulative session token estimate the status bar
+  // renders; estimation is a heuristic (~4 chars per token), good enough for
+  // an at-a-glance budget signal until provider adapters surface real usage.
   const tuiHooks: RuntimeHook[] = [
     {
       beforeTool(_session, action) {
@@ -2361,6 +2397,13 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       },
       afterTool(_session, result) {
         store.dispatch({ type: 'tool-hook-end', result });
+      },
+      afterTurn(turnSession) {
+        const tokens = turnSession.records.reduce(
+          (sum, record) => sum + estimateRecordTokens(record).tokens,
+          0
+        );
+        store.dispatch({ type: 'session-tokens-update', tokens });
       }
     }
   ];
