@@ -54,6 +54,10 @@ CLIQ_TUI=0 cliq chat
 
 One-shot runs (`cliq "task"`) and headless modes (`cliq run --jsonl`) are unaffected.
 
+#### Known limitation: terminal resize during an active turn
+
+The TUI uses Ink's *inline* render mode (no alt-screen) so prior turns stay in the shell scrollback and you can search/copy them like any normal output. The cost is that **resizing the terminal while a turn is actively rendering** (the model is still streaming) can leave duplicated rows in scrollback — Ink can't reach back past the current frame to clean them up. Resizing between turns is fine. If this bites you often, drop into `--classic` for that session, or wait for the turn to finish before resizing.
+
 ## Current scope
 
 Cliq is intentionally small right now. It supports:

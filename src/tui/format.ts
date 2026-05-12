@@ -4,7 +4,12 @@ import type { ToolResult } from '../tools/types.js';
 // Mirrors src/cli.ts:formatToolResultLine for the TUI surface so the TUI can
 // evolve its rendering without churning the readline REPL.
 
-const BASH_HEADER_LINES = 2;
+// Tool result content has a 2-line header for bash (TOOL_RESULT line + the
+// `$ <cmd>` echo) and a similar 2-line header for the file tools
+// (TOOL_RESULT line + `path=<...>` line). Both shapes happen to share the
+// same offset so a single constant works for all current tools; revisit if a
+// tool ships a different envelope.
+const TOOL_HEADER_LINES = 2;
 
 export function toolNameFromAction(action: ModelAction): string {
   if ('bash' in action) return 'bash';
@@ -72,12 +77,12 @@ export function formatToolResultSummary(result: ToolResult): string {
   return detail;
 }
 
-export function extractBashBody(result: ToolResult): string | undefined {
-  if (result.tool !== 'bash') return undefined;
-  // Bash content has a 2-line header: "TOOL_RESULT bash <status>\n$ <cmd>\n<output...>"
+export function extractToolBody(result: ToolResult): string | undefined {
+  // 'message' isn't a tool but be defensive — model can in principle emit one
+  // and we still get a ToolResult for unknown shapes.
   const parts = result.content.split('\n');
-  if (parts.length <= BASH_HEADER_LINES) return undefined;
-  const body = parts.slice(BASH_HEADER_LINES).join('\n');
+  if (parts.length <= TOOL_HEADER_LINES) return undefined;
+  const body = parts.slice(TOOL_HEADER_LINES).join('\n');
   return body.trim().length > 0 ? body : undefined;
 }
 

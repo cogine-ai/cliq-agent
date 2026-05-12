@@ -84,6 +84,44 @@ test('Tab key applies the completion when one is provided', async () => {
   assert.equal(changes[changes.length - 1], '/policy ');
 });
 
+test('control chars (e.g. Ctrl+O = \\x0f) are stripped before reaching onChange', async () => {
+  const calls: string[] = [];
+  const { stdin } = render(
+    <InputBar
+      value=""
+      onChange={(next) => {
+        calls.push(next);
+      }}
+      onSubmit={() => {}}
+    />
+  );
+  // Ctrl+O fires in Ink even though its bytes are control. The input bar
+  // must drop them so the App-level keybinding handler is the only consumer.
+  stdin.write('\x0f');
+  await new Promise((r) => setTimeout(r, 10));
+  // onChange is gated on cleaned !== value, so a pure-control keystroke
+  // against an empty buffer must not fire onChange at all.
+  assert.equal(calls.length, 0);
+});
+
+test('LF / Ctrl+J (\\x0a) is also stripped — single-line input must not gain a newline', async () => {
+  const calls: string[] = [];
+  const { stdin } = render(
+    <InputBar
+      value=""
+      onChange={(next) => {
+        calls.push(next);
+      }}
+      onSubmit={() => {}}
+    />
+  );
+  // \x0a is LF; same byte as Ctrl+J. Some pastes also splice LFs into the
+  // stream. Either way, it must not survive into the controlled value.
+  stdin.write('\x0a');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(calls.length, 0);
+});
+
 test('Tab is a no-op when completion equals current value', async () => {
   const changes: string[] = [];
   const { stdin } = render(
