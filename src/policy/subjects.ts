@@ -4,6 +4,9 @@ import type { ApprovalSubject, ToolAccess } from './types.js';
 
 type ToolApprovalDisplay = Extract<ApprovalSubject, { kind: 'tool' }>['display'];
 
+const MAX_FALLBACK_DETAIL_LENGTH = 300;
+const TRUNCATED_DETAIL_MARKER = '... (truncated)';
+
 export function buildToolApprovalSubject(opts: {
   definition: { name: string; access: ToolAccess };
   action: ModelAction;
@@ -55,6 +58,13 @@ function buildToolDisplay(
 
   return {
     title: `Allow ${toolName}?`,
-    detail: JSON.stringify(action)
+    detail: formatFallbackDetail(action)
   };
+}
+
+function formatFallbackDetail(action: ModelAction): string {
+  const detail = JSON.stringify(action);
+  if (detail.length <= MAX_FALLBACK_DETAIL_LENGTH) return detail;
+  const readablePrefix = detail.slice(0, MAX_FALLBACK_DETAIL_LENGTH - TRUNCATED_DETAIL_MARKER.length);
+  return `${readablePrefix}${TRUNCATED_DETAIL_MARKER}`;
 }

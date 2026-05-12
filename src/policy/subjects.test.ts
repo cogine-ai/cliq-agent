@@ -42,6 +42,19 @@ test('buildToolApprovalSubject creates fallback display detail for other tools',
   assert.equal(subject.display.detail, '{"grep":{"path":"src","pattern":"createRunner"}}');
 });
 
+test('buildToolApprovalSubject truncates long fallback display detail', () => {
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'grep', access: 'read' },
+    action: { grep: { path: 'src', pattern: 'x'.repeat(1000) } }
+  });
+
+  assert.equal(subject.kind, 'tool');
+  assert.ok(subject.display.detail);
+  assert.ok(subject.display.detail.length <= 300);
+  assert.ok(subject.display.detail.startsWith('{"grep":{"path":"src","pattern":"'));
+  assert.ok(subject.display.detail.endsWith('... (truncated)'));
+});
+
 test('buildTxApplyApprovalSubject copies transaction review fields', () => {
   const snapshot = {
     tx: {

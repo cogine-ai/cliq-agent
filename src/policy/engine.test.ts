@@ -35,6 +35,16 @@ function txApplySubject(): ApprovalSubject {
   };
 }
 
+function permissionRequestSubject(): ApprovalSubject {
+  return {
+    kind: 'permission-request',
+    source: 'tool',
+    toolName: 'bash',
+    reason: 'needs network access',
+    requestedCapabilities: ['network']
+  };
+}
+
 test('auto allows registered tool subjects that passed core validation', async () => {
   const policy = createPolicyEngine({ mode: 'auto' });
 
@@ -42,6 +52,31 @@ test('auto allows registered tool subjects that passed core validation', async (
     behavior: 'allow',
     decidedBy: 'policy'
   });
+});
+
+test('permission requests follow policy modes', async () => {
+  const subject = permissionRequestSubject();
+
+  assert.deepEqual(await createPolicyEngine({ mode: 'auto' }).decide(subject), {
+    behavior: 'allow',
+    decidedBy: 'policy'
+  });
+  assert.deepEqual(await createPolicyEngine({ mode: 'read-only' }).decide(subject), {
+    behavior: 'deny',
+    reason: 'policy mode read-only blocks permission requests',
+    decidedBy: 'policy'
+  });
+
+  for (const mode of ['confirm-write', 'confirm-bash', 'confirm-all'] as const) {
+    const decision = await createPolicyEngine({ mode }).decide(subject);
+    assert.equal(decision.behavior, 'ask');
+    assert.equal(decision.decidedBy, 'policy');
+    if (decision.behavior === 'ask') {
+      assert.match(decision.prompt, /Allow permission request\?/);
+      assert.match(decision.prompt, /network/);
+      assert.match(decision.prompt, new RegExp(`policy: ${mode}`));
+    }
+  }
 });
 
 test('read-only denies write, exec, and tx-apply subjects', async () => {
