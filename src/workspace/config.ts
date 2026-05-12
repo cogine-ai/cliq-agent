@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { APP_DIR } from '../config.js';
+import type { HookCommandConfig, HookEventName, HookMatcherConfig, HooksConfig } from '../hooks/types.js';
 import type { PartialModelConfig } from '../model/config.js';
 import type { AutoCompactConfig } from '../session/auto-compact-config.js';
 
@@ -46,6 +47,7 @@ export type WorkspaceConfig = {
   model?: PartialModelConfig;
   autoCompact: AutoCompactConfig;
   transactions?: TxConfig;
+  hooks?: HooksConfig;
 };
 
 const EMPTY_WORKSPACE_CONFIG: WorkspaceConfig = {
@@ -54,6 +56,18 @@ const EMPTY_WORKSPACE_CONFIG: WorkspaceConfig = {
   defaultSkills: [],
   autoCompact: {}
 };
+
+const HOOK_EVENT_NAMES = new Set<HookEventName>([
+  'SessionStart',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PostToolUse',
+  'PermissionRequest',
+  'TxFinalized',
+  'TxValidated',
+  'TxApplyReview',
+  'Stop'
+]);
 
 function cloneEmptyWorkspaceConfig(): WorkspaceConfig {
   return {
@@ -165,6 +179,96 @@ function readAutoCompactConfig(record: Record<string, unknown>): AutoCompactConf
   }
 
   return config;
+}
+
+function readHooksConfig(input: unknown): HooksConfig | undefined {
+  if (input === undefined) {
+    return undefined;
+  }
+
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('hooks must be an object');
+  }
+
+  const raw = input as Record<string, unknown>;
+  const result: HooksConfig = {};
+  for (const [eventName, matcherEntries] of Object.entries(raw)) {
+    if (!HOOK_EVENT_NAMES.has(eventName as HookEventName)) {
+      throw new Error(`hooks.${eventName} must be a supported hook event`);
+    }
+    if (!Array.isArray(matcherEntries)) {
+      throw new Error(`hooks.${eventName} must be an array`);
+    }
+    const parsedEntries: HookMatcherConfig[] = matcherEntries.map((entry, index) =>
+      readHookMatcherConfig(entry, `hooks.${eventName}[${index}]`)
+    );
+    Object.assign(result, { [eventName]: parsedEntries });
+  }
+  return result;
+}
+
+function readHookMatcherConfig(input: unknown, configPath: string): HookMatcherConfig {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error(`${configPath} must be an object`);
+  }
+
+  const raw = input as Record<string, unknown>;
+  const matcher = raw.matcher;
+  if (matcher !== undefined && typeof matcher !== 'string') {
+    throw new Error(`${configPath}.matcher must be a string`);
+  }
+
+  if (!Array.isArray(raw.hooks)) {
+    throw new Error(`${configPath}.hooks must be an array`);
+  }
+
+  const hooks = raw.hooks.map((entry, index) => readHookCommandConfig(entry, `${configPath}.hooks[${index}]`));
+  return {
+    ...(typeof matcher === 'string' ? { matcher } : {}),
+    hooks
+  };
+}
+
+function readHookCommandConfig(input: unknown, configPath: string): HookCommandConfig {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error(`${configPath} must be an object`);
+  }
+
+  const raw = input as Record<string, unknown>;
+  if (raw.type !== 'command') {
+    throw new Error(`${configPath}.type must be command`);
+  }
+  if (typeof raw.command !== 'string' || raw.command.trim().length === 0) {
+    throw new Error(`${configPath}.command must be a non-empty string`);
+  }
+
+  const hook: HookCommandConfig = {
+    type: 'command',
+    command: raw.command
+  };
+
+  if (raw.timeoutMs !== undefined) {
+    if (typeof raw.timeoutMs !== 'number' || !Number.isInteger(raw.timeoutMs) || raw.timeoutMs <= 0) {
+      throw new Error(`${configPath}.timeoutMs must be a positive integer`);
+    }
+    hook.timeoutMs = raw.timeoutMs;
+  }
+
+  if (raw.statusMessage !== undefined) {
+    if (typeof raw.statusMessage !== 'string') {
+      throw new Error(`${configPath}.statusMessage must be a string`);
+    }
+    hook.statusMessage = raw.statusMessage;
+  }
+
+  if (raw.required !== undefined) {
+    if (typeof raw.required !== 'boolean') {
+      throw new Error(`${configPath}.required must be a boolean`);
+    }
+    hook.required = raw.required;
+  }
+
+  return hook;
 }
 
 export function parseTransactions(input: unknown): TxConfig | undefined {
@@ -338,13 +442,15 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   const model = readModelConfig(record);
   const autoCompact = readAutoCompactConfig(record);
   const transactions = parseTransactions(record.transactions);
+  const hooks = readHooksConfig(record.hooks);
   return {
     instructionFiles: readStringArray(record, 'instructionFiles'),
     extensions: readStringArray(record, 'extensions'),
     defaultSkills: readStringArray(record, 'defaultSkills'),
     autoCompact,
     ...(model ? { model } : {}),
-    ...(transactions !== undefined ? { transactions } : {})
+    ...(transactions !== undefined ? { transactions } : {}),
+    ...(hooks !== undefined ? { hooks } : {})
   };
 }
 
