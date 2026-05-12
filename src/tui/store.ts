@@ -62,6 +62,7 @@ export type UiAction =
   | { type: 'tool-hook-end'; result: ToolResult }
   | { type: 'user-input'; text: string }
   | { type: 'system-message'; text: string }
+  | { type: 'toggle-tool-body' }
   | { type: 'approval-resolve'; decision: UiApprovalDecision }
   | { type: 'session-reset' }
   | { type: 'policy-change'; mode: PolicyMode };
@@ -111,6 +112,18 @@ export function reduce(state: UiState, action: UiAction): UiState {
     }
     case 'system-message':
       return pushSystem(state, action.text);
+    case 'toggle-tool-body': {
+      // Spec A.10: Phase A focus is implicit-last-only — toggle the most
+      // recent tool entry that has a body (bash output today; future tools
+      // could grow bodies too).
+      for (let i = state.transcript.length - 1; i >= 0; i -= 1) {
+        const entry = state.transcript[i]!;
+        if (entry.kind === 'tool' && entry.body) {
+          return updateToolEntry(state, i, { expanded: !entry.expanded });
+        }
+      }
+      return state;
+    }
     case 'approval-resolve':
       // The bridge that owns the Promise resolves it before dispatching this
       // action; the reducer only clears UI state. Stage 3.3 wires the bridge.

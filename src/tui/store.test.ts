@@ -359,6 +359,41 @@ test('compact-* and checkpoint-created events produce system entries', () => {
   assert.match(systemTexts[2]!, /compaction completed: 9000 → 3000 tokens/);
 });
 
+test('toggle-tool-body flips expanded on the latest tool entry that has a body', () => {
+  let s = baseInit();
+  s = reduce(s, { type: 'runtime-event', event: { type: 'tool-start', tool: 'bash', preview: '' } });
+  s = reduce(s, { type: 'tool-hook-start', action: { bash: 'echo hi' } });
+  s = reduce(s, {
+    type: 'tool-hook-end',
+    result: {
+      tool: 'bash',
+      status: 'ok',
+      content: 'TOOL_RESULT bash success\n$ echo hi\nhi\n',
+      meta: {}
+    }
+  });
+  // After toggle, expanded becomes true.
+  s = reduce(s, { type: 'toggle-tool-body' });
+  let entry = s.transcript[0]!;
+  assert.equal(entry.kind, 'tool');
+  if (entry.kind !== 'tool') return;
+  assert.equal(entry.expanded, true);
+
+  // Toggle again: expanded becomes false.
+  s = reduce(s, { type: 'toggle-tool-body' });
+  entry = s.transcript[0]!;
+  if (entry.kind !== 'tool') return;
+  assert.equal(entry.expanded, false);
+});
+
+test('toggle-tool-body is a no-op when no tool entry has a body', () => {
+  let s = baseInit();
+  s = reduce(s, { type: 'user-input', text: 'hi' });
+  const before = s;
+  const after = reduce(s, { type: 'toggle-tool-body' });
+  assert.equal(after, before);
+});
+
 test('end-to-end: user input, thinking, final assistant message', () => {
   const store = createUiStore(baseInit());
   store.dispatch({ type: 'user-input', text: 'what time is it?' });

@@ -131,6 +131,42 @@ test('/reset awaits onReset and clears the transcript via session-reset', async 
   assert.match(lastFrame() ?? '', /session reset/);
 });
 
+test('Ctrl+C clears the input buffer when no turn is active', async () => {
+  const store = makeStore();
+  const { stdin, lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+  stdin.write('partial');
+  await flush();
+  assert.match(lastFrame() ?? '', /partial/);
+
+  stdin.write('\x03'); // Ctrl+C
+  await flush();
+  assert.doesNotMatch(lastFrame() ?? '', /partial/);
+});
+
+test('Ctrl+C during an active turn calls onCancelTurn and renders cancelling notice', async () => {
+  const store = makeStore();
+  store.dispatch({
+    type: 'runtime-event',
+    event: { type: 'model-start', provider: 'ollama', model: 'qwen3:4b', streaming: false }
+  });
+  let cancels = 0;
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onCancelTurn={() => {
+        cancels += 1;
+      }}
+    />
+  );
+  await flush();
+
+  stdin.write('\x03');
+  await flush();
+  assert.equal(cancels, 1);
+  assert.match(lastFrame() ?? '', /cancelling/);
+});
+
 test('regular text input still routes to onSubmit and appends a user entry', async () => {
   const store = makeStore();
   const submitted: string[] = [];

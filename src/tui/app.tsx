@@ -6,6 +6,7 @@ import { InputBar } from './components/input-bar.js';
 import { SlashPalette } from './components/slash-palette.js';
 import { StatusBar } from './components/status-bar.js';
 import { Transcript } from './components/transcript.js';
+import { useKeybindings } from './hooks/use-keybindings.js';
 import { useUiStore } from './hooks/use-ui-store.js';
 import { buildHelpText, completeSlash, parseSlash } from './slash.js';
 import type { UiStore } from './store.js';
@@ -15,9 +16,10 @@ export type AppProps = {
   onSubmit: (text: string) => void | Promise<void>;
   onReset?: () => void | Promise<void>;
   onPolicyChange?: (mode: PolicyMode) => void | Promise<void>;
+  onCancelTurn?: () => void;
 };
 
-export function App({ store, onSubmit, onReset, onPolicyChange }: AppProps) {
+export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: AppProps) {
   const state = useUiStore(store);
   const [input, setInput] = useState('');
   const { exit } = useApp();
@@ -82,6 +84,30 @@ export function App({ store, onSubmit, onReset, onPolicyChange }: AppProps) {
 
   const inputDisabled = state.activeTurn !== null;
   const completion = completeSlash(input);
+
+  useKeybindings({
+    onCtrlC: () => {
+      if (state.activeTurn) {
+        // Cancel the active turn — bridge fires AbortController.abort().
+        onCancelTurn?.();
+        pushSystem('cancelling…');
+      } else if (input.length > 0) {
+        // No active turn: vim-style clear. Diverges from readline default
+        // (which exits) — explicit /exit is the exit path here.
+        setInput('');
+      }
+      // Empty input + no active turn: ignore. /exit is the exit path.
+    },
+    onCtrlD: () => {
+      if (input.length === 0) {
+        exit();
+      }
+      // Non-empty input: ignore (matches Claude Code).
+    },
+    onToggleBody: () => {
+      store.dispatch({ type: 'toggle-tool-body' });
+    }
+  });
 
   return (
     <Box flexDirection="column">

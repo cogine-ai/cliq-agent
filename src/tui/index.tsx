@@ -9,6 +9,7 @@ export type MountTuiOpts = {
   onSubmit: (text: string) => void | Promise<void>;
   onReset?: () => void | Promise<void>;
   onPolicyChange?: (mode: PolicyMode) => void | Promise<void>;
+  onCancelTurn?: () => void;
 };
 
 export type MountedTui = {
@@ -23,7 +24,11 @@ export function mountTui(opts: MountTuiOpts): MountedTui {
       onSubmit={opts.onSubmit}
       {...(opts.onReset ? { onReset: opts.onReset } : {})}
       {...(opts.onPolicyChange ? { onPolicyChange: opts.onPolicyChange } : {})}
-    />
+      {...(opts.onCancelTurn ? { onCancelTurn: opts.onCancelTurn } : {})}
+    />,
+    // Defer Ctrl+C handling to <App> via useKeybindings so we can either
+    // cancel the active turn or clear the input buffer per spec A.9.
+    { exitOnCtrlC: false }
   );
   return {
     unmount: () => {

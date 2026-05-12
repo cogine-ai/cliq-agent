@@ -2338,18 +2338,30 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     }
   });
 
+  // Per-turn AbortController so Ctrl+C can cancel an in-flight turn without
+  // poisoning subsequent turns. The runner's per-turn opts.signal channel
+  // (added in this stage) takes precedence over construction-time signal.
+  let currentTurn: AbortController | null = null;
+
   const tui = mountTui({
     store,
     onSubmit: async (text) => {
+      const controller = new AbortController();
+      currentTurn = controller;
       try {
-        await runner.runTurn(session, text);
+        await runner.runTurn(session, text, { signal: controller.signal });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         store.dispatch({
           type: 'runtime-event',
           event: { type: 'error', stage: 'model', message }
         });
+      } finally {
+        if (currentTurn === controller) currentTurn = null;
       }
+    },
+    onCancelTurn: () => {
+      currentTurn?.abort();
     },
     onReset: async () => {
       const fresh = await ensureFresh(session.cwd);
