@@ -16,7 +16,7 @@ Cliq is a tiny local coding agent harness built around a minimal, provider-agnos
 
 ## Quick start
 
-Requirements: Node.js 20 or newer.
+Requirements: Node.js 22 or newer.
 
 ```bash
 npm install -g @cogineai/cliq
@@ -38,6 +38,17 @@ Run a one-shot task:
 ```bash
 cliq "inspect this repo and summarize the architecture"
 ```
+
+### Beta: Ink TUI (`--tui`)
+
+A new Ink-based TUI for interactive chat is in beta as of v0.9. Opt in with `--tui`:
+
+```bash
+cliq --tui
+cliq chat --tui
+```
+
+The TUI renders an inline three-zone layout — scrolling transcript, input bar, and status line — and stays compatible with shell scrollback (no alt-screen). It will eventually become the default; until then the readline REPL remains default and `--tui` is opt-in. The approval modal lands in Stage 3, so `--tui` currently refuses `--policy confirm-*` and `--tx-apply interactive`.
 
 ## Current scope
 

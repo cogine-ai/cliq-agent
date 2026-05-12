@@ -11,7 +11,7 @@ import { runHeadless } from './headless/run.js';
 import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
-import type { ProviderName } from './model/types.js';
+import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
 import { createPolicyEngine } from './policy/engine.js';
 import type { PolicyMode } from './policy/types.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
@@ -28,6 +28,7 @@ import {
 import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
 import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
+import type { Session } from './session/types.js';
 import type { ToolResult } from './tools/types.js';
 import {
   openTx as coordOpenTx,
@@ -48,7 +49,7 @@ import {
   readTxReviewSnapshot
 } from './workspace/transactions/inspect.js';
 import { readTxState as coordReadTxState, resolveTxRoot } from './workspace/transactions/store.js';
-import { loadWorkspaceConfig } from './workspace/config.js';
+import { loadWorkspaceConfig, type WorkspaceConfig } from './workspace/config.js';
 import { isValidTxId } from './workspace/transactions/types.js';
 import { promises as fsPromises } from 'node:fs';
 
@@ -71,6 +72,7 @@ type ParsedArgsBase = {
   model: PartialModelConfig;
   txMode?: TxMode;
   txApply?: TxApplyPolicy;
+  tui?: boolean;
 };
 
 export type ParsedArgs = ParsedArgsBase & (
@@ -764,6 +766,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const model: PartialModelConfig = {};
   let txMode: TxMode | undefined;
   let txApply: TxApplyPolicy | undefined;
+  let tui = false;
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
@@ -818,6 +821,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
       txApply = value;
       i += 1;
       continue;
+    }
+
+    if (token === '--tui') {
+      tui = true;
+      continue;
+    }
+
+    if (token.startsWith('--tui=')) {
+      throw new Error('--tui does not accept a value');
     }
 
     if (token.startsWith('--policy=')) {
@@ -941,11 +953,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
     skills,
     model,
     ...(txMode !== undefined ? { txMode } : {}),
-    ...(txApply !== undefined ? { txApply } : {})
+    ...(txApply !== undefined ? { txApply } : {}),
+    ...(tui ? { tui } : {})
   };
   const baseExtras = {
     ...(txMode !== undefined ? { txMode } : {}),
-    ...(txApply !== undefined ? { txApply } : {})
+    ...(txApply !== undefined ? { txApply } : {}),
+    ...(tui ? { tui } : {})
   };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
   if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
@@ -1142,6 +1156,7 @@ Options:
   --jsonl                  With cliq run only, write structured JSONL events to stdout
   --tx <off|edit>          Override workspace config transactions.mode for this run
   --tx-apply <policy>      Override transactions.applyPolicy (interactive | auto-on-pass | manual-only)
+  --tui                    Beta: enter the Ink TUI for interactive chat (Phase A; opt-in until Stage 4)
 
 Policy modes:
   auto                     Execute registered tools without confirmation
@@ -2050,6 +2065,14 @@ export async function runCli(argv: string[]) {
     return;
   }
 
+  if (parsed.tui && (!process.stdin.isTTY || !process.stdout.isTTY)) {
+    process.stderr.write(
+      `--tui requires a TTY on both stdin and stdout. ` +
+        `Drop --tui for the readline REPL or use \`cliq run --jsonl\` for non-TTY workflows.\n`
+    );
+    throw new ReportedCliError('--tui requires a TTY', { exitCode: 1 });
+  }
+
   const session = await ensureSession(cwd);
   const assembly = await createRuntimeAssembly({
     cwd,
@@ -2064,10 +2087,6 @@ export async function runCli(argv: string[]) {
     model: modelConfig.model,
     baseUrl: modelConfig.baseUrl
   };
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
-  const eventSink = createCliEventSink();
-  let turnSawRuntimeError = false;
 
   // §A.6: build CoordinatorContext, run crash recovery before constructing the
   // interactive runner so own-session orphans converge and cross-session
@@ -2092,6 +2111,29 @@ export async function runCli(argv: string[]) {
   for (const skippedTxId of chatRecoveryResult.crossSessionSkipped) {
     process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
   }
+
+  // Stage 1.4: --tui forks BEFORE creating the readline interface so Ink
+  // owns stdin/stdout exclusively. The readline path below is unchanged.
+  if (parsed.tui) {
+    await runChatTuiSession({
+      cwd,
+      session,
+      assembly,
+      modelClient,
+      modelConfig,
+      policy,
+      wsCfg,
+      txMode: parsed.txMode,
+      txApply: parsed.txApply,
+      coordinatorCtx: chatCoordinatorCtx,
+      cliqHome
+    });
+    return;
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'cliq> ' });
+  const eventSink = createCliEventSink();
+  let turnSawRuntimeError = false;
 
   // Build TxRunnerOptions when transactions mode is active. Interactive arm
   // uses a TTY confirm prompt via the existing readline interface.
@@ -2181,5 +2223,117 @@ export async function runCli(argv: string[]) {
   }
 
   rl.close();
+  await saveSession(cwd, session);
+}
+
+const TUI_REFUSED_POLICIES = new Set<PolicyMode>(['confirm-write', 'confirm-bash', 'confirm-all']);
+
+type RunChatTuiSessionOpts = {
+  cwd: string;
+  session: Session;
+  assembly: Awaited<ReturnType<typeof createRuntimeAssembly>>;
+  modelClient: ModelClient;
+  modelConfig: ResolvedModelConfig;
+  policy: PolicyMode;
+  wsCfg: WorkspaceConfig;
+  txMode?: TxMode;
+  txApply?: TxApplyPolicy;
+  coordinatorCtx: CoordinatorContext;
+  cliqHome: string;
+};
+
+async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
+  const { policy, wsCfg, session, cwd } = opts;
+
+  // Stage 1.4 ships the TUI without the approval modal (lands in Stage 3).
+  // Refuse setups that would surface an approval prompt with no UI to render
+  // it, rather than silently denying the requested actions.
+  if (TUI_REFUSED_POLICIES.has(policy)) {
+    process.stderr.write(
+      `--tui (beta) does not yet support --policy ${policy}; the approval modal lands in Stage 3. ` +
+        `Use --policy auto or --policy read-only with --tui, or omit --tui for confirm-* modes.\n`
+    );
+    throw new ReportedCliError(`--tui does not yet support --policy ${policy}`, { exitCode: 1 });
+  }
+
+  const tuiTxMode = opts.txMode ?? wsCfg.transactions?.mode ?? 'off';
+  let tuiTransactions: TxRunnerOptions | undefined;
+  if (tuiTxMode === 'edit') {
+    const applyPolicy = opts.txApply ?? wsCfg.transactions?.applyPolicy ?? 'interactive';
+    if (applyPolicy === 'interactive') {
+      process.stderr.write(
+        `--tui (beta) cannot use --tx-apply interactive yet; the approval modal lands in Stage 3. ` +
+          `Use --tx-apply auto-on-pass or --tx-apply manual-only with --tui.\n`
+      );
+      throw new ReportedCliError(`--tui does not yet support --tx-apply interactive`, {
+        exitCode: 1
+      });
+    }
+    tuiTransactions = {
+      mode: 'edit',
+      auto: wsCfg.transactions?.auto ?? 'per-turn',
+      applyPolicy,
+      bashPolicy: wsCfg.transactions?.bashPolicy ?? 'passthrough',
+      headless: false,
+      validatorsConfig: wsCfg.transactions?.validators ?? {},
+      stagedViewConfig: wsCfg.transactions?.stagedView ?? {
+        copyMode: 'auto',
+        bindPaths: ['node_modules']
+      },
+      workspaceId: opts.coordinatorCtx.workspaceId,
+      workspaceRealPath: opts.coordinatorCtx.workspaceRealPath,
+      cliqHome: opts.cliqHome
+    };
+  }
+
+  // Lazy-import the TUI surface so headless / RPC / one-shot paths never
+  // pay the Ink + React module load cost. Enforced by import-isolation test.
+  const [{ mountTui }, { createInitialState, createUiStore }] = await Promise.all([
+    import('./tui/index.js'),
+    import('./tui/store.js')
+  ]);
+
+  const store = createUiStore(
+    createInitialState({
+      policy,
+      model: { provider: opts.modelConfig.provider, model: opts.modelConfig.model },
+      session: { id: session.id, cwd: session.cwd }
+    })
+  );
+
+  const runner = createRunner({
+    model: opts.modelClient,
+    hooks: [...opts.assembly.hooks, ...createCliHooks()],
+    policy: createPolicyEngine({ mode: policy }),
+    // Confirms only fire when the policy returns 'ask'; we refused those
+    // setups above, so this branch is unreachable in Stage 1.4.
+    confirm: async () => false,
+    instructions: opts.assembly.instructions,
+    autoCompact: {
+      config: opts.assembly.workspaceConfig.autoCompact,
+      modelConfig: opts.modelConfig
+    },
+    ...(tuiTransactions ? { transactions: tuiTransactions } : {}),
+    async onEvent(event) {
+      store.dispatch({ type: 'runtime-event', event });
+    }
+  });
+
+  const tui = mountTui({
+    store,
+    onSubmit: async (text) => {
+      try {
+        await runner.runTurn(session, text);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        store.dispatch({
+          type: 'runtime-event',
+          event: { type: 'error', stage: 'model', message }
+        });
+      }
+    }
+  });
+
+  await tui.waitUntilExit();
   await saveSession(cwd, session);
 }
