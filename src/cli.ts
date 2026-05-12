@@ -41,6 +41,12 @@ import {
   validateTx as coordValidateTx,
   type CoordinatorContext
 } from './workspace/transactions/coordinator.js';
+import {
+  formatTxDiff,
+  formatTxShow,
+  formatTxValidators,
+  readTxReviewSnapshot
+} from './workspace/transactions/inspect.js';
 import { readTxState as coordReadTxState, resolveTxRoot } from './workspace/transactions/store.js';
 import { loadWorkspaceConfig } from './workspace/config.js';
 import { isValidTxId } from './workspace/transactions/types.js';
@@ -96,6 +102,9 @@ export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'tx-open'; name?: string; explicit: true; json?: boolean; headless?: boolean; prompt?: undefined }
   | { cmd: 'tx-status'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
   | { cmd: 'tx-list'; json?: boolean; headless?: boolean; prompt?: undefined }
+  | { cmd: 'tx-diff'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
+  | { cmd: 'tx-show'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
+  | { cmd: 'tx-validators'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
   | {
       cmd: 'tx-apply';
       txId: string;
@@ -193,7 +202,7 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     return { ...base, cmd: 'help', topic: 'tx' };
   }
   if (!sub) {
-    throw new Error('cliq tx requires a subcommand (open, status, list, validate, approve, apply, abort)');
+    throw new Error('cliq tx requires a subcommand (open, status, list, diff, show, validators, validate, approve, apply, abort)');
   }
   const rest = args.slice(2);
   if (hasHelpFlag(rest)) {
@@ -248,6 +257,28 @@ function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
       return {
         ...base,
         cmd: 'tx-list',
+        ...(json ? { json } : {}),
+        ...(headless ? { headless } : {})
+      };
+    }
+    case 'diff':
+    case 'show':
+    case 'validators': {
+      const first = rest[0];
+      const txId = first !== undefined && !first.startsWith('--') ? first : undefined;
+      if (txId !== undefined) {
+        rest.shift();
+        if (!isValidTxId(txId)) {
+          throw new Error(`tx ${sub}: invalid <txId> "${txId}" (expected tx_<26 Crockford32 chars>)`);
+        }
+      }
+      if (rest.length > 0) {
+        throw new Error(`Unknown tx ${sub} argument: ${rest[0]}`);
+      }
+      return {
+        ...base,
+        cmd: sub === 'diff' ? 'tx-diff' : sub === 'show' ? 'tx-show' : 'tx-validators',
+        ...(txId !== undefined ? { txId } : {}),
         ...(json ? { json } : {}),
         ...(headless ? { headless } : {})
       };
@@ -388,6 +419,16 @@ export function renderUnhandledError(error: unknown) {
 
 export function cliExitCode(error: unknown) {
   return isReportedCliError(error) && error.exitCode !== undefined ? error.exitCode : 1;
+}
+
+export function resolveTxIdForReview(opts: {
+  providedTxId?: string;
+  sessionActiveTxId?: string;
+  command: string;
+}) {
+  if (opts.providedTxId) return opts.providedTxId;
+  if (opts.sessionActiveTxId) return opts.sessionActiveTxId;
+  throw new Error(`${opts.command} requires <txId> because there is no active transaction`);
 }
 
 function readFlagValue(raw: string[], index: number, flag: string) {
@@ -1008,6 +1049,9 @@ Usage:
   cliq tx open [name]               Open an explicit transaction
   cliq tx status [<txId>]           Show transaction status, or list all when no id is provided
   cliq tx list                      List all transactions in the workspace
+  cliq tx diff [<txId>]             Show the staged diff summary
+  cliq tx show [<txId>] [--json]    Show review state for a transaction
+  cliq tx validators [<txId>]       Show validator results and artifact errors
   cliq tx validate <txId>           Run validators against the transaction's staged view
   cliq tx approve  <txId> [opts]    Approve a validated transaction
   cliq tx apply    <txId> [opts]    Apply a transaction, chaining finalize -> validate -> approve -> apply as needed
@@ -1078,6 +1122,9 @@ Transaction subcommands:
   cliq tx open [name]               Open an explicit transaction (optional friendly name)
   cliq tx status [<txId>]           Show transaction status (or list all if no id)
   cliq tx list                      List all transactions in the workspace
+  cliq tx diff [<txId>]             Show the staged diff summary
+  cliq tx show [<txId>] [--json]    Show review state for a transaction
+  cliq tx validators [<txId>]       Show validator results and artifact errors
   cliq tx validate <txId>           Run validators against the transaction's staged view
   cliq tx approve  <txId> [opts]    Approve a validated transaction
                                     (--override <name> | --override-all | --allow-validator-error <name> | --reason "...")
@@ -1235,10 +1282,72 @@ function createCliEventSink() {
   };
 }
 
+export function formatTxRuntimeEventLine(event: RuntimeEventEnvelope): string | null {
+  if (event.type === 'tx-staging-start') {
+    const payload = event.payload as { txId: string };
+    return `[tx ${payload.txId}] staging started`;
+  }
+
+  if (event.type === 'tx-finalized') {
+    const payload = event.payload as {
+      txId: string;
+      diffSummary: { filesChanged: number; additions: number; deletions: number };
+    };
+    return `[tx ${payload.txId}] finalized: ${formatRuntimeDiffSummary(payload.diffSummary)}`;
+  }
+
+  if (event.type === 'tx-validated') {
+    const payload = event.payload as {
+      txId: string;
+      validators: {
+        blocking: { pass: number; fail: number };
+        advisory: { pass: number; fail: number };
+      };
+    };
+    return `[tx ${payload.txId}] validated: ${formatRuntimeValidatorSummary(payload.validators)}`;
+  }
+
+  if (event.type === 'tx-applied') {
+    const payload = event.payload as {
+      txId: string;
+      diffSummary: { filesChanged: number };
+    };
+    return `[tx ${payload.txId}] applied: ${payload.diffSummary.filesChanged} files changed`;
+  }
+
+  if (event.type === 'tx-aborted') {
+    const payload = event.payload as { txId: string; reason: string };
+    return `[tx ${payload.txId}] aborted: ${payload.reason}`;
+  }
+
+  return null;
+}
+
+function formatRuntimeDiffSummary(summary: {
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+}) {
+  return `${summary.filesChanged} files changed (net +${summary.additions}/-${summary.deletions})`;
+}
+
+function formatRuntimeValidatorSummary(validators: {
+  blocking: { pass: number; fail: number };
+  advisory: { pass: number; fail: number };
+}) {
+  return `blocking ${validators.blocking.pass} pass / ${validators.blocking.fail} fail, advisory ${validators.advisory.pass} pass / ${validators.advisory.fail} fail`;
+}
+
 async function renderHeadlessEventToCli(
   event: RuntimeEventEnvelope,
   eventSink: ReturnType<typeof createCliEventSink>
 ) {
+  const txLine = formatTxRuntimeEventLine(event);
+  if (txLine) {
+    process.stderr.write(`${txLine}\n`);
+    return;
+  }
+
   if (event.type === 'run-start' || event.type === 'run-end') {
     return;
   }
@@ -1484,6 +1593,9 @@ export async function runCli(argv: string[]) {
     parsed.cmd === 'tx-open' ||
     parsed.cmd === 'tx-status' ||
     parsed.cmd === 'tx-list' ||
+    parsed.cmd === 'tx-diff' ||
+    parsed.cmd === 'tx-show' ||
+    parsed.cmd === 'tx-validators' ||
     parsed.cmd === 'tx-validate' ||
     parsed.cmd === 'tx-approve' ||
     parsed.cmd === 'tx-apply' ||
@@ -1536,6 +1648,71 @@ export async function runCli(argv: string[]) {
         process.stdout.write('no transactions\n');
       } else {
         for (const t of list) process.stdout.write(`${t.id} ${t.state}\n`);
+      }
+      return;
+    }
+
+    if (
+      parsed.cmd === 'tx-diff' ||
+      parsed.cmd === 'tx-show' ||
+      parsed.cmd === 'tx-validators'
+    ) {
+      // Per spec §A.6: every tx subcommand handler runs crash recovery first.
+      await coordRecoverAtStart(ctx);
+      const command =
+        parsed.cmd === 'tx-diff'
+          ? 'tx diff'
+          : parsed.cmd === 'tx-show'
+            ? 'tx show'
+            : 'tx validators';
+      const txId = resolveTxIdForReview({
+        providedTxId: parsed.txId,
+        sessionActiveTxId: session.activeTxId,
+        command
+      });
+      const root = resolveTxRoot(ctx.cliqHome ?? resolveCliqHome());
+      const snapshot = await readTxReviewSnapshot({ root, txId });
+
+      if (parsed.cmd === 'tx-diff') {
+        if (wantsJson) {
+          writeJson({
+            type: 'tx-diff',
+            txId,
+            diff: snapshot.diff,
+            diffSummary: snapshot.tx.diffSummary ?? null
+          });
+        } else {
+          process.stdout.write(`${formatTxDiff(snapshot)}\n`);
+        }
+        return;
+      }
+
+      if (parsed.cmd === 'tx-show') {
+        if (wantsJson) {
+          writeJson({
+            type: 'tx-show',
+            txId,
+            tx: snapshot.tx,
+            bashEffects: snapshot.bashEffects,
+            validatorArtifactErrors: snapshot.validatorArtifactErrors,
+            artifactRef: snapshot.artifactRef
+          });
+        } else {
+          process.stdout.write(`${formatTxShow(snapshot)}\n`);
+        }
+        return;
+      }
+
+      if (wantsJson) {
+        writeJson({
+          type: 'tx-validators',
+          txId,
+          validators: snapshot.validatorArtifactResults,
+          summaries: snapshot.validatorResults,
+          validatorArtifactErrors: snapshot.validatorArtifactErrors
+        });
+      } else {
+        process.stdout.write(`${formatTxValidators(snapshot)}\n`);
       }
       return;
     }
@@ -1933,9 +2110,10 @@ export async function runCli(argv: string[]) {
       workspaceId: chatCoordinatorCtx.workspaceId,
       workspaceRealPath: chatCoordinatorCtx.workspaceRealPath,
       cliqHome,
-      confirmApply: async () => {
+      confirmApply: async (review) => {
+        process.stderr.write(`${review.prompt}\n`);
         const answer = await new Promise<string>((resolve) =>
-          rl.question('Apply transaction? [y/N] ', resolve)
+          rl.question('[y/N] ', resolve)
         );
         return answer.trim().toLowerCase() === 'y';
       }
