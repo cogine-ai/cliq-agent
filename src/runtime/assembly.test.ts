@@ -71,6 +71,55 @@ Prefer exact edits over shell mutation when possible.`,
   }
 });
 
+test('createRuntimeAssembly exposes workspace command hooks separately from extension hooks', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-command-hooks-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq', 'extensions'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify({
+        extensions: ['./.cliq/extensions/empty.js'],
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'bash',
+              hooks: [{ type: 'command', command: 'node .cliq/hooks/pre-tool-use.js' }]
+            }
+          ]
+        }
+      }),
+      'utf8'
+    );
+    await writeFile(
+      path.join(cwd, '.cliq', 'extensions', 'empty.js'),
+      `export default {
+        name: 'empty',
+        hooks: [{ beforeTurn: async () => undefined }]
+      };`,
+      'utf8'
+    );
+
+    const assembly = await createRuntimeAssembly({
+      cwd,
+      session: createSession(cwd),
+      policyMode: 'auto',
+      cliSkillNames: []
+    });
+
+    assert.equal(assembly.hooks.length, 1);
+    assert.deepEqual(assembly.commandHooks, {
+      PreToolUse: [
+        {
+          matcher: 'bash',
+          hooks: [{ type: 'command', command: 'node .cliq/hooks/pre-tool-use.js' }]
+        }
+      ]
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('createRuntimeAssembly surfaces extension instruction source failures clearly', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-fail-'));
   try {

@@ -52,6 +52,7 @@ export async function createRuntimeAssembly({
     skillNames,
     extensionNames: extensions.map((extension) => extension.name),
     hooks: extensions.flatMap((extension) => extension.hooks ?? []),
+    commandHooks: workspaceConfig.hooks ?? {},
     session,
     async instructions(currentSession: Session) {
       const extensionMessages = (

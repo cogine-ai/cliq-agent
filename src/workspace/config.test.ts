@@ -187,6 +187,76 @@ test('parseWorkspaceConfig leaves transactions undefined when block is absent', 
   assert.equal(parsed.transactions, undefined);
 });
 
+test('parseWorkspaceConfig accepts top-level command hooks config', () => {
+  const parsed = parseWorkspaceConfig({
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: 'bash|edit',
+          hooks: [
+            {
+              type: 'command',
+              command: 'node .cliq/hooks/pre-tool-use.js',
+              timeoutMs: 5000,
+              statusMessage: 'Checking command',
+              required: true
+            }
+          ]
+        }
+      ]
+    }
+  });
+
+  assert.deepEqual(parsed.hooks, {
+    PreToolUse: [
+      {
+        matcher: 'bash|edit',
+        hooks: [
+          {
+            type: 'command',
+            command: 'node .cliq/hooks/pre-tool-use.js',
+            timeoutMs: 5000,
+            statusMessage: 'Checking command',
+            required: true
+          }
+        ]
+      }
+    ]
+  });
+});
+
+test('parseWorkspaceConfig rejects invalid hooks config paths', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ hooks: { UnknownEvent: [] } }),
+    /hooks\.UnknownEvent must be a supported hook event/
+  );
+  assert.throws(
+    () =>
+      parseWorkspaceConfig({
+        hooks: { PreToolUse: [{ hooks: [{ type: 'script', command: 'node hook.js' }] }] }
+      }),
+    /hooks\.PreToolUse\[0\]\.hooks\[0\]\.type must be command/
+  );
+  assert.throws(
+    () => parseWorkspaceConfig({ hooks: { PreToolUse: [{ hooks: [{ type: 'command' }] }] } }),
+    /hooks\.PreToolUse\[0\]\.hooks\[0\]\.command must be a non-empty string/
+  );
+  assert.throws(
+    () =>
+      parseWorkspaceConfig({
+        hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'node hook.js', timeoutMs: -1 }] }] }
+      }),
+    /hooks\.PreToolUse\[0\]\.hooks\[0\]\.timeoutMs must be a positive integer/
+  );
+  assert.throws(
+    () =>
+      parseWorkspaceConfig({
+        hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'node hook.js', required: 'yes' }] }] }
+      }),
+    /hooks\.PreToolUse\[0\]\.hooks\[0\]\.required must be a boolean/
+  );
+});
+
 test('parseWorkspaceConfig rejects invalid transactions.mode', () => {
   assert.throws(
     () => parseWorkspaceConfig({ transactions: { mode: 'worktree' } }),
