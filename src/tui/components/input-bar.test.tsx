@@ -138,3 +138,169 @@ test('Tab is a no-op when completion equals current value', async () => {
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(changes.length, 0);
 });
+
+// Ink emits arrow keys as ANSI escape sequences (e.g. "\x1b[D" for left).
+// ink-testing-library forwards stdin bytes through Ink's parser, so writing
+// the raw sequence is the closest we can get to a real key press.
+const KEY_LEFT = '\x1b[D';
+const KEY_RIGHT = '\x1b[C';
+const KEY_UP = '\x1b[A';
+const KEY_DOWN = '\x1b[B';
+
+test('left arrow then printable inserts at the cursor (middle of buffer)', async () => {
+  let value = 'helo';
+  const changes: string[] = [];
+  const onChange = (next: string) => {
+    value = next;
+    changes.push(next);
+  };
+  const { stdin, rerender } = render(
+    <InputBar value={value} onChange={onChange} onSubmit={() => {}} />
+  );
+  // Move cursor: 4 → 3 → 2. Now sitting between 'e' and 'l'.
+  stdin.write(KEY_LEFT);
+  await new Promise((r) => setTimeout(r, 10));
+  stdin.write(KEY_LEFT);
+  await new Promise((r) => setTimeout(r, 10));
+  // Insert 'l' at the cursor: 'helo' → 'hello'.
+  stdin.write('l');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(changes[changes.length - 1], 'hello');
+  rerender(<InputBar value={value} onChange={onChange} onSubmit={() => {}} />);
+});
+
+test('backspace at cursor=0 is a no-op', async () => {
+  let value = 'hi';
+  const calls: string[] = [];
+  const onChange = (next: string) => {
+    value = next;
+    calls.push(next);
+  };
+  const { stdin, rerender } = render(
+    <InputBar value={value} onChange={onChange} onSubmit={() => {}} />
+  );
+  // Move cursor to position 0 (start of buffer).
+  stdin.write(KEY_LEFT);
+  await new Promise((r) => setTimeout(r, 10));
+  stdin.write(KEY_LEFT);
+  await new Promise((r) => setTimeout(r, 10));
+  // Backspace from cursor=0 must not fire onChange.
+  stdin.write('');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(calls.length, 0);
+  rerender(<InputBar value={value} onChange={onChange} onSubmit={() => {}} />);
+});
+
+test('backspace at cursor in the middle deletes the char before the cursor', async () => {
+  let value = 'helXlo';
+  const changes: string[] = [];
+  const onChange = (next: string) => {
+    value = next;
+    changes.push(next);
+  };
+  const { stdin, rerender } = render(
+    <InputBar value={value} onChange={onChange} onSubmit={() => {}} />
+  );
+  // Cursor starts at end (=6). Walk left to position 4 (between 'X' and 'l').
+  for (let i = 0; i < 2; i += 1) {
+    stdin.write(KEY_LEFT);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  // Backspace should delete 'X' (the char before the cursor at offset 4).
+  stdin.write('');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(changes[changes.length - 1], 'hello');
+  rerender(<InputBar value={value} onChange={onChange} onSubmit={() => {}} />);
+});
+
+test('right arrow at end of buffer is a no-op and never leaks the escape bytes', async () => {
+  const changes: string[] = [];
+  const { stdin } = render(
+    <InputBar
+      value="abc"
+      onChange={(next) => {
+        changes.push(next);
+      }}
+      onSubmit={() => {}}
+    />
+  );
+  // Cursor starts at value.length=3 — right arrow has nowhere to go.
+  stdin.write(KEY_RIGHT);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(changes.length, 0);
+});
+
+test('external value replacement (Tab completion) snaps cursor to end', async () => {
+  // Boot the component with a value, walk the cursor left, then have the
+  // parent push a fresh value through props (mimicking Tab completion).
+  // The next keystroke after the replacement should append at the new end,
+  // proving the cursor snapped rather than staying mid-buffer.
+  let value = '/p';
+  const changes: string[] = [];
+  const onChange = (next: string) => {
+    value = next;
+    changes.push(next);
+  };
+  const { stdin, rerender } = render(
+    <InputBar value={value} onChange={onChange} onSubmit={() => {}} completion="/policy " />
+  );
+  // Press Tab so the parent's useInput fires onChange('/policy ') — same
+  // path Tab completion takes in production.
+  stdin.write('\t');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(value, '/policy ');
+  rerender(
+    <InputBar value={value} onChange={onChange} onSubmit={() => {}} completion="/policy " />
+  );
+  // Now type a letter. If the cursor snapped to end (=8) it appends; if it
+  // had stayed at 2 we'd see '/pXolicy '.
+  stdin.write('x');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(value, '/policy x');
+});
+
+test('up arrow fires onHistoryPrev; down arrow fires onHistoryNext', async () => {
+  let upCount = 0;
+  let downCount = 0;
+  const { stdin } = render(
+    <InputBar
+      value=""
+      onChange={() => {}}
+      onSubmit={() => {}}
+      onHistoryPrev={() => {
+        upCount += 1;
+      }}
+      onHistoryNext={() => {
+        downCount += 1;
+      }}
+    />
+  );
+  stdin.write(KEY_UP);
+  await new Promise((r) => setTimeout(r, 10));
+  stdin.write(KEY_DOWN);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(upCount, 1);
+  assert.equal(downCount, 1);
+});
+
+test('forward delete in the middle removes the char under the cursor', async () => {
+  let value = 'helXlo';
+  const changes: string[] = [];
+  const onChange = (next: string) => {
+    value = next;
+    changes.push(next);
+  };
+  const { stdin, rerender } = render(
+    <InputBar value={value} onChange={onChange} onSubmit={() => {}} />
+  );
+  // Cursor at end (=6). Walk left to position 3 (under 'X').
+  for (let i = 0; i < 3; i += 1) {
+    stdin.write(KEY_LEFT);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  // Forward delete: removes 'X'. ink emits '\x1b[3~' for Delete.
+  stdin.write('\x1b[3~');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(changes[changes.length - 1], 'hello');
+  rerender(<InputBar value={value} onChange={onChange} onSubmit={() => {}} />);
+});

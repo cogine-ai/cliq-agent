@@ -1,4 +1,5 @@
 import { Box, Text, useInput, type Key } from 'ink';
+import { useRef, useState } from 'react';
 
 // ink-text-input v6 inserts the bare letter for Ctrl+<letter> combinations
 // (its source only filters Ctrl+C explicitly), so Ctrl+O / Ctrl+G / Ctrl+L /
@@ -15,13 +16,41 @@ function MiniTextInput({
   value,
   onChange,
   onSubmit,
+  onHistoryPrev,
+  onHistoryNext,
   focus = true
 }: {
   value: string;
   onChange: (next: string) => void;
   onSubmit?: (text: string) => void;
+  onHistoryPrev?: () => void;
+  onHistoryNext?: () => void;
   focus?: boolean;
 }) {
+  const [cursorOffset, setCursorOffset] = useState(value.length);
+  // Echo detector: every time we initiate a value change we stash the
+  // predicted string here. On the next render we compare the actual `value`
+  // prop against it — if they match, the parent forwarded our own emission
+  // and the cursor is already where we left it. If they DON'T match, the
+  // parent (Tab completion, history recall, /reset etc.) replaced the value
+  // out from under us and the cursor must snap to a sane spot.
+  const lastEmittedRef = useRef<string | null>(value);
+
+  if (lastEmittedRef.current !== value) {
+    // External mutation: clamp the cursor to the new value's length and
+    // record the new baseline so we don't snap again on the next render.
+    if (cursorOffset !== value.length) {
+      setCursorOffset(value.length);
+    }
+    lastEmittedRef.current = value;
+  }
+
+  function emit(next: string, nextCursor: number) {
+    lastEmittedRef.current = next;
+    setCursorOffset(nextCursor);
+    onChange(next);
+  }
+
   useInput(
     (input: string, key: Key) => {
       if (!focus) return;
@@ -36,41 +65,63 @@ function MiniTextInput({
         onSubmit?.(value);
         return;
       }
-      if (key.backspace) {
-        if (value.length === 0) return;
-        onChange(value.slice(0, -1));
+      if (key.upArrow) {
+        onHistoryPrev?.();
         return;
       }
-      // Forward Delete is a no-op: the cursor sits implicitly at the end of
-      // the buffer, so there is nothing past it to delete. Bundling Delete
-      // with Backspace would surprise users who lean on `fn+backspace`
-      // (= Delete on mac) to delete forward.
-      if (key.delete) return;
-      // No cursor / scrollback navigation yet. Ignore movement keys so they
-      // don't accidentally insert their escape-sequence bytes.
-      if (
-        key.upArrow ||
-        key.downArrow ||
-        key.leftArrow ||
-        key.rightArrow ||
-        key.escape ||
-        key.pageUp ||
-        key.pageDown
-      ) {
+      if (key.downArrow) {
+        onHistoryNext?.();
+        return;
+      }
+      if (key.leftArrow) {
+        if (cursorOffset > 0) setCursorOffset(cursorOffset - 1);
+        return;
+      }
+      if (key.rightArrow) {
+        if (cursorOffset < value.length) setCursorOffset(cursorOffset + 1);
+        return;
+      }
+      if (key.backspace) {
+        if (cursorOffset === 0) return;
+        const next = value.slice(0, cursorOffset - 1) + value.slice(cursorOffset);
+        emit(next, cursorOffset - 1);
+        return;
+      }
+      // Forward Delete removes the character UNDER the cursor. When the
+      // cursor is at end-of-buffer there's nothing to delete; bundling it
+      // with Backspace there would surprise mac users who lean on
+      // fn+backspace (= Delete) at the end of a line.
+      if (key.delete) {
+        if (cursorOffset >= value.length) return;
+        const next = value.slice(0, cursorOffset) + value.slice(cursorOffset + 1);
+        emit(next, cursorOffset);
+        return;
+      }
+      // Escape / pageUp / pageDown have no semantics in a single-line input;
+      // swallow them so their raw bytes don't end up in the buffer.
+      if (key.escape || key.pageUp || key.pageDown) {
         return;
       }
       if (input.length === 0) return;
       const printable = input.replace(CONTROL_CHARS_IN_PASTE, '');
       if (printable.length === 0) return;
-      onChange(value + printable);
+      const next = value.slice(0, cursorOffset) + printable + value.slice(cursorOffset);
+      emit(next, cursorOffset + printable.length);
     },
     { isActive: focus }
   );
 
+  if (!focus) {
+    return <Text>{value}</Text>;
+  }
+  const before = value.slice(0, cursorOffset);
+  const under = value[cursorOffset];
+  const after = under === undefined ? '' : value.slice(cursorOffset + 1);
   return (
     <Text>
-      {value}
-      {focus ? <Text inverse>{' '}</Text> : null}
+      {before}
+      <Text inverse>{under ?? ' '}</Text>
+      {after}
     </Text>
   );
 }
@@ -79,12 +130,16 @@ export function InputBar({
   value,
   onChange,
   onSubmit,
+  onHistoryPrev,
+  onHistoryNext,
   disabled = false,
   completion = null
 }: {
   value: string;
   onChange: (next: string) => void;
   onSubmit: (text: string) => void;
+  onHistoryPrev?: () => void;
+  onHistoryNext?: () => void;
   disabled?: boolean;
   completion?: string | null;
 }) {
@@ -112,7 +167,13 @@ export function InputBar({
       {disabled ? (
         <Text dimColor>{value}</Text>
       ) : (
-        <MiniTextInput value={value} onChange={onChange} onSubmit={handleSubmit} />
+        <MiniTextInput
+          value={value}
+          onChange={onChange}
+          onSubmit={handleSubmit}
+          onHistoryPrev={onHistoryPrev}
+          onHistoryNext={onHistoryNext}
+        />
       )}
     </Box>
   );
