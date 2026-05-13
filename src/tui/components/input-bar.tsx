@@ -34,11 +34,27 @@ function MiniTextInput({
   // and the cursor is already where we left it. If they DON'T match, the
   // parent (Tab completion, history recall, /reset etc.) replaced the value
   // out from under us and the cursor must snap to a sane spot.
+  //
+  // Why a ref and not useState? The textbook React pattern for "derive
+  // state from props" stores the comparison key in useState and compares
+  // during render (see "Adjusting state when a prop changes" in the React
+  // docs). That works when props change *externally* only. Here the prop
+  // ALSO changes as a forwarded echo of `emit()` — we need to stamp the
+  // predicted next value *synchronously* before `onChange` so the next
+  // render's comparison succeeds. useState would lag a render behind (the
+  // setState commit hasn't happened yet by the time the parent forwards
+  // our emission back), and we'd misclassify every keystroke as an
+  // external replacement and snap the cursor to end of buffer. The ref
+  // mutation is synchronous; that's the whole point of using it here.
   const lastEmittedRef = useRef<string | null>(value);
 
   if (lastEmittedRef.current !== value) {
-    // External mutation: clamp the cursor to the new value's length and
-    // record the new baseline so we don't snap again on the next render.
+    // External mutation. Setting state during render is intentional and
+    // matches the "Adjusting state when a prop changes" pattern: React
+    // discards the in-progress render and re-renders synchronously with
+    // the corrected cursor — no flicker frame. Moving this into a
+    // useEffect would paint one frame with a stale cursor before the
+    // effect fired.
     if (cursorOffset !== value.length) {
       setCursorOffset(value.length);
     }
