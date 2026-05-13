@@ -98,5 +98,10 @@ export function buildHelpText(): string {
     const display = cmd.args ? `${cmd.name} ${cmd.args}` : cmd.name;
     lines.push(`  ${display.padEnd(22)} ${cmd.description}`);
   }
+  lines.push('', 'Keys:');
+  lines.push('  Shift+Tab              Rotate policy mode (read-only → confirm-write → confirm-bash → auto)');
+  lines.push('  Ctrl+O                 Toggle the most recent tool body');
+  lines.push('  Ctrl+C                 Cancel an active turn (or clear input)');
+  lines.push('  Ctrl+D                 Exit on empty input');
   return lines.join('\n');
 }

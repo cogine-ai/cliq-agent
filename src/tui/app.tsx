@@ -9,6 +9,7 @@ import { StatusBar } from './components/status-bar.js';
 import { Transcript } from './components/transcript.js';
 import { useKeybindings } from './hooks/use-keybindings.js';
 import { useUiStore } from './hooks/use-ui-store.js';
+import { nextPolicyMode } from './policy-rotation.js';
 import { buildHelpText, completeSlash, parseSlash } from './slash.js';
 import type { UiApprovalDecision, UiStore } from './store.js';
 
@@ -86,6 +87,26 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
   const inputDisabled = state.activeTurn !== null;
   const completion = completeSlash(input);
 
+  async function rotatePolicy() {
+    // Read the current policy from the store rather than the rendered state
+    // snapshot — if the user mashes Shift+Tab faster than React commits the
+    // last policy-change, the closure-captured state.policy would be stale
+    // and successive presses would all compute the same `next` from the old
+    // value. Going through the store dispenses fresh state per keystroke.
+    const current = store.getState().policy;
+    const next = nextPolicyMode(current);
+    if (next === current) return;
+    try {
+      await onPolicyChange?.(next);
+      store.dispatch({ type: 'policy-change', mode: next });
+      pushSystem(`policy → ${next}`);
+    } catch (error) {
+      pushSystem(
+        `policy rotation failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   useKeybindings({
     onCtrlC: () => {
       if (state.activeTurn) {
@@ -107,6 +128,9 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
     },
     onToggleBody: () => {
       store.dispatch({ type: 'toggle-tool-body' });
+    },
+    onRotatePolicy: () => {
+      void rotatePolicy();
     }
   });
 

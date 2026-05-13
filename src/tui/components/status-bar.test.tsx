@@ -48,3 +48,17 @@ test('renders the active tx state when state.tx is set', () => {
   assert.match(frame, /tx tx_abc123 validated/);
   assert.doesNotMatch(frame, /tx idle/);
 });
+
+test('renders the session token estimate when sessionTokens is non-null', () => {
+  // Just over the 1k boundary to exercise the k-suffix formatter.
+  const { lastFrame } = render(<StatusBar state={init({ sessionTokens: 12345 })} />);
+  assert.match(lastFrame() ?? '', /12\.3k tok/);
+
+  // Below 1k stays as raw integer.
+  const small = render(<StatusBar state={init({ sessionTokens: 850 })} />);
+  assert.match(small.lastFrame() ?? '', /850 tok/);
+
+  // null hides the segment entirely.
+  const none = render(<StatusBar state={init({ sessionTokens: null })} />);
+  assert.doesNotMatch(none.lastFrame() ?? '', /tok/);
+});

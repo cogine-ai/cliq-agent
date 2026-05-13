@@ -9,6 +9,9 @@ export type KeybindingHandlers = {
   // plain 'o', but we use Ctrl+O so it never conflicts with text composition;
   // there is no focus model yet to safely interpret a bare letter.
   onToggleBody?: () => void;
+  // Shift+Tab — rotates through the policy modes. Tab alone is reserved for
+  // slash-completion in the input bar.
+  onRotatePolicy?: () => void;
 };
 
 export function useKeybindings(handlers: KeybindingHandlers) {
@@ -23,6 +26,10 @@ export function useKeybindings(handlers: KeybindingHandlers) {
     }
     if (key.ctrl && input === 'o') {
       handlers.onToggleBody?.();
+      return;
+    }
+    if (key.shift && key.tab) {
+      handlers.onRotatePolicy?.();
     }
   });
 }

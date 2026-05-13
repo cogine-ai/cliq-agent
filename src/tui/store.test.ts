@@ -102,7 +102,7 @@ test('runtime-event error records entry, caps history at 20, clears activeTurn',
   assert.equal(cur.errors[cur.errors.length - 1]!.message, 'e24');
 });
 
-test('session-reset clears transcript/turn/approval/errors but preserves identity fields', () => {
+test('session-reset clears transcript/turn/approval/errors/tokens but preserves identity fields', () => {
   let s = baseInit();
   s = reduce(s, { type: 'user-input', text: 'a' });
   s = reduce(s, {
@@ -113,12 +113,16 @@ test('session-reset clears transcript/turn/approval/errors but preserves identit
     type: 'runtime-event',
     event: { type: 'error', stage: 'model', message: 'x' },
   });
+  s = reduce(s, { type: 'session-tokens-update', tokens: 4242 });
 
   const after = reduce(s, { type: 'session-reset' });
   assert.equal(after.transcript.length, 0);
   assert.equal(after.activeTurn, null);
   assert.equal(after.pendingApproval, null);
   assert.equal(after.errors.length, 0);
+  // Token bar must hide after /reset so the new session is not labeled with
+  // the previous session's running estimate.
+  assert.equal(after.sessionTokens, null);
   assert.equal(after.policy, 'auto');
   assert.equal(after.session.id, 'ses_test');
   assert.equal(after.model.model, 'qwen3:4b');
@@ -471,6 +475,15 @@ test('compact-end and compact-error still surface as system entries (state chang
   assert.equal(systemTexts.length, 2);
   assert.match(systemTexts[0]!, /compaction completed: 9000 → 3000 tokens/);
   assert.match(systemTexts[1]!, /compaction error \(threshold\): oom/);
+});
+
+test('session-tokens-update sets sessionTokens; null until first dispatch', () => {
+  const initial = baseInit();
+  assert.equal(initial.sessionTokens, null);
+  const after = reduce(initial, { type: 'session-tokens-update', tokens: 1234 });
+  assert.equal(after.sessionTokens, 1234);
+  const refreshed = reduce(after, { type: 'session-tokens-update', tokens: 5678 });
+  assert.equal(refreshed.sessionTokens, 5678);
 });
 
 test('toggle-tool-body flips expanded on the latest tool entry that has a body', () => {

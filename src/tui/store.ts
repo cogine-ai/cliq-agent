@@ -63,6 +63,10 @@ export type UiState = {
   session: { id: string; cwd: string };
   tx: UiTx | null;
   errors: ErrorEntry[];
+  // Estimated cumulative session token count, refreshed by the cli bridge
+  // after each turn via `session-tokens-update`. null until the first turn
+  // completes.
+  sessionTokens: number | null;
   // Monotonic counter for entry ids; kept in state so reduce() stays pure.
   nextEntryId: number;
 };
@@ -73,6 +77,7 @@ export type UiAction =
   | { type: 'tool-hook-end'; result: ToolResult }
   | { type: 'user-input'; text: string }
   | { type: 'system-message'; text: string }
+  | { type: 'session-tokens-update'; tokens: number }
   | { type: 'toggle-tool-body' }
   | { type: 'approval-request'; pending: PendingApproval }
   // approval-resolve carries the id of the pending it resolves so a stale
@@ -106,6 +111,7 @@ export function createInitialState(opts: {
     session: opts.session,
     tx: null,
     errors: [],
+    sessionTokens: null,
     nextEntryId: 1,
   };
 }
@@ -128,6 +134,8 @@ export function reduce(state: UiState, action: UiAction): UiState {
     }
     case 'system-message':
       return pushSystem(state, action.text);
+    case 'session-tokens-update':
+      return { ...state, sessionTokens: action.tokens };
     case 'toggle-tool-body': {
       // Spec A.10: Phase A focus is implicit-last-only — toggle the most
       // recent tool entry that has a body (bash output today; future tools
@@ -160,6 +168,10 @@ export function reduce(state: UiState, action: UiAction): UiState {
         activeTurn: null,
         pendingApproval: null,
         errors: [],
+        // The token bar reflects "this session" — once /reset cuts a fresh
+        // session, the previous count is stale. Hide the segment until the
+        // first turn of the new session writes a fresh estimate.
+        sessionTokens: null
       };
     case 'policy-change':
       return { ...state, policy: action.mode };
