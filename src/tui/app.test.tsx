@@ -186,3 +186,45 @@ test('regular text input still routes to onSubmit and appends a user entry', asy
   assert.deepEqual(submitted, ['hello agent']);
   assert.match(lastFrame() ?? '', /hello agent/);
 });
+
+test('up arrow recalls the most recent submitted user input; down restores the draft', async () => {
+  // Drive two submissions through the user-input path so the transcript
+  // (and therefore the history projection) ends up with ['foo', 'bar'].
+  const store = makeStore();
+  const { stdin, lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+
+  stdin.write('foo');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+  stdin.write('bar');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+
+  // Type a draft we expect to be saved on first ↑.
+  stdin.write('draft');
+  await flush();
+  // ↑ → newest entry ('bar') is now in the input row.
+  stdin.write('\x1b[A');
+  await flush();
+  const afterFirstUp = lastFrame() ?? '';
+  assert.match(afterFirstUp, /> bar/);
+
+  // ↑ again → older entry ('foo').
+  stdin.write('\x1b[A');
+  await flush();
+  const afterSecondUp = lastFrame() ?? '';
+  assert.match(afterSecondUp, /> foo/);
+
+  // ↓ → back to 'bar'. ↓ once more → the saved draft.
+  stdin.write('\x1b[B');
+  await flush();
+  assert.match(lastFrame() ?? '', /> bar/);
+  stdin.write('\x1b[B');
+  await flush();
+  const afterRestore = lastFrame() ?? '';
+  assert.match(afterRestore, /> draft/);
+});

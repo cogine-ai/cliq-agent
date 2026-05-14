@@ -1,5 +1,5 @@
 import { Box, useApp } from 'ink';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import type { PolicyMode } from '../policy/types.js';
 import { ApprovalModal } from './components/approval-modal.js';
@@ -7,6 +7,7 @@ import { InputBar } from './components/input-bar.js';
 import { SlashPalette } from './components/slash-palette.js';
 import { StatusBar } from './components/status-bar.js';
 import { Transcript } from './components/transcript.js';
+import { useInputHistory } from './hooks/use-input-history.js';
 import { useKeybindings } from './hooks/use-keybindings.js';
 import { useUiStore } from './hooks/use-ui-store.js';
 import { nextPolicyMode } from './policy-rotation.js';
@@ -26,12 +27,39 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
   const [input, setInput] = useState('');
   const { exit } = useApp();
 
+  // Project the transcript down to the list of submitted user inputs in
+  // chronological order. Slash commands never land in the transcript as
+  // user-input (App.handleSubmit routes them to runSlash before dispatch),
+  // so the recall list is naturally just plain prompts — no /help, /reset,
+  // etc. cluttering ↑.
+  const inputHistory = useMemo(
+    () =>
+      state.transcript
+        .filter((entry): entry is Extract<typeof entry, { kind: 'user' }> => entry.kind === 'user')
+        .map((entry) => entry.text),
+    [state.transcript]
+  );
+
+  const { onHistoryPrev, onHistoryNext, resetHistoryNav } = useInputHistory({
+    history: inputHistory,
+    current: input,
+    setValue: setInput,
+  });
+
+  function handleInputChange(next: string) {
+    // Typing while inside a recall should pin the buffer back to "present"
+    // so the next ↑ saves THIS draft rather than the one we recalled from.
+    resetHistoryNav();
+    setInput(next);
+  }
+
   function pushSystem(text: string) {
     store.dispatch({ type: 'system-message', text });
   }
 
   async function handleSubmit(text: string) {
     setInput('');
+    resetHistoryNav();
     if (text.startsWith('/')) {
       await runSlash(text);
       return;
@@ -155,8 +183,10 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
           {input.startsWith('/') ? <SlashPalette query={input} /> : null}
           <InputBar
             value={input}
-            onChange={setInput}
+            onChange={handleInputChange}
             onSubmit={handleSubmit}
+            onHistoryPrev={onHistoryPrev}
+            onHistoryNext={onHistoryNext}
             disabled={inputDisabled}
             completion={completion}
           />
