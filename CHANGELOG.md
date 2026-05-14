@@ -62,7 +62,8 @@ payload-aware approvals, and a steady stream of TUI polish.
 
 - **Lexical JSON escape errors in model action output are now repaired** before
   parse, so streaming providers that emit non-canonical escapes no longer fail
-  a turn outright. (#40, v0.8.1 line shipped as part of this release.)
+  a turn outright. (#40; merged through the v0.8.1 repair branch and released
+  here, with no separate v0.8.1 tag.)
 - **Ctrl+O no longer leaks a literal `o` into the input buffer** in the TUI
   (ink-text-input's Ctrl-letter passthrough is replaced by a tiny custom
   single-line input that skips every modifier combination). (#43)
