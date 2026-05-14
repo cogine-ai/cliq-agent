@@ -36,6 +36,8 @@ export type HookInput = {
   cwd: string;
   turnId?: string;
   model?: string;
+  prompt?: string;
+  finalMessage?: string;
   toolName?: string;
   toolUseId?: string;
   matcherAliases?: string[];

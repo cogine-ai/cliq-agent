@@ -36,6 +36,35 @@ export function selectHookCommands(hooks: HooksConfig, input: HookInput): HookCo
   return entries.flatMap((entry) => (matchesHookMatcher(entry, input) ? entry.hooks : []));
 }
 
+export type CommandHookRunResult = {
+  hook: HookCommandConfig;
+  result: HookRunResult;
+};
+
+export function formatHookFailureReason(result: HookRunResult) {
+  if (result.status === 'denied') {
+    return result.decision.reason ?? 'hook denied';
+  }
+  if (result.status === 'error') {
+    const stderr = result.stderr.trim();
+    return stderr ? `${result.error}: ${stderr}` : result.error;
+  }
+  return 'hook failed';
+}
+
+export async function runCommandHooks(
+  hooks: HooksConfig,
+  input: HookInput,
+  opts: { cwd: string }
+): Promise<CommandHookRunResult[]> {
+  const selected = selectHookCommands(hooks, input);
+  const results: CommandHookRunResult[] = [];
+  for (const hook of selected) {
+    results.push({ hook, result: await runHookCommand(hook, input, opts) });
+  }
+  return results;
+}
+
 export async function runHookCommand(
   config: HookCommandConfig,
   input: HookInput,
