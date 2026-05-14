@@ -1,9 +1,10 @@
 # Universal Schema v1.0 — synced from the cogine-ai org-wide spec.
-# Spec: docs/labels-spec.md (in this repo, until cogine-ai/.github is created)
+# Canonical spec: https://github.com/cogine-ai/.github/blob/main/LABELS.md
+# Template source: https://github.com/cogine-ai/.github/blob/main/templates/labels.yml
 #
 # Edit the area:* section at the bottom for this repo only.
-# DO NOT rename labels in the "Locked legacy" section without coordinating
-# with the maintainer — they are read by exact name by cron automation.
+# DO NOT rename labels in the "Locked legacy" section — they are read by
+# exact name by cron automation.
 
 # === type:* ===
 - name: 'type:bug'
