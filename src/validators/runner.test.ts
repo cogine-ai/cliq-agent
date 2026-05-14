@@ -8,46 +8,62 @@ function fakeValidator(name: string, run: Validator['run']): Validator {
   return { name, defaultSeverity: 'advisory', run };
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+}
 
 test('runValidators runs in parallel by default', async () => {
+  const started: string[] = [];
+  const aDone = deferred();
+  const bDone = deferred();
   const a = fakeValidator('a', async () => {
-    await sleep(50);
+    started.push('a');
+    await aDone.promise;
     return { name: 'a', severity: 'advisory', status: 'pass', durationMs: 50 };
   });
   const b = fakeValidator('b', async () => {
-    await sleep(50);
+    started.push('b');
+    await bDone.promise;
     return { name: 'b', severity: 'advisory', status: 'pass', durationMs: 50 };
   });
-  const start = Date.now();
-  const results = await runValidators({
+  const resultsPromise = runValidators({
     txId: 'tx_par', registry: [a, b], workspaceView: '/tmp', realCwd: '/tmp'
   });
-  const elapsed = Date.now() - start;
+  assert.deepEqual(started, ['a', 'b']);
+  bDone.resolve();
+  aDone.resolve();
+  const results = await resultsPromise;
   assert.equal(results.length, 2);
   assert.equal(results[0].name, 'a');
   assert.equal(results[1].name, 'b');
-  assert.ok(elapsed < 90, `expected <90ms, got ${elapsed}ms`);
 });
 
 test('runValidators serial mode preserves order', async () => {
+  const events: string[] = [];
+  const aDone = deferred();
   const a = fakeValidator('a', async () => {
-    await sleep(50);
+    events.push('a:start');
+    await aDone.promise;
+    events.push('a:end');
     return { name: 'a', severity: 'advisory', status: 'pass', durationMs: 50 };
   });
   const b = fakeValidator('b', async () => {
-    await sleep(50);
+    events.push('b:start');
+    events.push('b:end');
     return { name: 'b', severity: 'advisory', status: 'pass', durationMs: 50 };
   });
-  const start = Date.now();
-  const results = await runValidators({
+  const resultsPromise = runValidators({
     txId: 'tx_ser', registry: [a, b], workspaceView: '/tmp', realCwd: '/tmp', serial: true
   });
-  const elapsed = Date.now() - start;
+  assert.deepEqual(events, ['a:start']);
+  aDone.resolve();
+  const results = await resultsPromise;
   assert.equal(results.length, 2);
   assert.equal(results[0].name, 'a');
   assert.equal(results[1].name, 'b');
-  assert.ok(elapsed >= 100, `expected >=100ms, got ${elapsed}ms`);
+  assert.deepEqual(events, ['a:start', 'a:end', 'b:start', 'b:end']);
 });
 
 test('runValidators captures thrown errors as status:error and does not bubble', async () => {
