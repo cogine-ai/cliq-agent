@@ -6,7 +6,7 @@ on:
       ref:
         description: Tag, branch, or commit to publish
         required: true
-        default: v0.8.0
+        default: v0.9.0
 
 permissions:
   contents: read
