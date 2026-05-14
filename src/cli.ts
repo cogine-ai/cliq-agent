@@ -4,6 +4,8 @@ import { createInterface as createPromptInterface } from 'node:readline/promises
 
 import { DEFAULT_POLICY_MODE } from './config.js';
 import { exportHandoff } from './handoff/export.js';
+import { formatHookFailureReason, runCommandHooks } from './hooks/runner.js';
+import type { HooksConfig } from './hooks/types.js';
 import type { HeadlessRunStatus, RuntimeEventEnvelope } from './headless/contract.js';
 import { writeJsonlEvent } from './headless/jsonl.js';
 import { runStdioJsonRpcServer } from './headless/rpc.js';
@@ -1238,6 +1240,45 @@ function createCliHooks(): RuntimeHook[] {
   ];
 }
 
+async function runCliSessionStartHooks({
+  commandHooks,
+  cwd,
+  session,
+  modelConfig
+}: {
+  commandHooks: HooksConfig;
+  cwd: string;
+  session: Session;
+  modelConfig: ResolvedModelConfig;
+}) {
+  for (const run of await runCommandHooks(
+    commandHooks,
+    {
+      schemaVersion: 1,
+      hookEventName: 'SessionStart',
+      sessionId: session.id,
+      cwd,
+      model: modelConfig.model
+    },
+    { cwd }
+  )) {
+    if (run.result.status === 'denied') {
+      const message = `SessionStart hook denied: ${formatHookFailureReason(run.result)}`;
+      process.stderr.write(`${message}\n`);
+      throw new ReportedCliError(message, { exitCode: 1 });
+    }
+    if (run.result.status === 'error') {
+      const message = `${run.hook.required ? 'required ' : ''}SessionStart hook failed: ${formatHookFailureReason(
+        run.result
+      )}`;
+      process.stderr.write(`${message}\n`);
+      if (run.hook.required) {
+        throw new ReportedCliError(message, { exitCode: 1 });
+      }
+    }
+  }
+}
+
 function firstLine(value: unknown) {
   if (typeof value !== 'string' || !value.trim()) {
     return null;
@@ -2151,6 +2192,13 @@ export async function runCli(argv: string[]) {
     process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
   }
 
+  await runCliSessionStartHooks({
+    commandHooks: assembly.commandHooks ?? {},
+    cwd,
+    session,
+    modelConfig
+  });
+
   // TUI is the default on TTY. Forks BEFORE creating the readline interface
   // so Ink owns stdin/stdout exclusively. The readline path below is the
   // explicit opt-out via --classic, CLIQ_TUI=0, or non-TTY contexts.
@@ -2206,6 +2254,7 @@ export async function runCli(argv: string[]) {
   const runner = createRunner({
     model: modelClient,
     hooks: [...assembly.hooks, ...createCliHooks()],
+    commandHooks: assembly.commandHooks ?? {},
     policy: createPolicyEngine({ mode: policy }),
     confirm: createConfirmTool(rl),
     instructions: assembly.instructions,
@@ -2411,6 +2460,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   const runner = createRunner({
     model: opts.modelClient,
     hooks: [...opts.assembly.hooks, ...tuiHooks],
+    commandHooks: opts.assembly.commandHooks ?? {},
     policy: livePolicy.engine,
     // The modal owns 'ask' resolution; runner.confirm is only invoked if the
     // wrapped engine ever returns 'ask' (it shouldn't), so this is a defense.

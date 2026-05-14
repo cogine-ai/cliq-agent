@@ -1,4 +1,6 @@
 import { DEFAULT_POLICY_MODE, MAX_LOOPS } from '../config.js';
+import { formatHookFailureReason, runCommandHooks, type CommandHookRunResult } from '../hooks/runner.js';
+import type { HookEventName, HookInput, HooksConfig } from '../hooks/types.js';
 import type { InstructionMessage } from '../instructions/types.js';
 import { classifyContextOverflow } from '../model/errors.js';
 import { findKnownModelDescriptor } from '../model/registry.js';
@@ -57,6 +59,7 @@ export function createRunner({
   model,
   registry = createToolRegistry(),
   hooks = [],
+  commandHooks = {},
   policy = createPolicyEngine({ mode: DEFAULT_POLICY_MODE }),
   instructions = async () => [],
   onEvent = async () => undefined,
@@ -68,6 +71,7 @@ export function createRunner({
   model: ModelClient;
   registry?: ReturnType<typeof createToolRegistry>;
   hooks?: RuntimeHook[];
+  commandHooks?: HooksConfig;
   policy?: ReturnType<typeof createPolicyEngine>;
   confirm?: PolicyConfirm;
   instructions?: (session: Session) => Promise<InstructionMessage[]>;
@@ -79,6 +83,86 @@ export function createRunner({
   if (transactions) {
     assertHeadlessCompatible(transactions);
   }
+
+  async function emitCommandHookWarning(eventName: HookEventName, run: CommandHookRunResult) {
+    await onEvent({
+      type: 'error',
+      stage: eventName === 'PermissionRequest' ? 'policy' : 'tool',
+      message: `${eventName} hook failed (${run.hook.command}): ${formatHookFailureReason(run.result)}`,
+      recoverable: true
+    });
+  }
+
+  async function runNonBlockingCommandHookEvent(input: HookInput) {
+    for (const run of await runCommandHooks(commandHooks, input, { cwd: input.cwd })) {
+      if (run.result.status !== 'ok') {
+        await emitCommandHookWarning(input.hookEventName, run);
+      }
+    }
+  }
+
+  async function runPreToolUseHooks(input: HookInput): Promise<ApprovalDecision | null> {
+    for (const run of await runCommandHooks(commandHooks, input, { cwd: input.cwd })) {
+      if (run.result.status === 'denied') {
+        return {
+          behavior: 'deny',
+          reason: formatHookFailureReason(run.result),
+          decidedBy: 'hook'
+        };
+      }
+      if (run.result.status === 'error') {
+        if (run.hook.required) {
+          return {
+            behavior: 'deny',
+            reason: `required PreToolUse hook failed: ${formatHookFailureReason(run.result)}`,
+            decidedBy: 'hook'
+          };
+        }
+        await emitCommandHookWarning('PreToolUse', run);
+      }
+    }
+    return null;
+  }
+
+  async function runPermissionRequestHooks(input: HookInput): Promise<ApprovalDecision | null> {
+    for (const run of await runCommandHooks(commandHooks, input, { cwd: input.cwd })) {
+      if (run.result.status === 'denied') {
+        return {
+          behavior: 'deny',
+          reason: formatHookFailureReason(run.result),
+          decidedBy: 'hook'
+        };
+      }
+      if (run.result.status === 'error') {
+        await emitCommandHookWarning('PermissionRequest', run);
+        continue;
+      }
+      const permissionDecision = run.result.output?.permissionDecision;
+      if (permissionDecision?.behavior === 'allow') {
+        return {
+          behavior: 'allow',
+          reason: permissionDecision.message,
+          decidedBy: 'hook'
+        };
+      }
+      if (permissionDecision?.behavior === 'deny') {
+        return {
+          behavior: 'deny',
+          reason: permissionDecision.message ?? 'permission request denied by hook',
+          decidedBy: 'hook'
+        };
+      }
+      if (run.result.output?.decision === 'allow') {
+        return {
+          behavior: 'allow',
+          reason: run.result.output.reason,
+          decidedBy: 'hook'
+        };
+      }
+    }
+    return null;
+  }
+
   return {
     async runTurn(
       session: Session,
@@ -139,6 +223,14 @@ export function createRunner({
         });
         session.lifecycle.lastUserInputAt = ts;
         await saveSession(cwd, session);
+        await runNonBlockingCommandHookEvent({
+          schemaVersion: 1,
+          hookEventName: 'UserPromptSubmit',
+          sessionId: session.id,
+          cwd,
+          prompt: userInput,
+          model: session.model?.model
+        });
         await throwIfCancelled();
 
         // Tx open at turn start (if tx mode is on).
@@ -401,44 +493,83 @@ export function createRunner({
                 await onEvent(e);
               });
             }
+            await runNonBlockingCommandHookEvent({
+              schemaVersion: 1,
+              hookEventName: 'Stop',
+              sessionId: session.id,
+              cwd,
+              finalMessage,
+              model: session.model?.model
+            });
             await onEvent({ type: 'final', message: finalMessage });
             return finalMessage;
           }
 
           const { definition } = registry.resolve(action);
+          const subject = buildToolApprovalSubject({
+            definition,
+            action,
+            ...(transactions
+              ? {
+                  tx: {
+                    enabled: true,
+                    ...(activeTxFromTxRunner ? { txId: activeTxFromTxRunner.id } : {}),
+                    mode: transactions.mode
+                  }
+                }
+              : {})
+          });
           await onEvent({ type: 'tool-start', tool: definition.name, preview: rawContent.slice(0, 120) });
           await throwIfCancelled();
           let result: ToolResult | null = null;
           let decision: ApprovalDecision | null = null;
+          let hookDenyEventName: 'PreToolUse' | 'PermissionRequest' | null = null;
 
           await throwIfCancelled();
           try {
-            const subject = buildToolApprovalSubject({
-              definition,
+            decision = await runPreToolUseHooks({
+              schemaVersion: 1,
+              hookEventName: 'PreToolUse',
+              sessionId: session.id,
+              cwd,
+              toolName: definition.name,
               action,
-              ...(transactions
-                ? {
-                    tx: {
-                      enabled: true,
-                      ...(activeTxFromTxRunner ? { txId: activeTxFromTxRunner.id } : {}),
-                      mode: transactions.mode
-                    }
-                  }
-                : {})
+              approvalSubject: subject,
+              model: session.model?.model
             });
-            decision = await policy.decide(subject);
-            if (decision.behavior === 'ask') {
-              if (!confirm) {
-                decision = {
-                  behavior: 'deny',
-                  reason: 'confirmation required but no confirmer is available',
-                  decidedBy: 'policy'
-                };
-              } else {
-                const approved = await confirm(decision.prompt);
-                decision = approved
-                  ? { behavior: 'allow', decidedBy: 'user' }
-                  : { behavior: 'deny', reason: 'user declined confirmation', decidedBy: 'user' };
+            if (decision?.behavior === 'deny' && decision.decidedBy === 'hook') {
+              hookDenyEventName = 'PreToolUse';
+            }
+            if (decision === null) {
+              decision = await policy.decide(subject);
+              if (decision.behavior === 'ask') {
+                const hookDecision = await runPermissionRequestHooks({
+                  schemaVersion: 1,
+                  hookEventName: 'PermissionRequest',
+                  sessionId: session.id,
+                  cwd,
+                  toolName: definition.name,
+                  action,
+                  approvalSubject: subject,
+                  model: session.model?.model
+                });
+                if (hookDecision) {
+                  decision = hookDecision;
+                  if (decision.behavior === 'deny') {
+                    hookDenyEventName = 'PermissionRequest';
+                  }
+                } else if (!confirm) {
+                  decision = {
+                    behavior: 'deny',
+                    reason: 'confirmation required but no confirmer is available',
+                    decidedBy: 'policy'
+                  };
+                } else {
+                  const approved = await confirm(decision.prompt);
+                  decision = approved
+                    ? { behavior: 'allow', decidedBy: 'user' }
+                    : { behavior: 'deny', reason: 'user declined confirmation', decidedBy: 'user' };
+                }
               }
             }
           } catch (error) {
@@ -461,7 +592,8 @@ export function createRunner({
               content: `TOOL_RESULT ${definition.name} ERROR\npolicy=${policy.mode}\n${decision.reason}`,
               meta: {
                 policy: policy.mode,
-                reason: decision.reason
+                reason: decision.reason,
+                ...(hookDenyEventName ? { hookEventName: hookDenyEventName } : {})
               }
             };
           } else if (result === null && decision !== null) {
@@ -522,6 +654,17 @@ export function createRunner({
             status: storedResult.status,
             content: storedResult.content,
             meta: storedResult.meta
+          });
+          await runNonBlockingCommandHookEvent({
+            schemaVersion: 1,
+            hookEventName: 'PostToolUse',
+            sessionId: session.id,
+            cwd,
+            toolName: definition.name,
+            action,
+            approvalSubject: subject,
+            toolResult: storedResult,
+            model: session.model?.model
           });
           await runHooks(hooks, 'afterTool', session, storedResult);
           await onEvent({ type: 'tool-end', tool: storedResult.tool, status: storedResult.status });

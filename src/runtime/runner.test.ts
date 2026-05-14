@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -39,6 +39,18 @@ async function createTempSession() {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-runner-workspace-'));
   cleanupDirs.push(cwd);
   return createSession(cwd);
+}
+
+function commandFor(scriptPath: string): string {
+  return `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
+}
+
+async function writeHookScript(cwd: string, name: string, source: string) {
+  const hooksDir = path.join(cwd, '.cliq', 'hooks');
+  await mkdir(hooksDir, { recursive: true });
+  const scriptPath = path.join(hooksDir, name);
+  await writeFile(scriptPath, source, 'utf8');
+  return commandFor(scriptPath);
 }
 
 test('registry resolves bash and edit tools', () => {
@@ -735,6 +747,502 @@ test('runner confirmation prompt for bash includes the actual command', async ()
   assert.match(prompts[0] ?? '', /Allow bash command\?/);
   assert.match(prompts[0] ?? '', /npm test/);
   assert.match(prompts[0] ?? '', /policy: confirm-bash/);
+});
+
+test('runner runs PreToolUse and PostToolUse command hooks around tool execution', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+  const prePath = path.join(session.cwd, 'pre.json');
+  const postPath = path.join(session.cwd, 'post.json');
+  const preCommand = await writeHookScript(
+    session.cwd,
+    'pre-tool-use.js',
+    `let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  const parsed = JSON.parse(input);
+  require('node:fs').writeFileSync(${JSON.stringify(prePath)}, JSON.stringify({
+    hookEventName: parsed.hookEventName,
+    sessionId: parsed.sessionId,
+    cwd: parsed.cwd,
+    toolName: parsed.toolName,
+    action: parsed.action,
+    approvalSubject: parsed.approvalSubject
+  }));
+});
+`
+  );
+  const postCommand = await writeHookScript(
+    session.cwd,
+    'post-tool-use.js',
+    `let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  const parsed = JSON.parse(input);
+  require('node:fs').writeFileSync(${JSON.stringify(postPath)}, JSON.stringify({
+    hookEventName: parsed.hookEventName,
+    toolName: parsed.toolName,
+    toolResult: parsed.toolResult
+  }));
+});
+`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    commandHooks: {
+      PreToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: preCommand }] }],
+      PostToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: postCommand }] }]
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              return {
+                tool: 'bash',
+                status: 'ok' as const,
+                content: 'TOOL_RESULT bash OK\n$ pwd\n(exit=0 signal=none)\n/tmp/workspace',
+                meta: { exit: 0 }
+              };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'show cwd');
+
+  const pre = JSON.parse(await readFile(prePath, 'utf8')) as {
+    hookEventName: string;
+    sessionId: string;
+    cwd: string;
+    toolName: string;
+    action: { bash: string };
+    approvalSubject: { kind: string; toolName: string };
+  };
+  const post = JSON.parse(await readFile(postPath, 'utf8')) as {
+    hookEventName: string;
+    toolName: string;
+    toolResult: { tool: string; status: string };
+  };
+
+  assert.equal(pre.hookEventName, 'PreToolUse');
+  assert.equal(pre.sessionId, session.id);
+  assert.equal(pre.cwd, session.cwd);
+  assert.equal(pre.toolName, 'bash');
+  assert.deepEqual(pre.action, { bash: 'pwd' });
+  assert.equal(pre.approvalSubject.kind, 'tool');
+  assert.equal(pre.approvalSubject.toolName, 'bash');
+  assert.equal(post.hookEventName, 'PostToolUse');
+  assert.equal(post.toolName, 'bash');
+  assert.equal(post.toolResult.tool, 'bash');
+  assert.equal(post.toolResult.status, 'ok');
+});
+
+test('runner blocks tool execution when PreToolUse command hook denies', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+  let executed = false;
+  const denyCommand = await writeHookScript(
+    session.cwd,
+    'deny-pre-tool-use.js',
+    `process.stderr.write('blocked by pre hook'); process.exit(2);`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    commandHooks: {
+      PreToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: denyCommand }] }]
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executed = true;
+              return { tool: 'bash', status: 'ok' as const, content: 'should not run', meta: {} };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'show cwd');
+  const toolRecord = session.records.find((record) => record.kind === 'tool');
+
+  assert.equal(executed, false);
+  assert.equal(toolRecord?.kind, 'tool');
+  assert.equal(toolRecord?.status, 'error');
+  assert.equal(toolRecord?.meta?.hookEventName, 'PreToolUse');
+  assert.equal(toolRecord?.meta?.reason, 'blocked by pre hook');
+});
+
+test('runner warns and continues for non-required PreToolUse infrastructure errors', async () => {
+  const session = await createTempSession();
+  const events: Array<{ type: string; message?: string; recoverable?: boolean }> = [];
+  let calls = 0;
+  let executed = false;
+  const failingCommand = await writeHookScript(
+    session.cwd,
+    'failing-pre-tool-use.js',
+    `process.stderr.write('hook crashed'); process.exit(9);`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    commandHooks: {
+      PreToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: failingCommand }] }]
+    },
+    onEvent(event) {
+      if (event.type === 'error') events.push(event);
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executed = true;
+              return { tool: 'bash', status: 'ok' as const, content: 'TOOL_RESULT bash OK', meta: {} };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  const finalMessage = await runner.runTurn(session, 'show cwd');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal(executed, true);
+  assert.equal(events.length, 1);
+  assert.match(events[0]?.message ?? '', /PreToolUse hook failed/i);
+  assert.equal(events[0]?.recoverable, true);
+});
+
+test('runner blocks tool execution for required PreToolUse infrastructure errors', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+  let executed = false;
+  const failingCommand = await writeHookScript(
+    session.cwd,
+    'required-failing-pre-tool-use.js',
+    `process.stderr.write('hook crashed'); process.exit(9);`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    commandHooks: {
+      PreToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: failingCommand, required: true }] }]
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executed = true;
+              return { tool: 'bash', status: 'ok' as const, content: 'should not run', meta: {} };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'show cwd');
+  const toolRecord = session.records.find((record) => record.kind === 'tool');
+
+  assert.equal(executed, false);
+  assert.equal(toolRecord?.status, 'error');
+  assert.equal(toolRecord?.meta?.hookEventName, 'PreToolUse');
+  assert.match(String(toolRecord?.meta?.reason ?? ''), /required PreToolUse hook failed/i);
+});
+
+test('runner lets PermissionRequest command hooks allow policy asks without user confirmation', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+  let executed = false;
+  let confirmCalls = 0;
+  const allowCommand = await writeHookScript(
+    session.cwd,
+    'allow-permission-request.js',
+    `process.stdout.write(JSON.stringify({ permissionDecision: { behavior: 'allow', message: 'approved by hook' } }));`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    confirm: async () => {
+      confirmCalls += 1;
+      return false;
+    },
+    commandHooks: {
+      PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: allowCommand }] }]
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executed = true;
+              return { tool: 'bash', status: 'ok' as const, content: 'TOOL_RESULT bash OK', meta: {} };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'show cwd');
+
+  assert.equal(executed, true);
+  assert.equal(confirmCalls, 0);
+});
+
+test('runner lets PermissionRequest command hooks deny policy asks', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+  let executed = false;
+  let confirmCalls = 0;
+  const denyCommand = await writeHookScript(
+    session.cwd,
+    'deny-permission-request.js',
+    `process.stdout.write(JSON.stringify({ permissionDecision: { behavior: 'deny', message: 'denied by hook' } }));`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    confirm: async () => {
+      confirmCalls += 1;
+      return true;
+    },
+    commandHooks: {
+      PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: denyCommand }] }]
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executed = true;
+              return { tool: 'bash', status: 'ok' as const, content: 'should not run', meta: {} };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'show cwd');
+  const toolRecord = session.records.find((record) => record.kind === 'tool');
+
+  assert.equal(executed, false);
+  assert.equal(confirmCalls, 0);
+  assert.equal(toolRecord?.status, 'error');
+  assert.equal(toolRecord?.meta?.reason, 'denied by hook');
+});
+
+test('runner falls back to user confirmation when PermissionRequest hooks make no decision', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+  let confirmCalls = 0;
+  const noDecisionCommand = await writeHookScript(
+    session.cwd,
+    'no-decision-permission-request.js',
+    `process.stdout.write(JSON.stringify({ additionalContext: 'not a decision' }));`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    confirm: async () => {
+      confirmCalls += 1;
+      return true;
+    },
+    commandHooks: {
+      PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: noDecisionCommand }] }]
+    }
+  });
+
+  await runner.runTurn(session, 'show cwd');
+
+  assert.equal(confirmCalls, 1);
+});
+
+test('runner does not invoke PermissionRequest hooks for read-only hard denies', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+  const markerPath = path.join(session.cwd, 'permission-hook-ran');
+  const markerCommand = await writeHookScript(
+    session.cwd,
+    'marker-permission-request.js',
+    `require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'ran');`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'read-only' }),
+    commandHooks: {
+      PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: markerCommand }] }]
+    }
+  });
+
+  await runner.runTurn(session, 'show cwd');
+
+  await assert.rejects(() => readFile(markerPath, 'utf8'), /ENOENT/);
+});
+
+test('runner runs UserPromptSubmit and Stop command hooks at turn boundaries', async () => {
+  const session = await createTempSession();
+  const promptPath = path.join(session.cwd, 'prompt.json');
+  const stopPath = path.join(session.cwd, 'stop.json');
+  const observedFinalEvents: string[] = [];
+  const promptCommand = await writeHookScript(
+    session.cwd,
+    'user-prompt-submit.js',
+    `let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  const parsed = JSON.parse(input);
+  require('node:fs').writeFileSync(${JSON.stringify(promptPath)}, JSON.stringify({
+    hookEventName: parsed.hookEventName,
+    prompt: parsed.prompt,
+    sessionId: parsed.sessionId
+  }));
+});
+`
+  );
+  const stopCommand = await writeHookScript(
+    session.cwd,
+    'stop.js',
+    `let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  const parsed = JSON.parse(input);
+  require('node:fs').writeFileSync(${JSON.stringify(stopPath)}, JSON.stringify({
+    hookEventName: parsed.hookEventName,
+    finalMessage: parsed.finalMessage
+  }));
+});
+`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    commandHooks: {
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: promptCommand }] }],
+      Stop: [{ hooks: [{ type: 'command', command: stopCommand }] }]
+    },
+    async onEvent(event) {
+      if (event.type === 'final') {
+        const stop = JSON.parse(await readFile(stopPath, 'utf8')) as { finalMessage: string };
+        observedFinalEvents.push(stop.finalMessage);
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'say done');
+
+  const prompt = JSON.parse(await readFile(promptPath, 'utf8')) as {
+    hookEventName: string;
+    prompt: string;
+    sessionId: string;
+  };
+  const stop = JSON.parse(await readFile(stopPath, 'utf8')) as { hookEventName: string; finalMessage: string };
+
+  assert.equal(prompt.hookEventName, 'UserPromptSubmit');
+  assert.equal(prompt.prompt, 'say done');
+  assert.equal(prompt.sessionId, session.id);
+  assert.equal(stop.hookEventName, 'Stop');
+  assert.equal(stop.finalMessage, 'done');
+  assert.deepEqual(observedFinalEvents, ['done']);
 });
 
 test('runner emits model lifecycle events without raw deltas', async () => {

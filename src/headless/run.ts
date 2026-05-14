@@ -1,6 +1,8 @@
 import { stat, realpath } from 'node:fs/promises';
 
 import { DEFAULT_POLICY_MODE } from '../config.js';
+import { formatHookFailureReason, runCommandHooks } from '../hooks/runner.js';
+import type { HooksConfig } from '../hooks/types.js';
 import { resolveModelConfig } from '../model/config.js';
 import type { PartialModelConfig } from '../model/config.js';
 import { createModelClient } from '../model/index.js';
@@ -152,6 +154,45 @@ function normalizeCaughtError(error: unknown): HeadlessRunError {
   return errorFrom('internal-error', 'assembly', message);
 }
 
+async function runHeadlessSessionStartHooks({
+  commandHooks,
+  cwd,
+  session,
+  modelConfig,
+  emitWarning
+}: {
+  commandHooks: HooksConfig;
+  cwd: string;
+  session: Session;
+  modelConfig: ResolvedModelConfig;
+  emitWarning(message: string): Promise<void>;
+}) {
+  for (const run of await runCommandHooks(
+    commandHooks,
+    {
+      schemaVersion: 1,
+      hookEventName: 'SessionStart',
+      sessionId: session.id,
+      cwd,
+      model: modelConfig.model
+    },
+    { cwd }
+  )) {
+    if (run.result.status === 'denied') {
+      throw errorFrom('tool-error', 'tool', `SessionStart hook denied: ${formatHookFailureReason(run.result)}`, true);
+    }
+    if (run.result.status === 'error') {
+      const message = `${run.hook.required ? 'required ' : ''}SessionStart hook failed: ${formatHookFailureReason(
+        run.result
+      )}`;
+      if (run.hook.required) {
+        throw errorFrom('tool-error', 'tool', message, true);
+      }
+      await emitWarning(message);
+    }
+  }
+}
+
 export async function runHeadless(
   request: HeadlessRunRequest,
   options: HeadlessRunOptions & RunHeadlessDependencies = {}
@@ -266,6 +307,27 @@ export async function runHeadless(
       );
     }
 
+    await runHeadlessSessionStartHooks({
+      commandHooks: assembly.commandHooks ?? {},
+      cwd: request.cwd,
+      session,
+      modelConfig,
+      async emitWarning(message) {
+        await emit(
+          createEvent(
+            'error',
+            {
+              code: 'tool-error',
+              stage: 'tool',
+              message,
+              recoverable: true
+            },
+            { sessionId: session.id, turn: runScope.intendedTurn }
+          )
+        );
+      }
+    });
+
     // Build TxRunnerOptions when transactions mode is active.
     const txMode = request.txMode ?? workspaceConfig.transactions?.mode ?? 'off';
     let transactions: TxRunnerOptions | undefined;
@@ -289,6 +351,7 @@ export async function runHeadless(
     const runner = createRunner({
       model: modelClient,
       hooks: [...assembly.hooks, ...(options.hooks ?? [])],
+      commandHooks: assembly.commandHooks ?? {},
       policy: createPolicyEngine({ mode: policy }),
       confirm: options.confirm,
       instructions: assembly.instructions,
