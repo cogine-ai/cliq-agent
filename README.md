@@ -43,9 +43,18 @@ cliq "inspect this repo and summarize the architecture"
 
 When you launch `cliq` (or `cliq chat`) on a TTY, you enter the Ink-based TUI by default. It renders an inline three-zone layout — scrolling transcript, input bar, and status line — and stays compatible with shell scrollback (no alt-screen).
 
-Inside the TUI: slash commands (`/exit`, `/quit`, `/reset`, `/help`, `/policy <mode>`) with palette popover and Tab completion; Ctrl+C cancels an active turn or clears the input; Ctrl+D exits on empty input; Ctrl+O folds/unfolds the most recent bash output; an approval modal handles `--policy confirm-*` and interactive `--tx-apply` decisions.
+Inside the TUI:
 
-Opt out of the TUI with `--classic` or `CLIQ_TUI=0` to fall back to the legacy readline REPL:
+- Slash commands (`/exit`, `/quit`, `/reset`, `/help`, `/policy <mode>`) open a
+  palette popover and support Tab completion.
+- ↑ / ↓ recall previously submitted prompts while preserving any in-progress
+  draft; ← / → move the cursor inside the input buffer.
+- Shift+Tab rotates through policy modes; Ctrl+C cancels an active turn or clears
+  input; Ctrl+D exits on empty input; Ctrl+O folds or unfolds the most recent
+  bash output.
+- An approval modal handles `--policy confirm-*` and interactive `--tx-apply` decisions.
+
+The TUI runs by default on a TTY, but you can opt in explicitly with `--tui` (useful when scripting around the default). Opt out with `--classic` or `CLIQ_TUI=0` to fall back to the legacy readline REPL:
 
 ```bash
 cliq --classic
@@ -301,11 +310,10 @@ cliq tx abort <txId>
 
 Current preview limits:
 
-- `cliq tx diff`, `cliq tx show`, and `cliq tx validators` are not implemented yet.
 - `edit-tx` stages text replacements in existing files. File creation, deletion, rename, mode changes, and shell-driven mutations are still outside the staged diff.
 - `bash` runs against the real workspace. Its side effects are recorded as `BashEffect`s for review, but they are not rolled back if the tx is aborted.
 - Validator override names must match the validator result name exactly. Shell validators use the configured `name` as-is, for example `tsc`; Cliq does not add a `shell:` prefix.
-- `transactions.bashPolicy=confirm` is intentionally rejected in v0.8; use `passthrough` or `deny` until the interactive confirm callback is wired.
+- `transactions.bashPolicy=confirm` is accepted by config, but the interactive prompt callback isn't yet wired into the tx-mode bash tool, so invocations conservatively deny. Use `passthrough` or `deny` until the prompt is connected to the TUI.
 
 When a transaction's apply leaves files partially written (e.g., a disk error mid-write), aborting requires an explicit `--restore-confirmed` (rolls back via the pre-apply ghost snapshot) or `--keep-partial` (leaves the partial state in place).
 
