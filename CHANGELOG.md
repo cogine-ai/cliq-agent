@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Workspace trust gate** — interactive chat prompts once per canonical workspace before reading `./.cliq/config`; headless/`run --jsonl`/`rpc`/`tx validate|apply` fail closed unless `CLIQ_TRUST_WORKSPACE` or persisted trust permits it (#48).
 
+### Fixed
+
+- Trust gate polish from review: clearer `--classic` disclosure, canonical `realpath` required for trust keys, corrupted `trust.json` ignored like “no record”, Ink prompt guard against duplicate decisions (#61).
 
 ## [0.9.0] - 2026-05-14
 

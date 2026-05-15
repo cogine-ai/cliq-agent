@@ -18,7 +18,8 @@ import { ensureFresh, ensureSession, makeId, resolveCliqHome, workspaceIdFromRea
 import type { Session } from '../session/types.js';
 import {
   createWorkspaceTrustContext,
-  evaluateWorkspaceTrustForNonInteractive
+  evaluateWorkspaceTrustForNonInteractive,
+  WorkspaceTrustError
 } from '../session/trust.js';
 import { recoverAtStart, type CoordinatorContext } from '../workspace/transactions/coordinator.js';
 import {
@@ -134,6 +135,10 @@ function errorStatus(error: HeadlessRunError): 'failed' | 'cancelled' {
 function normalizeCaughtError(error: unknown): HeadlessRunError {
   if (isHeadlessRunError(error)) {
     return error;
+  }
+
+  if (error instanceof WorkspaceTrustError) {
+    return errorFrom('invalid-input', 'session', error.message);
   }
 
   const message = error instanceof Error ? error.message : String(error);

@@ -95,11 +95,14 @@ export async function createWorkspaceTrustContext(
     throw error;
   }
 
-  let workspaceRealPath = cwd;
+  let workspaceRealPath: string;
   try {
     workspaceRealPath = await fs.realpath(cwd);
-  } catch {
-    // fall through with cwd verbatim
+  } catch (error) {
+    throw new WorkspaceTrustError(
+      `cannot resolve canonical workspace path for trust gate: ${cwd} (${error instanceof Error ? error.message : String(error)})`,
+      2
+    );
   }
 
   return {
@@ -118,7 +121,13 @@ export async function readPersistedWorkspaceTrust(
 ): Promise<PersistedWorkspaceTrustDecision | undefined> {
   const target = workspaceTrustRecordPath(ctx);
   try {
-    const parsed = JSON.parse(await fs.readFile(target, 'utf8')) as unknown;
+    const raw = await fs.readFile(target, 'utf8');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
     if (!parsed || typeof parsed !== 'object') {
       return undefined;
     }

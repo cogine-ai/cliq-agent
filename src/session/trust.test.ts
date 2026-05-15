@@ -81,3 +81,17 @@ test('persisted trusted decision unlocks non-interactive evaluation', async () =
   const verdict = await evaluateWorkspaceTrustForNonInteractive(ctx, {});
   assert.deepEqual(verdict, { ok: true as const, source: 'persisted' });
 });
+
+test('corrupted trust.json is treated as absent record (fail-closed for headless)', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-trust-ws-corrupt-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-trust-home-corrupt-'));
+  cleanup.push(cwd, home);
+
+  const ctx = await createWorkspaceTrustContext(cwd, home);
+  await mkdir(path.dirname(workspaceTrustRecordPath(ctx)), { recursive: true });
+  await writeFile(workspaceTrustRecordPath(ctx), '{"version":1,');
+
+  assert.equal(await readPersistedWorkspaceTrust(ctx), undefined);
+  const verdict = await evaluateWorkspaceTrustForNonInteractive(ctx, {});
+  assert.equal(verdict.ok, false);
+});

@@ -40,6 +40,7 @@ import {
   workspaceTrustRecordPath,
   writePersistedWorkspaceTrust
 } from './session/trust.js';
+import type { WorkspaceTrustContext } from './session/trust.js';
 import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
 import type { Session } from './session/types.js';
 import type { ToolResult } from './tools/types.js';
@@ -1560,17 +1561,31 @@ async function prepareWorkspaceRestore(
 }
 
 async function denyIfWorkspaceUntrustedNonInteractiveRuntime(cwd: string) {
-  const ctx = await createWorkspaceTrustContext(cwd);
-  const verdict = await evaluateWorkspaceTrustForNonInteractive(ctx);
-  if (!verdict.ok) {
-    process.stderr.write(`${verdict.message}\n`);
-    throw new ReportedCliError(verdict.message, { exitCode: 1 });
+  try {
+    const ctx = await createWorkspaceTrustContext(cwd);
+    const verdict = await evaluateWorkspaceTrustForNonInteractive(ctx);
+    if (!verdict.ok) {
+      process.stderr.write(`${verdict.message}\n`);
+      throw new ReportedCliError(verdict.message, { exitCode: 1 });
+    }
+  } catch (error) {
+    if (error instanceof ReportedCliError) {
+      throw error;
+    }
+    if (error instanceof WorkspaceTrustError) {
+      process.stderr.write(`${error.message}\n`);
+      throw new ReportedCliError(error.message, { exitCode: error.exitCode });
+    }
+    throw error;
   }
 }
 
 async function promptClassicWorkspaceTrust(cwdRaw: string, workspaceRealPath: string): Promise<boolean> {
   const readlinePromises = await import('node:readline/promises');
-  process.stdout.write('\nTrusted workspace gate — Cliq will load `.cliq/config` (hooks, extensions, validators) for:\n');
+  process.stdout.write(
+    '\nTrusted workspace gate — if you approve, Cliq loads `.cliq/config` and may read or edit files under the workspace, ' +
+      'and run repo-configured hooks, extension scripts, and validators. Paths:\n'
+  );
   process.stdout.write(
     `  ${cwdRaw === workspaceRealPath ? workspaceRealPath : `${cwdRaw} → ${workspaceRealPath}`}\n`
   );
@@ -1596,7 +1611,15 @@ async function ensureInteractiveWorkspaceTrustedForRuntime(opts: {
   stdoutIsTTY: boolean;
   preferInkTui: boolean;
 }) {
-  const ctx = await createWorkspaceTrustContext(opts.cwd);
+  let ctx: WorkspaceTrustContext;
+  try {
+    ctx = await createWorkspaceTrustContext(opts.cwd);
+  } catch (error) {
+    if (error instanceof WorkspaceTrustError) {
+      throw new ReportedCliError(error.message, { exitCode: error.exitCode });
+    }
+    throw error;
+  }
   try {
     const envTrust = parseCliqTrustWorkspaceEnv();
     if (envTrust === 'deny') {

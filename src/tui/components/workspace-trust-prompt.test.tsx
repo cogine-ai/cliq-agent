@@ -15,6 +15,7 @@ test('workspace trust ink prompt renders path and honours y/n/escape decisions',
   );
 
   assert.match(trusted.lastFrame() ?? '', /canonical: \/canonical\/project/);
+  assert.match(trusted.lastFrame() ?? '', /\.cliq\/config/);
 
   trusted.stdin.write('y');
   await flush();
