@@ -16,6 +16,10 @@ import { createRunner } from '../runtime/runner.js';
 import type { TxRunnerOptions } from '../runtime/tx-runner.js';
 import { ensureFresh, ensureSession, makeId, resolveCliqHome, workspaceIdFromRealPath } from '../session/store.js';
 import type { Session } from '../session/types.js';
+import {
+  createWorkspaceTrustContext,
+  evaluateWorkspaceTrustForNonInteractive
+} from '../session/trust.js';
 import { recoverAtStart, type CoordinatorContext } from '../workspace/transactions/coordinator.js';
 import {
   emptyHeadlessArtifacts,
@@ -230,6 +234,12 @@ export async function runHeadless(
       throw errorFrom('cancelled', 'cancel', 'run cancelled');
     }
     await validateRequest(request);
+
+    const trustCtx = await createWorkspaceTrustContext(request.cwd);
+    const trustVerdict = await evaluateWorkspaceTrustForNonInteractive(trustCtx);
+    if (!trustVerdict.ok) {
+      throw errorFrom('invalid-input', 'session', trustVerdict.message);
+    }
 
     const session = request.session?.mode === 'new' ? await ensureFresh(request.cwd) : await ensureSession(request.cwd);
     const policy = request.policy ?? DEFAULT_POLICY_MODE;
