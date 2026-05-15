@@ -1162,6 +1162,61 @@ async function createCliTxFixture(env: CliTestEnv) {
   return txId;
 }
 
+test('runCli tx validate --json emits trust refusal as stdout JSON instead of stderr only', async () => {
+  await withCliTestEnv('tx-validate-trust-json', async (env) => {
+    const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
+    delete process.env.CLIQ_TRUST_WORKSPACE;
+
+    try {
+      await assert.rejects(
+        () => runCli(['node', 'src/index.ts', 'tx', 'validate', 'tx_any', '--json']),
+        isReportedCliError
+      );
+    } finally {
+      if (previousTrust === undefined) {
+        delete process.env.CLIQ_TRUST_WORKSPACE;
+      } else {
+        process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+      }
+    }
+
+    const payloads = env.output
+      .join('')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { type?: string; message?: string });
+
+    assert.equal(payloads.length, 1);
+    assert.equal(payloads[0]?.type, 'error');
+    assert.ok(
+      /untrusted workspace|non-interactive mode/i.exec(payloads[0]?.message ?? ''),
+      'expected gate copy to mention non-interactive refuse'
+    );
+    assert.equal(env.stderrText().trim(), '');
+  });
+});
+
+test('runCli bare chat surfaces CLIQ_TRUST_WORKSPACE=deny on stderr before exit', async () => {
+  await withCliTestEnv('chat-trust-deny-stderr', async (env) => {
+    const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
+    process.env.CLIQ_TRUST_WORKSPACE = 'deny';
+
+    try {
+      await assert.rejects(() => runCli(['node', 'src/index.ts']), isReportedCliError);
+    } finally {
+      if (previousTrust === undefined) {
+        delete process.env.CLIQ_TRUST_WORKSPACE;
+      } else {
+        process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+      }
+    }
+
+    assert.match(env.stderrText(), /CLIQ_TRUST_WORKSPACE=deny/);
+    assert.ok(env.stderrText().includes(env.cwd), 'message should cite the workspace path');
+  });
+});
+
 test('runCli tx review commands inspect the provided or active transaction', async () => {
   await withCliTestEnv('tx-review', async (env) => {
     const txId = await createCliTxFixture(env);
