@@ -30,6 +30,17 @@ import {
 import { estimateRecordTokens } from './session/auto-compaction.js';
 import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
+import {
+  createWorkspaceTrustContext,
+  evaluateWorkspaceTrustForNonInteractive,
+  formatTrustResetHint,
+  parseCliqTrustWorkspaceEnv,
+  readPersistedWorkspaceTrust,
+  WorkspaceTrustError,
+  workspaceTrustRecordPath,
+  writePersistedWorkspaceTrust
+} from './session/trust.js';
+import type { WorkspaceTrustContext } from './session/trust.js';
 import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
 import type { Session } from './session/types.js';
 import type { ToolResult } from './tools/types.js';
@@ -424,11 +435,21 @@ export function renderUnhandledError(error: unknown) {
     return null;
   }
 
+  if (error instanceof WorkspaceTrustError) {
+    return null;
+  }
+
   return error instanceof Error ? error.message : String(error);
 }
 
 export function cliExitCode(error: unknown) {
-  return isReportedCliError(error) && error.exitCode !== undefined ? error.exitCode : 1;
+  if (isReportedCliError(error)) {
+    return error.exitCode ?? 1;
+  }
+  if (error instanceof WorkspaceTrustError) {
+    return error.exitCode;
+  }
+  return 1;
 }
 
 export function resolveTxIdForReview(opts: {
@@ -1215,6 +1236,8 @@ Env:
   OPENAI_COMPATIBLE_API_KEY Optional for openai-compatible
   CLIQ_MODEL_*              Optional provider/model/base URL/streaming defaults
   CLIQ_POLICY_MODE          Optional default policy mode
+  CLIQ_TRUST_WORKSPACE       trust | deny — non-interactive/CI shortcut to trust or forbid workspace runtime gates
+                             (trusted | untrusted synonyms). Interactive chat still prompts unless set.
   CLIQ_TUI                  Set to "0" to fall back to the legacy readline REPL
 `);
 }
@@ -1537,6 +1560,119 @@ async function prepareWorkspaceRestore(
   await createRestoreSafetyCheckpoint(cwd, session, checkpointId);
 }
 
+async function denyIfWorkspaceUntrustedNonInteractiveRuntime(cwd: string) {
+  try {
+    const ctx = await createWorkspaceTrustContext(cwd);
+    const verdict = await evaluateWorkspaceTrustForNonInteractive(ctx);
+    if (!verdict.ok) {
+      process.stderr.write(`${verdict.message}\n`);
+      throw new ReportedCliError(verdict.message, { exitCode: 1 });
+    }
+  } catch (error) {
+    if (error instanceof ReportedCliError) {
+      throw error;
+    }
+    if (error instanceof WorkspaceTrustError) {
+      process.stderr.write(`${error.message}\n`);
+      throw new ReportedCliError(error.message, { exitCode: error.exitCode });
+    }
+    throw error;
+  }
+}
+
+async function promptClassicWorkspaceTrust(cwdRaw: string, workspaceRealPath: string): Promise<boolean> {
+  const readlinePromises = await import('node:readline/promises');
+  process.stdout.write(
+    '\nTrusted workspace gate — if you approve, Cliq loads `.cliq/config` and may read or edit files under the workspace, ' +
+      'and run repo-configured hooks, extension scripts, and validators. Paths:\n'
+  );
+  process.stdout.write(
+    `  ${cwdRaw === workspaceRealPath ? workspaceRealPath : `${cwdRaw} → ${workspaceRealPath}`}\n`
+  );
+  process.stdout.write(
+    'Approve only intentional directories — this gate is separate from `--policy` tool approvals.\n'
+  );
+  const rl = readlinePromises.createInterface({
+    input: process.stdin as NodeJS.ReadableStream,
+    output: process.stdout as NodeJS.WritableStream
+  });
+  try {
+    const answer = await rl.question('Trust this workspace? [y/N] ');
+    const norm = answer.trim().toLowerCase();
+    return norm === 'y' || norm === 'yes';
+  } finally {
+    rl.close();
+  }
+}
+
+async function ensureInteractiveWorkspaceTrustedForRuntime(opts: {
+  cwd: string;
+  stdinIsTTY: boolean;
+  stdoutIsTTY: boolean;
+  preferInkTui: boolean;
+}) {
+  let ctx: WorkspaceTrustContext;
+  try {
+    ctx = await createWorkspaceTrustContext(opts.cwd);
+  } catch (error) {
+    if (error instanceof WorkspaceTrustError) {
+      throw new ReportedCliError(error.message, { exitCode: error.exitCode });
+    }
+    throw error;
+  }
+  try {
+    const envTrust = parseCliqTrustWorkspaceEnv();
+    if (envTrust === 'deny') {
+      throw new ReportedCliError(
+        `CLIQ_TRUST_WORKSPACE=deny blocks Cliq workspace runtime for "${ctx.workspaceRealPath}"`,
+        { exitCode: 1 }
+      );
+    }
+    if (envTrust === 'trust') {
+      return;
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceTrustError) {
+      throw new ReportedCliError(error.message, { exitCode: error.exitCode });
+    }
+    throw error;
+  }
+
+  const persisted = await readPersistedWorkspaceTrust(ctx);
+  if (persisted === 'trusted') {
+    return;
+  }
+  if (persisted === 'denied') {
+    throw new ReportedCliError(
+      `Trusted workspace previously declined for "${ctx.workspaceRealPath}". ${formatTrustResetHint(workspaceTrustRecordPath(ctx))}`,
+      { exitCode: 1 }
+    );
+  }
+
+  if (!opts.stdinIsTTY || !opts.stdoutIsTTY) {
+    throw new ReportedCliError(
+      'Cannot prompt for workspace trust unless stdin and stdout are both attached to a terminal (TTY). Non-interactive mode requires CLIQ_TRUST_WORKSPACE=trust.',
+      { exitCode: 1 }
+    );
+  }
+
+  let accepted = false;
+  if (opts.preferInkTui) {
+    const { mountWorkspaceTrustDialogAndWait } = await import('./tui/mount-workspace-trust.js');
+    accepted = await mountWorkspaceTrustDialogAndWait(
+      ctx.workspaceRealPath,
+      opts.cwd !== ctx.workspaceRealPath ? opts.cwd : undefined
+    );
+  } else {
+    accepted = await promptClassicWorkspaceTrust(opts.cwd, ctx.workspaceRealPath);
+  }
+
+  await writePersistedWorkspaceTrust(ctx, accepted ? 'trusted' : 'denied');
+  if (!accepted) {
+    throw new ReportedCliError(`Declined trusting workspace "${ctx.workspaceRealPath}"`, { exitCode: 0 });
+  }
+}
+
 export async function runCli(argv: string[]) {
   const parsed = parseArgs(argv);
   const { cmd, prompt, policy, skills, model: cliModel } = parsed;
@@ -1559,6 +1695,7 @@ export async function runCli(argv: string[]) {
   }
 
   if (cmd === 'rpc') {
+    await denyIfWorkspaceUntrustedNonInteractiveRuntime(cwd);
     await runStdioJsonRpcServer();
     return;
   }
@@ -1844,6 +1981,7 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-validate') {
+      await denyIfWorkspaceUntrustedNonInteractiveRuntime(cwd);
       // Per spec §A.6: every tx subcommand handler runs crash recovery first.
       await coordRecoverAtStart(ctx);
       const wsCfg = await loadWorkspaceConfig(cwd);
@@ -1916,6 +2054,7 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-apply') {
+      await denyIfWorkspaceUntrustedNonInteractiveRuntime(cwd);
       // Per spec §A.6: every tx subcommand handler runs crash recovery first.
       await coordRecoverAtStart(ctx);
 
@@ -2152,6 +2291,13 @@ export async function runCli(argv: string[]) {
     );
     throw new ReportedCliError('--tui requires a TTY', { exitCode: 1 });
   }
+
+  await ensureInteractiveWorkspaceTrustedForRuntime({
+    cwd,
+    stdinIsTTY: Boolean(process.stdin.isTTY),
+    stdoutIsTTY: Boolean(process.stdout.isTTY),
+    preferInkTui: wantsTui
+  });
 
   const session = await ensureSession(cwd);
   const assembly = await createRuntimeAssembly({

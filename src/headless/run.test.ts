@@ -9,6 +9,7 @@ import type { RuntimeEventEnvelope } from './contract.js';
 import { runHeadless } from './run.js';
 
 const previousHome = process.env.CLIQ_HOME;
+const previousTrustWorkspace = process.env.CLIQ_TRUST_WORKSPACE;
 const cleanupDirs: string[] = [];
 
 test.after(async () => {
@@ -16,6 +17,11 @@ test.after(async () => {
     delete process.env.CLIQ_HOME;
   } else {
     process.env.CLIQ_HOME = previousHome;
+  }
+  if (previousTrustWorkspace === undefined) {
+    delete process.env.CLIQ_TRUST_WORKSPACE;
+  } else {
+    process.env.CLIQ_TRUST_WORKSPACE = previousTrustWorkspace;
   }
   await Promise.all(cleanupDirs.map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -25,6 +31,7 @@ async function setupWorkspace() {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-run-workspace-'));
   cleanupDirs.push(home, cwd);
   process.env.CLIQ_HOME = home;
+  process.env.CLIQ_TRUST_WORKSPACE = 'trust';
   return { home, cwd };
 }
 
@@ -49,6 +56,28 @@ function finalModel(message = 'done'): ModelClient {
     }
   };
 }
+
+test('runHeadless refuses non-interactive runs without persisted workspace trust', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-no-trust-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-no-trust-ws-'));
+  cleanupDirs.push(home, cwd);
+  process.env.CLIQ_HOME = home;
+  delete process.env.CLIQ_TRUST_WORKSPACE;
+
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'never runs',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('ignored') }
+  );
+
+  assert.equal(output.status, 'failed');
+  assert.ok(output.error);
+  assert.match(output.error!.message, /CLIQ_TRUST_WORKSPACE=/);
+});
 
 test('runHeadless emits run-start through run-end for a completed run', async () => {
   const { cwd } = await setupWorkspace();

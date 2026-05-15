@@ -23,6 +23,7 @@ import {
 } from './cli.js';
 import { createCheckpoint } from './session/checkpoints.js';
 import { createSession, ensureSession, saveSession, sessionFilePath } from './session/store.js';
+import { WorkspaceTrustError } from './session/trust.js';
 import type { ToolResult } from './tools/types.js';
 import { appendBashEffect } from './workspace/transactions/bash-effects.js';
 import {
@@ -884,6 +885,7 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
+  const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
   let stdout = '';
   let stderr = '';
   const stdoutWrite = process.stdout.write;
@@ -904,6 +906,7 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
 
   try {
     process.env.CLIQ_HOME = home;
+    process.env.CLIQ_TRUST_WORKSPACE = 'trust';
     await assert.rejects(
       () =>
         runCli([
@@ -924,6 +927,11 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
   } finally {
     process.stdout.write = stdoutWrite;
     process.stderr.write = stderrWrite;
+    if (previousTrust === undefined) {
+      delete process.env.CLIQ_TRUST_WORKSPACE;
+    } else {
+      process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+    }
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
     } else {
@@ -944,6 +952,7 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-jsonl-home-'));
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
+  const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
   const previousStdoutWrite = process.stdout.write;
   const previousStderrWrite = process.stderr.write;
   const fetchMock = mock.method(globalThis, 'fetch', async () => {
@@ -954,6 +963,7 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
 
   process.chdir(cwd);
   process.env.CLIQ_HOME = home;
+  process.env.CLIQ_TRUST_WORKSPACE = 'trust';
   process.stdout.write = ((chunk: string | Uint8Array) => {
     chunks.push(String(chunk));
     return true;
@@ -987,6 +997,11 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
     process.stdout.write = previousStdoutWrite;
     process.stderr.write = previousStderrWrite;
     fetchMock.mock.restore();
+    if (previousTrust === undefined) {
+      delete process.env.CLIQ_TRUST_WORKSPACE;
+    } else {
+      process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+    }
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
     } else {
@@ -1006,6 +1021,14 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
   assert.equal(lines.some((line) => JSON.parse(line).type === 'error'), true);
   assert.equal(JSON.parse(lines.at(-1)!).type, 'run-end');
   assert.equal(stderrChunks.join('').trim(), '');
+});
+
+test('renderUnhandledError suppresses workspace trust sentinel errors', () => {
+  assert.equal(renderUnhandledError(new WorkspaceTrustError('workspace trust declined', 0)), null);
+});
+
+test('cliExitCode reads WorkspaceTrustError exit codes', () => {
+  assert.equal(cliExitCode(new WorkspaceTrustError('trust env invalid', 2)), 2);
 });
 
 test('renderUnhandledError suppresses errors already reported by runtime events', () => {
