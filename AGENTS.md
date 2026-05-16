@@ -14,7 +14,7 @@ overrides it for a subtree.
 - Source layout: `src/` (CLI, runtime, session, TUI, transactions, headless,
   workspace, tools); tests live next to the code as `*.test.ts`.
 
-## Build, test, lint
+## Build and test
 
 Before pushing or opening a PR, the following must succeed locally:
 
