@@ -16,6 +16,33 @@ test('buildToolApprovalSubject creates a bash approval subject with command payl
   assert.deepEqual(subject.action, { bash: 'npm test' });
   assert.equal(subject.display.title, 'Allow bash command?');
   assert.equal(subject.display.command, 'npm test');
+  if (subject.kind === 'tool') {
+    assert.deepEqual(subject.channel, { kind: 'bash', commandHead: 'npm' });
+  }
+});
+
+test('buildToolApprovalSubject extracts a clean command head for bash with env prefixes', () => {
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: 'NODE_ENV=production sudo -u deploy git push' }
+  });
+
+  if (subject.kind === 'tool') {
+    assert.deepEqual(subject.channel, { kind: 'bash', commandHead: 'git' });
+  }
+});
+
+test('buildToolApprovalSubject reports empty commandHead for unidentifiable bash lines', () => {
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: '&& ls' }
+  });
+
+  if (subject.kind === 'tool') {
+    // Empty string is the explicit "no head" sentinel; allowlist matching
+    // MUST fall through to ask/preset instead of guessing.
+    assert.deepEqual(subject.channel, { kind: 'bash', commandHead: '' });
+  }
 });
 
 test('buildToolApprovalSubject marks TX edits as staged and includes the path', () => {
@@ -28,7 +55,10 @@ test('buildToolApprovalSubject marks TX edits as staged and includes the path', 
   assert.equal(subject.kind, 'tool');
   assert.equal(subject.display.title, 'Allow staged edit?');
   assert.equal(subject.display.path, 'src/index.ts');
-  assert.deepEqual(subject.tx, { enabled: true, txId: 'tx_review', mode: 'edit' });
+  if (subject.kind === 'tool') {
+    assert.deepEqual(subject.channel, { kind: 'fs-write', path: 'src/index.ts', op: 'modify' });
+    assert.deepEqual(subject.tx, { enabled: true, txId: 'tx_review', mode: 'edit' });
+  }
 });
 
 test('buildToolApprovalSubject creates fallback display detail for other tools', () => {
@@ -40,6 +70,35 @@ test('buildToolApprovalSubject creates fallback display detail for other tools',
   assert.equal(subject.kind, 'tool');
   assert.equal(subject.display.title, 'Allow grep?');
   assert.equal(subject.display.detail, '{"grep":{"path":"src","pattern":"createRunner"}}');
+  if (subject.kind === 'tool') {
+    assert.deepEqual(subject.channel, { kind: 'fs-read', path: 'src' });
+  }
+});
+
+test('buildToolApprovalSubject derives fs-read channel for read/ls/find with omitted path', () => {
+  const ls = buildToolApprovalSubject({
+    definition: { name: 'ls', access: 'read' },
+    action: { ls: {} }
+  });
+  if (ls.kind === 'tool') {
+    assert.deepEqual(ls.channel, { kind: 'fs-read', path: '' });
+  }
+
+  const find = buildToolApprovalSubject({
+    definition: { name: 'find', access: 'read' },
+    action: { find: { name: '*.ts' } }
+  });
+  if (find.kind === 'tool') {
+    assert.deepEqual(find.channel, { kind: 'fs-read', path: '' });
+  }
+
+  const read = buildToolApprovalSubject({
+    definition: { name: 'read', access: 'read' },
+    action: { read: { path: 'docs/README.md' } }
+  });
+  if (read.kind === 'tool') {
+    assert.deepEqual(read.channel, { kind: 'fs-read', path: 'docs/README.md' });
+  }
 });
 
 test('buildToolApprovalSubject truncates long fallback display detail', () => {

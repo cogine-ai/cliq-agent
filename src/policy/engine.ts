@@ -1,13 +1,36 @@
+import {
+  EMPTY_PERMISSION_TABLE,
+  matchAgainstTable,
+  type PermissionRule,
+  type PermissionTable,
+  type TableDecision
+} from './decision-table.js';
 import type { ApprovalDecision, ApprovalSubject, PolicyMode } from './types.js';
 
 type PolicyEngineOptions = {
   mode: PolicyMode;
+  /**
+   * Optional decision table consulted before the legacy {@link PolicyMode}
+   * preset. Defaults to {@link EMPTY_PERMISSION_TABLE}, in which case the
+   * engine behaves exactly like the pre-#62-A implementation. The
+   * deny/allow/ask matcher only applies to tool subjects with a
+   * {@link AccessChannel}; tx-apply and permission-request subjects always
+   * fall through to the preset.
+   */
+  table?: PermissionTable;
 };
 
-export function createPolicyEngine({ mode }: PolicyEngineOptions) {
+export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: PolicyEngineOptions) {
   async function decide(subject: ApprovalSubject): Promise<ApprovalDecision> {
     if (subject.kind === 'permission-request') {
       return decidePermissionRequest(subject);
+    }
+
+    if (subject.kind === 'tool') {
+      const tableDecision = matchAgainstTable(table, subject.channel);
+      const resolved = applyTableDecision(tableDecision, subject);
+      if (resolved) return resolved;
+      // Fallthrough → continue to the legacy PolicyMode preset below.
     }
 
     if (mode === 'auto') {
@@ -41,6 +64,42 @@ export function createPolicyEngine({ mode }: PolicyEngineOptions) {
     }
 
     return { behavior: 'allow', decidedBy: 'policy' };
+  }
+
+  function applyTableDecision(
+    tableDecision: TableDecision,
+    subject: Extract<ApprovalSubject, { kind: 'tool' }>
+  ): ApprovalDecision | undefined {
+    switch (tableDecision.kind) {
+      case 'deny':
+        return {
+          behavior: 'deny',
+          reason: describeRule('deny', tableDecision.rule, subject),
+          decidedBy: 'policy'
+        };
+      case 'allow':
+        return {
+          behavior: 'allow',
+          reason: describeRule('allow', tableDecision.rule, subject),
+          decidedBy: 'policy'
+        };
+      case 'ask':
+        return {
+          behavior: 'ask',
+          prompt: formatApprovalPrompt(subject),
+          decidedBy: 'policy'
+        };
+      case 'fallthrough':
+        return undefined;
+    }
+  }
+
+  function describeRule(
+    kind: 'allow' | 'deny',
+    rule: PermissionRule,
+    subject: Extract<ApprovalSubject, { kind: 'tool' }>
+  ): string {
+    return `${kind} by ${rule.source} rule "${rule.channel}: ${rule.pattern}" (subject: ${subject.toolName})`;
   }
 
   function requiresConfirmation(subject: ApprovalSubject): boolean {
