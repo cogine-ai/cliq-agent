@@ -23,6 +23,23 @@ test('parseBashCommandHead unwraps sudo and env style wrappers', () => {
   assert.equal(parseBashCommandHead('doas pacman -Syu'), 'pacman');
 });
 
+test('parseBashCommandHead skips nice argument-taking flags in all spellings', () => {
+  // Regression for PR #71 CodeRabbit finding: `nice -n 10 npm test` used to
+  // return "10" because skipWrapperFlags didn't consume the priority arg.
+  assert.equal(parseBashCommandHead('nice npm test'), 'npm');
+  assert.equal(parseBashCommandHead('nice -n 10 npm test'), 'npm');
+  assert.equal(parseBashCommandHead('nice -n10 npm test'), 'npm');
+  assert.equal(parseBashCommandHead('nice --adjustment 10 npm test'), 'npm');
+  assert.equal(parseBashCommandHead('nice --adjustment=10 npm test'), 'npm');
+  assert.equal(parseBashCommandHead('nice --priority=5 git push'), 'git');
+});
+
+test('parseBashCommandHead handles sudo long-form --user= attached value', () => {
+  // Parallel coverage so the attached-value branch in skipWrapperFlags isn't
+  // exercised only by nice.
+  assert.equal(parseBashCommandHead('sudo --user=deploy ls'), 'ls');
+});
+
 test('parseBashCommandHead returns the basename for absolute paths', () => {
   assert.equal(parseBashCommandHead('/usr/local/bin/python -m pip'), 'python');
   assert.equal(parseBashCommandHead('  /usr/bin/git status'), 'git');
@@ -45,6 +62,16 @@ test('parseBashCommandHead stops at shell pipelines and separators', () => {
   assert.equal(parseBashCommandHead('npm test && rm -rf /'), 'npm');
   assert.equal(parseBashCommandHead('git status; echo hi'), 'git');
   assert.equal(parseBashCommandHead('ls | head -n 1'), 'ls');
+});
+
+test('parseBashCommandHead refuses redirection-leading lines (regression pin for > / <)', () => {
+  // CodeRabbit findings on PR #71 (one stale, one new) called out the `>` /
+  // `<` cases. The regex already covers them; pin the behavior with explicit
+  // tests so a future trim of the character class can't silently regress
+  // "no identifiable head" for redirection-prefixed lines.
+  assert.equal(parseBashCommandHead('> out.txt ls'), null);
+  assert.equal(parseBashCommandHead('>> log.txt echo hi'), null);
+  assert.equal(parseBashCommandHead('< in.txt cat'), null);
 });
 
 test('parseBashCommandHead handles quoted argv[0]', () => {

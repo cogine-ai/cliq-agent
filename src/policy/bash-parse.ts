@@ -73,24 +73,37 @@ function isCommandWrapper(token: string): boolean {
 }
 
 /**
- * Wrapper commands like `sudo` / `env` accept short and long options before
- * the actual command. Skip flag tokens until we hit a non-flag word, which
- * is the wrapped command. For `env -u VAR cmd` and `sudo -u user cmd`,
- * a single flag-argument follows; we err on the side of "consume one extra
- * token after a known argument-taking flag" rather than try to model every
- * option exactly.
+ * Wrapper commands like `sudo` / `env` / `nice` accept short and long options
+ * before the actual command. Skip flag tokens until we hit a non-flag word,
+ * which is the wrapped command. For `env -u VAR cmd`, `sudo -u user cmd`,
+ * `nice -n 10 cmd`, etc., a single flag-argument follows; we err on the
+ * side of "consume one extra token after a known argument-taking flag"
+ * rather than try to model every option exactly.
+ *
+ * Long-form / attached-value spellings (`-n10`, `--adjustment=10`,
+ * `--user=me`) carry the value inside the same token, so we don't consume
+ * an extra one for them.
  */
+const SEPARATED_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  // sudo
+  '-u', '-g', '-p',
+  // nice priority
+  '-n', '--priority', '--adjustment'
+]);
+
+const ATTACHED_VALUE_FLAG_PREFIXES: readonly string[] = [
+  // sudo
+  '--user=', '--group=', '--prompt=',
+  // nice priority
+  '--priority=', '--adjustment='
+];
+
 function skipWrapperFlags(tokens: string[], start: number): number {
   let i = start;
   while (i < tokens.length) {
     const token = tokens[i]!;
     if (!token.startsWith('-')) return i;
-    // Flags known to take a follow-up arg in sudo/env: -u, -g, -p, -S (env),
-    // -i (env without arg, harmless if we don't skip).
-    if (token === '-u' || token === '-g' || token === '-p') {
-      i += 2;
-      continue;
-    }
+
     // `env -S` takes a single string with embedded args; the wrapped command
     // is in that string itself ("env -S node script.js" → "node"). Treat
     // the next token as the wrapped command line and re-parse it.
@@ -103,6 +116,21 @@ function skipWrapperFlags(tokens: string[], start: number): number {
       tokens[tokens.length - 1] = reparsed;
       return tokens.length - 1;
     }
+
+    // Flags whose argument is in the NEXT token: `nice -n 10`, `sudo -u me`.
+    // Attached forms like `-n10` carry the value inside the same token and
+    // do not advance an extra slot.
+    if (SEPARATED_VALUE_FLAGS.has(token)) {
+      i += 2;
+      continue;
+    }
+
+    // Long-form attached-value spellings: `--adjustment=10`, `--user=me`, …
+    if (ATTACHED_VALUE_FLAG_PREFIXES.some((prefix) => token.startsWith(prefix))) {
+      i += 1;
+      continue;
+    }
+
     i += 1;
   }
   return i;

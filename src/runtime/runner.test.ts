@@ -1062,18 +1062,29 @@ test('PermissionRequest hook allow with explicit scope is accepted (forward comp
   // v0 only acts on 'once'; 'session' and 'workspace' are accepted from the
   // hook so authors can start emitting them, but treated as 'once' by the
   // runner until #62-B lands. The hook must still complete the turn cleanly.
+  // Non-string scope values are also exercised here (regression pin for
+  // PR #71 nitpick) to lock in coerceHookPermissionScope's "unknown/non-string
+  // → 'once'" guarantee.
   const session = await createTempSession();
   let calls = 0;
   let executed = false;
-  for (const scope of ['session', 'workspace', 'forever-unknown', undefined] as const) {
+  const scopes: ReadonlyArray<string | number | undefined> = [
+    'session',
+    'workspace',
+    'forever-unknown',
+    undefined,
+    123
+  ];
+  for (const scope of scopes) {
     calls = 0;
     executed = false;
     const payload = scope === undefined
       ? `{ permissionDecision: { behavior: 'allow', message: 'ok' } }`
-      : `{ permissionDecision: { behavior: 'allow', message: 'ok', scope: '${scope}' } }`;
+      : `{ permissionDecision: { behavior: 'allow', message: 'ok', scope: ${JSON.stringify(scope)} } }`;
+    const safeName = String(scope ?? 'missing').replace(/[^a-z0-9]/gi, '_');
     const cmd = await writeHookScript(
       session.cwd,
-      `allow-scope-${scope ?? 'missing'}.js`,
+      `allow-scope-${safeName}.js`,
       `process.stdout.write(JSON.stringify(${payload}));`
     );
 

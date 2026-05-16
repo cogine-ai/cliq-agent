@@ -32,11 +32,27 @@ export type PermissionTable = {
   ask: PermissionRule[];
 };
 
+/**
+ * Freeze a PermissionRule[] (and each rule inside) so module-level shared
+ * singletons like {@link EMPTY_PERMISSION_TABLE} and {@link BUILTIN_DENY}
+ * cannot be mutated at runtime. Without this, `table.deny.push(...)` against
+ * the default singleton would silently poison every later caller because the
+ * empty table is reused as the engine's default.
+ */
+function freezeRules(rules: readonly PermissionRule[]): readonly PermissionRule[] {
+  return Object.freeze(rules.map((r) => Object.freeze({ ...r })));
+}
+
+/**
+ * Default permission table. Deeply frozen — see {@link freezeRules}. Callers
+ * that need to layer rules MUST start from {@link composePermissionTable},
+ * which produces a fresh mutable {@link PermissionTable}.
+ */
 export const EMPTY_PERMISSION_TABLE: PermissionTable = Object.freeze({
-  deny: [],
-  allow: [],
-  ask: []
-}) as PermissionTable;
+  deny: freezeRules([]),
+  allow: freezeRules([]),
+  ask: freezeRules([])
+}) as unknown as PermissionTable;
 
 /**
  * Built-in deny shadow list. These rules are loaded as `source: 'builtin'`
@@ -44,11 +60,14 @@ export const EMPTY_PERMISSION_TABLE: PermissionTable = Object.freeze({
  * this list tight; err on the side of "ask" (in the preset) rather than
  * "deny" so legitimate flows are never silently broken.
  *
+ * Deeply frozen so a stray `BUILTIN_DENY.push(...)` (e.g. from a test) can't
+ * corrupt later sessions.
+ *
  * TODO(no-issue: builtin-deny-shadow-curation): curate with telemetry from
  * #62-B once the user-visible allowlist surface lands. v0 only covers the
  * obviously-dangerous lines.
  */
-export const BUILTIN_DENY: readonly PermissionRule[] = Object.freeze([
+export const BUILTIN_DENY: readonly PermissionRule[] = freezeRules([
   // Recursive removals that target the filesystem root or the user's home.
   rule('bash', 'rm', 'builtin'),
   // .git is application state, not user content. Direct writes corrupt the

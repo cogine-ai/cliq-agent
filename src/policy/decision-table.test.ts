@@ -22,6 +22,37 @@ const wsRule = (channel: PermissionRule['channel'], pattern: string): Permission
   source: 'workspace'
 });
 
+test('EMPTY_PERMISSION_TABLE and BUILTIN_DENY are deeply frozen (no shared-singleton mutation)', () => {
+  // Regression for PR #71 CodeRabbit finding: the default table singleton is
+  // reused as PolicyEngine's default `table`. A shallow freeze would let a
+  // stray `EMPTY_PERMISSION_TABLE.deny.push(...)` poison every later
+  // PolicyEngine call. assert it via mutation attempts under strict mode
+  // (Node test runner uses ES modules → strict by default).
+  assert.throws(() => {
+    (EMPTY_PERMISSION_TABLE.deny as PermissionRule[]).push({
+      channel: 'bash',
+      pattern: '*',
+      source: 'workspace'
+    });
+  }, /read[- ]?only|frozen|extensible|object is not extensible/i);
+
+  assert.throws(() => {
+    (BUILTIN_DENY as PermissionRule[]).push({
+      channel: 'bash',
+      pattern: 'sh',
+      source: 'workspace'
+    });
+  }, /read[- ]?only|frozen|extensible|object is not extensible/i);
+
+  // Individual builtin rules are also frozen, so a stray rewrite (e.g.
+  // changing source to bypass the "builtin never overridable" invariant)
+  // is rejected too.
+  const firstBuiltin = BUILTIN_DENY[0]!;
+  assert.throws(() => {
+    (firstBuiltin as PermissionRule).source = 'workspace';
+  }, /read[- ]?only|cannot assign|object is not extensible/i);
+});
+
 test('EMPTY_PERMISSION_TABLE has no rules and falls through for every channel', () => {
   const channels = [
     { kind: 'fs-read', path: 'README.md' },
