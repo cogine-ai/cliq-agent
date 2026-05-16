@@ -4,6 +4,7 @@ import type { ModelAction } from '../protocol/model/actions.js';
 import type { RuntimeEvent } from '../protocol/runtime/events.js';
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
 import type { ToolResult } from '../tools/types.js';
+import type { PackageUpdateNotice } from '../updates.js';
 import {
   extractToolBody,
   formatToolResultSummary,
@@ -67,6 +68,9 @@ export type UiState = {
   // after each turn via `session-tokens-update`. null until the first turn
   // completes.
   sessionTokens: number | null;
+  // Non-blocking package update notice, populated by the TUI startup path when
+  // npm reports a newer published version. null means "no notice to show".
+  versionUpdate: PackageUpdateNotice | null;
   // Monotonic counter for entry ids; kept in state so reduce() stays pure.
   nextEntryId: number;
 };
@@ -78,6 +82,7 @@ export type UiAction =
   | { type: 'user-input'; text: string }
   | { type: 'system-message'; text: string }
   | { type: 'session-tokens-update'; tokens: number }
+  | { type: 'version-update'; notice: PackageUpdateNotice | null }
   | { type: 'toggle-tool-body' }
   | { type: 'approval-request'; pending: PendingApproval }
   // approval-resolve carries the id of the pending it resolves so a stale
@@ -112,6 +117,7 @@ export function createInitialState(opts: {
     tx: null,
     errors: [],
     sessionTokens: null,
+    versionUpdate: null,
     nextEntryId: 1,
   };
 }
@@ -136,6 +142,8 @@ export function reduce(state: UiState, action: UiAction): UiState {
       return pushSystem(state, action.text);
     case 'session-tokens-update':
       return { ...state, sessionTokens: action.tokens };
+    case 'version-update':
+      return { ...state, versionUpdate: action.notice };
     case 'toggle-tool-body': {
       // Spec A.10: Phase A focus is implicit-last-only — toggle the most
       // recent tool entry that has a body (bash output today; future tools

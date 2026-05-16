@@ -44,6 +44,8 @@ import type { WorkspaceTrustContext } from './session/trust.js';
 import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
 import type { Session } from './session/types.js';
 import type { ToolResult } from './tools/types.js';
+import type { UiStore } from './tui/store.js';
+import { checkForPackageUpdate, readCurrentPackageVersion } from './updates.js';
 import {
   openTx as coordOpenTx,
   applyTx as coordApplyTx,
@@ -74,6 +76,7 @@ const RESTORE_SCOPES = ['session', 'files', 'both'] as const;
 const HELP_TOPICS = ['checkpoint', 'compact', 'handoff', 'tx'] as const;
 const TX_MODES = ['off', 'edit'] as const;
 const TX_APPLY_POLICIES = ['interactive', 'auto-on-pass', 'manual-only'] as const;
+const CLIQ_PACKAGE_NAME = '@cogineai/cliq';
 
 type RestoreScope = (typeof RESTORE_SCOPES)[number];
 type HelpTopic = (typeof HELP_TOPICS)[number];
@@ -2552,6 +2555,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       session: { id: session.id, cwd: session.cwd }
     })
   );
+  void notifyIfPackageUpdateAvailable(store);
 
   const approvalBridge = createApprovalBridge(store);
 
@@ -2692,6 +2696,18 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
 
   await tui.waitUntilExit();
   await saveSession(cwd, session);
+}
+
+async function notifyIfPackageUpdateAvailable(store: UiStore) {
+  const currentVersion = await readCurrentPackageVersion();
+  if (!currentVersion) return;
+  const notice = await checkForPackageUpdate({
+    packageName: CLIQ_PACKAGE_NAME,
+    currentVersion
+  });
+  if (notice) {
+    store.dispatch({ type: 'version-update', notice });
+  }
 }
 
 function createTuiLivePolicyEngine(
