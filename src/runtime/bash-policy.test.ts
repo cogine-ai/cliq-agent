@@ -61,6 +61,51 @@ test('bashPolicy is bypassed when tx mode is off', async () => {
   assert.equal(r.decision, 'allow');
 });
 
+test('policyAlreadyApproved collapses passthrough/confirm to allow (no double prompt)', async () => {
+  // The runner invokes execute() only after PolicyEngine + user confirm has
+  // already said yes. The tx overlay therefore must not re-ask the user.
+  for (const policy of ['passthrough', 'confirm'] as const) {
+    const r = await enforceBashPolicy({
+      policy,
+      txMode: 'edit',
+      headless: false,
+      policyAlreadyApproved: true
+    });
+    assert.equal(r.decision, 'allow');
+  }
+});
+
+test('policyAlreadyApproved does NOT bypass the headless+confirm safety net', async () => {
+  // bashPolicy=confirm under --headless is an explicit CI safety net: the
+  // operator deliberately set it so unattended runs cannot execute bash,
+  // even if the PolicyEngine preset (e.g. 'auto') would otherwise allow it.
+  // policyAlreadyApproved represents the upstream PolicyEngine decision, not
+  // operator intent, so the headless safety net wins.
+  const r = await enforceBashPolicy({
+    policy: 'confirm',
+    txMode: 'edit',
+    headless: true,
+    policyAlreadyApproved: true
+  });
+  assert.equal(r.decision, 'deny');
+  if (r.decision === 'deny') {
+    assert.match(r.message, /headless/);
+  }
+});
+
+test('policyAlreadyApproved does NOT override a tx-overlay deny', async () => {
+  const r = await enforceBashPolicy({
+    policy: 'deny',
+    txMode: 'edit',
+    headless: false,
+    policyAlreadyApproved: true
+  });
+  assert.equal(r.decision, 'deny');
+  if (r.decision === 'deny') {
+    assert.match(r.message, /deny/);
+  }
+});
+
 test('snapshotMtimes captures all files; diffMtimes finds modifications and additions', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-bash-policy-'));
   try {

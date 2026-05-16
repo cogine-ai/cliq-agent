@@ -12,7 +12,22 @@ export type EnforceBashPolicyOptions = {
   policy: TxBashPolicy;
   txMode: 'off' | 'edit';
   headless: boolean;
-  confirm?: () => Promise<boolean>; // user prompt in interactive mode
+  /**
+   * Set when the caller has already obtained an approval through the
+   * PolicyEngine path (preset / decision table / user confirm / hook).
+   * The transactional bash overlay then only enforces tx-specific
+   * tightening on top of that decision, so `passthrough` and `confirm`
+   * collapse to allow (no double prompt) and `deny` still wins.
+   *
+   * This is the bash-side of merging the historical dual-track surface
+   * (PolicyMode + TxBashPolicy) into a single decision flow. See #62-A
+   * commit "merge bash dual-track" for the rationale.
+   *
+   * Default `false` for backward compatibility with existing call sites
+   * and tests; the runner-driven tool execute path always passes `true`.
+   */
+  policyAlreadyApproved?: boolean;
+  confirm?: () => Promise<boolean>; // user prompt in interactive mode (legacy)
 };
 
 export async function enforceBashPolicy(opts: EnforceBashPolicyOptions): Promise<BashPolicyDecision> {
@@ -20,17 +35,49 @@ export async function enforceBashPolicy(opts: EnforceBashPolicyOptions): Promise
   if (opts.txMode === 'off') {
     return { decision: 'allow' };
   }
+
+  // Tx-specific hard limits run regardless of the upstream PolicyEngine
+  // decision: `deny` always wins so the tx overlay can refuse bash even
+  // after the user said yes to PolicyEngine's prompt.
+  if (opts.policy === 'deny') {
+    return {
+      decision: 'deny',
+      code: 'tx-overlay-error',
+      message: 'bashPolicy=deny rejects bash invocations under tx mode'
+    };
+  }
+
+  // Headless + bashPolicy=confirm is an explicit CI safety net: even when the
+  // upstream PolicyEngine has approved (e.g. via preset='auto' or a decision
+  // table allow), the operator deliberately set bashPolicy=confirm so that
+  // unattended runs can't execute bash. That guarantee must hold regardless
+  // of policyAlreadyApproved.
+  if (opts.policy === 'confirm' && opts.headless) {
+    return {
+      decision: 'deny',
+      code: 'tx-overlay-error',
+      message: 'bashPolicy=confirm cannot prompt in --headless mode; promoted to deny'
+    };
+  }
+
+  if (opts.policyAlreadyApproved) {
+    // Trust the upstream decision (preset / decision table / user / hook).
+    // `passthrough` and `confirm` both collapse to allow here: passthrough
+    // is "tx adds no extra friction beyond PolicyEngine", and confirm is
+    // "PolicyEngine already prompted the user; don't ask twice". The
+    // headless+confirm case is handled above so the CI safety net stays.
+    //
+    // TODO(#50, #46): once auto-validate/auto-approve wiring (#50) and the
+    // overrides+reason pipeline (#46) land, the tx overlay can reuse the
+    // override surface here so an approved tx can carry a per-command
+    // reason instead of just collapsing to allow.
+    return { decision: 'allow' };
+  }
+
   switch (opts.policy) {
     case 'passthrough':
       return { decision: 'allow' };
     case 'confirm': {
-      if (opts.headless) {
-        return {
-          decision: 'deny',
-          code: 'tx-overlay-error',
-          message: 'bashPolicy=confirm cannot prompt in --headless mode; promoted to deny'
-        };
-      }
       if (!opts.confirm) {
         // No confirm function provided in interactive mode → conservative deny.
         return {
@@ -60,12 +107,6 @@ export async function enforceBashPolicy(opts: EnforceBashPolicyOptions): Promise
         message: 'bash invocation rejected by user'
       };
     }
-    case 'deny':
-      return {
-        decision: 'deny',
-        code: 'tx-overlay-error',
-        message: 'bashPolicy=deny rejects bash invocations under tx mode'
-      };
   }
 }
 
