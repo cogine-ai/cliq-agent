@@ -105,5 +105,6 @@ payload-aware approvals, and a steady stream of TUI polish.
   [GitHub Releases](https://github.com/cogine-ai/cliq-agent/releases); this
   file starts with v0.9.0.
 
-[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.8.0...v0.9.0
