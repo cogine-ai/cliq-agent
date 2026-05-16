@@ -2698,7 +2698,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   await saveSession(cwd, session);
 }
 
-async function notifyIfPackageUpdateAvailable(store: UiStore) {
+export async function notifyIfPackageUpdateAvailable(store: UiStore) {
   const currentVersion = await readCurrentPackageVersion();
   if (!currentVersion) return;
   const notice = await checkForPackageUpdate({

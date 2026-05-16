@@ -9,6 +9,9 @@ test('isVersionGreater compares semantic versions numerically', () => {
   assert.equal(isVersionGreater('1.0.0', '0.99.99'), true);
   assert.equal(isVersionGreater('0.9.0', '0.9.0'), false);
   assert.equal(isVersionGreater('0.9.0', '0.10.0'), false);
+  assert.equal(isVersionGreater('1.0.0', '1.0.0-rc.1'), true);
+  assert.equal(isVersionGreater('1.0.0-rc.2', '1.0.0-rc.1'), true);
+  assert.equal(isVersionGreater('1.0.0-rc.1', '1.0.0'), false);
 });
 
 test('checkForPackageUpdate returns latest when npm has a newer version', async () => {
