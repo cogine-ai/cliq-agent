@@ -7,20 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-16
+
+This release lands the first layer of Cliq's three-layer security model
+(**Workspace Trust → Tool Permission → Sandbox**, see `AGENTS.md`): an
+interactive trust gate that fronts repo-side configuration loading, plus
+the internal machinery (decision table, AccessChannel classification,
+forward-compatible hook surface) that the user-visible per-tool
+permission UX will plug into in v0.11.
+
 ### Added
 
-- **Workspace trust gate** — interactive chat prompts once per canonical workspace before reading `./.cliq/config`; headless/`run --jsonl`/`rpc`/`tx validate|apply` fail closed unless `CLIQ_TRUST_WORKSPACE` or persisted trust permits it (#48).
-- **Tool permission decision table (internal)** — `PolicyEngine` now consults a layered `PermissionTable` (builtin deny → workspace deny → allow → ask → preset) before falling back to the legacy `PolicyMode` preset. Every tool `ApprovalSubject` carries an `AccessChannel` (`fs-read`, `fs-write`, `bash`, `mcp`, `network`) derived deterministically in `buildToolApprovalSubject`. No user-visible surface yet — the table is empty by default and call sites are unchanged. CLI flags, workspace config, and persisted per-workspace rules land in the follow-up #62-B (#62).
-- **`HookOutput.permissionDecision.scope`** (forward-compatible) — `PermissionRequest` hooks may now emit `scope: 'once' | 'session' | 'workspace'` and `additionalAllowlistEntries: string[]`. The runner only acts on `'once'` today; richer scopes are accepted but coerced to `'once'` until the persistence surface ships in #62-B. Existing hooks are unaffected (#62).
+- **Workspace trust gate** — interactive chat prompts once per canonical workspace before reading `./.cliq/config`; headless/`run --jsonl`/`rpc`/`tx validate|apply` fail closed unless `CLIQ_TRUST_WORKSPACE` or persisted trust permits it (#48, #61).
+- **Tool permission decision table (internal)** — `PolicyEngine` now consults a layered `PermissionTable` (builtin deny → workspace deny → allow → ask → preset) before falling back to the legacy `PolicyMode` preset. Every tool `ApprovalSubject` carries an `AccessChannel` (`fs-read`, `fs-write`, `bash`, `mcp`, `network`) derived deterministically in `buildToolApprovalSubject`. No user-visible surface yet — the table is empty by default and call sites are unchanged. CLI flags, workspace config, and persisted per-workspace rules land in the follow-up #62-B (#62, #71).
+- **`HookOutput.permissionDecision.scope`** (forward-compatible) — `PermissionRequest` hooks may now emit `scope: 'once' | 'session' | 'workspace'` and `additionalAllowlistEntries: string[]`. The runner only acts on `'once'` today; richer scopes are accepted but coerced to `'once'` until the persistence surface ships in #62-B. Existing hooks are unaffected (#62, #71).
+- **`AGENTS.md`** — canonical onboarding doc for AI coding agents and human contributors. Documents the three-layer security model, code-review conventions, and reference targets for trust UX (CodeBuddy, Codex CLI, Claude Code) (#70, #72).
+- **`docs/beta/cliq-internal-beta-user-guide.docx`** — ships the current internal beta user guide alongside the source (#70).
 
 ### Changed
 
-- **Bash decision flow merged into a single path** — `enforceBashPolicy` accepts a new `policyAlreadyApproved` flag (set by the runner-driven tool execute path) so the tx overlay no longer re-prompts when `PolicyEngine` has already approved. `bashPolicy=passthrough` and `bashPolicy=confirm` collapse to allow; `bashPolicy=deny` still wins. The headless + `bashPolicy=confirm` CI safety net is preserved (#62).
+- **Bash decision flow merged into a single path** — `enforceBashPolicy` accepts a new `policyAlreadyApproved` flag (set by the runner-driven tool execute path) so the tx overlay no longer re-prompts when `PolicyEngine` has already approved. `bashPolicy=passthrough` and `bashPolicy=confirm` collapse to allow; `bashPolicy=deny` still wins. The headless + `bashPolicy=confirm` CI safety net is preserved (#62, #71).
 
 ### Fixed
 
-- Trust gate polish from review: clearer `--classic` disclosure, canonical `realpath` required for trust keys, corrupted `trust.json` ignored like “no record”, Ink prompt guard against duplicate decisions (#61).
-- Latent always-deny bug for interactive `bashPolicy=confirm` (the bash tool never passed a confirm callback). The merged decision flow above eliminates the double-prompt by trusting the upstream `PolicyEngine` decision (#62).
+- Trust gate polish from review: clearer `--classic` disclosure, canonical `realpath` required for trust keys, corrupted `trust.json` ignored like "no record", Ink prompt guard against duplicate decisions (#61).
+- `cliq tx validate` / `cliq tx apply` with `--json` or `--headless` now surface workspace-trust refusals as a one-line JSON error on stdout instead of dumping plain text to stderr — matches the rest of the tx machine-readable contract (#69).
+- Interactive runtime trust gate now writes the failure message to stderr before throwing, eliminating silent non-zero exits in `CLIQ_TRUST_WORKSPACE=deny` / persisted-denied / non-TTY paths (#69).
+- Latent always-deny bug for interactive `bashPolicy=confirm` (the bash tool never passed a confirm callback). The merged decision flow above eliminates the double-prompt by trusting the upstream `PolicyEngine` decision (#62, #71).
+- `parseBashCommandHead` now correctly skips `nice -n`/`--priority`/`--adjustment` args (incl. attached-value forms) and pins regression coverage for redirection-prefixed lines like `> out.txt ls` (#71).
+- Default `PermissionTable` singletons (`EMPTY_PERMISSION_TABLE`, `BUILTIN_DENY`) are now deeply frozen so a stray mutation can't poison shared `PolicyEngine` defaults (#71).
 
 ## [0.9.0] - 2026-05-14
 
