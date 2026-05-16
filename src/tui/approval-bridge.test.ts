@@ -9,6 +9,7 @@ const subject: ApprovalSubject = {
   kind: 'tool',
   toolName: 'bash',
   access: 'exec',
+  channel: { kind: 'bash', commandHead: 'ls' },
   action: { bash: 'ls' } as never,
   display: { title: 'Allow bash command?', command: 'ls' }
 };
