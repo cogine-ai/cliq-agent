@@ -18,6 +18,7 @@ import {
   resolveTuiInitialPolicy,
   resolveTuiPreference,
   resolveTxIdForReview,
+  notifyIfPackageUpdateAvailable,
   ReportedCliError,
   runCli
 } from './cli.js';
@@ -25,6 +26,7 @@ import { createCheckpoint } from './session/checkpoints.js';
 import { createSession, ensureSession, saveSession, sessionFilePath } from './session/store.js';
 import { WorkspaceTrustError } from './session/trust.js';
 import type { ToolResult } from './tools/types.js';
+import type { UiAction, UiStore } from './tui/store.js';
 import { appendBashEffect } from './workspace/transactions/bash-effects.js';
 import {
   createTx,
@@ -1693,4 +1695,102 @@ test('resolveTuiPreference precedence: --classic > --tui > CLIQ_TUI=0 > TTY defa
     resolveTuiPreference({ classic: true, tui: false, envOptOut: false, isTTY: false }),
     false
   );
+});
+
+function captureDispatchStore(actions: UiAction[]): UiStore {
+  return {
+    getState() {
+      throw new Error('getState is not used by notifyIfPackageUpdateAvailable');
+    },
+    subscribe() {
+      throw new Error('subscribe is not used by notifyIfPackageUpdateAvailable');
+    },
+    dispatch(action) {
+      actions.push(action);
+    }
+  };
+}
+
+async function readPackageVersionForTest(): Promise<string> {
+  const raw = await readFile(new URL('../package.json', import.meta.url), 'utf8');
+  const parsed = JSON.parse(raw) as { version?: unknown };
+  if (typeof parsed.version !== 'string') {
+    throw new Error('package.json version must be a string');
+  }
+  return parsed.version;
+}
+
+function nextPatchVersion(version: string): string {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  assert.ok(match, `expected semver package version, got ${version}`);
+  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
+}
+
+test('notifyIfPackageUpdateAvailable dispatches when npm has a newer version', async () => {
+  const actions: UiAction[] = [];
+  const current = await readPackageVersionForTest();
+  const latest = nextPatchVersion(current);
+  const fetchMock = mock.method(globalThis, 'fetch', async () =>
+    Response.json({ version: latest })
+  );
+
+  try {
+    await notifyIfPackageUpdateAvailable(captureDispatchStore(actions));
+  } finally {
+    fetchMock.mock.restore();
+  }
+
+  assert.deepEqual(actions, [
+    { type: 'version-update', notice: { current, latest } }
+  ]);
+});
+
+test('notifyIfPackageUpdateAvailable is silent when no update is available or check fails', async () => {
+  const current = await readPackageVersionForTest();
+  const sameVersionActions: UiAction[] = [];
+  const sameVersionFetch = mock.method(globalThis, 'fetch', async () =>
+    Response.json({ version: current })
+  );
+  try {
+    await notifyIfPackageUpdateAvailable(captureDispatchStore(sameVersionActions));
+  } finally {
+    sameVersionFetch.mock.restore();
+  }
+  assert.equal(sameVersionActions.length, 0);
+
+  const failingActions: UiAction[] = [];
+  const failingFetch = mock.method(globalThis, 'fetch', async () => {
+    throw new Error('offline');
+  });
+  try {
+    await notifyIfPackageUpdateAvailable(captureDispatchStore(failingActions));
+  } finally {
+    failingFetch.mock.restore();
+  }
+  assert.equal(failingActions.length, 0);
+});
+
+test('notifyIfPackageUpdateAvailable absorbs dispatch errors', async () => {
+  const latest = nextPatchVersion(await readPackageVersionForTest());
+  const fetchMock = mock.method(globalThis, 'fetch', async () =>
+    Response.json({ version: latest })
+  );
+
+  try {
+    await assert.doesNotReject(() =>
+      notifyIfPackageUpdateAvailable({
+        getState() {
+          throw new Error('getState is not used by notifyIfPackageUpdateAvailable');
+        },
+        subscribe() {
+          throw new Error('subscribe is not used by notifyIfPackageUpdateAvailable');
+        },
+        dispatch() {
+          throw new Error('dispatch failed');
+        }
+      })
+    );
+  } finally {
+    fetchMock.mock.restore();
+  }
 });

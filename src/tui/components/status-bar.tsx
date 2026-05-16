@@ -27,23 +27,26 @@ export function StatusBar({ state }: { state: UiState }) {
   const hasError = state.errors.length > 0;
 
   return (
-    <Box>
-      {hasError ? <Text color="red">● </Text> : null}
-      <Text dimColor>{`${state.model.provider}/${state.model.model}`}</Text>
-      <Sep />
-      <Text color={policyColor}>{state.policy}</Text>
-      <Sep />
-      <Text dimColor>{sessionId}</Text>
-      <Sep />
-      <Text dimColor>{cwdLabel}</Text>
-      <Sep />
-      <Text dimColor>{txStatus}</Text>
-      {tokensLabel !== null ? (
-        <>
-          <Sep />
-          <Text dimColor>{tokensLabel}</Text>
-        </>
-      ) : null}
+    <Box width="100%" justifyContent="space-between">
+      <Box>
+        {hasError ? <Text color="red">● </Text> : null}
+        <Text dimColor>{`${state.model.provider}/${state.model.model}`}</Text>
+        <Sep />
+        <Text color={policyColor}>{state.policy}</Text>
+        <Sep />
+        <Text dimColor>{sessionId}</Text>
+        <Sep />
+        <Text dimColor>{cwdLabel}</Text>
+        <Sep />
+        <Text dimColor>{txStatus}</Text>
+        {tokensLabel !== null ? (
+          <>
+            <Sep />
+            <Text dimColor>{tokensLabel}</Text>
+          </>
+        ) : null}
+      </Box>
+      {state.versionUpdate ? <Text color="yellow">{`update ${state.versionUpdate.latest}`}</Text> : null}
     </Box>
   );
 }
