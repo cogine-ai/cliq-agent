@@ -139,6 +139,13 @@ export function createRunner({
       }
       const permissionDecision = run.result.output?.permissionDecision;
       if (permissionDecision?.behavior === 'allow') {
+        // Coerce scope: missing/unknown → 'once'. Per #62-A, only 'once'
+        // has runtime effect today; 'session' and 'workspace' are accepted
+        // from the hook (so authors can start emitting them) but treated
+        // as 'once' until the session/workspace allowlist persistence
+        // surface ships in #62-B.
+        const _scope = coerceHookPermissionScope(permissionDecision.scope);
+        void _scope; // TODO(#62-B): plumb scope into the session/workspace allowlist
         return {
           behavior: 'allow',
           reason: permissionDecision.message,
@@ -161,6 +168,20 @@ export function createRunner({
       }
     }
     return null;
+  }
+
+  /**
+   * Normalize a hook-provided scope value. Missing → 'once'. Unknown /
+   * non-string values are also coerced to 'once' rather than rejected so a
+   * forward-compatible hook (emitting e.g. 'forever') gracefully degrades to
+   * one-shot on older runners.
+   *
+   * TODO(#62-B): when the session/workspace allowlist surface lands, change
+   * the return type to a richer enum that the runner actually acts on.
+   */
+  function coerceHookPermissionScope(value: unknown): 'once' | 'session' | 'workspace' {
+    if (value === 'session' || value === 'workspace') return value;
+    return 'once';
   }
 
   return {

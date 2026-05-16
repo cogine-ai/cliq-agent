@@ -1058,6 +1058,62 @@ test('runner lets PermissionRequest command hooks allow policy asks without user
   assert.equal(confirmCalls, 0);
 });
 
+test('PermissionRequest hook allow with explicit scope is accepted (forward compat)', async () => {
+  // v0 only acts on 'once'; 'session' and 'workspace' are accepted from the
+  // hook so authors can start emitting them, but treated as 'once' by the
+  // runner until #62-B lands. The hook must still complete the turn cleanly.
+  const session = await createTempSession();
+  let calls = 0;
+  let executed = false;
+  for (const scope of ['session', 'workspace', 'forever-unknown', undefined] as const) {
+    calls = 0;
+    executed = false;
+    const payload = scope === undefined
+      ? `{ permissionDecision: { behavior: 'allow', message: 'ok' } }`
+      : `{ permissionDecision: { behavior: 'allow', message: 'ok', scope: '${scope}' } }`;
+    const cmd = await writeHookScript(
+      session.cwd,
+      `allow-scope-${scope ?? 'missing'}.js`,
+      `process.stdout.write(JSON.stringify(${payload}));`
+    );
+
+    const runner = createRunner({
+      model: {
+        async complete() {
+          calls += 1;
+          return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+        }
+      },
+      policy: createPolicyEngine({ mode: 'confirm-bash' }),
+      confirm: async () => false,
+      commandHooks: {
+        PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: cmd }] }]
+      },
+      registry: {
+        definitions: [],
+        resolve() {
+          return {
+            definition: {
+              name: 'bash',
+              access: 'exec',
+              supports(action: unknown): action is { bash: string } {
+                return typeof (action as { bash?: unknown }).bash === 'string';
+              },
+              async execute() {
+                executed = true;
+                return { tool: 'bash', status: 'ok' as const, content: 'TOOL_RESULT bash OK', meta: {} };
+              }
+            }
+          };
+        }
+      }
+    });
+
+    await runner.runTurn(session, 'show cwd');
+    assert.equal(executed, true, `executed for scope=${scope ?? 'missing'}`);
+  }
+});
+
 test('runner lets PermissionRequest command hooks deny policy asks', async () => {
   const session = await createTempSession();
   let calls = 0;
