@@ -2699,14 +2699,18 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
 }
 
 export async function notifyIfPackageUpdateAvailable(store: UiStore) {
-  const currentVersion = await readCurrentPackageVersion();
-  if (!currentVersion) return;
-  const notice = await checkForPackageUpdate({
-    packageName: CLIQ_PACKAGE_NAME,
-    currentVersion
-  });
-  if (notice) {
-    store.dispatch({ type: 'version-update', notice });
+  try {
+    const currentVersion = await readCurrentPackageVersion();
+    if (!currentVersion) return;
+    const notice = await checkForPackageUpdate({
+      packageName: CLIQ_PACKAGE_NAME,
+      currentVersion
+    });
+    if (notice) {
+      store.dispatch({ type: 'version-update', notice });
+    }
+  } catch {
+    // The update check is best-effort and must never destabilize TUI startup.
   }
 }
 

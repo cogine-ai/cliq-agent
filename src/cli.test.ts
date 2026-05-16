@@ -1769,3 +1769,28 @@ test('notifyIfPackageUpdateAvailable is silent when no update is available or ch
   }
   assert.equal(failingActions.length, 0);
 });
+
+test('notifyIfPackageUpdateAvailable absorbs dispatch errors', async () => {
+  const latest = nextPatchVersion(await readPackageVersionForTest());
+  const fetchMock = mock.method(globalThis, 'fetch', async () =>
+    Response.json({ version: latest })
+  );
+
+  try {
+    await assert.doesNotReject(() =>
+      notifyIfPackageUpdateAvailable({
+        getState() {
+          throw new Error('getState is not used by notifyIfPackageUpdateAvailable');
+        },
+        subscribe() {
+          throw new Error('subscribe is not used by notifyIfPackageUpdateAvailable');
+        },
+        dispatch() {
+          throw new Error('dispatch failed');
+        }
+      })
+    );
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
