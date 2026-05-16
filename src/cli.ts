@@ -1560,12 +1560,19 @@ async function prepareWorkspaceRestore(
   await createRestoreSafetyCheckpoint(cwd, session, checkpointId);
 }
 
-async function denyIfWorkspaceUntrustedNonInteractiveRuntime(cwd: string) {
+async function denyIfWorkspaceUntrustedNonInteractiveRuntime(
+  cwd: string,
+  machineReadable?: { writeJsonError: (message: string) => void }
+) {
   try {
     const ctx = await createWorkspaceTrustContext(cwd);
     const verdict = await evaluateWorkspaceTrustForNonInteractive(ctx);
     if (!verdict.ok) {
-      process.stderr.write(`${verdict.message}\n`);
+      if (machineReadable) {
+        machineReadable.writeJsonError(verdict.message);
+      } else {
+        process.stderr.write(`${verdict.message}\n`);
+      }
       throw new ReportedCliError(verdict.message, { exitCode: 1 });
     }
   } catch (error) {
@@ -1573,7 +1580,11 @@ async function denyIfWorkspaceUntrustedNonInteractiveRuntime(cwd: string) {
       throw error;
     }
     if (error instanceof WorkspaceTrustError) {
-      process.stderr.write(`${error.message}\n`);
+      if (machineReadable) {
+        machineReadable.writeJsonError(error.message);
+      } else {
+        process.stderr.write(`${error.message}\n`);
+      }
       throw new ReportedCliError(error.message, { exitCode: error.exitCode });
     }
     throw error;
@@ -1605,6 +1616,11 @@ async function promptClassicWorkspaceTrust(cwdRaw: string, workspaceRealPath: st
   }
 }
 
+function reportWorkspaceTrustInteractiveFailure(message: string, exitCode: number): never {
+  process.stderr.write(`${message}\n`);
+  throw new ReportedCliError(message, { exitCode });
+}
+
 async function ensureInteractiveWorkspaceTrustedForRuntime(opts: {
   cwd: string;
   stdinIsTTY: boolean;
@@ -1616,16 +1632,16 @@ async function ensureInteractiveWorkspaceTrustedForRuntime(opts: {
     ctx = await createWorkspaceTrustContext(opts.cwd);
   } catch (error) {
     if (error instanceof WorkspaceTrustError) {
-      throw new ReportedCliError(error.message, { exitCode: error.exitCode });
+      reportWorkspaceTrustInteractiveFailure(error.message, error.exitCode);
     }
     throw error;
   }
   try {
     const envTrust = parseCliqTrustWorkspaceEnv();
     if (envTrust === 'deny') {
-      throw new ReportedCliError(
+      reportWorkspaceTrustInteractiveFailure(
         `CLIQ_TRUST_WORKSPACE=deny blocks Cliq workspace runtime for "${ctx.workspaceRealPath}"`,
-        { exitCode: 1 }
+        1
       );
     }
     if (envTrust === 'trust') {
@@ -1633,7 +1649,7 @@ async function ensureInteractiveWorkspaceTrustedForRuntime(opts: {
     }
   } catch (error) {
     if (error instanceof WorkspaceTrustError) {
-      throw new ReportedCliError(error.message, { exitCode: error.exitCode });
+      reportWorkspaceTrustInteractiveFailure(error.message, error.exitCode);
     }
     throw error;
   }
@@ -1643,16 +1659,16 @@ async function ensureInteractiveWorkspaceTrustedForRuntime(opts: {
     return;
   }
   if (persisted === 'denied') {
-    throw new ReportedCliError(
+    reportWorkspaceTrustInteractiveFailure(
       `Trusted workspace previously declined for "${ctx.workspaceRealPath}". ${formatTrustResetHint(workspaceTrustRecordPath(ctx))}`,
-      { exitCode: 1 }
+      1
     );
   }
 
   if (!opts.stdinIsTTY || !opts.stdoutIsTTY) {
-    throw new ReportedCliError(
+    reportWorkspaceTrustInteractiveFailure(
       'Cannot prompt for workspace trust unless stdin and stdout are both attached to a terminal (TTY). Non-interactive mode requires CLIQ_TRUST_WORKSPACE=trust.',
-      { exitCode: 1 }
+      1
     );
   }
 
@@ -1669,7 +1685,7 @@ async function ensureInteractiveWorkspaceTrustedForRuntime(opts: {
 
   await writePersistedWorkspaceTrust(ctx, accepted ? 'trusted' : 'denied');
   if (!accepted) {
-    throw new ReportedCliError(`Declined trusting workspace "${ctx.workspaceRealPath}"`, { exitCode: 0 });
+    reportWorkspaceTrustInteractiveFailure(`Declined trusting workspace "${ctx.workspaceRealPath}"`, 0);
   }
 }
 
@@ -1981,7 +1997,10 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-validate') {
-      await denyIfWorkspaceUntrustedNonInteractiveRuntime(cwd);
+      await denyIfWorkspaceUntrustedNonInteractiveRuntime(
+        cwd,
+        wantsJson ? { writeJsonError: (msg) => writeJson({ type: 'error', message: msg }) } : undefined
+      );
       // Per spec §A.6: every tx subcommand handler runs crash recovery first.
       await coordRecoverAtStart(ctx);
       const wsCfg = await loadWorkspaceConfig(cwd);
@@ -2054,7 +2073,10 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-apply') {
-      await denyIfWorkspaceUntrustedNonInteractiveRuntime(cwd);
+      await denyIfWorkspaceUntrustedNonInteractiveRuntime(
+        cwd,
+        wantsJson ? { writeJsonError: (msg) => writeJson({ type: 'error', message: msg }) } : undefined
+      );
       // Per spec §A.6: every tx subcommand handler runs crash recovery first.
       await coordRecoverAtStart(ctx);
 
