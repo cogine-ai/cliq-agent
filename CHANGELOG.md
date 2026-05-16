@@ -10,10 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Workspace trust gate** — interactive chat prompts once per canonical workspace before reading `./.cliq/config`; headless/`run --jsonl`/`rpc`/`tx validate|apply` fail closed unless `CLIQ_TRUST_WORKSPACE` or persisted trust permits it (#48).
+- **Tool permission decision table (internal)** — `PolicyEngine` now consults a layered `PermissionTable` (builtin deny → workspace deny → allow → ask → preset) before falling back to the legacy `PolicyMode` preset. Every tool `ApprovalSubject` carries an `AccessChannel` (`fs-read`, `fs-write`, `bash`, `mcp`, `network`) derived deterministically in `buildToolApprovalSubject`. No user-visible surface yet — the table is empty by default and call sites are unchanged. CLI flags, workspace config, and persisted per-workspace rules land in the follow-up #62-B (#62).
+- **`HookOutput.permissionDecision.scope`** (forward-compatible) — `PermissionRequest` hooks may now emit `scope: 'once' | 'session' | 'workspace'` and `additionalAllowlistEntries: string[]`. The runner only acts on `'once'` today; richer scopes are accepted but coerced to `'once'` until the persistence surface ships in #62-B. Existing hooks are unaffected (#62).
+
+### Changed
+
+- **Bash decision flow merged into a single path** — `enforceBashPolicy` accepts a new `policyAlreadyApproved` flag (set by the runner-driven tool execute path) so the tx overlay no longer re-prompts when `PolicyEngine` has already approved. `bashPolicy=passthrough` and `bashPolicy=confirm` collapse to allow; `bashPolicy=deny` still wins. The headless + `bashPolicy=confirm` CI safety net is preserved (#62).
 
 ### Fixed
 
 - Trust gate polish from review: clearer `--classic` disclosure, canonical `realpath` required for trust keys, corrupted `trust.json` ignored like “no record”, Ink prompt guard against duplicate decisions (#61).
+- Latent always-deny bug for interactive `bashPolicy=confirm` (the bash tool never passed a confirm callback). The merged decision flow above eliminates the double-prompt by trusting the upstream `PolicyEngine` decision (#62).
 
 ## [0.9.0] - 2026-05-14
 

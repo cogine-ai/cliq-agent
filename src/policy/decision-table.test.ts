@@ -23,11 +23,12 @@ const wsRule = (channel: PermissionRule['channel'], pattern: string): Permission
 });
 
 test('EMPTY_PERMISSION_TABLE has no rules and falls through for every channel', () => {
-  for (const channel of [
-    { kind: 'fs-read', path: 'README.md' } as const,
-    { kind: 'fs-write', path: 'src/foo.ts', op: 'modify' as const },
-    { kind: 'bash', commandHead: 'npm' } as const
-  ]) {
+  const channels = [
+    { kind: 'fs-read', path: 'README.md' },
+    { kind: 'fs-write', path: 'src/foo.ts', op: 'modify' },
+    { kind: 'bash', commandHead: 'npm' }
+  ] as const;
+  for (const channel of channels) {
     assert.deepEqual(matchAgainstTable(EMPTY_PERMISSION_TABLE, channel), { kind: 'fallthrough' });
   }
 });
