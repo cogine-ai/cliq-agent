@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-workspace `permissions.json` persistence** — `~/.cliq/workspaces/<id>/permissions.json` stores allow/deny rules picked from the TUI "Always allow in this workspace" decision. Atomic writes, fail-closed reads (corrupted/version-mismatched/workspace-id-mismatched records are ignored rather than honored), and the same load-order invariant as `trust.json` (must follow the Workspace Trust gate). User-global allow/deny is deliberately not shipped in v0 (#62).
+- **Workspace `permissions` config section** — `.cliq/config.json` now accepts `permissions: { preset?, allow?, deny?, ask? }` so a workspace can pin its default friction level and per-action rules without forcing every invocation to pass CLI flags. Errors carry the offending rule index for fast typo location (#62).
+- **Shared `<channel>: <pattern>` permission grammar** — one parser used by workspace config, CLI flags, and the TUI session memory; covers `fs-read`, `fs-write`, `bash`, `mcp`, `network` channels with literal / `*` / `prefix *` matching. Forward-compat for MCP and network channels; today they only carry the model's stated intent (#62).
+- **CLI flags `--allow / --deny / --ask` (repeatable) and `--preset` alias for `--policy`** — feed `'cli'`-tagged rules into the layered permission table. `--policy` and `--preset` are mutually exclusive on the same invocation to avoid silent winners; `CLIQ_POLICY_MODE` does not count as a conflict so CLI flags can override an env default (#62).
+- **Composed layered `PermissionTable` runtime** — `PolicyEngine` now consults builtin deny → workspace config → persisted `permissions.json` → CLI flags → session memory before falling back to the `PolicyMode` preset. Behavior surface is unchanged for callers that don't set any permission rules; the default empty table degrades to the legacy `PolicyMode`-only decision (#62).
+- **TUI 4-scope ApprovalModal** — `y` allow / `a` allow this turn / `s` allow this session / `Shift+W` always allow in this workspace / `n` deny. `[W]orkspace` is dim-colored to flag it as the most sticky decision. Session/workspace scopes only render on tool subjects; tx-apply and permission-request modals stay one-shot. Workspace-scope decisions persist via `appendPersistedWorkspacePermission`; persist failures surface as stderr warnings without blocking the current turn (#62).
+- **README `## Tool permissions` section** documenting the rule grammar, all five layers, CLI flags, workspace config, modal scopes, and the headless one-shot guarantee.
+
+### Changed
+
+- `POLICY_MODES` / `isPolicyMode` / `POLICY_MODE_LIST` extracted from `src/cli.ts` into a shared `src/policy/modes.ts` so workspace config, CLI flags, slash commands, and the TUI all read from one source of truth (#62).
+- `accessChannelPrimaryKey` now exported from `src/policy/decision-table.ts` so other layers (TUI extend-allow, slash command rendering, audit log) can derive a stable rule pattern from a live subject without re-implementing the channel switch (#62).
+- Headless / `--json` / `rpc` / non-TTY paths are explicitly documented as one-shot scope only: `PermissionRequest` hooks emitting `scope: 'session'` or `scope: 'workspace'` are coerced down to `'once'` (already enforced via `coerceHookPermissionScope` since #62-A), and `~/.cliq/workspaces/<id>/permissions.json` is never written from these paths. Pinned by a new regression test in `src/headless/run.test.ts` (#62).
+
 ## [0.10.0] - 2026-05-16
 
 This release lands the first layer of Cliq's three-layer security model
