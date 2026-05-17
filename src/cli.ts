@@ -15,6 +15,7 @@ import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
 import { createPolicyEngine } from './policy/engine.js';
+import { isPolicyMode, POLICY_MODE_LIST, POLICY_MODES } from './policy/modes.js';
 import type { ApprovalSubject, PolicyMode } from './policy/types.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './protocol/runtime/events.js';
@@ -69,8 +70,6 @@ import { loadWorkspaceConfig, type WorkspaceConfig } from './workspace/config.js
 import { isValidTxId } from './workspace/transactions/types.js';
 import { promises as fsPromises } from 'node:fs';
 
-const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
-const POLICY_MODE_LIST = POLICY_MODES.join(', ');
 const STREAMING_MODES = ['auto', 'on', 'off'] as const;
 const RESTORE_SCOPES = ['session', 'files', 'both'] as const;
 const HELP_TOPICS = ['checkpoint', 'compact', 'handoff', 'tx'] as const;
@@ -162,10 +161,6 @@ export type ParsedArgs = ParsedArgsBase & (
       prompt?: undefined;
     }
 );
-
-function isPolicyMode(value: string): value is PolicyMode {
-  return (POLICY_MODES as readonly string[]).includes(value);
-}
 
 function isStreamingMode(value: string) {
   return (STREAMING_MODES as readonly string[]).includes(value);
