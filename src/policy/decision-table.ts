@@ -159,7 +159,13 @@ function matchesRule(rule: PermissionRule, channel: AccessChannel): boolean {
   return matchPattern(rule.pattern, primaryKey(channel));
 }
 
-function primaryKey(channel: AccessChannel): string {
+/**
+ * Project an {@link AccessChannel} down to the single string that allow/deny
+ * patterns match against ("primary key"). Exported so other layers (TUI
+ * extend-allow, slash command rendering, audit log) can derive a stable
+ * pattern from a live subject without re-implementing this switch.
+ */
+export function accessChannelPrimaryKey(channel: AccessChannel): string {
   switch (channel.kind) {
     case 'fs-read':
       return channel.path;
@@ -173,6 +179,8 @@ function primaryKey(channel: AccessChannel): string {
       return channel.host ?? '';
   }
 }
+
+const primaryKey = accessChannelPrimaryKey;
 
 function matchPattern(pattern: string, value: string): boolean {
   if (pattern === '*') return true;
