@@ -137,6 +137,89 @@ test('parseArgs rejects missing policy values', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--policy']), /Missing value for --policy/i);
 });
 
+test('parseArgs --preset is an alias for --policy and marks policy explicit', () => {
+  const flag = parseArgs(['node', 'src/index.ts', '--preset', 'confirm-write', 'chat']);
+  assert.equal(flag.policy, 'confirm-write');
+  assert.equal(flag.policyExplicit, true);
+
+  const eq = parseArgs(['node', 'src/index.ts', '--preset=read-only', 'chat']);
+  assert.equal(eq.policy, 'read-only');
+  assert.equal(eq.policyExplicit, true);
+});
+
+test('parseArgs rejects --preset xxx unknown mode and missing value', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--preset', 'yolo']),
+    /Unknown policy mode/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--preset']),
+    /Missing value for --preset/i
+  );
+});
+
+test('parseArgs refuses simultaneous --policy and --preset (either order)', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--policy', 'auto', '--preset', 'auto']),
+    /--policy and --preset are mutually exclusive/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--preset=auto', '--policy=auto']),
+    /--preset and --policy are mutually exclusive/i
+  );
+});
+
+test('parseArgs tolerates CLIQ_POLICY_MODE + --preset (env is not a CLI conflict)', () => {
+  const previous = process.env.CLIQ_POLICY_MODE;
+  process.env.CLIQ_POLICY_MODE = 'auto';
+  try {
+    const parsed = parseArgs(['node', 'src/index.ts', '--preset', 'read-only', 'chat']);
+    assert.equal(parsed.policy, 'read-only');
+    assert.equal(parsed.policyExplicit, true);
+  } finally {
+    if (previous === undefined) delete process.env.CLIQ_POLICY_MODE;
+    else process.env.CLIQ_POLICY_MODE = previous;
+  }
+});
+
+test('parseArgs collects --allow / --deny / --ask as a layered cliPermissions block', () => {
+  const parsed = parseArgs([
+    'node',
+    'src/index.ts',
+    '--allow',
+    'bash: git *',
+    '--allow=fs-read: docs/*',
+    '--deny',
+    'fs-write: .env',
+    '--ask=fs-write: src/*',
+    'chat'
+  ]);
+  assert.deepEqual(parsed.cliPermissions, {
+    allow: [
+      { channel: 'bash', pattern: 'git *', source: 'cli' },
+      { channel: 'fs-read', pattern: 'docs/*', source: 'cli' }
+    ],
+    deny: [{ channel: 'fs-write', pattern: '.env', source: 'cli' }],
+    ask: [{ channel: 'fs-write', pattern: 'src/*', source: 'cli' }]
+  });
+});
+
+test('parseArgs leaves cliPermissions undefined when no allow/deny/ask flag is given', () => {
+  const parsed = parseArgs(['node', 'src/index.ts', 'chat']);
+  assert.equal(parsed.cliPermissions, undefined);
+});
+
+test('parseArgs surfaces grammar errors for malformed --allow/--deny rules with the flag name', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--allow', 'no-colon-here']),
+    /--allow.*missing a colon/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--deny=unknown-channel: foo']),
+    /--deny.*unknown channel/i
+  );
+});
+
 test('parseArgs rejects invalid CLIQ_POLICY_MODE values', () => {
   const previous = process.env.CLIQ_POLICY_MODE;
   process.env.CLIQ_POLICY_MODE = 'invalid';

@@ -14,8 +14,10 @@ import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
+import type { PermissionRule } from './policy/decision-table.js';
 import { createPolicyEngine } from './policy/engine.js';
 import { isPolicyMode, POLICY_MODE_LIST, POLICY_MODES } from './policy/modes.js';
+import { PermissionGrammarError, parsePermissionRuleString } from './policy/permissions-grammar.js';
 import type { ApprovalSubject, PolicyMode } from './policy/types.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './protocol/runtime/events.js';
@@ -84,9 +86,9 @@ type TxApplyPolicy = (typeof TX_APPLY_POLICIES)[number];
 
 type ParsedArgsBase = {
   policy: PolicyMode;
-  // True when the user explicitly set --policy or CLIQ_POLICY_MODE; lets the
-  // TUI dispatch override the global default with a more cautious default
-  // (confirm-all) without overruling explicit choices.
+  // True when the user explicitly set --policy, --preset, or CLIQ_POLICY_MODE;
+  // lets the TUI dispatch override the global default with a more cautious
+  // default (confirm-all) without overruling explicit choices.
   policyExplicit?: boolean;
   skills: string[];
   model: PartialModelConfig;
@@ -94,6 +96,17 @@ type ParsedArgsBase = {
   txApply?: TxApplyPolicy;
   tui?: boolean;
   classic?: boolean;
+  /**
+   * Layered permission rules parsed from `--allow`/`--deny`/`--ask`
+   * (repeatable). Source is always `'cli'`. The rules feed into the
+   * PolicyEngine decision-table layering done in B4; the parser stays
+   * concerned only with the wire shape, not with how the layers compose.
+   */
+  cliPermissions?: {
+    allow: PermissionRule[];
+    deny: PermissionRule[];
+    ask: PermissionRule[];
+  };
 };
 
 export type ParsedArgs = ParsedArgsBase & (
@@ -469,6 +482,42 @@ function readFlagValue(raw: string[], index: number, flag: string) {
   return value;
 }
 
+/**
+ * Refuse simultaneous --policy + --preset on the same CLI invocation. Both
+ * flags set the PolicyMode preset; accepting both at once would force a
+ * silent winner, which is exactly the kind of "configuration that takes
+ * effect without telling you" bug we're avoiding in the trust + permission
+ * stack. CLIQ_POLICY_MODE is intentionally not part of this check (env vars
+ * are an implicit default that a CLI flag should be allowed to override).
+ */
+function assertPolicyFlagNotConflicting(
+  seen: '--policy' | '--preset' | null,
+  incoming: '--policy' | '--preset'
+) {
+  if (seen !== null && seen !== incoming) {
+    throw new Error(
+      `${seen} and ${incoming} are mutually exclusive: both set the policy preset. Pick one.`
+    );
+  }
+}
+
+/**
+ * Parse a single `<channel>: <pattern>` string passed via --allow / --deny /
+ * --ask, re-tagging the grammar error with the flag name so the user can
+ * locate the bad argument in their command line ("--allow 'no-colon'"
+ * instead of just "missing a colon"). Source is always 'cli'.
+ */
+function parsePermissionFlag(flag: string, raw: string): PermissionRule {
+  try {
+    return parsePermissionRuleString(raw, 'cli', flag);
+  } catch (err) {
+    if (err instanceof PermissionGrammarError) {
+      throw new Error(err.message);
+    }
+    throw err;
+  }
+}
+
 function parseCompactCreateArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   if (hasHelpFlag(args.slice(2))) {
     return { ...base, cmd: 'help', topic: 'compact' };
@@ -796,6 +845,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let tui = false;
   let classic = false;
   let policyExplicit = false;
+  // Track which CLI flag (if any) set the preset so we can refuse
+  // simultaneous --policy + --preset. Both are aliases for the same setting;
+  // accepting both at once would force the parser to pick a winner silently.
+  // Environment-only configuration (CLIQ_POLICY_MODE) is intentionally NOT
+  // counted here so users can layer a CLI override on top of an env default.
+  let policyFlagSeen: '--policy' | '--preset' | null = null;
+  const cliAllow: PermissionRule[] = [];
+  const cliDeny: PermissionRule[] = [];
+  const cliAsk: PermissionRule[] = [];
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
@@ -879,8 +937,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
       if (!isPolicyMode(value)) {
         throw new Error(`Unknown policy mode: ${value}`);
       }
+      assertPolicyFlagNotConflicting(policyFlagSeen, '--policy');
       policy = value;
       policyExplicit = true;
+      policyFlagSeen = '--policy';
       continue;
     }
 
@@ -889,8 +949,74 @@ export function parseArgs(argv: string[]): ParsedArgs {
       if (!isPolicyMode(value)) {
         throw new Error(`Unknown policy mode: ${value}`);
       }
+      assertPolicyFlagNotConflicting(policyFlagSeen, '--policy');
       policy = value;
       policyExplicit = true;
+      policyFlagSeen = '--policy';
+      i += 1;
+      continue;
+    }
+
+    // --preset is an alias for --policy (modeled after Codex / Claude CLI
+    // habits) that lets a workspace config or operator default the preset
+    // without overloading the longer --policy name. The two flags are
+    // mutually exclusive on the CLI — see assertPolicyFlagNotConflicting.
+    if (token.startsWith('--preset=')) {
+      const value = token.slice('--preset='.length);
+      if (!value) {
+        throw new Error(`Missing value for --preset; expected one of: ${POLICY_MODE_LIST}`);
+      }
+      if (!isPolicyMode(value)) {
+        throw new Error(`Unknown policy mode: ${value}`);
+      }
+      assertPolicyFlagNotConflicting(policyFlagSeen, '--preset');
+      policy = value;
+      policyExplicit = true;
+      policyFlagSeen = '--preset';
+      continue;
+    }
+
+    if (token === '--preset') {
+      const value = readFlagValue(raw, i, '--preset');
+      if (!isPolicyMode(value)) {
+        throw new Error(`Unknown policy mode: ${value}`);
+      }
+      assertPolicyFlagNotConflicting(policyFlagSeen, '--preset');
+      policy = value;
+      policyExplicit = true;
+      policyFlagSeen = '--preset';
+      i += 1;
+      continue;
+    }
+
+    // --allow / --deny / --ask each take a single "<channel>: <pattern>"
+    // string and are repeatable. Each occurrence is parsed through the
+    // shared grammar (src/policy/permissions-grammar.ts) so workspace
+    // config + CLI flags + TUI session memory all speak the same wire shape.
+    if (token.startsWith('--allow=')) {
+      cliAllow.push(parsePermissionFlag('--allow', token.slice('--allow='.length)));
+      continue;
+    }
+    if (token === '--allow') {
+      cliAllow.push(parsePermissionFlag('--allow', readFlagValue(raw, i, '--allow')));
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('--deny=')) {
+      cliDeny.push(parsePermissionFlag('--deny', token.slice('--deny='.length)));
+      continue;
+    }
+    if (token === '--deny') {
+      cliDeny.push(parsePermissionFlag('--deny', readFlagValue(raw, i, '--deny')));
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('--ask=')) {
+      cliAsk.push(parsePermissionFlag('--ask', token.slice('--ask='.length)));
+      continue;
+    }
+    if (token === '--ask') {
+      cliAsk.push(parsePermissionFlag('--ask', readFlagValue(raw, i, '--ask')));
       i += 1;
       continue;
     }
@@ -989,6 +1115,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   const cmd = args[0];
+  const cliPermissions =
+    cliAllow.length === 0 && cliDeny.length === 0 && cliAsk.length === 0
+      ? undefined
+      : { allow: cliAllow, deny: cliDeny, ask: cliAsk };
   const base: ParsedArgsBase = {
     policy,
     ...(policyExplicit ? { policyExplicit } : {}),
@@ -997,14 +1127,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
     ...(tui ? { tui } : {}),
-    ...(classic ? { classic } : {})
+    ...(classic ? { classic } : {}),
+    ...(cliPermissions ? { cliPermissions } : {})
   };
   const baseExtras = {
     ...(policyExplicit ? { policyExplicit } : {}),
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
     ...(tui ? { tui } : {}),
-    ...(classic ? { classic } : {})
+    ...(classic ? { classic } : {}),
+    ...(cliPermissions ? { cliPermissions } : {})
   };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
   if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
