@@ -14,7 +14,8 @@ import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
-import type { PermissionRule } from './policy/decision-table.js';
+import { composeRuntimePermissionTable } from './policy/compose-runtime.js';
+import type { PermissionRule, PermissionTable } from './policy/decision-table.js';
 import { createPolicyEngine } from './policy/engine.js';
 import { isPolicyMode, POLICY_MODE_LIST, POLICY_MODES } from './policy/modes.js';
 import { PermissionGrammarError, parsePermissionRuleString } from './policy/permissions-grammar.js';
@@ -2374,7 +2375,8 @@ export async function runCli(argv: string[]) {
           skills,
           model: cliModel,
           txMode: parsed.txMode,
-          txApply: parsed.txApply
+          txApply: parsed.txApply,
+          ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
         },
         {
           onEvent(event) {
@@ -2401,7 +2403,8 @@ export async function runCli(argv: string[]) {
         skills,
         model: cliModel,
         txMode: parsed.txMode,
-        txApply: parsed.txApply
+        txApply: parsed.txApply,
+        ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
       },
       {
         hooks: createCliHooks(),
@@ -2485,6 +2488,16 @@ export async function runCli(argv: string[]) {
     sessionId: session.id,
     workspaceRealPath: chatWorkspaceRealPath
   };
+  // SECURITY: trust gate has already decided above (line ~2447); only NOW
+  // is it safe to read workspace-controlled permission state (workspace
+  // config.permissions + persisted permissions.json). composeRuntimePermissionTable
+  // documents this invariant; keep the call below this line.
+  const chatTrustContext = await createWorkspaceTrustContext(cwd, cliqHome);
+  const chatPermissionTable: PermissionTable = await composeRuntimePermissionTable({
+    trustContext: chatTrustContext,
+    workspaceConfigPermissions: wsCfg.permissions,
+    ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
+  });
   const chatRecoveryResult = await coordRecoverAtStart(chatCoordinatorCtx);
   for (const skippedTxId of chatRecoveryResult.crossSessionSkipped) {
     process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
@@ -2513,7 +2526,8 @@ export async function runCli(argv: string[]) {
       txMode: parsed.txMode,
       txApply: parsed.txApply,
       coordinatorCtx: chatCoordinatorCtx,
-      cliqHome
+      cliqHome,
+      permissionTable: chatPermissionTable
     });
     return;
   }
@@ -2553,7 +2567,7 @@ export async function runCli(argv: string[]) {
     model: modelClient,
     hooks: [...assembly.hooks, ...createCliHooks()],
     commandHooks: assembly.commandHooks ?? {},
-    policy: createPolicyEngine({ mode: policy }),
+    policy: createPolicyEngine({ mode: policy, table: chatPermissionTable }),
     confirm: createConfirmTool(rl),
     instructions: assembly.instructions,
     autoCompact: {
@@ -2642,6 +2656,14 @@ type RunChatTuiSessionOpts = {
   txApply?: TxApplyPolicy;
   coordinatorCtx: CoordinatorContext;
   cliqHome: string;
+  /**
+   * Composed permission table for the runtime PolicyEngine. Layered upstream
+   * in the caller (chat dispatch) AFTER the workspace trust gate has decided,
+   * to satisfy the load-order invariant documented in
+   * src/policy/compose-runtime.ts. Re-used for every `/policy <mode>` swap so
+   * deny/allow/ask rules survive a mid-session preset change.
+   */
+  permissionTable: PermissionTable;
 };
 
 // The TUI defaults to the most cautious mode that still lets the agent do
@@ -2692,9 +2714,16 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   //     through to runner.confirm (which only takes a string prompt).
   //   * `allow-for-this-turn` short-circuits subsequent 'ask' decisions in
   //     the same turn; reset by livePolicy.resetTurn() at each onSubmit.
+  //   * The composed permission table (workspace config + persisted +
+  //     CLI flags) is bound here and re-used for every mid-session swap so
+  //     deny/allow/ask layers survive a `/policy <mode>` change.
   // tx.applyPolicy stays bound to construction-time value (per spec open
   // question 3) — that is enforced inside tuiTransactions.confirmApply below.
-  const livePolicy = createTuiLivePolicyEngine(policy, approvalBridge.requestApproval);
+  const livePolicy = createTuiLivePolicyEngine(
+    policy,
+    approvalBridge.requestApproval,
+    opts.permissionTable
+  );
 
   const tuiTxMode = opts.txMode ?? wsCfg.transactions?.mode ?? 'off';
   let tuiTransactions: TxRunnerOptions | undefined;
@@ -2843,9 +2872,10 @@ export async function notifyIfPackageUpdateAvailable(store: UiStore) {
 
 function createTuiLivePolicyEngine(
   initialMode: PolicyMode,
-  requestApproval: (subject: ApprovalSubject) => Promise<'allow' | 'deny' | 'allow-turn'>
+  requestApproval: (subject: ApprovalSubject) => Promise<'allow' | 'deny' | 'allow-turn'>,
+  table: PermissionTable
 ) {
-  let inner = createPolicyEngine({ mode: initialMode });
+  let inner = createPolicyEngine({ mode: initialMode, table });
   let allowTurn = false;
 
   const engine = {
@@ -2877,7 +2907,10 @@ function createTuiLivePolicyEngine(
   return {
     engine: engine as ReturnType<typeof createPolicyEngine>,
     setMode(mode: PolicyMode) {
-      inner = createPolicyEngine({ mode });
+      // Keep the layered permission table across preset swaps so a
+      // mid-session `/policy auto` doesn't silently drop the user's deny
+      // rules. Only the preset changes; deny/allow/ask layers persist.
+      inner = createPolicyEngine({ mode, table });
     },
     resetTurn() {
       allowTurn = false;

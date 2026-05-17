@@ -7,6 +7,7 @@ import { resolveModelConfig } from '../model/config.js';
 import type { PartialModelConfig } from '../model/config.js';
 import { createModelClient } from '../model/index.js';
 import type { ModelClient, ResolvedModelConfig } from '../model/types.js';
+import { composeRuntimePermissionTable } from '../policy/compose-runtime.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import type { PolicyConfirm, PolicyMode } from '../policy/types.js';
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
@@ -362,12 +363,23 @@ export async function runHeadless(
       };
     }
 
+    // SECURITY: the headless trust gate (denyIfWorkspaceUntrustedNonInteractiveRuntime
+    // in src/cli.ts) decided well before runHeadless was invoked, so it is
+    // safe to read workspace-controlled permission state here. See
+    // composeRuntimePermissionTable for the load-order invariant.
+    const headlessTrustContext = await createWorkspaceTrustContext(request.cwd, cliqHome);
+    const headlessPermissionTable = await composeRuntimePermissionTable({
+      trustContext: headlessTrustContext,
+      workspaceConfigPermissions: workspaceConfig.permissions,
+      ...(request.cliPermissions ? { cliPermissions: request.cliPermissions } : {})
+    });
+
     const modelClient = options.modelClient ?? options.createModelClient?.(modelConfig) ?? createModelClient(modelConfig);
     const runner = createRunner({
       model: modelClient,
       hooks: [...assembly.hooks, ...(options.hooks ?? [])],
       commandHooks: assembly.commandHooks ?? {},
-      policy: createPolicyEngine({ mode: policy }),
+      policy: createPolicyEngine({ mode: policy, table: headlessPermissionTable }),
       confirm: options.confirm,
       instructions: assembly.instructions,
       signal: options.signal,
