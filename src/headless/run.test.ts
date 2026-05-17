@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -258,6 +258,89 @@ process.stdin.on('end', () => {
   assert.equal(hookInput.hookEventName, 'PreToolUse');
   assert.equal(hookInput.toolName, 'bash');
   assert.deepEqual(hookInput.action, { bash: 'pwd' });
+});
+
+test('runHeadless coerces hook scope to "once" and never persists permissions.json (#62-B headless safety)', async () => {
+  // Even when a PermissionRequest hook tries to return scope='workspace',
+  // the headless path must treat the decision as one-shot and must NOT
+  // write to ~/.cliq/workspaces/<id>/permissions.json. Persisting from a
+  // non-interactive run would let unattended CI quietly accumulate
+  // "always allow" rules that survive forever — exactly the foot-gun
+  // the TUI's deliberate Shift+W gating guards against.
+  const { home, cwd } = await setupWorkspace();
+  const command = await writeWorkspaceHook(
+    cwd,
+    'workspace-scope-allow.js',
+    `let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({
+    permissionDecision: {
+      behavior: 'allow',
+      message: 'workspace-scope ask',
+      scope: 'workspace'
+    }
+  }));
+});
+`
+  );
+  await writeFile(
+    path.join(cwd, '.cliq', 'config.json'),
+    JSON.stringify({
+      hooks: {
+        PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command }] }]
+      }
+    }),
+    'utf8'
+  );
+  let calls = 0;
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'show cwd',
+      policy: 'confirm-bash',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    {
+      modelClient: {
+        async complete(_messages, options) {
+          calls += 1;
+          await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
+          await options?.onEvent?.({ type: 'end' });
+          return {
+            provider: 'ollama',
+            model: 'test-model',
+            content:
+              calls === 1 ? JSON.stringify({ bash: 'pwd' }) : JSON.stringify({ message: 'done' })
+          };
+        }
+      }
+    }
+  );
+
+  assert.equal(output.status, 'completed', 'turn must complete; hook allow was honored');
+  // Walk the cliqHome workspace dir; no permissions.json must have been
+  // written. Iterate workspace ids because the headless path derives one
+  // from realpath(cwd).
+  const workspacesDir = path.join(home, 'workspaces');
+  let leaked = false;
+  try {
+    const entries = await readdir(workspacesDir);
+    for (const id of entries) {
+      try {
+        await access(path.join(workspacesDir, id, 'permissions.json'));
+        leaked = true;
+        break;
+      } catch {
+        // file not found → expected
+      }
+    }
+  } catch {
+    // workspacesDir missing → trivially compliant
+  }
+  assert.equal(leaked, false, 'headless must not persist permissions.json');
 });
 
 test('runHeadless returns structured pre-session errors without session fields', async () => {

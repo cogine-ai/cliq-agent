@@ -1,3 +1,27 @@
+/**
+ * Headless run entrypoint.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * Permission-scope invariant (#62-B).
+ * ─────────────────────────────────────────────────────────────────────────
+ * In the headless / `--json` / `rpc` / non-TTY paths, every permission
+ * decision is effectively `'once'`. The TUI's "Allow this session" and
+ * "Always allow in this workspace" scopes are unreachable here:
+ *
+ *   - There is no ApprovalModal, no `extendAllow` callback, and the
+ *     PolicyEngine is constructed without the `livePolicy` proxy that the
+ *     TUI uses to mutate the permission table.
+ *   - PermissionRequest hooks that try to return `scope: 'session'` /
+ *     `'workspace'` are coerced down to `'once'` by
+ *     `coerceHookPermissionScope` in src/runtime/runner.ts (#62-A).
+ *   - `appendPersistedWorkspacePermission` is never invoked from this file,
+ *     so a non-interactive run cannot silently accumulate "always allow"
+ *     entries in `~/.cliq/workspaces/<id>/permissions.json`.
+ *
+ * Regression test: src/headless/run.test.ts
+ *   "runHeadless coerces hook scope to 'once' and never persists
+ *   permissions.json (#62-B headless safety)".
+ */
 import { stat, realpath } from 'node:fs/promises';
 
 import { DEFAULT_POLICY_MODE } from '../config.js';
