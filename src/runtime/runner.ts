@@ -1,3 +1,7 @@
+import crypto from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
 import { DEFAULT_POLICY_MODE, MAX_LOOPS } from '../config.js';
 import { formatHookFailureReason, runCommandHooks, type CommandHookRunResult } from '../hooks/runner.js';
 import type { HookEventName, HookInput, HooksConfig } from '../hooks/types.js';
@@ -12,7 +16,7 @@ import { parseModelAction } from '../protocol/model/actions.js';
 import { resolveAutoCompactConfig, type AutoCompactConfig } from '../session/auto-compact-config.js';
 import { maybeAutoCompact, type AutoCompactState } from '../session/auto-compaction.js';
 import { createCheckpoint } from '../session/checkpoints.js';
-import { appendRecord, makeId, nowIso, resolveCliqHome, saveSession } from '../session/store.js';
+import { appendRecord, makeId, nowIso, resolveCliqHome, saveSession, workspaceIdFromRealPath } from '../session/store.js';
 import type { Session } from '../session/types.js';
 import { createToolRegistry } from '../tools/registry.js';
 import { normalizeToolResultForStorage } from '../tools/results.js';
@@ -31,6 +35,9 @@ import {
   type TxRunnerOptions
 } from './tx-runner.js';
 import type { WorkspaceWriter } from './workspace-writer.js';
+
+type HookPermissionScope = 'once' | 'session' | 'workspace';
+type ScopedApprovalDecision = ApprovalDecision & { scope: HookPermissionScope };
 
 type AutoCompactRunnerOptions = {
   config: AutoCompactConfig;
@@ -53,6 +60,61 @@ function isAbortError(error: unknown) {
     candidate.code === 'ERR_ABORTED' ||
     candidate.code === 'ABORT_ERR'
   );
+}
+
+export function coerceHookPermissionScope(scope: unknown): HookPermissionScope {
+  return scope === 'session' || scope === 'workspace' ? scope : 'once';
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringify(entry)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+function permissionCacheKey(subject: unknown) {
+  return crypto.createHash('sha256').update(stableStringify(subject)).digest('hex');
+}
+
+async function workspacePermissionCachePath(cwd: string) {
+  const workspaceRealPath = await fs.realpath(cwd);
+  const workspaceId = workspaceIdFromRealPath(workspaceRealPath);
+  return path.join(resolveCliqHome(), 'workspaces', workspaceId, 'permissions.json');
+}
+
+async function readWorkspacePermissionCache(cwd: string): Promise<Record<string, { reason?: string }>> {
+  try {
+    const content = await fs.readFile(await workspacePermissionCachePath(cwd), 'utf8');
+    const parsed = JSON.parse(content) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const approvals: Record<string, { reason?: string }> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const reason = (value as { reason?: unknown }).reason;
+      approvals[key] = typeof reason === 'string' ? { reason } : {};
+    }
+    return approvals;
+  } catch (error) {
+    if (error && typeof error === 'object' && (error as { code?: unknown }).code === 'ENOENT') {
+      return {};
+    }
+    return {};
+  }
+}
+
+async function writeWorkspacePermissionApproval(cwd: string, key: string, reason: string | undefined) {
+  const cachePath = await workspacePermissionCachePath(cwd);
+  const approvals = await readWorkspacePermissionCache(cwd);
+  approvals[key] = reason === undefined ? {} : { reason };
+  await fs.mkdir(path.dirname(cachePath), { recursive: true });
+  await fs.writeFile(cachePath, `${JSON.stringify(approvals, null, 2)}\n`, 'utf8');
 }
 
 export function createRunner({
@@ -83,6 +145,7 @@ export function createRunner({
   if (transactions) {
     assertHeadlessCompatible(transactions);
   }
+  const sessionPermissionApprovals = new Map<string, { reason?: string }>();
 
   async function emitCommandHookWarning(eventName: HookEventName, run: CommandHookRunResult) {
     await onEvent({
@@ -124,7 +187,7 @@ export function createRunner({
     return null;
   }
 
-  async function runPermissionRequestHooks(input: HookInput): Promise<ApprovalDecision | null> {
+  async function runPermissionRequestHooks(input: HookInput): Promise<ScopedApprovalDecision | ApprovalDecision | null> {
     for (const run of await runCommandHooks(commandHooks, input, { cwd: input.cwd })) {
       if (run.result.status === 'denied') {
         return {
@@ -142,7 +205,8 @@ export function createRunner({
         return {
           behavior: 'allow',
           reason: permissionDecision.message,
-          decidedBy: 'hook'
+          decidedBy: 'hook',
+          scope: coerceHookPermissionScope(permissionDecision.scope)
         };
       }
       if (permissionDecision?.behavior === 'deny') {
@@ -156,7 +220,8 @@ export function createRunner({
         return {
           behavior: 'allow',
           reason: run.result.output.reason,
-          decidedBy: 'hook'
+          decidedBy: 'hook',
+          scope: 'once'
         };
       }
     }
@@ -521,6 +586,7 @@ export function createRunner({
           });
           await onEvent({ type: 'tool-start', tool: definition.name, preview: rawContent.slice(0, 120) });
           await throwIfCancelled();
+          const approvalKey = permissionCacheKey(subject);
           let result: ToolResult | null = null;
           let decision: ApprovalDecision | null = null;
           let hookDenyEventName: 'PreToolUse' | 'PermissionRequest' | null = null;
@@ -543,20 +609,37 @@ export function createRunner({
             if (decision === null) {
               decision = await policy.decide(subject);
               if (decision.behavior === 'ask') {
-                const hookDecision = await runPermissionRequestHooks({
-                  schemaVersion: 1,
-                  hookEventName: 'PermissionRequest',
-                  sessionId: session.id,
-                  cwd,
-                  toolName: definition.name,
-                  action,
-                  approvalSubject: subject,
-                  model: session.model?.model
-                });
+                const cachedSessionApproval = sessionPermissionApprovals.get(approvalKey);
+                const cachedWorkspaceApproval = cachedSessionApproval
+                  ? undefined
+                  : (await readWorkspacePermissionCache(cwd))[approvalKey];
+                const hookDecision =
+                  cachedSessionApproval || cachedWorkspaceApproval
+                    ? {
+                        behavior: 'allow' as const,
+                        reason: (cachedSessionApproval ?? cachedWorkspaceApproval)?.reason,
+                        decidedBy: 'hook' as const
+                      }
+                    : await runPermissionRequestHooks({
+                        schemaVersion: 1,
+                        hookEventName: 'PermissionRequest',
+                        sessionId: session.id,
+                        cwd,
+                        toolName: definition.name,
+                        action,
+                        approvalSubject: subject,
+                        model: session.model?.model
+                      });
                 if (hookDecision) {
                   decision = hookDecision;
                   if (decision.behavior === 'deny') {
                     hookDenyEventName = 'PermissionRequest';
+                  } else if ('scope' in hookDecision) {
+                    if (hookDecision.scope === 'session') {
+                      sessionPermissionApprovals.set(approvalKey, { reason: hookDecision.reason });
+                    } else if (hookDecision.scope === 'workspace') {
+                      await writeWorkspacePermissionApproval(cwd, approvalKey, hookDecision.reason);
+                    }
                   }
                 } else if (!confirm) {
                   decision = {

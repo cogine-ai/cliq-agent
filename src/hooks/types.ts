@@ -63,6 +63,7 @@ export type HookOutput = {
   permissionDecision?: {
     behavior: 'allow' | 'deny';
     message?: string;
+    scope?: 'once' | 'session' | 'workspace' | (string & {});
   };
   [key: string]: unknown;
 };

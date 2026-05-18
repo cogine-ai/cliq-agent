@@ -1058,6 +1058,131 @@ test('runner lets PermissionRequest command hooks allow policy asks without user
   assert.equal(confirmCalls, 0);
 });
 
+test('runner reuses session-scoped PermissionRequest hook approvals in the same runner process', async () => {
+  const session = await createTempSession();
+  const markerPath = path.join(session.cwd, 'session-permission-hook-runs');
+  let calls = 0;
+  let executions = 0;
+  let confirmCalls = 0;
+  const allowCommand = await writeHookScript(
+    session.cwd,
+    'allow-session-permission-request.js',
+    `require('node:fs').appendFileSync(${JSON.stringify(markerPath)}, 'run\\n'); process.stdout.write(JSON.stringify({ permissionDecision: { behavior: 'allow', message: 'approved by hook', scope: 'session' } }));`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls <= 2 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    confirm: async () => {
+      confirmCalls += 1;
+      return false;
+    },
+    commandHooks: {
+      PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: allowCommand }] }]
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executions += 1;
+              return { tool: 'bash', status: 'ok' as const, content: 'TOOL_RESULT bash OK', meta: {} };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'show cwd twice');
+
+  assert.equal(executions, 2);
+  assert.equal(confirmCalls, 0);
+  assert.equal((await readFile(markerPath, 'utf8')).trim().split('\n').length, 1);
+});
+
+test('runner persists workspace-scoped PermissionRequest hook approvals across runners', async () => {
+  const session = await createTempSession();
+  const markerPath = path.join(session.cwd, 'workspace-permission-hook-runs');
+  let calls = 0;
+  let executions = 0;
+  let confirmCalls = 0;
+  const allowCommand = await writeHookScript(
+    session.cwd,
+    'allow-workspace-permission-request.js',
+    `require('node:fs').appendFileSync(${JSON.stringify(markerPath)}, 'run\\n'); process.stdout.write(JSON.stringify({ permissionDecision: { behavior: 'allow', message: 'approved by hook', scope: 'workspace' } }));`
+  );
+  const registry = {
+    definitions: [],
+    resolve() {
+      return {
+        definition: {
+          name: 'bash',
+          access: 'exec',
+          supports(action: unknown): action is { bash: string } {
+            return typeof (action as { bash?: unknown }).bash === 'string';
+          },
+          async execute() {
+            executions += 1;
+            return { tool: 'bash', status: 'ok' as const, content: 'TOOL_RESULT bash OK', meta: {} };
+          }
+        }
+      };
+    }
+  };
+  const firstRunner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    confirm: async () => {
+      confirmCalls += 1;
+      return false;
+    },
+    commandHooks: {
+      PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: allowCommand }] }]
+    },
+    registry
+  });
+
+  await firstRunner.runTurn(session, 'show cwd');
+
+  const secondRunner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 3 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    confirm: async () => {
+      confirmCalls += 1;
+      return false;
+    },
+    registry
+  });
+
+  await secondRunner.runTurn(session, 'show cwd again');
+
+  assert.equal(executions, 2);
+  assert.equal(confirmCalls, 0);
+  assert.equal((await readFile(markerPath, 'utf8')).trim().split('\n').length, 1);
+});
+
 test('runner lets PermissionRequest command hooks deny policy asks', async () => {
   const session = await createTempSession();
   let calls = 0;
