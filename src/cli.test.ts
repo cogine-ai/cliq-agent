@@ -18,12 +18,15 @@ import {
   resolveTuiInitialPolicy,
   resolveTuiPreference,
   resolveTxIdForReview,
+  notifyIfPackageUpdateAvailable,
   ReportedCliError,
   runCli
 } from './cli.js';
 import { createCheckpoint } from './session/checkpoints.js';
 import { createSession, ensureSession, saveSession, sessionFilePath } from './session/store.js';
+import { WorkspaceTrustError } from './session/trust.js';
 import type { ToolResult } from './tools/types.js';
+import type { UiAction, UiStore } from './tui/store.js';
 import { appendBashEffect } from './workspace/transactions/bash-effects.js';
 import {
   createTx,
@@ -132,6 +135,89 @@ test('parseArgs rejects invalid policy values', () => {
 
 test('parseArgs rejects missing policy values', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--policy']), /Missing value for --policy/i);
+});
+
+test('parseArgs --preset is an alias for --policy and marks policy explicit', () => {
+  const flag = parseArgs(['node', 'src/index.ts', '--preset', 'confirm-write', 'chat']);
+  assert.equal(flag.policy, 'confirm-write');
+  assert.equal(flag.policyExplicit, true);
+
+  const eq = parseArgs(['node', 'src/index.ts', '--preset=read-only', 'chat']);
+  assert.equal(eq.policy, 'read-only');
+  assert.equal(eq.policyExplicit, true);
+});
+
+test('parseArgs rejects --preset xxx unknown mode and missing value', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--preset', 'yolo']),
+    /Unknown policy mode/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--preset']),
+    /Missing value for --preset/i
+  );
+});
+
+test('parseArgs refuses simultaneous --policy and --preset (either order)', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--policy', 'auto', '--preset', 'auto']),
+    /--policy and --preset are mutually exclusive/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--preset=auto', '--policy=auto']),
+    /--preset and --policy are mutually exclusive/i
+  );
+});
+
+test('parseArgs tolerates CLIQ_POLICY_MODE + --preset (env is not a CLI conflict)', () => {
+  const previous = process.env.CLIQ_POLICY_MODE;
+  process.env.CLIQ_POLICY_MODE = 'auto';
+  try {
+    const parsed = parseArgs(['node', 'src/index.ts', '--preset', 'read-only', 'chat']);
+    assert.equal(parsed.policy, 'read-only');
+    assert.equal(parsed.policyExplicit, true);
+  } finally {
+    if (previous === undefined) delete process.env.CLIQ_POLICY_MODE;
+    else process.env.CLIQ_POLICY_MODE = previous;
+  }
+});
+
+test('parseArgs collects --allow / --deny / --ask as a layered cliPermissions block', () => {
+  const parsed = parseArgs([
+    'node',
+    'src/index.ts',
+    '--allow',
+    'bash: git *',
+    '--allow=fs-read: docs/*',
+    '--deny',
+    'fs-write: .env',
+    '--ask=fs-write: src/*',
+    'chat'
+  ]);
+  assert.deepEqual(parsed.cliPermissions, {
+    allow: [
+      { channel: 'bash', pattern: 'git *', source: 'cli' },
+      { channel: 'fs-read', pattern: 'docs/*', source: 'cli' }
+    ],
+    deny: [{ channel: 'fs-write', pattern: '.env', source: 'cli' }],
+    ask: [{ channel: 'fs-write', pattern: 'src/*', source: 'cli' }]
+  });
+});
+
+test('parseArgs leaves cliPermissions undefined when no allow/deny/ask flag is given', () => {
+  const parsed = parseArgs(['node', 'src/index.ts', 'chat']);
+  assert.equal(parsed.cliPermissions, undefined);
+});
+
+test('parseArgs surfaces grammar errors for malformed --allow/--deny rules with the flag name', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--allow', 'no-colon-here']),
+    /--allow.*missing a colon/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--deny=unknown-channel: foo']),
+    /--deny.*unknown channel/i
+  );
 });
 
 test('parseArgs rejects invalid CLIQ_POLICY_MODE values', () => {
@@ -689,6 +775,14 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /read-only/);
   assert.match(output, /confirm-bash/);
   assert.match(output, /confirm-all/);
+  // #62-B permission surface — all four new flags must appear in help so
+  // operators can discover them without reading the README.
+  assert.match(output, /--preset MODE/);
+  assert.match(output, /mutually exclusive with --policy/i);
+  assert.match(output, /--allow "<rule>"/);
+  assert.match(output, /--deny\s+"<rule>"/);
+  assert.match(output, /--ask\s+"<rule>"/);
+  assert.match(output, /fs-read \| fs-write \| bash \| mcp \| network/);
   assert.match(output, /--skill NAME/);
   assert.match(output, /repeat/i);
   assert.match(output, /--streaming MODE/);
@@ -884,6 +978,7 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
+  const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
   let stdout = '';
   let stderr = '';
   const stdoutWrite = process.stdout.write;
@@ -904,6 +999,7 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
 
   try {
     process.env.CLIQ_HOME = home;
+    process.env.CLIQ_TRUST_WORKSPACE = 'trust';
     await assert.rejects(
       () =>
         runCli([
@@ -924,6 +1020,11 @@ test('runCli marks already-rendered runtime errors as reported', async () => {
   } finally {
     process.stdout.write = stdoutWrite;
     process.stderr.write = stderrWrite;
+    if (previousTrust === undefined) {
+      delete process.env.CLIQ_TRUST_WORKSPACE;
+    } else {
+      process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+    }
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
     } else {
@@ -944,6 +1045,7 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-jsonl-home-'));
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
+  const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
   const previousStdoutWrite = process.stdout.write;
   const previousStderrWrite = process.stderr.write;
   const fetchMock = mock.method(globalThis, 'fetch', async () => {
@@ -954,6 +1056,7 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
 
   process.chdir(cwd);
   process.env.CLIQ_HOME = home;
+  process.env.CLIQ_TRUST_WORKSPACE = 'trust';
   process.stdout.write = ((chunk: string | Uint8Array) => {
     chunks.push(String(chunk));
     return true;
@@ -987,6 +1090,11 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
     process.stdout.write = previousStdoutWrite;
     process.stderr.write = previousStderrWrite;
     fetchMock.mock.restore();
+    if (previousTrust === undefined) {
+      delete process.env.CLIQ_TRUST_WORKSPACE;
+    } else {
+      process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+    }
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;
     } else {
@@ -1006,6 +1114,14 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
   assert.equal(lines.some((line) => JSON.parse(line).type === 'error'), true);
   assert.equal(JSON.parse(lines.at(-1)!).type, 'run-end');
   assert.equal(stderrChunks.join('').trim(), '');
+});
+
+test('renderUnhandledError suppresses workspace trust sentinel errors', () => {
+  assert.equal(renderUnhandledError(new WorkspaceTrustError('workspace trust declined', 0)), null);
+});
+
+test('cliExitCode reads WorkspaceTrustError exit codes', () => {
+  assert.equal(cliExitCode(new WorkspaceTrustError('trust env invalid', 2)), 2);
 });
 
 test('renderUnhandledError suppresses errors already reported by runtime events', () => {
@@ -1138,6 +1254,61 @@ async function createCliTxFixture(env: CliTestEnv) {
   await saveSession(env.cwd, session);
   return txId;
 }
+
+test('runCli tx validate --json emits trust refusal as stdout JSON instead of stderr only', async () => {
+  await withCliTestEnv('tx-validate-trust-json', async (env) => {
+    const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
+    delete process.env.CLIQ_TRUST_WORKSPACE;
+
+    try {
+      await assert.rejects(
+        () => runCli(['node', 'src/index.ts', 'tx', 'validate', 'tx_any', '--json']),
+        isReportedCliError
+      );
+    } finally {
+      if (previousTrust === undefined) {
+        delete process.env.CLIQ_TRUST_WORKSPACE;
+      } else {
+        process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+      }
+    }
+
+    const payloads = env.output
+      .join('')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { type?: string; message?: string });
+
+    assert.equal(payloads.length, 1);
+    assert.equal(payloads[0]?.type, 'error');
+    assert.ok(
+      /untrusted workspace|non-interactive mode/i.exec(payloads[0]?.message ?? ''),
+      'expected gate copy to mention non-interactive refuse'
+    );
+    assert.equal(env.stderrText().trim(), '');
+  });
+});
+
+test('runCli bare chat surfaces CLIQ_TRUST_WORKSPACE=deny on stderr before exit', async () => {
+  await withCliTestEnv('chat-trust-deny-stderr', async (env) => {
+    const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
+    process.env.CLIQ_TRUST_WORKSPACE = 'deny';
+
+    try {
+      await assert.rejects(() => runCli(['node', 'src/index.ts']), isReportedCliError);
+    } finally {
+      if (previousTrust === undefined) {
+        delete process.env.CLIQ_TRUST_WORKSPACE;
+      } else {
+        process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+      }
+    }
+
+    assert.match(env.stderrText(), /CLIQ_TRUST_WORKSPACE=deny/);
+    assert.ok(env.stderrText().includes(env.cwd), 'message should cite the workspace path');
+  });
+});
 
 test('runCli tx review commands inspect the provided or active transaction', async () => {
   await withCliTestEnv('tx-review', async (env) => {
@@ -1615,4 +1786,102 @@ test('resolveTuiPreference precedence: --classic > --tui > CLIQ_TUI=0 > TTY defa
     resolveTuiPreference({ classic: true, tui: false, envOptOut: false, isTTY: false }),
     false
   );
+});
+
+function captureDispatchStore(actions: UiAction[]): UiStore {
+  return {
+    getState() {
+      throw new Error('getState is not used by notifyIfPackageUpdateAvailable');
+    },
+    subscribe() {
+      throw new Error('subscribe is not used by notifyIfPackageUpdateAvailable');
+    },
+    dispatch(action) {
+      actions.push(action);
+    }
+  };
+}
+
+async function readPackageVersionForTest(): Promise<string> {
+  const raw = await readFile(new URL('../package.json', import.meta.url), 'utf8');
+  const parsed = JSON.parse(raw) as { version?: unknown };
+  if (typeof parsed.version !== 'string') {
+    throw new Error('package.json version must be a string');
+  }
+  return parsed.version;
+}
+
+function nextPatchVersion(version: string): string {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  assert.ok(match, `expected semver package version, got ${version}`);
+  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
+}
+
+test('notifyIfPackageUpdateAvailable dispatches when npm has a newer version', async () => {
+  const actions: UiAction[] = [];
+  const current = await readPackageVersionForTest();
+  const latest = nextPatchVersion(current);
+  const fetchMock = mock.method(globalThis, 'fetch', async () =>
+    Response.json({ version: latest })
+  );
+
+  try {
+    await notifyIfPackageUpdateAvailable(captureDispatchStore(actions));
+  } finally {
+    fetchMock.mock.restore();
+  }
+
+  assert.deepEqual(actions, [
+    { type: 'version-update', notice: { current, latest } }
+  ]);
+});
+
+test('notifyIfPackageUpdateAvailable is silent when no update is available or check fails', async () => {
+  const current = await readPackageVersionForTest();
+  const sameVersionActions: UiAction[] = [];
+  const sameVersionFetch = mock.method(globalThis, 'fetch', async () =>
+    Response.json({ version: current })
+  );
+  try {
+    await notifyIfPackageUpdateAvailable(captureDispatchStore(sameVersionActions));
+  } finally {
+    sameVersionFetch.mock.restore();
+  }
+  assert.equal(sameVersionActions.length, 0);
+
+  const failingActions: UiAction[] = [];
+  const failingFetch = mock.method(globalThis, 'fetch', async () => {
+    throw new Error('offline');
+  });
+  try {
+    await notifyIfPackageUpdateAvailable(captureDispatchStore(failingActions));
+  } finally {
+    failingFetch.mock.restore();
+  }
+  assert.equal(failingActions.length, 0);
+});
+
+test('notifyIfPackageUpdateAvailable absorbs dispatch errors', async () => {
+  const latest = nextPatchVersion(await readPackageVersionForTest());
+  const fetchMock = mock.method(globalThis, 'fetch', async () =>
+    Response.json({ version: latest })
+  );
+
+  try {
+    await assert.doesNotReject(() =>
+      notifyIfPackageUpdateAvailable({
+        getState() {
+          throw new Error('getState is not used by notifyIfPackageUpdateAvailable');
+        },
+        subscribe() {
+          throw new Error('subscribe is not used by notifyIfPackageUpdateAvailable');
+        },
+        dispatch() {
+          throw new Error('dispatch failed');
+        }
+      })
+    );
+  } finally {
+    fetchMock.mock.restore();
+  }
 });

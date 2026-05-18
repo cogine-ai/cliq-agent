@@ -145,6 +145,22 @@ test('Tab is a no-op when completion equals current value', async () => {
   assert.equal(changes.length, 0);
 });
 
+test('raw Shift+Tab escape is swallowed before reaching the prompt buffer', async () => {
+  const changes: string[] = [];
+  const { stdin } = render(
+    <InputBar
+      value=""
+      onChange={(next) => {
+        changes.push(next);
+      }}
+      onSubmit={() => {}}
+    />
+  );
+  stdin.write('\x1b[Z');
+  await flush();
+  assert.equal(changes.length, 0);
+});
+
 // Ink emits arrow keys as ANSI escape sequences (e.g. "\x1b[D" for left).
 // ink-testing-library forwards stdin bytes through Ink's parser, so writing
 // the raw sequence is the closest we can get to a real key press.

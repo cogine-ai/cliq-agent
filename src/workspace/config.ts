@@ -4,6 +4,10 @@ import path from 'node:path';
 import { APP_DIR } from '../config.js';
 import type { HookCommandConfig, HookEventName, HookMatcherConfig, HooksConfig } from '../hooks/types.js';
 import type { PartialModelConfig } from '../model/config.js';
+import type { PermissionRule } from '../policy/decision-table.js';
+import { parsePermissionRuleStrings, PermissionGrammarError } from '../policy/permissions-grammar.js';
+import { isPolicyMode, POLICY_MODES } from '../policy/modes.js';
+import type { PolicyMode } from '../policy/types.js';
 import type { AutoCompactConfig } from '../session/auto-compact-config.js';
 
 export type TxMode = 'off' | 'edit';
@@ -40,6 +44,24 @@ export type TxConfig = {
   abortRetention?: string;
 };
 
+/**
+ * Per-workspace tool-permission configuration. Parsed from the `permissions:`
+ * section of `.cliq/config.json`. The parsed shape feeds directly into the
+ * PolicyEngine decision table at runtime; see src/policy/decision-table.ts
+ * for the matcher semantics and src/policy/permissions-grammar.ts for the
+ * "<channel>: <pattern>" string grammar shared with CLI flags.
+ *
+ * `preset` is an alias for the PolicyMode preset — accepted here so a
+ * workspace can pin its default friction level without forcing every
+ * invocation to pass --policy/--preset on the command line.
+ */
+export type WorkspacePermissionsConfig = {
+  preset?: PolicyMode;
+  allow?: PermissionRule[];
+  deny?: PermissionRule[];
+  ask?: PermissionRule[];
+};
+
 export type WorkspaceConfig = {
   instructionFiles: string[];
   extensions: string[];
@@ -48,6 +70,7 @@ export type WorkspaceConfig = {
   autoCompact: AutoCompactConfig;
   transactions?: TxConfig;
   hooks?: HooksConfig;
+  permissions?: WorkspacePermissionsConfig;
 };
 
 const EMPTY_WORKSPACE_CONFIG: WorkspaceConfig = {
@@ -433,6 +456,47 @@ export function parseTransactions(input: unknown): TxConfig | undefined {
   return result;
 }
 
+export function parsePermissionsConfig(input: unknown): WorkspacePermissionsConfig | undefined {
+  if (input === undefined) return undefined;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('permissions must be an object');
+  }
+
+  const raw = input as Record<string, unknown>;
+  const result: WorkspacePermissionsConfig = {};
+
+  if (raw.preset !== undefined) {
+    if (typeof raw.preset !== 'string' || !isPolicyMode(raw.preset)) {
+      throw new Error(
+        `permissions.preset must be one of: ${POLICY_MODES.join(', ')} (got ${JSON.stringify(raw.preset)})`
+      );
+    }
+    result.preset = raw.preset;
+  }
+
+  try {
+    if (raw.allow !== undefined) {
+      result.allow = parsePermissionRuleStrings(raw.allow, 'workspace', 'permissions.allow');
+    }
+    if (raw.deny !== undefined) {
+      result.deny = parsePermissionRuleStrings(raw.deny, 'workspace', 'permissions.deny');
+    }
+    if (raw.ask !== undefined) {
+      result.ask = parsePermissionRuleStrings(raw.ask, 'workspace', 'permissions.ask');
+    }
+  } catch (err) {
+    // Re-throw PermissionGrammarError messages verbatim so the caller sees
+    // "permissions.allow[3]=… missing a colon" rather than a generic
+    // "workspace config invalid". Other errors propagate untouched.
+    if (err instanceof PermissionGrammarError) {
+      throw new Error(err.message);
+    }
+    throw err;
+  }
+
+  return result;
+}
+
 export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error('workspace config must be a JSON object');
@@ -443,6 +507,7 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
   const autoCompact = readAutoCompactConfig(record);
   const transactions = parseTransactions(record.transactions);
   const hooks = readHooksConfig(record.hooks);
+  const permissions = parsePermissionsConfig(record.permissions);
   return {
     instructionFiles: readStringArray(record, 'instructionFiles'),
     extensions: readStringArray(record, 'extensions'),
@@ -450,7 +515,8 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
     autoCompact,
     ...(model ? { model } : {}),
     ...(transactions !== undefined ? { transactions } : {}),
-    ...(hooks !== undefined ? { hooks } : {})
+    ...(hooks !== undefined ? { hooks } : {}),
+    ...(permissions !== undefined ? { permissions } : {})
   };
 }
 

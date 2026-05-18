@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { Text } from 'ink';
 import { render } from 'ink-testing-library';
 
-import { useKeybindings } from './use-keybindings.js';
+import { isShiftTabInput, useKeybindings } from './use-keybindings.js';
 
 const flush = () => new Promise<void>((r) => setImmediate(r));
 
@@ -74,10 +74,23 @@ test('Ctrl+O fires onToggleBody and plain "o" does not', async () => {
   assert.equal(calls, 1);
 });
 
-// Shift+Tab is intentionally not driven through ink-testing-library: the
-// CSI Z ↔ key.shift|tab parsing varies by Ink version + ink-testing-library
-// stdin shim and we couldn't get a reliable round-trip in this environment.
-// The dispatch logic is covered by:
-//   - nextPolicyMode + POLICY_ROTATION (policy-rotation.test.ts)
-//   - the App-level handler wiring (compile-time)
-// and verified manually on a real TTY before each release.
+test('terminal Shift+Tab CSI Z fires onRotatePolicy', async () => {
+  let calls = 0;
+  const { stdin } = render(
+    <Probe
+      onRotatePolicy={() => {
+        calls += 1;
+      }}
+    />
+  );
+  stdin.write('\x1b[Z');
+  await flush();
+  assert.equal(calls, 1);
+});
+
+test('Shift+Tab detection accepts parsed and raw terminal forms', () => {
+  assert.equal(isShiftTabInput('', { shift: true, tab: true }), true);
+  assert.equal(isShiftTabInput('\x1b[Z', { shift: false, tab: false }), true);
+  assert.equal(isShiftTabInput('\x1b\t', { shift: false, tab: false }), true);
+  assert.equal(isShiftTabInput('\t', { shift: false, tab: true }), false);
+});

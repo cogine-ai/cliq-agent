@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { composePermissionTable, type PermissionRule } from './decision-table.js';
 import { createPolicyEngine } from './engine.js';
 import { buildToolApprovalSubject, buildTxApplyApprovalSubject } from './subjects.js';
 import type { ApprovalSubject, ToolAccess } from './types.js';
 import type { ModelAction } from '../protocol/model/actions.js';
 import type { TxReviewSnapshot } from '../workspace/transactions/inspect.js';
+
+const wsRule = (channel: PermissionRule['channel'], pattern: string): PermissionRule => ({
+  channel,
+  pattern,
+  source: 'workspace'
+});
 
 function toolSubject(
   name: string,
@@ -172,6 +179,85 @@ test('confirm-all asks for every tool subject', async () => {
   assert.equal((await policy.decide(toolSubject('read', 'read'))).behavior, 'ask');
   assert.equal((await policy.decide(toolSubject('edit', 'write'))).behavior, 'ask');
   assert.equal((await policy.decide(toolSubject('bash', 'exec', { bash: 'npm test' }))).behavior, 'ask');
+});
+
+test('decision table: workspace allow short-circuits a confirm-write preset', async () => {
+  const policy = createPolicyEngine({
+    mode: 'confirm-write',
+    table: composePermissionTable({ allow: [wsRule('fs-write', 'docs/*')] })
+  });
+  const edit = buildToolApprovalSubject({
+    definition: { name: 'edit', access: 'write' },
+    action: { edit: { path: 'docs/notes.md', old_text: 'a', new_text: 'b' } }
+  });
+  const decision = await policy.decide(edit);
+  assert.equal(decision.behavior, 'allow');
+  if (decision.behavior === 'allow') {
+    assert.match(decision.reason ?? '', /allow by workspace rule "fs-write: docs\/\*"/);
+  }
+});
+
+test('decision table: workspace deny beats a workspace allow on the same channel', async () => {
+  const policy = createPolicyEngine({
+    mode: 'auto',
+    table: composePermissionTable({
+      deny: [wsRule('fs-write', '.env')],
+      allow: [wsRule('fs-write', '*')]
+    })
+  });
+  const edit = buildToolApprovalSubject({
+    definition: { name: 'edit', access: 'write' },
+    action: { edit: { path: '.env', old_text: 'a', new_text: 'b' } }
+  });
+  const decision = await policy.decide(edit);
+  assert.equal(decision.behavior, 'deny');
+  if (decision.behavior === 'deny') {
+    assert.match(decision.reason, /deny by workspace rule "fs-write: \.env"/);
+  }
+});
+
+test('decision table: bash without identifiable head never matches allow (no silent approve)', async () => {
+  const policy = createPolicyEngine({
+    mode: 'confirm-bash',
+    // Even a "*" allow must not approve "&& ls"; the channel.commandHead
+    // sentinel forces fallthrough so the confirm-bash preset asks the user.
+    table: composePermissionTable({ allow: [wsRule('bash', '*')] })
+  });
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: '&& ls' }
+  });
+  const decision = await policy.decide(subject);
+  assert.equal(decision.behavior, 'ask');
+});
+
+test('decision table: builtin deny blocks plain `rm` even when user adds a broad bash allow', async () => {
+  const policy = createPolicyEngine({
+    mode: 'auto',
+    table: composePermissionTable({ allow: [wsRule('bash', '*')] })
+  });
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: 'rm -rf /' }
+  });
+  const decision = await policy.decide(subject);
+  assert.equal(decision.behavior, 'deny');
+  if (decision.behavior === 'deny') {
+    assert.match(decision.reason, /builtin/);
+  }
+});
+
+test('decision table: ask wins over preset auto', async () => {
+  const policy = createPolicyEngine({
+    mode: 'auto',
+    table: composePermissionTable({ ask: [wsRule('fs-write', 'src/*')] })
+  });
+  const edit = buildToolApprovalSubject({
+    definition: { name: 'edit', access: 'write' },
+    action: { edit: { path: 'src/index.ts', old_text: 'a', new_text: 'b' } }
+  });
+  const decision = await policy.decide(edit);
+  assert.equal(decision.behavior, 'ask');
 });
 
 test('tx-apply asks in confirm-write and confirm-all modes', async () => {

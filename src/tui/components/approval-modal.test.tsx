@@ -13,6 +13,7 @@ const toolSubject: Extract<ApprovalSubject, { kind: 'tool' }> = {
   kind: 'tool',
   toolName: 'bash',
   access: 'exec',
+  channel: { kind: 'bash', commandHead: 'rm' },
   action: { bash: 'rm -rf /' } as never,
   display: { title: 'Allow bash command?', command: 'rm -rf /' }
 };
@@ -104,4 +105,82 @@ test('"a" on a tx-apply subject is a no-op (no allow-turn for tx)', async () => 
   stdin.write('a');
   await flush();
   assert.equal(calls.length, 0);
+});
+
+test('tool modal renders the [s]ession and dim [W]orkspace hotkeys', () => {
+  const { lastFrame } = render(
+    <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={() => {}} />
+  );
+  const frame = lastFrame() ?? '';
+  // The hotkey row carries both scopes; the workspace label is the only one
+  // rendered in dim color, signaling it's the most sticky decision.
+  assert.match(frame, /\[s\]ession/);
+  assert.match(frame, /\[W\]orkspace/);
+});
+
+test('s -> allow-session and W -> allow-workspace on a tool subject', async () => {
+  const calls: UiApprovalDecision[] = [];
+  const decide = (d: UiApprovalDecision) => {
+    calls.push(d);
+  };
+
+  const session = render(
+    <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
+  );
+  session.stdin.write('s');
+  await flush();
+  assert.deepEqual(calls, ['allow-session']);
+
+  // Uppercase W is intentional — see ApprovalModal: lowercase w is reserved
+  // so the heaviest "persist forever in this workspace" decision needs a
+  // deliberate shift keystroke.
+  const workspace = render(
+    <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
+  );
+  workspace.stdin.write('W');
+  await flush();
+  assert.deepEqual(calls, ['allow-session', 'allow-workspace']);
+});
+
+test('lowercase w on a tool subject is a no-op (must be shifted)', async () => {
+  const calls: UiApprovalDecision[] = [];
+  const { stdin } = render(
+    <ApprovalModal
+      subject={toolSubject}
+      policy="confirm-bash"
+      onDecide={(d) => calls.push(d)}
+    />
+  );
+  stdin.write('w');
+  await flush();
+  assert.equal(calls.length, 0);
+});
+
+test('tx-apply subject does not render or accept session/workspace hotkeys', async () => {
+  const { lastFrame, stdin } = render(
+    <ApprovalModal
+      subject={txSubject}
+      policy="confirm-write"
+      onDecide={() => {}}
+    />
+  );
+  const frame = lastFrame() ?? '';
+  assert.doesNotMatch(frame, /\[s\]ession/);
+  assert.doesNotMatch(frame, /\[W\]orkspace/);
+
+  // Keys still get a no-op decision rather than throwing.
+  const calls: UiApprovalDecision[] = [];
+  const { stdin: stdin2 } = render(
+    <ApprovalModal
+      subject={txSubject}
+      policy="confirm-write"
+      onDecide={(d) => calls.push(d)}
+    />
+  );
+  stdin2.write('s');
+  stdin2.write('W');
+  await flush();
+  assert.equal(calls.length, 0);
+  // Silence "stdin not used" warning from the first render.
+  stdin.write('');
 });

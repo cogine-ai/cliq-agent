@@ -62,3 +62,12 @@ test('renders the session token estimate when sessionTokens is non-null', () => 
   const none = render(<StatusBar state={init({ sessionTokens: null })} />);
   assert.doesNotMatch(none.lastFrame() ?? '', /tok/);
 });
+
+test('renders update notice when a newer version is available', () => {
+  const state = {
+    ...init(),
+    versionUpdate: { current: '0.9.0', latest: '0.10.0' }
+  };
+  const { lastFrame } = render(<StatusBar state={state} />);
+  assert.match(lastFrame() ?? '', /update 0\.10\.0/);
+});

@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { DEFAULT_POLICY_MODE, MAX_LOOPS } from '../config.js';
 import { formatHookFailureReason, runCommandHooks, type CommandHookRunResult } from '../hooks/runner.js';
-import type { HookEventName, HookInput, HooksConfig } from '../hooks/types.js';
+import type { HookEventName, HookInput, HookPermissionScope, HooksConfig } from '../hooks/types.js';
 import type { InstructionMessage } from '../instructions/types.js';
 import { classifyContextOverflow } from '../model/errors.js';
 import { findKnownModelDescriptor } from '../model/registry.js';
@@ -36,7 +36,6 @@ import {
 } from './tx-runner.js';
 import type { WorkspaceWriter } from './workspace-writer.js';
 
-type HookPermissionScope = 'once' | 'session' | 'workspace';
 type ScopedApprovalDecision = ApprovalDecision & { scope: HookPermissionScope };
 
 type AutoCompactRunnerOptions = {
@@ -86,7 +85,11 @@ function permissionCacheKey(subject: unknown) {
 async function workspacePermissionCachePath(cwd: string) {
   const workspaceRealPath = await fs.realpath(cwd);
   const workspaceId = workspaceIdFromRealPath(workspaceRealPath);
-  return path.join(resolveCliqHome(), 'workspaces', workspaceId, 'permissions.json');
+  // Keep hook approval cache separate from the structured workspace
+  // permissions.json store used by src/session/permissions.ts. PermissionRequest
+  // scope approvals are opaque hashes of concrete approval subjects, not
+  // user-authored allow/deny grammar rules.
+  return path.join(resolveCliqHome(), 'workspaces', workspaceId, 'hook-approvals.json');
 }
 
 async function readWorkspacePermissionCache(cwd: string): Promise<Record<string, { reason?: string }>> {

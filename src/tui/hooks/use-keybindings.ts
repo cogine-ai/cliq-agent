@@ -28,8 +28,12 @@ export function useKeybindings(handlers: KeybindingHandlers) {
       handlers.onToggleBody?.();
       return;
     }
-    if (key.shift && key.tab) {
+    if (isShiftTabInput(input, key)) {
       handlers.onRotatePolicy?.();
     }
   });
+}
+
+export function isShiftTabInput(input: string, key: Pick<Key, 'shift' | 'tab'>) {
+  return (key.shift && key.tab) || input === '\x1b[Z' || input === '\x1b\t';
 }

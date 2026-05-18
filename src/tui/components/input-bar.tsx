@@ -1,6 +1,8 @@
 import { Box, Text, useInput, type Key } from 'ink';
 import { useRef, useState } from 'react';
 
+import { isShiftTabInput } from '../hooks/use-keybindings.js';
+
 // ink-text-input v6 inserts the bare letter for Ctrl+<letter> combinations
 // (its source only filters Ctrl+C explicitly), so Ctrl+O / Ctrl+G / Ctrl+L /
 // etc. end up in the controlled buffer before the App-level keybinding
@@ -76,6 +78,7 @@ function MiniTextInput({
       if (key.ctrl || key.meta) return;
       // Tab / Shift+Tab are reserved for slash completion and policy
       // rotation respectively — the parent's useInput claims both.
+      if (isShiftTabInput(input, key)) return;
       if (key.tab) return;
       if (key.return) {
         onSubmit?.(value);

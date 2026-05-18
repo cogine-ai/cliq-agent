@@ -23,6 +23,7 @@ test('createInitialState seeds an empty state with counter at 1', () => {
   assert.equal(s.pendingApproval, null);
   assert.equal(s.policy, 'auto');
   assert.equal(s.errors.length, 0);
+  assert.equal(s.versionUpdate, null);
   assert.equal(s.nextEntryId, 1);
 });
 
@@ -114,6 +115,7 @@ test('session-reset clears transcript/turn/approval/errors/tokens but preserves 
     event: { type: 'error', stage: 'model', message: 'x' },
   });
   s = reduce(s, { type: 'session-tokens-update', tokens: 4242 });
+  s = reduce(s, { type: 'version-update', notice: { current: '0.9.0', latest: '0.10.0' } });
 
   const after = reduce(s, { type: 'session-reset' });
   assert.equal(after.transcript.length, 0);
@@ -123,9 +125,19 @@ test('session-reset clears transcript/turn/approval/errors/tokens but preserves 
   // Token bar must hide after /reset so the new session is not labeled with
   // the previous session's running estimate.
   assert.equal(after.sessionTokens, null);
+  assert.deepEqual(after.versionUpdate, { current: '0.9.0', latest: '0.10.0' });
   assert.equal(after.policy, 'auto');
   assert.equal(after.session.id, 'ses_test');
   assert.equal(after.model.model, 'qwen3:4b');
+});
+
+test('version-update stores and clears package update notice', () => {
+  const notice = { current: '0.9.0', latest: '0.10.0' };
+  const afterSet = reduce(baseInit(), { type: 'version-update', notice });
+  assert.deepEqual(afterSet.versionUpdate, notice);
+
+  const afterClear = reduce(afterSet, { type: 'version-update', notice: null });
+  assert.equal(afterClear.versionUpdate, null);
 });
 
 test('policy-change updates the policy mode and leaves transcript intact', () => {
@@ -147,6 +159,7 @@ test('approval-request sets pendingApproval; approval-resolve clears it by id', 
       kind: 'tool',
       toolName: 'bash',
       access: 'exec',
+      channel: { kind: 'bash', commandHead: 'ls' },
       action: { bash: 'ls' } as never,
       display: { title: 'Allow bash command?', command: 'ls' }
     },
@@ -172,6 +185,7 @@ test('approval-resolve with a mismatched id leaves a newer pending intact', () =
       kind: 'tool',
       toolName: 'bash',
       access: 'exec',
+      channel: { kind: 'bash', commandHead: 'ls' },
       action: { bash: 'ls' } as never,
       display: { title: 'Allow bash command?', command: 'ls' }
     },

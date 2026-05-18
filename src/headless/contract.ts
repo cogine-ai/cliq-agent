@@ -1,5 +1,6 @@
 import type { PartialModelConfig } from '../model/config.js';
 import type { ProviderName } from '../model/types.js';
+import type { PermissionRule } from '../policy/decision-table.js';
 import type { PolicyMode } from '../policy/types.js';
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
 import type { AutoCompactConfig } from '../session/auto-compact-config.js';
@@ -23,6 +24,19 @@ export type HeadlessRunRequest = {
   metadata?: Record<string, string | number | boolean | null>;
   txMode?: 'off' | 'edit';
   txApply?: 'interactive' | 'auto-on-pass' | 'manual-only';
+  /**
+   * CLI-layer permission rules from `--allow`/`--deny`/`--ask` (already
+   * parsed and tagged `source: 'cli'`). Composed with the workspace config
+   * and persisted permissions.json AFTER the trust gate has decided —
+   * see src/policy/compose-runtime.ts. Optional; absence is equivalent to
+   * "no CLI overrides". Workspace config + persisted layers are always
+   * loaded inside runHeadless regardless of this field.
+   */
+  cliPermissions?: {
+    allow: PermissionRule[];
+    deny: PermissionRule[];
+    ask: PermissionRule[];
+  };
 };
 
 export type HeadlessRunOptions = {

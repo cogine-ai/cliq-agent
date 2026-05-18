@@ -10,6 +10,12 @@ export type ApprovalModalProps = {
 };
 
 export function ApprovalModal({ subject, policy, onDecide }: ApprovalModalProps) {
+  const isTool = subject.kind === 'tool';
+  // Capital W is intentional for "allow-workspace" — it persists to
+  // ~/.cliq/workspaces/<id>/permissions.json and survives the cliq
+  // invocation, so the shift requirement adds an extra deliberate keystroke
+  // beyond the lowercase per-session and per-turn options. Other modal keys
+  // (`y`, `n`, `a`, `s`) are accepted in both cases.
   useInput((input: string, key: Key) => {
     if (input === 'y' || input === 'Y') {
       onDecide('allow');
@@ -21,9 +27,25 @@ export function ApprovalModal({ subject, policy, onDecide }: ApprovalModalProps)
     }
     // 'allow-for-this-turn' is a tool-approval sugar; spec A.6 does not apply
     // it to tx-apply prompts (those are end-of-turn, no "remaining tools"
-    // bucket to short-circuit).
-    if ((input === 'a' || input === 'A') && subject.kind === 'tool') {
+    // bucket to short-circuit). Same constraint applies to allow-session
+    // and allow-workspace — those need a channel to derive a rule against.
+    if (!isTool) {
+      if (input === 'a' || input === 'A') {
+        // Tx-apply / permission-request modals don't have an "allow turn"
+        // bucket. Silently ignore.
+      }
+      return;
+    }
+    if (input === 'a' || input === 'A') {
       onDecide('allow-turn');
+      return;
+    }
+    if (input === 's' || input === 'S') {
+      onDecide('allow-session');
+      return;
+    }
+    if (input === 'W') {
+      onDecide('allow-workspace');
     }
   });
 
@@ -39,7 +61,7 @@ export function ApprovalModal({ subject, policy, onDecide }: ApprovalModalProps)
       ) : (
         <PermissionBody subject={subject} policy={policy} />
       )}
-      <Hotkeys allowTurn={subject.kind === 'tool'} />
+      <Hotkeys allowTurn={isTool} allowScopes={isTool} />
     </Box>
   );
 }
@@ -133,12 +155,23 @@ function Field({ label, value, warn = false }: { label: string; value: string; w
   );
 }
 
-function Hotkeys({ allowTurn }: { allowTurn: boolean }) {
+function Hotkeys({ allowTurn, allowScopes }: { allowTurn: boolean; allowScopes: boolean }) {
+  // Layout intentionally walks "once → turn → session → workspace" so
+  // visually the most sticky choice (workspace, persisted to disk) is the
+  // rightmost option. `[W]` is rendered in dimColor to flag it as the
+  // weightiest commit; lowercase `[s]ession` keeps the in-process scope
+  // visually lighter than its persisted neighbor.
   return (
     <Box marginTop={1}>
       <Text color="green">[y]es allow </Text>
       <Text color="red"> [n]o deny </Text>
       {allowTurn ? <Text color="cyan"> [a]llow this turn </Text> : null}
+      {allowScopes ? (
+        <>
+          <Text color="cyan"> [s]ession </Text>
+          <Text dimColor> [W]orkspace </Text>
+        </>
+      ) : null}
       <Text dimColor> Esc=deny</Text>
     </Box>
   );

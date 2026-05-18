@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -9,6 +9,7 @@ import type { RuntimeEventEnvelope } from './contract.js';
 import { runHeadless } from './run.js';
 
 const previousHome = process.env.CLIQ_HOME;
+const previousTrustWorkspace = process.env.CLIQ_TRUST_WORKSPACE;
 const cleanupDirs: string[] = [];
 
 test.after(async () => {
@@ -16,6 +17,11 @@ test.after(async () => {
     delete process.env.CLIQ_HOME;
   } else {
     process.env.CLIQ_HOME = previousHome;
+  }
+  if (previousTrustWorkspace === undefined) {
+    delete process.env.CLIQ_TRUST_WORKSPACE;
+  } else {
+    process.env.CLIQ_TRUST_WORKSPACE = previousTrustWorkspace;
   }
   await Promise.all(cleanupDirs.map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -25,6 +31,7 @@ async function setupWorkspace() {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-run-workspace-'));
   cleanupDirs.push(home, cwd);
   process.env.CLIQ_HOME = home;
+  process.env.CLIQ_TRUST_WORKSPACE = 'trust';
   return { home, cwd };
 }
 
@@ -49,6 +56,28 @@ function finalModel(message = 'done'): ModelClient {
     }
   };
 }
+
+test('runHeadless refuses non-interactive runs without persisted workspace trust', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-no-trust-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-no-trust-ws-'));
+  cleanupDirs.push(home, cwd);
+  process.env.CLIQ_HOME = home;
+  delete process.env.CLIQ_TRUST_WORKSPACE;
+
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'never runs',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('ignored') }
+  );
+
+  assert.equal(output.status, 'failed');
+  assert.ok(output.error);
+  assert.match(output.error!.message, /CLIQ_TRUST_WORKSPACE=/);
+});
 
 test('runHeadless emits run-start through run-end for a completed run', async () => {
   const { cwd } = await setupWorkspace();
@@ -229,6 +258,187 @@ process.stdin.on('end', () => {
   assert.equal(hookInput.hookEventName, 'PreToolUse');
   assert.equal(hookInput.toolName, 'bash');
   assert.deepEqual(hookInput.action, { bash: 'pwd' });
+});
+
+test('runHeadless falls back to workspace permissions.preset when request.policy is omitted (#62-B)', async () => {
+  // Regression for PR #91 Codex finding "Honor workspace permissions.preset
+  // at runtime". With request.policy undefined and workspace config setting
+  // permissions.preset='read-only', a model-issued edit must be denied by
+  // the PolicyEngine. Without the fallback the run would happily execute
+  // the edit under the global DEFAULT_POLICY_MODE.
+  const { cwd } = await setupWorkspace();
+  await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+  await writeFile(
+    path.join(cwd, '.cliq', 'config.json'),
+    JSON.stringify({ permissions: { preset: 'read-only' } }),
+    'utf8'
+  );
+  let calls = 0;
+  const toolEndStatuses: string[] = [];
+  const errorEvents: string[] = [];
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'edit README.md',
+      // policy is intentionally omitted so workspace preset takes over.
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    {
+      modelClient: {
+        async complete(_messages, options) {
+          calls += 1;
+          await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
+          await options?.onEvent?.({ type: 'end' });
+          return {
+            provider: 'ollama',
+            model: 'test-model',
+            content:
+              calls === 1
+                ? JSON.stringify({ edit: { path: 'README.md', old_text: 'a', new_text: 'b' } })
+                : JSON.stringify({ message: 'gave up' })
+          };
+        }
+      },
+      onEvent(event) {
+        if (event.type === 'tool-end') {
+          toolEndStatuses.push(event.payload.status);
+        }
+        if (event.type === 'error') {
+          errorEvents.push(JSON.stringify(event.payload));
+        }
+      }
+    }
+  );
+
+  assert.equal(output.status, 'completed', 'run still completes after deny');
+  // PolicyEngine deny under read-only surfaces as a tool-end with status
+  // 'error'. Without the workspace preset fallback the edit would run
+  // cleanly and tool-end.status would be 'ok'.
+  assert.ok(
+    toolEndStatuses.includes('error'),
+    'edit must be denied by PolicyEngine when workspace preset=read-only; tool-end statuses=' +
+      JSON.stringify(toolEndStatuses) +
+      ' errors=' +
+      JSON.stringify(errorEvents)
+  );
+});
+
+test('runHeadless coerces hook scope to "once" and never persists permissions.json (#62-B headless safety)', async () => {
+  // Even when a PermissionRequest hook tries to return scope='workspace',
+  // the headless path must treat the decision as one-shot and must NOT
+  // write to ~/.cliq/workspaces/<id>/permissions.json. Persisting from a
+  // non-interactive run would let unattended CI quietly accumulate
+  // "always allow" rules that survive forever — exactly the foot-gun
+  // the TUI's deliberate Shift+W gating guards against.
+  //
+  // We exercise the SAME bash action twice in one run so that "one-shot"
+  // (scope='once') has a chance to fail visibly: if headless mistakenly
+  // honored the workspace scope, the hook would be skipped the second
+  // time. The hook writes a counter to disk to record how many times it
+  // ran; we assert it ran twice.
+  const { home, cwd } = await setupWorkspace();
+  const hookCounterPath = path.join(cwd, 'permission-hook-calls');
+  const command = await writeWorkspaceHook(
+    cwd,
+    'workspace-scope-allow.js',
+    `const fs = require('node:fs');
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  // Bump a counter file so the test can confirm the hook participated
+  // in BOTH decisions. If 'once' were silently upgraded to 'workspace'
+  // the second turn would skip the hook and the counter would stay at 1.
+  let prev = 0;
+  try {
+    prev = parseInt(fs.readFileSync(${JSON.stringify(hookCounterPath)}, 'utf8'), 10) || 0;
+  } catch {}
+  fs.writeFileSync(${JSON.stringify(hookCounterPath)}, String(prev + 1));
+  process.stdout.write(JSON.stringify({
+    permissionDecision: {
+      behavior: 'allow',
+      message: 'workspace-scope ask',
+      scope: 'workspace'
+    }
+  }));
+});
+`
+  );
+  await writeFile(
+    path.join(cwd, '.cliq', 'config.json'),
+    JSON.stringify({
+      hooks: {
+        PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command }] }]
+      }
+    }),
+    'utf8'
+  );
+  let calls = 0;
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'show cwd',
+      policy: 'confirm-bash',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    {
+      modelClient: {
+        async complete(_messages, options) {
+          calls += 1;
+          await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
+          await options?.onEvent?.({ type: 'end' });
+          // Emit `bash: pwd` on the first AND second turn so the
+          // PermissionRequest hook is asked twice. Anything else would
+          // let a "session was silently upgraded to workspace" regression
+          // slip through.
+          if (calls === 1 || calls === 2) {
+            return {
+              provider: 'ollama',
+              model: 'test-model',
+              content: JSON.stringify({ bash: 'pwd' })
+            };
+          }
+          return {
+            provider: 'ollama',
+            model: 'test-model',
+            content: JSON.stringify({ message: 'done' })
+          };
+        }
+      }
+    }
+  );
+
+  assert.equal(output.status, 'completed', 'turn must complete; hook allow was honored');
+
+  const hookCalls = parseInt(await readFile(hookCounterPath, 'utf8'), 10);
+  assert.equal(
+    hookCalls,
+    2,
+    `PermissionRequest hook must run for each bash invocation under scope='once'; observed ${hookCalls}`
+  );
+
+  // Walk the cliqHome workspace dir; no permissions.json must have been
+  // written. Iterate workspace ids because the headless path derives one
+  // from realpath(cwd).
+  const workspacesDir = path.join(home, 'workspaces');
+  let leaked = false;
+  try {
+    const entries = await readdir(workspacesDir);
+    for (const id of entries) {
+      try {
+        await access(path.join(workspacesDir, id, 'permissions.json'));
+        leaked = true;
+        break;
+      } catch {
+        // file not found → expected
+      }
+    }
+  } catch {
+    // workspacesDir missing → trivially compliant
+  }
+  assert.equal(leaked, false, 'headless must not persist permissions.json');
 });
 
 test('runHeadless returns structured pre-session errors without session fields', async () => {
