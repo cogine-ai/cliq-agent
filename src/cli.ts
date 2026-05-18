@@ -1351,7 +1351,16 @@ Transaction subcommands:
                                     (use --restore-confirmed or --keep-partial for applied-partial)
 
 Options:
-  --policy MODE            auto | confirm-write | read-only | confirm-bash | confirm-all
+  --policy MODE            auto | confirm-write | read-only | confirm-bash | confirm-all (mutually exclusive with --preset)
+  --preset MODE            Alias for --policy MODE; same values; mutually exclusive with --policy
+  --allow "<rule>"         Add a permission rule layered on top of the preset. Repeatable.
+  --deny  "<rule>"         Same as --allow but adds a deny rule (deny always wins).
+  --ask   "<rule>"         Same as --allow but forces the preset to ask for the matching action.
+                           Rule grammar: "<channel>: <pattern>" where
+                           <channel> is fs-read | fs-write | bash | mcp | network
+                           and <pattern> is a literal, "*" wildcard, or "prefix *"
+                           (e.g. "bash: npm *", "fs-write: .env", "fs-read: docs/*").
+                           See README "## Tool permissions" for the full layer order.
   --skill NAME             Activate a local skill; repeat to load multiple skills
   --provider NAME          openrouter | anthropic | openai | openai-compatible | ollama
   --model ID               Provider model id; required for openai-compatible; auto-discovered for ollama
@@ -2828,7 +2837,12 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       cliqHome: opts.cliqHome,
       // Interactive tx apply now flows through the same modal as tool
       // approvals, with a tx-apply subject. allow-for-this-turn does not
-      // apply (tx apply happens at end-of-turn after all tools).
+      // apply (tx apply happens at end-of-turn after all tools), and
+      // allow-session / allow-workspace are gated out of the modal for
+      // tx-apply subjects (see ApprovalModal `!isTool` guard). We still
+      // treat any non-deny choice as approval here so the decision flow
+      // stays robust if those subjects ever start producing the extra
+      // scopes — only an explicit `deny` blocks the apply.
       confirmApply: async (review) => {
         const subject: ApprovalSubject = {
           kind: 'tx-apply',
@@ -2839,7 +2853,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
           artifactRef: review.artifactRef
         };
         const decision = await approvalBridge.requestApproval(subject);
-        return decision === 'allow' || decision === 'allow-turn';
+        return decision !== 'deny';
       }
     };
   }

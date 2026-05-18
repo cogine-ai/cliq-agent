@@ -775,6 +775,14 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /read-only/);
   assert.match(output, /confirm-bash/);
   assert.match(output, /confirm-all/);
+  // #62-B permission surface — all four new flags must appear in help so
+  // operators can discover them without reading the README.
+  assert.match(output, /--preset MODE/);
+  assert.match(output, /mutually exclusive with --policy/i);
+  assert.match(output, /--allow "<rule>"/);
+  assert.match(output, /--deny\s+"<rule>"/);
+  assert.match(output, /--ask\s+"<rule>"/);
+  assert.match(output, /fs-read \| fs-write \| bash \| mcp \| network/);
   assert.match(output, /--skill NAME/);
   assert.match(output, /repeat/i);
   assert.match(output, /--streaming MODE/);

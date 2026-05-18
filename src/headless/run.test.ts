@@ -331,14 +331,30 @@ test('runHeadless coerces hook scope to "once" and never persists permissions.js
   // non-interactive run would let unattended CI quietly accumulate
   // "always allow" rules that survive forever — exactly the foot-gun
   // the TUI's deliberate Shift+W gating guards against.
+  //
+  // We exercise the SAME bash action twice in one run so that "one-shot"
+  // (scope='once') has a chance to fail visibly: if headless mistakenly
+  // honored the workspace scope, the hook would be skipped the second
+  // time. The hook writes a counter to disk to record how many times it
+  // ran; we assert it ran twice.
   const { home, cwd } = await setupWorkspace();
+  const hookCounterPath = path.join(cwd, 'permission-hook-calls');
   const command = await writeWorkspaceHook(
     cwd,
     'workspace-scope-allow.js',
-    `let input = '';
+    `const fs = require('node:fs');
+let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
+  // Bump a counter file so the test can confirm the hook participated
+  // in BOTH decisions. If 'once' were silently upgraded to 'workspace'
+  // the second turn would skip the hook and the counter would stay at 1.
+  let prev = 0;
+  try {
+    prev = parseInt(fs.readFileSync(${JSON.stringify(hookCounterPath)}, 'utf8'), 10) || 0;
+  } catch {}
+  fs.writeFileSync(${JSON.stringify(hookCounterPath)}, String(prev + 1));
   process.stdout.write(JSON.stringify({
     permissionDecision: {
       behavior: 'allow',
@@ -373,11 +389,21 @@ process.stdin.on('end', () => {
           calls += 1;
           await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
           await options?.onEvent?.({ type: 'end' });
+          // Emit `bash: pwd` on the first AND second turn so the
+          // PermissionRequest hook is asked twice. Anything else would
+          // let a "session was silently upgraded to workspace" regression
+          // slip through.
+          if (calls === 1 || calls === 2) {
+            return {
+              provider: 'ollama',
+              model: 'test-model',
+              content: JSON.stringify({ bash: 'pwd' })
+            };
+          }
           return {
             provider: 'ollama',
             model: 'test-model',
-            content:
-              calls === 1 ? JSON.stringify({ bash: 'pwd' }) : JSON.stringify({ message: 'done' })
+            content: JSON.stringify({ message: 'done' })
           };
         }
       }
@@ -385,6 +411,14 @@ process.stdin.on('end', () => {
   );
 
   assert.equal(output.status, 'completed', 'turn must complete; hook allow was honored');
+
+  const hookCalls = parseInt(await readFile(hookCounterPath, 'utf8'), 10);
+  assert.equal(
+    hookCalls,
+    2,
+    `PermissionRequest hook must run for each bash invocation under scope='once'; observed ${hookCalls}`
+  );
+
   // Walk the cliqHome workspace dir; no permissions.json must have been
   // written. Iterate workspace ids because the headless path derives one
   // from realpath(cwd).
