@@ -251,11 +251,81 @@ For day-to-day coding, `confirm-write`, `confirm-bash`, or `confirm-all` provide
 - `confirm-bash`: ask before `bash`
 - `confirm-all`: ask before every tool
 
-You can set the default with:
+Set the default with:
 
 ```bash
 export CLIQ_POLICY_MODE=read-only
+# or per-invocation:
+cliq --policy read-only "inspect this repo"
+# --preset is an alias for --policy (mutually exclusive):
+cliq --preset confirm-write "fix the failing test"
 ```
+
+## Tool permissions
+
+On top of the `PolicyMode` preset above, you can layer per-action **allow / deny / ask** rules. Rules are matched before the preset; **deny always wins**, and a small set of built-in denies (e.g. `bash: rm`, `fs-write: .git/*`) cannot be overridden.
+
+Rule grammar: `"<channel>: <pattern>"`.
+
+Channels: `fs-read`, `fs-write`, `bash`, `mcp`, `network`.
+Patterns: literal string, `*` wildcard, `prefix *` for command/path prefixes (e.g. `npm *`, `docs/*`).
+
+### CLI flags (repeatable)
+
+```bash
+cliq \
+  --allow "bash: git *" \
+  --allow "fs-read: docs/*" \
+  --deny  "fs-write: .env" \
+  --ask   "fs-write: src/*" \
+  "ship a fix"
+```
+
+`--allow/--deny/--ask` produce `'cli'`-tagged rules and are stacked on top of any workspace and persisted rules.
+
+### Workspace config
+
+Add a `permissions` section to `./.cliq/config.json`:
+
+```json
+{
+  "permissions": {
+    "preset": "confirm-write",
+    "allow": ["bash: git *", "fs-read: docs/*"],
+    "deny":  ["fs-write: .env"],
+    "ask":   ["fs-write: src/*"]
+  }
+}
+```
+
+### Approval modal scopes (TUI)
+
+When the TUI asks for approval, you can pick:
+
+| Key | Scope | Persistence |
+|---|---|---|
+| `y` | Allow this action only | none |
+| `a` | Allow this and any further asks in the **same turn** | none (tool subjects only) |
+| `s` | Allow matching actions for the rest of this **session** | in-process |
+| `Shift+W` | **Always allow** matching actions in this **workspace** | `~/.cliq/workspaces/<id>/permissions.json` |
+| `n` / `Esc` | Deny this action | none |
+
+Capital `W` for the workspace scope is intentional — it's the most sticky decision, so it requires a deliberate shift keystroke.
+
+Headless / `--json` / `rpc` / non-TTY runs are restricted to single-action allows: hooks that emit `scope: 'session'` or `scope: 'workspace'` are coerced down to `'once'` and `permissions.json` is never written from a non-interactive run.
+
+### Layer ordering
+
+When deciding a tool call, Cliq walks layers in this fixed order; the first matching rule wins, otherwise the `PolicyMode` preset decides:
+
+1. **Built-in deny** (small, non-overridable shadow list)
+2. **Workspace config** `permissions.{allow,deny,ask}`
+3. **Persisted** `~/.cliq/workspaces/<id>/permissions.json`
+4. **CLI flags** `--allow / --deny / --ask`
+5. **Session memory** (TUI "Allow this session" picks)
+6. **PolicyMode preset** (fallthrough)
+
+Within each layer, `deny` always wins over `allow`. All of layers 2–5 only load after the workspace trust gate has approved this workspace.
 
 ## Workspace config
 

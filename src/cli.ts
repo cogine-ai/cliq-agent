@@ -14,8 +14,13 @@ import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
+import { composeRuntimePermissionTable } from './policy/compose-runtime.js';
+import { accessChannelPrimaryKey, type PermissionRule, type PermissionTable } from './policy/decision-table.js';
 import { createPolicyEngine } from './policy/engine.js';
+import { isPolicyMode, POLICY_MODE_LIST, POLICY_MODES } from './policy/modes.js';
+import { PermissionGrammarError, parsePermissionRuleString } from './policy/permissions-grammar.js';
 import type { ApprovalSubject, PolicyMode } from './policy/types.js';
+import { appendPersistedWorkspacePermission } from './session/permissions.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './protocol/runtime/events.js';
 import { createRunner } from './runtime/runner.js';
@@ -69,8 +74,6 @@ import { loadWorkspaceConfig, type WorkspaceConfig } from './workspace/config.js
 import { isValidTxId } from './workspace/transactions/types.js';
 import { promises as fsPromises } from 'node:fs';
 
-const POLICY_MODES = ['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all'] as const satisfies readonly PolicyMode[];
-const POLICY_MODE_LIST = POLICY_MODES.join(', ');
 const STREAMING_MODES = ['auto', 'on', 'off'] as const;
 const RESTORE_SCOPES = ['session', 'files', 'both'] as const;
 const HELP_TOPICS = ['checkpoint', 'compact', 'handoff', 'tx'] as const;
@@ -85,9 +88,9 @@ type TxApplyPolicy = (typeof TX_APPLY_POLICIES)[number];
 
 type ParsedArgsBase = {
   policy: PolicyMode;
-  // True when the user explicitly set --policy or CLIQ_POLICY_MODE; lets the
-  // TUI dispatch override the global default with a more cautious default
-  // (confirm-all) without overruling explicit choices.
+  // True when the user explicitly set --policy, --preset, or CLIQ_POLICY_MODE;
+  // lets the TUI dispatch override the global default with a more cautious
+  // default (confirm-all) without overruling explicit choices.
   policyExplicit?: boolean;
   skills: string[];
   model: PartialModelConfig;
@@ -95,6 +98,17 @@ type ParsedArgsBase = {
   txApply?: TxApplyPolicy;
   tui?: boolean;
   classic?: boolean;
+  /**
+   * Layered permission rules parsed from `--allow`/`--deny`/`--ask`
+   * (repeatable). Source is always `'cli'`. The rules feed into the
+   * PolicyEngine decision-table layering done in B4; the parser stays
+   * concerned only with the wire shape, not with how the layers compose.
+   */
+  cliPermissions?: {
+    allow: PermissionRule[];
+    deny: PermissionRule[];
+    ask: PermissionRule[];
+  };
 };
 
 export type ParsedArgs = ParsedArgsBase & (
@@ -162,10 +176,6 @@ export type ParsedArgs = ParsedArgsBase & (
       prompt?: undefined;
     }
 );
-
-function isPolicyMode(value: string): value is PolicyMode {
-  return (POLICY_MODES as readonly string[]).includes(value);
-}
 
 function isStreamingMode(value: string) {
   return (STREAMING_MODES as readonly string[]).includes(value);
@@ -472,6 +482,64 @@ function readFlagValue(raw: string[], index: number, flag: string) {
   }
 
   return value;
+}
+
+/**
+ * Refuse simultaneous --policy + --preset on the same CLI invocation. Both
+ * flags set the PolicyMode preset; accepting both at once would force a
+ * silent winner, which is exactly the kind of "configuration that takes
+ * effect without telling you" bug we're avoiding in the trust + permission
+ * stack. CLIQ_POLICY_MODE is intentionally not part of this check (env vars
+ * are an implicit default that a CLI flag should be allowed to override).
+ */
+function assertPolicyFlagNotConflicting(
+  seen: '--policy' | '--preset' | null,
+  incoming: '--policy' | '--preset'
+) {
+  if (seen !== null && seen !== incoming) {
+    throw new Error(
+      `${seen} and ${incoming} are mutually exclusive: both set the policy preset. Pick one.`
+    );
+  }
+}
+
+/**
+ * Parse a single `<channel>: <pattern>` string passed via --allow / --deny /
+ * --ask, re-tagging the grammar error with the flag name so the user can
+ * locate the bad argument in their command line ("--allow 'no-colon'"
+ * instead of just "missing a colon"). Source is always 'cli'.
+ */
+function parsePermissionFlag(flag: string, raw: string): PermissionRule {
+  try {
+    return parsePermissionRuleString(raw, 'cli', flag);
+  } catch (err) {
+    if (err instanceof PermissionGrammarError) {
+      throw new Error(err.message);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Derive the PermissionRule that an "allow this {session,workspace}" modal
+ * decision would persist. Returns null when the subject doesn't carry an
+ * identifiable channel key (e.g. bash with no parseable command head, or a
+ * non-tool subject) — the caller surfaces a soft error so the user picks a
+ * different scope or modifies the action.
+ *
+ * Channel kind survives untouched; the pattern is the channel's primary
+ * key (see accessChannelPrimaryKey in src/policy/decision-table.ts). This
+ * means a TUI-extended rule matches future actions with the same exact
+ * commandHead / path / mcp tool / network host — no wildcard guessing.
+ */
+function approvalSubjectToPermissionRule(
+  subject: ApprovalSubject,
+  source: PermissionRule['source']
+): PermissionRule | null {
+  if (subject.kind !== 'tool') return null;
+  const key = accessChannelPrimaryKey(subject.channel);
+  if (!key) return null;
+  return { channel: subject.channel.kind, pattern: key, source };
 }
 
 function parseCompactCreateArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
@@ -801,6 +869,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let tui = false;
   let classic = false;
   let policyExplicit = false;
+  // Track which CLI flag (if any) set the preset so we can refuse
+  // simultaneous --policy + --preset. Both are aliases for the same setting;
+  // accepting both at once would force the parser to pick a winner silently.
+  // Environment-only configuration (CLIQ_POLICY_MODE) is intentionally NOT
+  // counted here so users can layer a CLI override on top of an env default.
+  let policyFlagSeen: '--policy' | '--preset' | null = null;
+  const cliAllow: PermissionRule[] = [];
+  const cliDeny: PermissionRule[] = [];
+  const cliAsk: PermissionRule[] = [];
   const envPolicy = process.env.CLIQ_POLICY_MODE;
   if (envPolicy !== undefined) {
     if (!isPolicyMode(envPolicy)) {
@@ -884,8 +961,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
       if (!isPolicyMode(value)) {
         throw new Error(`Unknown policy mode: ${value}`);
       }
+      assertPolicyFlagNotConflicting(policyFlagSeen, '--policy');
       policy = value;
       policyExplicit = true;
+      policyFlagSeen = '--policy';
       continue;
     }
 
@@ -894,8 +973,74 @@ export function parseArgs(argv: string[]): ParsedArgs {
       if (!isPolicyMode(value)) {
         throw new Error(`Unknown policy mode: ${value}`);
       }
+      assertPolicyFlagNotConflicting(policyFlagSeen, '--policy');
       policy = value;
       policyExplicit = true;
+      policyFlagSeen = '--policy';
+      i += 1;
+      continue;
+    }
+
+    // --preset is an alias for --policy (modeled after Codex / Claude CLI
+    // habits) that lets a workspace config or operator default the preset
+    // without overloading the longer --policy name. The two flags are
+    // mutually exclusive on the CLI — see assertPolicyFlagNotConflicting.
+    if (token.startsWith('--preset=')) {
+      const value = token.slice('--preset='.length);
+      if (!value) {
+        throw new Error(`Missing value for --preset; expected one of: ${POLICY_MODE_LIST}`);
+      }
+      if (!isPolicyMode(value)) {
+        throw new Error(`Unknown policy mode: ${value}`);
+      }
+      assertPolicyFlagNotConflicting(policyFlagSeen, '--preset');
+      policy = value;
+      policyExplicit = true;
+      policyFlagSeen = '--preset';
+      continue;
+    }
+
+    if (token === '--preset') {
+      const value = readFlagValue(raw, i, '--preset');
+      if (!isPolicyMode(value)) {
+        throw new Error(`Unknown policy mode: ${value}`);
+      }
+      assertPolicyFlagNotConflicting(policyFlagSeen, '--preset');
+      policy = value;
+      policyExplicit = true;
+      policyFlagSeen = '--preset';
+      i += 1;
+      continue;
+    }
+
+    // --allow / --deny / --ask each take a single "<channel>: <pattern>"
+    // string and are repeatable. Each occurrence is parsed through the
+    // shared grammar (src/policy/permissions-grammar.ts) so workspace
+    // config + CLI flags + TUI session memory all speak the same wire shape.
+    if (token.startsWith('--allow=')) {
+      cliAllow.push(parsePermissionFlag('--allow', token.slice('--allow='.length)));
+      continue;
+    }
+    if (token === '--allow') {
+      cliAllow.push(parsePermissionFlag('--allow', readFlagValue(raw, i, '--allow')));
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('--deny=')) {
+      cliDeny.push(parsePermissionFlag('--deny', token.slice('--deny='.length)));
+      continue;
+    }
+    if (token === '--deny') {
+      cliDeny.push(parsePermissionFlag('--deny', readFlagValue(raw, i, '--deny')));
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('--ask=')) {
+      cliAsk.push(parsePermissionFlag('--ask', token.slice('--ask='.length)));
+      continue;
+    }
+    if (token === '--ask') {
+      cliAsk.push(parsePermissionFlag('--ask', readFlagValue(raw, i, '--ask')));
       i += 1;
       continue;
     }
@@ -994,6 +1139,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   const cmd = args[0];
+  const cliPermissions =
+    cliAllow.length === 0 && cliDeny.length === 0 && cliAsk.length === 0
+      ? undefined
+      : { allow: cliAllow, deny: cliDeny, ask: cliAsk };
   const base: ParsedArgsBase = {
     policy,
     ...(policyExplicit ? { policyExplicit } : {}),
@@ -1002,14 +1151,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
     ...(tui ? { tui } : {}),
-    ...(classic ? { classic } : {})
+    ...(classic ? { classic } : {}),
+    ...(cliPermissions ? { cliPermissions } : {})
   };
   const baseExtras = {
     ...(policyExplicit ? { policyExplicit } : {}),
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
     ...(tui ? { tui } : {}),
-    ...(classic ? { classic } : {})
+    ...(classic ? { classic } : {}),
+    ...(cliPermissions ? { cliPermissions } : {})
   };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
   if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
@@ -1200,7 +1351,16 @@ Transaction subcommands:
                                     (use --restore-confirmed or --keep-partial for applied-partial)
 
 Options:
-  --policy MODE            auto | confirm-write | read-only | confirm-bash | confirm-all
+  --policy MODE            auto | confirm-write | read-only | confirm-bash | confirm-all (mutually exclusive with --preset)
+  --preset MODE            Alias for --policy MODE; same values; mutually exclusive with --policy
+  --allow "<rule>"         Add a permission rule layered on top of the preset. Repeatable.
+  --deny  "<rule>"         Same as --allow but adds a deny rule (deny always wins).
+  --ask   "<rule>"         Same as --allow but forces the preset to ask for the matching action.
+                           Rule grammar: "<channel>: <pattern>" where
+                           <channel> is fs-read | fs-write | bash | mcp | network
+                           and <pattern> is a literal, "*" wildcard, or "prefix *"
+                           (e.g. "bash: npm *", "fs-write: .env", "fs-read: docs/*").
+                           See README "## Tool permissions" for the full layer order.
   --skill NAME             Activate a local skill; repeat to load multiple skills
   --provider NAME          openrouter | anthropic | openai | openai-compatible | ollama
   --model ID               Provider model id; required for openai-compatible; auto-discovered for ollama
@@ -1694,7 +1854,10 @@ async function ensureInteractiveWorkspaceTrustedForRuntime(opts: {
 
 export async function runCli(argv: string[]) {
   const parsed = parseArgs(argv);
-  const { cmd, prompt, policy, skills, model: cliModel } = parsed;
+  const { cmd, prompt, skills, model: cliModel } = parsed;
+  // policy starts as whatever parseArgs computed (default / env / CLI flag);
+  // workspace `permissions.preset` may override below if no CLI/env was set.
+  let policy = parsed.policy;
   const cwd = process.cwd();
 
   if (cmd === 'help') {
@@ -2247,7 +2410,8 @@ export async function runCli(argv: string[]) {
           skills,
           model: cliModel,
           txMode: parsed.txMode,
-          txApply: parsed.txApply
+          txApply: parsed.txApply,
+          ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
         },
         {
           onEvent(event) {
@@ -2274,7 +2438,8 @@ export async function runCli(argv: string[]) {
         skills,
         model: cliModel,
         txMode: parsed.txMode,
-        txApply: parsed.txApply
+        txApply: parsed.txApply,
+        ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
       },
       {
         hooks: createCliHooks(),
@@ -2358,6 +2523,27 @@ export async function runCli(argv: string[]) {
     sessionId: session.id,
     workspaceRealPath: chatWorkspaceRealPath
   };
+  // SECURITY: trust gate has already decided above (line ~2447); only NOW
+  // is it safe to read workspace-controlled permission state (workspace
+  // config.permissions + persisted permissions.json). composeRuntimePermissionTable
+  // documents this invariant; keep the call below this line.
+  const chatTrustContext = await createWorkspaceTrustContext(cwd, cliqHome);
+  const chatPermissionTable: PermissionTable = await composeRuntimePermissionTable({
+    trustContext: chatTrustContext,
+    workspaceConfigPermissions: wsCfg.permissions,
+    ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
+  });
+
+  // Workspace permissions.preset acts as the default PolicyMode for this
+  // workspace when the operator hasn't already pinned one via CLI flag or
+  // CLIQ_POLICY_MODE. CLI / env always win to preserve the documented
+  // override precedence; when neither is set, a workspace-declared preset
+  // is treated as an explicit choice so the TUI's
+  // "confirm-all when nothing was set" default doesn't override it.
+  if (!parsed.policyExplicit && wsCfg.permissions?.preset) {
+    policy = wsCfg.permissions.preset;
+    parsed.policyExplicit = true;
+  }
   const chatRecoveryResult = await coordRecoverAtStart(chatCoordinatorCtx);
   for (const skippedTxId of chatRecoveryResult.crossSessionSkipped) {
     process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
@@ -2386,7 +2572,9 @@ export async function runCli(argv: string[]) {
       txMode: parsed.txMode,
       txApply: parsed.txApply,
       coordinatorCtx: chatCoordinatorCtx,
-      cliqHome
+      cliqHome,
+      permissionTable: chatPermissionTable,
+      trustContext: chatTrustContext
     });
     return;
   }
@@ -2426,7 +2614,7 @@ export async function runCli(argv: string[]) {
     model: modelClient,
     hooks: [...assembly.hooks, ...createCliHooks()],
     commandHooks: assembly.commandHooks ?? {},
-    policy: createPolicyEngine({ mode: policy }),
+    policy: createPolicyEngine({ mode: policy, table: chatPermissionTable }),
     confirm: createConfirmTool(rl),
     instructions: assembly.instructions,
     autoCompact: {
@@ -2515,6 +2703,21 @@ type RunChatTuiSessionOpts = {
   txApply?: TxApplyPolicy;
   coordinatorCtx: CoordinatorContext;
   cliqHome: string;
+  /**
+   * Composed permission table for the runtime PolicyEngine. Layered upstream
+   * in the caller (chat dispatch) AFTER the workspace trust gate has decided,
+   * to satisfy the load-order invariant documented in
+   * src/policy/compose-runtime.ts. Re-used for every `/policy <mode>` swap so
+   * deny/allow/ask rules survive a mid-session preset change.
+   */
+  permissionTable: PermissionTable;
+  /**
+   * Same workspace trust context the chat dispatch used when composing the
+   * table — kept around so the TUI's "Always allow in this workspace"
+   * decision can write to ~/.cliq/workspaces/<id>/permissions.json through
+   * the canonical workspaceId without re-resolving realpath.
+   */
+  trustContext: WorkspaceTrustContext;
 };
 
 // The TUI defaults to the most cautious mode that still lets the agent do
@@ -2565,9 +2768,54 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   //     through to runner.confirm (which only takes a string prompt).
   //   * `allow-for-this-turn` short-circuits subsequent 'ask' decisions in
   //     the same turn; reset by livePolicy.resetTurn() at each onSubmit.
+  //   * The composed permission table (workspace config + persisted +
+  //     CLI flags) is bound here and re-used for every mid-session swap so
+  //     deny/allow/ask layers survive a `/policy <mode>` change.
+  //   * `allow-session` mutates the in-process table; `allow-workspace`
+  //     additionally persists the rule via appendPersistedWorkspacePermission.
+  //     The same `opts.permissionTable` object is held by livePolicy, so a
+  //     push() here is visible to subsequent decide() calls without a
+  //     re-compose. Builtin deny is seeded first by composePermissionTable
+  //     upstream, so a malicious `allow: bash: rm` push still loses to the
+  //     `deny: bash: rm` rule walked earlier.
   // tx.applyPolicy stays bound to construction-time value (per spec open
   // question 3) — that is enforced inside tuiTransactions.confirmApply below.
-  const livePolicy = createTuiLivePolicyEngine(policy, approvalBridge.requestApproval);
+  const livePolicy = createTuiLivePolicyEngine(
+    policy,
+    approvalBridge.requestApproval,
+    opts.permissionTable,
+    async (subject, scope) => {
+      const rule = approvalSubjectToPermissionRule(subject, scope === 'session' ? 'session' : 'persisted');
+      if (!rule) {
+        return {
+          ok: false,
+          reason: `cannot derive a permission rule from ${subject.kind} subject`
+        };
+      }
+      // Workspace scope is sticky-on-disk, so persist BEFORE mutating the
+      // in-memory table. If the persist fails we must not leave a
+      // session-lived in-memory allow behind — that would silently break
+      // the {ok: false} contract that extendAllow callers (livePolicy)
+      // rely on to fall back to a one-shot decision. Session scope has no
+      // disk side; just push directly.
+      if (scope === 'workspace') {
+        try {
+          await appendPersistedWorkspacePermission(opts.trustContext, 'allow', {
+            channel: rule.channel,
+            pattern: rule.pattern
+          });
+        } catch (err) {
+          return {
+            ok: false,
+            reason: err instanceof Error ? err.message : String(err)
+          };
+        }
+      }
+      opts.permissionTable.allow.push(rule);
+      livePolicy.rebuildForExtendedAllow();
+      return { ok: true };
+    }
+  );
 
   const tuiTxMode = opts.txMode ?? wsCfg.transactions?.mode ?? 'off';
   let tuiTransactions: TxRunnerOptions | undefined;
@@ -2589,7 +2837,12 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       cliqHome: opts.cliqHome,
       // Interactive tx apply now flows through the same modal as tool
       // approvals, with a tx-apply subject. allow-for-this-turn does not
-      // apply (tx apply happens at end-of-turn after all tools).
+      // apply (tx apply happens at end-of-turn after all tools), and
+      // allow-session / allow-workspace are gated out of the modal for
+      // tx-apply subjects (see ApprovalModal `!isTool` guard). We still
+      // treat any non-deny choice as approval here so the decision flow
+      // stays robust if those subjects ever start producing the extra
+      // scopes — only an explicit `deny` blocks the apply.
       confirmApply: async (review) => {
         const subject: ApprovalSubject = {
           kind: 'tx-apply',
@@ -2600,7 +2853,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
           artifactRef: review.artifactRef
         };
         const decision = await approvalBridge.requestApproval(subject);
-        return decision === 'allow' || decision === 'allow-turn';
+        return decision !== 'deny';
       }
     };
   }
@@ -2716,9 +2969,24 @@ export async function notifyIfPackageUpdateAvailable(store: UiStore) {
 
 function createTuiLivePolicyEngine(
   initialMode: PolicyMode,
-  requestApproval: (subject: ApprovalSubject) => Promise<'allow' | 'deny' | 'allow-turn'>
+  requestApproval: (
+    subject: ApprovalSubject
+  ) => Promise<'allow' | 'deny' | 'allow-turn' | 'allow-session' | 'allow-workspace'>,
+  table: PermissionTable,
+  /**
+   * Called when the user picks `allow-session` or `allow-workspace`. The
+   * caller is responsible for deriving the PermissionRule from the subject,
+   * appending it to whichever store backs that scope (in-process session
+   * memory for 'session', the persisted permissions.json for 'workspace'),
+   * and returning a non-empty error string if the persist failed so the
+   * livePolicy can downgrade silently to a one-shot allow with a warning.
+   */
+  extendAllow: (
+    subject: ApprovalSubject,
+    scope: 'session' | 'workspace'
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>
 ) {
-  let inner = createPolicyEngine({ mode: initialMode });
+  let inner = createPolicyEngine({ mode: initialMode, table });
   let allowTurn = false;
 
   const engine = {
@@ -2739,6 +3007,19 @@ function createTuiLivePolicyEngine(
         allowTurn = true;
         return { behavior: 'allow', decidedBy: 'user' as const };
       }
+      if (userChoice === 'allow-session' || userChoice === 'allow-workspace') {
+        const scope = userChoice === 'allow-session' ? 'session' : 'workspace';
+        const result = await extendAllow(subject, scope);
+        if (!result.ok) {
+          // Surface why we couldn't persist (e.g. EROFS, EACCES) but still
+          // grant this single action — refusing here would punish the user
+          // for picking the heavier scope.
+          process.stderr.write(
+            `cliq: could not extend approval to ${scope}: ${result.reason}\n`
+          );
+        }
+        return { behavior: 'allow', decidedBy: 'user' as const };
+      }
       return {
         behavior: 'deny' as const,
         reason: 'user denied via TUI approval modal',
@@ -2750,10 +3031,22 @@ function createTuiLivePolicyEngine(
   return {
     engine: engine as ReturnType<typeof createPolicyEngine>,
     setMode(mode: PolicyMode) {
-      inner = createPolicyEngine({ mode });
+      // Keep the layered permission table across preset swaps so a
+      // mid-session `/policy auto` doesn't silently drop the user's deny
+      // rules. Only the preset changes; deny/allow/ask layers persist.
+      inner = createPolicyEngine({ mode, table });
     },
     resetTurn() {
       allowTurn = false;
+    },
+    /**
+     * Mutate the shared permission table in place after the caller has
+     * appended a rule (session or workspace scope), then rebuild the inner
+     * engine against the now-larger table. Used by extendAllow callers in
+     * runChatTuiSession.
+     */
+    rebuildForExtendedAllow() {
+      inner = createPolicyEngine({ mode: inner.mode, table });
     }
   };
 }

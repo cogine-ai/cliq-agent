@@ -367,3 +367,63 @@ test('parseWorkspaceConfig accepts bashPolicy=deny', () => {
   const parsed = parseWorkspaceConfig(raw);
   assert.equal(parsed.transactions?.bashPolicy, 'deny');
 });
+
+test('parseWorkspaceConfig leaves permissions undefined when section is absent', () => {
+  const parsed = parseWorkspaceConfig({});
+  assert.equal(parsed.permissions, undefined);
+});
+
+test('parseWorkspaceConfig accepts preset + allow + deny + ask permission rules', () => {
+  const parsed = parseWorkspaceConfig({
+    permissions: {
+      preset: 'confirm-write',
+      allow: ['bash: git *', 'fs-read: docs/*'],
+      deny: ['fs-write: .env'],
+      ask: ['fs-write: src/*']
+    }
+  });
+  assert.equal(parsed.permissions?.preset, 'confirm-write');
+  assert.deepEqual(parsed.permissions?.allow, [
+    { channel: 'bash', pattern: 'git *', source: 'workspace' },
+    { channel: 'fs-read', pattern: 'docs/*', source: 'workspace' }
+  ]);
+  assert.deepEqual(parsed.permissions?.deny, [
+    { channel: 'fs-write', pattern: '.env', source: 'workspace' }
+  ]);
+  assert.deepEqual(parsed.permissions?.ask, [
+    { channel: 'fs-write', pattern: 'src/*', source: 'workspace' }
+  ]);
+});
+
+test('parseWorkspaceConfig rejects an unknown PolicyMode in permissions.preset', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ permissions: { preset: 'yolo' } }),
+    /permissions\.preset must be one of/
+  );
+});
+
+test('parseWorkspaceConfig surfaces the offending rule index for malformed strings', () => {
+  // The grammar error must pinpoint the index so the user can find the bad
+  // line in their config without reading the whole file.
+  assert.throws(
+    () =>
+      parseWorkspaceConfig({
+        permissions: { allow: ['bash: git *', 'no-colon-here'] }
+      }),
+    /permissions\.allow\[1\].*missing a colon/
+  );
+});
+
+test('parseWorkspaceConfig rejects non-array allow/deny/ask', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ permissions: { allow: 'bash: *' } }),
+    /permissions\.allow must be an array/
+  );
+});
+
+test('parseWorkspaceConfig rejects non-object permissions section', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ permissions: 'bash: *' }),
+    /permissions must be an object/
+  );
+});

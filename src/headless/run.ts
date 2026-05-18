@@ -1,3 +1,27 @@
+/**
+ * Headless run entrypoint.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * Permission-scope invariant (#62-B).
+ * ─────────────────────────────────────────────────────────────────────────
+ * In the headless / `--json` / `rpc` / non-TTY paths, every permission
+ * decision is effectively `'once'`. The TUI's "Allow this session" and
+ * "Always allow in this workspace" scopes are unreachable here:
+ *
+ *   - There is no ApprovalModal, no `extendAllow` callback, and the
+ *     PolicyEngine is constructed without the `livePolicy` proxy that the
+ *     TUI uses to mutate the permission table.
+ *   - PermissionRequest hooks that try to return `scope: 'session'` /
+ *     `'workspace'` are coerced down to `'once'` by
+ *     `coerceHookPermissionScope` in src/runtime/runner.ts (#62-A).
+ *   - `appendPersistedWorkspacePermission` is never invoked from this file,
+ *     so a non-interactive run cannot silently accumulate "always allow"
+ *     entries in `~/.cliq/workspaces/<id>/permissions.json`.
+ *
+ * Regression test: src/headless/run.test.ts
+ *   "runHeadless coerces hook scope to 'once' and never persists
+ *   permissions.json (#62-B headless safety)".
+ */
 import { stat, realpath } from 'node:fs/promises';
 
 import { DEFAULT_POLICY_MODE } from '../config.js';
@@ -7,6 +31,7 @@ import { resolveModelConfig } from '../model/config.js';
 import type { PartialModelConfig } from '../model/config.js';
 import { createModelClient } from '../model/index.js';
 import type { ModelClient, ResolvedModelConfig } from '../model/types.js';
+import { composeRuntimePermissionTable } from '../policy/compose-runtime.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import type { PolicyConfirm, PolicyMode } from '../policy/types.js';
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
@@ -247,7 +272,11 @@ export async function runHeadless(
     }
 
     const session = request.session?.mode === 'new' ? await ensureFresh(request.cwd) : await ensureSession(request.cwd);
-    const policy = request.policy ?? DEFAULT_POLICY_MODE;
+    // Caller-supplied policy (from cli.ts via parsed.policy, or a programmatic
+    // SDK request) always wins. When neither was given, the workspace's
+    // permissions.preset takes over as the default friction level for this
+    // workspace. Only after both fall through do we land on DEFAULT_POLICY_MODE.
+    let policy = request.policy ?? DEFAULT_POLICY_MODE;
     const assembly = await createRuntimeAssembly({
       cwd: request.cwd,
       session,
@@ -362,12 +391,29 @@ export async function runHeadless(
       };
     }
 
+    // SECURITY: the headless trust gate (denyIfWorkspaceUntrustedNonInteractiveRuntime
+    // in src/cli.ts) decided well before runHeadless was invoked, so it is
+    // safe to read workspace-controlled permission state here. See
+    // composeRuntimePermissionTable for the load-order invariant.
+    const headlessTrustContext = await createWorkspaceTrustContext(request.cwd, cliqHome);
+    const headlessPermissionTable = await composeRuntimePermissionTable({
+      trustContext: headlessTrustContext,
+      workspaceConfigPermissions: workspaceConfig.permissions,
+      ...(request.cliPermissions ? { cliPermissions: request.cliPermissions } : {})
+    });
+
+    // Apply the workspace preset fallback after the trust gate has
+    // approved reading workspace state. Caller-supplied policy still wins.
+    if (request.policy === undefined && workspaceConfig.permissions?.preset) {
+      policy = workspaceConfig.permissions.preset;
+    }
+
     const modelClient = options.modelClient ?? options.createModelClient?.(modelConfig) ?? createModelClient(modelConfig);
     const runner = createRunner({
       model: modelClient,
       hooks: [...assembly.hooks, ...(options.hooks ?? [])],
       commandHooks: assembly.commandHooks ?? {},
-      policy: createPolicyEngine({ mode: policy }),
+      policy: createPolicyEngine({ mode: policy, table: headlessPermissionTable }),
       confirm: options.confirm,
       instructions: assembly.instructions,
       signal: options.signal,
