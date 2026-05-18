@@ -272,7 +272,11 @@ export async function runHeadless(
     }
 
     const session = request.session?.mode === 'new' ? await ensureFresh(request.cwd) : await ensureSession(request.cwd);
-    const policy = request.policy ?? DEFAULT_POLICY_MODE;
+    // Caller-supplied policy (from cli.ts via parsed.policy, or a programmatic
+    // SDK request) always wins. When neither was given, the workspace's
+    // permissions.preset takes over as the default friction level for this
+    // workspace. Only after both fall through do we land on DEFAULT_POLICY_MODE.
+    let policy = request.policy ?? DEFAULT_POLICY_MODE;
     const assembly = await createRuntimeAssembly({
       cwd: request.cwd,
       session,
@@ -397,6 +401,12 @@ export async function runHeadless(
       workspaceConfigPermissions: workspaceConfig.permissions,
       ...(request.cliPermissions ? { cliPermissions: request.cliPermissions } : {})
     });
+
+    // Apply the workspace preset fallback after the trust gate has
+    // approved reading workspace state. Caller-supplied policy still wins.
+    if (request.policy === undefined && workspaceConfig.permissions?.preset) {
+      policy = workspaceConfig.permissions.preset;
+    }
 
     const modelClient = options.modelClient ?? options.createModelClient?.(modelConfig) ?? createModelClient(modelConfig);
     const runner = createRunner({

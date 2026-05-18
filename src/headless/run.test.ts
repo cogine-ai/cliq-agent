@@ -260,6 +260,70 @@ process.stdin.on('end', () => {
   assert.deepEqual(hookInput.action, { bash: 'pwd' });
 });
 
+test('runHeadless falls back to workspace permissions.preset when request.policy is omitted (#62-B)', async () => {
+  // Regression for PR #91 Codex finding "Honor workspace permissions.preset
+  // at runtime". With request.policy undefined and workspace config setting
+  // permissions.preset='read-only', a model-issued edit must be denied by
+  // the PolicyEngine. Without the fallback the run would happily execute
+  // the edit under the global DEFAULT_POLICY_MODE.
+  const { cwd } = await setupWorkspace();
+  await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+  await writeFile(
+    path.join(cwd, '.cliq', 'config.json'),
+    JSON.stringify({ permissions: { preset: 'read-only' } }),
+    'utf8'
+  );
+  let calls = 0;
+  const toolEndStatuses: string[] = [];
+  const errorEvents: string[] = [];
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'edit README.md',
+      // policy is intentionally omitted so workspace preset takes over.
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    {
+      modelClient: {
+        async complete(_messages, options) {
+          calls += 1;
+          await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
+          await options?.onEvent?.({ type: 'end' });
+          return {
+            provider: 'ollama',
+            model: 'test-model',
+            content:
+              calls === 1
+                ? JSON.stringify({ edit: { path: 'README.md', old_text: 'a', new_text: 'b' } })
+                : JSON.stringify({ message: 'gave up' })
+          };
+        }
+      },
+      onEvent(event) {
+        if (event.type === 'tool-end') {
+          toolEndStatuses.push(event.payload.status);
+        }
+        if (event.type === 'error') {
+          errorEvents.push(JSON.stringify(event.payload));
+        }
+      }
+    }
+  );
+
+  assert.equal(output.status, 'completed', 'run still completes after deny');
+  // PolicyEngine deny under read-only surfaces as a tool-end with status
+  // 'error'. Without the workspace preset fallback the edit would run
+  // cleanly and tool-end.status would be 'ok'.
+  assert.ok(
+    toolEndStatuses.includes('error'),
+    'edit must be denied by PolicyEngine when workspace preset=read-only; tool-end statuses=' +
+      JSON.stringify(toolEndStatuses) +
+      ' errors=' +
+      JSON.stringify(errorEvents)
+  );
+});
+
 test('runHeadless coerces hook scope to "once" and never persists permissions.json (#62-B headless safety)', async () => {
   // Even when a PermissionRequest hook tries to return scope='workspace',
   // the headless path must treat the decision as one-shot and must NOT

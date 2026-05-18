@@ -1845,7 +1845,10 @@ async function ensureInteractiveWorkspaceTrustedForRuntime(opts: {
 
 export async function runCli(argv: string[]) {
   const parsed = parseArgs(argv);
-  const { cmd, prompt, policy, skills, model: cliModel } = parsed;
+  const { cmd, prompt, skills, model: cliModel } = parsed;
+  // policy starts as whatever parseArgs computed (default / env / CLI flag);
+  // workspace `permissions.preset` may override below if no CLI/env was set.
+  let policy = parsed.policy;
   const cwd = process.cwd();
 
   if (cmd === 'help') {
@@ -2521,6 +2524,17 @@ export async function runCli(argv: string[]) {
     workspaceConfigPermissions: wsCfg.permissions,
     ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
   });
+
+  // Workspace permissions.preset acts as the default PolicyMode for this
+  // workspace when the operator hasn't already pinned one via CLI flag or
+  // CLIQ_POLICY_MODE. CLI / env always win to preserve the documented
+  // override precedence; when neither is set, a workspace-declared preset
+  // is treated as an explicit choice so the TUI's
+  // "confirm-all when nothing was set" default doesn't override it.
+  if (!parsed.policyExplicit && wsCfg.permissions?.preset) {
+    policy = wsCfg.permissions.preset;
+    parsed.policyExplicit = true;
+  }
   const chatRecoveryResult = await coordRecoverAtStart(chatCoordinatorCtx);
   for (const skippedTxId of chatRecoveryResult.crossSessionSkipped) {
     process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
@@ -2769,11 +2783,12 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
           reason: `cannot derive a permission rule from ${subject.kind} subject`
         };
       }
-      // Push first so an in-memory mutation succeeds even if persistence
-      // fails — the user-visible "allow" decision in this turn must be
-      // honored regardless. The persisted layer is best-effort.
-      opts.permissionTable.allow.push(rule);
-      livePolicy.rebuildForExtendedAllow();
+      // Workspace scope is sticky-on-disk, so persist BEFORE mutating the
+      // in-memory table. If the persist fails we must not leave a
+      // session-lived in-memory allow behind — that would silently break
+      // the {ok: false} contract that extendAllow callers (livePolicy)
+      // rely on to fall back to a one-shot decision. Session scope has no
+      // disk side; just push directly.
       if (scope === 'workspace') {
         try {
           await appendPersistedWorkspacePermission(opts.trustContext, 'allow', {
@@ -2787,6 +2802,8 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
           };
         }
       }
+      opts.permissionTable.allow.push(rule);
+      livePolicy.rebuildForExtendedAllow();
       return { ok: true };
     }
   );
