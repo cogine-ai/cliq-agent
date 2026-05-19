@@ -139,6 +139,14 @@ test('matchAgainstTable: wildcard, exact, prefix " *", and trailing "/*" pattern
   );
 });
 
+test('matchAgainstTable: compound bash never matches allow (chains hidden commands)', () => {
+  const table = tableWith({
+    allow: [wsRule('bash', 'npm *'), wsRule('bash', 'git *')]
+  });
+  const decision = matchAgainstTable(table, { kind: 'bash', commandHead: 'npm', compound: true });
+  assert.equal(decision.kind, 'ask');
+});
+
 test('matchAgainstTable: bash with empty commandHead never matches allow/ask', () => {
   const table = tableWith({
     allow: [wsRule('bash', '*'), wsRule('bash', '')]

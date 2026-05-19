@@ -231,6 +231,19 @@ test('decision table: bash without identifiable head never matches allow (no sil
   assert.equal(decision.behavior, 'ask');
 });
 
+test('decision table: compound bash never allow-list matches even under policy=auto', async () => {
+  const policy = createPolicyEngine({
+    mode: 'auto',
+    table: composePermissionTable({ allow: [wsRule('bash', 'git *')] })
+  });
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: 'git status && rm -rf /' }
+  });
+  const decision = await policy.decide(subject);
+  assert.equal(decision.behavior, 'ask');
+});
+
 test('decision table: builtin deny blocks plain `rm` even when user adds a broad bash allow', async () => {
   const policy = createPolicyEngine({
     mode: 'auto',

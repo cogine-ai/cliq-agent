@@ -18,6 +18,14 @@ test('buildToolApprovalSubject creates a bash approval subject with command payl
   assert.equal(subject.display.command, 'npm test');
   if (subject.kind === 'tool') {
     assert.deepEqual(subject.channel, { kind: 'bash', commandHead: 'npm' });
+    const chained = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash: 'npm test && rm -rf /' }
+    });
+    assert.equal(chained.kind, 'tool');
+    if (chained.kind === 'tool') {
+      assert.deepEqual(chained.channel, { kind: 'bash', commandHead: 'npm', compound: true });
+    }
   }
 });
 
