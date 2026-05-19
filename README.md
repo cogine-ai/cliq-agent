@@ -52,6 +52,8 @@ Inside the TUI:
 - Shift+Tab rotates through policy modes; Ctrl+C cancels an active turn or clears
   input; Ctrl+D exits on empty input; Ctrl+O folds or unfolds the most recent
   bash output.
+- The status line uses short behavior labels for policy modes: `plan`,
+  `ask all`, `ask edits`, `ask shell`, and `auto run`.
 - An approval modal handles `--policy confirm-*` and interactive `--tx-apply` decisions.
 
 The TUI runs by default on a TTY, but you can opt in explicitly with `--tui` (useful when scripting around the default). Opt out with `--classic` or `CLIQ_TUI=0` to fall back to the legacy readline REPL:

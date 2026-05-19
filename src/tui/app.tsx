@@ -10,6 +10,7 @@ import { Transcript } from './components/transcript.js';
 import { useInputHistory } from './hooks/use-input-history.js';
 import { useKeybindings } from './hooks/use-keybindings.js';
 import { useUiStore } from './hooks/use-ui-store.js';
+import { formatPolicyModeSummary } from './policy-display.js';
 import { nextPolicyMode } from './policy-rotation.js';
 import { buildHelpText, completeSlash, parseSlash } from './slash.js';
 import type { UiApprovalDecision, UiStore } from './store.js';
@@ -94,7 +95,7 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
         try {
           await onPolicyChange?.(parsed.mode);
           store.dispatch({ type: 'policy-change', mode: parsed.mode });
-          pushSystem(`policy mode switched to ${parsed.mode}`);
+          pushSystem(`policy mode switched to ${formatPolicyModeSummary(parsed.mode)}`);
         } catch (error) {
           pushSystem(`/policy failed: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -127,7 +128,7 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
     try {
       await onPolicyChange?.(next);
       store.dispatch({ type: 'policy-change', mode: next });
-      pushSystem(`policy → ${next}`);
+      pushSystem(`policy → ${formatPolicyModeSummary(next)}`);
     } catch (error) {
       pushSystem(
         `policy rotation failed: ${error instanceof Error ? error.message : String(error)}`

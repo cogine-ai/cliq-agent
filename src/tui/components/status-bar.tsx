@@ -2,24 +2,11 @@ import path from 'node:path';
 
 import { Box, Text } from 'ink';
 
-import type { PolicyMode } from '../../policy/types.js';
+import { getPolicyModeDisplay } from '../policy-display.js';
 import type { UiState } from '../store.js';
 
-const POLICY_COLOR: Record<PolicyMode, string> = {
-  // Safety / friction at a glance:
-  //   read-only — fully safe (no writes possible)
-  //   confirm-all — safe + functional (TUI default; asks for everything)
-  //   confirm-write / confirm-bash — half safe (one access class is silent)
-  //   auto — most dangerous (no confirmation; was historically the default)
-  'read-only': 'cyan',
-  'confirm-all': 'green',
-  'confirm-write': 'yellow',
-  'confirm-bash': 'yellow',
-  auto: 'red'
-};
-
 export function StatusBar({ state }: { state: UiState }) {
-  const policyColor = POLICY_COLOR[state.policy] ?? 'gray';
+  const policyDisplay = getPolicyModeDisplay(state.policy);
   const txStatus = formatTxStatus(state.tx);
   const sessionId = shortSessionId(state.session.id);
   const cwdLabel = `/${path.basename(state.session.cwd)}`;
@@ -31,7 +18,7 @@ export function StatusBar({ state }: { state: UiState }) {
       {hasError ? <Text color="red">● </Text> : null}
       <Text dimColor>{`${state.model.provider}/${state.model.model}`}</Text>
       <Sep />
-      <Text color={policyColor}>{state.policy}</Text>
+      <Text color={policyDisplay.color}>{policyDisplay.label}</Text>
       <Sep />
       <Text dimColor>{sessionId}</Text>
       <Sep />

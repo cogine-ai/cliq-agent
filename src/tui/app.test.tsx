@@ -22,7 +22,7 @@ test('mounts and renders status bar segments', () => {
   const { lastFrame } = render(<App store={store} onSubmit={() => {}} />);
   const frame = lastFrame() ?? '';
   assert.match(frame, /ollama\/qwen3:4b/);
-  assert.match(frame, /auto/);
+  assert.match(frame, /auto run/);
 });
 
 test('end-to-end: dispatches reach the rendered transcript', async () => {
@@ -60,6 +60,8 @@ test('typing /help and submitting renders the help block in the transcript', asy
   const frame = lastFrame() ?? '';
   assert.match(frame, /Available slash commands/);
   assert.match(frame, /\/policy <mode>/);
+  assert.match(frame, /plan \(read-only\)/);
+  assert.match(frame, /Rotate policy: plan → ask edits → ask shell → auto run/);
 });
 
 test('typing an unknown slash command pushes an "unknown command" notice', async () => {
@@ -85,7 +87,7 @@ test('/policy without a mode argument surfaces an inline error', async () => {
 test('/policy <mode> calls onPolicyChange and dispatches policy-change', async () => {
   const store = makeStore();
   const captured: string[] = [];
-  const { stdin } = render(
+  const { stdin, lastFrame } = render(
     <App
       store={store}
       onSubmit={() => {}}
@@ -101,6 +103,7 @@ test('/policy <mode> calls onPolicyChange and dispatches policy-change', async (
   await flush(); // extra tick for the awaited onPolicyChange chain
   assert.deepEqual(captured, ['read-only']);
   assert.equal(store.getState().policy, 'read-only');
+  assert.match(lastFrame() ?? '', /policy mode switched to plan \(read-only\)/);
 });
 
 test('/reset awaits onReset and clears the transcript via session-reset', async () => {

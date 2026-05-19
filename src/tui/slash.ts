@@ -1,4 +1,11 @@
 import type { PolicyMode } from '../policy/types.js';
+import {
+  formatPolicyModeDetail,
+  formatPolicyModeLabels,
+  formatPolicyModeList,
+  POLICY_MODE_ORDER
+} from './policy-display.js';
+import { POLICY_ROTATION } from './policy-rotation.js';
 
 export type SlashCommandSpec = {
   name: string;
@@ -11,19 +18,11 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
   { name: '/quit', description: 'Same as /exit' },
   { name: '/reset', description: 'Reset the current session (drops transcript and records)' },
   { name: '/help', description: 'Show available commands' },
-  { name: '/policy', args: '<mode>', description: 'Live-swap the policy mode' }
-];
-
-const POLICY_MODES_LIST: readonly PolicyMode[] = [
-  'auto',
-  'confirm-write',
-  'read-only',
-  'confirm-bash',
-  'confirm-all'
+  { name: '/policy', args: '<mode>', description: 'Switch the active policy mode' }
 ];
 
 function isPolicyMode(value: string): value is PolicyMode {
-  return (POLICY_MODES_LIST as readonly string[]).includes(value);
+  return (POLICY_MODE_ORDER as readonly string[]).includes(value);
 }
 
 export type ParsedSlashCommand =
@@ -58,14 +57,14 @@ export function parseSlash(input: string): ParsedSlashCommand {
         return {
           kind: 'invalid',
           head,
-          reason: `/policy requires a mode argument: ${POLICY_MODES_LIST.join(', ')}`
+          reason: `/policy requires a mode argument: ${formatPolicyModeList()}`
         };
       }
       if (!isPolicyMode(mode)) {
         return {
           kind: 'invalid',
           head,
-          reason: `unknown policy mode "${mode}"; expected one of: ${POLICY_MODES_LIST.join(', ')}`
+          reason: `unknown policy mode "${mode}"; expected one of: ${formatPolicyModeList()}`
         };
       }
       return { kind: 'policy', mode };
@@ -98,8 +97,12 @@ export function buildHelpText(): string {
     const display = cmd.args ? `${cmd.name} ${cmd.args}` : cmd.name;
     lines.push(`  ${display.padEnd(22)} ${cmd.description}`);
   }
+  lines.push('', 'Policy modes:');
+  for (const mode of POLICY_MODE_ORDER) {
+    lines.push(`  ${formatPolicyModeDetail(mode)}`);
+  }
   lines.push('', 'Keys:');
-  lines.push('  Shift+Tab              Rotate policy mode (read-only → confirm-write → confirm-bash → auto)');
+  lines.push(`  Shift+Tab              Rotate policy: ${formatPolicyModeLabels(POLICY_ROTATION)}`);
   lines.push('  Ctrl+O                 Toggle the most recent tool body');
   lines.push('  Ctrl+C                 Cancel an active turn (or clear input)');
   lines.push('  Ctrl+D                 Exit on empty input');

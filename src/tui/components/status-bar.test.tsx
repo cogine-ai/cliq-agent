@@ -19,7 +19,7 @@ test('renders provider/model · policy · short session · cwd basename · tx id
   const { lastFrame } = render(<StatusBar state={init()} />);
   const frame = lastFrame() ?? '';
   assert.match(frame, /ollama\/qwen3:4b/);
-  assert.match(frame, /auto/);
+  assert.match(frame, /auto run/);
   assert.match(frame, /ses_a1b2c3/);
   assert.match(frame, /repo/);
   assert.match(frame, /tx idle/);
@@ -35,9 +35,11 @@ test('shows a red error indicator when errors are present', () => {
   assert.match(frame, /●/);
 });
 
-test('reflects updated policy mode', () => {
+test('reflects updated policy mode with the TUI label instead of raw mode value', () => {
   const { lastFrame } = render(<StatusBar state={init({ policy: 'read-only' })} />);
-  assert.match(lastFrame() ?? '', /read-only/);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /plan/);
+  assert.doesNotMatch(frame, /read-only/);
 });
 
 test('renders the active tx state when state.tx is set', () => {

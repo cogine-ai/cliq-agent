@@ -62,4 +62,12 @@ test('buildHelpText lists every command with its description', () => {
   assert.match(text, /\/reset/);
   assert.match(text, /\/help/);
   assert.match(text, /\/policy <mode>/);
+  assert.match(text, /Policy modes:/);
+  assert.match(text, /plan \(read-only\)/);
+  assert.match(text, /ask edits \(confirm-write\)/);
+  assert.match(text, /ask shell \(confirm-bash\)/);
+  assert.match(text, /ask all \(confirm-all\)/);
+  assert.match(text, /auto run \(auto\)/);
+  assert.match(text, /Rotate policy: plan → ask edits → ask shell → auto run/);
+  assert.doesNotMatch(text, /read-only → confirm-write → confirm-bash → auto/);
 });
