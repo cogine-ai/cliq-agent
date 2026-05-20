@@ -94,6 +94,32 @@ Prompt body.`,
   }
 });
 
+test('discoverSkillCatalog marks name mismatches as invalid diagnostics', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-name-mismatch-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq', 'skills', 'reviewer'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
+      `---
+name: other
+description: mismatched name
+---
+
+Prompt body.`,
+      'utf8'
+    );
+
+    const catalog = await discoverSkillCatalog(cwd);
+    const entry = catalog.entries.find((item) => item.name === 'reviewer');
+
+    assert.equal(entry?.status, 'invalid');
+    assert.equal(entry?.diagnostics.some((diagnostic) => diagnostic.code === 'name-mismatch'), true);
+    await assert.rejects(() => loadSkills(cwd, ['reviewer']), /matching frontmatter name/i);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('loadSkills records a warning rather than rejecting a blank prompt body', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-empty-'));
   try {
@@ -142,6 +168,28 @@ test('loadSkills rejects invalid skill names before resolving paths', async () =
     () => loadSkills('/tmp/workspace', ['../escape']),
     /Invalid skill name: \.\.\/escape/i
   );
+});
+
+test('discoverSkillCatalog walks ancestors to the git root and prefers more specific project skills', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-ancestor-root-'));
+  try {
+    const cwd = path.join(root, 'packages', 'app');
+    await mkdir(path.join(root, '.git'), { recursive: true });
+    await mkdir(cwd, { recursive: true });
+    await writeSkill(path.join(root, '.cliq', 'skills'), 'reviewer', 'Root project skill.');
+    await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer', 'Nested project skill.');
+
+    const catalog = await discoverSkillCatalog(cwd);
+    const entries = catalog.entries.filter((entry) => entry.name === 'reviewer');
+
+    assert.equal(entries.length, 2);
+    assert.equal(entries.find((entry) => entry.skillDir.startsWith(cwd))?.status, 'available');
+    assert.equal(entries.find((entry) => entry.skillDir.startsWith(root) && !entry.skillDir.startsWith(cwd))?.status, 'shadowed');
+    const [loaded] = await loadSkills(cwd, ['reviewer'], { catalog });
+    assert.match(loaded?.prompt ?? '', /Nested project skill/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('discoverSkillCatalog finds project .cliq, project .agents, and user skill roots', async () => {

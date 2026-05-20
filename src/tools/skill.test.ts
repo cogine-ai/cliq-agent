@@ -55,3 +55,19 @@ test('skillTool dedupes repeated activation', async () => {
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+test('skillTool reports unknown skills without granting permissions', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-tool-unknown-'));
+  try {
+    const session = createSession(cwd);
+
+    const result = await skillTool.execute({ skill: { name: 'missing' } }, { cwd, session });
+
+    assert.equal(skillTool.access, 'read');
+    assert.equal(result.status, 'error');
+    assert.match(result.content, /Unknown skill: missing/i);
+    assert.deepEqual(session.activeSkills, []);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
