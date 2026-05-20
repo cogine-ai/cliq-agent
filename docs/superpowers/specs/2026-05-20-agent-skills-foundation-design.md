@@ -84,7 +84,7 @@ V1 must do:
 
 - Module 1, reduced: parse standard `SKILL.md` frontmatter robustly enough for real Agent Skills files, but do not over-model every optional field as behavior.
 - Module 2, reduced: build a deterministic catalog from `./.cliq/skills`, project `.agents/skills`, `~/.cliq/skills`, and `~/.agents/skills`, with collision diagnostics.
-- Module 4, reduced: preserve existing explicit activation through `--skill`, `defaultSkills`, and headless `skills`; do not require TUI `/skill` yet. Workspace-configured `defaultSkills` may activate only project-owned skills in V1. User/global skills require run-level explicit activation such as `--skill` or `HeadlessRunRequest.skills`, or a later approval flow.
+- Module 4, reduced: preserve existing explicit activation through `--skill`, `defaultSkills`, and headless `skills`; do not require TUI `/skill` yet. Workspace-configured `defaultSkills` may activate only project-owned skills in V1. Project ownership must be determined by canonical realpath containment inside trusted project roots; symlink or alias escapes are rejected with diagnostics. User/global skills require run-level explicit activation such as `--skill` or `HeadlessRunRequest.skills`, or a later approval flow.
 - Trust ordering: project skill discovery still happens only after Workspace Trust.
 - Tests: cover parser, discovery roots, collision precedence, and backward compatibility with current local skills.
 
@@ -398,6 +398,8 @@ CLI:
 Workspace config:
 
 - `defaultSkills` remains a workspace-controlled compatibility surface, so V1 must resolve it only against project-owned skills from trusted project roots.
+- Project-owned resolution must canonicalize the selected skill directory to a realpath and verify containment inside trusted project roots before reading `SKILL.md` or injecting instructions.
+- If canonicalization fails, or if the realpath escapes the trusted project roots through a symlink or path alias, Cliq must reject activation and emit a diagnostic that includes the skill id and resolved path when available.
 - If `defaultSkills` names a skill that exists only in a user/global root, Cliq should warn and skip it instead of reading or injecting that user-level skill.
 - Users can still activate user/global skills explicitly with `--skill` or headless `skills`; that run-level request is the user/operator approval path until a dedicated skill permission grammar exists.
 
@@ -539,7 +541,7 @@ Startup / assembly:
 3. Discover skills from trusted project roots and user/global roots.
 4. Parse manifests and diagnostics.
 5. Apply collision rules.
-6. Apply skill permission, disable filters, and V1 scope filters such as project-only resolution for workspace `defaultSkills`.
+6. Apply skill permission, disable filters, and V1 scope filters such as project-only resolution for workspace `defaultSkills`, using canonical-path ownership checks before loading skill bodies.
 7. Build compact catalog.
 8. Register `skill` and optional `skillResource` tools when those later-stage modules are enabled.
 9. Build instruction layers from base, workspace instructions, active skill bodies, and extensions.
@@ -605,6 +607,7 @@ Regression tests:
 - Non-interactive untrusted workspace still fails closed.
 - Existing `--skill`, project-owned `defaultSkills`, and headless `skills` still activate skills through the instruction layer.
 - Workspace `defaultSkills` does not activate user/global skills, even when a matching user/global skill exists and no project skill matches.
+- Workspace `defaultSkills` rejects project skill entries whose canonical realpath escapes trusted project roots through a symlink or alias, and records an audit diagnostic.
 - Run-level explicit activation through `--skill` or headless `skills` can activate user/global skills after normal catalog and policy checks.
 
 Catalog budget tests:
