@@ -78,7 +78,7 @@ Prefer exact edits over shell mutation when possible.`,
   }
 });
 
-test('createRuntimeAssembly refreshes active skill prompts and drops unavailable skills', async () => {
+test('createRuntimeAssembly refreshes active skill prompts and retries unavailable skills', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-skill-refresh-'));
   const skillFile = path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md');
   try {
@@ -120,11 +120,26 @@ Updated review prompt.`,
     const missingMessages = await assembly.instructions(assembly.session);
 
     assert.equal(missingMessages.some((message) => message.source === 'skill:reviewer'), false);
-    assert.equal(assembly.session.activeSkills.length, 0);
+    assert.equal(assembly.session.activeSkills.length, 1);
     assert.equal(
       assembly.skillDiagnostics.some((diagnostic) => diagnostic.code === 'active-skill-unavailable'),
       true
     );
+
+    await writeFile(
+      skillFile,
+      `---
+name: reviewer
+description: review instructions
+---
+
+Recovered review prompt.`,
+      'utf8'
+    );
+    const recoveredMessages = await assembly.instructions(assembly.session);
+    const recoveredSkill = recoveredMessages.find((message) => message.source === 'skill:reviewer');
+    assert.match(recoveredSkill?.content ?? '', /Recovered review prompt/);
+    assert.equal(assembly.session.activeSkills.length, 1);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

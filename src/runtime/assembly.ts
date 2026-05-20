@@ -95,7 +95,8 @@ export async function createRuntimeAssembly({
     commandHooks: workspaceConfig.hooks ?? {},
     session,
     async instructions(currentSession: Session) {
-      const refreshedSkills: ActiveSkill[] = [];
+      const retainedSkills: ActiveSkill[] = [];
+      const instructionSkills: ActiveSkill[] = [];
       for (const skill of currentSession.activeSkills ?? []) {
         const refreshed = await refreshActiveSkill(skill);
         for (const item of refreshed.diagnostics) {
@@ -104,10 +105,13 @@ export async function createRuntimeAssembly({
           }
         }
         if (refreshed.skill) {
-          refreshedSkills.push(refreshed.skill);
+          retainedSkills.push(refreshed.skill);
+          instructionSkills.push(refreshed.skill);
+        } else {
+          retainedSkills.push(skill);
         }
       }
-      currentSession.activeSkills = refreshedSkills;
+      currentSession.activeSkills = retainedSkills;
 
       const extensionMessages = (
         await Promise.all(
@@ -132,7 +136,7 @@ export async function createRuntimeAssembly({
         cwd,
         basePrompt: BASE_SYSTEM_PROMPT,
         workspaceInstructions,
-        skills: refreshedSkills.map((skill) => ({ name: skill.name, prompt: skill.prompt })),
+        skills: instructionSkills.map((skill) => ({ name: skill.name, prompt: skill.prompt })),
         extensionMessages
       });
     }
