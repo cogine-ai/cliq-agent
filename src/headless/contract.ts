@@ -391,6 +391,29 @@ export type CompactionView = {
   };
 };
 
+export type SkillView = {
+  name: string;
+  description: string | null;
+  scope: 'project' | 'user';
+  sourceKind: 'project-cliq' | 'project-agents' | 'user-cliq' | 'user-agents';
+  sourceRoot: string;
+  skillFile: string;
+  status?: 'available' | 'invalid' | 'shadowed';
+  active?: boolean;
+  diagnostics?: Array<{
+    level: 'info' | 'warning' | 'error';
+    code: string;
+    message: string;
+    source?: string;
+  }>;
+};
+
+export type SkillsListView = {
+  cwd: string;
+  skills: SkillView[];
+  activeSkills: SkillView[];
+};
+
 export type HandoffView = {
   id: string;
   createdAt: string;
@@ -419,6 +442,7 @@ export type SessionView = {
   parentSessionId?: string;
   forkedFromCheckpointId?: string;
   records: SessionRecordView[];
+  activeSkills: SkillView[];
   checkpoints: CheckpointView[];
   compactions: CompactionView[];
 };

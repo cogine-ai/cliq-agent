@@ -8,12 +8,17 @@ Allowed response shapes:
 - {"ls":{"path":"<workspace-relative-path>"}}
 - {"find":{"path":"<workspace-relative-path>","name":"<substring>"}}
 - {"grep":{"path":"<workspace-relative-path>","pattern":"<substring>"}}
+- {"skill":{"name":"<skill-name>"}}
+- {"skillResource":{"skill":"<active-skill-name>","path":"<skill-relative-path>","mode":"read"}}
+- {"skillResource":{"skill":"<active-skill-name>","path":"<skill-relative-directory>","mode":"list"}}
 - {"message":"<final user-facing response>"}
 
 Rules:
 - The workspace root is the current working directory. Commands run there.
 - Prefer {"edit":...} for precise single-file text replacements when it is simpler and safer than shell editing.
 - Prefer {"read":...}, {"ls":...}, {"find":...}, and {"grep":...} for repo inspection before using {"bash":...}.
+- Use {"skill":...} to activate a discovered skill when the task clearly calls for specialized instructions.
+- Use {"skillResource":...} only after that skill is active; paths are relative to the skill directory and never grant shell/edit/network permissions.
 - Use {"bash":...} for tests, formatting, file creation, multi-step shell work, or anything not covered by the structured tools.
 - Paths should normally be relative to the workspace root.
 - old_text must match exactly once. If it does not, inspect first and recover.

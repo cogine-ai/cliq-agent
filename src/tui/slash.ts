@@ -11,7 +11,9 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
   { name: '/quit', description: 'Same as /exit' },
   { name: '/reset', description: 'Reset the current session (drops transcript and records)' },
   { name: '/help', description: 'Show available commands' },
-  { name: '/policy', args: '<mode>', description: 'Live-swap the policy mode' }
+  { name: '/policy', args: '<mode>', description: 'Live-swap the policy mode' },
+  { name: '/skills', description: 'Show available and active skills' },
+  { name: '/skill', args: '<name>', description: 'Activate a skill by name' }
 ];
 
 const POLICY_MODES_LIST: readonly PolicyMode[] = [
@@ -31,6 +33,8 @@ export type ParsedSlashCommand =
   | { kind: 'reset' }
   | { kind: 'help' }
   | { kind: 'policy'; mode: PolicyMode }
+  | { kind: 'skills' }
+  | { kind: 'skill'; name: string }
   | { kind: 'unknown'; head: string }
   | { kind: 'invalid'; head: string; reason: string };
 
@@ -52,6 +56,26 @@ export function parseSlash(input: string): ParsedSlashCommand {
       return { kind: 'reset' };
     case '/help':
       return { kind: 'help' };
+    case '/skills':
+      return { kind: 'skills' };
+    case '/skill': {
+      const name = rest.join(' ').trim();
+      if (!name) {
+        return {
+          kind: 'invalid',
+          head,
+          reason: '/skill requires a skill name'
+        };
+      }
+      if (/\s/.test(name)) {
+        return {
+          kind: 'invalid',
+          head,
+          reason: '/skill accepts exactly one skill name'
+        };
+      }
+      return { kind: 'skill', name };
+    }
     case '/policy': {
       const mode = rest.join(' ').trim();
       if (!mode) {

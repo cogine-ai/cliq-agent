@@ -24,6 +24,16 @@ export type GrepAction = {
   pattern: string;
 };
 
+export type SkillAction = {
+  name: string;
+};
+
+export type SkillResourceAction = {
+  skill: string;
+  path?: string;
+  mode?: 'read' | 'list';
+};
+
 import { repairJsonStrings } from './json-repair.js';
 
 export type ModelAction =
@@ -33,9 +43,11 @@ export type ModelAction =
   | { ls: LsAction }
   | { find: FindAction }
   | { grep: GrepAction }
+  | { skill: SkillAction }
+  | { skillResource: SkillResourceAction }
   | { message: string };
 
-const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'message'] as const;
+const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'skill', 'skillResource', 'message'] as const;
 
 export function parseModelAction(content: string): ModelAction {
   let parsed: unknown;
@@ -129,6 +141,34 @@ export function parseModelAction(content: string): ModelAction {
         grep: {
           path: grep.path as string | undefined,
           pattern: grep.pattern
+        }
+      };
+    }
+  }
+
+  if (record.skill && typeof record.skill === 'object' && !Array.isArray(record.skill)) {
+    const skill = record.skill as Record<string, unknown>;
+    if (typeof skill.name === 'string') {
+      return {
+        skill: {
+          name: skill.name
+        }
+      };
+    }
+  }
+
+  if (record.skillResource && typeof record.skillResource === 'object' && !Array.isArray(record.skillResource)) {
+    const resource = record.skillResource as Record<string, unknown>;
+    if (
+      typeof resource.skill === 'string' &&
+      (resource.path === undefined || typeof resource.path === 'string') &&
+      (resource.mode === undefined || resource.mode === 'read' || resource.mode === 'list')
+    ) {
+      return {
+        skillResource: {
+          skill: resource.skill,
+          ...(resource.path !== undefined ? { path: resource.path as string } : {}),
+          ...(resource.mode !== undefined ? { mode: resource.mode as 'read' | 'list' } : {})
         }
       };
     }

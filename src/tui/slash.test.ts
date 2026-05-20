@@ -14,6 +14,14 @@ test('parseSlash maps /reset and /help', () => {
   assert.deepEqual(parseSlash('/help'), { kind: 'help' });
 });
 
+test('parseSlash maps skill commands', () => {
+  assert.deepEqual(parseSlash('/skills'), { kind: 'skills' });
+  assert.deepEqual(parseSlash('/skill reviewer'), { kind: 'skill', name: 'reviewer' });
+  const noArg = parseSlash('/skill');
+  assert.equal(noArg.kind, 'invalid');
+  if (noArg.kind === 'invalid') assert.match(noArg.reason, /requires a skill name/);
+});
+
 test('parseSlash /policy requires a known mode argument', () => {
   assert.deepEqual(parseSlash('/policy auto'), { kind: 'policy', mode: 'auto' });
   assert.deepEqual(parseSlash('/policy read-only'), { kind: 'policy', mode: 'read-only' });
@@ -37,7 +45,7 @@ test('parseSlash flags unknown commands without throwing', () => {
 test('matchSlash returns prefix-matching commands', () => {
   assert.deepEqual(
     matchSlash('/').map((c) => c.name).sort(),
-    ['/exit', '/help', '/policy', '/quit', '/reset']
+    ['/exit', '/help', '/policy', '/quit', '/reset', '/skill', '/skills']
   );
   assert.deepEqual(
     matchSlash('/p').map((c) => c.name),
@@ -62,4 +70,6 @@ test('buildHelpText lists every command with its description', () => {
   assert.match(text, /\/reset/);
   assert.match(text, /\/help/);
   assert.match(text, /\/policy <mode>/);
+  assert.match(text, /\/skills/);
+  assert.match(text, /\/skill <name>/);
 });

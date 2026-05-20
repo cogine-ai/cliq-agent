@@ -429,10 +429,92 @@ export function createSession(cwd: string): Session {
     createdAt: now,
     updatedAt: now,
     lifecycle: { status: 'idle', turn: 0 },
+    activeSkills: [],
     records: [],
     checkpoints: [],
     compactions: []
   };
+}
+
+function isActiveSkill(value: unknown) {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const skill = value as Record<string, unknown>;
+  const manifest = skill.manifest;
+  const diagnostics = skill.diagnostics;
+  return (
+    isNonEmptyString(skill.name) &&
+    (typeof skill.description === 'string' || skill.description === null) &&
+    typeof skill.prompt === 'string' &&
+    (skill.scope === 'project' || skill.scope === 'user') &&
+    (skill.sourceKind === 'project-cliq' ||
+      skill.sourceKind === 'project-agents' ||
+      skill.sourceKind === 'user-cliq' ||
+      skill.sourceKind === 'user-agents') &&
+    isNonEmptyString(skill.sourceRoot) &&
+    isNonEmptyString(skill.skillDir) &&
+    isNonEmptyString(skill.skillFile) &&
+    (skill.activatedBy === 'workspace-default' ||
+      skill.activatedBy === 'cli' ||
+      skill.activatedBy === 'headless' ||
+      skill.activatedBy === 'model' ||
+      skill.activatedBy === 'tui') &&
+    isValidIsoDateString(skill.activatedAt) &&
+    isSkillManifest(manifest) &&
+    Array.isArray(diagnostics) &&
+    diagnostics.every((item) => isSkillDiagnostic(item))
+  );
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.values(value).every((entry) => typeof entry === 'string')
+  );
+}
+
+function isValidIsoDateString(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+    !Number.isNaN(Date.parse(value))
+  );
+}
+
+function isSkillManifest(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const manifest = value as Record<string, unknown>;
+  return (
+    isNonEmptyString(manifest.name) &&
+    isNonEmptyString(manifest.description) &&
+    (manifest.license === undefined || typeof manifest.license === 'string') &&
+    (manifest.compatibility === undefined || typeof manifest.compatibility === 'string') &&
+    (manifest.metadata === undefined || isStringRecord(manifest.metadata)) &&
+    (manifest.allowedTools === undefined ||
+      (Array.isArray(manifest.allowedTools) && manifest.allowedTools.every((tool) => typeof tool === 'string')))
+  );
+}
+
+function isSkillDiagnostic(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const diagnostic = value as Record<string, unknown>;
+  return (
+    (diagnostic.level === 'info' || diagnostic.level === 'warning' || diagnostic.level === 'error') &&
+    isNonEmptyString(diagnostic.code) &&
+    isNonEmptyString(diagnostic.message) &&
+    (diagnostic.source === undefined || typeof diagnostic.source === 'string')
+  );
 }
 
 function isSession(value: unknown): value is Session {
@@ -450,6 +532,9 @@ function isSession(value: unknown): value is Session {
     typeof (value as Session).lifecycle === 'object' &&
     ((value as Session).lifecycle.status === 'idle' || (value as Session).lifecycle.status === 'running') &&
     typeof (value as Session).lifecycle.turn === 'number' &&
+    ((value as { activeSkills?: unknown }).activeSkills === undefined ||
+      (Array.isArray((value as { activeSkills?: unknown }).activeSkills) &&
+        (value as { activeSkills: unknown[] }).activeSkills.every((skill) => isActiveSkill(skill)))) &&
     Array.isArray((value as Session).records) &&
     (value as Session).records.every((record) => isSessionRecord(record)) &&
     ((value as { checkpoints?: unknown }).checkpoints === undefined ||
@@ -488,6 +573,9 @@ function normalizeSession(session: Session): Session {
   const compactions = Array.isArray((session as { compactions?: unknown }).compactions)
     ? session.compactions
     : [];
+  const activeSkills = Array.isArray((session as { activeSkills?: unknown }).activeSkills)
+    ? session.activeSkills
+    : [];
 
   if (
     id === session.id &&
@@ -495,6 +583,7 @@ function normalizeSession(session: Session): Session {
     records.length === session.records.length &&
     checkpoints === session.checkpoints &&
     compactions === session.compactions &&
+    activeSkills === session.activeSkills &&
     !modelChanged
   ) {
     return session;
@@ -505,6 +594,7 @@ function normalizeSession(session: Session): Session {
     id,
     version,
     model,
+    activeSkills,
     records,
     checkpoints,
     compactions

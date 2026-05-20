@@ -11,6 +11,8 @@ import {
   type HeadlessRunOutput,
   type HeadlessRunRequest,
   type RuntimeEventEnvelope,
+  type SkillView,
+  type SkillsListView,
   type SessionView
 } from './contract.js';
 import {
@@ -21,7 +23,10 @@ import {
   WorkspaceNotFoundError
 } from './artifacts.js';
 import { runHeadless as defaultRunHeadless } from './run.js';
-import { makeId } from '../session/store.js';
+import { makeId, loadActiveSession } from '../session/store.js';
+import { createWorkspaceTrustContext, evaluateWorkspaceTrustForNonInteractive } from '../session/trust.js';
+import { discoverSkillCatalog } from '../skills/loader.js';
+import type { SkillCatalogEntry } from '../skills/types.js';
 
 type JsonRpcId = string | number | null;
 
@@ -48,6 +53,7 @@ export type RpcServerOptions = {
   runHeadless?: RunHeadless;
   getSessionView?: (cwd: string, sessionId?: string) => Promise<SessionView>;
   getArtifactView?: (cwd: string, artifactId: string, sessionId?: string) => Promise<ArtifactView>;
+  listSkills?: (cwd: string) => Promise<SkillsListView>;
 };
 
 export type RpcServer = {
@@ -175,6 +181,18 @@ function asArtifactGetParams(params: unknown): { cwd: string; artifactId: string
   return { cwd, artifactId, sessionId };
 }
 
+function asSkillsListParams(params: unknown): { cwd: string } | null {
+  if (!isObject(params)) {
+    return null;
+  }
+
+  const cwd = asCwd(params.cwd);
+  if (!cwd) {
+    return null;
+  }
+  return { cwd };
+}
+
 function isNotFoundError(error: unknown) {
   return error instanceof SessionNotFoundError || error instanceof ArtifactNotFoundError;
 }
@@ -183,11 +201,53 @@ function isWorkspaceNotFoundError(error: unknown) {
   return error instanceof WorkspaceNotFoundError;
 }
 
+function entryToSkillView(entry: SkillCatalogEntry, activeNames: Set<string>): SkillView {
+  return {
+    name: entry.name,
+    description: entry.description,
+    scope: entry.scope,
+    sourceKind: entry.sourceKind,
+    sourceRoot: entry.sourceRoot,
+    skillFile: entry.skillFile,
+    status: entry.status,
+    active: activeNames.has(entry.name),
+    diagnostics: entry.diagnostics
+  };
+}
+
+async function defaultListSkills(cwd: string): Promise<SkillsListView> {
+  const trustContext = await createWorkspaceTrustContext(cwd);
+  const verdict = await evaluateWorkspaceTrustForNonInteractive(trustContext);
+  if (!verdict.ok) {
+    throw new WorkspaceNotFoundError(cwd, verdict.message);
+  }
+  const [catalog, activeSession] = await Promise.all([
+    discoverSkillCatalog(cwd),
+    loadActiveSession(cwd)
+  ]);
+  const activeNames = new Set((activeSession?.activeSkills ?? []).map((skill) => skill.name));
+  return {
+    cwd,
+    skills: catalog.entries.map((entry) => entryToSkillView(entry, activeNames)),
+    activeSkills: (activeSession?.activeSkills ?? []).map((skill) => ({
+      name: skill.name,
+      description: skill.description,
+      scope: skill.scope,
+      sourceKind: skill.sourceKind,
+      sourceRoot: skill.sourceRoot,
+      skillFile: skill.skillFile,
+      active: true,
+      diagnostics: skill.diagnostics
+    }))
+  };
+}
+
 export function createRpcServer(options: RpcServerOptions): RpcServer {
   const runHeadless = options.runHeadless ?? defaultRunHeadless;
   const makeRunId = options.makeRunId ?? (() => makeId('run'));
   const getSessionView = options.getSessionView ?? defaultGetSessionView;
   const getArtifactView = options.getArtifactView ?? getArtifactViewForRequest;
+  const listSkills = options.listSkills ?? defaultListSkills;
   const finishedRunIds = new Set<string>();
   let activeRun: ActiveRun | undefined;
   let transportClosed = false;
@@ -394,6 +454,24 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
     }
   };
 
+  const handleSkillsList = async (responder: JsonRpcResponder, params: unknown) => {
+    const parsed = asSkillsListParams(params);
+    if (!parsed) {
+      responder.error(INVALID_PARAMS, 'skills.list params must include cwd');
+      return;
+    }
+
+    try {
+      responder.result(await listSkills(parsed.cwd));
+    } catch (error) {
+      if (isWorkspaceNotFoundError(error)) {
+        responder.error(INVALID_PARAMS, errorMessage(error));
+        return;
+      }
+      throw error;
+    }
+  };
+
   const dispatch = async (request: JsonRpcRequest) => {
     const responder = createResponder(request);
 
@@ -409,6 +487,9 @@ export function createRpcServer(options: RpcServerOptions): RpcServer {
         return;
       case 'artifact.get':
         await handleArtifactGet(responder, request.params);
+        return;
+      case 'skills.list':
+        await handleSkillsList(responder, request.params);
         return;
       default:
         responder.error(METHOD_NOT_FOUND, `method not found: ${request.method}`);

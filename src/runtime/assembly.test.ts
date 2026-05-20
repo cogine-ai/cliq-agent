@@ -27,6 +27,7 @@ test('createRuntimeAssembly merges config skills, CLI skills, and extension inst
       path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
       `---
 name: reviewer
+description: review instructions
 ---
 
 Review before editing.`,
@@ -36,6 +37,7 @@ Review before editing.`,
       path.join(cwd, '.cliq', 'skills', 'safe-edit', 'SKILL.md'),
       `---
 name: safe-edit
+description: safe edit instructions
 ---
 
 Prefer exact edits over shell mutation when possible.`,
@@ -63,9 +65,81 @@ Prefer exact edits over shell mutation when possible.`,
     const messages = await assembly.instructions(assembly.session);
 
     assert.deepEqual(assembly.skillNames, ['reviewer', 'safe-edit']);
+    assert.deepEqual(
+      assembly.session.activeSkills.map((skill) => `${skill.name}:${skill.activatedBy}`),
+      ['reviewer:workspace-default', 'safe-edit:cli']
+    );
     assert.equal(assembly.extensionNames.includes('policy-instructions'), true);
     assert.equal(messages.some((message) => message.layer === 'workspace'), true);
+    assert.equal(messages.some((message) => message.source === 'skill:reviewer'), true);
     assert.equal(messages.some((message) => message.source === 'echo'), true);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('createRuntimeAssembly refreshes active skill prompts and retries unavailable skills', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-skill-refresh-'));
+  const skillFile = path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md');
+  try {
+    await mkdir(path.dirname(skillFile), { recursive: true });
+    await writeFile(
+      skillFile,
+      `---
+name: reviewer
+description: review instructions
+---
+
+Original review prompt.`,
+      'utf8'
+    );
+
+    const assembly = await createRuntimeAssembly({
+      cwd,
+      session: createSession(cwd),
+      policyMode: 'read-only',
+      cliSkillNames: ['reviewer']
+    });
+
+    await writeFile(
+      skillFile,
+      `---
+name: reviewer
+description: review instructions
+---
+
+Updated review prompt.`,
+      'utf8'
+    );
+    const changedMessages = await assembly.instructions(assembly.session);
+    const changedSkill = changedMessages.find((message) => message.source === 'skill:reviewer');
+    assert.match(changedSkill?.content ?? '', /Updated review prompt/);
+    assert.doesNotMatch(changedSkill?.content ?? '', /Original review prompt/);
+
+    await rm(skillFile);
+    const missingMessages = await assembly.instructions(assembly.session);
+
+    assert.equal(missingMessages.some((message) => message.source === 'skill:reviewer'), false);
+    assert.equal(assembly.session.activeSkills.length, 1);
+    assert.equal(
+      assembly.skillDiagnostics.some((diagnostic) => diagnostic.code === 'active-skill-unavailable'),
+      true
+    );
+
+    await writeFile(
+      skillFile,
+      `---
+name: reviewer
+description: review instructions
+---
+
+Recovered review prompt.`,
+      'utf8'
+    );
+    const recoveredMessages = await assembly.instructions(assembly.session);
+    const recoveredSkill = recoveredMessages.find((message) => message.source === 'skill:reviewer');
+    assert.match(recoveredSkill?.content ?? '', /Recovered review prompt/);
+    assert.equal(assembly.session.activeSkills.length, 1);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

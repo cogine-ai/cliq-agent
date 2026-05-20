@@ -1,5 +1,6 @@
 import type { ProviderName } from '../model/types.js';
 import type { ModelAction } from '../protocol/model/actions.js';
+import type { ActiveSkill } from '../skills/types.js';
 import type { AutoCompactContextWindowSource } from './auto-compact-config.js';
 
 export type SessionModelRef = {
@@ -182,6 +183,7 @@ export type Session = {
     lastUserInputAt?: string;
     lastAssistantOutputAt?: string;
   };
+  activeSkills: ActiveSkill[];
   records: SessionRecord[];
   checkpoints: SessionCheckpoint[];
   compactions: CompactionArtifact[];

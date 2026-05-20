@@ -15,6 +15,7 @@ import type {
   CheckpointView,
   CompactionView,
   HandoffView,
+  SkillView,
   SessionRecordView,
   SessionView,
   WorkspaceCheckpointView
@@ -234,6 +235,19 @@ export function toCompactionView(compaction: CompactionArtifact): CompactionView
   };
 }
 
+function toActiveSkillView(skill: Session['activeSkills'][number]): SkillView {
+  return {
+    name: skill.name,
+    description: skill.description,
+    scope: skill.scope,
+    sourceKind: skill.sourceKind,
+    sourceRoot: skill.sourceRoot,
+    skillFile: skill.skillFile,
+    active: true,
+    diagnostics: skill.diagnostics
+  };
+}
+
 export function toSessionView(session: Session): SessionView {
   return {
     id: session.id,
@@ -243,6 +257,7 @@ export function toSessionView(session: Session): SessionView {
     ...(session.parentSessionId ? { parentSessionId: session.parentSessionId } : {}),
     ...(session.forkedFromCheckpointId ? { forkedFromCheckpointId: session.forkedFromCheckpointId } : {}),
     records: session.records.map(toSessionRecordView),
+    activeSkills: (session.activeSkills ?? []).map(toActiveSkillView),
     checkpoints: session.checkpoints.map(toCheckpointView),
     compactions: session.compactions.map(toCompactionView)
   };
