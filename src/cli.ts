@@ -15,12 +15,11 @@ import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
 import { composeRuntimePermissionTable } from './policy/compose-runtime.js';
-import { accessChannelPrimaryKey, type PermissionRule, type PermissionTable } from './policy/decision-table.js';
+import type { PermissionRule, PermissionTable } from './policy/decision-table.js';
 import { createPolicyEngine } from './policy/engine.js';
 import { isPolicyMode, POLICY_MODE_LIST, POLICY_MODES } from './policy/modes.js';
 import { PermissionGrammarError, parsePermissionRuleString } from './policy/permissions-grammar.js';
 import type { ApprovalSubject, PolicyMode } from './policy/types.js';
-import { appendPersistedWorkspacePermission } from './session/permissions.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
 import type { RuntimeEvent } from './protocol/runtime/events.js';
 import { createRunner } from './runtime/runner.js';
@@ -49,6 +48,8 @@ import type { WorkspaceTrustContext } from './session/trust.js';
 import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
 import type { Session } from './session/types.js';
 import type { ToolResult } from './tools/types.js';
+import { extendApprovalScope } from './tui/extend-approval-scope.js';
+import { createTuiLivePolicyEngine } from './tui/live-policy.js';
 import type { UiStore } from './tui/store.js';
 import { checkForPackageUpdate, readCurrentPackageVersion } from './updates.js';
 import {
@@ -518,28 +519,6 @@ function parsePermissionFlag(flag: string, raw: string): PermissionRule {
     }
     throw err;
   }
-}
-
-/**
- * Derive the PermissionRule that an "allow this {session,workspace}" modal
- * decision would persist. Returns null when the subject doesn't carry an
- * identifiable channel key (e.g. bash with no parseable command head, or a
- * non-tool subject) — the caller surfaces a soft error so the user picks a
- * different scope or modifies the action.
- *
- * Channel kind survives untouched; the pattern is the channel's primary
- * key (see accessChannelPrimaryKey in src/policy/decision-table.ts). This
- * means a TUI-extended rule matches future actions with the same exact
- * commandHead / path / mcp tool / network host — no wildcard guessing.
- */
-function approvalSubjectToPermissionRule(
-  subject: ApprovalSubject,
-  source: PermissionRule['source']
-): PermissionRule | null {
-  if (subject.kind !== 'tool') return null;
-  const key = accessChannelPrimaryKey(subject.channel);
-  if (!key) return null;
-  return { channel: subject.channel.kind, pattern: key, source };
 }
 
 function parseCompactCreateArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
@@ -2784,37 +2763,9 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     policy,
     approvalBridge.requestApproval,
     opts.permissionTable,
-    async (subject, scope) => {
-      const rule = approvalSubjectToPermissionRule(subject, scope === 'session' ? 'session' : 'persisted');
-      if (!rule) {
-        return {
-          ok: false,
-          reason: `cannot derive a permission rule from ${subject.kind} subject`
-        };
-      }
-      // Workspace scope is sticky-on-disk, so persist BEFORE mutating the
-      // in-memory table. If the persist fails we must not leave a
-      // session-lived in-memory allow behind — that would silently break
-      // the {ok: false} contract that extendAllow callers (livePolicy)
-      // rely on to fall back to a one-shot decision. Session scope has no
-      // disk side; just push directly.
-      if (scope === 'workspace') {
-        try {
-          await appendPersistedWorkspacePermission(opts.trustContext, 'allow', {
-            channel: rule.channel,
-            pattern: rule.pattern
-          });
-        } catch (err) {
-          return {
-            ok: false,
-            reason: err instanceof Error ? err.message : String(err)
-          };
-        }
-      }
-      opts.permissionTable.allow.push(rule);
-      livePolicy.rebuildForExtendedAllow();
-      return { ok: true };
-    }
+    (subject, scope) =>
+      extendApprovalScope(opts.trustContext, opts.permissionTable, subject, scope),
+    () => livePolicy.rebuildForExtendedAllow()
   );
 
   const tuiTxMode = opts.txMode ?? wsCfg.transactions?.mode ?? 'off';
@@ -2967,86 +2918,3 @@ export async function notifyIfPackageUpdateAvailable(store: UiStore) {
   }
 }
 
-function createTuiLivePolicyEngine(
-  initialMode: PolicyMode,
-  requestApproval: (
-    subject: ApprovalSubject
-  ) => Promise<'allow' | 'deny' | 'allow-turn' | 'allow-session' | 'allow-workspace'>,
-  table: PermissionTable,
-  /**
-   * Called when the user picks `allow-session` or `allow-workspace`. The
-   * caller is responsible for deriving the PermissionRule from the subject,
-   * appending it to whichever store backs that scope (in-process session
-   * memory for 'session', the persisted permissions.json for 'workspace'),
-   * and returning a non-empty error string if the persist failed so the
-   * livePolicy can downgrade silently to a one-shot allow with a warning.
-   */
-  extendAllow: (
-    subject: ApprovalSubject,
-    scope: 'session' | 'workspace'
-  ) => Promise<{ ok: true } | { ok: false; reason: string }>
-) {
-  let inner = createPolicyEngine({ mode: initialMode, table });
-  let allowTurn = false;
-
-  const engine = {
-    get mode() {
-      return inner.mode;
-    },
-    decide: async (subject: ApprovalSubject) => {
-      const decision = await inner.decide(subject);
-      if (decision.behavior !== 'ask') return decision;
-      if (allowTurn) {
-        return { behavior: 'allow', decidedBy: 'user' as const };
-      }
-      const userChoice = await requestApproval(subject);
-      if (userChoice === 'allow') {
-        return { behavior: 'allow', decidedBy: 'user' as const };
-      }
-      if (userChoice === 'allow-turn') {
-        allowTurn = true;
-        return { behavior: 'allow', decidedBy: 'user' as const };
-      }
-      if (userChoice === 'allow-session' || userChoice === 'allow-workspace') {
-        const scope = userChoice === 'allow-session' ? 'session' : 'workspace';
-        const result = await extendAllow(subject, scope);
-        if (!result.ok) {
-          // Surface why we couldn't persist (e.g. EROFS, EACCES) but still
-          // grant this single action — refusing here would punish the user
-          // for picking the heavier scope.
-          process.stderr.write(
-            `cliq: could not extend approval to ${scope}: ${result.reason}\n`
-          );
-        }
-        return { behavior: 'allow', decidedBy: 'user' as const };
-      }
-      return {
-        behavior: 'deny' as const,
-        reason: 'user denied via TUI approval modal',
-        decidedBy: 'user' as const
-      };
-    }
-  };
-
-  return {
-    engine: engine as ReturnType<typeof createPolicyEngine>,
-    setMode(mode: PolicyMode) {
-      // Keep the layered permission table across preset swaps so a
-      // mid-session `/policy auto` doesn't silently drop the user's deny
-      // rules. Only the preset changes; deny/allow/ask layers persist.
-      inner = createPolicyEngine({ mode, table });
-    },
-    resetTurn() {
-      allowTurn = false;
-    },
-    /**
-     * Mutate the shared permission table in place after the caller has
-     * appended a rule (session or workspace scope), then rebuild the inner
-     * engine against the now-larger table. Used by extendAllow callers in
-     * runChatTuiSession.
-     */
-    rebuildForExtendedAllow() {
-      inner = createPolicyEngine({ mode: inner.mode, table });
-    }
-  };
-}
