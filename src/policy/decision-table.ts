@@ -137,6 +137,24 @@ export function matchAgainstTable(table: PermissionTable, channel: AccessChannel
     return { kind: 'fallthrough' };
   }
 
+  if (isBashCompound(channel)) {
+    // Allowlist rules only inspect the first command head; chained commands must
+    // not inherit an allow match (e.g. `git status && rm -rf /` with
+    // `allow: bash: git *`). Deny rules already ran above. When an allow rule
+    // would match, force ask; otherwise fall through to ask rules / preset.
+    for (const askRule of table.ask) {
+      if (matchesRule(askRule, channel)) {
+        return { kind: 'ask', rule: askRule };
+      }
+    }
+    for (const allowRule of table.allow) {
+      if (matchesRule(allowRule, channel)) {
+        return { kind: 'ask', rule: COMPOUND_BASH_SENTINEL };
+      }
+    }
+    return { kind: 'fallthrough' };
+  }
+
   for (const allowRule of table.allow) {
     if (matchesRule(allowRule, channel)) {
       return { kind: 'allow', rule: allowRule };
@@ -150,8 +168,18 @@ export function matchAgainstTable(table: PermissionTable, channel: AccessChannel
   return { kind: 'fallthrough' };
 }
 
+const COMPOUND_BASH_SENTINEL: PermissionRule = Object.freeze({
+  channel: 'bash',
+  pattern: '(compound)',
+  source: 'builtin'
+});
+
 function isBashWithoutHead(channel: AccessChannel): boolean {
   return channel.kind === 'bash' && channel.commandHead === '';
+}
+
+function isBashCompound(channel: AccessChannel): boolean {
+  return channel.kind === 'bash' && channel.compound === true;
 }
 
 function matchesRule(rule: PermissionRule, channel: AccessChannel): boolean {

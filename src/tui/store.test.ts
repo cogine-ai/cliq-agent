@@ -159,7 +159,7 @@ test('approval-request sets pendingApproval; approval-resolve clears it by id', 
       kind: 'tool',
       toolName: 'bash',
       access: 'exec',
-      channel: { kind: 'bash', commandHead: 'ls' },
+      channel: { kind: 'bash', commandHead: 'ls', compound: false },
       action: { bash: 'ls' } as never,
       display: { title: 'Allow bash command?', command: 'ls' }
     },
@@ -185,7 +185,7 @@ test('approval-resolve with a mismatched id leaves a newer pending intact', () =
       kind: 'tool',
       toolName: 'bash',
       access: 'exec',
-      channel: { kind: 'bash', commandHead: 'ls' },
+      channel: { kind: 'bash', commandHead: 'ls', compound: false },
       action: { bash: 'ls' } as never,
       display: { title: 'Allow bash command?', command: 'ls' }
     },
