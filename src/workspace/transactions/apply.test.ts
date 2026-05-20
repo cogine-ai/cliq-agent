@@ -16,6 +16,7 @@ import {
   ApplyPartial,
   StageCMetadataError
 } from './apply.js';
+import { recoverApply } from './recovery.js';
 import {
   resolveTxRoot,
   createTx,
@@ -26,7 +27,7 @@ import {
   readApplyProgress,
   readTxState as readTxStateAgain
 } from './store.js';
-import { createSession, mutateSession } from '../../session/store.js';
+import { createSession, loadSessionById, mutateSession } from '../../session/store.js';
 import type { Session } from '../../session/types.js';
 import { applyRecordId } from './types.js';
 
@@ -367,8 +368,101 @@ async function setupApprovedTxWithDiffSummary(
   return root;
 }
 
-// TODO(Phase 9, Tasks 36-39): add a test for crash between Phase C-session and
-// Phase C-tx that exercises recovery convergence. Out of scope for Task 28-29.
+test('recoverApply converges a crash after Phase C-session but before Phase C-tx', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const txId = 'tx_c_session_crash';
+      const root = await setupApprovedTxWithDiffSummary(home, ws, txId, [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      const a = await runStageA({ root, txId, cwd: ws });
+      await runStageB({ root, txId, cwd: ws }, a.plan);
+      const { session } = await setupSessionForApply(ws, { activeTxId: txId });
+      const txBefore = await readTxStateAgain(root, txId);
+      assert.ok(txBefore);
+      const diffSummary = txBefore.diffSummary;
+      assert.ok(diffSummary);
+      assert.equal(txBefore.state, 'approved');
+      const progressBefore = await readApplyProgress(root, txId);
+      assert.ok(progressBefore);
+      assert.equal(progressBefore.phase, 'apply-committed');
+
+      const recordId = applyRecordId(txId);
+      await mutateSession(ws, session, (s) => {
+        s.records.push({
+          id: recordId,
+          ts: new Date().toISOString(),
+          kind: 'tx-applied',
+          role: 'user',
+          content: `Transaction ${txId} applied: ${diffSummary.filesChanged} files changed`,
+          meta: {
+            txId,
+            txKind: 'edit',
+            diffSummary,
+            files: {
+              creates: diffSummary.creates,
+              modifies: diffSummary.modifies,
+              deletes: diffSummary.deletes
+            },
+            validators: {
+              blocking: { pass: 0, fail: 0 },
+              advisory: { pass: 0, fail: 0, names: [] }
+            },
+            overrides: [],
+            artifactRef: `tx/${txId}/`,
+            ghostSnapshotId: a.ghostSnapshotId
+          }
+        });
+        s.activeTxId = undefined;
+      });
+
+      const persistedSession = await loadSessionById(ws, session.id);
+      assert.ok(persistedSession);
+      assert.equal(persistedSession.activeTxId, undefined);
+      assert.equal(
+        persistedSession.records.filter((r) => r.id === recordId).length,
+        1,
+        'crash fixture should contain exactly one persisted tx-applied record'
+      );
+
+      const txCrash = await readTxStateAgain(root, txId);
+      const progressCrash = await readApplyProgress(root, txId);
+      assert.ok(txCrash);
+      assert.ok(progressCrash);
+      assert.equal(txCrash.state, 'approved');
+      assert.equal(progressCrash.phase, 'apply-committed');
+
+      const outcome = await recoverApply(
+        root,
+        {
+          txId,
+          tx: txCrash,
+          kind: 'apply',
+          phase: 'apply-committed',
+          progress: progressCrash
+        },
+        { cwd: ws, session: persistedSession }
+      );
+      assert.equal(outcome.action, 'apply-committed-stage-c');
+
+      const progressAfter = await readApplyProgress(root, txId);
+      assert.equal(progressAfter?.phase, 'apply-finalized');
+      const txAfter = await readTxStateAgain(root, txId);
+      assert.equal(txAfter?.state, 'applied');
+      assert.equal(txAfter?.ghostSnapshotId, a.ghostSnapshotId);
+      assert.equal(persistedSession.activeTxId, undefined);
+      const recordsAfter = persistedSession.records.filter((r) => r.id === recordId);
+      assert.equal(recordsAfter.length, 1, 'recovery must not duplicate tx-applied');
+      assert.equal(recordsAfter[0]?.kind, 'tx-applied');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
 
 test('Stage C Phase C-session appends tx-applied record with deterministic id and clears activeTxId', async () => {
   await withFakeCliqHome(async (home) => {
@@ -583,4 +677,3 @@ test('applyTx propagates ApplyPartial from Stage B and leaves state=applied-part
     }
   });
 });
-
