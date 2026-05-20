@@ -84,7 +84,7 @@ V1 must do:
 
 - Module 1, reduced: parse standard `SKILL.md` frontmatter robustly enough for real Agent Skills files, but do not over-model every optional field as behavior.
 - Module 2, reduced: build a deterministic catalog from `./.cliq/skills`, project `.agents/skills`, `~/.cliq/skills`, and `~/.agents/skills`, with collision diagnostics.
-- Module 4, reduced: preserve existing explicit activation through `--skill`, `defaultSkills`, and headless `skills`; do not require TUI `/skill` yet.
+- Module 4, reduced: preserve existing explicit activation through `--skill`, `defaultSkills`, and headless `skills`; do not require TUI `/skill` yet. Workspace-configured `defaultSkills` may activate only project-owned skills in V1. User/global skills require run-level explicit activation such as `--skill` or `HeadlessRunRequest.skills`, or a later approval flow.
 - Trust ordering: project skill discovery still happens only after Workspace Trust.
 - Tests: cover parser, discovery roots, collision precedence, and backward compatibility with current local skills.
 
@@ -122,7 +122,7 @@ Stage 3 should include:
 
 ### Likely Overbuilt Or Not Yet Proven
 
-- `disableModelInvocation` in the manifest is not needed until Cliq supports model-driven activation.
+- Manifest fields reserved only for later model-driven activation should wait until Cliq actually supports that activation path.
 - `skill-resource` as a separate permission channel is premature before a resource resolver exists.
 - Persisted active-skill state is unnecessary while skills are only activated at process start via config or CLI.
 - `skill-start` / `skill-end` runtime events are optional observability; normal tool events may be enough.
@@ -224,7 +224,6 @@ type SkillManifest = {
   compatibility?: string;
   metadata?: Record<string, string>;
   allowedTools?: string[];
-  disableModelInvocation?: boolean;
 };
 
 type SkillDiagnostic = {
@@ -309,7 +308,9 @@ Catalog disclosure:
 
 - Include only `name`, `description`, and stable activation id. Do not include full skill bodies.
 - Include scope labels only when useful to disambiguate project/user origin.
-- Apply a catalog token/character budget. Use Codex's documented pattern as guidance: cap the catalog to a small fraction of context, shorten descriptions first, then omit low-priority entries with a warning.
+- Apply a catalog token/character budget. V1 should default to at most 5% of the available prompt budget, with an implementation-owned hard ceiling so small-context models cannot be flooded by catalog text.
+- Keep each disclosed description to at most 200 characters before prompt insertion. If a description is longer, preserve the prefix, append an ASCII omission marker such as `...`, and keep the full description only in diagnostics or management surfaces.
+- If the catalog still exceeds budget after description trimming, omit entries in deterministic priority order: inactive third-party or extra roots first, then user-level roots, then project roots, while preserving explicitly requested active skills. Each omitted entry must be reported in diagnostics and tagged `omitted_due_to_budget` in catalog metadata.
 
 ## Module 3: Skill Activation Tool
 
@@ -393,6 +394,12 @@ CLI:
 
 - `cliq --skill reviewer "task"` forces activation before the first model call.
 - Future `cliq skills ...` management commands are out of scope for the first seven modules.
+
+Workspace config:
+
+- `defaultSkills` remains a workspace-controlled compatibility surface, so V1 must resolve it only against project-owned skills from trusted project roots.
+- If `defaultSkills` names a skill that exists only in a user/global root, Cliq should warn and skip it instead of reading or injecting that user-level skill.
+- Users can still activate user/global skills explicitly with `--skill` or headless `skills`; that run-level request is the user/operator approval path until a dedicated skill permission grammar exists.
 
 Explicit activation must produce the same protected skill context record as model-driven activation so behavior is consistent across CLI, TUI, JSONL, and RPC.
 
@@ -532,7 +539,7 @@ Startup / assembly:
 3. Discover skills from trusted project roots and user/global roots.
 4. Parse manifests and diagnostics.
 5. Apply collision rules.
-6. Apply skill permission and disable filters.
+6. Apply skill permission, disable filters, and V1 scope filters such as project-only resolution for workspace `defaultSkills`.
 7. Build compact catalog.
 8. Register `skill` and optional `skillResource` tools when those later-stage modules are enabled.
 9. Build instruction layers from base, workspace instructions, active skill bodies, and extensions.
@@ -563,7 +570,7 @@ Resource access:
 ## Compatibility With Existing Cliq Behavior
 
 - `./.cliq/skills/<name>/SKILL.md` remains supported.
-- `defaultSkills` remains supported but should mean "activate by default" rather than "always inject every discovered skill body."
+- `defaultSkills` remains supported but should mean "activate project-owned skills by default" rather than "always inject every discovered skill body." It must not cause a trusted repo to read or inject a same-named user/global skill.
 - `--skill` remains repeatable and additive.
 - Existing local skill tests should continue passing after being updated for the new parser and catalog semantics.
 - Existing extensions remain separate. Skills do not register runtime hooks or new model actions.
@@ -596,7 +603,15 @@ Regression tests:
 
 - Workspace Trust still runs before repo skill discovery.
 - Non-interactive untrusted workspace still fails closed.
-- Existing `--skill`, `defaultSkills`, and headless `skills` still activate skills through the instruction layer.
+- Existing `--skill`, project-owned `defaultSkills`, and headless `skills` still activate skills through the instruction layer.
+- Workspace `defaultSkills` does not activate user/global skills, even when a matching user/global skill exists and no project skill matches.
+- Run-level explicit activation through `--skill` or headless `skills` can activate user/global skills after normal catalog and policy checks.
+
+Catalog budget tests:
+
+- Catalog disclosure stays under the configured token/character budget when the number of discovered skills exceeds the prompt budget.
+- Long descriptions are trimmed to the configured per-description limit before prompt insertion, while the full manifest description remains available to diagnostics/management surfaces.
+- Entries omitted after budget trimming follow the deterministic priority order and are reported with `omitted_due_to_budget` metadata.
 
 Later-stage tests:
 
@@ -623,7 +638,7 @@ Phase 1: compatibility and catalog foundation.
 - Parser/validator for real `SKILL.md` files.
 - Discovery/catalog for `.cliq/skills` and `.agents/skills`, limited to project and user roots.
 - Collision diagnostics and deterministic precedence.
-- Existing explicit activation through `defaultSkills`, `--skill`, and headless `skills`.
+- Existing explicit activation through project-owned `defaultSkills`, `--skill`, and headless `skills`.
 - No protocol changes and no new model action.
 
 Phase 2: dynamic activation.
