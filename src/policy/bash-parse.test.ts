@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseBashCommandHead } from './bash-parse.js';
+import { bashCommandHasCompoundSyntax, parseBashCommandHead } from './bash-parse.js';
 
 test('parseBashCommandHead returns the plain command for a simple invocation', () => {
   assert.equal(parseBashCommandHead('npm test'), 'npm');
@@ -54,6 +54,17 @@ test('parseBashCommandHead returns null when no identifiable head exists', () =>
   assert.equal(parseBashCommandHead('| cat'), null);
   // Unterminated quote: tokenizer bails out.
   assert.equal(parseBashCommandHead('npm "test'), null);
+});
+
+test('bashCommandHasCompoundSyntax detects chained commands outside quotes', () => {
+  assert.equal(bashCommandHasCompoundSyntax('npm test'), false);
+  assert.equal(bashCommandHasCompoundSyntax('git status && rm -rf /'), true);
+  assert.equal(bashCommandHasCompoundSyntax('git status; echo hi'), true);
+  assert.equal(bashCommandHasCompoundSyntax('ls | head'), true);
+  assert.equal(bashCommandHasCompoundSyntax('npm test & sleep 1'), true);
+  assert.equal(bashCommandHasCompoundSyntax('"git" status && rm'), true);
+  assert.equal(bashCommandHasCompoundSyntax('git "status && rm"'), false);
+  assert.equal(bashCommandHasCompoundSyntax(''), false);
 });
 
 test('parseBashCommandHead stops at shell pipelines and separators', () => {

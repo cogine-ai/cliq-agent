@@ -26,6 +26,63 @@
  * quoting, and explicit pipeline/control-operator handling land in #62-B
  * alongside the user-visible allowlist surface.
  */
+/**
+ * True when the line chains multiple shell commands (`&&`, `||`, `;`, `|`,
+ * `&`, newline). Used by the decision table to refuse allowlist matches on
+ * the first command head only — the bash tool still executes the full line.
+ */
+export function bashCommandHasCompoundSyntax(commandLine: string): boolean {
+  if (typeof commandLine !== 'string') return false;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return false;
+
+  // Operator-leading lines have no first command to pair with a chain.
+  if (/^[&|;<>(){}!]/.test(trimmed)) return false;
+
+  let i = 0;
+  let quote: '"' | "'" | null = null;
+
+  while (i < trimmed.length) {
+    const ch = trimmed[i]!;
+
+    if (quote) {
+      if (ch === '\\' && quote === '"' && i + 1 < trimmed.length) {
+        i += 2;
+        continue;
+      }
+      if (ch === quote) {
+        quote = null;
+        i += 1;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      i += 1;
+      continue;
+    }
+
+    if (ch === '\n' || ch === ';') return true;
+
+    if (ch === '|') {
+      i += trimmed[i + 1] === '|' ? 2 : 1;
+      return true;
+    }
+
+    if (ch === '&') {
+      i += trimmed[i + 1] === '&' ? 2 : 1;
+      return true;
+    }
+
+    i += 1;
+  }
+
+  return false;
+}
+
 export function parseBashCommandHead(commandLine: string): string | null {
   if (typeof commandLine !== 'string') return null;
   const trimmed = commandLine.trim();

@@ -216,6 +216,26 @@ test('decision table: workspace deny beats a workspace allow on the same channel
   }
 });
 
+test('decision table: compound bash never matches allow (chained-command bypass)', async () => {
+  const policy = createPolicyEngine({
+    mode: 'auto',
+    table: composePermissionTable({ allow: [wsRule('bash', 'git *')] })
+  });
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: 'git status && rm -rf /' }
+  });
+  const decision = await policy.decide(subject);
+  assert.equal(decision.behavior, 'ask');
+  assert.equal(subject.kind, 'tool');
+  if (subject.kind === 'tool') {
+    assert.equal(subject.channel.kind, 'bash');
+    if (subject.channel.kind === 'bash') {
+      assert.equal(subject.channel.compound, true);
+    }
+  }
+});
+
 test('decision table: bash without identifiable head never matches allow (no silent approve)', async () => {
   const policy = createPolicyEngine({
     mode: 'confirm-bash',
