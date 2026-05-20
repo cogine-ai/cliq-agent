@@ -35,6 +35,21 @@ test('parses grep action', () => {
   });
 });
 
+test('parses skill activation action', () => {
+  assert.deepEqual(parseModelAction('{"skill":{"name":"reviewer"}}'), {
+    skill: { name: 'reviewer' }
+  });
+});
+
+test('parses skill resource read and list actions', () => {
+  assert.deepEqual(parseModelAction('{"skillResource":{"skill":"reviewer","path":"references/rubric.md"}}'), {
+    skillResource: { skill: 'reviewer', path: 'references/rubric.md' }
+  });
+  assert.deepEqual(parseModelAction('{"skillResource":{"skill":"reviewer","mode":"list"}}'), {
+    skillResource: { skill: 'reviewer', mode: 'list' }
+  });
+});
+
 test('parses final message action', () => {
   assert.deepEqual(parseModelAction('{"message":"done"}'), { message: 'done' });
 });

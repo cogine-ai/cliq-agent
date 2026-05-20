@@ -682,3 +682,10 @@ Examples that may be revisited later, without committing to them now:
 - Install/update/remove, only after a separate distribution and trust design exists.
 
 For the next design pass, review modules 1-7 first. Module 8 should not drive foundation architecture until those boundaries are validated.
+
+## Implementation Decision Addenda
+
+The first implementation pass resolved the two deferred module 1-7 decisions in separate decision records:
+
+- Dynamic activation uses a hybrid model: existing explicit activation remains, and the model can call a read-class `skill` action that adds session-level active skill metadata. See `docs/superpowers/decisions/2026-05-21-skill-dynamic-activation.md`.
+- Skill activation and skill resources do not introduce new permission grammar in this stage. They stay under Workspace Trust, existing read-tool policy behavior, and resource resolver boundaries. See `docs/superpowers/decisions/2026-05-21-skill-permission-policy.md`.

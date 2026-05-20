@@ -633,6 +633,49 @@ test('runner records a denied bash action when mode is read-only', async () => {
   assert.equal(confirmCalls, 0);
 });
 
+test('runner makes model-activated skills available as next-call instructions', async () => {
+  const session = await createTempSession();
+  await mkdir(path.join(session.cwd, '.cliq', 'skills', 'reviewer'), { recursive: true });
+  await writeFile(
+    path.join(session.cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
+    `---
+name: reviewer
+description: review workflow
+---
+
+Use reviewer workflow.`,
+    'utf8'
+  );
+
+  let calls = 0;
+  let sawSkillInstruction = false;
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        calls += 1;
+        if (calls === 1) {
+          return completion('{"skill":{"name":"reviewer"}}');
+        }
+        sawSkillInstruction = messages.some((message) => message.role === 'system' && /Use reviewer workflow/.test(message.content));
+        return completion('{"message":"done"}');
+      }
+    },
+    instructions: async (currentSession) =>
+      currentSession.activeSkills.map((skill) => ({
+        role: 'system',
+        layer: 'skill',
+        source: `skill:${skill.name}`,
+        content: skill.prompt
+      }))
+  });
+
+  const finalMessage = await runner.runTurn(session, 'use reviewer');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal(sawSkillInstruction, true);
+  assert.equal(session.activeSkills[0]?.name, 'reviewer');
+});
+
 test('runner records policy decision failures as tool errors', async () => {
   const session = await createTempSession();
   const afterToolEvents: string[] = [];

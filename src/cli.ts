@@ -22,6 +22,7 @@ import { PermissionGrammarError, parsePermissionRuleString } from './policy/perm
 import type { ApprovalSubject, PolicyMode } from './policy/types.js';
 import { appendPersistedWorkspacePermission } from './session/permissions.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
+import { activateSkill, formatSkillCatalog } from './skills/loader.js';
 import type { RuntimeEvent } from './protocol/runtime/events.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
@@ -2944,6 +2945,15 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     },
     onPolicyChange: async (mode) => {
       livePolicy.setMode(mode);
+    },
+    onSkillsList: () => formatSkillCatalog(opts.assembly.skillCatalog, session.activeSkills ?? []),
+    onSkillActivate: async (name: string) => {
+      const result = await activateSkill(cwd, session, name, {
+        catalog: opts.assembly.skillCatalog,
+        activatedBy: 'tui'
+      });
+      await saveSession(cwd, session);
+      return `skill ${result.skill.name} ${result.status}`;
     }
   });
 

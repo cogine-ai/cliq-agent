@@ -18,6 +18,8 @@ export function toolNameFromAction(action: ModelAction): string {
   if ('ls' in action) return 'ls';
   if ('find' in action) return 'find';
   if ('grep' in action) return 'grep';
+  if ('skill' in action) return 'skill';
+  if ('skillResource' in action) return 'skillResource';
   if ('message' in action) return 'message';
   const _exhaustive: never = action;
   return _exhaustive;
@@ -43,6 +45,11 @@ export function previewFromAction(action: ModelAction): string {
   if ('grep' in action) {
     const g = action.grep;
     return `${g.pattern}${g.path ? ` in ${g.path}` : ''}`;
+  }
+  if ('skill' in action) return action.skill.name;
+  if ('skillResource' in action) {
+    const r = action.skillResource;
+    return `${r.skill}:${r.path ?? '.'}`;
   }
   if ('message' in action) {
     // 'message' is not a tool action; if it slipped past the runner's

@@ -429,10 +429,31 @@ export function createSession(cwd: string): Session {
     createdAt: now,
     updatedAt: now,
     lifecycle: { status: 'idle', turn: 0 },
+    activeSkills: [],
     records: [],
     checkpoints: [],
     compactions: []
   };
+}
+
+function isActiveSkill(value: unknown) {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const skill = value as Record<string, unknown>;
+  return (
+    typeof skill.name === 'string' &&
+    (typeof skill.description === 'string' || skill.description === null) &&
+    typeof skill.prompt === 'string' &&
+    typeof skill.scope === 'string' &&
+    typeof skill.sourceKind === 'string' &&
+    typeof skill.sourceRoot === 'string' &&
+    typeof skill.skillDir === 'string' &&
+    typeof skill.skillFile === 'string' &&
+    typeof skill.activatedBy === 'string' &&
+    typeof skill.activatedAt === 'string' &&
+    Array.isArray(skill.diagnostics)
+  );
 }
 
 function isSession(value: unknown): value is Session {
@@ -450,6 +471,9 @@ function isSession(value: unknown): value is Session {
     typeof (value as Session).lifecycle === 'object' &&
     ((value as Session).lifecycle.status === 'idle' || (value as Session).lifecycle.status === 'running') &&
     typeof (value as Session).lifecycle.turn === 'number' &&
+    ((value as { activeSkills?: unknown }).activeSkills === undefined ||
+      (Array.isArray((value as { activeSkills?: unknown }).activeSkills) &&
+        (value as { activeSkills: unknown[] }).activeSkills.every((skill) => isActiveSkill(skill)))) &&
     Array.isArray((value as Session).records) &&
     (value as Session).records.every((record) => isSessionRecord(record)) &&
     ((value as { checkpoints?: unknown }).checkpoints === undefined ||
@@ -488,6 +512,9 @@ function normalizeSession(session: Session): Session {
   const compactions = Array.isArray((session as { compactions?: unknown }).compactions)
     ? session.compactions
     : [];
+  const activeSkills = Array.isArray((session as { activeSkills?: unknown }).activeSkills)
+    ? session.activeSkills
+    : [];
 
   if (
     id === session.id &&
@@ -495,6 +522,7 @@ function normalizeSession(session: Session): Session {
     records.length === session.records.length &&
     checkpoints === session.checkpoints &&
     compactions === session.compactions &&
+    activeSkills === session.activeSkills &&
     !modelChanged
   ) {
     return session;
@@ -505,6 +533,7 @@ function normalizeSession(session: Session): Session {
     id,
     version,
     model,
+    activeSkills,
     records,
     checkpoints,
     compactions
