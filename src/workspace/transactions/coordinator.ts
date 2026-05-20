@@ -174,19 +174,60 @@ export type CoordinatorApplyResult =
       message: string;
     };
 
+export type ApplyTxOptions = { overrides?: string[]; reason?: string };
+
+function hasApplyApprovalOptions(opts: ApplyTxOptions): boolean {
+  return (opts.overrides?.length ?? 0) > 0 || opts.reason !== undefined;
+}
+
+function hasRecordedApplyApprovalOptions(tx: Transaction, opts: ApplyTxOptions): boolean {
+  const overrides = opts.overrides ?? [];
+  if (overrides.length === 0) return false;
+  return overrides.every((validatorName) =>
+    (tx.overridesApplied ?? []).some(
+      (entry) =>
+        entry.validatorName === validatorName &&
+        (opts.reason === undefined || entry.reason === opts.reason)
+    )
+  );
+}
+
 export async function applyTx(
   ctx: CoordinatorContext,
   txId: string,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _opts: { overrides?: string[]; reason?: string } = {}
+  opts: ApplyTxOptions = {}
 ): Promise<CoordinatorApplyResult> {
-  // For v0.8: tx must already be 'approved'. The auto-validate/auto-approve
-  // pipeline is deferred to runner integration. CLI users can run this
-  // against a manually-prepared tx for testing or wait for the full pipeline.
-  // TODO(post-v0.8): plumb overrides/reason into the validate/approve stage.
+  // `applyTx` can safely drive validated -> approved -> applied because the
+  // approve stage needs only tx-local state plus these options. It still cannot
+  // validate finalized txs by itself because validation requires workspace
+  // validator/staged-view config from the caller.
   try {
+    const root = txRootFor(ctx);
+    const tx = await readTxState(root, txId);
+    if (tx?.state === 'validated') {
+      const approval = await approveTx(ctx, txId, opts);
+      if (!approval.ok) {
+        return {
+          ok: false,
+          error: 'rejected',
+          message: `uncovered blocking failures: ${approval.uncoveredFailures.join(', ')}`
+        };
+      }
+    } else if (
+      tx?.state === 'approved' &&
+      hasApplyApprovalOptions(opts) &&
+      !hasRecordedApplyApprovalOptions(tx, opts)
+    ) {
+      return {
+        ok: false,
+        error: 'rejected',
+        message:
+          'applyTx received approval options for an already approved transaction, but they are not recorded on the transaction; pass overrides/reason before approval or re-run from validated state'
+      };
+    }
+
     const result = await runApplyTx({
-      root: txRootFor(ctx),
+      root,
       txId,
       cwd: ctx.cwd,
       session: ctx.session

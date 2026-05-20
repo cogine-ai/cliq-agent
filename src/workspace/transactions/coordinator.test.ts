@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -168,6 +168,127 @@ test('coordinator.applyTx happy path: approved tx applies and writes tx-applied 
     if (opened?.kind === 'tx-opened' && applied?.kind === 'tx-applied') {
       assert.equal(opened.meta.txId, applied.meta.txId);
     }
+  });
+});
+
+test('coordinator.applyTx approves a validated tx with overrides and reason before applying', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home, session }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+    const tx = await openTx(ctx, { explicit: true });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+    await finalizeTx(ctx, tx.id);
+    await validateTx(
+      ctx,
+      tx.id,
+      { disabled: ['builtin:index-clean', 'builtin:size-limit'] },
+      { copyMode: 'copy', bindPaths: [] }
+    );
+
+    const result = await applyTx(ctx, tx.id, {
+      overrides: ['builtin:diff-sanity'],
+      reason: 'binary fixture is intentional'
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'a\u0000b');
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'applied');
+    const applied = session.records.find((r) => r.kind === 'tx-applied');
+    assert.ok(applied);
+    if (applied?.kind === 'tx-applied') {
+      assert.deepEqual(applied.meta.overrides.map((entry) => entry.validatorName), [
+        'builtin:diff-sanity'
+      ]);
+      assert.equal(applied.meta.overrides[0].reason, 'binary fixture is intentional');
+    }
+  });
+});
+
+test('coordinator.applyTx rejects approval options on an already approved tx', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+    const tx = await openTx(ctx, { explicit: true });
+    const root = resolveTxRoot(home);
+    const txState = (await readTxState(root, tx.id))!;
+    await writeTxState(root, {
+      ...txState,
+      state: 'approved',
+      diffSummary: {
+        filesChanged: 1,
+        additions: 0,
+        deletions: 0,
+        creates: [],
+        modifies: ['a.txt'],
+        deletes: []
+      }
+    });
+    await writeDiff(root, tx.id, {
+      files: [{ path: 'a.txt', op: 'modify', oldContent: 'one', newContent: 'ONE' }],
+      outOfBand: []
+    });
+
+    const result = await applyTx(ctx, tx.id, {
+      overrides: ['builtin:diff-sanity'],
+      reason: 'too late'
+    });
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error, 'rejected');
+      assert.match(result.message, /already approved/);
+    }
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'one');
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'approved');
+  });
+});
+
+test('coordinator.applyTx accepts approval options already recorded on an approved tx', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+    const tx = await openTx(ctx, { explicit: true });
+    const root = resolveTxRoot(home);
+    const txState = (await readTxState(root, tx.id))!;
+    await writeTxState(root, {
+      ...txState,
+      state: 'approved',
+      diffSummary: {
+        filesChanged: 1,
+        additions: 0,
+        deletions: 0,
+        creates: [],
+        modifies: ['a.txt'],
+        deletes: []
+      },
+      overridesApplied: [
+        {
+          validatorName: 'builtin:diff-sanity',
+          reason: 'already approved',
+          by: 'cli',
+          ts: '2026-05-19T00:00:00.000Z'
+        }
+      ]
+    });
+    await writeDiff(root, tx.id, {
+      files: [{ path: 'a.txt', op: 'modify', oldContent: 'one', newContent: 'ONE' }],
+      outOfBand: []
+    });
+
+    const result = await applyTx(ctx, tx.id, {
+      overrides: ['builtin:diff-sanity'],
+      reason: 'already approved'
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'ONE');
   });
 });
 
