@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseBashCommandHead } from './bash-parse.js';
+import { bashCommandHasCompoundSyntax, parseBashCommandHead } from './bash-parse.js';
 
 test('parseBashCommandHead returns the plain command for a simple invocation', () => {
   assert.equal(parseBashCommandHead('npm test'), 'npm');
@@ -62,6 +62,16 @@ test('parseBashCommandHead stops at shell pipelines and separators', () => {
   assert.equal(parseBashCommandHead('npm test && rm -rf /'), 'npm');
   assert.equal(parseBashCommandHead('git status; echo hi'), 'git');
   assert.equal(parseBashCommandHead('ls | head -n 1'), 'ls');
+});
+
+test('bashCommandHasCompoundSyntax detects chained shell but not redirects', () => {
+  assert.equal(bashCommandHasCompoundSyntax('npm test && rm -rf /'), true);
+  assert.equal(bashCommandHasCompoundSyntax('git status; echo hi'), true);
+  assert.equal(bashCommandHasCompoundSyntax('ls | head -n 1'), true);
+  assert.equal(bashCommandHasCompoundSyntax('npm test || make'), true);
+  assert.equal(bashCommandHasCompoundSyntax('npm test'), false);
+  assert.equal(bashCommandHasCompoundSyntax('npm test 2>&1'), false);
+  assert.equal(bashCommandHasCompoundSyntax('&& ls'), false);
 });
 
 test('parseBashCommandHead refuses redirection-leading lines (regression pin for > / <)', () => {

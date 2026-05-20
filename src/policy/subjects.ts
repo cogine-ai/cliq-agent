@@ -1,6 +1,6 @@
 import type { ModelAction } from '../protocol/model/actions.js';
 import type { TxReviewSnapshot } from '../workspace/transactions/inspect.js';
-import { parseBashCommandHead } from './bash-parse.js';
+import { bashCommandHasCompoundSyntax, parseBashCommandHead } from './bash-parse.js';
 import type { AccessChannel, ApprovalSubject, ToolAccess } from './types.js';
 
 type ToolApprovalDisplay = Extract<ApprovalSubject, { kind: 'tool' }>['display'];
@@ -45,8 +45,10 @@ function deriveChannel(
     // (leading operator, unterminated quote …). Surface that as an empty
     // string so the decision-table matcher treats it as "no head" and
     // falls through to ask/preset rather than guessing.
-    const commandHead = parseBashCommandHead(action.bash) ?? '';
-    return { kind: 'bash', commandHead };
+    const commandLine = action.bash;
+    const commandHead = parseBashCommandHead(commandLine) ?? '';
+    const compound = bashCommandHasCompoundSyntax(commandLine);
+    return { kind: 'bash', commandHead, ...(compound ? { compound: true } : {}) };
   }
 
   if ('edit' in action) {

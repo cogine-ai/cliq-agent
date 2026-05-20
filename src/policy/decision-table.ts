@@ -137,6 +137,16 @@ export function matchAgainstTable(table: PermissionTable, channel: AccessChannel
     return { kind: 'fallthrough' };
   }
 
+  if (isBashCompound(channel)) {
+    // Allowlist rules only see the first command head (see bash-parse.ts).
+    // Chained shell (`git status && rm -rf /`) must never match allow — force
+    // ask so `policy=auto` cannot silently approve the full line.
+    return {
+      kind: 'ask',
+      rule: { channel: 'bash', pattern: '*', source: 'builtin' }
+    };
+  }
+
   for (const allowRule of table.allow) {
     if (matchesRule(allowRule, channel)) {
       return { kind: 'allow', rule: allowRule };
@@ -152,6 +162,10 @@ export function matchAgainstTable(table: PermissionTable, channel: AccessChannel
 
 function isBashWithoutHead(channel: AccessChannel): boolean {
   return channel.kind === 'bash' && channel.commandHead === '';
+}
+
+function isBashCompound(channel: AccessChannel): boolean {
+  return channel.kind === 'bash' && channel.compound === true;
 }
 
 function matchesRule(rule: PermissionRule, channel: AccessChannel): boolean {

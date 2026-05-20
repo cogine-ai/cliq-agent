@@ -26,6 +26,87 @@
  * quoting, and explicit pipeline/control-operator handling land in #62-B
  * alongside the user-visible allowlist surface.
  */
+/**
+ * True when the line contains shell syntax that can run more than the first
+ * command word (pipelines, `&&` / `||`, `;` separators, …). Allowlist rules
+ * only inspect {@link parseBashCommandHead}'s first token, so compound lines
+ * MUST NOT match allow — they fall through to ask (or preset) instead.
+ */
+export function bashCommandHasCompoundSyntax(commandLine: string): boolean {
+  if (typeof commandLine !== 'string') return false;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return false;
+
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]!;
+
+    if (quote) {
+      if (ch === '\\' && quote === '"' && i + 1 < trimmed.length) {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+
+    if (ch === ';') {
+      return hasTrailingShellCommand(trimmed, i + 1);
+    }
+
+    if (ch === '|') {
+      const next = trimmed[i + 1];
+      if (next === '|') {
+        return hasLeadingShellCommand(trimmed, i) && hasTrailingShellCommand(trimmed, i + 2);
+      }
+      return hasLeadingShellCommand(trimmed, i) && hasTrailingShellCommand(trimmed, i + 1);
+    }
+
+    if (ch === '&') {
+      const prev = i > 0 ? trimmed[i - 1]! : '';
+      const next = trimmed[i + 1];
+      // Redirect merges like `2>&1` / `>&` are not command separators.
+      if (prev === '>' || prev === '<') {
+        continue;
+      }
+      if (next === '&') {
+        return hasLeadingShellCommand(trimmed, i) && hasTrailingShellCommand(trimmed, i + 2);
+      }
+      return hasLeadingShellCommand(trimmed, i) && hasTrailingShellCommand(trimmed, i + 1);
+    }
+  }
+
+  return false;
+}
+
+function hasLeadingShellCommand(line: string, operatorIndex: number): boolean {
+  let i = operatorIndex - 1;
+  while (i >= 0 && (line[i] === ' ' || line[i] === '\t')) {
+    i -= 1;
+  }
+  return i >= 0;
+}
+
+function hasTrailingShellCommand(line: string, start: number): boolean {
+  let i = start;
+  while (i < line.length && (line[i] === ' ' || line[i] === '\t')) {
+    i += 1;
+  }
+  if (i >= line.length) {
+    return false;
+  }
+  const ch = line[i]!;
+  // Trailing operator with no command (e.g. "npm test &&") is not compound.
+  return ch !== '|' && ch !== '&' && ch !== ';';
+}
+
 export function parseBashCommandHead(commandLine: string): string | null {
   if (typeof commandLine !== 'string') return null;
   const trimmed = commandLine.trim();
