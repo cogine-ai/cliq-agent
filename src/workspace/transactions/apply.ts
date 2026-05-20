@@ -16,6 +16,10 @@ import { createApplyPreSnapshot } from './snapshot.js';
 import { mutateSession } from '../../session/store.js';
 import type { Session, SessionRecord } from '../../session/types.js';
 import { applyRecordId, validatorSummaryFromTx } from './types.js';
+import {
+  checkIndexUnchanged,
+  IndexChangedSinceValidation
+} from '../../validators/builtin/index-clean.js';
 
 export type ApplyContext = {
   root: string;
@@ -63,9 +67,22 @@ export async function runStageA(ctx: ApplyContext): Promise<StageAOutcome> {
       throw new ApplyRejected('apply already in flight; use cliq tx status or wait');
     }
 
-    // A2: index-clean cross-check is deferred to a future helper; v0.8 relies on
-    // the validator-time baseline captured by builtin:index-clean. TODO(v0.9): add
-    // checkIndexUnchanged and re-validate here.
+    // A2: re-check the validator-time Git index baseline before writing
+    // apply-progress. If builtin:index-clean was disabled or not persisted
+    // (e.g. unit fixtures that construct approved tx rows directly), this is
+    // a no-op.
+    try {
+      await checkIndexUnchanged({
+        root: ctx.root,
+        txId: ctx.txId,
+        realCwd: tx.workspaceRealPath
+      });
+    } catch (err) {
+      if (err instanceof IndexChangedSinceValidation) {
+        throw new ApplyRejected(err.message);
+      }
+      throw err;
+    }
 
     // A3: bulk preflight -- read every modify target's current bytes, fingerprint,
     // and compare to entry.oldContent. Any mismatch aborts Stage A without writing

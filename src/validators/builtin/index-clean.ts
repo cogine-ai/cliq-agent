@@ -1,8 +1,31 @@
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { Validator, Finding } from '../types.js';
+import type { Validator, Finding, ValidatorResult } from '../types.js';
+import { validatorsDir } from '../../workspace/transactions/store.js';
 
 const execFileAsync = promisify(execFile);
+const INDEX_CLEAN_NAME = 'builtin:index-clean';
+
+type CheckIndexUnchangedOptions = {
+  root: string;
+  txId: string;
+  realCwd: string;
+};
+
+type ComparableIndexState = {
+  status: ValidatorResult['status'];
+  message: string;
+  findings: Finding[];
+};
+
+export class IndexChangedSinceValidation extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'IndexChangedSinceValidation';
+  }
+}
 
 /**
  * Parses git's `--porcelain=v2 -z` output. Records are NUL-terminated;
@@ -76,7 +99,7 @@ function nthFieldRest(seg: string, n: number): string {
 }
 
 export const indexClean: Validator = {
-  name: 'builtin:index-clean',
+  name: INDEX_CLEAN_NAME,
   defaultSeverity: 'blocking',
   async run(ctx) {
     const start = Date.now();
@@ -103,7 +126,7 @@ export const indexClean: Validator = {
       const isNotRepo = /not a git repository/i.test(stderr) || /not a git repository/i.test(errMsg);
       if (isNotRepo) {
         return {
-          name: 'builtin:index-clean',
+          name: INDEX_CLEAN_NAME,
           severity: 'blocking',
           status: 'pass',
           durationMs: Date.now() - start,
@@ -115,7 +138,7 @@ export const indexClean: Validator = {
       // can investigate rather than silently masking it as a "skipped" pass.
       const detail = stderr.trim() ? ` (stderr: ${stderr.trim().slice(0, 256)})` : '';
       return {
-        name: 'builtin:index-clean',
+        name: INDEX_CLEAN_NAME,
         severity: 'blocking',
         status: 'fail',
         durationMs: Date.now() - start,
@@ -133,7 +156,7 @@ export const indexClean: Validator = {
       findings.push({ path: entry.path, message });
     }
     return {
-      name: 'builtin:index-clean',
+      name: INDEX_CLEAN_NAME,
       severity: 'blocking',
       status: findings.length === 0 ? 'pass' : 'fail',
       durationMs: Date.now() - start,
@@ -141,3 +164,69 @@ export const indexClean: Validator = {
     };
   }
 };
+
+export async function checkIndexUnchanged(opts: CheckIndexUnchangedOptions): Promise<void> {
+  const baseline = await readIndexCleanBaseline(opts.root, opts.txId);
+  if (!baseline) return;
+  if (baseline.name !== INDEX_CLEAN_NAME) {
+    throw new IndexChangedSinceValidation(
+      'invalid builtin:index-clean validation baseline; re-run cliq tx validate before apply'
+    );
+  }
+
+  const current = await indexClean.run({
+    txId: opts.txId,
+    workspaceView: opts.realCwd,
+    realCwd: opts.realCwd,
+    signal: new AbortController().signal
+  });
+  if (!sameIndexState(baseline, current)) {
+    throw new IndexChangedSinceValidation(
+      `Git index changed since builtin:index-clean validation; re-run cliq tx validate before apply${formatCurrentIndexDetail(current)}`
+    );
+  }
+}
+
+async function readIndexCleanBaseline(root: string, txId: string): Promise<ValidatorResult | null> {
+  try {
+    const raw = await fs.readFile(indexCleanBaselinePath(root, txId), 'utf8');
+    return JSON.parse(raw) as ValidatorResult;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    throw new IndexChangedSinceValidation(
+      'could not read builtin:index-clean validation baseline; re-run cliq tx validate before apply'
+    );
+  }
+}
+
+function indexCleanBaselinePath(root: string, txId: string): string {
+  const sanitized = INDEX_CLEAN_NAME.replace(/[^A-Za-z0-9_.-]/g, '_');
+  return path.join(validatorsDir(root, txId), `${sanitized}.json`);
+}
+
+function sameIndexState(a: ValidatorResult, b: ValidatorResult): boolean {
+  return JSON.stringify(comparableIndexState(a)) === JSON.stringify(comparableIndexState(b));
+}
+
+function comparableIndexState(result: ValidatorResult): ComparableIndexState {
+  return {
+    status: result.status,
+    message: result.message ?? '',
+    findings: [...(result.findings ?? [])]
+      .map((finding) => ({
+        path: finding.path,
+        line: finding.line,
+        column: finding.column,
+        severity: finding.severity,
+        message: finding.message
+      }))
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+  };
+}
+
+function formatCurrentIndexDetail(result: ValidatorResult): string {
+  const paths = [...new Set((result.findings ?? []).map((finding) => finding.path).filter(Boolean))];
+  if (paths.length === 0) return ` (current status: ${result.status})`;
+  return ` (current status: ${result.status}; paths: ${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ', ...' : ''})`;
+}
