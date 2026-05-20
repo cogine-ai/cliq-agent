@@ -3,10 +3,10 @@ import { buildInstructionMessages, loadWorkspaceInstructionFiles } from '../inst
 import { BASE_SYSTEM_PROMPT } from '../prompt/system.js';
 import type { PolicyMode } from '../policy/types.js';
 import type { Session } from '../session/types.js';
-import { activateSkill, discoverSkillCatalog, mergeSkillNames } from '../skills/loader.js';
+import { activateSkill, discoverSkillCatalog, mergeSkillNames, refreshActiveSkill } from '../skills/loader.js';
 import { loadWorkspaceConfig } from '../workspace/config.js';
 import type { InstructionLayer, InstructionMessage } from '../instructions/types.js';
-import type { SkillDiagnostic } from '../skills/types.js';
+import type { ActiveSkill, SkillDiagnostic } from '../skills/types.js';
 
 const INSTRUCTION_LAYERS = new Set<InstructionLayer>(['core', 'workspace', 'skill', 'extension']);
 
@@ -47,6 +47,14 @@ export async function createRuntimeAssembly({
   const workspaceConfig = await loadWorkspaceConfig(cwd);
   const skillCatalog = await discoverSkillCatalog(cwd);
   const skillDiagnostics: SkillDiagnostic[] = [];
+  const skillDiagnosticKeys = new Set<string>();
+  const recordSkillDiagnostic = (item: SkillDiagnostic) => {
+    const key = `${item.level}:${item.code}:${item.source ?? ''}:${item.message}`;
+    if (!skillDiagnosticKeys.has(key)) {
+      skillDiagnosticKeys.add(key);
+      skillDiagnostics.push(item);
+    }
+  };
   const skillNames = mergeSkillNames(workspaceConfig.defaultSkills, cliSkillNames);
   const extensions = await loadExtensions(cwd, workspaceConfig.extensions);
   for (const name of workspaceConfig.defaultSkills) {
@@ -59,7 +67,7 @@ export async function createRuntimeAssembly({
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/not project-owned/i.test(message)) {
-        skillDiagnostics.push({
+        recordSkillDiagnostic({
           level: 'warning',
           code: 'workspace-default-not-project-owned',
           message: `Workspace default skill ${name} is not project-owned and was not activated`
@@ -87,6 +95,20 @@ export async function createRuntimeAssembly({
     commandHooks: workspaceConfig.hooks ?? {},
     session,
     async instructions(currentSession: Session) {
+      const refreshedSkills: ActiveSkill[] = [];
+      for (const skill of currentSession.activeSkills ?? []) {
+        const refreshed = await refreshActiveSkill(skill);
+        for (const item of refreshed.diagnostics) {
+          if (item.level === 'error') {
+            recordSkillDiagnostic(item);
+          }
+        }
+        if (refreshed.skill) {
+          refreshedSkills.push(refreshed.skill);
+        }
+      }
+      currentSession.activeSkills = refreshedSkills;
+
       const extensionMessages = (
         await Promise.all(
           extensions.flatMap((extension) =>
@@ -110,7 +132,7 @@ export async function createRuntimeAssembly({
         cwd,
         basePrompt: BASE_SYSTEM_PROMPT,
         workspaceInstructions,
-        skills: (currentSession.activeSkills ?? []).map((skill) => ({ name: skill.name, prompt: skill.prompt })),
+        skills: refreshedSkills.map((skill) => ({ name: skill.name, prompt: skill.prompt })),
         extensionMessages
       });
     }

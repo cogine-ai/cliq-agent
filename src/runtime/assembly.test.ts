@@ -78,6 +78,58 @@ Prefer exact edits over shell mutation when possible.`,
   }
 });
 
+test('createRuntimeAssembly refreshes active skill prompts and drops unavailable skills', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-skill-refresh-'));
+  const skillFile = path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md');
+  try {
+    await mkdir(path.dirname(skillFile), { recursive: true });
+    await writeFile(
+      skillFile,
+      `---
+name: reviewer
+description: review instructions
+---
+
+Original review prompt.`,
+      'utf8'
+    );
+
+    const assembly = await createRuntimeAssembly({
+      cwd,
+      session: createSession(cwd),
+      policyMode: 'read-only',
+      cliSkillNames: ['reviewer']
+    });
+
+    await writeFile(
+      skillFile,
+      `---
+name: reviewer
+description: review instructions
+---
+
+Updated review prompt.`,
+      'utf8'
+    );
+    const changedMessages = await assembly.instructions(assembly.session);
+    const changedSkill = changedMessages.find((message) => message.source === 'skill:reviewer');
+    assert.match(changedSkill?.content ?? '', /Updated review prompt/);
+    assert.doesNotMatch(changedSkill?.content ?? '', /Original review prompt/);
+
+    await rm(skillFile);
+    const missingMessages = await assembly.instructions(assembly.session);
+
+    assert.equal(missingMessages.some((message) => message.source === 'skill:reviewer'), false);
+    assert.equal(assembly.session.activeSkills.length, 0);
+    assert.equal(
+      assembly.skillDiagnostics.some((diagnostic) => diagnostic.code === 'active-skill-unavailable'),
+      true
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('createRuntimeAssembly exposes workspace command hooks separately from extension hooks', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-command-hooks-'));
   try {

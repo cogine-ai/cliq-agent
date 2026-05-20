@@ -105,11 +105,15 @@ test('/policy <mode> calls onPolicyChange and dispatches policy-change', async (
 
 test('/skills calls onSkillsList and renders the result', async () => {
   const store = makeStore();
+  let calls = 0;
   const { stdin, lastFrame } = render(
     <App
       store={store}
       onSubmit={() => {}}
-      onSkillsList={() => 'Skills:\n* reviewer [project/available] review instructions'}
+      onSkillsList={() => {
+        calls += 1;
+        return 'Skills:\n* reviewer [project/available] review instructions';
+      }}
     />
   );
 
@@ -119,6 +123,7 @@ test('/skills calls onSkillsList and renders the result', async () => {
   await flush();
   await flush();
 
+  assert.equal(calls, 1);
   assert.match(lastFrame() ?? '', /reviewer/);
 });
 

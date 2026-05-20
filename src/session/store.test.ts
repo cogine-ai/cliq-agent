@@ -57,6 +57,41 @@ test('createSession records structured default model identity', () => {
   });
 });
 
+test('ensureSession rejects persisted sessions with malformed active skills', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-active-skill-session-'));
+  try {
+    const session = createSession(cwd);
+    session.activeSkills = [
+      {
+        name: 'reviewer',
+        description: 'review instructions',
+        prompt: 'Review before editing.',
+        manifest: { name: 'reviewer', description: 'review instructions' },
+        scope: 'project',
+        sourceKind: 'project-cliq',
+        sourceRoot: path.join(cwd, '.cliq', 'skills'),
+        skillDir: path.join(cwd, '.cliq', 'skills', 'reviewer'),
+        skillFile: path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
+        diagnostics: [],
+        activatedBy: 'cli',
+        activatedAt: nowIso()
+      }
+    ];
+    await saveSession(cwd, session);
+    const target = sessionFilePath(session);
+    const raw = JSON.parse(await readFile(target, 'utf8')) as { activeSkills: Array<{ scope: string }> };
+    raw.activeSkills[0]!.scope = 'global';
+    await writeFile(target, JSON.stringify(raw), 'utf8');
+
+    const recovered = await ensureSession(cwd);
+
+    assert.notEqual(recovered.id, session.id);
+    assert.deepEqual(recovered.activeSkills, []);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('resolveCliqHome uses CLIQ_HOME when provided and falls back to ~/.cliq', () => {
   assert.equal(resolveCliqHome({ CLIQ_HOME: '/tmp/custom-cliq' }, '/home/alice'), path.resolve('/tmp/custom-cliq'));
   assert.equal(resolveCliqHome({}, '/home/alice'), path.resolve(path.join('/home/alice', '.cliq')));

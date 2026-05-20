@@ -500,7 +500,7 @@ export async function activateSkill(
 ): Promise<{ status: 'activated' | 'already-active'; skill: ActiveSkill }> {
   const [loaded] = await loadSkills(cwd, [name], options);
   const activeSkills = session.activeSkills ?? [];
-  const existing = activeSkills.find((skill) => skill.skillFile === loaded.skillFile || skill.name === loaded.name);
+  const existing = activeSkills.find((skill) => skill.skillFile === loaded.skillFile);
   if (existing) {
     session.activeSkills = activeSkills;
     return { status: 'already-active', skill: existing };
@@ -511,9 +511,53 @@ export async function activateSkill(
     activatedBy: options.activatedBy,
     activatedAt: new Date().toISOString()
   };
+  const sameNameIndex = activeSkills.findIndex((skill) => skill.name === loaded.name);
+  if (sameNameIndex >= 0) {
+    activeSkills[sameNameIndex] = active;
+    session.activeSkills = activeSkills;
+    return { status: 'activated', skill: active };
+  }
+
   activeSkills.push(active);
   session.activeSkills = activeSkills;
   return { status: 'activated', skill: active };
+}
+
+export async function refreshActiveSkill(skill: ActiveSkill): Promise<{ skill: ActiveSkill | null; diagnostics: SkillDiagnostic[] }> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(skill.skillFile, 'utf8');
+  } catch (error) {
+    const item = diagnostic(
+      'error',
+      'active-skill-unavailable',
+      `Active skill ${skill.name} could not be refreshed: ${error instanceof Error ? error.message : String(error)}`,
+      skill.skillFile
+    );
+    return { skill: null, diagnostics: [item] };
+  }
+
+  const parsed = parseSkillMarkdown(raw, skill.skillFile);
+  const diagnostics = [...parsed.diagnostics];
+  if (parsed.manifest.name && parsed.manifest.name !== skill.name) {
+    diagnostics.push(
+      diagnostic('error', 'name-mismatch', `Skill ${skill.name} must declare matching frontmatter name`, skill.skillFile)
+    );
+  }
+  if (diagnostics.some((item) => item.level === 'error')) {
+    return { skill: null, diagnostics };
+  }
+
+  return {
+    skill: {
+      ...skill,
+      description: parsed.manifest.description || null,
+      prompt: parsed.prompt,
+      manifest: parsed.manifest,
+      diagnostics
+    },
+    diagnostics
+  };
 }
 
 export function formatSkillCatalog(catalog: SkillCatalog, activeSkills: readonly ActiveSkill[] = []) {

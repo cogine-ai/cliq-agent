@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { discoverSkillCatalog, loadSkills, mergeSkillNames, parseSkillMarkdown } from './loader.js';
+import { activateSkill, discoverSkillCatalog, loadSkills, mergeSkillNames, parseSkillMarkdown } from './loader.js';
+import { createSession } from '../session/store.js';
 
 test('mergeSkillNames preserves order and removes duplicates', () => {
   assert.deepEqual(mergeSkillNames(['reviewer', 'safe-edit'], ['safe-edit', 'planner']), [
@@ -208,6 +209,43 @@ test('loadSkills can require project-owned skills for workspace defaultSkills', 
         }),
       /not project-owned/i
     );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('activateSkill replaces a same-name active user skill with the selected project skill', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-activate-precedence-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-activate-precedence-home-'));
+  try {
+    await writeSkill(path.join(home, '.cliq', 'skills'), 'reviewer', 'User skill.');
+    const session = createSession(cwd);
+    const userCatalog = await discoverSkillCatalog(cwd, {
+      homeDir: home,
+      cliqHome: path.join(home, '.cliq')
+    });
+    await activateSkill(cwd, session, 'reviewer', {
+      catalog: userCatalog,
+      activatedBy: 'cli'
+    });
+
+    await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer', 'Project skill.');
+    const projectCatalog = await discoverSkillCatalog(cwd, {
+      homeDir: home,
+      cliqHome: path.join(home, '.cliq')
+    });
+    const result = await activateSkill(cwd, session, 'reviewer', {
+      catalog: projectCatalog,
+      projectOnly: true,
+      activatedBy: 'workspace-default'
+    });
+
+    assert.equal(result.status, 'activated');
+    assert.equal(session.activeSkills.length, 1);
+    assert.equal(session.activeSkills[0]?.scope, 'project');
+    assert.equal(session.activeSkills[0]?.activatedBy, 'workspace-default');
+    assert.match(session.activeSkills[0]?.prompt ?? '', /Project skill/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

@@ -10,7 +10,10 @@ const SKILL_RESOURCE_MAX_BYTES = 64_000;
 const SKILL_RESOURCE_LIST_MAX_ENTRIES = 200;
 
 function rejectUnsafeResourcePath(inputPath: string) {
-  if (path.isAbsolute(inputPath)) {
+  if (path.isAbsolute(inputPath) || path.win32.isAbsolute(inputPath)) {
+    throw new Error('skill resource path must be skill-relative');
+  }
+  if (inputPath.split(/[\\/]+/).includes('..')) {
     throw new Error('skill resource path must be skill-relative');
   }
   const normalized = path.normalize(inputPath || '.');

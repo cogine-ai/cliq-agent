@@ -50,6 +50,17 @@ test('parses skill resource read and list actions', () => {
   });
 });
 
+test('rejects invalid skill activation payloads', () => {
+  assert.throws(() => parseModelAction('{"skill":{"name":123}}'), /unsupported action/i);
+});
+
+test('rejects invalid skill resource payloads', () => {
+  assert.throws(() => parseModelAction('{"skillResource":{"skill":"reviewer","mode":"write"}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"skillResource":{"skill":123,"path":"x"}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"skillResource":{"path":"x"}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"skillResource":{"skill":"reviewer","path":123}}'), /unsupported action/i);
+});
+
 test('parses final message action', () => {
   assert.deepEqual(parseModelAction('{"message":"done"}'), { message: 'done' });
 });

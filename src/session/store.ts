@@ -441,18 +441,79 @@ function isActiveSkill(value: unknown) {
     return false;
   }
   const skill = value as Record<string, unknown>;
+  const manifest = skill.manifest;
+  const diagnostics = skill.diagnostics;
   return (
-    typeof skill.name === 'string' &&
+    isNonEmptyString(skill.name) &&
     (typeof skill.description === 'string' || skill.description === null) &&
     typeof skill.prompt === 'string' &&
-    typeof skill.scope === 'string' &&
-    typeof skill.sourceKind === 'string' &&
-    typeof skill.sourceRoot === 'string' &&
-    typeof skill.skillDir === 'string' &&
-    typeof skill.skillFile === 'string' &&
-    typeof skill.activatedBy === 'string' &&
-    typeof skill.activatedAt === 'string' &&
-    Array.isArray(skill.diagnostics)
+    (skill.scope === 'project' || skill.scope === 'user') &&
+    (skill.sourceKind === 'project-cliq' ||
+      skill.sourceKind === 'project-agents' ||
+      skill.sourceKind === 'user-cliq' ||
+      skill.sourceKind === 'user-agents') &&
+    isNonEmptyString(skill.sourceRoot) &&
+    isNonEmptyString(skill.skillDir) &&
+    isNonEmptyString(skill.skillFile) &&
+    (skill.activatedBy === 'workspace-default' ||
+      skill.activatedBy === 'cli' ||
+      skill.activatedBy === 'headless' ||
+      skill.activatedBy === 'model' ||
+      skill.activatedBy === 'tui') &&
+    isValidIsoDateString(skill.activatedAt) &&
+    isSkillManifest(manifest) &&
+    Array.isArray(diagnostics) &&
+    diagnostics.every((item) => isSkillDiagnostic(item))
+  );
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.values(value).every((entry) => typeof entry === 'string')
+  );
+}
+
+function isValidIsoDateString(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+    !Number.isNaN(Date.parse(value))
+  );
+}
+
+function isSkillManifest(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const manifest = value as Record<string, unknown>;
+  return (
+    isNonEmptyString(manifest.name) &&
+    isNonEmptyString(manifest.description) &&
+    (manifest.license === undefined || typeof manifest.license === 'string') &&
+    (manifest.compatibility === undefined || typeof manifest.compatibility === 'string') &&
+    (manifest.metadata === undefined || isStringRecord(manifest.metadata)) &&
+    (manifest.allowedTools === undefined ||
+      (Array.isArray(manifest.allowedTools) && manifest.allowedTools.every((tool) => typeof tool === 'string')))
+  );
+}
+
+function isSkillDiagnostic(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const diagnostic = value as Record<string, unknown>;
+  return (
+    (diagnostic.level === 'info' || diagnostic.level === 'warning' || diagnostic.level === 'error') &&
+    isNonEmptyString(diagnostic.code) &&
+    isNonEmptyString(diagnostic.message) &&
+    (diagnostic.source === undefined || typeof diagnostic.source === 'string')
   );
 }
 

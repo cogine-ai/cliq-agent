@@ -5,7 +5,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
-import { ArtifactNotFoundError, SessionNotFoundError } from './artifacts.js';
+import { ArtifactNotFoundError, SessionNotFoundError, WorkspaceNotFoundError } from './artifacts.js';
 import type { HeadlessRunOutput, HeadlessRunRequest, RuntimeEventEnvelope } from './contract.js';
 import {
   HEADLESS_EXIT_CANCELLED,
@@ -293,6 +293,71 @@ test('rpc skills.list exposes catalog and active skill state', async () => {
   assert.equal(response.id, 7);
   assert.equal(response.result.skills[0].name, 'reviewer');
   assert.equal(response.result.activeSkills[0].active, true);
+});
+
+test('rpc skills.list returns invalid params for malformed params', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    }
+  });
+
+  await server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 8, method: 'skills.list', params: {} }));
+
+  const [response] = parseLines(writes);
+  assert.equal(response.id, 8);
+  assert.equal(response.error.code, -32602);
+});
+
+test('rpc skills.list maps missing workspaces to invalid params', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    },
+    async listSkills(cwd) {
+      throw new WorkspaceNotFoundError(cwd);
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'skills.list',
+      params: { cwd: '/tmp/missing-workspace' }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.id, 9);
+  assert.equal(response.error.code, -32602);
+});
+
+test('rpc skills.list maps unexpected failures to internal errors', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    },
+    async listSkills() {
+      throw new Error('catalog failed');
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 10,
+      method: 'skills.list',
+      params: { cwd: process.cwd() }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.id, 10);
+  assert.equal(response.error.code, -32603);
 });
 
 test('stdio rpc aborts the active run and resolves when stdin closes', async () => {

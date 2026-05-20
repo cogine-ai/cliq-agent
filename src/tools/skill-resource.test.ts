@@ -76,6 +76,10 @@ test('skillResourceTool rejects traversal and symlink escapes', async () => {
       { skillResource: { skill: 'reviewer', path: '../SKILL.md' } },
       { cwd, session }
     );
+    const normalizedTraversal = await skillResourceTool.execute(
+      { skillResource: { skill: 'reviewer', path: 'references/../SKILL.md' } },
+      { cwd, session }
+    );
     const link = await skillResourceTool.execute(
       { skillResource: { skill: 'reviewer', path: 'references/secret.md' } },
       { cwd, session }
@@ -83,6 +87,8 @@ test('skillResourceTool rejects traversal and symlink escapes', async () => {
 
     assert.equal(traversal.status, 'error');
     assert.match(traversal.content, /relative/i);
+    assert.equal(normalizedTraversal.status, 'error');
+    assert.match(normalizedTraversal.content, /relative/i);
     assert.equal(link.status, 'error');
     assert.match(link.content, /outside/i);
   } finally {
