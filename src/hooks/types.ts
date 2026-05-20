@@ -55,11 +55,11 @@ export type HookInput = {
 };
 
 /**
- * Scope of a permission decision returned by a PermissionRequest hook. v0
- * defines the wire shape but only `'once'` has any runtime effect; `'session'`
- * and `'workspace'` are accepted from the hook so authors can start emitting
- * the field, but the runner intentionally treats them as `'once'` until the
- * session/workspace allowlist persistence lands in #62-B.
+ * Scope of a permission decision returned by a PermissionRequest hook.
+ * `'once'` authorizes only the current ask, `'session'` reuses the approval
+ * in the current runner process, and `'workspace'` persists it for the
+ * workspace. Older runners that do not understand a future scope must fall
+ * back to one-shot behavior instead of crashing.
  *
  * Defaulting unspecified scopes to `'once'` preserves byte-for-byte behavior
  * for hooks that haven't been updated.
@@ -80,12 +80,8 @@ export type HookOutput = {
      * also coerced to `'once'` rather than rejected, to keep the hook
      * surface forward-compatible: an older runner reading a newer hook's
      * `'forever'`-style scope will fall back to one-shot instead of crashing.
-     *
-     * TODO(#62-B): wire `'session'` (in-process allowlist) and `'workspace'`
-     * (persisted to ~/.cliq/workspaces/<id>/permissions.json) end-to-end
-     * once the user-visible allowlist surface lands.
      */
-    scope?: HookPermissionScope;
+    scope?: HookPermissionScope | (string & {});
   };
   /**
    * Optional additional allowlist entries that the hook wants to append to
