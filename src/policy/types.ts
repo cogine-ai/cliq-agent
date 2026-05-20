@@ -31,7 +31,7 @@ export type ToolAccess = 'read' | 'write' | 'exec';
 export type AccessChannel =
   | { kind: 'fs-read'; path: string }
   | { kind: 'fs-write'; path: string; op: 'create' | 'modify' | 'delete' }
-  | { kind: 'bash'; commandHead: string }
+  | { kind: 'bash'; commandHead: string; compound: boolean }
   | { kind: 'mcp'; server: string; tool: string }
   | { kind: 'network'; host?: string };
 
