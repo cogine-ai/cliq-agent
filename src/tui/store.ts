@@ -3,6 +3,7 @@ import type { ApprovalSubject, PolicyMode } from '../policy/types.js';
 import type { ModelAction } from '../protocol/model/actions.js';
 import type { RuntimeEvent } from '../protocol/runtime/events.js';
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
+import { resolveShellSpec } from '../tools/shell.js';
 import type { ToolResult } from '../tools/types.js';
 import {
   extractToolBody,
@@ -61,6 +62,7 @@ export type UiState = {
   policy: PolicyMode;
   model: { provider: ProviderName; model: string };
   session: { id: string; cwd: string };
+  shell: { label: string };
   tx: UiTx | null;
   errors: ErrorEntry[];
   // Estimated cumulative session token count, refreshed by the cli bridge
@@ -101,6 +103,7 @@ export function createInitialState(opts: {
   policy: PolicyMode;
   model: { provider: ProviderName; model: string };
   session: { id: string; cwd: string };
+  shell?: { label: string };
 }): UiState {
   return {
     transcript: [],
@@ -109,6 +112,7 @@ export function createInitialState(opts: {
     policy: opts.policy,
     model: opts.model,
     session: opts.session,
+    shell: opts.shell ?? { label: resolveShellSpec().label },
     tx: null,
     errors: [],
     sessionTokens: null,

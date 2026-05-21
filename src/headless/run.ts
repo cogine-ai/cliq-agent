@@ -16,6 +16,7 @@ import { createRunner } from '../runtime/runner.js';
 import type { TxRunnerOptions } from '../runtime/tx-runner.js';
 import { ensureFresh, ensureSession, makeId, resolveCliqHome, workspaceIdFromRealPath } from '../session/store.js';
 import type { Session } from '../session/types.js';
+import { resolveShellSpec } from '../tools/shell.js';
 import { recoverAtStart, type CoordinatorContext } from '../workspace/transactions/coordinator.js';
 import {
   emptyHeadlessArtifacts,
@@ -243,6 +244,7 @@ export async function runHeadless(
       ...assembly.workspaceConfig,
       autoCompact: request.autoCompact ?? assembly.workspaceConfig.autoCompact
     };
+    const shell = resolveShellSpec({ config: workspaceConfig.shell });
     const modelConfig = await resolveModelConfig({
       workspace: workspaceConfig,
       cli: (request.model ?? {}) as PartialModelConfig
@@ -360,6 +362,7 @@ export async function runHeadless(
         config: workspaceConfig.autoCompact,
         modelConfig
       },
+      shell,
       ...(transactions ? { transactions } : {}),
       async onEvent(runtimeEvent) {
         const mapped = runtimeEventToHeadless(runtimeEvent);

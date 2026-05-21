@@ -265,11 +265,16 @@ Cliq reads optional runtime config from `./.cliq/config.json` in the current wor
     "model": "qwen3:4b",
     "baseUrl": "http://localhost:11434",
     "streaming": "auto"
+  },
+  "shell": {
+    "provider": "powershell"
   }
 }
 ```
 
 All fields are optional. If the file is missing, Cliq uses no repo-local prompt, skill, or extension overrides and resolves the model with its local-first Ollama default.
+
+`shell.provider` accepts `bash`, `powershell`, or `cmd`. When omitted, shell actions use `bash -lc` on macOS/Linux and Windows-native PowerShell on Windows. For custom shells, set `shell.command` and optional `shell.args`; Cliq appends the model's shell command after those args.
 
 ## Transactions (preview)
 

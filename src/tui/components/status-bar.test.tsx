@@ -25,6 +25,11 @@ test('renders provider/model · policy · short session · cwd basename · tx id
   assert.match(frame, /tx idle/);
 });
 
+test('renders the active shell label', () => {
+  const { lastFrame } = render(<StatusBar state={init({ shell: { label: 'PowerShell' } })} />);
+  assert.match(lastFrame() ?? '', /PowerShell/);
+});
+
 test('shows a red error indicator when errors are present', () => {
   const state = init({
     errors: [{ id: 'e1', stage: 'model', message: 'oops' }],

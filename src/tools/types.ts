@@ -4,6 +4,7 @@ import type { WorkspaceWriter } from '../runtime/workspace-writer.js';
 import type { Session } from '../session/types.js';
 import type { TxBashPolicy } from '../workspace/config.js';
 import type { BashEffect } from '../workspace/transactions/types.js';
+import type { ShellSpec } from './shell.js';
 
 export type ToolStatus = 'ok' | 'error';
 
@@ -27,6 +28,7 @@ export type ToolContext = {
   session: Session;
   signal?: AbortSignal;
   writer?: WorkspaceWriter;
+  shell?: ShellSpec;
   tx?: ToolContextTxFacade;
 };
 

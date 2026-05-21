@@ -16,6 +16,7 @@ import { appendRecord, makeId, nowIso, resolveCliqHome, saveSession } from '../s
 import type { Session } from '../session/types.js';
 import { createToolRegistry } from '../tools/registry.js';
 import { normalizeToolResultForStorage } from '../tools/results.js';
+import type { ShellSpec } from '../tools/shell.js';
 import type { ToolContextTxFacade, ToolResult } from '../tools/types.js';
 import { appendBashEffect } from '../workspace/transactions/bash-effects.js';
 import { createOverlayWriter } from '../workspace/transactions/overlay.js';
@@ -65,6 +66,7 @@ export function createRunner({
   onEvent = async () => undefined,
   autoCompact,
   signal: defaultSignal,
+  shell,
   transactions,
   confirm
 }: {
@@ -78,6 +80,7 @@ export function createRunner({
   onEvent?: RuntimeEventSink;
   autoCompact?: AutoCompactRunnerOptions;
   signal?: AbortSignal;
+  shell?: ShellSpec;
   transactions?: TxRunnerOptions;
 }) {
   if (transactions) {
@@ -622,6 +625,7 @@ export function createRunner({
                 session,
                 signal,
                 writer,
+                shell,
                 tx: txFacade
               });
             } catch (error) {

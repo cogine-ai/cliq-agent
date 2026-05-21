@@ -11,6 +11,14 @@ export type TxAuto = 'per-turn' | 'manual';
 export type TxApplyPolicy = 'interactive' | 'auto-on-pass' | 'manual-only';
 export type TxBashPolicy = 'passthrough' | 'confirm' | 'deny';
 export type TxCopyMode = 'auto' | 'reflink' | 'copy';
+export type ShellProvider = 'bash' | 'powershell' | 'cmd';
+
+export type ShellConfig = {
+  provider?: ShellProvider;
+  command?: string;
+  args?: string[];
+  label?: string;
+};
 
 export type TxShellValidator = {
   name: string;
@@ -45,6 +53,7 @@ export type WorkspaceConfig = {
   extensions: string[];
   defaultSkills: string[];
   model?: PartialModelConfig;
+  shell?: ShellConfig;
   autoCompact: AutoCompactConfig;
   transactions?: TxConfig;
   hooks?: HooksConfig;
@@ -118,6 +127,57 @@ function readModelConfig(record: Record<string, unknown>): PartialModelConfig | 
     ...(typeof model.baseUrl === 'string' ? { baseUrl: model.baseUrl } : {}),
     ...(typeof model.streaming === 'string' ? { streaming: model.streaming } : {})
   };
+}
+
+function readNonEmptyString(record: Record<string, unknown>, key: string, configPath: string) {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`${configPath} must be a non-empty string`);
+  }
+
+  return value;
+}
+
+function readShellConfig(record: Record<string, unknown>): ShellConfig | undefined {
+  const value = record.shell;
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('shell must be an object');
+  }
+
+  const shell = value as Record<string, unknown>;
+  const provider = shell.provider;
+  if (provider !== undefined && provider !== 'bash' && provider !== 'powershell' && provider !== 'cmd') {
+    throw new Error('shell.provider must be one of: bash, powershell, cmd');
+  }
+
+  if (shell.args !== undefined && (!Array.isArray(shell.args) || shell.args.some((arg) => typeof arg !== 'string'))) {
+    throw new Error('shell.args must be an array of strings');
+  }
+
+  const command = readNonEmptyString(shell, 'command', 'shell.command');
+  const label = readNonEmptyString(shell, 'label', 'shell.label');
+  const config: ShellConfig = {};
+  if (provider !== undefined) {
+    config.provider = provider;
+  }
+  if (command !== undefined) {
+    config.command = command;
+  }
+  if (shell.args !== undefined) {
+    config.args = shell.args as string[];
+  }
+  if (label !== undefined) {
+    config.label = label;
+  }
+  return config;
 }
 
 type NumericAutoCompactConfigKey = Exclude<keyof AutoCompactConfig, 'enabled'>;
@@ -440,6 +500,7 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
 
   const record = input as Record<string, unknown>;
   const model = readModelConfig(record);
+  const shell = readShellConfig(record);
   const autoCompact = readAutoCompactConfig(record);
   const transactions = parseTransactions(record.transactions);
   const hooks = readHooksConfig(record.hooks);
@@ -449,6 +510,7 @@ export function parseWorkspaceConfig(input: unknown): WorkspaceConfig {
     defaultSkills: readStringArray(record, 'defaultSkills'),
     autoCompact,
     ...(model ? { model } : {}),
+    ...(shell ? { shell } : {}),
     ...(transactions !== undefined ? { transactions } : {}),
     ...(hooks !== undefined ? { hooks } : {})
   };

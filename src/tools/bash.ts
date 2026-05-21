@@ -7,6 +7,7 @@ import {
   diffMtimes,
   recordBashEffect as buildBashEffect
 } from '../runtime/bash-policy.js';
+import { buildShellSpawn, resolveShellSpec } from './shell.js';
 import type { ToolContext, ToolDefinition, ToolResult } from './types.js';
 
 function clip(text: string) {
@@ -15,7 +16,9 @@ function clip(text: string) {
 
 function runBashChild(action: { bash: string }, context: ToolContext): Promise<ToolResult> {
   return new Promise((resolve) => {
-    const child = spawn('bash', ['-lc', action.bash], { cwd: context.cwd, env: process.env });
+    const shell = context.shell ?? resolveShellSpec();
+    const spawnSpec = buildShellSpawn(shell, action.bash);
+    const child = spawn(spawnSpec.command, spawnSpec.args, { cwd: context.cwd, env: process.env });
     let out = '';
     let timedOut = false;
     let settled = false;
@@ -57,7 +60,7 @@ function runBashChild(action: { bash: string }, context: ToolContext): Promise<T
       finish({
         tool: 'bash',
         status: 'error',
-        meta: { exit: null, signal: (error as NodeJS.ErrnoException).code ?? 'error', timed_out: false },
+        meta: { exit: null, signal: (error as NodeJS.ErrnoException).code ?? 'error', timed_out: false, shell: shell.label },
         content: [`TOOL_RESULT bash ERROR`, `$ ${action.bash}`, `(exit=null signal=${(error as NodeJS.ErrnoException).code ?? 'error'})`, error.message]
           .filter(Boolean)
           .join('\n')
@@ -70,7 +73,7 @@ function runBashChild(action: { bash: string }, context: ToolContext): Promise<T
       finish({
         tool: 'bash',
         status,
-        meta: { exit: code ?? null, signal: signal ?? 'none', timed_out: timedOut },
+        meta: { exit: code ?? null, signal: signal ?? 'none', timed_out: timedOut, shell: shell.label },
         content: [`TOOL_RESULT bash ${status.toUpperCase()}`, `$ ${action.bash}`, `(exit=${code ?? 'null'} signal=${signal ?? 'none'})`, out]
           .filter(Boolean)
           .join('\n')

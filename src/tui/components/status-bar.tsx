@@ -33,6 +33,8 @@ export function StatusBar({ state }: { state: UiState }) {
       <Sep />
       <Text color={policyColor}>{state.policy}</Text>
       <Sep />
+      <Text dimColor>{state.shell.label}</Text>
+      <Sep />
       <Text dimColor>{sessionId}</Text>
       <Sep />
       <Text dimColor>{cwdLabel}</Text>

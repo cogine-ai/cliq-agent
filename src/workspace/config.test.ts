@@ -150,6 +150,51 @@ test('loadWorkspaceConfig reads autoCompact config', async () => {
   }
 });
 
+test('parseWorkspaceConfig accepts shell provider config', () => {
+  const parsed = parseWorkspaceConfig({
+    shell: {
+      provider: 'powershell'
+    }
+  });
+
+  assert.deepEqual(parsed.shell, { provider: 'powershell' });
+});
+
+test('parseWorkspaceConfig accepts explicit shell command config', () => {
+  const parsed = parseWorkspaceConfig({
+    shell: {
+      command: 'pwsh',
+      args: ['-NoLogo', '-Command'],
+      label: 'PowerShell 7'
+    }
+  });
+
+  assert.deepEqual(parsed.shell, {
+    command: 'pwsh',
+    args: ['-NoLogo', '-Command'],
+    label: 'PowerShell 7'
+  });
+});
+
+test('parseWorkspaceConfig rejects invalid shell config', () => {
+  assert.throws(
+    () => parseWorkspaceConfig({ shell: 'powershell' }),
+    /shell must be an object/
+  );
+  assert.throws(
+    () => parseWorkspaceConfig({ shell: { provider: 'zsh' } }),
+    /shell\.provider/
+  );
+  assert.throws(
+    () => parseWorkspaceConfig({ shell: { command: '' } }),
+    /shell\.command/
+  );
+  assert.throws(
+    () => parseWorkspaceConfig({ shell: { args: '-lc' } }),
+    /shell\.args/
+  );
+});
+
 test('parseWorkspaceConfig accepts transactions block with full settings', () => {
   const parsed = parseWorkspaceConfig({
     transactions: {

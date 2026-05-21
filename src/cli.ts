@@ -32,6 +32,7 @@ import { createCompaction } from './session/compaction.js';
 import { forkSessionFromCheckpoint } from './session/fork.js';
 import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
 import type { Session } from './session/types.js';
+import { resolveShellSpec, type ShellSpec } from './tools/shell.js';
 import type { ToolResult } from './tools/types.js';
 import {
   openTx as coordOpenTx,
@@ -1207,6 +1208,9 @@ Examples:
   cliq --policy read-only "inspect this repo"
   cliq --provider ollama --model qwen3:4b "inspect this repo"
 
+Workspace config:
+  .cliq/config.json shell.provider selects bash | powershell | cmd; shell.command/args can define a custom shell
+
 Env:
   OPENROUTER_API_KEY        Required for OpenRouter
   ANTHROPIC_API_KEY         Required for Anthropic
@@ -2173,6 +2177,7 @@ export async function runCli(argv: string[]) {
   // orphans get filtered (with a warning to stderr).
   const cliqHome = resolveCliqHome();
   const wsCfg = await loadWorkspaceConfig(cwd);
+  const chatShell = resolveShellSpec({ config: wsCfg.shell });
   let chatWorkspaceRealPath = cwd;
   try {
     chatWorkspaceRealPath = await fsPromises.realpath(cwd);
@@ -2215,7 +2220,8 @@ export async function runCli(argv: string[]) {
       txMode: parsed.txMode,
       txApply: parsed.txApply,
       coordinatorCtx: chatCoordinatorCtx,
-      cliqHome
+      cliqHome,
+      shell: chatShell
     });
     return;
   }
@@ -2262,6 +2268,7 @@ export async function runCli(argv: string[]) {
       config: assembly.workspaceConfig.autoCompact,
       modelConfig
     },
+    shell: chatShell,
     ...(chatTransactions ? { transactions: chatTransactions } : {}),
     async onEvent(event) {
       if (event.type === 'error') {
@@ -2270,7 +2277,7 @@ export async function runCli(argv: string[]) {
       await eventSink(event);
     }
   });
-  console.log(`cliq chat in ${session.cwd}`);
+  console.log(`cliq chat in ${session.cwd} (shell: ${chatShell.label})`);
   rl.prompt();
 
   for await (const line of rl) {
@@ -2344,6 +2351,7 @@ type RunChatTuiSessionOpts = {
   txApply?: TxApplyPolicy;
   coordinatorCtx: CoordinatorContext;
   cliqHome: string;
+  shell: ShellSpec;
 };
 
 // The TUI defaults to the most cautious mode that still lets the agent do
@@ -2381,7 +2389,8 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     createInitialState({
       policy,
       model: { provider: opts.modelConfig.provider, model: opts.modelConfig.model },
-      session: { id: session.id, cwd: session.cwd }
+      session: { id: session.id, cwd: session.cwd },
+      shell: { label: opts.shell.label }
     })
   );
 
@@ -2470,6 +2479,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       config: opts.assembly.workspaceConfig.autoCompact,
       modelConfig: opts.modelConfig
     },
+    shell: opts.shell,
     ...(tuiTransactions ? { transactions: tuiTransactions } : {}),
     async onEvent(event) {
       store.dispatch({ type: 'runtime-event', event });
