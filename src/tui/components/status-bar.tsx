@@ -24,28 +24,40 @@ export function StatusBar({ state }: { state: UiState }) {
   const sessionId = shortSessionId(state.session.id);
   const cwdLabel = `/${path.basename(state.session.cwd)}`;
   const tokensLabel = state.sessionTokens !== null ? `${formatTokens(state.sessionTokens)} tok` : null;
-  const hasError = state.errors.length > 0;
+  const latestError = state.errors.at(-1);
+  const latestErrorLabel = latestError ? formatErrorStatus(latestError) : null;
 
   return (
-    <Box>
-      {hasError ? <Text color="red">● </Text> : null}
-      <Text dimColor>{`${state.model.provider}/${state.model.model}`}</Text>
-      <Sep />
-      <Text color={policyColor}>{state.policy}</Text>
-      <Sep />
-      <Text dimColor>{sessionId}</Text>
-      <Sep />
-      <Text dimColor>{cwdLabel}</Text>
-      <Sep />
-      <Text dimColor>{txStatus}</Text>
-      {tokensLabel !== null ? (
-        <>
-          <Sep />
-          <Text dimColor>{tokensLabel}</Text>
-        </>
-      ) : null}
+    <Box flexDirection="column">
+      {latestErrorLabel ? <Text color="red">● {latestErrorLabel}</Text> : null}
+      <Box>
+        <Text dimColor>{`${state.model.provider}/${state.model.model}`}</Text>
+        <Sep />
+        <Text color={policyColor}>{state.policy}</Text>
+        <Sep />
+        <Text dimColor>{sessionId}</Text>
+        <Sep />
+        <Text dimColor>{cwdLabel}</Text>
+        <Sep />
+        <Text dimColor>{txStatus}</Text>
+        {tokensLabel !== null ? (
+          <>
+            <Sep />
+            <Text dimColor>{tokensLabel}</Text>
+          </>
+        ) : null}
+      </Box>
     </Box>
   );
+}
+
+function formatErrorStatus(error: UiState['errors'][number]): string {
+  const label = `${error.stage} error: ${error.message}`.replace(/\s+/g, ' ').trim();
+  const maxLength = 120;
+  if (label.length <= maxLength) {
+    return label;
+  }
+  return `${label.slice(0, maxLength - 3)}...`;
 }
 
 function Sep() {

@@ -671,7 +671,14 @@ export function createRunner({
           await throwIfCancelled();
         }
 
-        throw new Error('Exceeded action loop limit');
+        const loopLimitMessage = `Model did not produce a final assistant message after tool calls (${MAX_LOOPS} action attempts).`;
+        await onEvent({
+          type: 'error',
+          stage: 'model',
+          message: loopLimitMessage,
+          code: 'model-error'
+        });
+        throw new Error(loopLimitMessage);
       } finally {
         if (!checkpointCreated) {
           session.lifecycle.status = previousLifecycle.status;

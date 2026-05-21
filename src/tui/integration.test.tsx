@@ -117,6 +117,41 @@ test('end-to-end: user prompt → approval modal → allow → tool result → f
   assert.match(frame, />/);
 });
 
+test('tool result followed by runtime error renders a visible status message', async () => {
+  const store = makeStore();
+  const { lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+
+  store.dispatch({ type: 'user-input', text: 'use a tool' });
+  dispatchEvent(store, {
+    type: 'model-start',
+    provider: 'ollama',
+    model: 'qwen3:4b',
+    streaming: false
+  });
+  store.dispatch({ type: 'tool-hook-start', action: { bash: 'pwd' } });
+  store.dispatch({
+    type: 'tool-hook-end',
+    result: {
+      tool: 'bash',
+      status: 'ok',
+      content: 'TOOL_RESULT bash OK\n$ pwd\n/tmp/repo',
+      meta: {}
+    }
+  });
+  dispatchEvent(store, {
+    type: 'error',
+    stage: 'model',
+    message: 'Exceeded action loop limit'
+  });
+  await flush();
+
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /tool: bash/);
+  assert.match(frame, /Exceeded action loop limit/);
+  assert.doesNotMatch(frame, /thinking/);
+  assert.match(frame, />/);
+});
+
 test('user denies an approval — resolve fires with deny and modal clears', async () => {
   const store = makeStore();
   const { stdin } = render(<App store={store} onSubmit={() => {}} />);

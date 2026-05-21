@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { MAX_LOOPS } from '../config.js';
 import type { ModelClient } from '../model/types.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { createSession } from '../session/store.js';
@@ -319,6 +320,62 @@ test('runner appends tool results and replays them back to the model', async () 
     secondCallMessages.some((message) => message.role === 'user' && message.content.includes('TOOL_RESULT bash OK')),
     true
   );
+});
+
+test('runner emits a clear error when tool actions never reach a final assistant message', async () => {
+  const session = await createTempSession();
+  const errors: Array<{ stage?: string; message?: string; code?: string }> = [];
+  let modelCalls = 0;
+  let toolRuns = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        modelCalls += 1;
+        return completion('{"bash":"pwd"}');
+      }
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              toolRuns += 1;
+              return {
+                tool: 'bash',
+                status: 'ok' as const,
+                content: 'TOOL_RESULT bash OK\n$ pwd\n/tmp/workspace',
+                meta: { exit: 0 }
+              };
+            }
+          }
+        };
+      }
+    },
+    onEvent(event) {
+      if (event.type === 'error') {
+        errors.push({ stage: event.stage, message: event.message, code: event.code });
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => runner.runTurn(session, 'show cwd'),
+    /Model did not produce a final assistant message after tool calls/
+  );
+  assert.equal(modelCalls, MAX_LOOPS);
+  assert.equal(toolRuns, MAX_LOOPS);
+  assert.deepEqual(errors.at(-1), {
+    stage: 'model',
+    message: `Model did not produce a final assistant message after tool calls (${MAX_LOOPS} action attempts).`,
+    code: 'model-error'
+  });
 });
 
 test('runner caps stored tool result content before appending tool record', async () => {
