@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -71,6 +71,37 @@ test('loadSkills reads SKILL.md from the workspace skill directory', async () =>
     assert.equal(loaded[0]?.scope, 'project');
   } finally {
     await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('loadSkills rejects project SKILL.md symlinks outside the trusted project root', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-file-escape-'));
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-file-escape-outside-'));
+  try {
+    const skillDir = path.join(cwd, '.cliq', 'skills', 'reviewer');
+    const externalSkill = path.join(outside, 'SKILL.md');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      externalSkill,
+      `---
+name: reviewer
+description: external skill
+---
+
+External prompt.`,
+      'utf8'
+    );
+    await symlink(externalSkill, path.join(skillDir, 'SKILL.md'));
+
+    const catalog = await discoverSkillCatalog(cwd);
+    const entry = catalog.entries.find((item) => item.name === 'reviewer');
+
+    assert.equal(entry?.status, 'invalid');
+    assert.equal(entry?.diagnostics.some((diagnostic) => diagnostic.code === 'project-skill-escape'), true);
+    await assert.rejects(() => loadSkills(cwd, ['reviewer'], { catalog }), /trusted project root/i);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
 });
 

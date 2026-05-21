@@ -322,24 +322,17 @@ async function readSkillEntry(root: SkillDiscoveryRoot, dirName: string): Promis
   }
 
   const diagnostics: SkillDiagnostic[] = [];
-  let raw = '';
-  try {
-    raw = await fs.readFile(skillFileRealPath, 'utf8');
-  } catch (error) {
-    diagnostics.push(
-      diagnostic(
-        'error',
-        'read-failed',
-        `Failed to read skill file: ${error instanceof Error ? error.message : String(error)}`,
-        skillFile
-      )
-    );
-  }
-
+  let canReadSkillFile = true;
   if (root.ownerRoot) {
     const ownerRealPath = await realpathIfExists(root.ownerRoot);
     const skillDirRealPath = await realpathIfExists(skillDir);
-    if (!ownerRealPath || !skillDirRealPath || !isPathInsideWorkspace(ownerRealPath, skillDirRealPath)) {
+    if (
+      !ownerRealPath ||
+      !skillDirRealPath ||
+      !isPathInsideWorkspace(ownerRealPath, skillDirRealPath) ||
+      !isPathInsideWorkspace(ownerRealPath, skillFileRealPath)
+    ) {
+      canReadSkillFile = false;
       diagnostics.push(
         diagnostic(
           'error',
@@ -351,7 +344,25 @@ async function readSkillEntry(root: SkillDiscoveryRoot, dirName: string): Promis
     }
   }
 
-  const parsed = parseSkillMarkdown(raw, skillFile);
+  let raw = '';
+  if (canReadSkillFile) {
+    try {
+      raw = await fs.readFile(skillFileRealPath, 'utf8');
+    } catch (error) {
+      diagnostics.push(
+        diagnostic(
+          'error',
+          'read-failed',
+          `Failed to read skill file: ${error instanceof Error ? error.message : String(error)}`,
+          skillFile
+        )
+      );
+    }
+  }
+
+  const parsed = canReadSkillFile
+    ? parseSkillMarkdown(raw, skillFile)
+    : { manifest: { name: '', description: '' }, prompt: '', diagnostics: [] };
   diagnostics.push(...parsed.diagnostics);
   if (parsed.manifest.name && parsed.manifest.name !== dirName) {
     diagnostics.push(
