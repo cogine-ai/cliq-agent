@@ -404,6 +404,11 @@ Cliq ships a small built-in system skill set:
 - `skill-installer`
 - `skill-doctor`
 
+Built-in skills are shipped inside the `@cogineai/cliq` package and loaded from
+that immutable package location. Cliq does not copy them into `~/.cliq/skills`
+or overwrite user/project skills during install. Upgrading built-in skills means
+upgrading the Cliq package, for example `npm install -g @cogineai/cliq@latest`.
+
 Local project skills are discovered from project roots after workspace trust has been decided:
 
 - Project: `./.cliq/skills/<name>/SKILL.md` and `./.agents/skills/<name>/SKILL.md`

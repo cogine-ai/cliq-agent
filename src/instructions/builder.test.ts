@@ -8,7 +8,7 @@ test('buildInstructionMessages preserves deterministic layer order', async () =>
     cwd: '/tmp/workspace',
     basePrompt: 'BASE',
     workspaceInstructions: ['WORKSPACE'],
-    skills: [{ name: 'reviewer', prompt: 'SKILL' }],
+    skills: [{ name: 'reviewer', skillDir: '/tmp/workspace/.cliq/skills/reviewer', prompt: 'SKILL' }],
     extensionMessages: [{ role: 'system', layer: 'extension', source: 'logger', content: 'EXTENSION' }]
   });
 
@@ -17,7 +17,7 @@ test('buildInstructionMessages preserves deterministic layer order', async () =>
     [
       'core:base:BASE',
       'workspace:workspace:WORKSPACE',
-      'skill:skill:reviewer:SKILL',
+      'skill:skill:reviewer:Skill directory: /tmp/workspace/.cliq/skills/reviewer\nBundled resources and scripts are relative to this directory. Use absolute paths when running bundled scripts with bash.\n\nSKILL',
       'extension:logger:EXTENSION'
     ]
   );
