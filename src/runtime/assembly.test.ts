@@ -27,6 +27,9 @@ test('createRuntimeAssembly merges config skills, CLI skills, and extension inst
       path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
       `---
 name: reviewer
+description: Review before editing
+allowed-tools:
+  - Bash(git status:*)
 ---
 
 Review before editing.`,
@@ -36,6 +39,7 @@ Review before editing.`,
       path.join(cwd, '.cliq', 'skills', 'safe-edit', 'SKILL.md'),
       `---
 name: safe-edit
+description: Prefer exact edits over shell mutation
 ---
 
 Prefer exact edits over shell mutation when possible.`,
@@ -65,6 +69,7 @@ Prefer exact edits over shell mutation when possible.`,
     assert.deepEqual(assembly.skillNames, ['reviewer', 'safe-edit']);
     assert.equal(assembly.extensionNames.includes('policy-instructions'), true);
     assert.equal(messages.some((message) => message.layer === 'workspace'), true);
+    assert.equal(messages.some((message) => message.layer === 'skill' && /Bash\(git status/i.test(message.content)), false);
     assert.equal(messages.some((message) => message.source === 'echo'), true);
   } finally {
     await rm(cwd, { recursive: true, force: true });
