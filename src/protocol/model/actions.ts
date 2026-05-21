@@ -24,6 +24,10 @@ export type GrepAction = {
   pattern: string;
 };
 
+export type OsPathAction = {
+  name: 'desktop';
+};
+
 import { repairJsonStrings } from './json-repair.js';
 
 export type ModelAction =
@@ -33,9 +37,10 @@ export type ModelAction =
   | { ls: LsAction }
   | { find: FindAction }
   | { grep: GrepAction }
+  | { os_path: OsPathAction }
   | { message: string };
 
-const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'message'] as const;
+const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'os_path', 'message'] as const;
 
 export function parseModelAction(content: string): ModelAction {
   let parsed: unknown;
@@ -129,6 +134,17 @@ export function parseModelAction(content: string): ModelAction {
         grep: {
           path: grep.path as string | undefined,
           pattern: grep.pattern
+        }
+      };
+    }
+  }
+
+  if (record.os_path && typeof record.os_path === 'object' && !Array.isArray(record.os_path)) {
+    const osPath = record.os_path as Record<string, unknown>;
+    if (osPath.name === 'desktop') {
+      return {
+        os_path: {
+          name: 'desktop'
         }
       };
     }

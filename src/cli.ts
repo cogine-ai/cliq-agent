@@ -1191,7 +1191,7 @@ Options:
 Policy modes:
   auto                     Execute registered tools without confirmation
   confirm-write            Ask before write tools
-  read-only                Allow read, ls, find, and grep only
+  read-only                Allow read, ls, find, grep, and os_path only
   confirm-bash             Ask before exec tools
   confirm-all              Ask before every tool
 

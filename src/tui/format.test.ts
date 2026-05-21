@@ -15,6 +15,7 @@ test('toolNameFromAction maps each ModelAction variant to its registry name', ()
   assert.equal(toolNameFromAction({ ls: { path: '.' } }), 'ls');
   assert.equal(toolNameFromAction({ find: { name: '*.ts' } }), 'find');
   assert.equal(toolNameFromAction({ grep: { pattern: 'foo' } }), 'grep');
+  assert.equal(toolNameFromAction({ os_path: { name: 'desktop' } }), 'os_path');
 });
 
 test('previewFromAction shows the most useful field per action kind', () => {
@@ -34,6 +35,7 @@ test('previewFromAction shows the most useful field per action kind', () => {
   assert.equal(previewFromAction({ find: { name: '*.ts', path: 'src' } }), '*.ts in src');
   assert.equal(previewFromAction({ grep: { pattern: 'foo' } }), 'foo');
   assert.equal(previewFromAction({ grep: { pattern: 'foo', path: 'src' } }), 'foo in src');
+  assert.equal(previewFromAction({ os_path: { name: 'desktop' } }), 'desktop');
 });
 
 test('formatToolResultSummary prefers path; falls back to policy/error', () => {

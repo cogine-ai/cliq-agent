@@ -4,10 +4,11 @@ import { editTool } from './edit.js';
 import { findTool } from './find.js';
 import { grepTool } from './grep.js';
 import { lsTool } from './ls.js';
+import { osPathTool } from './os-path.js';
 import { readTool } from './read.js';
 import type { ToolDefinition } from './types.js';
 
-export function createToolRegistry(definitions: ToolDefinition[] = [bashTool, editTool, readTool, lsTool, findTool, grepTool]) {
+export function createToolRegistry(definitions: ToolDefinition[] = [bashTool, editTool, readTool, lsTool, findTool, grepTool, osPathTool]) {
   return {
     definitions,
     resolve(action: ModelAction) {
