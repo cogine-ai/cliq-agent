@@ -5,7 +5,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
-import { ArtifactNotFoundError, SessionNotFoundError } from './artifacts.js';
+import { ArtifactNotFoundError, SessionNotFoundError, WorkspaceNotFoundError } from './artifacts.js';
 import type { HeadlessRunOutput, HeadlessRunRequest, RuntimeEventEnvelope } from './contract.js';
 import {
   HEADLESS_EXIT_CANCELLED,
@@ -242,6 +242,122 @@ test('rpc run.cancel aborts the active run controller', async () => {
 
   const messages = parseLines(writes);
   assert.deepEqual(messages[1], { jsonrpc: '2.0', id: 2, result: { status: 'cancelled' } });
+});
+
+test('rpc skills.list exposes catalog and active skill state', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    },
+    async listSkills(cwd) {
+      return {
+        cwd,
+        skills: [
+          {
+            name: 'reviewer',
+            description: 'review instructions',
+            scope: 'project',
+            sourceKind: 'project-cliq',
+            sourceRoot: path.join(cwd, '.cliq', 'skills'),
+            skillFile: path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
+            status: 'available',
+            active: true
+          }
+        ],
+        activeSkills: [
+          {
+            name: 'reviewer',
+            description: 'review instructions',
+            scope: 'project',
+            sourceKind: 'project-cliq',
+            sourceRoot: path.join(cwd, '.cliq', 'skills'),
+            skillFile: path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
+            active: true
+          }
+        ]
+      };
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'skills.list',
+      params: { cwd: process.cwd() }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.id, 7);
+  assert.equal(response.result.skills[0].name, 'reviewer');
+  assert.equal(response.result.activeSkills[0].active, true);
+});
+
+test('rpc skills.list returns invalid params for malformed params', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    }
+  });
+
+  await server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 8, method: 'skills.list', params: {} }));
+
+  const [response] = parseLines(writes);
+  assert.equal(response.id, 8);
+  assert.equal(response.error.code, -32602);
+});
+
+test('rpc skills.list maps missing workspaces to invalid params', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    },
+    async listSkills(cwd) {
+      throw new WorkspaceNotFoundError(cwd);
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'skills.list',
+      params: { cwd: '/tmp/missing-workspace' }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.id, 9);
+  assert.equal(response.error.code, -32602);
+});
+
+test('rpc skills.list maps unexpected failures to internal errors', async () => {
+  const writes: string[] = [];
+  const server = createRpcServer({
+    writeLine(line) {
+      writes.push(line);
+    },
+    async listSkills() {
+      throw new Error('catalog failed');
+    }
+  });
+
+  await server.handleLine(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 10,
+      method: 'skills.list',
+      params: { cwd: process.cwd() }
+    })
+  );
+
+  const [response] = parseLines(writes);
+  assert.equal(response.id, 10);
+  assert.equal(response.error.code, -32603);
 });
 
 test('stdio rpc aborts the active run and resolves when stdin closes', async () => {
@@ -561,6 +677,7 @@ test('rpc session.get returns a stable session view', async () => {
         model: { provider: 'ollama', model: 'fake' },
         lifecycle: { status: 'idle', turn: 0 },
         records: [],
+        activeSkills: [],
         checkpoints: [],
         compactions: []
       };

@@ -79,6 +79,43 @@ test('runHeadless refuses non-interactive runs without persisted workspace trust
   assert.match(output.error!.message, /CLIQ_TRUST_WORKSPACE=/);
 });
 
+test('runHeadless checks workspace trust before loading skill configuration', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-skill-trust-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-skill-trust-ws-'));
+  cleanupDirs.push(home, cwd);
+  process.env.CLIQ_HOME = home;
+  delete process.env.CLIQ_TRUST_WORKSPACE;
+  await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+  await writeFile(path.join(cwd, '.cliq', 'config.json'), '{bad json', 'utf8');
+  await mkdir(path.join(cwd, '.cliq', 'skills', 'reviewer'), { recursive: true });
+  await writeFile(
+    path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
+    `---
+name: reviewer
+description: should not be read before trust
+---
+
+Do not load this before trust.`,
+    'utf8'
+  );
+
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'never runs',
+      model: { provider: 'ollama', model: 'test-model' },
+      skills: ['reviewer'],
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('ignored') }
+  );
+
+  assert.equal(output.status, 'failed');
+  assert.ok(output.error);
+  assert.match(output.error!.message, /CLIQ_TRUST_WORKSPACE=/);
+  assert.doesNotMatch(output.error!.message, /bad json|reviewer/i);
+});
+
 test('runHeadless emits run-start through run-end for a completed run', async () => {
   const { cwd } = await setupWorkspace();
   const events: string[] = [];

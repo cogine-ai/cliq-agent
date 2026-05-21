@@ -103,6 +103,54 @@ test('/policy <mode> calls onPolicyChange and dispatches policy-change', async (
   assert.equal(store.getState().policy, 'read-only');
 });
 
+test('/skills calls onSkillsList and renders the result', async () => {
+  const store = makeStore();
+  let calls = 0;
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onSkillsList={() => {
+        calls += 1;
+        return 'Skills:\n* reviewer [project/available] review instructions';
+      }}
+    />
+  );
+
+  stdin.write('/skills');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+
+  assert.equal(calls, 1);
+  assert.match(lastFrame() ?? '', /reviewer/);
+});
+
+test('/skill <name> calls onSkillActivate and renders the result', async () => {
+  const store = makeStore();
+  const activated: string[] = [];
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onSkillActivate={(name) => {
+        activated.push(name);
+        return `skill ${name} activated`;
+      }}
+    />
+  );
+
+  stdin.write('/skill reviewer');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+
+  assert.deepEqual(activated, ['reviewer']);
+  assert.match(lastFrame() ?? '', /skill reviewer activated/);
+});
+
 test('/reset awaits onReset and clears the transcript via session-reset', async () => {
   const store = makeStore();
   store.dispatch({ type: 'user-input', text: 'before reset' });

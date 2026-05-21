@@ -198,6 +198,7 @@ run.start(params: HeadlessRunRequest) -> { runId }
 run.cancel(params: { runId: string }) -> { status: 'cancelled' | 'not-found' | 'already-finished' }
 session.get(params: { cwd: string; sessionId?: string }) -> SessionView
 artifact.get(params: { cwd: string; artifactId: string; sessionId?: string }) -> ArtifactView
+skills.list(params: { cwd: string }) -> { cwd, skills, activeSkills }
 ```
 
 Runtime events are emitted as notifications:
@@ -397,7 +398,12 @@ See `docs/superpowers/specs/2026-05-02-cliq-transactional-workspace-runtime-desi
 
 ## Local skills
 
-Local skills live at `./.cliq/skills/<name>/SKILL.md` and inject additional system instructions without changing Cliq core code.
+Local skills are discovered from project roots after workspace trust has been decided:
+
+- Project: `./.cliq/skills/<name>/SKILL.md` and `./.agents/skills/<name>/SKILL.md`
+- User: `~/.cliq/skills/<name>/SKILL.md` and `~/.agents/skills/<name>/SKILL.md`
+
+Project skills win over user skills when names collide. Workspace `defaultSkills` can activate only project-owned skills; `--skill <name>`, headless `skills`, TUI `/skill <name>`, and the model `{"skill":{"name":"..."}}` action can explicitly activate discovered project or user skills. Activation injects instructions only; it does not grant bash, edit, network, or MCP permissions.
 
 ```md
 ---
@@ -408,7 +414,9 @@ description: inspection-first review mode
 Prefer read-only inspection first. Summarize structure before proposing mutations.
 ```
 
-You can activate a skill explicitly with `--skill <name>` or make it load by default via `defaultSkills` in workspace config.
+Optional frontmatter fields include `license`, `compatibility`, `metadata`, and `allowed-tools`. `allowed-tools` is descriptive metadata only; tool authorization still goes through Cliq's normal policy engine.
+
+Activated skills can expose bundled resources. The model can read or list them through `skillResource`, and the resolver keeps paths relative to the activated skill directory with traversal, symlink-escape, binary, and size checks.
 
 ## Extensions
 
