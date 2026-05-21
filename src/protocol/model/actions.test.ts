@@ -35,6 +35,12 @@ test('parses grep action', () => {
   });
 });
 
+test('parses os_path desktop discovery action', () => {
+  assert.deepEqual(parseModelAction('{"os_path":{"name":"desktop"}}'), {
+    os_path: { name: 'desktop' }
+  });
+});
+
 test('parses final message action', () => {
   assert.deepEqual(parseModelAction('{"message":"done"}'), { message: 'done' });
 });

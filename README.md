@@ -73,7 +73,7 @@ Cliq is intentionally small right now. It supports:
 
 - Interactive chat and one-shot tasks
 - Machine-readable JSONL headless runs
-- Structured file inspection with read, list, find, and grep
+- Structured file inspection with read, list, find, grep, and OS path discovery
 - Shell command execution
 - Exact text replacement edits
 - Local session persistence, checkpoints, forks, compactions, and handoffs

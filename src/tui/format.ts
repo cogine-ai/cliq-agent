@@ -18,6 +18,7 @@ export function toolNameFromAction(action: ModelAction): string {
   if ('ls' in action) return 'ls';
   if ('find' in action) return 'find';
   if ('grep' in action) return 'grep';
+  if ('os_path' in action) return 'os_path';
   if ('message' in action) return 'message';
   const _exhaustive: never = action;
   return _exhaustive;
@@ -44,6 +45,7 @@ export function previewFromAction(action: ModelAction): string {
     const g = action.grep;
     return `${g.pattern}${g.path ? ` in ${g.path}` : ''}`;
   }
+  if ('os_path' in action) return action.os_path.name;
   if ('message' in action) {
     // 'message' is not a tool action; if it slipped past the runner's
     // dispatch into a preview, render empty rather than crash. The
