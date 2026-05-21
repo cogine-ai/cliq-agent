@@ -29,6 +29,9 @@
   "files": [
     "dist/**/*.js",
     "!dist/**/*.test.js",
+    "skills/**",
+    "!skills/**/__pycache__/**",
+    "!skills/**/*.pyc",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

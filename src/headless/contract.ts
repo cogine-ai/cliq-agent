@@ -394,8 +394,8 @@ export type CompactionView = {
 export type SkillView = {
   name: string;
   description: string | null;
-  scope: 'project' | 'user';
-  sourceKind: 'project-cliq' | 'project-agents' | 'user-cliq' | 'user-agents';
+  scope: 'project' | 'user' | 'builtin';
+  sourceKind: 'project-cliq' | 'project-agents' | 'user-cliq' | 'user-agents' | 'builtin';
   sourceRoot: string;
   skillFile: string;
   status?: 'available' | 'invalid' | 'shadowed';

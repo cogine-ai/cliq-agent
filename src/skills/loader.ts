@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { APP_DIR } from '../config.js';
 import { resolveCliqHome } from '../session/store.js';
@@ -30,6 +31,7 @@ type SkillDiscoveryRoot = {
 export type SkillDiscoveryOptions = {
   homeDir?: string;
   cliqHome?: string;
+  builtinRoot?: string | null;
 };
 
 export type LoadSkillsOptions = {
@@ -313,6 +315,25 @@ function userDiscoveryRoots(options: SkillDiscoveryOptions = {}): SkillDiscovery
   ];
 }
 
+function defaultBuiltinSkillsRoot() {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(moduleDir, '..', '..', 'skills', '.system');
+}
+
+function builtinDiscoveryRoots(options: SkillDiscoveryOptions = {}): SkillDiscoveryRoot[] {
+  if (options.builtinRoot === null) {
+    return [];
+  }
+  return [
+    {
+      scope: 'builtin',
+      sourceKind: 'builtin',
+      sourceRoot: path.resolve(options.builtinRoot ?? defaultBuiltinSkillsRoot()),
+      rank: 0
+    }
+  ];
+}
+
 async function readSkillEntry(root: SkillDiscoveryRoot, dirName: string): Promise<SkillCatalogEntry | null> {
   const skillDir = path.join(root.sourceRoot, dirName);
   const skillFile = path.join(skillDir, 'SKILL.md');
@@ -414,7 +435,7 @@ async function readRootEntries(root: SkillDiscoveryRoot): Promise<SkillCatalogEn
 }
 
 export async function discoverSkillCatalog(cwd: string, options: SkillDiscoveryOptions = {}): Promise<SkillCatalog> {
-  const roots = [...(await projectDiscoveryRoots(cwd)), ...userDiscoveryRoots(options)];
+  const roots = [...(await projectDiscoveryRoots(cwd)), ...userDiscoveryRoots(options), ...builtinDiscoveryRoots(options)];
   const entries = (await Promise.all(roots.map((root) => readRootEntries(root)))).flat();
 
   const groups = new Map<string, SkillCatalogEntry[]>();

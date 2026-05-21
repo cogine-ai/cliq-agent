@@ -20,9 +20,9 @@ export type ParsedSkillMarkdown = {
   diagnostics: SkillDiagnostic[];
 };
 
-export type SkillScope = 'project' | 'user';
+export type SkillScope = 'project' | 'user' | 'builtin';
 
-export type SkillSourceKind = 'project-cliq' | 'project-agents' | 'user-cliq' | 'user-agents';
+export type SkillSourceKind = 'project-cliq' | 'project-agents' | 'user-cliq' | 'user-agents' | 'builtin';
 
 export type SkillStatus = 'available' | 'invalid' | 'shadowed';
 
