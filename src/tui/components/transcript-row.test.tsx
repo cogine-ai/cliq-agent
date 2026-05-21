@@ -19,13 +19,14 @@ test('renders an assistant entry plain', () => {
   assert.doesNotMatch(lastFrame() ?? '', />/);
 });
 
-test('renders a tool entry with status glyph, name, and summary', () => {
+test('renders a tool entry with status label, name, and summary', () => {
   const { lastFrame } = render(
     <TranscriptRow
       entry={{ kind: 'tool', id: 't1', tool: 'edit', status: 'ok', summary: 'src/foo.ts' }}
     />
   );
   const frame = lastFrame() ?? '';
+  assert.match(frame, /OK/);
   assert.match(frame, /edit/);
   assert.match(frame, /src\/foo\.ts/);
 });
@@ -35,6 +36,7 @@ test('renders a tool entry without a summary (running, no preview yet)', () => {
     <TranscriptRow entry={{ kind: 'tool', id: 't1', tool: 'bash', status: 'running', summary: '' }} />
   );
   const frame = lastFrame() ?? '';
+  assert.match(frame, /running/);
   assert.match(frame, /bash/);
   assert.doesNotMatch(frame, /—/); // no detail separator without a summary
 });
@@ -54,10 +56,58 @@ test('renders bash body folded to 20 lines with a "more lines" marker', () => {
     />
   );
   const frame = lastFrame() ?? '';
+  assert.match(frame, /OK/);
+  assert.match(frame, /Ctrl\+O to expand/);
   assert.match(frame, /line-1\b/);
   assert.match(frame, /line-20\b/);
   assert.doesNotMatch(frame, /line-21\b/);
   assert.match(frame, /5 more lines/);
+});
+
+test('renders shell error exit details without expanding raw output', () => {
+  const body = Array.from({ length: 25 }, (_, i) => `error-line-${i + 1}`).join('\n');
+  const { lastFrame } = render(
+    <TranscriptRow
+      entry={{
+        kind: 'tool',
+        id: 't1',
+        tool: 'bash',
+        status: 'error',
+        summary: 'npm test — exit=42',
+        body
+      }}
+    />
+  );
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /ERROR/);
+  assert.match(frame, /npm test/);
+  assert.match(frame, /exit=42/);
+  assert.doesNotMatch(frame, /error-line-21\b/);
+});
+
+test('renders denied policy detail and unknown fallback state', () => {
+  const denied = render(
+    <TranscriptRow
+      entry={{
+        kind: 'tool',
+        id: 't1',
+        tool: 'edit',
+        status: 'error',
+        summary: 'policy=confirm-write confirmation denied'
+      }}
+    />
+  ).lastFrame() ?? '';
+  assert.match(denied, /ERROR/);
+  assert.match(denied, /policy=confirm-write confirmation denied/);
+
+  const fallback = render(
+    <TranscriptRow
+      entry={{ kind: 'tool', id: 't2', tool: 'unknown', status: 'ok', summary: '(no details)' }}
+    />
+  ).lastFrame() ?? '';
+  assert.match(fallback, /OK/);
+  assert.match(fallback, /unknown/);
+  assert.match(fallback, /\(no details\)/);
 });
 
 test('a trailing newline in bash body does not inflate the "more lines" count', () => {
