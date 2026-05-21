@@ -24,8 +24,8 @@ import type { WorkspacePermissionsConfig } from '../workspace/config.js';
  *   2. workspace config        — `.cliq/config` permissions section
  *   3. persisted per-workspace — ~/.cliq/workspaces/<id>/permissions.json
  *   4. CLI flags               — --allow/--deny/--ask
- *   5. session memory          — TUI "Allow this session" picks (B5 wires;
- *                                B4 just leaves a hook in the caller)
+ *   5. session memory          — TUI "Allow this session" via mutable table +
+ *                                extendAllow in the caller (not composed here)
  *
  * The user-global allow/deny store (~/.cliq/permissions.global.json) is
  * intentionally absent — see TODO(no-issue: user-global-permissions) in

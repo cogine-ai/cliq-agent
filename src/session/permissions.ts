@@ -20,8 +20,7 @@ import type { WorkspaceTrustContext } from './trust.js';
  *
  * The store API itself is intentionally agnostic — it neither knows nor cares
  * whether trust has been resolved. Enforcing the load order is the
- * responsibility of the call site in src/cli.ts / src/runtime/assembly.ts
- * (wired in step B4 of #62-B).
+ * responsibility of composeRuntimePermissionTable callers after trust resolves.
  */
 
 export const WORKSPACE_PERMISSIONS_RECORD_VERSION = 1 as const;

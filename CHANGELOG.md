@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Removed stale `transactions.bashPolicy=confirm` config rejection** — the v0.8 launch gate is gone. Interactive TX runs rely on the merged PolicyEngine path (`policyAlreadyApproved`); `confirm` still promotes to deny under `--headless` as the CI safety net (unchanged).
 - `POLICY_MODES` / `isPolicyMode` / `POLICY_MODE_LIST` extracted from `src/cli.ts` into a shared `src/policy/modes.ts` so workspace config, CLI flags, slash commands, and the TUI all read from one source of truth (#62).
 - `accessChannelPrimaryKey` now exported from `src/policy/decision-table.ts` so other layers (TUI extend-allow, slash command rendering, audit log) can derive a stable rule pattern from a live subject without re-implementing the channel switch (#62).
 - Headless / `--json` / `rpc` / non-TTY paths are explicitly documented as one-shot scope only: `PermissionRequest` hooks emitting `scope: 'session'` or `scope: 'workspace'` are coerced down to `'once'` (already enforced via `coerceHookPermissionScope` since #62-A), and `~/.cliq/workspaces/<id>/permissions.json` is never written from these paths. Pinned by a new regression test in `src/headless/run.test.ts` (#62).

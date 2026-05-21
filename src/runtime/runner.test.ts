@@ -1059,9 +1059,8 @@ test('runner lets PermissionRequest command hooks allow policy asks without user
 });
 
 test('PermissionRequest hook allow with explicit scope is accepted (forward compat)', async () => {
-  // v0 only acts on 'once'; 'session' and 'workspace' are accepted from the
-  // hook so authors can start emitting them, but treated as 'once' by the
-  // runner until #62-B lands. The hook must still complete the turn cleanly.
+  // Hook path coerces session/workspace to one-shot; TUI extendAllow persists
+  // those scopes separately. The hook must still complete the turn cleanly.
   // Non-string scope values are also exercised here (regression pin for
   // PR #71 nitpick) to lock in coerceHookPermissionScope's "unknown/non-string
   // → 'once'" guarantee.

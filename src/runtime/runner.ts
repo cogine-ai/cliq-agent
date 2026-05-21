@@ -139,13 +139,10 @@ export function createRunner({
       }
       const permissionDecision = run.result.output?.permissionDecision;
       if (permissionDecision?.behavior === 'allow') {
-        // Coerce scope: missing/unknown → 'once'. Per #62-A, only 'once'
-        // has runtime effect today; 'session' and 'workspace' are accepted
-        // from the hook (so authors can start emitting them) but treated
-        // as 'once' until the session/workspace allowlist persistence
-        // surface ships in #62-B.
+        // Coerce scope: missing/unknown → 'once'. Hook-emitted session/workspace
+        // scopes are still one-shot here; the TUI extendAllow path persists them.
         const _scope = coerceHookPermissionScope(permissionDecision.scope);
-        void _scope; // TODO(#62-B): plumb scope into the session/workspace allowlist
+        void _scope; // TODO(post-#62-B): plumb scope into session/workspace allowlist
         return {
           behavior: 'allow',
           reason: permissionDecision.message,
@@ -176,8 +173,8 @@ export function createRunner({
    * forward-compatible hook (emitting e.g. 'forever') gracefully degrades to
    * one-shot on older runners.
    *
-   * TODO(#62-B): when the session/workspace allowlist surface lands, change
-   * the return type to a richer enum that the runner actually acts on.
+   * TODO(post-#62-B): act on session/workspace scopes from hooks (TUI path
+   * already persists via extendAllow).
    */
   function coerceHookPermissionScope(value: unknown): 'once' | 'session' | 'workspace' {
     if (value === 'session' || value === 'workspace') return value;

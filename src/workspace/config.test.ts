@@ -348,12 +348,10 @@ test('parseWorkspaceConfig refuses applyPolicy=manual-only when auto is unset (d
   );
 });
 
-test('parseWorkspaceConfig refuses bashPolicy=confirm in v0.8 (deferred to v0.9)', () => {
+test('parseWorkspaceConfig accepts bashPolicy=confirm', () => {
   const raw = { transactions: { mode: 'edit', bashPolicy: 'confirm' } };
-  assert.throws(
-    () => parseWorkspaceConfig(raw),
-    /bashPolicy=confirm is not yet supported in v0\.8/
-  );
+  const parsed = parseWorkspaceConfig(raw);
+  assert.equal(parsed.transactions?.bashPolicy, 'confirm');
 });
 
 test('parseWorkspaceConfig accepts bashPolicy=passthrough', () => {
