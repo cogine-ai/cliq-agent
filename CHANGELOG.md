@@ -7,8 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-05-22
+
+This release completes the user-facing tool-permission surface that followed
+the v0.10 Workspace Trust gate, and adds the foundation for local Agent Skills:
+deterministic discovery, explicit and model-driven activation, TUI/RPC
+inspection, active-skill state, and bounded resource reads.
+
 ### Added
 
+- **Agent Skills foundation** — Cliq now discovers local `SKILL.md` files from
+  project `.cliq/skills` / `.agents/skills` and user `~/.cliq/skills` /
+  `~/.agents/skills` roots after Workspace Trust has decided. The catalog
+  includes scope, source kind, diagnostics, deterministic collision handling,
+  and robust frontmatter parsing for standard Agent Skills files (#120-#128).
+- **Skill activation surfaces** — existing `defaultSkills`, repeatable
+  `--skill`, and headless `skills` now share the catalog-backed loader. TUI
+  users can inspect and activate skills through `/skills` and `/skill <name>`,
+  while models can activate discovered skills through the new `skill` action.
+  Workspace `defaultSkills` remain restricted to project-owned skills (#120-#128).
+- **Active skill state and instruction refresh** — activated skills are tracked
+  in session state and reinjected into runtime-composed instructions on later
+  turns, including after session replay and compaction-sensitive paths. Missing
+  or invalidated active skills surface diagnostics instead of silently
+  disappearing (#120-#128).
+- **Bounded skill resources** — activated skills can expose bundled files
+  through the `skillResource` action. Reads and listings stay relative to the
+  activated skill directory and reject traversal, symlink escape, binary files,
+  and oversized files (#120-#128).
+- **RPC skill catalog visibility** — `cliq rpc` now exposes `skills.list` so
+  GUI, gateway, and automation clients can inspect available and active skills
+  without scraping terminal output (#120-#128).
+- **TUI update notice** — the status bar can surface npm update availability
+  without failing the session if the update check errors.
 - **Per-workspace `permissions.json` persistence** — `~/.cliq/workspaces/<id>/permissions.json` stores allow/deny rules picked from the TUI "Always allow in this workspace" decision. Atomic writes, fail-closed reads (corrupted/version-mismatched/workspace-id-mismatched records are ignored rather than honored), and the same load-order invariant as `trust.json` (must follow the Workspace Trust gate). User-global allow/deny is deliberately not shipped in v0 (#62).
 - **Workspace `permissions` config section** — `.cliq/config.json` now accepts `permissions: { preset?, allow?, deny?, ask? }` so a workspace can pin its default friction level and per-action rules without forcing every invocation to pass CLI flags. Errors carry the offending rule index for fast typo location (#62).
 - **Shared `<channel>: <pattern>` permission grammar** — one parser used by workspace config, CLI flags, and the TUI session memory; covers `fs-read`, `fs-write`, `bash`, `mcp`, `network` channels with literal / `*` / `prefix *` matching. Forward-compat for MCP and network channels; today they only carry the model's stated intent (#62).
@@ -22,6 +53,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `POLICY_MODES` / `isPolicyMode` / `POLICY_MODE_LIST` extracted from `src/cli.ts` into a shared `src/policy/modes.ts` so workspace config, CLI flags, slash commands, and the TUI all read from one source of truth (#62).
 - `accessChannelPrimaryKey` now exported from `src/policy/decision-table.ts` so other layers (TUI extend-allow, slash command rendering, audit log) can derive a stable rule pattern from a live subject without re-implementing the channel switch (#62).
 - Headless / `--json` / `rpc` / non-TTY paths are explicitly documented as one-shot scope only: `PermissionRequest` hooks emitting `scope: 'session'` or `scope: 'workspace'` are coerced down to `'once'` (already enforced via `coerceHookPermissionScope` since #62-A), and `~/.cliq/workspaces/<id>/permissions.json` is never written from these paths. Pinned by a new regression test in `src/headless/run.test.ts` (#62).
+
+### Fixed
+
+- Project skill loading now validates the canonical realpath of both the skill
+  directory and `SKILL.md` file before treating a project skill as available,
+  closing a symlink escape where `SKILL.md` could point outside the trusted
+  project root (#120-#128).
+- Shift+Tab handling no longer leaks raw terminal input into the TUI buffer.
+- Update-check failures are absorbed by the TUI instead of interrupting the
+  interactive session.
 
 ## [0.10.0] - 2026-05-16
 
@@ -121,6 +162,7 @@ payload-aware approvals, and a steady stream of TUI polish.
   [GitHub Releases](https://github.com/cogine-ai/cliq-agent/releases); this
   file starts with v0.9.0.
 
-[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.8.0...v0.9.0
