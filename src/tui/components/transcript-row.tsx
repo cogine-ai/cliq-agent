@@ -3,6 +3,7 @@ import { Box, Text } from 'ink';
 import type { TranscriptEntry } from '../store.js';
 
 const TOOL_GLYPH = { running: '▸', ok: '✓', error: '✗' } as const;
+const TOOL_STATUS_LABEL = { running: 'running', ok: 'OK', error: 'ERROR' } as const;
 const FOLDED_BODY_LINES = 20;
 
 export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
@@ -24,11 +25,14 @@ export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
       );
     case 'tool': {
       const glyph = TOOL_GLYPH[entry.status];
+      const label = TOOL_STATUS_LABEL[entry.status];
       const color = entry.status === 'error' ? 'red' : entry.status === 'ok' ? 'green' : 'yellow';
       return (
         <Box flexDirection="column">
           <Box>
             <Text color={color}>{glyph} </Text>
+            <Text color={color} bold>{label}</Text>
+            <Text> </Text>
             <Text dimColor>tool: </Text>
             <Text>{entry.tool}</Text>
             {entry.summary ? (

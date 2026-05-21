@@ -36,15 +36,25 @@ test('previewFromAction shows the most useful field per action kind', () => {
   assert.equal(previewFromAction({ grep: { pattern: 'foo', path: 'src' } }), 'foo in src');
 });
 
-test('formatToolResultSummary prefers path; falls back to policy/error', () => {
+test('formatToolResultSummary prefers target details; falls back to policy/error', () => {
   assert.equal(
     formatToolResultSummary({
       tool: 'read',
       status: 'ok',
       content: '...',
-      meta: { path: 'src/foo.ts' }
+      meta: { path: 'src/foo.ts', start_line: 3, end_line: 8 }
     }),
-    'src/foo.ts'
+    'src/foo.ts:3-8'
+  );
+
+  assert.equal(
+    formatToolResultSummary({
+      tool: 'grep',
+      status: 'ok',
+      content: '...',
+      meta: { path: 'src', matches: 2 }
+    }),
+    'src — 2 matches'
   );
 
   assert.equal(
@@ -83,9 +93,42 @@ test('formatToolResultSummary prefers path; falls back to policy/error', () => {
   );
 });
 
+test('formatToolResultSummary surfaces bash command and exit state', () => {
+  assert.equal(
+    formatToolResultSummary({
+      tool: 'bash',
+      status: 'ok',
+      content: 'TOOL_RESULT bash OK\n$ npm test\n(exit=0 signal=none)\npass',
+      meta: { exit: 0, signal: 'none', timed_out: false }
+    }),
+    'npm test — exit=0'
+  );
+
+  assert.equal(
+    formatToolResultSummary({
+      tool: 'bash',
+      status: 'error',
+      content: 'TOOL_RESULT bash ERROR\n$ npm test\n(exit=42 signal=none)\nfail',
+      meta: { exit: 42, signal: 'none', timed_out: false }
+    }),
+    'npm test — exit=42'
+  );
+
+  assert.equal(
+    formatToolResultSummary({
+      tool: 'bash',
+      status: 'error',
+      content: 'TOOL_RESULT bash ERROR\n$ long command\n(exit=null signal=SIGTERM)\n[process timed out]',
+      meta: { exit: null, signal: 'SIGTERM', timed_out: true }
+    }),
+    'long command — exit=null signal=SIGTERM timed out'
+  );
+});
+
 test('extractToolBody strips the TOOL_RESULT header for bash and the file tools', () => {
   const bash = `TOOL_RESULT bash success
 $ echo hi
+(exit=0 signal=none)
 hi
 done`;
   assert.equal(extractToolBody({ tool: 'bash', status: 'ok', content: bash, meta: {} }), 'hi\ndone');
