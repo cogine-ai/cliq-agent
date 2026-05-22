@@ -1,8 +1,73 @@
+const SHELL_INTERPRETER_HEADS = new Set([
+  'ash',
+  'bash',
+  'busybox',
+  'dash',
+  'fish',
+  'ksh',
+  'sh',
+  'zsh'
+]);
+
 /**
  * True when a bash line contains syntax that can execute more than the
  * command head matched by a `bash: <head> *` allow rule.
+ *
+ * Also inspects inline scripts passed to shell interpreters via `-c` / `--command`
+ * so `bash -c 'git status && rm -rf /'` cannot bypass allow rules through quoting.
  */
 export function bashCommandHasUnsafeAllowSyntax(commandLine: string): boolean {
+  if (unsafeAllowSyntaxInFragment(commandLine)) return true;
+  const nested = extractShellInlineScript(commandLine);
+  if (nested !== null && unsafeAllowSyntaxInFragment(nested)) return true;
+  return false;
+}
+
+/**
+ * Extract the inline script argument from `sh -c`, `bash -c`, etc., when present.
+ * Returns null for non-interpreter invocations or when no `-c` script is found.
+ */
+export function extractShellInlineScript(commandLine: string): string | null {
+  if (typeof commandLine !== 'string') return null;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return null;
+
+  const tokens = tokenizeWords(trimmed);
+  if (tokens.length === 0) return null;
+
+  let i = 0;
+  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
+    i += 1;
+  }
+  while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
+    i = skipWrapperFlags(tokens, i + 1);
+    if (i >= tokens.length) return null;
+  }
+  if (i >= tokens.length) return null;
+
+  const head = tokenBasename(tokens[i]!);
+  if (!SHELL_INTERPRETER_HEADS.has(head)) return null;
+  i += 1;
+
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '-c' || token === '--command') {
+      return tokens[i + 1] ?? null;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return null;
+}
+
+function tokenBasename(token: string): string {
+  return token.includes('/') ? token.split('/').filter(Boolean).pop()! : token;
+}
+
+function unsafeAllowSyntaxInFragment(commandLine: string): boolean {
   if (typeof commandLine !== 'string') return false;
   const trimmed = commandLine.trim();
   if (trimmed === '') return false;
@@ -198,6 +263,10 @@ function skipWrapperFlags(tokens: string[], start: number): number {
  * fall through to the preset rather than guess.
  */
 function tokenizeLeadingWords(input: string): string[] {
+  return tokenizeWords(input, { stopAtShellOperators: true });
+}
+
+function tokenizeWords(input: string, options: { stopAtShellOperators?: boolean } = {}): string[] {
   const out: string[] = [];
   let buf = '';
   let i = 0;
@@ -238,7 +307,7 @@ function tokenizeLeadingWords(input: string): string[] {
     }
 
     // Stop at shell operators; we don't try to chase pipelines.
-    if (ch === '|' || ch === '&' || ch === ';' || ch === '\n') {
+    if (options.stopAtShellOperators && (ch === '|' || ch === '&' || ch === ';' || ch === '\n')) {
       break;
     }
 
