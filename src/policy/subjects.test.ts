@@ -17,7 +17,7 @@ test('buildToolApprovalSubject creates a bash approval subject with command payl
   assert.equal(subject.display.title, 'Allow bash command?');
   assert.equal(subject.display.command, 'npm test');
   if (subject.kind === 'tool') {
-    assert.deepEqual(subject.channel, { kind: 'bash', commandHead: 'npm' });
+    assert.deepEqual(subject.channel, { kind: 'bash', commandHead: 'npm', unsafeForAllow: false });
   }
 });
 
@@ -28,7 +28,7 @@ test('buildToolApprovalSubject extracts a clean command head for bash with env p
   });
 
   if (subject.kind === 'tool') {
-    assert.deepEqual(subject.channel, { kind: 'bash', commandHead: 'git' });
+    assert.deepEqual(subject.channel, { kind: 'bash', commandHead: 'git', unsafeForAllow: false });
   }
 });
 
@@ -41,7 +41,29 @@ test('buildToolApprovalSubject reports empty commandHead for unidentifiable bash
   if (subject.kind === 'tool') {
     // Empty string is the explicit "no head" sentinel; allowlist matching
     // MUST fall through to ask/preset instead of guessing.
-    assert.deepEqual(subject.channel, { kind: 'bash', commandHead: '' });
+    assert.deepEqual(subject.channel, { kind: 'bash', commandHead: '', unsafeForAllow: false });
+  }
+});
+
+test('buildToolApprovalSubject marks executable shell syntax unsafe for bash allow rules', () => {
+  for (const bash of [
+    'git status && rm -rf /',
+    'git status $(rm -rf /)',
+    'git status `rm -rf /`',
+    'git status <(rm -rf /)'
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+
+    if (subject.kind === 'tool') {
+      assert.deepEqual(subject.channel, {
+        kind: 'bash',
+        commandHead: 'git',
+        unsafeForAllow: true
+      });
+    }
   }
 });
 

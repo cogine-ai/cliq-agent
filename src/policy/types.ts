@@ -31,7 +31,15 @@ export type ToolAccess = 'read' | 'write' | 'exec';
 export type AccessChannel =
   | { kind: 'fs-read'; path: string }
   | { kind: 'fs-write'; path: string; op: 'create' | 'modify' | 'delete' }
-  | { kind: 'bash'; commandHead: string }
+  | {
+      kind: 'bash';
+      commandHead: string;
+      /**
+       * True when syntax after the head can execute additional shell code and
+       * therefore must not be auto-approved by a bash allow rule.
+       */
+      unsafeForAllow: boolean;
+    }
   | { kind: 'mcp'; server: string; tool: string }
   | { kind: 'network'; host?: string };
 

@@ -22,6 +22,9 @@ const wsRule = (channel: PermissionRule['channel'], pattern: string): Permission
   source: 'workspace'
 });
 
+const bashChannel = (commandHead: string, unsafeForAllow = false) =>
+  ({ kind: 'bash', commandHead, unsafeForAllow }) as const;
+
 test('EMPTY_PERMISSION_TABLE and BUILTIN_DENY are deeply frozen (no shared-singleton mutation)', () => {
   // Regression for PR #71 CodeRabbit finding: the default table singleton is
   // reused as PolicyEngine's default `table`. A shallow freeze would let a
@@ -57,7 +60,7 @@ test('EMPTY_PERMISSION_TABLE has no rules and falls through for every channel', 
   const channels = [
     { kind: 'fs-read', path: 'README.md' },
     { kind: 'fs-write', path: 'src/foo.ts', op: 'modify' },
-    { kind: 'bash', commandHead: 'npm' }
+    bashChannel('npm')
   ] as const;
   for (const channel of channels) {
     assert.deepEqual(matchAgainstTable(EMPTY_PERMISSION_TABLE, channel), { kind: 'fallthrough' });
@@ -86,7 +89,7 @@ test('matchAgainstTable: deny wins over allow even at the same channel', () => {
     deny: [wsRule('bash', 'git *')],
     allow: [wsRule('bash', 'git *')]
   });
-  const decision = matchAgainstTable(table, { kind: 'bash', commandHead: 'git' });
+  const decision = matchAgainstTable(table, bashChannel('git'));
   assert.equal(decision.kind, 'deny');
   if (decision.kind === 'deny') {
     assert.equal(decision.rule.pattern, 'git *');
@@ -97,7 +100,7 @@ test('matchAgainstTable: BUILTIN deny rules are never overridable by a later all
   // Compose puts BUILTIN_DENY first; even a perfect allow match for
   // "bash: rm" must not flip the decision.
   const table = composePermissionTable({ allow: [wsRule('bash', 'rm')] });
-  const decision = matchAgainstTable(table, { kind: 'bash', commandHead: 'rm' });
+  const decision = matchAgainstTable(table, bashChannel('rm'));
   assert.equal(decision.kind, 'deny');
   if (decision.kind === 'deny') {
     assert.equal(decision.rule.source, 'builtin');
@@ -109,7 +112,7 @@ test('matchAgainstTable: allow precedes ask when both match', () => {
     allow: [wsRule('bash', 'npm *')],
     ask: [wsRule('bash', 'npm *')]
   });
-  const decision = matchAgainstTable(table, { kind: 'bash', commandHead: 'npm' });
+  const decision = matchAgainstTable(table, bashChannel('npm'));
   assert.equal(decision.kind, 'allow');
 });
 
@@ -123,8 +126,8 @@ test('matchAgainstTable: wildcard, exact, prefix " *", and trailing "/*" pattern
     ]
   });
 
-  assert.equal(matchAgainstTable(table, { kind: 'bash', commandHead: 'arbitrary' }).kind, 'allow');
-  assert.equal(matchAgainstTable(table, { kind: 'bash', commandHead: 'npm' }).kind, 'allow');
+  assert.equal(matchAgainstTable(table, bashChannel('arbitrary')).kind, 'allow');
+  assert.equal(matchAgainstTable(table, bashChannel('npm')).kind, 'allow');
   assert.equal(
     matchAgainstTable(table, { kind: 'fs-read', path: 'docs/README.md' }).kind,
     'allow'
@@ -143,7 +146,7 @@ test('matchAgainstTable: bash with empty commandHead never matches allow/ask', (
   const table = tableWith({
     allow: [wsRule('bash', '*'), wsRule('bash', '')]
   });
-  const decision = matchAgainstTable(table, { kind: 'bash', commandHead: '' });
+  const decision = matchAgainstTable(table, bashChannel(''));
   // Even a literal "" pattern or wildcard "*" must not approve an
   // unidentified bash invocation; the matcher falls through so the preset
   // can ask the user.
@@ -152,7 +155,7 @@ test('matchAgainstTable: bash with empty commandHead never matches allow/ask', (
 
 test('matchAgainstTable: empty-commandHead bash still hits deny rules (no escape hatch)', () => {
   const table = composePermissionTable({ deny: [wsRule('bash', '*')] });
-  const decision = matchAgainstTable(table, { kind: 'bash', commandHead: '' });
+  const decision = matchAgainstTable(table, bashChannel(''));
   // Deny precedence runs before the empty-head shortcut, so a sweeping
   // "deny: bash *" still applies.
   assert.equal(decision.kind, 'deny');
@@ -162,8 +165,33 @@ test('matchAgainstTable: channel kind mismatch is never a match', () => {
   const table = tableWith({
     allow: [wsRule('fs-read', 'README.md')]
   });
-  const decision = matchAgainstTable(table, { kind: 'bash', commandHead: 'README.md' });
+  const decision = matchAgainstTable(table, bashChannel('README.md'));
   assert.equal(decision.kind, 'fallthrough');
+});
+
+test('matchAgainstTable: unsafe bash syntax cannot be approved by allow rules', () => {
+  const table = tableWith({
+    allow: [wsRule('bash', 'git *')]
+  });
+  const decision = matchAgainstTable(table, bashChannel('git', true));
+  assert.equal(decision.kind, 'ask');
+  if (decision.kind === 'ask') {
+    assert.equal(decision.rule.source, 'builtin');
+    assert.equal(decision.rule.pattern, '(unsafe-shell-syntax)');
+  }
+});
+
+test('matchAgainstTable: explicit ask wins over allow for unsafe bash syntax', () => {
+  const table = tableWith({
+    allow: [wsRule('bash', 'git *')],
+    ask: [wsRule('bash', 'git *')]
+  });
+  const decision = matchAgainstTable(table, bashChannel('git', true));
+  assert.equal(decision.kind, 'ask');
+  if (decision.kind === 'ask') {
+    assert.equal(decision.rule.source, 'workspace');
+    assert.equal(decision.rule.pattern, 'git *');
+  }
 });
 
 test('matchAgainstTable: mcp + network channels (type-only today)', () => {
