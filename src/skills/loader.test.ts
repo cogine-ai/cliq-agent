@@ -76,6 +76,27 @@ test('loadSkills reads SKILL.md from the workspace skill directory', async () =>
   }
 });
 
+test('loadSkills rejects project skill directories symlinked outside the trusted project root', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-dir-escape-'));
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-dir-escape-outside-'));
+  try {
+    await writeSkill(outside, 'reviewer', 'External prompt from outside the trust root.');
+    await mkdir(path.join(cwd, '.cliq', 'skills'), { recursive: true });
+    await symlink(path.join(outside, 'reviewer'), path.join(cwd, '.cliq', 'skills', 'reviewer'));
+
+    const catalog = await discoverSkillCatalog(cwd);
+    const entry = catalog.entries.find((item) => item.name === 'reviewer');
+
+    assert.equal(entry?.status, 'invalid');
+    assert.equal(entry?.diagnostics.some((diagnostic) => diagnostic.code === 'project-skill-escape'), true);
+    assert.notEqual(entry?.description, 'External prompt from outside the trust root.');
+    await assert.rejects(() => loadSkills(cwd, ['reviewer'], { catalog }), /trusted project root/i);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
 test('loadSkills rejects project SKILL.md symlinks outside the trusted project root', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-file-escape-'));
   const outside = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-file-escape-outside-'));

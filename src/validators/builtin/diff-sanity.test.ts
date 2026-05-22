@@ -44,6 +44,18 @@ test('diff-sanity fails when path escapes workspace', async () => {
   });
 });
 
+test('diff-sanity allows paths with consecutive dots inside a segment (folder..name)', async () => {
+  await withFakeCliqHome(async (home) => {
+    await writeDiff(home, 'tx_2b', {
+      files: [{ path: 'folder..name/report.ts', op: 'modify', oldContent: 'a', newContent: 'b' }],
+      outOfBand: []
+    });
+    const result = await diffSanity.run(ctx('tx_2b'));
+    assert.equal(result.status, 'pass');
+    assert.equal(result.findings, undefined);
+  });
+});
+
 test('diff-sanity fails when content contains NUL byte', async () => {
   await withFakeCliqHome(async (home) => {
     await writeDiff(home, 'tx_3', { files: [{ path: 'a.bin', op: 'modify', oldContent: 'a', newContent: 'a\u0000b' }], outOfBand: [] });
