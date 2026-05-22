@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import type { Dirent } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -315,20 +316,76 @@ function userDiscoveryRoots(options: SkillDiscoveryOptions = {}): SkillDiscovery
   ];
 }
 
-function defaultBuiltinSkillsRoot() {
+function packagedBuiltinSkillsRoot() {
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
   return path.resolve(moduleDir, '..', '..', 'skills', '.system');
 }
 
-function builtinDiscoveryRoots(options: SkillDiscoveryOptions = {}): SkillDiscoveryRoot[] {
+async function directoryIsEmpty(target: string) {
+  try {
+    const entries = await fs.readdir(target);
+    return entries.length === 0;
+  } catch {
+    return true;
+  }
+}
+
+async function copyBuiltinSkillIfMissing(sourceRoot: string, targetRoot: string, skillName: string) {
+  const sourceDir = path.join(sourceRoot, skillName);
+  const targetDir = path.join(targetRoot, skillName);
+  const targetExists = await exists(targetDir);
+  if (targetExists && !(await directoryIsEmpty(targetDir))) {
+    return;
+  }
+
+  if (targetExists) {
+    await fs.rm(targetDir, { recursive: true, force: true });
+  }
+  await fs.cp(sourceDir, targetDir, { recursive: true, force: false, errorOnExist: true });
+}
+
+async function syncPackagedBuiltinSkills(options: SkillDiscoveryOptions = {}) {
+  const homeDir = path.resolve(options.homeDir ?? os.homedir());
+  const cliqHome = path.resolve(options.cliqHome ?? resolveCliqHome(process.env, homeDir));
+  const sourceRoot = packagedBuiltinSkillsRoot();
+  const targetRoot = path.join(cliqHome, 'skills', '.system');
+
+  let sourceEntries: Dirent[];
+  try {
+    sourceEntries = await fs.readdir(sourceRoot, { withFileTypes: true });
+  } catch {
+    return sourceRoot;
+  }
+
+  try {
+    await fs.mkdir(targetRoot, { recursive: true });
+    for (const entry of sourceEntries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      if (!(await exists(path.join(sourceRoot, entry.name, 'SKILL.md')))) {
+        continue;
+      }
+      await copyBuiltinSkillIfMissing(sourceRoot, targetRoot, entry.name);
+    }
+    return targetRoot;
+  } catch {
+    return sourceRoot;
+  }
+}
+
+async function builtinDiscoveryRoots(options: SkillDiscoveryOptions = {}): Promise<SkillDiscoveryRoot[]> {
   if (options.builtinRoot === null) {
     return [];
   }
+  const sourceRoot = options.builtinRoot === undefined
+    ? await syncPackagedBuiltinSkills(options)
+    : path.resolve(options.builtinRoot);
   return [
     {
       scope: 'builtin',
       sourceKind: 'builtin',
-      sourceRoot: path.resolve(options.builtinRoot ?? defaultBuiltinSkillsRoot()),
+      sourceRoot,
       rank: 0
     }
   ];
@@ -435,7 +492,11 @@ async function readRootEntries(root: SkillDiscoveryRoot): Promise<SkillCatalogEn
 }
 
 export async function discoverSkillCatalog(cwd: string, options: SkillDiscoveryOptions = {}): Promise<SkillCatalog> {
-  const roots = [...(await projectDiscoveryRoots(cwd)), ...userDiscoveryRoots(options), ...builtinDiscoveryRoots(options)];
+  const roots = [
+    ...(await projectDiscoveryRoots(cwd)),
+    ...userDiscoveryRoots(options),
+    ...(await builtinDiscoveryRoots(options))
+  ];
   const entries = (await Promise.all(roots.map((root) => readRootEntries(root)))).flat();
 
   const groups = new Map<string, SkillCatalogEntry[]>();
@@ -516,6 +577,11 @@ export async function loadSkillFromCatalog(
 }
 
 export async function loadSkills(cwd: string, names: string[], options: LoadSkillsOptions = {}): Promise<LoadedSkill[]> {
+  for (const name of names) {
+    if (!isValidSkillName(name)) {
+      throw new Error(`Invalid skill name: ${name}`);
+    }
+  }
   const catalog = options.catalog ?? (await discoverSkillCatalog(cwd, options.discovery));
   const loaded: LoadedSkill[] = [];
   for (const name of names) {
