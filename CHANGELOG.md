@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-05-22
+
+This patch release hardens the first built-in skills rollout and closes a
+permission allowlist edge case found during dogfooding.
+
+### Added
+
+- **Built-in skill delivery** — Cliq now ships and syncs the default
+  `skill-creator`, `skill-installer`, and `skill-doctor` skills into
+  `~/.cliq/skills/.system`, so fresh installs and upgrades have the core
+  skill maintenance helpers available without a separate manual install (#163).
+- **Regression coverage** for project skill trust escapes, diff-sanity path
+  normalization with `..` inside a filename segment, and workspace
+  `defaultSkills` rejecting user-only skills (#181).
+
+### Changed
+
+- Upgraded `ws` from 8.20.0 to 8.20.1 (#162).
+
+### Fixed
+
+- Built-in skill sync now repairs partially copied managed skill directories
+  instead of treating a lone `SKILL.md` as complete, and handles installer
+  GitHub refs that contain slashes when falling back to git auth (#163).
+- Built-in skill metadata parsing now accepts top-level `name` fields from
+  skill manifests (#163).
+- Bash permission allow rules no longer auto-approve commands that append
+  executable shell syntax such as `&&`, `;`, pipes, newlines, `$()`,
+  backticks, or process substitution after an allowed command head (#183).
+- Project skill loading keeps validating both the skill directory and
+  `SKILL.md` realpaths inside the trusted project root (#181).
+
 ## [0.11.0] - 2026-05-22
 
 This release completes the user-facing tool-permission surface that followed
@@ -162,7 +194,8 @@ payload-aware approvals, and a steady stream of TUI polish.
   [GitHub Releases](https://github.com/cogine-ai/cliq-agent/releases); this
   file starts with v0.9.0.
 
-[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.8.0...v0.9.0
