@@ -105,6 +105,29 @@ def _github_ref_exists(owner: str, repo: str, ref: str) -> bool:
         full_name = f"refs/{namespace}/{ref}"
         if any(item.get("ref") == full_name for item in refs if isinstance(item, dict)):
             return True
+    return _git_ref_exists(owner, repo, ref)
+
+
+def _git_ref_exists(owner: str, repo: str, ref: str) -> bool:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    for namespace in ("heads", "tags"):
+        full_ref = f"refs/{namespace}/{ref}"
+        for repo_url in (_build_repo_url(owner, repo), _build_repo_ssh(owner, repo)):
+            try:
+                result = subprocess.run(
+                    ["git", "ls-remote", "--exit-code", repo_url, full_ref],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=10,
+                    env=env,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if result.returncode == 0:
+                return True
     return False
 
 

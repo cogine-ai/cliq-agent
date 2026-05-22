@@ -327,13 +327,55 @@ async function copyBuiltinSkillIfMissing(sourceRoot: string, targetRoot: string,
   const targetExists = await exists(targetDir);
   const targetSkillFile = path.join(targetDir, 'SKILL.md');
   if (targetExists && (await exists(targetSkillFile))) {
-    return;
+    const sourceSkillFile = path.join(sourceDir, 'SKILL.md');
+    const [sourceSkill, targetSkill] = await Promise.all([
+      fs.readFile(sourceSkillFile, 'utf8'),
+      fs.readFile(targetSkillFile, 'utf8')
+    ]);
+    if (sourceSkill !== targetSkill || await targetContainsSourceTree(sourceDir, targetDir)) {
+      return;
+    }
   }
 
-  if (targetExists) {
-    await fs.rm(targetDir, { recursive: true, force: true });
+  const tempDir = path.join(targetRoot, `.${skillName}.tmp-${process.pid}-${Date.now()}`);
+  await fs.rm(tempDir, { recursive: true, force: true });
+  try {
+    await fs.cp(sourceDir, tempDir, { recursive: true, force: false, errorOnExist: true });
+    if (targetExists) {
+      await fs.rm(targetDir, { recursive: true, force: true });
+    }
+    await fs.rename(tempDir, targetDir);
+  } catch (error) {
+    await fs.rm(tempDir, { recursive: true, force: true });
+    throw error;
   }
-  await fs.cp(sourceDir, targetDir, { recursive: true, force: false, errorOnExist: true });
+}
+
+async function targetContainsSourceTree(sourceDir: string, targetDir: string, relativePath = ''): Promise<boolean> {
+  const sourcePath = path.join(sourceDir, relativePath);
+  const entries = await fs.readdir(sourcePath, { withFileTypes: true });
+  for (const entry of entries) {
+    const childRelativePath = path.join(relativePath, entry.name);
+    const targetPath = path.join(targetDir, childRelativePath);
+    if (entry.isDirectory()) {
+      try {
+        const targetStats = await fs.stat(targetPath);
+        if (!targetStats.isDirectory()) {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+      if (!(await targetContainsSourceTree(sourceDir, targetDir, childRelativePath))) {
+        return false;
+      }
+      continue;
+    }
+    if (!(await exists(targetPath))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 async function syncPackagedBuiltinSkills(options: SkillDiscoveryOptions = {}) {

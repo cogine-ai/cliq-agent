@@ -376,6 +376,35 @@ test('default built-in sync repairs incomplete managed system skill directories'
   }
 });
 
+test('default built-in sync repairs interrupted copies that already have SKILL.md', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-default-builtin-repair-skill-file-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-default-builtin-repair-skill-file-home-'));
+  try {
+    const cliqHome = path.join(home, '.cliq');
+    const partialDir = path.join(cliqHome, 'skills', '.system', 'skill-doctor');
+    const sourceSkillDir = path.join(process.cwd(), 'skills', '.system', 'skill-doctor');
+    await mkdir(partialDir, { recursive: true });
+    await writeFile(
+      path.join(partialDir, 'SKILL.md'),
+      await readFile(path.join(sourceSkillDir, 'SKILL.md'), 'utf8'),
+      'utf8'
+    );
+
+    const catalog = await discoverSkillCatalog(cwd, { homeDir: home, cliqHome });
+    const [loaded] = await loadSkills(cwd, ['skill-doctor'], { catalog });
+
+    assert.equal(loaded?.scope, 'builtin');
+    assert.match(loaded?.prompt ?? '', /Skill Doctor/i);
+    assert.match(
+      await readFile(path.join(partialDir, 'scripts', 'skill_doctor.py'), 'utf8'),
+      /def main/
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('discoverSkillCatalog gives project skills precedence over user skills and marks shadowed entries', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-shadow-'));
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-shadow-home-'));
