@@ -172,7 +172,9 @@ User skill prompt.`,
     );
 
     const originalHome = process.env.HOME;
+    const originalCliqHome = process.env.CLIQ_HOME;
     process.env.HOME = home;
+    process.env.CLIQ_HOME = path.join(home, '.cliq');
     try {
       const assembly = await createRuntimeAssembly({
         cwd,
@@ -199,6 +201,11 @@ User skill prompt.`,
         delete process.env.HOME;
       } else {
         process.env.HOME = originalHome;
+      }
+      if (originalCliqHome === undefined) {
+        delete process.env.CLIQ_HOME;
+      } else {
+        process.env.CLIQ_HOME = originalCliqHome;
       }
     }
   } finally {
