@@ -72,6 +72,10 @@ Prefer exact edits over shell mutation when possible.`,
     assert.equal(assembly.extensionNames.includes('policy-instructions'), true);
     assert.equal(messages.some((message) => message.layer === 'workspace'), true);
     assert.equal(messages.some((message) => message.source === 'skill:reviewer'), true);
+    assert.match(
+      messages.find((message) => message.source === 'skill:safe-edit')?.content ?? '',
+      new RegExp(`Skill directory: ${path.join(cwd, '.cliq', 'skills', 'safe-edit').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
+    );
     assert.equal(messages.some((message) => message.source === 'echo'), true);
   } finally {
     await rm(cwd, { recursive: true, force: true });

@@ -1362,7 +1362,7 @@ Options:
                            and <pattern> is a literal, "*" wildcard, or "prefix *"
                            (e.g. "bash: npm *", "fs-write: .env", "fs-read: docs/*").
                            See README "## Tool permissions" for the full layer order.
-  --skill NAME             Activate a local skill; repeat to load multiple skills
+  --skill NAME             Activate a skill; repeat to load multiple skills
   --provider NAME          openrouter | anthropic | openai | openai-compatible | ollama
   --model ID               Provider model id; required for openai-compatible; auto-discovered for ollama
   --base-url URL           Required for openai-compatible; optional provider override

@@ -447,11 +447,12 @@ function isActiveSkill(value: unknown) {
     isNonEmptyString(skill.name) &&
     (typeof skill.description === 'string' || skill.description === null) &&
     typeof skill.prompt === 'string' &&
-    (skill.scope === 'project' || skill.scope === 'user') &&
+    (skill.scope === 'project' || skill.scope === 'user' || skill.scope === 'builtin') &&
     (skill.sourceKind === 'project-cliq' ||
       skill.sourceKind === 'project-agents' ||
       skill.sourceKind === 'user-cliq' ||
-      skill.sourceKind === 'user-agents') &&
+      skill.sourceKind === 'user-agents' ||
+      skill.sourceKind === 'builtin') &&
     isNonEmptyString(skill.sourceRoot) &&
     isNonEmptyString(skill.skillDir) &&
     isNonEmptyString(skill.skillFile) &&

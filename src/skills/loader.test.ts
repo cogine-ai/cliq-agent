@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 import { activateSkill, discoverSkillCatalog, loadSkills, mergeSkillNames, parseSkillMarkdown } from './loader.js';
 import { createSession } from '../session/store.js';
+
+const NO_BUILTINS = { builtinRoot: null };
 
 test('mergeSkillNames preserves order and removes duplicates', () => {
   assert.deepEqual(mergeSkillNames(['reviewer', 'safe-edit'], ['safe-edit', 'planner']), [
@@ -65,7 +67,7 @@ test('loadSkills reads SKILL.md from the workspace skill directory', async () =>
   try {
     await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer');
 
-    const loaded = await loadSkills(cwd, ['reviewer']);
+    const loaded = await loadSkills(cwd, ['reviewer'], { discovery: NO_BUILTINS });
     assert.equal(loaded[0]?.name, 'reviewer');
     assert.match(loaded[0]?.prompt ?? '', /Prefer read-only inspection/i);
     assert.equal(loaded[0]?.scope, 'project');
@@ -93,7 +95,7 @@ External prompt.`,
     );
     await symlink(externalSkill, path.join(skillDir, 'SKILL.md'));
 
-    const catalog = await discoverSkillCatalog(cwd);
+    const catalog = await discoverSkillCatalog(cwd, NO_BUILTINS);
     const entry = catalog.entries.find((item) => item.name === 'reviewer');
 
     assert.equal(entry?.status, 'invalid');
@@ -119,7 +121,10 @@ Prompt body.`,
       'utf8'
     );
 
-    await assert.rejects(() => loadSkills(cwd, ['broken']), /must declare a name/i);
+    await assert.rejects(
+      () => loadSkills(cwd, ['broken'], { discovery: NO_BUILTINS }),
+      /must declare a name/i
+    );
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -140,12 +145,15 @@ Prompt body.`,
       'utf8'
     );
 
-    const catalog = await discoverSkillCatalog(cwd);
+    const catalog = await discoverSkillCatalog(cwd, NO_BUILTINS);
     const entry = catalog.entries.find((item) => item.name === 'reviewer');
 
     assert.equal(entry?.status, 'invalid');
     assert.equal(entry?.diagnostics.some((diagnostic) => diagnostic.code === 'name-mismatch'), true);
-    await assert.rejects(() => loadSkills(cwd, ['reviewer']), /matching frontmatter name/i);
+    await assert.rejects(
+      () => loadSkills(cwd, ['reviewer'], { discovery: NO_BUILTINS }),
+      /matching frontmatter name/i
+    );
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -165,7 +173,7 @@ description: intentionally empty
       'utf8'
     );
 
-    const loaded = await loadSkills(cwd, ['empty']);
+    const loaded = await loadSkills(cwd, ['empty'], { discovery: NO_BUILTINS });
     assert.equal(loaded[0]?.prompt, '');
     assert.equal(
       loaded[0]?.diagnostics.some((diagnostic) => diagnostic.code === 'empty-body' && diagnostic.level === 'warning'),
@@ -186,7 +194,7 @@ test('loadSkills accepts CRLF frontmatter and body separators', async () => {
       'utf8'
     );
 
-    const loaded = await loadSkills(cwd, ['reviewer']);
+    const loaded = await loadSkills(cwd, ['reviewer'], { discovery: NO_BUILTINS });
     assert.equal(loaded[0]?.name, 'reviewer');
     assert.match(loaded[0]?.prompt ?? '', /Prefer read-only inspection/i);
   } finally {
@@ -210,7 +218,7 @@ test('discoverSkillCatalog walks ancestors to the git root and prefers more spec
     await writeSkill(path.join(root, '.cliq', 'skills'), 'reviewer', 'Root project skill.');
     await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer', 'Nested project skill.');
 
-    const catalog = await discoverSkillCatalog(cwd);
+    const catalog = await discoverSkillCatalog(cwd, NO_BUILTINS);
     const entries = catalog.entries.filter((entry) => entry.name === 'reviewer');
 
     assert.equal(entries.length, 2);
@@ -234,7 +242,8 @@ test('discoverSkillCatalog finds project .cliq, project .agents, and user skill 
 
     const catalog = await discoverSkillCatalog(cwd, {
       homeDir: home,
-      cliqHome: path.join(home, '.cliq')
+      cliqHome: path.join(home, '.cliq'),
+      builtinRoot: null
     });
 
     assert.deepEqual(
@@ -245,6 +254,150 @@ test('discoverSkillCatalog finds project .cliq, project .agents, and user skill 
         'tester:user:user-agents',
         'writer:user:user-cliq'
       ]
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('discoverSkillCatalog includes built-in skills with lowest precedence', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-builtin-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-builtin-home-'));
+  const builtin = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-builtin-root-'));
+  try {
+    await writeSkill(path.join(cwd, '.cliq', 'skills'), 'skill-creator', 'Project override.');
+    await writeSkill(builtin, 'skill-creator', 'Bundled skill.');
+    await writeSkill(builtin, 'skill-doctor', 'Bundled doctor.');
+
+    const catalog = await discoverSkillCatalog(cwd, {
+      homeDir: home,
+      cliqHome: path.join(home, '.cliq'),
+      builtinRoot: builtin
+    });
+    const creatorEntries = catalog.entries.filter((entry) => entry.name === 'skill-creator');
+
+    assert.equal(creatorEntries.length, 2);
+    assert.equal(creatorEntries.find((entry) => entry.scope === 'project')?.status, 'available');
+    assert.equal(creatorEntries.find((entry) => entry.scope === 'builtin')?.status, 'shadowed');
+    assert.equal(catalog.entries.find((entry) => entry.name === 'skill-doctor')?.scope, 'builtin');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+    await rm(builtin, { recursive: true, force: true });
+  }
+});
+
+test('loadSkills can read bundled Cliq system skills', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-default-builtin-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-default-builtin-home-'));
+  try {
+    const cliqHome = path.join(home, '.cliq');
+    const catalog = await discoverSkillCatalog(cwd, {
+      homeDir: home,
+      cliqHome
+    });
+    const builtinNames = catalog.entries
+      .filter((entry) => entry.scope === 'builtin')
+      .map((entry) => entry.name)
+      .sort();
+
+    assert.deepEqual(builtinNames, ['skill-creator', 'skill-doctor', 'skill-installer']);
+    assert.equal(
+      catalog.entries
+        .filter((entry) => entry.scope === 'builtin')
+        .every((entry) => entry.skillDir.startsWith(path.join(cliqHome, 'skills', '.system'))),
+      true
+    );
+    const [loaded] = await loadSkills(cwd, ['skill-doctor'], { catalog });
+    assert.equal(loaded?.scope, 'builtin');
+    assert.match(loaded?.prompt ?? '', /Skill Doctor/i);
+    assert.match(
+      await readFile(path.join(cliqHome, 'skills', '.system', 'skill-doctor', 'SKILL.md'), 'utf8'),
+      /Skill Doctor/i
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('default built-in sync does not overwrite a non-empty managed system skill', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-default-builtin-merge-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-default-builtin-merge-home-'));
+  try {
+    const cliqHome = path.join(home, '.cliq');
+    await writeSkill(
+      path.join(cliqHome, 'skills', '.system'),
+      'skill-doctor',
+      'Existing managed copy should remain.'
+    );
+
+    const catalog = await discoverSkillCatalog(cwd, { homeDir: home, cliqHome });
+    const [loaded] = await loadSkills(cwd, ['skill-doctor'], { catalog });
+
+    assert.equal(loaded?.scope, 'builtin');
+    assert.match(loaded?.prompt ?? '', /Existing managed copy/);
+    assert.match(
+      await readFile(path.join(cliqHome, 'skills', '.system', 'skill-doctor', 'SKILL.md'), 'utf8'),
+      /Existing managed copy/
+    );
+    assert.equal(
+      catalog.entries.some((entry) => entry.scope === 'builtin' && entry.name === 'skill-creator'),
+      true
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('default built-in sync repairs incomplete managed system skill directories', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-default-builtin-repair-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-default-builtin-repair-home-'));
+  try {
+    const cliqHome = path.join(home, '.cliq');
+    const partialDir = path.join(cliqHome, 'skills', '.system', 'skill-doctor');
+    await mkdir(partialDir, { recursive: true });
+    await writeFile(path.join(partialDir, 'partial.txt'), 'interrupted copy', 'utf8');
+
+    const catalog = await discoverSkillCatalog(cwd, { homeDir: home, cliqHome });
+    const [loaded] = await loadSkills(cwd, ['skill-doctor'], { catalog });
+
+    assert.equal(loaded?.scope, 'builtin');
+    assert.match(loaded?.prompt ?? '', /Skill Doctor/i);
+    assert.match(
+      await readFile(path.join(cliqHome, 'skills', '.system', 'skill-doctor', 'SKILL.md'), 'utf8'),
+      /Skill Doctor/i
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('default built-in sync repairs interrupted copies that already have SKILL.md', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-default-builtin-repair-skill-file-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-default-builtin-repair-skill-file-home-'));
+  try {
+    const cliqHome = path.join(home, '.cliq');
+    const partialDir = path.join(cliqHome, 'skills', '.system', 'skill-doctor');
+    const sourceSkillDir = path.join(process.cwd(), 'skills', '.system', 'skill-doctor');
+    await mkdir(partialDir, { recursive: true });
+    await writeFile(
+      path.join(partialDir, 'SKILL.md'),
+      await readFile(path.join(sourceSkillDir, 'SKILL.md'), 'utf8'),
+      'utf8'
+    );
+
+    const catalog = await discoverSkillCatalog(cwd, { homeDir: home, cliqHome });
+    const [loaded] = await loadSkills(cwd, ['skill-doctor'], { catalog });
+
+    assert.equal(loaded?.scope, 'builtin');
+    assert.match(loaded?.prompt ?? '', /Skill Doctor/i);
+    assert.match(
+      await readFile(path.join(partialDir, 'scripts', 'skill_doctor.py'), 'utf8'),
+      /def main/
     );
   } finally {
     await rm(cwd, { recursive: true, force: true });

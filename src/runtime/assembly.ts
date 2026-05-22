@@ -136,7 +136,7 @@ export async function createRuntimeAssembly({
         cwd,
         basePrompt: BASE_SYSTEM_PROMPT,
         workspaceInstructions,
-        skills: instructionSkills.map((skill) => ({ name: skill.name, prompt: skill.prompt })),
+        skills: instructionSkills.map((skill) => ({ name: skill.name, skillDir: skill.skillDir, prompt: skill.prompt })),
         extensionMessages
       });
     }

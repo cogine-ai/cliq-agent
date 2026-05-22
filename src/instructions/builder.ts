@@ -33,7 +33,7 @@ export async function buildInstructionMessages(options: BuildInstructionMessages
       role: 'system',
       layer: 'skill',
       source: `skill:${skill.name}`,
-      content: skill.prompt
+      content: `Skill directory: ${skill.skillDir}\nBundled resources and scripts are relative to this directory. Use absolute paths when running bundled scripts with bash.\n\n${skill.prompt}`
     });
   }
 
