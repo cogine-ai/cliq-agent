@@ -71,6 +71,32 @@ test('parseArgs accepts command-scoped run --jsonl', () => {
   });
 });
 
+test('parseArgs accepts top-level version flags without stealing run prompts', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--version']), {
+    cmd: 'version',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', '-v']), {
+    cmd: 'version',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', '-v']), {
+    cmd: 'chat',
+    prompt: '-v',
+    policy: 'auto',
+    skills: [],
+    model: {}
+  });
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--version', 'extra']),
+    /Unknown --version argument: extra/i
+  );
+});
+
 test('parseArgs keeps --jsonl in the prompt after the first prompt token', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', 'inspect', '--jsonl']), {
     cmd: 'chat',
@@ -770,6 +796,7 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.doesNotMatch(output, /cliq checkpoints/);
   assert.doesNotMatch(output, /cliq compactions/);
   assert.match(output, /-h, --help/);
+  assert.match(output, /-v, --version/);
   assert.match(output, /--policy MODE/);
   assert.match(output, /confirm-write/);
   assert.match(output, /read-only/);
@@ -1307,6 +1334,29 @@ test('runCli bare chat surfaces CLIQ_TRUST_WORKSPACE=deny on stderr before exit'
 
     assert.match(env.stderrText(), /CLIQ_TRUST_WORKSPACE=deny/);
     assert.ok(env.stderrText().includes(env.cwd), 'message should cite the workspace path');
+  });
+});
+
+test('runCli version flags print package version without workspace trust', async () => {
+  const current = await readPackageVersionForTest();
+
+  await withCliTestEnv('version', async (env) => {
+    const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
+    process.env.CLIQ_TRUST_WORKSPACE = 'deny';
+
+    try {
+      await runCli(['node', 'src/index.ts', '--version']);
+      await runCli(['node', 'src/index.ts', '-v']);
+    } finally {
+      if (previousTrust === undefined) {
+        delete process.env.CLIQ_TRUST_WORKSPACE;
+      } else {
+        process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+      }
+    }
+
+    assert.equal(env.outputText(), `${current}\n${current}\n`);
+    assert.equal(env.stderrText(), '');
   });
 });
 
