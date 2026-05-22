@@ -49,11 +49,9 @@ import type { ValidatorResult } from '../../validators/types.js';
  * applyPolicy require runner integration (OverlayWriter injection,
  * turn-boundary hooks) and are deferred to a follow-up task.
  *
- * Likewise the validate/approve/finalize stages of the tx lifecycle are
- * deferred. v0.8's `applyTx` requires the underlying tx to already be in
- * 'approved' state (Stage A guard). For now the coordinator surfaces this
- * as a 'rejected' result and the operator/test must construct an approved
- * tx with diff manually. TODO(post-v0.8): wire auto-validate/auto-approve.
+ * `applyTx` wires the manual lifecycle stages together for explicit tx apply:
+ * staging -> finalized -> validated -> approved -> applied, preserving the
+ * low-level apply guards for already-approved and terminal transactions.
  */
 
 export type CoordinatorContext = {
@@ -174,17 +172,76 @@ export type CoordinatorApplyResult =
       message: string;
     };
 
+type ApprovalOptions = {
+  overrides?: string[];
+  overrideAll?: boolean;
+  allowValidatorError?: string[];
+  reason?: string;
+  by?: string;
+};
+
+export type CoordinatorApplyOptions = ApprovalOptions & {
+  validatorsConfig?: TxValidatorsConfig;
+  stagedViewConfig?: TxStagedViewConfig;
+};
+
+const DEFAULT_STAGED_VIEW_CONFIG: TxStagedViewConfig = {
+  copyMode: 'auto',
+  bindPaths: ['node_modules']
+};
+
+async function prepareTxForApply(
+  ctx: CoordinatorContext,
+  txId: string,
+  opts: CoordinatorApplyOptions
+): Promise<{ ok: true } | { ok: false; uncoveredFailures: string[] }> {
+  const root = txRootFor(ctx);
+  let tx = await readTxState(root, txId);
+  if (!tx) throw new Error(`tx not found: ${txId}`);
+
+  if (tx.state === 'staging') {
+    await finalizeTx(ctx, txId);
+    tx = await readTxState(root, txId);
+  }
+
+  if (tx?.state === 'finalized') {
+    await validateTx(
+      ctx,
+      txId,
+      opts.validatorsConfig ?? {},
+      opts.stagedViewConfig ?? DEFAULT_STAGED_VIEW_CONFIG
+    );
+    tx = await readTxState(root, txId);
+  }
+
+  if (tx?.state === 'validated') {
+    return approveTx(ctx, txId, {
+      overrides: opts.overrides,
+      overrideAll: opts.overrideAll,
+      allowValidatorError: opts.allowValidatorError,
+      reason: opts.reason,
+      by: opts.by
+    });
+  }
+
+  return { ok: true };
+}
+
 export async function applyTx(
   ctx: CoordinatorContext,
   txId: string,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _opts: { overrides?: string[]; reason?: string } = {}
+  opts: CoordinatorApplyOptions = {}
 ): Promise<CoordinatorApplyResult> {
-  // For v0.8: tx must already be 'approved'. The auto-validate/auto-approve
-  // pipeline is deferred to runner integration. CLI users can run this
-  // against a manually-prepared tx for testing or wait for the full pipeline.
-  // TODO(post-v0.8): plumb overrides/reason into the validate/approve stage.
   try {
+    const approval = await prepareTxForApply(ctx, txId, opts);
+    if (!approval.ok) {
+      return {
+        ok: false,
+        error: 'rejected',
+        message: `uncovered blocking failures: ${approval.uncoveredFailures.join(', ')}`
+      };
+    }
+
     const result = await runApplyTx({
       root: txRootFor(ctx),
       txId,
@@ -363,13 +420,7 @@ async function persistValidatorResult(root: string, txId: string, r: ValidatorRe
   await fs.writeFile(path.join(validatorsDir(root, txId), `${sanitized}.json`), JSON.stringify(r, null, 2), 'utf8');
 }
 
-export type ApproveTxOptions = {
-  overrides?: string[];
-  overrideAll?: boolean;
-  allowValidatorError?: string[];
-  reason?: string;
-  by?: string;
-};
+export type ApproveTxOptions = ApprovalOptions;
 
 export async function approveTx(
   ctx: CoordinatorContext,

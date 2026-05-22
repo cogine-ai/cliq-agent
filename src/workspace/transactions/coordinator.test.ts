@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -118,14 +118,64 @@ test('coordinator.getTxStatus returns null for missing tx', async () => {
   });
 });
 
-test('coordinator.applyTx returns rejected when tx is not approved', async () => {
-  await withCoordinatorEnv(async ({ ctx }) => {
+test('coordinator.applyTx auto-finalizes, validates, approves, and applies a staged tx', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
     const tx = await openTx(ctx, { explicit: false });
-    // tx is in 'staging' state.
-    const result = await applyTx(ctx, tx.id);
-    assert.equal(result.ok, false);
-    if (!result.ok) {
-      assert.equal(result.error, 'rejected');
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+
+    const result = await applyTx(ctx, tx.id, {
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] },
+      stagedViewConfig: { copyMode: 'copy', bindPaths: [] }
+    });
+
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.deepEqual(result.filesApplied, ['a.txt']);
+    }
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'ONE');
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'applied');
+    assert.equal(after?.validators?.[0].name, 'builtin:diff-sanity');
+  });
+});
+
+test('coordinator.applyTx threads overrides and reason into approval metadata', async () => {
+  await withCoordinatorEnv(async ({ ctx, ws, home, session }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'a', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    const writer = createOverlayWriter(ws, overlayDir(root, tx.id));
+    await writer.replaceText('a.txt', 'a', 'a\u0000b');
+
+    const result = await applyTx(ctx, tx.id, {
+      overrides: ['builtin:diff-sanity'],
+      reason: 'binary fixture is intentional',
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] },
+      stagedViewConfig: { copyMode: 'copy', bindPaths: [] }
+    });
+
+    assert.equal(result.ok, true);
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'applied');
+    assert.equal(after?.overridesApplied?.length, 1);
+    assert.equal(after?.overridesApplied?.[0].validatorName, 'builtin:diff-sanity');
+    assert.equal(after?.overridesApplied?.[0].reason, 'binary fixture is intentional');
+    assert.equal(after?.overridesApplied?.[0].by, 'cli');
+
+    const applied = session.records.find((r) => r.kind === 'tx-applied');
+    assert.ok(applied);
+    if (applied?.kind === 'tx-applied') {
+      assert.equal(applied.meta.overrides[0].validatorName, 'builtin:diff-sanity');
+      assert.equal(applied.meta.overrides[0].reason, 'binary fixture is intentional');
     }
   });
 });
@@ -168,6 +218,9 @@ test('coordinator.applyTx happy path: approved tx applies and writes tx-applied 
     if (opened?.kind === 'tx-opened' && applied?.kind === 'tx-applied') {
       assert.equal(opened.meta.txId, applied.meta.txId);
     }
+    const after = await readTxState(root, tx.id);
+    assert.equal(after?.state, 'applied');
+    assert.equal(after?.validators, undefined);
   });
 });
 
