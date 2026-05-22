@@ -205,9 +205,14 @@ def _read_skill_manifest_name(path: str) -> str | None:
     if not lines or lines[0].strip() != "---":
         return None
     for line in lines[1:]:
-        if line.strip() == "---":
+        stripped = line.strip()
+        if stripped == "---":
             return None
-        key, separator, value = line.partition(":")
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line[:1].isspace():
+            continue
+        key, separator, value = stripped.partition(":")
         if separator and key.strip() == "name":
             return value.strip().strip("\"'")
     return None
