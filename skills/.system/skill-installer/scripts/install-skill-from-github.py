@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
 import os
 import shutil
 import subprocess
@@ -58,7 +59,7 @@ def _request(url: str) -> bytes:
 
 def _parse_github_url(url: str, default_ref: str) -> tuple[str, str, str, str | None]:
     parsed = urllib.parse.urlparse(url)
-    if parsed.netloc != "github.com":
+    if parsed.scheme != "https" or parsed.netloc != "github.com":
         raise InstallError("Only GitHub URLs are supported for download mode.")
     parts = [p for p in parsed.path.split("/") if p]
     if len(parts) < 2:
@@ -70,11 +71,41 @@ def _parse_github_url(url: str, default_ref: str) -> tuple[str, str, str, str | 
         if parts[2] in ("tree", "blob"):
             if len(parts) < 4:
                 raise InstallError("GitHub URL missing ref or path.")
-            ref = parts[3]
-            subpath = "/".join(parts[4:])
+            ref, subpath = _split_github_ref_and_path(owner, repo, parts[3:], default_ref)
         else:
             subpath = "/".join(parts[2:])
     return owner, repo, ref, subpath or None
+
+
+def _split_github_ref_and_path(owner: str, repo: str, segments: list[str], default_ref: str) -> tuple[str, str]:
+    if not segments:
+        raise InstallError("GitHub URL missing ref or path.")
+
+    if default_ref:
+        ref_parts = default_ref.split("/")
+        if segments[: len(ref_parts)] == ref_parts:
+            return default_ref, "/".join(segments[len(ref_parts):])
+
+    for split_at in range(len(segments) - 1, 0, -1):
+        candidate_ref = "/".join(segments[:split_at])
+        if _github_ref_exists(owner, repo, candidate_ref):
+            return candidate_ref, "/".join(segments[split_at:])
+
+    return segments[0], "/".join(segments[1:])
+
+
+def _github_ref_exists(owner: str, repo: str, ref: str) -> bool:
+    for namespace in ("heads", "tags"):
+        encoded = urllib.parse.quote(ref, safe="/")
+        url = f"https://api.github.com/repos/{owner}/{repo}/git/matching-refs/{namespace}/{encoded}"
+        try:
+            refs = json.loads(_request(url).decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
+            continue
+        full_name = f"refs/{namespace}/{ref}"
+        if any(item.get("ref") == full_name for item in refs if isinstance(item, dict)):
+            return True
+    return False
 
 
 def _download_repo_zip(owner: str, repo: str, ref: str, dest_dir: str) -> str:
@@ -113,6 +144,8 @@ def _safe_extract_zip(zip_file: zipfile.ZipFile, dest_dir: str) -> None:
 
 
 def _validate_relative_path(path: str) -> None:
+    if path.startswith("-"):
+        raise InstallError("Skill path must not start with '-'.")
     if os.path.isabs(path) or os.path.normpath(path).startswith(".."):
         raise InstallError("Skill path must be a relative path inside the repo.")
 
@@ -156,9 +189,28 @@ def _git_sparse_checkout(repo_url: str, ref: str, paths: list[str], dest_dir: st
                 repo_dir,
             ]
         )
-    _run_git(["git", "-C", repo_dir, "sparse-checkout", "set", *paths])
+    _run_git(["git", "-C", repo_dir, "sparse-checkout", "set", "--", *paths])
     _run_git(["git", "-C", repo_dir, "checkout", ref])
     return repo_dir
+
+
+def _read_skill_manifest_name(path: str) -> str | None:
+    skill_md = os.path.join(path, "SKILL.md")
+    try:
+        with open(skill_md, "r", encoding="utf-8") as file_handle:
+            lines = file_handle.readlines()
+    except OSError as exc:
+        raise InstallError(f"Unable to read SKILL.md: {exc}") from exc
+
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return None
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "name":
+            return value.strip().strip("\"'")
+    return None
 
 
 def _validate_skill(path: str) -> None:
@@ -291,6 +343,11 @@ def main(argv: list[str]) -> int:
                     raise InstallError(f"Destination already exists: {dest_dir}")
                 skill_src = os.path.join(repo_root, path)
                 _validate_skill(skill_src)
+                manifest_name = _read_skill_manifest_name(skill_src)
+                if manifest_name and manifest_name != skill_name:
+                    raise InstallError(
+                        f"Destination skill name '{skill_name}' must match SKILL.md name '{manifest_name}'."
+                    )
                 _copy_skill(skill_src, dest_dir)
                 installed.append((skill_name, dest_dir))
         finally:

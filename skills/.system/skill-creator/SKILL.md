@@ -57,7 +57,7 @@ Prefer raw artifacts such as example prompts, outputs, diffs, logs, or traces. G
 
 Every skill consists of a required SKILL.md file and optional bundled resources:
 
-```
+```text
 skill-name/
 ├── SKILL.md (required)
 │   ├── YAML frontmatter metadata (required)
@@ -157,7 +157,7 @@ Cliq loads FORMS.md, REFERENCE.md, or EXAMPLES.md only when needed.
 
 For Skills with multiple domains, organize content by domain to avoid loading irrelevant context:
 
-```
+```text
 bigquery-skill/
 ├── SKILL.md (overview and navigation)
 └── reference/
@@ -171,7 +171,7 @@ When a user asks about sales metrics, Cliq only reads sales.md.
 
 Similarly, for skills supporting multiple frameworks or variants, organize by variant:
 
-```
+```text
 cloud-deploy/
 ├── SKILL.md (workflow + provider selection)
 └── references/
@@ -379,7 +379,7 @@ Decision rule for forward-testing:
     * modify live production systems
 
   In these cases, show the user your proposed prompt and request (1) a yes/no decision, and
-  (2) any suggested modifictions.
+  (2) any suggested modifications.
 
 Considerations when forward-testing:
    - use fresh threads for independent passes

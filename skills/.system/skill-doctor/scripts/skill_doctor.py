@@ -191,7 +191,9 @@ def read_entry(root: Root, skill_dir: Path) -> Entry | None:
     if not any(item.level == "error" and item.code == "project-skill-escape" for item in diagnostics):
         try:
             raw = skill_file_real.read_text(encoding="utf-8")
-        except Exception as exc:
+        except OSError as exc:
+            diagnostics.append(diag("error", "read-failed", f"Failed to read skill file: {exc}", str(skill_file)))
+        except UnicodeDecodeError as exc:
             diagnostics.append(diag("error", "read-failed", f"Failed to read skill file: {exc}", str(skill_file)))
 
     manifest, body, parse_diags = parse_frontmatter(raw, str(skill_file))

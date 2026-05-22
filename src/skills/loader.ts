@@ -321,20 +321,12 @@ function packagedBuiltinSkillsRoot() {
   return path.resolve(moduleDir, '..', '..', 'skills', '.system');
 }
 
-async function directoryIsEmpty(target: string) {
-  try {
-    const entries = await fs.readdir(target);
-    return entries.length === 0;
-  } catch {
-    return true;
-  }
-}
-
 async function copyBuiltinSkillIfMissing(sourceRoot: string, targetRoot: string, skillName: string) {
   const sourceDir = path.join(sourceRoot, skillName);
   const targetDir = path.join(targetRoot, skillName);
   const targetExists = await exists(targetDir);
-  if (targetExists && !(await directoryIsEmpty(targetDir))) {
+  const targetSkillFile = path.join(targetDir, 'SKILL.md');
+  if (targetExists && (await exists(targetSkillFile))) {
     return;
   }
 
@@ -359,19 +351,24 @@ async function syncPackagedBuiltinSkills(options: SkillDiscoveryOptions = {}) {
 
   try {
     await fs.mkdir(targetRoot, { recursive: true });
-    for (const entry of sourceEntries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
+  } catch {
+    return sourceRoot;
+  }
+
+  for (const entry of sourceEntries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    try {
       if (!(await exists(path.join(sourceRoot, entry.name, 'SKILL.md')))) {
         continue;
       }
       await copyBuiltinSkillIfMissing(sourceRoot, targetRoot, entry.name);
+    } catch {
+      continue;
     }
-    return targetRoot;
-  } catch {
-    return sourceRoot;
   }
+  return targetRoot;
 }
 
 async function builtinDiscoveryRoots(options: SkillDiscoveryOptions = {}): Promise<SkillDiscoveryRoot[]> {

@@ -77,7 +77,7 @@ User and project skills are not auto-updated by package upgrades. Updating
 third-party or copied skills belongs to the skill installer/manager workflow,
 not to the Cliq package install path.
 
-Future releases can add a manifest/hash based replacement policy for built-ins
+Future releases can add a manifest/hash-based replacement policy for built-ins
 that must be force-upgraded. Until that exists, the default policy is merge-only.
 
 ## `cliq update`
@@ -101,5 +101,5 @@ enterprise-pinned versions, or ambiguous package managers.
 
 - No install-time `postinstall` copy step.
 - No overwrite of non-empty same-name built-in skill directories.
-- No manifest/hash based force-upgrade policy yet.
+- No manifest/hash-based force-upgrade policy yet.
 - No default automatic update of third-party skills.
