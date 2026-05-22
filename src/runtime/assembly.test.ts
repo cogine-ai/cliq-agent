@@ -145,6 +145,68 @@ Recovered review prompt.`,
   }
 });
 
+test('createRuntimeAssembly warns when workspace defaultSkills are not project-owned', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-default-skill-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-default-skill-home-'));
+  try {
+    await mkdir(path.join(home, '.cliq', 'skills', 'reviewer'), { recursive: true });
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(
+      path.join(home, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
+      `---
+name: reviewer
+description: user-only default skill
+---
+
+User skill prompt.`,
+      'utf8'
+    );
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify({
+        instructionFiles: [],
+        extensions: [],
+        defaultSkills: ['reviewer']
+      }),
+      'utf8'
+    );
+
+    const originalHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const assembly = await createRuntimeAssembly({
+        cwd,
+        session: createSession(cwd),
+        policyMode: 'read-only',
+        cliSkillNames: []
+      });
+
+      assert.deepEqual(assembly.session.activeSkills, []);
+      assert.equal(
+        assembly.skillDiagnostics.some(
+          (diagnostic) => diagnostic.code === 'workspace-default-not-project-owned'
+        ),
+        true
+      );
+      assert.match(
+        assembly.skillDiagnostics.find(
+          (diagnostic) => diagnostic.code === 'workspace-default-not-project-owned'
+        )?.message ?? '',
+        /reviewer/i
+      );
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('createRuntimeAssembly exposes workspace command hooks separately from extension hooks', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-command-hooks-'));
   try {
