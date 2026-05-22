@@ -76,6 +76,12 @@ export const BUILTIN_DENY: readonly PermissionRule[] = freezeRules([
   rule('fs-write', '.git', 'builtin')
 ]);
 
+const UNSAFE_BASH_ALLOW_RULE: PermissionRule = Object.freeze({
+  channel: 'bash',
+  pattern: '(unsafe-shell-syntax)',
+  source: 'builtin'
+});
+
 function rule(
   channel: AccessChannelKind,
   pattern: string,
@@ -137,6 +143,19 @@ export function matchAgainstTable(table: PermissionTable, channel: AccessChannel
     return { kind: 'fallthrough' };
   }
 
+  if (isBashUnsafeForAllow(channel)) {
+    for (const askRule of table.ask) {
+      if (matchesRule(askRule, channel)) {
+        return { kind: 'ask', rule: askRule };
+      }
+    }
+    for (const allowRule of table.allow) {
+      if (matchesRule(allowRule, channel)) {
+        return { kind: 'ask', rule: UNSAFE_BASH_ALLOW_RULE };
+      }
+    }
+  }
+
   for (const allowRule of table.allow) {
     if (matchesRule(allowRule, channel)) {
       return { kind: 'allow', rule: allowRule };
@@ -152,6 +171,10 @@ export function matchAgainstTable(table: PermissionTable, channel: AccessChannel
 
 function isBashWithoutHead(channel: AccessChannel): boolean {
   return channel.kind === 'bash' && channel.commandHead === '';
+}
+
+function isBashUnsafeForAllow(channel: AccessChannel): boolean {
+  return channel.kind === 'bash' && channel.unsafeForAllow === true;
 }
 
 function matchesRule(rule: PermissionRule, channel: AccessChannel): boolean {
