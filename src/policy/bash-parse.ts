@@ -1,13 +1,29 @@
 const SHELL_INTERPRETER_HEADS = new Set([
   'ash',
   'bash',
-  'busybox',
   'dash',
   'fish',
   'ksh',
   'sh',
   'zsh'
 ]);
+
+const BUSYBOX_HEAD = 'busybox';
+const MAX_SHELL_INLINE_DEPTH = 8;
+
+const SHELL_OPTION_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '-o',
+  '+o',
+  '-O',
+  '+O',
+  '--init-file',
+  '--rcfile'
+]);
+
+const SHELL_OPTION_ATTACHED_VALUE_PREFIXES: readonly string[] = [
+  '--init-file=',
+  '--rcfile='
+];
 
 /**
  * True when a bash line contains syntax that can execute more than the
@@ -17,10 +33,15 @@ const SHELL_INTERPRETER_HEADS = new Set([
  * so `bash -c 'git status && rm -rf /'` cannot bypass allow rules through quoting.
  */
 export function bashCommandHasUnsafeAllowSyntax(commandLine: string): boolean {
+  return bashCommandHasUnsafeAllowSyntaxInner(commandLine, 0);
+}
+
+function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number): boolean {
   if (unsafeAllowSyntaxInFragment(commandLine)) return true;
   const nested = extractShellInlineScript(commandLine);
-  if (nested !== null && unsafeAllowSyntaxInFragment(nested)) return true;
-  return false;
+  if (nested === null) return false;
+  if (depth >= MAX_SHELL_INLINE_DEPTH) return true;
+  return bashCommandHasUnsafeAllowSyntaxInner(nested, depth + 1);
 }
 
 /**
@@ -45,14 +66,31 @@ export function extractShellInlineScript(commandLine: string): string | null {
   }
   if (i >= tokens.length) return null;
 
-  const head = tokenBasename(tokens[i]!);
-  if (!SHELL_INTERPRETER_HEADS.has(head)) return null;
+  let head = tokenBasename(tokens[i]!);
   i += 1;
+
+  if (head === BUSYBOX_HEAD) {
+    if (i >= tokens.length) return null;
+    head = tokenBasename(tokens[i]!);
+    i += 1;
+  }
+
+  if (!SHELL_INTERPRETER_HEADS.has(head)) return null;
 
   while (i < tokens.length) {
     const token = tokens[i]!;
-    if (token === '-c' || token === '--command') {
+    if (isShellCommandStringFlag(token)) {
       return tokens[i + 1] ?? null;
+    }
+    if (token.startsWith('--command=')) {
+      return token.slice('--command='.length);
+    }
+    if (
+      SHELL_OPTION_VALUE_FLAGS.has(token) ||
+      SHELL_OPTION_ATTACHED_VALUE_PREFIXES.some((prefix) => token.startsWith(prefix))
+    ) {
+      i += SHELL_OPTION_VALUE_FLAGS.has(token) ? 2 : 1;
+      continue;
     }
     if (token.startsWith('-')) {
       i += 1;
@@ -65,6 +103,14 @@ export function extractShellInlineScript(commandLine: string): string | null {
 
 function tokenBasename(token: string): string {
   return token.includes('/') ? token.split('/').filter(Boolean).pop()! : token;
+}
+
+function isShellCommandStringFlag(token: string): boolean {
+  if (token === '-c' || token === '--command') return true;
+  // Shells commonly combine short flags, e.g. `bash -lc "..."` or
+  // `bash -euc "..."`. Treat any combined short option containing `c`
+  // as the command-string form and inspect the following token.
+  return /^-[A-Za-z]*c[A-Za-z]*$/.test(token);
 }
 
 function unsafeAllowSyntaxInFragment(commandLine: string): boolean {

@@ -251,6 +251,9 @@ test('decision table: bash allow rules do not auto-approve compound syntax insid
 
   for (const bash of [
     "bash -c 'git status && rm -rf /'",
+    "bash -lc 'git status && rm -rf /'",
+    "bash -o pipefail -c 'git status && rm -rf /'",
+    "bash -c 'bash -c \"git status && rm -rf /\"'",
     'bash -c "git status; rm -rf /"',
     'sh -c "git status | sh"'
   ]) {

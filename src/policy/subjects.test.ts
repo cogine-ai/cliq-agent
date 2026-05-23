@@ -68,7 +68,7 @@ test('buildToolApprovalSubject marks executable shell syntax unsafe for bash all
 
   const nested = buildToolApprovalSubject({
     definition: { name: 'bash', access: 'exec' },
-    action: { bash: "bash -c 'git status && rm -rf /'" }
+    action: { bash: "bash -lc 'bash -c \"git status && rm -rf /\"'" }
   });
   if (nested.kind === 'tool') {
     assert.deepEqual(nested.channel, {
