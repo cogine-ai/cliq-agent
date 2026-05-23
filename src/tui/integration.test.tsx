@@ -79,6 +79,7 @@ test('end-to-end: user prompt → approval modal → allow → tool result → f
   };
   store.dispatch({ type: 'approval-request', pending });
   await flush();
+  await flush();
   let frame = lastFrame() ?? '';
   assert.match(frame, /Approval required/);
   assert.match(frame, /Allow bash command\?/);
@@ -138,6 +139,7 @@ test('user denies an approval — resolve fires with deny and modal clears', asy
   };
   store.dispatch({ type: 'approval-request', pending });
   await flush();
+  await flush();
 
   stdin.write('n');
   await flush();
@@ -174,6 +176,7 @@ test('tx-apply approval surfaces with diff/validator summary and allows', async 
   };
   store.dispatch({ type: 'approval-request', pending });
   await flush();
+  await flush();
   const frame = lastFrame() ?? '';
   assert.match(frame, /Apply transaction tx_smoke\?/);
   assert.match(frame, /1 changed \(\+5\/-2\)/);
@@ -184,4 +187,42 @@ test('tx-apply approval surfaces with diff/validator summary and allows', async 
   await flush();
   await flush();
   assert.equal(resolved, 'allow');
+});
+
+test('tool completion followed by runtime error leaves a visible final outcome', async () => {
+  const store = makeStore();
+  const { stdin, lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+
+  stdin.write('run failing tool');
+  await flush();
+  stdin.write('\r');
+  await flush();
+
+  dispatchEvent(store, {
+    type: 'model-start',
+    provider: 'ollama',
+    model: 'qwen3:4b',
+    streaming: false
+  });
+  store.dispatch({ type: 'tool-hook-start', action: { bash: 'false' } });
+  store.dispatch({
+    type: 'tool-hook-end',
+    result: {
+      tool: 'bash',
+      status: 'error',
+      content: 'TOOL_RESULT bash ERROR\nexit code 1',
+      meta: { exitCode: 1 }
+    }
+  });
+  dispatchEvent(store, {
+    type: 'error',
+    stage: 'tool',
+    message: 'bash failed with exit code 1'
+  });
+  await flush();
+
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /error \(tool\): bash failed with exit code 1/);
+  assert.doesNotMatch(frame, /thinking/);
+  assert.match(frame, />/);
 });

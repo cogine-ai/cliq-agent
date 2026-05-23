@@ -3,8 +3,14 @@ import { test } from 'node:test';
 
 import { render } from 'ink-testing-library';
 
+import type { ApprovalSubject } from '../policy/types.js';
 import { App } from './app.js';
-import { createInitialState, createUiStore } from './store.js';
+import {
+  createInitialState,
+  createUiStore,
+  type PendingApproval,
+  type UiApprovalDecision
+} from './store.js';
 
 const flush = () => new Promise<void>((r) => setImmediate(r));
 
@@ -16,6 +22,15 @@ const makeStore = () =>
       session: { id: 'ses_smoke', cwd: '/tmp/smoke' }
     })
   );
+
+const approvalSubject: ApprovalSubject = {
+  kind: 'tool',
+  toolName: 'bash',
+  access: 'exec',
+  channel: { kind: 'bash', commandHead: 'ls', unsafeForAllow: false },
+  action: { bash: 'ls' } as never,
+  display: { title: 'Allow bash command?', command: 'ls' }
+};
 
 test('mounts and renders status bar segments', () => {
   const store = makeStore();
@@ -154,6 +169,7 @@ test('/skill <name> calls onSkillActivate and renders the result', async () => {
 test('/reset awaits onReset and clears the transcript via session-reset', async () => {
   const store = makeStore();
   store.dispatch({ type: 'user-input', text: 'before reset' });
+  store.dispatch({ type: 'runtime-event', event: { type: 'final', message: 'ready' } });
   let onResetCalls = 0;
   const { stdin, lastFrame } = render(
     <App
@@ -215,6 +231,101 @@ test('Ctrl+C during an active turn calls onCancelTurn and renders cancelling not
   assert.match(lastFrame() ?? '', /cancelling/);
 });
 
+test('submitted prompt immediately enters running state and blocks a second submit', async () => {
+  const store = makeStore();
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={(text) => {
+        submitted.push(text);
+      }}
+    />
+  );
+
+  stdin.write('first');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  assert.deepEqual(submitted, ['first']);
+  assert.notEqual(store.getState().activeTurn, null);
+  assert.match(lastFrame() ?? '', /running/i);
+
+  stdin.write('second');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  assert.deepEqual(submitted, ['first']);
+  assert.doesNotMatch(lastFrame() ?? '', /> second/);
+});
+
+test('Ctrl+C while approval is pending force-denies and cancels the turn', async () => {
+  const store = makeStore();
+  store.dispatch({ type: 'user-input', text: 'needs approval' });
+  let resolved: UiApprovalDecision | null = null;
+  const pending: PendingApproval = {
+    id: 'pa_cancel',
+    subject: approvalSubject,
+    resolve: (decision) => {
+      resolved = decision;
+    }
+  };
+  store.dispatch({ type: 'approval-request', pending });
+  let cancels = 0;
+
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onCancelTurn={() => {
+        cancels += 1;
+      }}
+    />
+  );
+  await flush();
+
+  stdin.write('\x03');
+  await flush();
+
+  assert.equal(resolved, 'deny');
+  assert.equal(store.getState().pendingApproval, null);
+  assert.equal(cancels, 1);
+  assert.match(lastFrame() ?? '', /cancelling/);
+});
+
+test('approval state ignores non-cancel global shortcuts', async () => {
+  const store = makeStore();
+  let resolved: UiApprovalDecision | null = null;
+  const pending: PendingApproval = {
+    id: 'pa_scope',
+    subject: approvalSubject,
+    resolve: (decision) => {
+      resolved = decision;
+    }
+  };
+  store.dispatch({ type: 'approval-request', pending });
+  const policyChanges: string[] = [];
+  const { stdin } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onPolicyChange={(mode) => {
+        policyChanges.push(mode);
+      }}
+    />
+  );
+  await flush();
+
+  stdin.write('\x1b[Z'); // Shift+Tab
+  stdin.write('\x0f'); // Ctrl+O
+  await flush();
+
+  assert.deepEqual(policyChanges, []);
+  assert.equal(store.getState().policy, 'auto');
+  assert.equal(resolved, null);
+  assert.equal(store.getState().pendingApproval, pending);
+});
+
 test('regular text input still routes to onSubmit and appends a user entry', async () => {
   const store = makeStore();
   const submitted: string[] = [];
@@ -239,7 +350,14 @@ test('up arrow recalls the most recent submitted user input; down restores the d
   // Drive two submissions through the user-input path so the transcript
   // (and therefore the history projection) ends up with ['foo', 'bar'].
   const store = makeStore();
-  const { stdin, lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={(text) => {
+        store.dispatch({ type: 'runtime-event', event: { type: 'final', message: `ack ${text}` } });
+      }}
+    />
+  );
 
   stdin.write('foo');
   await flush();

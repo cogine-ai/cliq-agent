@@ -32,10 +32,12 @@ test('user-input appends a user transcript entry with monotonic id', () => {
   s = reduce(s, { type: 'user-input', text: 'hello' });
   assert.equal(s.transcript.length, 1);
   assert.deepEqual(s.transcript[0], { kind: 'user', id: 'u1', text: 'hello' });
+  assert.deepEqual(s.activeTurn, { modelChunks: 0, modelChars: 0 });
 
   s = reduce(s, { type: 'user-input', text: 'again' });
   assert.equal(s.transcript.length, 2);
   assert.equal(s.transcript[1]!.id, 'u2');
+  assert.deepEqual(s.activeTurn, { modelChunks: 0, modelChars: 0 });
 });
 
 test('runtime-event model-start opens activeTurn with zeroed counters', () => {
@@ -77,7 +79,7 @@ test('runtime-event final appends assistant entry and clears activeTurn', () => 
   assert.deepEqual(s.transcript[0], { kind: 'assistant', id: 'a1', text: 'done' });
 });
 
-test('runtime-event error records entry, caps history at 20, clears activeTurn', () => {
+test('runtime-event error records visible transcript entry, caps history at 20, clears activeTurn', () => {
   let s = reduce(baseInit(), {
     type: 'runtime-event',
     event: { type: 'model-start', provider: 'ollama', model: 'qwen3:4b', streaming: false },
@@ -90,6 +92,12 @@ test('runtime-event error records entry, caps history at 20, clears activeTurn',
   assert.equal(s.errors.length, 1);
   assert.equal(s.errors[0]!.message, 'oops');
   assert.equal(s.errors[0]!.code, 'model-error');
+  assert.equal(s.transcript.length, 1);
+  assert.deepEqual(s.transcript[0], {
+    kind: 'system',
+    id: 's1',
+    text: 'error (model): oops'
+  });
 
   let cur = s;
   for (let i = 0; i < 25; i += 1) {
@@ -101,6 +109,30 @@ test('runtime-event error records entry, caps history at 20, clears activeTurn',
   assert.equal(cur.errors.length, 20);
   // oldest entries dropped — last entry is the latest one pushed
   assert.equal(cur.errors[cur.errors.length - 1]!.message, 'e24');
+});
+
+test('runtime-event cancel records a visible cancellation and duplicate errors are ignored', () => {
+  let s = reduce(baseInit(), { type: 'user-input', text: 'stop this' });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'error', stage: 'cancel', message: 'run cancelled' },
+  });
+
+  assert.equal(s.activeTurn, null);
+  assert.equal(s.errors.length, 1);
+  assert.equal(s.transcript.length, 2);
+  assert.deepEqual(s.transcript[1], {
+    kind: 'system',
+    id: 's2',
+    text: 'cancelled: run cancelled'
+  });
+
+  const duplicate = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'error', stage: 'model', message: 'run cancelled' },
+  });
+  assert.equal(duplicate.errors.length, 1);
+  assert.equal(duplicate.transcript.length, 2);
 });
 
 test('session-reset clears transcript/turn/approval/errors/tokens but preserves identity fields', () => {
