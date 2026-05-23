@@ -92,6 +92,40 @@ test('ensureSession rejects persisted sessions with malformed active skills', as
   }
 });
 
+test('ensureSession round-trips persisted builtin active skills', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-builtin-active-skill-session-'));
+  try {
+    const session = createSession(cwd);
+    session.activeSkills = [
+      {
+        name: 'skill-doctor',
+        description: 'Validate bundled skills',
+        prompt: 'Run skill doctor checks.',
+        manifest: { name: 'skill-doctor', description: 'Validate bundled skills' },
+        scope: 'builtin',
+        sourceKind: 'builtin',
+        sourceRoot: path.join(cwd, '.cliq', 'skills', '.system'),
+        skillDir: path.join(cwd, '.cliq', 'skills', '.system', 'skill-doctor'),
+        skillFile: path.join(cwd, '.cliq', 'skills', '.system', 'skill-doctor', 'SKILL.md'),
+        diagnostics: [],
+        activatedBy: 'cli',
+        activatedAt: nowIso()
+      }
+    ];
+    await saveSession(cwd, session);
+
+    const recovered = await ensureSession(cwd);
+
+    assert.equal(recovered.id, session.id);
+    assert.equal(recovered.activeSkills.length, 1);
+    assert.equal(recovered.activeSkills[0]?.scope, 'builtin');
+    assert.equal(recovered.activeSkills[0]?.sourceKind, 'builtin');
+    assert.equal(recovered.activeSkills[0]?.name, 'skill-doctor');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('resolveCliqHome uses CLIQ_HOME when provided and falls back to ~/.cliq', () => {
   assert.equal(resolveCliqHome({ CLIQ_HOME: '/tmp/custom-cliq' }, '/home/alice'), path.resolve('/tmp/custom-cliq'));
   assert.equal(resolveCliqHome({}, '/home/alice'), path.resolve(path.join('/home/alice', '.cliq')));

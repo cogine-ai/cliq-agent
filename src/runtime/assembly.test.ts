@@ -149,6 +149,54 @@ Recovered review prompt.`,
   }
 });
 
+test('createRuntimeAssembly omits instructions when an active skill fails refresh validation', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-skill-refresh-invalid-'));
+  const skillFile = path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md');
+  try {
+    await mkdir(path.dirname(skillFile), { recursive: true });
+    await writeFile(
+      skillFile,
+      `---
+name: reviewer
+description: review instructions
+---
+
+Original review prompt.`,
+      'utf8'
+    );
+
+    const assembly = await createRuntimeAssembly({
+      cwd,
+      session: createSession(cwd),
+      policyMode: 'read-only',
+      cliSkillNames: ['reviewer']
+    });
+
+    await writeFile(
+      skillFile,
+      `---
+name: other
+description: review instructions
+---
+
+Renamed in place.`,
+      'utf8'
+    );
+
+    const messages = await assembly.instructions(assembly.session);
+
+    assert.equal(messages.some((message) => message.source === 'skill:reviewer'), false);
+    assert.equal(assembly.session.activeSkills.length, 1);
+    assert.equal(assembly.session.activeSkills[0]?.prompt, 'Original review prompt.');
+    assert.equal(
+      assembly.skillDiagnostics.some((diagnostic) => diagnostic.code === 'name-mismatch'),
+      true
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('createRuntimeAssembly warns when workspace defaultSkills are not project-owned', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-default-skill-'));
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-default-skill-home-'));

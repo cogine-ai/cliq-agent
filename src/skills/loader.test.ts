@@ -4,7 +4,16 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { activateSkill, discoverSkillCatalog, loadSkills, mergeSkillNames, parseSkillMarkdown } from './loader.js';
+import {
+  activateSkill,
+  discoverSkillCatalog,
+  formatSkillCatalog,
+  loadSkills,
+  mergeSkillNames,
+  parseSkillMarkdown,
+  refreshActiveSkill
+} from './loader.js';
+import type { ActiveSkill, SkillCatalog } from './types.js';
 import { createSession } from '../session/store.js';
 
 const NO_BUILTINS = { builtinRoot: null };
@@ -466,6 +475,171 @@ test('loadSkills can require project-owned skills for workspace defaultSkills', 
     await rm(cwd, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test('refreshActiveSkill reloads an updated prompt from disk', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-refresh-'));
+  try {
+    const skillFile = path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md');
+    await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer', 'Original prompt.');
+    const active: ActiveSkill = {
+      name: 'reviewer',
+      description: 'reviewer: use focused instructions',
+      prompt: 'Original prompt.',
+      manifest: { name: 'reviewer', description: 'reviewer: use focused instructions' },
+      scope: 'project',
+      sourceKind: 'project-cliq',
+      sourceRoot: path.join(cwd, '.cliq', 'skills'),
+      skillDir: path.dirname(skillFile),
+      skillFile,
+      diagnostics: [],
+      activatedBy: 'cli',
+      activatedAt: new Date().toISOString()
+    };
+
+    await writeFile(
+      skillFile,
+      `---
+name: reviewer
+description: reviewer: use focused instructions
+---
+
+Updated prompt.`,
+      'utf8'
+    );
+
+    const refreshed = await refreshActiveSkill(active);
+    assert.equal(refreshed.skill?.prompt, 'Updated prompt.');
+    assert.equal(refreshed.diagnostics.some((item) => item.level === 'error'), false);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('refreshActiveSkill reports read failures without throwing', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-refresh-missing-'));
+  const skillFile = path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md');
+  try {
+    const active: ActiveSkill = {
+      name: 'reviewer',
+      description: 'reviewer instructions',
+      prompt: 'Stale prompt.',
+      manifest: { name: 'reviewer', description: 'reviewer instructions' },
+      scope: 'project',
+      sourceKind: 'project-cliq',
+      sourceRoot: path.join(cwd, '.cliq', 'skills'),
+      skillDir: path.dirname(skillFile),
+      skillFile,
+      diagnostics: [],
+      activatedBy: 'model',
+      activatedAt: new Date().toISOString()
+    };
+
+    const refreshed = await refreshActiveSkill(active);
+    assert.equal(refreshed.skill, null);
+    assert.equal(
+      refreshed.diagnostics.some((item) => item.code === 'active-skill-unavailable' && item.level === 'error'),
+      true
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('refreshActiveSkill rejects frontmatter name mismatches during refresh', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-refresh-name-mismatch-'));
+  try {
+    const skillFile = path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md');
+    await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer', 'Original prompt.');
+    const active: ActiveSkill = {
+      name: 'reviewer',
+      description: 'reviewer: use focused instructions',
+      prompt: 'Original prompt.',
+      manifest: { name: 'reviewer', description: 'reviewer: use focused instructions' },
+      scope: 'project',
+      sourceKind: 'project-cliq',
+      sourceRoot: path.join(cwd, '.cliq', 'skills'),
+      skillDir: path.dirname(skillFile),
+      skillFile,
+      diagnostics: [],
+      activatedBy: 'cli',
+      activatedAt: new Date().toISOString()
+    };
+
+    await writeFile(
+      skillFile,
+      `---
+name: other
+description: renamed in place
+---
+
+Renamed prompt.`,
+      'utf8'
+    );
+
+    const refreshed = await refreshActiveSkill(active);
+    assert.equal(refreshed.skill, null);
+    assert.equal(
+      refreshed.diagnostics.some((item) => item.code === 'name-mismatch' && item.level === 'error'),
+      true
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('formatSkillCatalog marks active skills and includes status metadata', () => {
+  const catalog: SkillCatalog = {
+    entries: [
+      {
+        id: 'project-cliq:/tmp/reviewer/SKILL.md',
+        name: 'reviewer',
+        description: 'Review before editing',
+        scope: 'project',
+        sourceKind: 'project-cliq',
+        sourceRoot: '/tmp/.cliq/skills',
+        skillDir: '/tmp/.cliq/skills/reviewer',
+        skillFile: '/tmp/.cliq/skills/reviewer/SKILL.md',
+        status: 'available',
+        diagnostics: [],
+        rank: 10_002
+      },
+      {
+        id: 'user-cliq:/tmp/writer/SKILL.md',
+        name: 'writer',
+        description: 'Write docs',
+        scope: 'user',
+        sourceKind: 'user-cliq',
+        sourceRoot: '/home/user/.cliq/skills',
+        skillDir: '/home/user/.cliq/skills/writer',
+        skillFile: '/home/user/.cliq/skills/writer/SKILL.md',
+        status: 'shadowed',
+        diagnostics: [],
+        rank: 2
+      }
+    ],
+    diagnostics: []
+  };
+  const active: ActiveSkill[] = [
+    {
+      name: 'reviewer',
+      description: 'Review before editing',
+      prompt: 'Review prompt.',
+      manifest: { name: 'reviewer', description: 'Review before editing' },
+      scope: 'project',
+      sourceKind: 'project-cliq',
+      sourceRoot: '/tmp/.cliq/skills',
+      skillDir: '/tmp/.cliq/skills/reviewer',
+      skillFile: '/tmp/.cliq/skills/reviewer/SKILL.md',
+      diagnostics: [],
+      activatedBy: 'cli',
+      activatedAt: '2026-05-23T00:00:00.000Z'
+    }
+  ];
+
+  const formatted = formatSkillCatalog(catalog, active);
+  assert.match(formatted, /^\* reviewer \[project\/available\]/m);
+  assert.match(formatted, /^  writer \[user\/shadowed\]/m);
 });
 
 test('activateSkill replaces a same-name active user skill with the selected project skill', async () => {
