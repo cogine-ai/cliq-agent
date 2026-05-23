@@ -48,6 +48,7 @@ test('buildToolApprovalSubject reports empty commandHead for unidentifiable bash
 test('buildToolApprovalSubject marks executable shell syntax unsafe for bash allow rules', () => {
   for (const bash of [
     'git status && rm -rf /',
+    'git status (rm -rf /)',
     'git status $(rm -rf /)',
     'git status `rm -rf /`',
     'git status <(rm -rf /)'

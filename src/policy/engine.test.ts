@@ -227,6 +227,7 @@ test('decision table: bash allow rules do not auto-approve executable shell synt
     'git status; rm -rf /',
     'git status | sh',
     'git status\nrm -rf /',
+    'git status (rm -rf /)',
     'git status $(rm -rf /)',
     'git status `rm -rf /`',
     'git status <(rm -rf /)',

@@ -157,6 +157,8 @@ function unsafeAllowSyntaxInFragment(commandLine: string): boolean {
     if (ch === '&' && next !== '>' && trimmed[i - 1] !== '>') return true;
     if (ch === '`') return true;
     if (ch === '$' && next === '(') return true;
+    // Unquoted subshells: `git status (rm -rf /)` runs more than the matched head.
+    if (ch === '(') return true;
     if ((ch === '<' || ch === '>') && next === '(') return true;
   }
 

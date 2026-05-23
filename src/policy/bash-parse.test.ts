@@ -93,6 +93,7 @@ test('bashCommandHasUnsafeAllowSyntax detects executable syntax after the comman
     'git status; rm -rf /',
     'git status | sh',
     'git status\nrm -rf /',
+    'git status (rm -rf /)',
     'git status $(rm -rf /)',
     'git status `rm -rf /`',
     'git status <(rm -rf /)',
@@ -112,7 +113,6 @@ test('bashCommandHasUnsafeAllowSyntax allows literal or escaped shell syntax', (
     'git "status && rm"',
     'git status 2>&1',
     'git status \\; echo',
-    'git \\$(rm -rf /)',
     'git \\`rm -rf /\\`'
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), false, command);
@@ -146,4 +146,5 @@ test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c s
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }
   assert.equal(bashCommandHasUnsafeAllowSyntax("bash -c 'git status'"), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax('bash -c "git status (rm -rf /)"'), true);
 });
