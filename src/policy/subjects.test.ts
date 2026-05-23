@@ -65,6 +65,18 @@ test('buildToolApprovalSubject marks executable shell syntax unsafe for bash all
       });
     }
   }
+
+  const nested = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: "bash -lc 'bash -c \"git status && rm -rf /\"'" }
+  });
+  if (nested.kind === 'tool') {
+    assert.deepEqual(nested.channel, {
+      kind: 'bash',
+      commandHead: 'bash',
+      unsafeForAllow: true
+    });
+  }
 });
 
 test('buildToolApprovalSubject marks TX edits as staged and includes the path', () => {

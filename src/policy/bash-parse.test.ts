@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { bashCommandHasUnsafeAllowSyntax, parseBashCommandHead } from './bash-parse.js';
+import {
+  bashCommandHasUnsafeAllowSyntax,
+  extractShellInlineScript,
+  parseBashCommandHead
+} from './bash-parse.js';
 
 test('parseBashCommandHead returns the plain command for a simple invocation', () => {
   assert.equal(parseBashCommandHead('npm test'), 'npm');
@@ -113,4 +117,33 @@ test('bashCommandHasUnsafeAllowSyntax allows literal or escaped shell syntax', (
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), false, command);
   }
+});
+
+test('extractShellInlineScript returns the -c script for shell interpreters', () => {
+  assert.equal(extractShellInlineScript("bash -c 'git status'"), 'git status');
+  assert.equal(extractShellInlineScript("bash -lc 'git status'"), 'git status');
+  assert.equal(extractShellInlineScript("bash -euc 'git status'"), 'git status');
+  assert.equal(extractShellInlineScript("bash -o pipefail -c 'git status'"), 'git status');
+  assert.equal(extractShellInlineScript("bash --noprofile --norc -c 'git status'"), 'git status');
+  assert.equal(extractShellInlineScript("busybox sh -c 'git status'"), 'git status');
+  assert.equal(extractShellInlineScript('sh -c "npm test"'), 'npm test');
+  assert.equal(extractShellInlineScript('sudo bash -c "git pull"'), 'git pull');
+  assert.equal(extractShellInlineScript('npm test'), null);
+});
+
+test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c scripts', () => {
+  for (const command of [
+    "bash -c 'git status && rm -rf /'",
+    "bash -lc 'git status && rm -rf /'",
+    "bash -o pipefail -c 'git status && rm -rf /'",
+    "bash --noprofile --norc -c 'git status && rm -rf /'",
+    "bash -c 'bash -c \"git status && rm -rf /\"'",
+    'bash -c "git status; rm -rf /"',
+    'sh -c "git status | sh"',
+    'sudo bash -c "git status $(rm -rf /)"',
+    '/usr/bin/env bash -c "git status && rm -rf /"'
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
+  }
+  assert.equal(bashCommandHasUnsafeAllowSyntax("bash -c 'git status'"), false);
 });

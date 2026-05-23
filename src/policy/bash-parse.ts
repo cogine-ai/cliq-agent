@@ -1,8 +1,119 @@
+const SHELL_INTERPRETER_HEADS = new Set([
+  'ash',
+  'bash',
+  'dash',
+  'fish',
+  'ksh',
+  'sh',
+  'zsh'
+]);
+
+const BUSYBOX_HEAD = 'busybox';
+const MAX_SHELL_INLINE_DEPTH = 8;
+
+const SHELL_OPTION_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '-o',
+  '+o',
+  '-O',
+  '+O',
+  '--init-file',
+  '--rcfile'
+]);
+
+const SHELL_OPTION_ATTACHED_VALUE_PREFIXES: readonly string[] = [
+  '--init-file=',
+  '--rcfile='
+];
+
 /**
  * True when a bash line contains syntax that can execute more than the
  * command head matched by a `bash: <head> *` allow rule.
+ *
+ * Also inspects inline scripts passed to shell interpreters via `-c` / `--command`
+ * so `bash -c 'git status && rm -rf /'` cannot bypass allow rules through quoting.
  */
 export function bashCommandHasUnsafeAllowSyntax(commandLine: string): boolean {
+  return bashCommandHasUnsafeAllowSyntaxInner(commandLine, 0);
+}
+
+function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number): boolean {
+  if (unsafeAllowSyntaxInFragment(commandLine)) return true;
+  const nested = extractShellInlineScript(commandLine);
+  if (nested === null) return false;
+  if (depth >= MAX_SHELL_INLINE_DEPTH) return true;
+  return bashCommandHasUnsafeAllowSyntaxInner(nested, depth + 1);
+}
+
+/**
+ * Extract the inline script argument from `sh -c`, `bash -c`, etc., when present.
+ * Returns null for non-interpreter invocations or when no `-c` script is found.
+ */
+export function extractShellInlineScript(commandLine: string): string | null {
+  if (typeof commandLine !== 'string') return null;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return null;
+
+  const tokens = tokenizeWords(trimmed);
+  if (tokens.length === 0) return null;
+
+  let i = 0;
+  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
+    i += 1;
+  }
+  while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
+    i = skipWrapperFlags(tokens, i + 1);
+    if (i >= tokens.length) return null;
+  }
+  if (i >= tokens.length) return null;
+
+  let head = tokenBasename(tokens[i]!);
+  i += 1;
+
+  if (head === BUSYBOX_HEAD) {
+    if (i >= tokens.length) return null;
+    head = tokenBasename(tokens[i]!);
+    i += 1;
+  }
+
+  if (!SHELL_INTERPRETER_HEADS.has(head)) return null;
+
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (isShellCommandStringFlag(token)) {
+      return tokens[i + 1] ?? null;
+    }
+    if (token.startsWith('--command=')) {
+      return token.slice('--command='.length);
+    }
+    if (
+      SHELL_OPTION_VALUE_FLAGS.has(token) ||
+      SHELL_OPTION_ATTACHED_VALUE_PREFIXES.some((prefix) => token.startsWith(prefix))
+    ) {
+      i += SHELL_OPTION_VALUE_FLAGS.has(token) ? 2 : 1;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return null;
+}
+
+function tokenBasename(token: string): string {
+  return token.includes('/') ? token.split('/').filter(Boolean).pop()! : token;
+}
+
+function isShellCommandStringFlag(token: string): boolean {
+  if (token === '-c' || token === '--command') return true;
+  // Shells commonly combine short flags, e.g. `bash -lc "..."` or
+  // `bash -euc "..."`. Treat any combined short option containing `c`
+  // as the command-string form and inspect the following token.
+  return /^-[A-Za-z]*c[A-Za-z]*$/.test(token);
+}
+
+function unsafeAllowSyntaxInFragment(commandLine: string): boolean {
   if (typeof commandLine !== 'string') return false;
   const trimmed = commandLine.trim();
   if (trimmed === '') return false;
@@ -198,6 +309,10 @@ function skipWrapperFlags(tokens: string[], start: number): number {
  * fall through to the preset rather than guess.
  */
 function tokenizeLeadingWords(input: string): string[] {
+  return tokenizeWords(input, { stopAtShellOperators: true });
+}
+
+function tokenizeWords(input: string, options: { stopAtShellOperators?: boolean } = {}): string[] {
   const out: string[] = [];
   let buf = '';
   let i = 0;
@@ -238,7 +353,7 @@ function tokenizeLeadingWords(input: string): string[] {
     }
 
     // Stop at shell operators; we don't try to chase pipelines.
-    if (ch === '|' || ch === '&' || ch === ';' || ch === '\n') {
+    if (options.stopAtShellOperators && (ch === '|' || ch === '&' || ch === ';' || ch === '\n')) {
       break;
     }
 
