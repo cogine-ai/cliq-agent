@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test, { mock } from 'node:test';
 
-import { readNdjsonDeltas, readSseDeltas } from './http.js';
+import { readNdjsonDeltas, readSseDeltas, readTextStream } from './http.js';
 import { createOpenAICompatibleClient } from './providers/openai-compatible.js';
 
 function streamResponse(chunks: string[]) {
@@ -127,4 +127,27 @@ test('readNdjsonDeltas skips malformed payloads and keeps valid deltas', async (
   } finally {
     warnMock.mock.restore();
   }
+});
+
+test('readTextStream cancels the response reader when aborted while streaming', async () => {
+  const controller = new AbortController();
+  let cancelled = false;
+  const response = new Response(
+    new ReadableStream({
+      start(streamController) {
+        streamController.enqueue(new TextEncoder().encode('partial'));
+      },
+      cancel() {
+        cancelled = true;
+      }
+    }),
+    { status: 200 }
+  );
+
+  const readPromise = readTextStream(response, () => {
+    controller.abort();
+  }, { signal: controller.signal });
+
+  await assert.rejects(readPromise, /Model request cancelled/);
+  assert.equal(cancelled, true);
 });

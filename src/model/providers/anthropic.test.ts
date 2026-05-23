@@ -3,6 +3,18 @@ import test, { mock } from 'node:test';
 
 import { createAnthropicClient } from './anthropic.js';
 
+async function expectModelCancellation(promise: Promise<unknown>) {
+  await assert.rejects(
+    Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('stream did not cancel')), 250);
+      })
+    ]),
+    /Model request cancelled/
+  );
+}
+
 test('anthropic client sends messages request', async () => {
   const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
     assert.equal(String(_url), 'https://api.anthropic.com/v1/messages');
@@ -35,6 +47,54 @@ test('anthropic client sends messages request', async () => {
     assert.equal(result.provider, 'anthropic');
     assert.equal(result.model, 'claude-sonnet-4-20250514');
     assert.deepEqual(events, []);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('anthropic streaming cancels provider response body on abort', async () => {
+  let cancelled = false;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}\n\n'
+            )
+          );
+        },
+        cancel() {
+          cancelled = true;
+        }
+      })
+    );
+  });
+
+  try {
+    const controller = new AbortController();
+    const deltas: string[] = [];
+    const client = createAnthropicClient({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-20250514',
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      streaming: 'on'
+    });
+
+    await expectModelCancellation(
+      client.complete([{ role: 'user', content: 'hello' }], {
+        signal: controller.signal,
+        onEvent(event) {
+          if (event.type !== 'text-delta') return;
+          deltas.push(event.text);
+          controller.abort();
+        }
+      })
+    );
+
+    assert.deepEqual(deltas, ['partial']);
+    assert.equal(cancelled, true);
   } finally {
     fetchMock.mock.restore();
   }

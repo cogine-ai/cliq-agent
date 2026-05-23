@@ -66,7 +66,8 @@ export function createAnthropicClient(config: ResolvedModelConfig): ModelClient 
                   ? (event.delta.text ?? null)
                   : null;
               },
-              async (text) => options?.onEvent?.({ type: 'text-delta', text })
+              async (text) => options?.onEvent?.({ type: 'text-delta', text }),
+              { signal: options?.signal }
             )
           ).trim();
 

@@ -40,7 +40,8 @@ export function createOllamaClient(config: ResolvedModelConfig): ModelClient {
                 const event = json as { message?: { content?: string } };
                 return event.message?.content ?? null;
               },
-              async (text) => options?.onEvent?.({ type: 'text-delta', text })
+              async (text) => options?.onEvent?.({ type: 'text-delta', text }),
+              { signal: options?.signal }
             )
           ).trim();
 

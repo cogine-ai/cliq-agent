@@ -3,6 +3,18 @@ import test, { mock } from 'node:test';
 
 import { createOllamaClient } from './ollama.js';
 
+async function expectModelCancellation(promise: Promise<unknown>) {
+  await assert.rejects(
+    Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('stream did not cancel')), 250);
+      })
+    ]),
+    /Model request cancelled/
+  );
+}
+
 test('ollama client sends native chat request', async () => {
   const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
     assert.equal(String(_url), 'http://localhost:11434/api/chat');
@@ -25,6 +37,49 @@ test('ollama client sends native chat request', async () => {
       provider: 'ollama',
       model: 'qwen3:14b'
     });
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('ollama streaming cancels provider response body on abort', async () => {
+  let cancelled = false;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"message":{"content":"partial"}}\n'));
+        },
+        cancel() {
+          cancelled = true;
+        }
+      })
+    );
+  });
+
+  try {
+    const controller = new AbortController();
+    const deltas: string[] = [];
+    const client = createOllamaClient({
+      provider: 'ollama',
+      model: 'qwen3:14b',
+      baseUrl: 'http://localhost:11434',
+      streaming: 'on'
+    });
+
+    await expectModelCancellation(
+      client.complete([{ role: 'user', content: 'hello' }], {
+        signal: controller.signal,
+        onEvent(event) {
+          if (event.type !== 'text-delta') return;
+          deltas.push(event.text);
+          controller.abort();
+        }
+      })
+    );
+
+    assert.deepEqual(deltas, ['partial']);
+    assert.equal(cancelled, true);
   } finally {
     fetchMock.mock.restore();
   }

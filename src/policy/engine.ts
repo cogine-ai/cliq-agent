@@ -26,6 +26,11 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
       return decidePermissionRequest(subject);
     }
 
+    if (mode === 'read-only') {
+      const hardDeny = decideReadOnlyHardDeny(subject);
+      if (hardDeny) return hardDeny;
+    }
+
     if (subject.kind === 'tool') {
       const tableDecision = matchAgainstTable(table, subject.channel);
       const resolved = applyTableDecision(tableDecision, subject);
@@ -38,20 +43,6 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
     }
 
     if (mode === 'read-only') {
-      if (subject.kind === 'tx-apply') {
-        return {
-          behavior: 'deny',
-          reason: 'policy mode read-only blocks transaction apply',
-          decidedBy: 'policy'
-        };
-      }
-      if (subject.access !== 'read') {
-        return {
-          behavior: 'deny',
-          reason: `policy mode read-only blocks ${subject.access} tools`,
-          decidedBy: 'policy'
-        };
-      }
       return { behavior: 'allow', decidedBy: 'policy' };
     }
 
@@ -92,6 +83,24 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
       case 'fallthrough':
         return undefined;
     }
+  }
+
+  function decideReadOnlyHardDeny(subject: ApprovalSubject): ApprovalDecision | undefined {
+    if (subject.kind === 'tx-apply') {
+      return {
+        behavior: 'deny',
+        reason: 'policy mode read-only blocks transaction apply',
+        decidedBy: 'policy'
+      };
+    }
+    if (subject.kind === 'tool' && subject.access !== 'read') {
+      return {
+        behavior: 'deny',
+        reason: `policy mode read-only blocks ${subject.access} tools`,
+        decidedBy: 'policy'
+      };
+    }
+    return undefined;
   }
 
   function describeRule(
