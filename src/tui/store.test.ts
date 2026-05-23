@@ -135,6 +135,23 @@ test('runtime-event cancel records a visible cancellation and duplicate errors a
   assert.equal(duplicate.transcript.length, 2);
 });
 
+test('runtime-event duplicate errors keep distinct non-cancel stages visible', () => {
+  let s = reduce(baseInit(), {
+    type: 'runtime-event',
+    event: { type: 'error', stage: 'tool', message: 'same failure' },
+  });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'error', stage: 'model', message: 'same failure' },
+  });
+
+  assert.equal(s.errors.length, 2);
+  assert.deepEqual(
+    s.transcript.filter((entry) => entry.kind === 'system').map((entry) => entry.text),
+    ['error (tool): same failure', 'error (model): same failure']
+  );
+});
+
 test('session-reset clears transcript/turn/approval/errors/tokens but preserves identity fields', () => {
   let s = baseInit();
   s = reduce(s, { type: 'user-input', text: 'a' });

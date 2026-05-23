@@ -431,11 +431,23 @@ function isDuplicateRuntimeError(
 ): boolean {
   const lastError = state.errors[state.errors.length - 1];
   const lastTranscript = state.transcript[state.transcript.length - 1];
-  return (
-    lastError?.message === event.message &&
-    lastTranscript?.kind === 'system' &&
-    lastTranscript.text === formatRuntimeErrorMessage(lastError)
-  );
+  if (
+    !lastError ||
+    lastTranscript?.kind !== 'system' ||
+    lastTranscript.text !== formatRuntimeErrorMessage(lastError) ||
+    lastError.message !== event.message
+  ) {
+    return false;
+  }
+
+  return lastError.stage === event.stage || isCancelFollowupRuntimeError(lastError, event);
+}
+
+function isCancelFollowupRuntimeError(
+  lastError: ErrorEntry,
+  event: Extract<RuntimeEvent, { type: 'error' }>
+): boolean {
+  return lastError.stage === 'cancel' && event.stage === 'model';
 }
 
 export type Listener = (state: UiState) => void;
