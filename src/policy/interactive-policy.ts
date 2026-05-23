@@ -1,22 +1,44 @@
-import { type PermissionTable } from '../policy/decision-table.js';
-import { createPolicyEngine } from '../policy/engine.js';
-import type { ApprovalSubject, PolicyMode } from '../policy/types.js';
-import type { ExtendApprovalScopeResult } from './extend-approval-scope.js';
+import { type PermissionTable } from './decision-table.js';
+import { createPolicyEngine } from './engine.js';
+import type { ApprovalSubject, PolicyMode } from './types.js';
+import type { ApprovalScope, ExtendApprovalScopeResult } from './approval-scope.js';
 
-export function createTuiLivePolicyEngine(
-  initialMode: PolicyMode,
-  requestApproval: (
-    subject: ApprovalSubject
-  ) => Promise<'allow' | 'deny' | 'allow-turn' | 'allow-session' | 'allow-workspace'>,
-  table: PermissionTable,
+export type InteractiveApprovalChoice =
+  | 'allow'
+  | 'deny'
+  | 'allow-turn'
+  | 'allow-session'
+  | 'allow-workspace';
+
+export type ExtendAllowFailure = {
+  scope: ApprovalScope;
+  reason: string;
+};
+
+export type InteractivePolicyEngineOptions = {
+  initialMode: PolicyMode;
+  requestApproval: (subject: ApprovalSubject) => Promise<InteractiveApprovalChoice>;
+  table: PermissionTable;
   extendAllow: (
     subject: ApprovalSubject,
-    scope: 'session' | 'workspace'
-  ) => Promise<ExtendApprovalScopeResult>,
-  onExtendedAllow?: () => void
-) {
+    scope: ApprovalScope
+  ) => Promise<ExtendApprovalScopeResult>;
+  onExtendAllowFailure?: (failure: ExtendAllowFailure) => void;
+};
+
+export function createInteractivePolicyEngine({
+  initialMode,
+  requestApproval,
+  table,
+  extendAllow,
+  onExtendAllowFailure
+}: InteractivePolicyEngineOptions) {
   let inner = createPolicyEngine({ mode: initialMode, table });
   let allowTurn = false;
+
+  function rebuildForExtendedAllow() {
+    inner = createPolicyEngine({ mode: inner.mode, table });
+  }
 
   const engine = {
     get mode() {
@@ -40,11 +62,9 @@ export function createTuiLivePolicyEngine(
         const scope = userChoice === 'allow-session' ? 'session' : 'workspace';
         const result = await extendAllow(subject, scope);
         if (!result.ok) {
-          process.stderr.write(
-            `cliq: could not extend approval to ${scope}: ${result.reason}\n`
-          );
+          onExtendAllowFailure?.({ scope, reason: result.reason });
         } else {
-          onExtendedAllow?.();
+          rebuildForExtendedAllow();
         }
         return { behavior: 'allow', decidedBy: 'user' as const };
       }
@@ -64,8 +84,6 @@ export function createTuiLivePolicyEngine(
     resetTurn() {
       allowTurn = false;
     },
-    rebuildForExtendedAllow() {
-      inner = createPolicyEngine({ mode: inner.mode, table });
-    }
+    rebuildForExtendedAllow
   };
 }

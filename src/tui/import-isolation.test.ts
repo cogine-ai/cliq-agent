@@ -63,6 +63,17 @@ function extractImports(source: string): string[] {
   return [...specs];
 }
 
+function extractStaticRuntimeImports(source: string): string[] {
+  const specs = new Set<string>();
+  const staticRuntimeImportPattern =
+    /\bimport\s+(?!type\b)(?:[^'";]+\s+from\s+)?['"]([^'"]+)['"]/g;
+  let m: RegExpExecArray | null;
+  while ((m = staticRuntimeImportPattern.exec(source)) !== null) {
+    specs.add(m[1]!);
+  }
+  return [...specs];
+}
+
 function isForbiddenPackage(spec: string): boolean {
   if (FORBIDDEN_PACKAGES.has(spec)) return true;
   // Subpath imports e.g. 'react/jsx-runtime', 'ink/internal/x'.
@@ -99,6 +110,20 @@ test('runtime / headless / protocol modules never import Ink/React or src/tui/',
     violations.length,
     0,
     `import-isolation violations:\n  ${violations.join('\n  ')}`
+  );
+});
+
+test('cli entrypoint only loads src/tui/ through lazy runtime imports', async () => {
+  const file = resolve(SRC_ROOT, 'cli.ts');
+  const source = await readFile(file, 'utf8');
+  const violations = extractStaticRuntimeImports(source)
+    .filter((spec) => resolvesIntoTui(spec, file))
+    .map((spec) => `${file}: statically imports src/tui/ via "${spec}"`);
+
+  assert.equal(
+    violations.length,
+    0,
+    `cli TUI import-boundary violations:\n  ${violations.join('\n  ')}`
   );
 });
 

@@ -1,4 +1,5 @@
 import type { ProviderName } from '../model/types.js';
+import type { InteractiveApprovalChoice } from '../policy/interactive-policy.js';
 import type { ApprovalSubject, PolicyMode } from '../policy/types.js';
 import type { ModelAction } from '../protocol/model/actions.js';
 import type { RuntimeEvent } from '../protocol/runtime/events.js';
@@ -58,7 +59,7 @@ export type ActiveTurn = {
  * is no meaningful channel to persist a "session" or "workspace" allow rule
  * against.
  */
-export type UiApprovalDecision = 'allow' | 'deny' | 'allow-turn' | 'allow-session' | 'allow-workspace';
+export type UiApprovalDecision = InteractiveApprovalChoice;
 
 export type PendingApproval = {
   id: string;

@@ -14,9 +14,11 @@ import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
+import { extendApprovalScope } from './policy/approval-scope.js';
 import { composeRuntimePermissionTable } from './policy/compose-runtime.js';
 import type { PermissionRule, PermissionTable } from './policy/decision-table.js';
 import { createPolicyEngine } from './policy/engine.js';
+import { createInteractivePolicyEngine } from './policy/interactive-policy.js';
 import { isPolicyMode, POLICY_MODE_LIST, POLICY_MODES } from './policy/modes.js';
 import { PermissionGrammarError, parsePermissionRuleString } from './policy/permissions-grammar.js';
 import type { ApprovalSubject, PolicyMode } from './policy/types.js';
@@ -49,8 +51,6 @@ import type { WorkspaceTrustContext } from './session/trust.js';
 import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
 import type { Session } from './session/types.js';
 import type { ToolResult } from './tools/types.js';
-import { extendApprovalScope } from './tui/extend-approval-scope.js';
-import { createTuiLivePolicyEngine } from './tui/live-policy.js';
 import type { UiStore } from './tui/store.js';
 import { checkForPackageUpdate, readCurrentPackageVersion } from './updates.js';
 import {
@@ -2778,14 +2778,16 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   //     `deny: bash: rm` rule walked earlier.
   // tx.applyPolicy stays bound to construction-time value (per spec open
   // question 3) — that is enforced inside tuiTransactions.confirmApply below.
-  const livePolicy = createTuiLivePolicyEngine(
-    policy,
-    approvalBridge.requestApproval,
-    opts.permissionTable,
-    (subject, scope) =>
+  const livePolicy = createInteractivePolicyEngine({
+    initialMode: policy,
+    requestApproval: approvalBridge.requestApproval,
+    table: opts.permissionTable,
+    extendAllow: (subject, scope) =>
       extendApprovalScope(opts.trustContext, opts.permissionTable, subject, scope),
-    () => livePolicy.rebuildForExtendedAllow()
-  );
+    onExtendAllowFailure: ({ scope, reason }) => {
+      process.stderr.write(`cliq: could not extend approval to ${scope}: ${reason}\n`);
+    }
+  });
 
   const tuiTxMode = opts.txMode ?? wsCfg.transactions?.mode ?? 'off';
   let tuiTransactions: TxRunnerOptions | undefined;
@@ -2945,4 +2947,3 @@ export async function notifyIfPackageUpdateAvailable(store: UiStore) {
     // The update check is best-effort and must never destabilize TUI startup.
   }
 }
-

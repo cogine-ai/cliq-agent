@@ -4,15 +4,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import type { PermissionTable } from '../policy/decision-table.js';
-import { buildToolApprovalSubject } from '../policy/subjects.js';
-import type { ApprovalSubject } from '../policy/types.js';
+import type { PermissionTable } from './decision-table.js';
+import { buildToolApprovalSubject } from './subjects.js';
+import type { ApprovalSubject } from './types.js';
 import { readPersistedWorkspacePermissions } from '../session/permissions.js';
 import { createWorkspaceTrustContext } from '../session/trust.js';
 import {
   approvalSubjectToPermissionRule,
   extendApprovalScope
-} from './extend-approval-scope.js';
+} from './approval-scope.js';
 
 const bashSubject: ApprovalSubject = buildToolApprovalSubject({
   definition: { name: 'bash', access: 'exec' },

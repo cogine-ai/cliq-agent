@@ -1,7 +1,9 @@
-import { accessChannelPrimaryKey, type PermissionRule, type PermissionTable } from '../policy/decision-table.js';
-import type { ApprovalSubject } from '../policy/types.js';
+import { accessChannelPrimaryKey, type PermissionRule, type PermissionTable } from './decision-table.js';
+import type { ApprovalSubject } from './types.js';
 import { appendPersistedWorkspacePermission } from '../session/permissions.js';
 import type { WorkspaceTrustContext } from '../session/trust.js';
+
+export type ApprovalScope = 'session' | 'workspace';
 
 /**
  * Derive the PermissionRule that an "allow this {session,workspace}" modal
@@ -23,7 +25,7 @@ export function approvalSubjectToPermissionRule(
 export type ExtendApprovalScopeResult = { ok: true } | { ok: false; reason: string };
 
 /**
- * Apply a session- or workspace-scoped allow from the TUI approval modal.
+ * Apply a session- or workspace-scoped allow from an interactive approval.
  *
  * Workspace scope persists to disk BEFORE mutating the in-memory table so a
  * failed write cannot leave a session-lived allow behind (PR #91 regression).
@@ -36,7 +38,7 @@ export async function extendApprovalScope(
   trustContext: WorkspaceTrustContext,
   permissionTable: PermissionTable,
   subject: ApprovalSubject,
-  scope: 'session' | 'workspace',
+  scope: ApprovalScope,
   deps: ExtendApprovalScopeDeps = {}
 ): Promise<ExtendApprovalScopeResult> {
   const appendPersisted = deps.appendPersisted ?? appendPersistedWorkspacePermission;
