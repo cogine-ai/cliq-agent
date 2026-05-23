@@ -216,6 +216,33 @@ test('decision table: workspace deny beats a workspace allow on the same channel
   }
 });
 
+test('decision table: bash allow rules do not auto-approve executable shell syntax', async () => {
+  const policy = createPolicyEngine({
+    mode: 'auto',
+    table: composePermissionTable({ allow: [wsRule('bash', 'git *')] })
+  });
+
+  const unsafeCommands = [
+    'git status && rm -rf /',
+    'git status; rm -rf /',
+    'git status | sh',
+    'git status\nrm -rf /',
+    'git status $(rm -rf /)',
+    'git status `rm -rf /`',
+    'git status <(rm -rf /)',
+    'git status >(rm -rf /)'
+  ];
+
+  for (const bash of unsafeCommands) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+    const decision = await policy.decide(subject);
+    assert.equal(decision.behavior, 'ask', bash);
+  }
+});
+
 test('decision table: bash without identifiable head never matches allow (no silent approve)', async () => {
   const policy = createPolicyEngine({
     mode: 'confirm-bash',

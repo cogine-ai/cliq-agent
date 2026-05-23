@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseBashCommandHead } from './bash-parse.js';
+import { bashCommandHasUnsafeAllowSyntax, parseBashCommandHead } from './bash-parse.js';
 
 test('parseBashCommandHead returns the plain command for a simple invocation', () => {
   assert.equal(parseBashCommandHead('npm test'), 'npm');
@@ -81,4 +81,36 @@ test('parseBashCommandHead handles quoted argv[0]', () => {
 
 test('parseBashCommandHead survives mixed env + wrapper + quoted command', () => {
   assert.equal(parseBashCommandHead('NODE_ENV=production sudo -u deploy "npm" run start'), 'npm');
+});
+
+test('bashCommandHasUnsafeAllowSyntax detects executable syntax after the command head', () => {
+  for (const command of [
+    'git status && rm -rf /',
+    'git status; rm -rf /',
+    'git status | sh',
+    'git status\nrm -rf /',
+    'git status $(rm -rf /)',
+    'git status `rm -rf /`',
+    'git status <(rm -rf /)',
+    'git status >(rm -rf /)',
+    '"git" status && rm -rf /',
+    'git "$(rm -rf /)"'
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
+  }
+});
+
+test('bashCommandHasUnsafeAllowSyntax allows literal or escaped shell syntax', () => {
+  for (const command of [
+    '',
+    'git status',
+    "git '$(rm -rf /)'",
+    'git "status && rm"',
+    'git status 2>&1',
+    'git status \\; echo',
+    'git \\$(rm -rf /)',
+    'git \\`rm -rf /\\`'
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), false, command);
+  }
 });

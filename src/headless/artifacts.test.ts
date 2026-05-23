@@ -97,6 +97,31 @@ test('toSessionView exposes stable records without raw assistant JSON', async ()
   assert.equal((view.records[2] as { contentPreview: string }).contentPreview.length <= 280, true);
 });
 
+test('toSessionView exposes active skills without raw prompt bodies', async () => {
+  const { cwd } = await setupWorkspace();
+  const session = createSession(cwd);
+  session.activeSkills.push({
+    name: 'reviewer',
+    description: 'review instructions',
+    prompt: 'Long skill prompt.',
+    manifest: { name: 'reviewer', description: 'review instructions' },
+    scope: 'project',
+    sourceKind: 'project-cliq',
+    sourceRoot: path.join(cwd, '.cliq', 'skills'),
+    skillDir: path.join(cwd, '.cliq', 'skills', 'reviewer'),
+    skillFile: path.join(cwd, '.cliq', 'skills', 'reviewer', 'SKILL.md'),
+    diagnostics: [],
+    activatedBy: 'model',
+    activatedAt: '2026-05-20T00:00:00.000Z'
+  });
+
+  const view = toSessionView(session);
+
+  assert.equal(view.activeSkills[0]?.name, 'reviewer');
+  assert.equal(view.activeSkills[0]?.active, true);
+  assert.equal('prompt' in view.activeSkills[0]!, false);
+});
+
 test('getArtifactView resolves checkpoint, workspace checkpoint, compaction, and handoff views', async () => {
   const { cwd } = await setupWorkspace();
   const session = createSession(cwd);

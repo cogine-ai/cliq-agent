@@ -1,4 +1,58 @@
 /**
+ * True when a bash line contains syntax that can execute more than the
+ * command head matched by a `bash: <head> *` allow rule.
+ */
+export function bashCommandHasUnsafeAllowSyntax(commandLine: string): boolean {
+  if (typeof commandLine !== 'string') return false;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return false;
+
+  // Operator-leading lines already have no command head, so the matcher
+  // falls through without consulting allow rules.
+  if (/^[&|;<>(){}!]/.test(trimmed)) return false;
+
+  let quote: '"' | "'" | null = null;
+
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i]!;
+    const next = trimmed[i + 1];
+
+    if (ch === '\\') {
+      i += 1;
+      continue;
+    }
+
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue;
+    }
+
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null;
+        continue;
+      }
+      if (ch === '`') return true;
+      if (ch === '$' && next === '(') return true;
+      continue;
+    }
+
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+
+    if (ch === '\n' || ch === ';' || ch === '|') return true;
+    if (ch === '&' && next !== '>' && trimmed[i - 1] !== '>') return true;
+    if (ch === '`') return true;
+    if (ch === '$' && next === '(') return true;
+    if ((ch === '<' || ch === '>') && next === '(') return true;
+  }
+
+  return false;
+}
+
+/**
  * Extract a stable "command head" from a bash invocation string so the
  * decision-table matcher can group rules like `bash: npm *` without false
  * positives from leading env assignments or `sudo`/`env` wrappers.

@@ -66,7 +66,7 @@ test('end-to-end: user prompt → approval modal → allow → tool result → f
     kind: 'tool',
     toolName: 'bash',
     access: 'exec',
-    channel: { kind: 'bash', commandHead: 'ls' },
+    channel: { kind: 'bash', commandHead: 'ls', unsafeForAllow: false },
     action: { bash: 'ls' } as never,
     display: { title: 'Allow bash command?', command: 'ls' }
   };
@@ -128,7 +128,7 @@ test('user denies an approval — resolve fires with deny and modal clears', asy
       kind: 'tool',
       toolName: 'bash',
       access: 'exec',
-      channel: { kind: 'bash', commandHead: 'rm' },
+      channel: { kind: 'bash', commandHead: 'rm', unsafeForAllow: false },
       action: { bash: 'rm -rf /' } as never,
       display: { title: 'Allow bash command?', command: 'rm -rf /' }
     },

@@ -1,6 +1,6 @@
 {
   "name": "@cogineai/cliq",
-  "version": "0.10.0",
+  "version": "0.11.1",
   "description": "Tiny local coding agent harness with a provider-agnostic JSON action protocol.",
   "private": false,
   "type": "module",
@@ -29,6 +29,9 @@
   "files": [
     "dist/**/*.js",
     "!dist/**/*.test.js",
+    "skills/**",
+    "!skills/**/__pycache__/**",
+    "!skills/**/*.pyc",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

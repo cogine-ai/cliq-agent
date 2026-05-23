@@ -21,6 +21,7 @@ import { isPolicyMode, POLICY_MODE_LIST, POLICY_MODES } from './policy/modes.js'
 import { PermissionGrammarError, parsePermissionRuleString } from './policy/permissions-grammar.js';
 import type { ApprovalSubject, PolicyMode } from './policy/types.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
+import { activateSkill, formatSkillCatalog } from './skills/loader.js';
 import type { RuntimeEvent } from './protocol/runtime/events.js';
 import { createRunner } from './runtime/runner.js';
 import type { RuntimeHook } from './runtime/hooks.js';
@@ -138,6 +139,7 @@ export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'handoff-create'; checkpointId?: string; prompt?: undefined }
   | { cmd: 'reset' | 'history' | 'rpc'; prompt?: undefined }
   | { cmd: 'help'; topic?: HelpTopic; prompt?: undefined }
+  | { cmd: 'version'; prompt?: undefined }
   | { cmd: 'tx-open'; name?: string; explicit: true; json?: boolean; headless?: boolean; prompt?: undefined }
   | { cmd: 'tx-status'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
   | { cmd: 'tx-list'; json?: boolean; headless?: boolean; prompt?: undefined }
@@ -834,7 +836,9 @@ function isKnownCommand(cmd: string | undefined) {
     cmd === 'help' ||
     cmd === 'tx' ||
     cmd === '--help' ||
-    cmd === '-h'
+    cmd === '-h' ||
+    cmd === '--version' ||
+    cmd === '-v'
   );
 }
 
@@ -1184,6 +1188,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     return { cmd: 'help', topic, policy, skills, model };
   }
   if (cmd === '--help' || cmd === '-h') return { cmd: 'help', policy, skills, model };
+  if (cmd === '--version' || cmd === '-v') {
+    ensureNoExtraArgs(args, 1, cmd);
+    return { cmd: 'version', policy, skills, model };
+  }
   // Fallback: any unrecognized first token gets treated as part of a chat
   // prompt. baseExtras carry --tui/--classic/--policy explicit flags so the
   // dispatch layer sees the same surface here as in the explicit `chat` path.
@@ -1314,6 +1322,7 @@ Usage:
   cliq help                Print this help
   cliq help TOPIC          Print help for checkpoint, compact, handoff, or tx
   -h, --help               Print this help
+  -v, --version            Print the Cliq version
 
 Transaction subcommands:
   cliq tx open [name]               Open an explicit transaction (optional friendly name)
@@ -1340,7 +1349,7 @@ Options:
                            and <pattern> is a literal, "*" wildcard, or "prefix *"
                            (e.g. "bash: npm *", "fs-write: .env", "fs-read: docs/*").
                            See README "## Tool permissions" for the full layer order.
-  --skill NAME             Activate a local skill; repeat to load multiple skills
+  --skill NAME             Activate a skill; repeat to load multiple skills
   --provider NAME          openrouter | anthropic | openai | openai-compatible | ollama
   --model ID               Provider model id; required for openai-compatible; auto-discovered for ollama
   --base-url URL           Required for openai-compatible; optional provider override
@@ -1837,12 +1846,22 @@ export async function runCli(argv: string[]) {
   // policy starts as whatever parseArgs computed (default / env / CLI flag);
   // workspace `permissions.preset` may override below if no CLI/env was set.
   let policy = parsed.policy;
-  const cwd = process.cwd();
 
   if (cmd === 'help') {
     printHelp(parsed.topic);
     return;
   }
+
+  if (cmd === 'version') {
+    const currentVersion = await readCurrentPackageVersion();
+    if (!currentVersion) {
+      throw new Error('Unable to read current package version');
+    }
+    console.log(currentVersion);
+    return;
+  }
+
+  const cwd = process.cwd();
 
   if (cmd === 'reset') {
     await ensureFresh(cwd);
@@ -2895,6 +2914,15 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     },
     onPolicyChange: async (mode) => {
       livePolicy.setMode(mode);
+    },
+    onSkillsList: () => formatSkillCatalog(opts.assembly.skillCatalog, session.activeSkills ?? []),
+    onSkillActivate: async (name: string) => {
+      const result = await activateSkill(cwd, session, name, {
+        catalog: opts.assembly.skillCatalog,
+        activatedBy: 'tui'
+      });
+      await saveSession(cwd, session);
+      return `skill ${result.skill.name} ${result.status}`;
     }
   });
 

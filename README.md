@@ -173,7 +173,7 @@ Run with a stricter policy mode:
 cliq --policy read-only "inspect the runner and explain how tool dispatch works"
 ```
 
-Activate one or more local skills for a run:
+Activate one or more skills for a run:
 
 ```bash
 cliq --skill reviewer --skill safe-edit "inspect the runtime and suggest a minimal refactor"
@@ -198,6 +198,7 @@ run.start(params: HeadlessRunRequest) -> { runId }
 run.cancel(params: { runId: string }) -> { status: 'cancelled' | 'not-found' | 'already-finished' }
 session.get(params: { cwd: string; sessionId?: string }) -> SessionView
 artifact.get(params: { cwd: string; artifactId: string; sessionId?: string }) -> ArtifactView
+skills.list(params: { cwd: string }) -> { cwd, skills, activeSkills }
 ```
 
 Runtime events are emitted as notifications:
@@ -395,9 +396,29 @@ When a transaction's apply leaves files partially written (e.g., a disk error mi
 
 See `docs/superpowers/specs/2026-05-02-cliq-transactional-workspace-runtime-design.md` for the full design.
 
-## Local skills
+## Skills
 
-Local skills live at `./.cliq/skills/<name>/SKILL.md` and inject additional system instructions without changing Cliq core code.
+Cliq ships a small built-in system skill set:
+
+- `skill-creator`
+- `skill-installer`
+- `skill-doctor`
+
+Built-in skills are shipped inside the `@cogineai/cliq` package and synced on
+first use into `${CLIQ_HOME:-~/.cliq}/skills/.system`. Cliq creates a missing or
+empty built-in skill directory there, but it does not overwrite a non-empty
+same-name skill directory in this release. Upgrading built-in skills means
+upgrading the Cliq package, for example `npm install -g @cogineai/cliq@latest`,
+then letting Cliq merge in missing built-in skills on the next run.
+
+Local project skills are discovered from project roots after workspace trust has been decided:
+
+- Project: `./.cliq/skills/<name>/SKILL.md` and `./.agents/skills/<name>/SKILL.md`
+- User: `~/.cliq/skills/<name>/SKILL.md` and `~/.agents/skills/<name>/SKILL.md`
+- Built-in: `${CLIQ_HOME:-~/.cliq}/skills/.system/<name>/SKILL.md`, synced from
+  the installed Cliq package
+
+Project skills win over user skills, and user skills win over built-in skills when names collide. Workspace `defaultSkills` can activate only project-owned skills; `--skill <name>`, headless `skills`, TUI `/skill <name>`, and the model `{"skill":{"name":"..."}}` action can explicitly activate discovered project, user, or built-in skills. Activation injects instructions only; it does not grant bash, edit, network, or MCP permissions.
 
 ```md
 ---
@@ -408,7 +429,9 @@ description: inspection-first review mode
 Prefer read-only inspection first. Summarize structure before proposing mutations.
 ```
 
-You can activate a skill explicitly with `--skill <name>` or make it load by default via `defaultSkills` in workspace config.
+Optional frontmatter fields include `license`, `compatibility`, `metadata`, and `allowed-tools`. `allowed-tools` is descriptive metadata only; tool authorization still goes through Cliq's normal policy engine.
+
+Activated skills can expose bundled resources. The model can read or list them through `skillResource`, and the resolver keeps paths relative to the activated skill directory with traversal, symlink-escape, binary, and size checks.
 
 ## Extensions
 

@@ -11,6 +11,7 @@ export type InstructionMessage = ChatMessage & {
 
 export type LoadedSkillPrompt = {
   name: string;
+  skillDir: string;
   prompt: string;
 };
 

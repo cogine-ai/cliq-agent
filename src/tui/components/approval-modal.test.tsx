@@ -13,7 +13,7 @@ const toolSubject: Extract<ApprovalSubject, { kind: 'tool' }> = {
   kind: 'tool',
   toolName: 'bash',
   access: 'exec',
-  channel: { kind: 'bash', commandHead: 'rm' },
+  channel: { kind: 'bash', commandHead: 'rm', unsafeForAllow: false },
   action: { bash: 'rm -rf /' } as never,
   display: { title: 'Allow bash command?', command: 'rm -rf /' }
 };

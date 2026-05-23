@@ -20,9 +20,19 @@ export type AppProps = {
   onReset?: () => void | Promise<void>;
   onPolicyChange?: (mode: PolicyMode) => void | Promise<void>;
   onCancelTurn?: () => void;
+  onSkillsList?: () => string | Promise<string>;
+  onSkillActivate?: (name: string) => string | Promise<string>;
 };
 
-export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: AppProps) {
+export function App({
+  store,
+  onSubmit,
+  onReset,
+  onPolicyChange,
+  onCancelTurn,
+  onSkillsList,
+  onSkillActivate
+}: AppProps) {
   const state = useUiStore(store);
   const [input, setInput] = useState('');
   const { exit } = useApp();
@@ -97,6 +107,24 @@ export function App({ store, onSubmit, onReset, onPolicyChange, onCancelTurn }: 
           pushSystem(`policy mode switched to ${parsed.mode}`);
         } catch (error) {
           pushSystem(`/policy failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return;
+      case 'skills':
+        try {
+          pushSystem(onSkillsList ? await onSkillsList() : 'No skill catalog is available in this TUI session.');
+        } catch (error) {
+          pushSystem(`/skills failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return;
+      case 'skill':
+        try {
+          pushSystem(
+            onSkillActivate
+              ? await onSkillActivate(parsed.name)
+              : `No skill activation handler is available for ${parsed.name}.`
+          );
+        } catch (error) {
+          pushSystem(`/skill failed: ${error instanceof Error ? error.message : String(error)}`);
         }
         return;
       case 'unknown':

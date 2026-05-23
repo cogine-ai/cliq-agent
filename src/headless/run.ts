@@ -281,7 +281,8 @@ export async function runHeadless(
       cwd: request.cwd,
       session,
       policyMode: policy,
-      cliSkillNames: request.skills ?? []
+      cliSkillNames: request.skills ?? [],
+      explicitSkillActivationSource: 'headless'
     });
     const workspaceConfig = {
       ...assembly.workspaceConfig,
