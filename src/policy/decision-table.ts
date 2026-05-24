@@ -138,11 +138,6 @@ export function matchAgainstTable(table: PermissionTable, channel: AccessChannel
     }
   }
 
-  if (isBashWithoutHead(channel)) {
-    // Refuse to match this against allow/ask; let preset decide. See above.
-    return { kind: 'fallthrough' };
-  }
-
   if (isBashUnsafeForAllow(channel)) {
     for (const askRule of table.ask) {
       if (matchesRule(askRule, channel)) {
@@ -154,6 +149,16 @@ export function matchAgainstTable(table: PermissionTable, channel: AccessChannel
         return { kind: 'ask', rule: UNSAFE_BASH_ALLOW_RULE };
       }
     }
+    // Wrapper invocations (e.g. `bash -c "git && rm"`) keep an outer head like
+    // "bash" while the compound lives in the script; do not fall through to auto.
+    if (table.allow.some((rule) => rule.channel === 'bash')) {
+      return { kind: 'ask', rule: UNSAFE_BASH_ALLOW_RULE };
+    }
+  }
+
+  if (isBashWithoutHead(channel)) {
+    // Refuse to match this against allow/ask; let preset decide. See above.
+    return { kind: 'fallthrough' };
   }
 
   for (const allowRule of table.allow) {

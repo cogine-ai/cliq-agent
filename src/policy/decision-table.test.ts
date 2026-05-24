@@ -181,6 +181,28 @@ test('matchAgainstTable: unsafe bash syntax cannot be approved by allow rules', 
   }
 });
 
+test('matchAgainstTable: unsafe bash with empty head still asks when bash allow rules exist', () => {
+  const table = tableWith({
+    allow: [wsRule('bash', '*')]
+  });
+  const decision = matchAgainstTable(table, bashChannel('', true));
+  assert.equal(decision.kind, 'ask');
+  if (decision.kind === 'ask') {
+    assert.equal(decision.rule.pattern, '(unsafe-shell-syntax)');
+  }
+});
+
+test('matchAgainstTable: unsafe wrapper head asks even when only a narrower bash allow exists', () => {
+  const table = tableWith({
+    allow: [wsRule('bash', 'git *')]
+  });
+  const decision = matchAgainstTable(table, bashChannel('bash', true));
+  assert.equal(decision.kind, 'ask');
+  if (decision.kind === 'ask') {
+    assert.equal(decision.rule.pattern, '(unsafe-shell-syntax)');
+  }
+});
+
 test('matchAgainstTable: explicit ask wins over allow for unsafe bash syntax', () => {
   const table = tableWith({
     allow: [wsRule('bash', 'git *')],

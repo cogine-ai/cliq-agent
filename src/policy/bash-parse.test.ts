@@ -144,6 +144,18 @@ test('extractShellInlineScript returns the -c script for shell interpreters', ()
   assert.equal(extractShellInlineScript('npm test'), null);
 });
 
+test('bashCommandHasUnsafeAllowSyntax flags subshell and brace-group wrappers', () => {
+  for (const command of [
+    '(git status && rm -rf /)',
+    '{ git status; rm -rf /; }',
+    'bash -c "(git status && rm -rf /)"',
+    'sh -c "(git status; rm -rf /)"'
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
+  }
+  assert.equal(bashCommandHasUnsafeAllowSyntax('&& ls'), false);
+});
+
 test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c scripts', () => {
   for (const command of [
     "bash -c 'git status && rm -rf /'",

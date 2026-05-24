@@ -268,6 +268,8 @@ test('decision table: bash allow rules do not auto-approve compound syntax insid
     "bash -o pipefail -c 'git status && rm -rf /'",
     "bash -c 'bash -c \"git status && rm -rf /\"'",
     'bash -c "git status; rm -rf /"',
+    'bash -c "(git status && rm -rf /)"',
+    '(git status && rm -rf /)',
     'sh -c "git status | sh"',
     "/usr/bin/env -S bash -c 'git status && rm -rf /'",
     "/usr/bin/env -i -S bash -c 'git status && rm -rf /'"
@@ -279,6 +281,19 @@ test('decision table: bash allow rules do not auto-approve compound syntax insid
     const decision = await policy.decide(subject);
     assert.equal(decision.behavior, 'ask', bash);
   }
+});
+
+test('decision table: bash -c compound asks when only a narrower git allow rule exists', async () => {
+  const policy = createPolicyEngine({
+    mode: 'auto',
+    table: composePermissionTable({ allow: [wsRule('bash', 'git *')] })
+  });
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: 'bash -c "git status && rm -rf /"' }
+  });
+  const decision = await policy.decide(subject);
+  assert.equal(decision.behavior, 'ask');
 });
 
 test('decision table: bash without identifiable head never matches allow (no silent approve)', async () => {

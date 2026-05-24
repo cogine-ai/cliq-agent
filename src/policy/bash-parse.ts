@@ -184,9 +184,10 @@ function unsafeAllowSyntaxInFragment(commandLine: string): boolean {
   const trimmed = commandLine.trim();
   if (trimmed === '') return false;
 
-  // Operator-leading lines already have no command head, so the matcher
-  // falls through without consulting allow rules.
-  if (/^[&|;<>(){}!]/.test(trimmed)) return false;
+  // Leading separators without a command head fall through to preset (e.g. `&& ls`).
+  if (/^[&|;]/.test(trimmed)) return false;
+  // Subshell / brace groups hide compound commands behind an empty command head.
+  if (/^[({]/.test(trimmed)) return true;
 
   let quote: '"' | "'" | null = null;
 
