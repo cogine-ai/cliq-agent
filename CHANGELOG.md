@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed the stale `transactions.bashPolicy=confirm` config-load rejection.
+  Interactive tx bash now relies on the merged `PolicyEngine` + `enforceBashPolicy`
+  path (`policyAlreadyApproved`); headless still promotes `confirm` to deny.
+
 ## [0.11.1] - 2026-05-22
 
 This patch release hardens the first built-in skills rollout and closes a
