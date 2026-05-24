@@ -147,3 +147,37 @@ test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c s
   }
   assert.equal(bashCommandHasUnsafeAllowSyntax("bash -c 'git status'"), false);
 });
+
+test('extractShellInlineScript handles --command= and option values before -c', () => {
+  assert.equal(extractShellInlineScript('bash --command=git status'), 'git');
+  assert.equal(extractShellInlineScript('bash --command "npm test"'), 'npm test');
+  assert.equal(
+    extractShellInlineScript("bash --init-file /tmp/rc.sh -c 'git status'"),
+    'git status'
+  );
+  assert.equal(
+    extractShellInlineScript("bash --rcfile=/tmp/rc.sh -c 'git status'"),
+    'git status'
+  );
+});
+
+function wrapShellInlineScript(script: string): string {
+  return `bash -c ${JSON.stringify(script)}`;
+}
+
+test('bashCommandHasUnsafeAllowSyntax treats excessive shell -c nesting as unsafe', () => {
+  // MAX_SHELL_INLINE_DEPTH is 8: the check runs after extracting a nested
+  // script, so the 9th nested `bash -c` layer must be refused even when the
+  // innermost script is otherwise benign.
+  let nested = 'git status';
+  for (let depth = 0; depth < 9; depth += 1) {
+    nested = wrapShellInlineScript(nested);
+  }
+  assert.equal(bashCommandHasUnsafeAllowSyntax(nested), true);
+
+  let withinLimit = 'git status';
+  for (let depth = 0; depth < 8; depth += 1) {
+    withinLimit = wrapShellInlineScript(withinLimit);
+  }
+  assert.equal(bashCommandHasUnsafeAllowSyntax(withinLimit), false);
+});

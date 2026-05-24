@@ -47,6 +47,65 @@ test('createInteractivePolicyEngine grants one-shot allow when workspace persist
   }
 });
 
+test('createInteractivePolicyEngine allow-turn skips later asks until resetTurn', async () => {
+  const table: PermissionTable = { deny: [], allow: [], ask: [] };
+  let approvalCalls = 0;
+  const live = createInteractivePolicyEngine({
+    initialMode: 'confirm-bash',
+    requestApproval: async () => {
+      approvalCalls += 1;
+      return 'allow-turn';
+    },
+    table,
+    extendAllow: async () => ({ ok: true })
+  });
+
+  const first = await live.engine.decide(bashSubject);
+  assert.deepEqual(first, { behavior: 'allow', decidedBy: 'user' });
+
+  const second = await live.engine.decide(bashSubject);
+  assert.deepEqual(second, { behavior: 'allow', decidedBy: 'user' });
+  assert.equal(approvalCalls, 1, 'allow-turn must satisfy later asks in the same turn');
+
+  live.resetTurn();
+  const third = await live.engine.decide(bashSubject);
+  assert.deepEqual(third, { behavior: 'allow', decidedBy: 'user' });
+  assert.equal(approvalCalls, 2, 'resetTurn must reopen the approval modal');
+});
+
+test('createInteractivePolicyEngine deny returns user denial', async () => {
+  const table: PermissionTable = { deny: [], allow: [], ask: [] };
+  const live = createInteractivePolicyEngine({
+    initialMode: 'confirm-bash',
+    requestApproval: async () => 'deny',
+    table,
+    extendAllow: async () => ({ ok: true })
+  });
+  const decision = await live.engine.decide(bashSubject);
+  assert.equal(decision.behavior, 'deny');
+  if (decision.behavior === 'deny') {
+    assert.equal(decision.decidedBy, 'user');
+    assert.match(decision.reason, /user denied/i);
+  }
+});
+
+test('createInteractivePolicyEngine one-shot allow does not persist for later asks', async () => {
+  const table: PermissionTable = { deny: [], allow: [], ask: [] };
+  let approvalCalls = 0;
+  const live = createInteractivePolicyEngine({
+    initialMode: 'confirm-bash',
+    requestApproval: async () => {
+      approvalCalls += 1;
+      return 'allow';
+    },
+    table,
+    extendAllow: async () => ({ ok: true })
+  });
+  await live.engine.decide(bashSubject);
+  await live.engine.decide(bashSubject);
+  assert.equal(approvalCalls, 2, 'plain allow must not auto-approve the next ask');
+});
+
 test('createInteractivePolicyEngine rebuilds after successful session extend', async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-live-session-'));
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-live-session-home-'));
