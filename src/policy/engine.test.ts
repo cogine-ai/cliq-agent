@@ -127,6 +127,19 @@ test('read-only denies write, exec, and tx-apply subjects', async () => {
   });
 });
 
+test('read-only hard-denies exec even when a permission table allow rule matches', async () => {
+  const policy = createPolicyEngine({
+    mode: 'read-only',
+    table: composePermissionTable({ allow: [wsRule('bash', '*')] })
+  });
+
+  assert.deepEqual(await policy.decide(toolSubject('bash', 'exec', { bash: 'pwd' })), {
+    behavior: 'deny',
+    reason: 'policy mode read-only blocks exec tools',
+    decidedBy: 'policy'
+  });
+});
+
 test('confirm-write asks for write tool subjects and allows read and exec', async () => {
   const policy = createPolicyEngine({ mode: 'confirm-write' });
   const edit = buildToolApprovalSubject({
@@ -255,7 +268,9 @@ test('decision table: bash allow rules do not auto-approve compound syntax insid
     "bash -o pipefail -c 'git status && rm -rf /'",
     "bash -c 'bash -c \"git status && rm -rf /\"'",
     'bash -c "git status; rm -rf /"',
-    'sh -c "git status | sh"'
+    'sh -c "git status | sh"',
+    "/usr/bin/env -S bash -c 'git status && rm -rf /'",
+    "/usr/bin/env -i -S bash -c 'git status && rm -rf /'"
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },

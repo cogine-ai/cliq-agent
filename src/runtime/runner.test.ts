@@ -947,6 +947,51 @@ test('runner blocks tool execution when PreToolUse command hook denies', async (
   assert.equal(toolRecord?.meta?.reason, 'blocked by pre hook');
 });
 
+test('runner stops read-only turns after repeated blocked exec requests', async () => {
+  const session = await createTempSession();
+  const events: Array<{ type: string; stage?: string; message?: string }> = [];
+  let calls = 0;
+  let executed = false;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion('{"bash":"pwd"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'read-only' }),
+    onEvent(event) {
+      if (event.type === 'error') events.push(event);
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executed = true;
+              return { tool: 'bash', status: 'ok' as const, content: 'should not run', meta: {} };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'run pwd'), /read-only mode repeatedly blocked exec tool bash/);
+
+  assert.equal(calls, 2);
+  assert.equal(executed, false);
+  assert.equal(session.records.filter((record) => record.kind === 'tool').length, 2);
+  assert.match(events.at(-1)?.message ?? '', /read-only mode repeatedly blocked exec tool bash/);
+});
+
 test('runner warns and continues for non-required PreToolUse infrastructure errors', async () => {
   const session = await createTempSession();
   const events: Array<{ type: string; message?: string; recoverable?: boolean }> = [];

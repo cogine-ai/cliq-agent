@@ -281,6 +281,7 @@ export function createRunner({
           thresholdCompactionsThisTurn: 0,
           thresholdSuppressed: false
         };
+        const repeatedReadOnlyDenials = new Map<string, number>();
 
         const emitModelError = async (error: unknown) => {
           await onEvent({
@@ -689,6 +690,22 @@ export function createRunner({
           });
           await runHooks(hooks, 'afterTool', session, storedResult);
           await onEvent({ type: 'tool-end', tool: storedResult.tool, status: storedResult.status });
+          if (
+            decision?.behavior === 'deny' &&
+            decision.decidedBy === 'policy' &&
+            policy.mode === 'read-only' &&
+            subject.kind === 'tool' &&
+            subject.access !== 'read'
+          ) {
+            const blockedKey = `${subject.access}:${definition.name}`;
+            const blockedCount = (repeatedReadOnlyDenials.get(blockedKey) ?? 0) + 1;
+            repeatedReadOnlyDenials.set(blockedKey, blockedCount);
+            if (blockedCount >= 2) {
+              const message = `read-only mode repeatedly blocked ${subject.access} tool ${definition.name}; switch policy mode or use read-only tools.`;
+              await onEvent({ type: 'error', stage: 'policy', message });
+              throw new Error(message);
+            }
+          }
           await throwIfCancelled();
         }
 

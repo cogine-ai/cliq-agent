@@ -3,6 +3,18 @@ import test, { mock } from 'node:test';
 
 import { createOpenAICompatibleClient } from './openai-compatible.js';
 
+async function expectModelCancellation(promise: Promise<unknown>) {
+  await assert.rejects(
+    Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('stream did not cancel')), 250);
+      })
+    ]),
+    /Model request cancelled/
+  );
+}
+
 test('openai-compatible client sends chat completions request', async () => {
   const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
     assert.equal(String(_url), 'http://localhost:4000/v1/chat/completions');
@@ -26,6 +38,49 @@ test('openai-compatible client sends chat completions request', async () => {
       provider: 'openai-compatible',
       model: 'local-model'
     });
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('openai-compatible streaming cancels provider response body on abort', async () => {
+  let cancelled = false;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'));
+        },
+        cancel() {
+          cancelled = true;
+        }
+      })
+    );
+  });
+
+  try {
+    const controller = new AbortController();
+    const deltas: string[] = [];
+    const client = createOpenAICompatibleClient({
+      provider: 'openai-compatible',
+      model: 'local-model',
+      baseUrl: 'http://localhost:4000/v1',
+      streaming: 'on'
+    });
+
+    await expectModelCancellation(
+      client.complete([{ role: 'user', content: 'hello' }], {
+        signal: controller.signal,
+        onEvent(event) {
+          if (event.type !== 'text-delta') return;
+          deltas.push(event.text);
+          controller.abort();
+        }
+      })
+    );
+
+    assert.deepEqual(deltas, ['partial']);
+    assert.equal(cancelled, true);
   } finally {
     fetchMock.mock.restore();
   }

@@ -116,7 +116,8 @@ async function completeWithStreaming(config: ResolvedModelConfig, messages: Chat
         const choice = (json as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0];
         return choice?.delta?.content ?? null;
       },
-      async (text) => options?.onEvent?.({ type: 'text-delta', text })
+      async (text) => options?.onEvent?.({ type: 'text-delta', text }),
+      { signal: options?.signal }
     )
   ).trim();
 

@@ -61,7 +61,12 @@ export function extractShellInlineScript(commandLine: string): string | null {
     i += 1;
   }
   while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
-    i = skipWrapperFlags(tokens, i + 1);
+    const expanded = expandEnvSplitString(tokens, i);
+    if (expanded) {
+      tokens.splice(i, expanded.consumed, ...expanded.tokens);
+      continue;
+    }
+    i = skipWrapperFlags(tokens, i);
     if (i >= tokens.length) return null;
   }
   if (i >= tokens.length) return null;
@@ -103,6 +108,67 @@ export function extractShellInlineScript(commandLine: string): string | null {
 
 function tokenBasename(token: string): string {
   return token.includes('/') ? token.split('/').filter(Boolean).pop()! : token;
+}
+
+function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consumed: number; tokens: string[] } | null {
+  if (tokenBasename(tokens[wrapperIndex]!) !== 'env') return null;
+  let splitFlagIndex: number | null = null;
+  let i = wrapperIndex + 1;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '-S' || token === '--split-string') {
+      splitFlagIndex = i;
+      break;
+    }
+    if (token.startsWith('--split-string=')) {
+      const splitTokens = tokenizeWords(token.slice('--split-string='.length));
+      if (splitTokens.length === 0) return null;
+      return {
+        consumed: i - wrapperIndex + 1,
+        tokens: splitTokens
+      };
+    }
+    const skipped = skipEnvOption(tokens, i);
+    if (skipped === i) break;
+    i = skipped;
+  }
+  if (splitFlagIndex === null) return null;
+  const splitString = tokens[splitFlagIndex + 1];
+  if (splitString === undefined) return null;
+  const splitTokens = tokenizeWords(splitString);
+  if (splitTokens.length === 0) return null;
+  return {
+    consumed: splitFlagIndex - wrapperIndex + 2,
+    tokens: splitTokens
+  };
+}
+
+function skipEnvOption(tokens: string[], index: number): number {
+  const token = tokens[index]!;
+  if (token === '-' || token === '--') return index;
+  if (isEnvAssignment(token)) return index + 1;
+  if (!token.startsWith('-')) return index;
+  if (
+    token === '-u' ||
+    token === '--unset' ||
+    token === '-C' ||
+    token === '--chdir' ||
+    token === '--block-signal' ||
+    token === '--ignore-signal' ||
+    token === '--default-signal'
+  ) {
+    return index + 2;
+  }
+  if (
+    token.startsWith('--unset=') ||
+    token.startsWith('--chdir=') ||
+    token.startsWith('--block-signal=') ||
+    token.startsWith('--ignore-signal=') ||
+    token.startsWith('--default-signal=')
+  ) {
+    return index + 1;
+  }
+  return index + 1;
 }
 
 function isShellCommandStringFlag(token: string): boolean {
@@ -214,7 +280,12 @@ export function parseBashCommandHead(commandLine: string): string | null {
 
   // Unwrap `sudo`/`env` style wrappers, skipping their option flags.
   while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
-    i = skipWrapperFlags(tokens, i + 1);
+    const expanded = expandEnvSplitString(tokens, i);
+    if (expanded) {
+      tokens.splice(i, expanded.consumed, ...expanded.tokens);
+      continue;
+    }
+    i = skipWrapperFlags(tokens, i);
     if (i >= tokens.length) return null;
   }
 
@@ -263,24 +334,16 @@ const ATTACHED_VALUE_FLAG_PREFIXES: readonly string[] = [
   '--priority=', '--adjustment='
 ];
 
-function skipWrapperFlags(tokens: string[], start: number): number {
-  let i = start;
+function skipWrapperFlags(tokens: string[], wrapperIndex: number): number {
+  if (tokenBasename(tokens[wrapperIndex]!) === 'env') {
+    return skipEnvWrapperFlags(tokens, wrapperIndex + 1);
+  }
+
+  let i = wrapperIndex + 1;
   while (i < tokens.length) {
     const token = tokens[i]!;
+    if (token === '--') return i + 1;
     if (!token.startsWith('-')) return i;
-
-    // `env -S` takes a single string with embedded args; the wrapped command
-    // is in that string itself ("env -S node script.js" → "node"). Treat
-    // the next token as the wrapped command line and re-parse it.
-    if (token === '-S') {
-      const remainder = tokens.slice(i + 1).join(' ');
-      const reparsed = parseBashCommandHead(remainder);
-      // Encode the result by terminating the outer scan; caller will read
-      // tokens[len-1] which we override via a synthetic slot.
-      if (reparsed === null) return tokens.length;
-      tokens[tokens.length - 1] = reparsed;
-      return tokens.length - 1;
-    }
 
     // Flags whose argument is in the NEXT token: `nice -n 10`, `sudo -u me`.
     // Attached forms like `-n10` carry the value inside the same token and
@@ -296,6 +359,26 @@ function skipWrapperFlags(tokens: string[], start: number): number {
       continue;
     }
 
+    i += 1;
+  }
+  return i;
+}
+
+function skipEnvWrapperFlags(tokens: string[], start: number): number {
+  let i = start;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '-' || token === '--') {
+      i += 1;
+      break;
+    }
+
+    const skipped = skipEnvOption(tokens, i);
+    if (skipped === i) break;
+    i = skipped;
+  }
+
+  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
     i += 1;
   }
   return i;

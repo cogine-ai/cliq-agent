@@ -56,7 +56,53 @@ export async function readJsonResponse<T>(response: Response, providerName: stri
   return (await response.json()) as T;
 }
 
-export async function readTextStream(response: Response, onChunk: (chunk: string) => void | Promise<void>) {
+type StreamReadOptions = {
+  signal?: AbortSignal;
+};
+
+function modelRequestCancelledError() {
+  return new Error('Model request cancelled');
+}
+
+async function readStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal | undefined
+) {
+  if (!signal) {
+    return reader.read();
+  }
+
+  let abortListener: (() => void) | null = null;
+  const abortPromise = new Promise<never>((_, reject) => {
+    abortListener = () => {
+      void reader.cancel(signal.reason).catch(() => undefined);
+      reject(modelRequestCancelledError());
+    };
+    signal.addEventListener('abort', abortListener, { once: true });
+  });
+
+  if (signal.aborted) {
+    await reader.cancel(signal.reason).catch(() => undefined);
+    if (abortListener) {
+      signal.removeEventListener('abort', abortListener);
+    }
+    throw modelRequestCancelledError();
+  }
+
+  try {
+    return await Promise.race([reader.read(), abortPromise]);
+  } finally {
+    if (abortListener) {
+      signal.removeEventListener('abort', abortListener);
+    }
+  }
+}
+
+export async function readTextStream(
+  response: Response,
+  onChunk: (chunk: string) => void | Promise<void>,
+  options: StreamReadOptions = {}
+) {
   if (!response.ok) {
     throw new Error(`Model stream error ${response.status}: ${await response.text()}`);
   }
@@ -70,7 +116,7 @@ export async function readTextStream(response: Response, onChunk: (chunk: string
   let output = '';
 
   for (;;) {
-    const { done, value } = await reader.read();
+    const { done, value } = await readStreamChunk(reader, options.signal);
     if (done) break;
     const text = decoder.decode(value, { stream: true });
     output += text;
@@ -94,7 +140,8 @@ function warnMalformedStreamPayload(format: string, payload: string, error: unkn
 export async function readSseDeltas(
   response: Response,
   extractDelta: (json: unknown) => string | null,
-  onDelta: (text: string) => void | Promise<void>
+  onDelta: (text: string) => void | Promise<void>,
+  options: StreamReadOptions = {}
 ) {
   let buffer = '';
   let content = '';
@@ -121,15 +168,19 @@ export async function readSseDeltas(
     }
   }
 
-  await readTextStream(response, async (chunk) => {
-    buffer += chunk;
-    const frames = buffer.split(/\r?\n\r?\n/);
-    buffer = frames.pop() ?? '';
+  await readTextStream(
+    response,
+    async (chunk) => {
+      buffer += chunk;
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() ?? '';
 
-    for (const frame of frames) {
-      await processFrame(frame);
-    }
-  });
+      for (const frame of frames) {
+        await processFrame(frame);
+      }
+    },
+    options
+  );
 
   if (buffer.trim()) {
     await processFrame(buffer);
@@ -141,7 +192,8 @@ export async function readSseDeltas(
 export async function readNdjsonDeltas(
   response: Response,
   extractDelta: (json: unknown) => string | null,
-  onDelta: (text: string) => void | Promise<void>
+  onDelta: (text: string) => void | Promise<void>,
+  options: StreamReadOptions = {}
 ) {
   let buffer = '';
   let content = '';
@@ -164,15 +216,19 @@ export async function readNdjsonDeltas(
     }
   }
 
-  await readTextStream(response, async (chunk) => {
-    buffer += chunk;
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
+  await readTextStream(
+    response,
+    async (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
 
-    for (const line of lines) {
-      await processLine(line);
-    }
-  });
+      for (const line of lines) {
+        await processLine(line);
+      }
+    },
+    options
+  );
 
   if (buffer.trim()) {
     await processLine(buffer);
