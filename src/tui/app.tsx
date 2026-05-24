@@ -68,6 +68,8 @@ export function App({
   }
 
   async function handleSubmit(text: string) {
+    const current = store.getState();
+    if (current.activeTurn || current.pendingApproval) return;
     setInput('');
     resetHistoryNav();
     if (text.startsWith('/')) {
@@ -78,7 +80,14 @@ export function App({
     try {
       await onSubmit(text);
     } catch (error) {
-      pushSystem(`onSubmit failed: ${error instanceof Error ? error.message : String(error)}`);
+      store.dispatch({
+        type: 'runtime-event',
+        event: {
+          type: 'error',
+          stage: 'model',
+          message: `onSubmit failed: ${error instanceof Error ? error.message : String(error)}`
+        }
+      });
     }
   }
 
@@ -140,7 +149,7 @@ export function App({
     }
   }
 
-  const inputDisabled = state.activeTurn !== null;
+  const inputDisabled = state.activeTurn !== null || state.pendingApproval !== null;
   const completion = completeSlash(input);
 
   async function rotatePolicy() {
@@ -165,7 +174,11 @@ export function App({
 
   useKeybindings({
     onCtrlC: () => {
-      if (state.activeTurn) {
+      if (store.getState().pendingApproval) {
+        denyPendingApproval();
+        onCancelTurn?.();
+        pushSystem('cancelling…');
+      } else if (store.getState().activeTurn) {
         // Cancel the active turn — bridge fires AbortController.abort().
         onCancelTurn?.();
         pushSystem('cancelling…');
@@ -177,23 +190,36 @@ export function App({
       // Empty input + no active turn: ignore. /exit is the exit path.
     },
     onCtrlD: () => {
+      const current = store.getState();
+      if (current.activeTurn || current.pendingApproval) return;
       if (input.length === 0) {
         exit();
       }
       // Non-empty input: ignore (matches Claude Code).
     },
     onToggleBody: () => {
+      const current = store.getState();
+      if (current.activeTurn || current.pendingApproval) return;
       store.dispatch({ type: 'toggle-tool-body' });
     },
     onRotatePolicy: () => {
+      const current = store.getState();
+      if (current.activeTurn || current.pendingApproval) return;
       void rotatePolicy();
     }
   });
 
   function handleApprovalDecide(decision: UiApprovalDecision) {
-    const pending = state.pendingApproval;
+    const pending = store.getState().pendingApproval;
     if (!pending) return;
     pending.resolve(decision);
+    store.dispatch({ type: 'approval-resolve', id: pending.id });
+  }
+
+  function denyPendingApproval() {
+    const pending = store.getState().pendingApproval;
+    if (!pending) return;
+    pending.resolve('deny');
     store.dispatch({ type: 'approval-resolve', id: pending.id });
   }
 
@@ -202,8 +228,10 @@ export function App({
       <Transcript entries={state.transcript} activeTurn={state.activeTurn} />
       {state.pendingApproval ? (
         <ApprovalModal
+          key={state.pendingApproval.id}
           subject={state.pendingApproval.subject}
           policy={state.policy}
+          activationKey={state.pendingApproval.id}
           onDecide={handleApprovalDecide}
         />
       ) : (

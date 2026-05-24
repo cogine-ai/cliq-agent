@@ -71,3 +71,33 @@ test('renders update notice when a newer version is available', () => {
   const { lastFrame } = render(<StatusBar state={state} />);
   assert.match(lastFrame() ?? '', /update 0\.10\.0/);
 });
+
+test('renders a running-state hint with the available cancel action', () => {
+  const state = init({ activeTurn: { modelChunks: 0, modelChars: 0 } });
+  const { lastFrame } = render(<StatusBar state={state} />);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /running/);
+  assert.match(frame, /Ctrl\+C cancel/);
+});
+
+test('renders an approval-state hint instead of normal input hints', () => {
+  const state = init({
+    pendingApproval: {
+      id: 'pa_status',
+      subject: {
+        kind: 'tool',
+        toolName: 'bash',
+        access: 'exec',
+        channel: { kind: 'bash', commandHead: 'ls', unsafeForAllow: false },
+        action: { bash: 'ls' } as never,
+        display: { title: 'Allow bash command?', command: 'ls' }
+      },
+      resolve: () => undefined
+    }
+  });
+  const { lastFrame } = render(<StatusBar state={state} />);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /approval/);
+  assert.match(frame, /Ctrl\+C cancel/);
+  assert.doesNotMatch(frame, /Ctrl\+D exits/);
+});

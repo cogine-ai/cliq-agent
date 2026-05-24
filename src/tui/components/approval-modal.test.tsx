@@ -72,6 +72,7 @@ test('y allows, n denies, a allows-for-turn (tool only)', async () => {
   const allow = render(
     <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
   );
+  await flush();
   allow.stdin.write('y');
   await flush();
   assert.deepEqual(calls, ['allow']);
@@ -79,6 +80,7 @@ test('y allows, n denies, a allows-for-turn (tool only)', async () => {
   const deny = render(
     <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
   );
+  await flush();
   deny.stdin.write('n');
   await flush();
   assert.deepEqual(calls, ['allow', 'deny']);
@@ -86,9 +88,31 @@ test('y allows, n denies, a allows-for-turn (tool only)', async () => {
   const allowTurn = render(
     <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
   );
+  await flush();
   allowTurn.stdin.write('a');
   await flush();
   assert.deepEqual(calls, ['allow', 'deny', 'allow-turn']);
+});
+
+test('ignores decision keys until the modal is active after its first render', async () => {
+  const calls: UiApprovalDecision[] = [];
+  const { stdin } = render(
+    <ApprovalModal
+      subject={toolSubject}
+      policy="confirm-bash"
+      onDecide={(d) => {
+        calls.push(d);
+      }}
+    />
+  );
+
+  stdin.write('y');
+  await flush();
+  assert.equal(calls.length, 0);
+
+  stdin.write('y');
+  await flush();
+  assert.deepEqual(calls, ['allow']);
 });
 
 test('"a" on a tx-apply subject is a no-op (no allow-turn for tx)', async () => {
@@ -102,6 +126,7 @@ test('"a" on a tx-apply subject is a no-op (no allow-turn for tx)', async () => 
       }}
     />
   );
+  await flush();
   stdin.write('a');
   await flush();
   assert.equal(calls.length, 0);
@@ -127,6 +152,7 @@ test('s -> allow-session and W -> allow-workspace on a tool subject', async () =
   const session = render(
     <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
   );
+  await flush();
   session.stdin.write('s');
   await flush();
   assert.deepEqual(calls, ['allow-session']);
@@ -137,6 +163,7 @@ test('s -> allow-session and W -> allow-workspace on a tool subject', async () =
   const workspace = render(
     <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
   );
+  await flush();
   workspace.stdin.write('W');
   await flush();
   assert.deepEqual(calls, ['allow-session', 'allow-workspace']);
@@ -151,6 +178,7 @@ test('lowercase w on a tool subject is a no-op (must be shifted)', async () => {
       onDecide={(d) => calls.push(d)}
     />
   );
+  await flush();
   stdin.write('w');
   await flush();
   assert.equal(calls.length, 0);
@@ -177,6 +205,7 @@ test('tx-apply subject does not render or accept session/workspace hotkeys', asy
       onDecide={(d) => calls.push(d)}
     />
   );
+  await flush();
   stdin2.write('s');
   stdin2.write('W');
   await flush();

@@ -1,4 +1,5 @@
 import { Box, Text, useInput, type Key } from 'ink';
+import { useEffect, useRef, useState } from 'react';
 
 import type { ApprovalSubject, PolicyMode } from '../../policy/types.js';
 import type { UiApprovalDecision } from '../store.js';
@@ -6,48 +7,68 @@ import type { UiApprovalDecision } from '../store.js';
 export type ApprovalModalProps = {
   subject: ApprovalSubject;
   policy: PolicyMode;
+  activationKey?: string;
   onDecide: (decision: UiApprovalDecision) => void;
 };
 
-export function ApprovalModal({ subject, policy, onDecide }: ApprovalModalProps) {
+export function ApprovalModal({ subject, policy, activationKey, onDecide }: ApprovalModalProps) {
   const isTool = subject.kind === 'tool';
+  const isActiveRef = useRef(false);
+  const [isActive, setIsActive] = useState(false);
+
+  useEffect(() => {
+    isActiveRef.current = false;
+    setIsActive(false);
+    const handle = setImmediate(() => {
+      isActiveRef.current = true;
+      setIsActive(true);
+    });
+    return () => {
+      clearImmediate(handle);
+      isActiveRef.current = false;
+    };
+  }, [activationKey]);
+
   // Capital W is intentional for "allow-workspace" — it persists to
   // ~/.cliq/workspaces/<id>/permissions.json and survives the cliq
   // invocation, so the shift requirement adds an extra deliberate keystroke
   // beyond the lowercase per-session and per-turn options. Other modal keys
   // (`y`, `n`, `a`, `s`) are accepted in both cases.
-  useInput((input: string, key: Key) => {
-    if (input === 'y' || input === 'Y') {
-      onDecide('allow');
-      return;
-    }
-    if (input === 'n' || input === 'N' || key.escape) {
-      onDecide('deny');
-      return;
-    }
-    // 'allow-for-this-turn' is a tool-approval sugar; spec A.6 does not apply
-    // it to tx-apply prompts (those are end-of-turn, no "remaining tools"
-    // bucket to short-circuit). Same constraint applies to allow-session
-    // and allow-workspace — those need a channel to derive a rule against.
-    if (!isTool) {
-      if (input === 'a' || input === 'A') {
-        // Tx-apply / permission-request modals don't have an "allow turn"
-        // bucket. Silently ignore.
+  useInput(
+    (input: string, key: Key) => {
+      if (!isActiveRef.current) return;
+      if (input === 'y' || input === 'Y') {
+        onDecide('allow');
+        return;
       }
-      return;
+      if (input === 'n' || input === 'N' || key.escape) {
+        onDecide('deny');
+        return;
+      }
+      // 'allow-for-this-turn' is a tool-approval sugar; spec A.6 does not apply
+      // it to tx-apply prompts (those are end-of-turn, no "remaining tools"
+      // bucket to short-circuit). Same constraint applies to allow-session
+      // and allow-workspace — those need a channel to derive a rule against.
+      if (!isTool) {
+        if (input === 'a' || input === 'A') {
+          // Tx-apply / permission-request modals don't have an "allow turn"
+          // bucket. Silently ignore.
+        }
+        return;
+      }
+      if (input === 'a' || input === 'A') {
+        onDecide('allow-turn');
+        return;
+      }
+      if (input === 's' || input === 'S') {
+        onDecide('allow-session');
+        return;
+      }
+      if (input === 'W') {
+        onDecide('allow-workspace');
+      }
     }
-    if (input === 'a' || input === 'A') {
-      onDecide('allow-turn');
-      return;
-    }
-    if (input === 's' || input === 'S') {
-      onDecide('allow-session');
-      return;
-    }
-    if (input === 'W') {
-      onDecide('allow-workspace');
-    }
-  });
+  );
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
@@ -62,6 +83,7 @@ export function ApprovalModal({ subject, policy, onDecide }: ApprovalModalProps)
         <PermissionBody subject={subject} policy={policy} />
       )}
       <Hotkeys allowTurn={isTool} allowScopes={isTool} />
+      {!isActive ? <Text dimColor>Waiting for fresh input…</Text> : null}
     </Box>
   );
 }

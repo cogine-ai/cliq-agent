@@ -156,6 +156,7 @@ export function reduce(state: UiState, action: UiAction): UiState {
       return {
         ...state,
         nextEntryId,
+        activeTurn: { modelChunks: 0, modelChars: 0 },
         transcript: [...state.transcript, { kind: 'user', id, text: action.text }],
       };
     }
@@ -315,7 +316,11 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
       };
     }
     case 'error': {
-      const { id, nextEntryId } = mintId(state, 'e');
+      const text = formatRuntimeErrorMessage(event);
+      if (isDuplicateRuntimeError(state, event)) {
+        return { ...state, activeTurn: null };
+      }
+      const { id, nextEntryId } = mintId(state, 's');
       const entry: ErrorEntry = {
         id,
         stage: event.stage,
@@ -326,6 +331,7 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
         ...state,
         nextEntryId,
         activeTurn: null,
+        transcript: [...state.transcript, { kind: 'system', id, text }],
         errors: [...state.errors, entry].slice(-MAX_ERROR_HISTORY),
       };
     }
@@ -409,6 +415,39 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
     default:
       return assertNever(event);
   }
+}
+
+function formatRuntimeErrorMessage(
+  event: Pick<Extract<RuntimeEvent, { type: 'error' }>, 'stage' | 'message'>
+): string {
+  return event.stage === 'cancel'
+    ? `cancelled: ${event.message}`
+    : `error (${event.stage}): ${event.message}`;
+}
+
+function isDuplicateRuntimeError(
+  state: UiState,
+  event: Extract<RuntimeEvent, { type: 'error' }>
+): boolean {
+  const lastError = state.errors[state.errors.length - 1];
+  const lastTranscript = state.transcript[state.transcript.length - 1];
+  if (
+    !lastError ||
+    lastTranscript?.kind !== 'system' ||
+    lastTranscript.text !== formatRuntimeErrorMessage(lastError) ||
+    lastError.message !== event.message
+  ) {
+    return false;
+  }
+
+  return lastError.stage === event.stage || isCancelFollowupRuntimeError(lastError, event);
+}
+
+function isCancelFollowupRuntimeError(
+  lastError: ErrorEntry,
+  event: Extract<RuntimeEvent, { type: 'error' }>
+): boolean {
+  return lastError.stage === 'cancel' && event.stage === 'model';
 }
 
 export type Listener = (state: UiState) => void;
