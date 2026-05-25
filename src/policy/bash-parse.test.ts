@@ -167,3 +167,17 @@ test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c s
   assert.equal(bashCommandHasUnsafeAllowSyntax("env - -S bash -c 'git status && rm -rf /'"), false);
   assert.equal(bashCommandHasUnsafeAllowSyntax("env -- -S bash -c 'git status && rm -rf /'"), false);
 });
+
+function nestedBashCommand(depth: number, inner = 'echo ok') {
+  let script = inner;
+  for (let level = 0; level < depth; level += 1) {
+    script = script.replace(/'/g, "'\"'\"'");
+    script = `bash -c '${script}'`;
+  }
+  return script;
+}
+
+test('bashCommandHasUnsafeAllowSyntax treats deeply nested shell -c scripts as unsafe', () => {
+  assert.equal(bashCommandHasUnsafeAllowSyntax(nestedBashCommand(8)), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax(nestedBashCommand(9)), true);
+});

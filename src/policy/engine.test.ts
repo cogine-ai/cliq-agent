@@ -140,6 +140,20 @@ test('read-only hard-denies exec even when a permission table allow rule matches
   });
 });
 
+test('read-only still honors workspace deny rules for read tools', async () => {
+  const policy = createPolicyEngine({
+    mode: 'read-only',
+    table: composePermissionTable({ deny: [wsRule('fs-read', '*')] })
+  });
+
+  const decision = await policy.decide(toolSubject('read', 'read', { read: { path: 'README.md' } }));
+  assert.equal(decision.behavior, 'deny');
+  assert.equal(decision.decidedBy, 'policy');
+  if (decision.behavior === 'deny') {
+    assert.match(decision.reason, /deny/i);
+  }
+});
+
 test('confirm-write asks for write tool subjects and allows read and exec', async () => {
   const policy = createPolicyEngine({ mode: 'confirm-write' });
   const edit = buildToolApprovalSubject({
