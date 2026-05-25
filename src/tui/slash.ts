@@ -1,18 +1,27 @@
 import type { PolicyMode } from '../policy/types.js';
-import { formatModeForHelp, listPolicyModeDescriptions } from './mode-language.js';
+import {
+  formatModeForHelp,
+  formatModeForStatus,
+  listPolicyModeDescriptions
+} from './mode-language.js';
 
 export type SlashCommandSpec = {
   name: string;
   args?: string;
   description: string;
+  details?: readonly string[];
 };
+
+const POLICY_MODE_DETAILS: readonly string[] = listPolicyModeDescriptions().map(
+  (description) => `${formatModeForStatus(description.mode)} (${description.mode})`
+);
 
 export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
   { name: '/exit', description: 'Exit the TUI and save the session' },
   { name: '/quit', description: 'Same as /exit' },
   { name: '/reset', description: 'Reset the current session (drops transcript and records)' },
   { name: '/help', description: 'Show commands, shortcuts, modes, and skills' },
-  { name: '/policy', args: '<mode>', description: 'Switch mode by internal name' },
+  { name: '/policy', args: '<mode>', description: 'Switch mode', details: POLICY_MODE_DETAILS },
   { name: '/skills', description: 'Show available and active skills' },
   { name: '/skill', args: '<name>', description: 'Activate a skill by name' }
 ];
@@ -23,6 +32,10 @@ const POLICY_MODES_LIST: readonly PolicyMode[] = listPolicyModeDescriptions().ma
 
 function isPolicyMode(value: string): value is PolicyMode {
   return (POLICY_MODES_LIST as readonly string[]).includes(value);
+}
+
+function formatPolicyModeChoices(): string {
+  return POLICY_MODE_DETAILS.join(', ');
 }
 
 export type ParsedSlashCommand =
@@ -79,14 +92,14 @@ export function parseSlash(input: string): ParsedSlashCommand {
         return {
           kind: 'invalid',
           head,
-          reason: `/policy requires a mode argument: ${POLICY_MODES_LIST.join(', ')}`
+          reason: `/policy requires a mode argument: ${formatPolicyModeChoices()}`
         };
       }
       if (!isPolicyMode(mode)) {
         return {
           kind: 'invalid',
           head,
-          reason: `unknown policy mode "${mode}"; expected one of: ${POLICY_MODES_LIST.join(', ')}`
+          reason: `unknown policy mode "${mode}"; expected one of: ${formatPolicyModeChoices()}`
         };
       }
       return { kind: 'policy', mode };
