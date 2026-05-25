@@ -48,29 +48,10 @@ function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number
  * Extract the inline script argument from `sh -c`, `bash -c`, etc., when present.
  * Returns null for non-interpreter invocations or when no `-c` script is found.
  */
-export function extractShellInlineScript(commandLine: string): string | null {
-  if (typeof commandLine !== 'string') return null;
-  const trimmed = commandLine.trim();
-  if (trimmed === '') return null;
+function extractShellInlineScriptAt(tokens: string[], start: number): string | null {
+  if (start >= tokens.length) return null;
 
-  const tokens = tokenizeWords(trimmed);
-  if (tokens.length === 0) return null;
-
-  let i = 0;
-  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
-    i += 1;
-  }
-  while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
-    const expanded = expandEnvSplitString(tokens, i);
-    if (expanded) {
-      tokens.splice(i, expanded.consumed, ...expanded.tokens);
-      continue;
-    }
-    i = skipWrapperFlags(tokens, i);
-    if (i >= tokens.length) return null;
-  }
-  if (i >= tokens.length) return null;
-
+  let i = start;
   let head = tokenBasename(tokens[i]!);
   i += 1;
 
@@ -102,6 +83,49 @@ export function extractShellInlineScript(commandLine: string): string | null {
       continue;
     }
     break;
+  }
+  return null;
+}
+
+export function extractShellInlineScript(commandLine: string): string | null {
+  if (typeof commandLine !== 'string') return null;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return null;
+
+  const tokens = tokenizeWords(trimmed);
+  if (tokens.length === 0) return null;
+
+  let i = 0;
+  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
+    i += 1;
+  }
+  while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
+    const expanded = expandEnvSplitString(tokens, i);
+    if (expanded) {
+      tokens.splice(i, expanded.consumed, ...expanded.tokens);
+      continue;
+    }
+    i = skipWrapperFlags(tokens, i);
+    if (i >= tokens.length) return null;
+  }
+  if (i < tokens.length) {
+    const direct = extractShellInlineScriptAt(tokens, i);
+    if (direct !== null) return direct;
+  }
+
+  // GNU env may place only the utility name in `-S` while `-c` stays outside
+  // the split-string (e.g. `env - -S bash -c 'git status && rm -rf /'`).
+  for (let j = 0; j < tokens.length; j += 1) {
+    const head = tokenBasename(tokens[j]!);
+    if (head === BUSYBOX_HEAD) {
+      const nested = extractShellInlineScriptAt(tokens, j);
+      if (nested !== null) return nested;
+      continue;
+    }
+    if (SHELL_INTERPRETER_HEADS.has(head)) {
+      const nested = extractShellInlineScriptAt(tokens, j);
+      if (nested !== null) return nested;
+    }
   }
   return null;
 }
@@ -145,7 +169,7 @@ function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consume
 
 function skipEnvOption(tokens: string[], index: number): number {
   const token = tokens[index]!;
-  if (token === '-' || token === '--') return index;
+  if (token === '-' || token === '--') return index + 1;
   if (isEnvAssignment(token)) return index + 1;
   if (!token.startsWith('-')) return index;
   if (
@@ -370,7 +394,7 @@ function skipEnvWrapperFlags(tokens: string[], start: number): number {
     const token = tokens[i]!;
     if (token === '-' || token === '--') {
       i += 1;
-      break;
+      continue;
     }
 
     const skipped = skipEnvOption(tokens, i);
