@@ -152,7 +152,8 @@ export function InputBar({
   onHistoryPrev,
   onHistoryNext,
   disabled = false,
-  completion = null
+  completion = null,
+  hint = null
 }: {
   value: string;
   onChange: (next: string) => void;
@@ -161,6 +162,7 @@ export function InputBar({
   onHistoryNext?: () => void;
   disabled?: boolean;
   completion?: string | null;
+  hint?: string | null;
 }) {
   useInput(
     (_input, key) => {
@@ -181,19 +183,22 @@ export function InputBar({
   }
 
   return (
-    <Box>
-      <Text color={disabled ? 'gray' : 'cyan'}>{disabled ? '… ' : '> '}</Text>
-      {disabled ? (
-        <Text dimColor>{value}</Text>
-      ) : (
-        <MiniTextInput
-          value={value}
-          onChange={onChange}
-          onSubmit={handleSubmit}
-          onHistoryPrev={onHistoryPrev}
-          onHistoryNext={onHistoryNext}
-        />
-      )}
+    <Box flexDirection="column">
+      <Box>
+        <Text color={disabled ? 'gray' : 'cyan'}>{disabled ? '… ' : '> '}</Text>
+        {disabled ? (
+          <Text dimColor>{value}</Text>
+        ) : (
+          <MiniTextInput
+            value={value}
+            onChange={onChange}
+            onSubmit={handleSubmit}
+            onHistoryPrev={onHistoryPrev}
+            onHistoryNext={onHistoryNext}
+          />
+        )}
+      </Box>
+      {hint ? <Text dimColor>{hint}</Text> : null}
     </Box>
   );
 }

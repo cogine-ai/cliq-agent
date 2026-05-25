@@ -10,9 +10,11 @@ import { Transcript } from './components/transcript.js';
 import { useInputHistory } from './hooks/use-input-history.js';
 import { useKeybindings } from './hooks/use-keybindings.js';
 import { useUiStore } from './hooks/use-ui-store.js';
+import { buildInputHint } from './hints.js';
+import { describePolicyMode } from './mode-language.js';
 import { nextPolicyMode } from './policy-rotation.js';
 import { buildHelpText, completeSlash, parseSlash } from './slash.js';
-import type { UiApprovalDecision, UiStore } from './store.js';
+import type { TranscriptEntry, UiApprovalDecision, UiState, UiStore } from './store.js';
 
 export type AppProps = {
   store: UiStore;
@@ -113,7 +115,7 @@ export function App({
         try {
           await onPolicyChange?.(parsed.mode);
           store.dispatch({ type: 'policy-change', mode: parsed.mode });
-          pushSystem(`policy mode switched to ${parsed.mode}`);
+          pushSystem(`mode → ${describePolicyMode(parsed.mode).label} (${parsed.mode})`);
         } catch (error) {
           pushSystem(`/policy failed: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -151,6 +153,18 @@ export function App({
 
   const inputDisabled = state.activeTurn !== null || state.pendingApproval !== null;
   const completion = completeSlash(input);
+  const terminalWidth = process.stdout.columns ?? 80;
+  const expandableTool = findLatestExpandableTool(state);
+  const inputHint = state.activeTurn
+    ? buildInputHint({ kind: 'active-turn', width: terminalWidth })
+    : input.startsWith('/')
+      ? buildInputHint({ kind: 'slash-input', width: terminalWidth })
+      : buildInputHint({
+          kind: 'idle',
+          hasInput: input.length > 0,
+          hasExpandableTool: expandableTool !== null,
+          width: terminalWidth
+        });
 
   async function rotatePolicy() {
     // Read the current policy from the store rather than the rendered state
@@ -164,7 +178,7 @@ export function App({
     try {
       await onPolicyChange?.(next);
       store.dispatch({ type: 'policy-change', mode: next });
-      pushSystem(`policy → ${next}`);
+      pushSystem(`mode → ${describePolicyMode(next).label} (${next})`);
     } catch (error) {
       pushSystem(
         `policy rotation failed: ${error instanceof Error ? error.message : String(error)}`
@@ -200,7 +214,13 @@ export function App({
     onToggleBody: () => {
       const current = store.getState();
       if (current.activeTurn || current.pendingApproval) return;
+      const target = findLatestExpandableTool(current);
+      if (!target) {
+        pushSystem('no tool output to expand');
+        return;
+      }
       store.dispatch({ type: 'toggle-tool-body' });
+      pushSystem(`${target.expanded ? 'collapsed' : 'expanded'} ${target.tool} output`);
     },
     onRotatePolicy: () => {
       const current = store.getState();
@@ -245,10 +265,21 @@ export function App({
             onHistoryNext={onHistoryNext}
             disabled={inputDisabled}
             completion={completion}
+            hint={inputHint}
           />
         </>
       )}
       <StatusBar state={state} />
     </Box>
   );
+}
+
+function findLatestExpandableTool(state: UiState): Extract<TranscriptEntry, { kind: 'tool' }> | null {
+  for (let i = state.transcript.length - 1; i >= 0; i -= 1) {
+    const entry = state.transcript[i]!;
+    if (entry.kind === 'tool' && entry.body) {
+      return entry;
+    }
+  }
+  return null;
 }

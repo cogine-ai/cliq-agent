@@ -1,4 +1,5 @@
 import type { PolicyMode } from '../policy/types.js';
+import { formatModeForHelp, listPolicyModeDescriptions } from './mode-language.js';
 
 export type SlashCommandSpec = {
   name: string;
@@ -10,19 +11,15 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
   { name: '/exit', description: 'Exit the TUI and save the session' },
   { name: '/quit', description: 'Same as /exit' },
   { name: '/reset', description: 'Reset the current session (drops transcript and records)' },
-  { name: '/help', description: 'Show available commands' },
-  { name: '/policy', args: '<mode>', description: 'Live-swap the policy mode' },
+  { name: '/help', description: 'Show commands, shortcuts, modes, and skills' },
+  { name: '/policy', args: '<mode>', description: 'Switch mode by internal name' },
   { name: '/skills', description: 'Show available and active skills' },
   { name: '/skill', args: '<name>', description: 'Activate a skill by name' }
 ];
 
-const POLICY_MODES_LIST: readonly PolicyMode[] = [
-  'auto',
-  'confirm-write',
-  'read-only',
-  'confirm-bash',
-  'confirm-all'
-];
+const POLICY_MODES_LIST: readonly PolicyMode[] = listPolicyModeDescriptions().map(
+  (description) => description.mode
+);
 
 function isPolicyMode(value: string): value is PolicyMode {
   return (POLICY_MODES_LIST as readonly string[]).includes(value);
@@ -122,10 +119,15 @@ export function buildHelpText(): string {
     const display = cmd.args ? `${cmd.name} ${cmd.args}` : cmd.name;
     lines.push(`  ${display.padEnd(22)} ${cmd.description}`);
   }
-  lines.push('', 'Keys:');
-  lines.push('  Shift+Tab              Rotate policy mode (read-only → confirm-write → confirm-bash → auto)');
-  lines.push('  Ctrl+O                 Toggle the most recent tool body');
-  lines.push('  Ctrl+C                 Cancel an active turn (or clear input)');
+  lines.push('', 'Modes:');
+  for (const description of listPolicyModeDescriptions()) {
+    lines.push(`  ${formatModeForHelp(description.mode)}`);
+  }
+  lines.push('', 'Shortcuts:');
+  lines.push('  Shift+Tab              Rotate mode');
+  lines.push('  Tab                    Complete slash command');
+  lines.push('  Ctrl+O                 Expand/collapse the most recent tool output');
+  lines.push('  Ctrl+C                 Cancel an active turn or clear input');
   lines.push('  Ctrl+D                 Exit on empty input');
   return lines.join('\n');
 }

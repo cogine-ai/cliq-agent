@@ -37,7 +37,7 @@ test('mounts and renders status bar segments', () => {
   const { lastFrame } = render(<App store={store} onSubmit={() => {}} />);
   const frame = lastFrame() ?? '';
   assert.match(frame, /ollama\/qwen3:4b/);
-  assert.match(frame, /auto/);
+  assert.match(frame, /! Auto Run/);
 });
 
 test('end-to-end: dispatches reach the rendered transcript', async () => {
@@ -231,6 +231,62 @@ test('Ctrl+C during an active turn calls onCancelTurn and renders cancelling not
   assert.match(lastFrame() ?? '', /cancelling/);
 });
 
+test('Shift+Tab rotates mode and confirms the user-facing mode label', async () => {
+  const store = makeStore();
+  const captured: string[] = [];
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onPolicyChange={(mode) => {
+        captured.push(mode);
+      }}
+    />
+  );
+
+  stdin.write('\x1b[Z');
+  await flush();
+  await flush();
+
+  assert.deepEqual(captured, ['read-only']);
+  assert.equal(store.getState().policy, 'read-only');
+  assert.match(lastFrame() ?? '', /mode → Read Only/);
+  assert.match(lastFrame() ?? '', /Read Only/);
+});
+
+test('Ctrl+O reports when no expandable tool output is available', async () => {
+  const store = makeStore();
+  const { stdin, lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+
+  stdin.write('\x0f');
+  await flush();
+
+  assert.match(lastFrame() ?? '', /no tool output to expand/);
+});
+
+test('Ctrl+O reports which tool output changed', async () => {
+  const store = makeStore();
+  store.dispatch({
+    type: 'tool-hook-end',
+    result: {
+      tool: 'bash',
+      status: 'ok',
+      content: 'TOOL_RESULT bash ok\n$ ls\none\ntwo',
+      meta: {}
+    }
+  });
+  const { stdin, lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+
+  stdin.write('\x0f');
+  await flush();
+
+  assert.equal(
+    store.getState().transcript.find((entry) => entry.kind === 'tool')?.expanded,
+    true
+  );
+  assert.match(lastFrame() ?? '', /expanded bash output/);
+});
+
 test('submitted prompt immediately enters running state and blocks a second submit', async () => {
   const store = makeStore();
   const submitted: string[] = [];
@@ -249,7 +305,7 @@ test('submitted prompt immediately enters running state and blocks a second subm
   await flush();
   assert.deepEqual(submitted, ['first']);
   assert.notEqual(store.getState().activeTurn, null);
-  assert.match(lastFrame() ?? '', /running/i);
+  assert.match(lastFrame() ?? '', /Running · Ctrl\+C cancel/);
 
   stdin.write('second');
   await flush();
@@ -324,6 +380,31 @@ test('approval state ignores non-cancel global shortcuts', async () => {
   assert.equal(store.getState().policy, 'auto');
   assert.equal(resolved, null);
   assert.equal(store.getState().pendingApproval, pending);
+});
+
+test('approval state suppresses normal composer hints and keeps approval choices visible', async () => {
+  const store = makeStore();
+  let resolved: UiApprovalDecision | null = null;
+  const pending: PendingApproval = {
+    id: 'pa_hint',
+    subject: approvalSubject,
+    resolve: (decision) => {
+      resolved = decision;
+    }
+  };
+  store.dispatch({ type: 'approval-request', pending });
+  const { stdin, lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+  await flush();
+
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /Approval required/);
+  assert.match(frame, /\[y\]es allow/);
+  assert.doesNotMatch(frame, /Enter send/);
+  assert.doesNotMatch(frame, /\/help commands/);
+
+  stdin.write('n');
+  await flush();
+  assert.equal(resolved, 'deny');
 });
 
 test('regular text input still routes to onSubmit and appends a user entry', async () => {

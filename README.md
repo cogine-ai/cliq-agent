@@ -46,12 +46,18 @@ When you launch `cliq` (or `cliq chat`) on a TTY, you enter the Ink-based TUI by
 Inside the TUI:
 
 - Slash commands (`/exit`, `/quit`, `/reset`, `/help`, `/policy <mode>`) open a
-  palette popover and support Tab completion.
+  palette popover and support Tab completion. `/help` lists commands,
+  shortcuts, and mode behavior.
 - ↑ / ↓ recall previously submitted prompts while preserving any in-progress
   draft; ← / → move the cursor inside the input buffer.
-- Shift+Tab rotates through policy modes; Ctrl+C cancels an active turn or clears
-  input; Ctrl+D exits on empty input; Ctrl+O folds or unfolds the most recent
-  bash output.
+- The status line shows the current mode in user-facing language, such as
+  `Read Only`, `? Ask Edits`, or `! Auto Run`.
+- Shift+Tab rotates through modes and confirms the new mode in the transcript;
+  Ctrl+C cancels an active turn or clears input; Ctrl+D exits on empty input;
+  Ctrl+O folds or unfolds the most recent tool output.
+- The input area shows short state-aware hints: idle hints point to `/help` and
+  mode switching, slash input shows completion help, and active turns show the
+  cancellation shortcut.
 - An approval modal handles `--policy confirm-*` and interactive `--tx-apply` decisions.
 
 The TUI runs by default on a TTY, but you can opt in explicitly with `--tui` (useful when scripting around the default). Opt out with `--classic` or `CLIQ_TUI=0` to fall back to the legacy readline REPL:
@@ -246,11 +252,11 @@ For day-to-day coding, `confirm-write`, `confirm-bash`, or `confirm-all` provide
 
 ## Policy modes
 
-- `auto`: execute all registered tools
-- `confirm-write`: ask before `edit`
-- `read-only`: allow only `read`, `ls`, `find`, and `grep`
-- `confirm-bash`: ask before `bash`
-- `confirm-all`: ask before every tool
+- `! Auto Run` (`auto`): execute all registered tools without asking first
+- `? Ask Edits` (`confirm-write`): ask before `edit` and transaction apply
+- `Read Only` (`read-only`): allow only `read`, `ls`, `find`, and `grep`
+- `? Ask Bash` (`confirm-bash`): ask before `bash`
+- `? Ask All` (`confirm-all`): ask before every tool
 
 Set the default with:
 
