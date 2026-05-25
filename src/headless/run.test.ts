@@ -79,6 +79,24 @@ test('runHeadless refuses non-interactive runs without persisted workspace trust
   assert.match(output.error!.message, /CLIQ_TRUST_WORKSPACE=/);
 });
 
+test('runHeadless rejects legacy policy tokens with migration guidance', async () => {
+  const { cwd } = await setupWorkspace();
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'inspect',
+      policy: 'read-only' as never,
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('ignored') }
+  );
+
+  assert.equal(output.status, 'failed');
+  assert.equal(output.error?.stage, 'input');
+  assert.match(output.error?.message ?? '', /read-only has been replaced by plan/i);
+});
+
 test('runHeadless checks workspace trust before loading skill configuration', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-skill-trust-home-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-skill-trust-ws-'));
@@ -300,14 +318,14 @@ process.stdin.on('end', () => {
 test('runHeadless falls back to workspace permissions.preset when request.policy is omitted (#62-B)', async () => {
   // Regression for PR #91 Codex finding "Honor workspace permissions.preset
   // at runtime". With request.policy undefined and workspace config setting
-  // permissions.preset='read-only', a model-issued edit must be denied by
+  // permissions.preset='plan', a model-issued edit must be denied by
   // the PolicyEngine. Without the fallback the run would happily execute
   // the edit under the global DEFAULT_POLICY_MODE.
   const { cwd } = await setupWorkspace();
   await mkdir(path.join(cwd, '.cliq'), { recursive: true });
   await writeFile(
     path.join(cwd, '.cliq', 'config.json'),
-    JSON.stringify({ permissions: { preset: 'read-only' } }),
+    JSON.stringify({ permissions: { preset: 'plan' } }),
     'utf8'
   );
   let calls = 0;
@@ -349,12 +367,12 @@ test('runHeadless falls back to workspace permissions.preset when request.policy
   );
 
   assert.equal(output.status, 'completed', 'run still completes after deny');
-  // PolicyEngine deny under read-only surfaces as a tool-end with status
+  // PolicyEngine deny under plan surfaces as a tool-end with status
   // 'error'. Without the workspace preset fallback the edit would run
   // cleanly and tool-end.status would be 'ok'.
   assert.ok(
     toolEndStatuses.includes('error'),
-    'edit must be denied by PolicyEngine when workspace preset=read-only; tool-end statuses=' +
+    'edit must be denied by PolicyEngine when workspace preset=plan; tool-end statuses=' +
       JSON.stringify(toolEndStatuses) +
       ' errors=' +
       JSON.stringify(errorEvents)
@@ -416,7 +434,7 @@ process.stdin.on('end', () => {
     {
       cwd,
       prompt: 'show cwd',
-      policy: 'confirm-bash',
+      policy: 'accept-edits',
       model: { provider: 'ollama', model: 'test-model' },
       autoCompact: { enabled: 'off' }
     },

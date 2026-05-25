@@ -24,6 +24,7 @@ import {
 } from './store.js';
 import { applyRecordId, abortRecordId, openRecordId } from './types.js';
 import { createOverlayWriter } from './overlay.js';
+import { createPolicyEngine } from '../../policy/engine.js';
 import { createSession, mutateSession } from '../../session/store.js';
 import type { Session } from '../../session/types.js';
 import { createRunner } from '../../runtime/runner.js';
@@ -278,6 +279,7 @@ test('e2e: happy path through runner with scripted model emits tx events and lan
     const events: RuntimeEvent[] = [];
     const runner = createRunner({
       model,
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
       transactions,
       onEvent: (e) => {
         events.push(e);
@@ -335,6 +337,7 @@ test('e2e: validator failure aborts turn end with reason=validator-fail and leav
     const events: RuntimeEvent[] = [];
     const runner = createRunner({
       model,
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
       transactions,
       onEvent: (e) => {
         events.push(e);

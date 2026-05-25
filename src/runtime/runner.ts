@@ -693,7 +693,7 @@ export function createRunner({
           if (
             decision?.behavior === 'deny' &&
             decision.decidedBy === 'policy' &&
-            policy.mode === 'read-only' &&
+            policy.mode === 'plan' &&
             subject.kind === 'tool' &&
             subject.access !== 'read'
           ) {
@@ -701,7 +701,7 @@ export function createRunner({
             const blockedCount = (repeatedReadOnlyDenials.get(blockedKey) ?? 0) + 1;
             repeatedReadOnlyDenials.set(blockedKey, blockedCount);
             if (blockedCount >= 2) {
-              const message = `read-only mode repeatedly blocked ${subject.access} tool ${definition.name}; switch policy mode or use read-only tools.`;
+              const message = `plan mode repeatedly blocked ${subject.access} tool ${definition.name}; switch policy mode or use inspection tools.`;
               await onEvent({ type: 'error', stage: 'policy', message });
               throw new Error(message);
             }

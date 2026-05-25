@@ -24,7 +24,7 @@ test('createInteractivePolicyEngine grants one-shot allow when workspace persist
     const table: PermissionTable = { deny: [], allow: [], ask: [] };
     const failures: Array<{ scope: 'session' | 'workspace'; reason: string }> = [];
     const live = createInteractivePolicyEngine({
-      initialMode: 'confirm-bash',
+      initialMode: 'accept-edits',
       requestApproval: async () => 'allow-workspace',
       table,
       extendAllow: (subject, scope) =>
@@ -55,7 +55,7 @@ test('createInteractivePolicyEngine rebuilds after successful session extend', a
     const table: PermissionTable = { deny: [], allow: [], ask: [] };
     let approvalCalls = 0;
     const live = createInteractivePolicyEngine({
-      initialMode: 'confirm-bash',
+      initialMode: 'accept-edits',
       requestApproval: async () => {
         approvalCalls += 1;
         return 'allow-session';

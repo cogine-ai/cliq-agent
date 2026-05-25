@@ -23,24 +23,32 @@ test('parseSlash maps skill commands', () => {
 });
 
 test('parseSlash /policy requires a known mode argument', () => {
-  assert.deepEqual(parseSlash('/policy auto'), { kind: 'policy', mode: 'auto' });
-  assert.deepEqual(parseSlash('/policy read-only'), { kind: 'policy', mode: 'read-only' });
-  assert.deepEqual(parseSlash('/policy confirm-write'), { kind: 'policy', mode: 'confirm-write' });
+  assert.deepEqual(parseSlash('/policy default'), { kind: 'policy', mode: 'default' });
+  assert.deepEqual(parseSlash('/policy accept-edits'), { kind: 'policy', mode: 'accept-edits' });
+  assert.deepEqual(parseSlash('/policy plan'), { kind: 'policy', mode: 'plan' });
+  assert.deepEqual(parseSlash('/policy yolo'), { kind: 'policy', mode: 'yolo' });
 
   const noArg = parseSlash('/policy');
   assert.equal(noArg.kind, 'invalid');
   if (noArg.kind === 'invalid') {
     assert.match(noArg.reason, /requires a mode argument/);
-    assert.match(noArg.reason, /! YOLO Run \(auto\)/);
-    assert.match(noArg.reason, /Read Only \(read-only\)/);
+    assert.match(noArg.reason, /Default \(default\)/);
+    assert.match(noArg.reason, /Plan \(plan\)/);
+    assert.match(noArg.reason, /! YOLO \(yolo\)/);
   }
 
   const bad = parseSlash('/policy frobnicate');
   assert.equal(bad.kind, 'invalid');
   if (bad.kind === 'invalid') {
     assert.match(bad.reason, /unknown policy mode/);
-    assert.match(bad.reason, /! YOLO Run \(auto\)/);
-    assert.match(bad.reason, /Read Only \(read-only\)/);
+    assert.match(bad.reason, /Default \(default\)/);
+    assert.match(bad.reason, /Plan \(plan\)/);
+  }
+
+  const old = parseSlash('/policy read-only');
+  assert.equal(old.kind, 'invalid');
+  if (old.kind === 'invalid') {
+    assert.match(old.reason, /read-only has been replaced by plan/);
   }
 });
 
@@ -81,8 +89,10 @@ test('buildHelpText lists every command with its description', () => {
   assert.match(text, /\/skills/);
   assert.match(text, /\/skill <name>/);
   assert.match(text, /Modes:/);
-  assert.match(text, /! YOLO Run \(auto\)/);
-  assert.match(text, /Read Only \(read-only\)/);
+  assert.match(text, /Default \(default\)/);
+  assert.match(text, /Accept Edits \(accept-edits\)/);
+  assert.match(text, /Plan \(plan\)/);
+  assert.match(text, /! YOLO \(yolo\)/);
   assert.match(text, /Shortcuts:/);
   assert.match(text, /Shift\+Tab\s+Rotate mode/);
   assert.match(text, /Ctrl\+O\s+Expand\/collapse the most recent tool output/);

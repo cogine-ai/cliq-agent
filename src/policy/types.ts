@@ -1,7 +1,7 @@
 import type { ModelAction } from '../protocol/model/actions.js';
 import type { DiffSummary, ValidatorResultSummary } from '../workspace/transactions/types.js';
 
-export type PolicyMode = 'auto' | 'confirm-write' | 'read-only' | 'confirm-bash' | 'confirm-all';
+export type PolicyMode = 'default' | 'accept-edits' | 'plan' | 'yolo';
 
 export type ToolAccess = 'read' | 'write' | 'exec';
 

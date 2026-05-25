@@ -18,6 +18,7 @@ export type LoadedSkillPrompt = {
 export type BuildInstructionMessagesOptions = {
   cwd: string;
   basePrompt: string;
+  coreMessages?: InstructionMessage[];
   workspaceInstructions: string[];
   skills: LoadedSkillPrompt[];
   extensionMessages: InstructionMessage[];

@@ -51,14 +51,14 @@ Inside the TUI:
 - ↑ / ↓ recall previously submitted prompts while preserving any in-progress
   draft; ← / → move the cursor inside the input buffer.
 - The status line shows the current mode in user-facing language, such as
-  `Read Only`, `? Ask Edits`, or `! YOLO Run`.
+  `Plan`, `? Default`, `+ Accept Edits`, or `! YOLO`.
 - Shift+Tab rotates through modes and confirms the new mode in the transcript;
   Ctrl+C cancels an active turn or clears input; Ctrl+D exits on empty input;
   Ctrl+O folds or unfolds the most recent tool output.
 - The input area shows short state-aware hints: idle hints point to `/help` and
   mode switching, slash input shows completion help, and active turns show the
   cancellation shortcut.
-- An approval modal handles `--policy confirm-*` and interactive `--tx-apply` decisions.
+- An approval modal handles `--policy default`, `--policy accept-edits`, and interactive `--tx-apply` decisions.
 
 The TUI runs by default on a TTY, but you can opt in explicitly with `--tui` (useful when scripting around the default). Opt out with `--classic` or `CLIQ_TUI=0` to fall back to the legacy readline REPL:
 
@@ -176,7 +176,7 @@ cliq history
 Run with a stricter policy mode:
 
 ```bash
-cliq --policy read-only "inspect the runner and explain how tool dispatch works"
+cliq --policy plan "inspect the runner and explain how tool dispatch works"
 ```
 
 Activate one or more skills for a run:
@@ -210,7 +210,7 @@ skills.list(params: { cwd: string }) -> { cwd, skills, activeSkills }
 Runtime events are emitted as notifications:
 
 ```json
-{"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":1,"eventId":"evt_001","runId":"run_abc","sessionId":"ses_123","turn":4,"timestamp":"2026-05-03T00:00:00.000Z","type":"run-start","payload":{"cwd":"/repo","policy":"auto","model":{"provider":"openai","model":"example-model"}}}}
+{"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":1,"eventId":"evt_001","runId":"run_abc","sessionId":"ses_123","turn":4,"timestamp":"2026-05-03T00:00:00.000Z","type":"run-start","payload":{"cwd":"/repo","policy":"default","model":{"provider":"openai","model":"example-model"}}}}
 ```
 
 `run.cancel` returning `cancelled` means the abort signal was delivered. Clients should wait for the terminal `run.event` with `type: "run-end"` before treating the run as finished. Clients that send notification-style `run.start` requests without an `id` must read the `runId` from subsequent `run.event` notifications.
@@ -242,30 +242,29 @@ Workspace trust decides whether Cliq enters the workspace runtime layer that rea
 - **Non-interactive & automation** (`cliq "task…"`, `cliq run --jsonl`, `cliq rpc`, `cliq tx validate|apply`): fail-closed unless the workspace already has a persisted `trusted` record or `CLIQ_TRUST_WORKSPACE=trust` is set deliberately (use `trust`/`trusted` synonyms; prefer `deny`/`untrusted` to forbid).
 - Ordering matters: Cliq resolves trust **before** reading repo-controlled `.cliq` config layers (supply-chain tooling should not get a loading-order shortcut).
 
-The default policy mode is `auto`, which allows registered tools to execute without confirmation. For unfamiliar repositories or exploratory review, prefer:
+The default policy mode is `default`, which asks before edits, shell commands, transaction apply, and permission requests. For unfamiliar repositories or exploratory review, prefer:
 
 ```bash
-cliq --policy read-only "inspect this repo"
+cliq --policy plan "inspect this repo"
 ```
 
-For day-to-day coding, `confirm-write`, `confirm-bash`, or `confirm-all` provide explicit approval checkpoints.
+For day-to-day coding, `default` provides approval checkpoints; `accept-edits` lets file edits proceed while still asking before shell commands.
 
 ## Policy modes
 
-- `! YOLO Run` (`auto`): execute all registered tools without asking first
-- `? Ask Edits` (`confirm-write`): ask before `edit` and transaction apply
-- `Read Only` (`read-only`): allow only `read`, `ls`, `find`, and `grep`
-- `? Ask Bash` (`confirm-bash`): ask before `bash`
-- `? Ask All` (`confirm-all`): ask before every tool
+- `? Default` (`default`): ask before edits, shell commands, transaction apply, and permission requests
+- `+ Accept Edits` (`accept-edits`): allow edits and successful transaction apply; ask before shell commands
+- `Plan` (`plan`): inspect and produce a plan; block edits, shell commands, transaction apply, and permission requests
+- `! YOLO` (`yolo`): auto-approve normal tool calls and permission requests, subject to built-in and explicit deny rules
 
 Set the default with:
 
 ```bash
-export CLIQ_POLICY_MODE=read-only
+export CLIQ_POLICY_MODE=plan
 # or per-invocation:
-cliq --policy read-only "inspect this repo"
+cliq --policy plan "inspect this repo"
 # --preset is an alias for --policy (mutually exclusive):
-cliq --preset confirm-write "fix the failing test"
+cliq --preset accept-edits "fix the failing test"
 ```
 
 ## Tool permissions
@@ -297,7 +296,7 @@ Add a `permissions` section to `./.cliq/config.json`:
 ```json
 {
   "permissions": {
-    "preset": "confirm-write",
+    "preset": "default",
     "allow": ["bash: git *", "fs-read: docs/*"],
     "deny":  ["fs-write: .env"],
     "ask":   ["fs-write: src/*"]
@@ -432,7 +431,7 @@ name: reviewer
 description: inspection-first review mode
 ---
 
-Prefer read-only inspection first. Summarize structure before proposing mutations.
+Prefer plan-mode inspection first. Summarize structure before proposing mutations.
 ```
 
 Optional frontmatter fields include `license`, `compatibility`, `metadata`, and `allowed-tools`. `allowed-tools` is descriptive metadata only; tool authorization still goes through Cliq's normal policy engine.

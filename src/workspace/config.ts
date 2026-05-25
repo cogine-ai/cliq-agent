@@ -6,7 +6,7 @@ import type { HookCommandConfig, HookEventName, HookMatcherConfig, HooksConfig }
 import type { PartialModelConfig } from '../model/config.js';
 import type { PermissionRule } from '../policy/decision-table.js';
 import { parsePermissionRuleStrings, PermissionGrammarError } from '../policy/permissions-grammar.js';
-import { isPolicyMode, POLICY_MODES } from '../policy/modes.js';
+import { formatPolicyModeError, isPolicyMode } from '../policy/modes.js';
 import type { PolicyMode } from '../policy/types.js';
 import type { AutoCompactConfig } from '../session/auto-compact-config.js';
 
@@ -468,7 +468,7 @@ export function parsePermissionsConfig(input: unknown): WorkspacePermissionsConf
   if (raw.preset !== undefined) {
     if (typeof raw.preset !== 'string' || !isPolicyMode(raw.preset)) {
       throw new Error(
-        `permissions.preset must be one of: ${POLICY_MODES.join(', ')} (got ${JSON.stringify(raw.preset)})`
+        `permissions.preset ${formatPolicyModeError(String(raw.preset))}`
       );
     }
     result.preset = raw.preset;

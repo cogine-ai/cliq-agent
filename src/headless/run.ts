@@ -33,6 +33,7 @@ import { createModelClient } from '../model/index.js';
 import type { ModelClient, ResolvedModelConfig } from '../model/types.js';
 import { composeRuntimePermissionTable } from '../policy/compose-runtime.js';
 import { createPolicyEngine } from '../policy/engine.js';
+import { formatPolicyModeError, isPolicyMode } from '../policy/modes.js';
 import type { PolicyConfirm, PolicyMode } from '../policy/types.js';
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
 import { createRuntimeAssembly } from '../runtime/assembly.js';
@@ -75,8 +76,6 @@ type RunScope = {
   intendedTurn: number;
 };
 
-const POLICY_MODES = new Set<PolicyMode>(['auto', 'confirm-write', 'read-only', 'confirm-bash', 'confirm-all']);
-
 function errorFrom(
   code: RuntimeErrorCode,
   stage: HeadlessErrorStage,
@@ -118,8 +117,10 @@ async function validateRequest(request: HeadlessRunRequest) {
   if (!request.cwd?.trim()) {
     throw errorFrom('invalid-input', 'input', 'cwd is required');
   }
-  if (request.policy !== undefined && !POLICY_MODES.has(request.policy)) {
-    throw errorFrom('invalid-input', 'input', `unknown policy mode: ${request.policy}`);
+  if (request.policy !== undefined) {
+    if (typeof request.policy !== 'string' || !isPolicyMode(request.policy)) {
+      throw errorFrom('invalid-input', 'input', formatPolicyModeError(String(request.policy)));
+    }
   }
   if (request.skills !== undefined && !Array.isArray(request.skills)) {
     throw errorFrom('invalid-input', 'input', 'skills must be an array of strings');
@@ -288,6 +289,12 @@ export async function runHeadless(
       ...assembly.workspaceConfig,
       autoCompact: request.autoCompact ?? assembly.workspaceConfig.autoCompact
     };
+    // Apply the workspace preset fallback after the trust gate has approved
+    // reading workspace state. Caller-supplied policy still wins.
+    if (request.policy === undefined && workspaceConfig.permissions?.preset) {
+      policy = workspaceConfig.permissions.preset;
+    }
+    assembly.setPolicyMode(policy);
     const modelConfig = await resolveModelConfig({
       workspace: workspaceConfig,
       cli: (request.model ?? {}) as PartialModelConfig
@@ -402,12 +409,6 @@ export async function runHeadless(
       workspaceConfigPermissions: workspaceConfig.permissions,
       ...(request.cliPermissions ? { cliPermissions: request.cliPermissions } : {})
     });
-
-    // Apply the workspace preset fallback after the trust gate has
-    // approved reading workspace state. Caller-supplied policy still wins.
-    if (request.policy === undefined && workspaceConfig.permissions?.preset) {
-      policy = workspaceConfig.permissions.preset;
-    }
 
     const modelClient = options.modelClient ?? options.createModelClient?.(modelConfig) ?? createModelClient(modelConfig);
     const runner = createRunner({

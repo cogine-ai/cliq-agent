@@ -10,39 +10,33 @@ import type { ApprovalDecision, ApprovalSubject, PolicyMode } from './types.js';
 type PolicyEngineOptions = {
   mode: PolicyMode;
   /**
-   * Optional decision table consulted before the legacy {@link PolicyMode}
-   * preset. Defaults to {@link EMPTY_PERMISSION_TABLE}, in which case the
-   * engine behaves exactly like the pre-#62-A implementation. The
-   * deny/allow/ask matcher only applies to tool subjects with a
-   * {@link AccessChannel}; tx-apply and permission-request subjects always
-   * fall through to the preset.
+   * Optional decision table consulted before the {@link PolicyMode} preset
+   * except for plan-mode hard denies. The deny/allow/ask matcher only applies
+   * to tool subjects with a {@link AccessChannel}; tx-apply and
+   * permission-request subjects always fall through to the preset.
    */
   table?: PermissionTable;
 };
 
 export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: PolicyEngineOptions) {
   async function decide(subject: ApprovalSubject): Promise<ApprovalDecision> {
-    if (subject.kind === 'permission-request') {
-      return decidePermissionRequest(subject);
+    if (mode === 'plan') {
+      const hardDeny = decidePlanHardDeny(subject);
+      if (hardDeny) return hardDeny;
     }
 
-    if (mode === 'read-only') {
-      const hardDeny = decideReadOnlyHardDeny(subject);
-      if (hardDeny) return hardDeny;
+    if (subject.kind === 'permission-request') {
+      return decidePermissionRequest(subject);
     }
 
     if (subject.kind === 'tool') {
       const tableDecision = matchAgainstTable(table, subject.channel);
       const resolved = applyTableDecision(tableDecision, subject);
       if (resolved) return resolved;
-      // Fallthrough → continue to the legacy PolicyMode preset below.
+      // Fallthrough -> continue to the PolicyMode preset below.
     }
 
-    if (mode === 'auto') {
-      return { behavior: 'allow', decidedBy: 'policy' };
-    }
-
-    if (mode === 'read-only') {
+    if (mode === 'yolo') {
       return { behavior: 'allow', decidedBy: 'policy' };
     }
 
@@ -85,18 +79,25 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
     }
   }
 
-  function decideReadOnlyHardDeny(subject: ApprovalSubject): ApprovalDecision | undefined {
+  function decidePlanHardDeny(subject: ApprovalSubject): ApprovalDecision | undefined {
+    if (subject.kind === 'permission-request') {
+      return {
+        behavior: 'deny',
+        reason: 'policy mode plan blocks permission requests',
+        decidedBy: 'policy'
+      };
+    }
     if (subject.kind === 'tx-apply') {
       return {
         behavior: 'deny',
-        reason: 'policy mode read-only blocks transaction apply',
+        reason: 'policy mode plan blocks transaction apply',
         decidedBy: 'policy'
       };
     }
     if (subject.kind === 'tool' && subject.access !== 'read') {
       return {
         behavior: 'deny',
-        reason: `policy mode read-only blocks ${subject.access} tools`,
+        reason: `policy mode plan blocks ${subject.access} tools`,
         decidedBy: 'policy'
       };
     }
@@ -112,17 +113,16 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
   }
 
   function requiresConfirmation(subject: ApprovalSubject): boolean {
-    if (mode === 'confirm-all') return true;
-
     if (subject.kind === 'tx-apply') {
-      return mode === 'confirm-write';
+      if (mode === 'default') return true;
+      if (mode === 'accept-edits') return subject.blockingFailures.length > 0;
+      return false;
     }
 
     if (subject.kind === 'tool') {
-      return (
-        (mode === 'confirm-write' && subject.access === 'write') ||
-        (mode === 'confirm-bash' && subject.access === 'exec')
-      );
+      if (mode === 'default') return subject.access === 'write' || subject.access === 'exec';
+      if (mode === 'accept-edits') return subject.access === 'exec';
+      return false;
     }
 
     return false;
@@ -166,15 +166,8 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
   }
 
   function decidePermissionRequest(subject: Extract<ApprovalSubject, { kind: 'permission-request' }>): ApprovalDecision {
-    if (mode === 'auto') {
+    if (mode === 'yolo') {
       return { behavior: 'allow', decidedBy: 'policy' };
-    }
-    if (mode === 'read-only') {
-      return {
-        behavior: 'deny',
-        reason: 'policy mode read-only blocks permission requests',
-        decidedBy: 'policy'
-      };
     }
     return {
       behavior: 'ask',

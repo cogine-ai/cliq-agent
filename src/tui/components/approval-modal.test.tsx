@@ -39,20 +39,20 @@ const txSubject: Extract<ApprovalSubject, { kind: 'tx-apply' }> = {
 
 test('renders the tool subject with command, access, and policy', () => {
   const { lastFrame } = render(
-    <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={() => {}} />
+    <ApprovalModal subject={toolSubject} policy="accept-edits" onDecide={() => {}} />
   );
   const frame = lastFrame() ?? '';
   assert.match(frame, /Approval required/);
   assert.match(frame, /Allow bash command\?/);
   assert.match(frame, /tool: bash/);
   assert.match(frame, /command: rm -rf \//);
-  assert.match(frame, /policy: confirm-bash/);
+  assert.match(frame, /policy: accept-edits/);
   assert.match(frame, /\[a\]llow this turn/);
 });
 
 test('renders the tx-apply subject with diff, validators, and blocking failures', () => {
   const { lastFrame } = render(
-    <ApprovalModal subject={txSubject} policy="confirm-write" onDecide={() => {}} />
+    <ApprovalModal subject={txSubject} policy="default" onDecide={() => {}} />
   );
   const frame = lastFrame() ?? '';
   assert.match(frame, /Apply transaction tx_123\?/);
@@ -70,7 +70,7 @@ test('y allows, n denies, a allows-for-turn (tool only)', async () => {
   };
 
   const allow = render(
-    <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
+    <ApprovalModal subject={toolSubject} policy="accept-edits" onDecide={decide} />
   );
   await flush();
   allow.stdin.write('y');
@@ -78,7 +78,7 @@ test('y allows, n denies, a allows-for-turn (tool only)', async () => {
   assert.deepEqual(calls, ['allow']);
 
   const deny = render(
-    <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
+    <ApprovalModal subject={toolSubject} policy="accept-edits" onDecide={decide} />
   );
   await flush();
   deny.stdin.write('n');
@@ -86,7 +86,7 @@ test('y allows, n denies, a allows-for-turn (tool only)', async () => {
   assert.deepEqual(calls, ['allow', 'deny']);
 
   const allowTurn = render(
-    <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
+    <ApprovalModal subject={toolSubject} policy="accept-edits" onDecide={decide} />
   );
   await flush();
   allowTurn.stdin.write('a');
@@ -99,7 +99,7 @@ test('ignores decision keys until the modal is active after its first render', a
   const { stdin } = render(
     <ApprovalModal
       subject={toolSubject}
-      policy="confirm-bash"
+      policy="accept-edits"
       onDecide={(d) => {
         calls.push(d);
       }}
@@ -120,7 +120,7 @@ test('"a" on a tx-apply subject is a no-op (no allow-turn for tx)', async () => 
   const { stdin } = render(
     <ApprovalModal
       subject={txSubject}
-      policy="confirm-write"
+      policy="default"
       onDecide={(d) => {
         calls.push(d);
       }}
@@ -134,7 +134,7 @@ test('"a" on a tx-apply subject is a no-op (no allow-turn for tx)', async () => 
 
 test('tool modal renders the [s]ession and dim [W]orkspace hotkeys', () => {
   const { lastFrame } = render(
-    <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={() => {}} />
+    <ApprovalModal subject={toolSubject} policy="accept-edits" onDecide={() => {}} />
   );
   const frame = lastFrame() ?? '';
   // The hotkey row carries both scopes; the workspace label is the only one
@@ -150,7 +150,7 @@ test('s -> allow-session and W -> allow-workspace on a tool subject', async () =
   };
 
   const session = render(
-    <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
+    <ApprovalModal subject={toolSubject} policy="accept-edits" onDecide={decide} />
   );
   await flush();
   session.stdin.write('s');
@@ -161,7 +161,7 @@ test('s -> allow-session and W -> allow-workspace on a tool subject', async () =
   // so the heaviest "persist forever in this workspace" decision needs a
   // deliberate shift keystroke.
   const workspace = render(
-    <ApprovalModal subject={toolSubject} policy="confirm-bash" onDecide={decide} />
+    <ApprovalModal subject={toolSubject} policy="accept-edits" onDecide={decide} />
   );
   await flush();
   workspace.stdin.write('W');
@@ -174,7 +174,7 @@ test('lowercase w on a tool subject is a no-op (must be shifted)', async () => {
   const { stdin } = render(
     <ApprovalModal
       subject={toolSubject}
-      policy="confirm-bash"
+      policy="accept-edits"
       onDecide={(d) => calls.push(d)}
     />
   );
@@ -188,7 +188,7 @@ test('tx-apply subject does not render or accept session/workspace hotkeys', asy
   const { lastFrame, stdin } = render(
     <ApprovalModal
       subject={txSubject}
-      policy="confirm-write"
+      policy="default"
       onDecide={() => {}}
     />
   );
@@ -201,7 +201,7 @@ test('tx-apply subject does not render or accept session/workspace hotkeys', asy
   const { stdin: stdin2 } = render(
     <ApprovalModal
       subject={txSubject}
-      policy="confirm-write"
+      policy="default"
       onDecide={(d) => calls.push(d)}
     />
   );

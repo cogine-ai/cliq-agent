@@ -19,8 +19,8 @@ test('narrows to a single command on a more specific prefix', () => {
   const { lastFrame } = render(<SlashPalette query="/po" />);
   const frame = lastFrame() ?? '';
   assert.match(frame, /\/policy/);
-  assert.match(frame, /! YOLO Run \(auto\)/);
-  assert.match(frame, /Read Only \(read-only\)/);
+  assert.match(frame, /Default \(default\)/);
+  assert.match(frame, /! YOLO \(yolo\)/);
   assert.doesNotMatch(frame, /\/exit/);
 });
 

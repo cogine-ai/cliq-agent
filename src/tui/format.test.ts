@@ -62,9 +62,9 @@ test('formatToolResultSummary prefers path; falls back to policy/error', () => {
       tool: 'bash',
       status: 'error',
       content: '...',
-      meta: { policy: 'confirm-bash', reason: 'user declined' }
+      meta: { policy: 'accept-edits', reason: 'user declined' }
     }),
-    'policy=confirm-bash user declined'
+    'policy=accept-edits user declined'
   );
 
   assert.equal(

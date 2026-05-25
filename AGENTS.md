@@ -51,8 +51,8 @@ them:
    edits or shell commands.
 2. **Tool Permission** — per-action authorization (read / write / bash / MCP /
    network) for tools that the agent runtime invokes once a workspace is
-   trusted. Lives in policy modes (`auto`, `confirm-write`, `confirm-all`,
-   `read-only`) and per-tool/policy hooks.
+   trusted. Lives in policy modes (`default`, `accept-edits`, `plan`,
+   `yolo`) and per-tool/policy hooks.
 3. **Sandbox / Boundary** — OS- or container-level enforcement (process
    sandbox, filesystem jails, network rules) as the last line of defense
    behind layers 1 and 2.

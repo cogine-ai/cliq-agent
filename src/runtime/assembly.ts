@@ -1,5 +1,6 @@
 import { loadExtensions } from '../extensions/loader.js';
 import { buildInstructionMessages, loadWorkspaceInstructionFiles } from '../instructions/builder.js';
+import { buildPolicyModeInstructionMessages } from '../instructions/modes.js';
 import { BASE_SYSTEM_PROMPT } from '../prompt/system.js';
 import type { PolicyMode } from '../policy/types.js';
 import type { Session } from '../session/types.js';
@@ -45,6 +46,7 @@ export async function createRuntimeAssembly({
   explicitSkillActivationSource?: 'cli' | 'headless';
 }) {
   const workspaceConfig = await loadWorkspaceConfig(cwd);
+  let currentPolicyMode = policyMode;
   const skillCatalog = await discoverSkillCatalog(cwd);
   const skillDiagnostics: SkillDiagnostic[] = [];
   const skillDiagnosticKeys = new Set<string>();
@@ -118,7 +120,7 @@ export async function createRuntimeAssembly({
           extensions.flatMap((extension) =>
             (extension.instructionSources ?? []).map(async (source) => {
               try {
-                const messages = await source({ cwd, session: currentSession, policyMode });
+                const messages = await source({ cwd, session: currentSession, policyMode: currentPolicyMode });
                 return validateExtensionMessages(extension.name, messages);
               } catch (error) {
                 throw new Error(
@@ -135,10 +137,14 @@ export async function createRuntimeAssembly({
       return buildInstructionMessages({
         cwd,
         basePrompt: BASE_SYSTEM_PROMPT,
+        coreMessages: buildPolicyModeInstructionMessages(currentPolicyMode),
         workspaceInstructions,
         skills: instructionSkills.map((skill) => ({ name: skill.name, skillDir: skill.skillDir, prompt: skill.prompt })),
         extensionMessages
       });
+    },
+    setPolicyMode(mode: PolicyMode) {
+      currentPolicyMode = mode;
     }
   };
 }

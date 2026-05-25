@@ -149,7 +149,7 @@ test('rpc run.start returns a run id and emits run events with the same id', asy
         type: 'run-start',
         payload: {
           cwd: request.cwd,
-          policy: request.policy ?? 'auto',
+          policy: request.policy ?? 'default',
           model: { provider: 'ollama', model: 'fake' }
         }
       };
@@ -506,7 +506,7 @@ test('rpc write failures abort the active run and close future writes', async ()
         type: 'run-start',
         payload: {
           cwd: process.cwd(),
-          policy: 'auto',
+          policy: 'default',
           model: { provider: 'ollama', model: 'fake' }
         }
       };
@@ -566,7 +566,7 @@ test('rpc async write failures abort the active run and close future writes', as
         type: 'run-start',
         payload: {
           cwd: process.cwd(),
-          policy: 'auto',
+          policy: 'default',
           model: { provider: 'ollama', model: 'fake' }
         }
       };
@@ -637,7 +637,7 @@ test('rpc run.start notifications start a run and emit run events without result
         type: 'run-start',
         payload: {
           cwd: request.cwd,
-          policy: request.policy ?? 'auto',
+          policy: request.policy ?? 'default',
           model: { provider: 'ollama', model: 'fake' }
         }
       };

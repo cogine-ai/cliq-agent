@@ -18,6 +18,7 @@ export async function buildInstructionMessages(options: BuildInstructionMessages
   const messages: InstructionMessage[] = [
     { role: 'system', layer: 'core', source: 'base', content: options.basePrompt }
   ];
+  messages.push(...(options.coreMessages ?? []));
 
   for (const instruction of options.workspaceInstructions) {
     messages.push({
