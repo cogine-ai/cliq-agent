@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-05-25
+
+This patch release focuses on permission-boundary correctness and cancellation
+reliability after the v0.11 tool-permission rollout.
+
+### Added
+
+- Provider-level streaming cancellation coverage for Anthropic-compatible,
+  Ollama, OpenAI-compatible, and OpenRouter adapters, ensuring abort signals
+  stop incremental output and cancel the underlying stream.
+- Regression coverage for env split-string shell wrappers, read-only hard
+  denies, TUI turn-state transitions, and approval-scope handling.
+
+### Changed
+
+- Permission approval helpers are now shared outside the TUI, keeping
+  approval-scope and interactive-policy behavior consistent across runtime
+  surfaces.
+- TUI turn state now preserves distinct runtime error stages instead of
+  collapsing separate failures into one generic state.
+
+### Fixed
+
+- Bash allow rules no longer auto-approve compound inline shell payloads hidden
+  behind `bash -c`, `env -S`, env assignments, or env option wrappers.
+- Read-only mode now hard-denies non-read tool execution before workspace,
+  persisted, CLI, session, or hook permission decisions can override it.
+- Repeated read-only blocked tool requests now stop the turn instead of letting
+  a local model loop indefinitely on the same denied action.
+- Streaming model reads now propagate `AbortSignal` through provider adapters
+  and clean up abort listeners on already-aborted and in-flight cancellation
+  paths.
+- `cliq -v` / `cliq --version` works without loading workspace trust state.
+
 ## [0.11.1] - 2026-05-22
 
 This patch release hardens the first built-in skills rollout and closes a
@@ -194,7 +228,8 @@ payload-aware approvals, and a steady stream of TUI polish.
   [GitHub Releases](https://github.com/cogine-ai/cliq-agent/releases); this
   file starts with v0.9.0.
 
-[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.9.0...v0.10.0
