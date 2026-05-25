@@ -29,7 +29,7 @@ test('policy mode language maps every internal mode to a user-facing label', () 
 });
 
 test('status label marks low-friction auto mode distinctly', () => {
-  assert.match(formatModeForStatus('auto'), /^! Auto Run$/);
+  assert.match(formatModeForStatus('auto'), /^! YOLO Run$/);
   assert.equal(describePolicyMode('auto').risk, 'danger');
   assert.equal(describePolicyMode('read-only').risk, 'safe');
 });

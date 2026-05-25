@@ -37,7 +37,7 @@ test('mounts and renders status bar segments', () => {
   const { lastFrame } = render(<App store={store} onSubmit={() => {}} />);
   const frame = lastFrame() ?? '';
   assert.match(frame, /ollama\/qwen3:4b/);
-  assert.match(frame, /! Auto Run/);
+  assert.match(frame, /! YOLO Run/);
 });
 
 test('end-to-end: dispatches reach the rendered transcript', async () => {

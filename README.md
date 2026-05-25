@@ -51,7 +51,7 @@ Inside the TUI:
 - ↑ / ↓ recall previously submitted prompts while preserving any in-progress
   draft; ← / → move the cursor inside the input buffer.
 - The status line shows the current mode in user-facing language, such as
-  `Read Only`, `? Ask Edits`, or `! Auto Run`.
+  `Read Only`, `? Ask Edits`, or `! YOLO Run`.
 - Shift+Tab rotates through modes and confirms the new mode in the transcript;
   Ctrl+C cancels an active turn or clears input; Ctrl+D exits on empty input;
   Ctrl+O folds or unfolds the most recent tool output.
@@ -252,7 +252,7 @@ For day-to-day coding, `confirm-write`, `confirm-bash`, or `confirm-all` provide
 
 ## Policy modes
 
-- `! Auto Run` (`auto`): execute all registered tools without asking first
+- `! YOLO Run` (`auto`): execute all registered tools without asking first
 - `? Ask Edits` (`confirm-write`): ask before `edit` and transaction apply
 - `Read Only` (`read-only`): allow only `read`, `ls`, `find`, and `grep`
 - `? Ask Bash` (`confirm-bash`): ask before `bash`

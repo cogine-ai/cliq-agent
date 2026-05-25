@@ -23,8 +23,8 @@ const POLICY_MODE_ORDER: readonly PolicyMode[] = [
 const POLICY_MODE_LANGUAGE: Record<PolicyMode, PolicyModeDescription> = {
   auto: {
     mode: 'auto',
-    label: 'Auto Run',
-    shortLabel: 'Auto',
+    label: 'YOLO Run',
+    shortLabel: 'YOLO',
     description: 'Runs read, edit, and shell tools without asking first.',
     risk: 'danger',
     marker: '!',

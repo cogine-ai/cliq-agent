@@ -19,7 +19,7 @@ test('renders provider/model · policy · short session · cwd basename · tx id
   const { lastFrame } = render(<StatusBar state={init()} />);
   const frame = lastFrame() ?? '';
   assert.match(frame, /ollama\/qwen3:4b/);
-  assert.match(frame, /! Auto Run/);
+  assert.match(frame, /! YOLO Run/);
   assert.doesNotMatch(frame, / · auto · /);
   assert.match(frame, /ses_a1b2c3/);
   assert.match(frame, /repo/);

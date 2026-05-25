@@ -29,11 +29,19 @@ test('parseSlash /policy requires a known mode argument', () => {
 
   const noArg = parseSlash('/policy');
   assert.equal(noArg.kind, 'invalid');
-  if (noArg.kind === 'invalid') assert.match(noArg.reason, /requires a mode argument/);
+  if (noArg.kind === 'invalid') {
+    assert.match(noArg.reason, /requires a mode argument/);
+    assert.match(noArg.reason, /! YOLO Run \(auto\)/);
+    assert.match(noArg.reason, /Read Only \(read-only\)/);
+  }
 
   const bad = parseSlash('/policy frobnicate');
   assert.equal(bad.kind, 'invalid');
-  if (bad.kind === 'invalid') assert.match(bad.reason, /unknown policy mode/);
+  if (bad.kind === 'invalid') {
+    assert.match(bad.reason, /unknown policy mode/);
+    assert.match(bad.reason, /! YOLO Run \(auto\)/);
+    assert.match(bad.reason, /Read Only \(read-only\)/);
+  }
 });
 
 test('parseSlash flags unknown commands without throwing', () => {
@@ -73,7 +81,7 @@ test('buildHelpText lists every command with its description', () => {
   assert.match(text, /\/skills/);
   assert.match(text, /\/skill <name>/);
   assert.match(text, /Modes:/);
-  assert.match(text, /! Auto Run \(auto\)/);
+  assert.match(text, /! YOLO Run \(auto\)/);
   assert.match(text, /Read Only \(read-only\)/);
   assert.match(text, /Shortcuts:/);
   assert.match(text, /Shift\+Tab\s+Rotate mode/);
