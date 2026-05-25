@@ -16,6 +16,18 @@ test('renders an active prompt glyph by default', () => {
   assert.match(lastFrame() ?? '', />/);
 });
 
+test('renders a compact context hint below the input row', () => {
+  const { lastFrame } = render(
+    <InputBar
+      value=""
+      onChange={() => {}}
+      onSubmit={() => {}}
+      hint="/help · Shift+Tab mode"
+    />
+  );
+  assert.match(lastFrame() ?? '', /\/help · Shift\+Tab mode/);
+});
+
 test('renders a dimmed waiting glyph when disabled', () => {
   const { lastFrame } = render(
     <InputBar value="" onChange={() => {}} onSubmit={() => {}} disabled />

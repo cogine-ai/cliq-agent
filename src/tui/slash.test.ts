@@ -72,4 +72,11 @@ test('buildHelpText lists every command with its description', () => {
   assert.match(text, /\/policy <mode>/);
   assert.match(text, /\/skills/);
   assert.match(text, /\/skill <name>/);
+  assert.match(text, /Modes:/);
+  assert.match(text, /! Auto Run \(auto\)/);
+  assert.match(text, /Read Only \(read-only\)/);
+  assert.match(text, /Shortcuts:/);
+  assert.match(text, /Shift\+Tab\s+Rotate mode/);
+  assert.match(text, /Ctrl\+O\s+Expand\/collapse the most recent tool output/);
+  assert.match(text, /Ctrl\+C\s+Cancel an active turn or clear input/);
 });
