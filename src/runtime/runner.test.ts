@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { ModelClient } from '../model/types.js';
+import { readPlanArtifact } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { createSession } from '../session/store.js';
 import { createToolRegistry } from '../tools/registry.js';
@@ -638,6 +639,43 @@ test('runner records a denied bash action when mode is plan', async () => {
   assert.equal(toolRecord?.status, 'error');
   assert.equal(toolRecord?.meta?.reason, 'policy mode plan blocks exec tools');
   assert.equal(confirmCalls, 0);
+});
+
+test('runner allows plan artifacts in plan mode and stops for TUI review after finalize', async () => {
+  const session = await createTempSession();
+  const events: Array<{ type: string; plan?: { id: string; title: string; contentMarkdown: string } }> = [];
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        if (calls === 1) {
+          return completion('{"plan":{"op":"draft","title":"TUI plan","content":"## Steps\\n- One"}}');
+        }
+        return completion(`{"plan":{"op":"finalize","planId":"${session.activePlanId}"}}`);
+      }
+    },
+    policy: createPolicyEngine({ mode: 'plan' }),
+    onEvent(event) {
+      if (event.type === 'plan-finalized') {
+        events.push({ type: event.type, plan: event.plan });
+      } else {
+        events.push({ type: event.type });
+      }
+    }
+  });
+
+  const final = await runner.runTurn(session, 'make a plan');
+
+  assert.equal(final, 'Plan ready for review: TUI plan');
+  assert.equal(calls, 2);
+  assert.equal(session.records.filter((record) => record.kind === 'tool' && record.tool === 'plan').length, 2);
+  assert.equal(session.activePlanId?.startsWith('plan_'), true);
+  assert.equal(events.some((event) => event.type === 'plan-finalized'), true);
+  const finalized = await readPlanArtifact(session.cwd, session, session.activePlanId!);
+  assert.equal(finalized.status, 'finalized');
+  assert.equal(finalized.contentMarkdown, '## Steps\n- One');
 });
 
 test('runner makes model-activated skills available as next-call instructions', async () => {

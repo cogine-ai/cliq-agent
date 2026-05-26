@@ -34,6 +34,23 @@ export type SkillResourceAction = {
   mode?: 'read' | 'list';
 };
 
+export type PlanAction =
+  | {
+      op: 'draft';
+      title: string;
+      content: string;
+    }
+  | {
+      op: 'update';
+      planId?: string;
+      title?: string;
+      content: string;
+    }
+  | {
+      op: 'finalize';
+      planId?: string;
+    };
+
 import { repairJsonStrings } from './json-repair.js';
 
 export type ModelAction =
@@ -45,9 +62,10 @@ export type ModelAction =
   | { grep: GrepAction }
   | { skill: SkillAction }
   | { skillResource: SkillResourceAction }
+  | { plan: PlanAction }
   | { message: string };
 
-const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'skill', 'skillResource', 'message'] as const;
+const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'skill', 'skillResource', 'plan', 'message'] as const;
 
 export function parseModelAction(content: string): ModelAction {
   let parsed: unknown;
@@ -169,6 +187,42 @@ export function parseModelAction(content: string): ModelAction {
           skill: resource.skill,
           ...(resource.path !== undefined ? { path: resource.path as string } : {}),
           ...(resource.mode !== undefined ? { mode: resource.mode as 'read' | 'list' } : {})
+        }
+      };
+    }
+  }
+
+  if (record.plan && typeof record.plan === 'object' && !Array.isArray(record.plan)) {
+    const plan = record.plan as Record<string, unknown>;
+    if (plan.op === 'draft' && typeof plan.title === 'string' && typeof plan.content === 'string') {
+      return {
+        plan: {
+          op: 'draft',
+          title: plan.title,
+          content: plan.content
+        }
+      };
+    }
+    if (
+      plan.op === 'update' &&
+      (plan.planId === undefined || typeof plan.planId === 'string') &&
+      (plan.title === undefined || typeof plan.title === 'string') &&
+      typeof plan.content === 'string'
+    ) {
+      return {
+        plan: {
+          op: 'update',
+          ...(plan.planId !== undefined ? { planId: plan.planId as string } : {}),
+          ...(plan.title !== undefined ? { title: plan.title as string } : {}),
+          content: plan.content
+        }
+      };
+    }
+    if (plan.op === 'finalize' && (plan.planId === undefined || typeof plan.planId === 'string')) {
+      return {
+        plan: {
+          op: 'finalize',
+          ...(plan.planId !== undefined ? { planId: plan.planId as string } : {})
         }
       };
     }

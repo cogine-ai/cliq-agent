@@ -410,6 +410,82 @@ test('approval state suppresses normal composer hints and keeps approval choices
   assert.equal(resolved, 'deny');
 });
 
+test('plan review approval switches mode and auto-runs the approved plan', async () => {
+  const store = makeStore();
+  store.dispatch({
+    type: 'runtime-event',
+    event: {
+      type: 'plan-finalized',
+      plan: {
+        id: 'plan_1',
+        title: 'Ship plan workflow',
+        contentMarkdown: '## Steps\n- Execute',
+        path: '/tmp/plan.json'
+      }
+    }
+  });
+  const decisions: string[] = [];
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={(text) => {
+        submitted.push(text);
+      }}
+      onPlanDecision={(_review, decision) => {
+        decisions.push(decision.type === 'approve' ? decision.targetMode : decision.type);
+        return { mode: decision.type === 'approve' ? decision.targetMode : 'plan', message: 'approved' };
+      }}
+    />
+  );
+  await flush();
+
+  stdin.write('a');
+  await flush();
+  await flush();
+
+  assert.deepEqual(decisions, ['accept-edits']);
+  assert.equal(store.getState().policy, 'accept-edits');
+  assert.equal(store.getState().pendingPlanReview, null);
+  assert.deepEqual(submitted, ['Execute the approved plan.']);
+  assert.match(lastFrame() ?? '', /approved/);
+});
+
+test('plan review rejection keeps plan mode and auto-runs revision prompt', async () => {
+  const store = makeStore();
+  store.dispatch({ type: 'policy-change', mode: 'plan' });
+  store.dispatch({
+    type: 'runtime-event',
+    event: {
+      type: 'plan-finalized',
+      plan: {
+        id: 'plan_1',
+        title: 'Rejected workflow',
+        contentMarkdown: '## Steps\n- Wrong',
+        path: '/tmp/plan.json'
+      }
+    }
+  });
+  const submitted: string[] = [];
+  const { stdin } = render(
+    <App
+      store={store}
+      onSubmit={(text) => {
+        submitted.push(text);
+      }}
+      onPlanDecision={() => ({ mode: 'plan', message: 'rejected' })}
+    />
+  );
+  await flush();
+
+  stdin.write('r');
+  await flush();
+  await flush();
+
+  assert.equal(store.getState().policy, 'plan');
+  assert.deepEqual(submitted, ['Revise the rejected plan and finalize a new plan for review.']);
+});
+
 test('regular text input still routes to onSubmit and appends a user entry', async () => {
   const store = makeStore();
   const submitted: string[] = [];

@@ -1,4 +1,5 @@
 import type { ProviderName } from '../model/types.js';
+import type { PlanTargetMode } from '../plans/types.js';
 import type { InteractiveApprovalChoice } from '../policy/interactive-policy.js';
 import type { ApprovalSubject, PolicyMode } from '../policy/types.js';
 import type { ModelAction } from '../protocol/model/actions.js';
@@ -70,6 +71,19 @@ export type PendingApproval = {
   resolve: (decision: UiApprovalDecision) => void;
 };
 
+export type PendingPlanReview = {
+  id: string;
+  planId: string;
+  title: string;
+  contentMarkdown: string;
+  path: string;
+};
+
+export type UiPlanDecision =
+  | { type: 'approve'; targetMode: PlanTargetMode }
+  | { type: 'reject' }
+  | { type: 'cancel' };
+
 // Lightweight subset of the runtime tx lifecycle for status-bar rendering;
 // finer-grained transitions stay in src/workspace/transactions/types.ts.
 export type UiTxState = 'staging' | 'finalized' | 'validated';
@@ -80,6 +94,7 @@ export type UiState = {
   transcript: TranscriptEntry[];
   activeTurn: ActiveTurn | null;
   pendingApproval: PendingApproval | null;
+  pendingPlanReview: PendingPlanReview | null;
   policy: PolicyMode;
   model: { provider: ProviderName; model: string };
   session: { id: string; cwd: string };
@@ -110,6 +125,7 @@ export type UiAction =
   // late-firing resolve cannot clear a freshly-installed pending. The
   // reducer no-ops on id mismatch.
   | { type: 'approval-resolve'; id: string }
+  | { type: 'plan-review-resolve'; id: string }
   | { type: 'session-reset' }
   | { type: 'policy-change'; mode: PolicyMode };
 
@@ -132,6 +148,7 @@ export function createInitialState(opts: {
     transcript: [],
     activeTurn: null,
     pendingApproval: null,
+    pendingPlanReview: null,
     policy: opts.policy,
     model: opts.model,
     session: opts.session,
@@ -191,12 +208,17 @@ export function reduce(state: UiState, action: UiAction): UiState {
       return state.pendingApproval && state.pendingApproval.id === action.id
         ? { ...state, pendingApproval: null }
         : state;
+    case 'plan-review-resolve':
+      return state.pendingPlanReview && state.pendingPlanReview.id === action.id
+        ? { ...state, pendingPlanReview: null }
+        : state;
     case 'session-reset':
       return {
         ...state,
         transcript: [],
         activeTurn: null,
         pendingApproval: null,
+        pendingPlanReview: null,
         errors: [],
         // The token bar reflects "this session" — once /reset cuts a fresh
         // session, the previous count is stale. Hide the segment until the
@@ -356,6 +378,21 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
       const idx = findLastRunningToolIndex(state.transcript, event.tool);
       if (idx === -1) return state;
       return updateToolEntry(state, idx, { status: event.status });
+    }
+    case 'plan-finalized': {
+      const { id, nextEntryId } = mintId(state, 'pr');
+      const next = pushSystem(state, `plan ready for review: ${event.plan.title}`);
+      return {
+        ...next,
+        nextEntryId,
+        pendingPlanReview: {
+          id,
+          planId: event.plan.id,
+          title: event.plan.title,
+          contentMarkdown: event.plan.contentMarkdown,
+          path: event.plan.path
+        }
+      };
     }
     case 'checkpoint-created':
     case 'compact-start':

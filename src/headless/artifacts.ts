@@ -256,6 +256,8 @@ export function toSessionView(session: Session): SessionView {
     lifecycle: session.lifecycle,
     ...(session.parentSessionId ? { parentSessionId: session.parentSessionId } : {}),
     ...(session.forkedFromCheckpointId ? { forkedFromCheckpointId: session.forkedFromCheckpointId } : {}),
+    ...(session.activePlanId ? { activePlanId: session.activePlanId } : {}),
+    ...(session.approvedPlanId ? { approvedPlanId: session.approvedPlanId } : {}),
     records: session.records.map(toSessionRecordView),
     activeSkills: (session.activeSkills ?? []).map(toActiveSkillView),
     checkpoints: session.checkpoints.map(toCheckpointView),

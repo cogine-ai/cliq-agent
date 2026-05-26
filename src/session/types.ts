@@ -173,6 +173,8 @@ export type Session = {
   parentSessionId?: string;
   forkedFromCheckpointId?: string;
   activeTxId?: string;
+  activePlanId?: string;
+  approvedPlanId?: string;
   model: SessionModelRef;
   cwd: string;
   createdAt: string;

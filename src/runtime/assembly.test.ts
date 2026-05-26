@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { createRuntimeAssembly } from './assembly.js';
 import { createSession } from '../session/store.js';
+import { approvePlan, createDraftPlan, finalizePlan } from '../plans/store.js';
 
 test('createRuntimeAssembly merges config skills, CLI skills, and extension instructions', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-'));
@@ -105,7 +106,7 @@ test('createRuntimeAssembly injects Plan Mode guidance and updates it when polic
     assert.match(planInstruction?.content ?? '', /Plan Mode/);
     assert.match(planInstruction?.content ?? '', /must not modify source files/i);
     assert.match(planInstruction?.content ?? '', /must not run bash\/exec/i);
-    assert.match(planInstruction?.content ?? '', /switching out of Plan Mode/i);
+    assert.match(planInstruction?.content ?? '', /mode switches out of Plan Mode/i);
 
     assembly.setPolicyMode('default');
     const defaultMessages = await assembly.instructions(assembly.session);
@@ -121,6 +122,44 @@ test('createRuntimeAssembly injects Plan Mode guidance and updates it when polic
     assert.match(reinjectedPlanInstruction?.content ?? '', /must not modify source files/i);
   } finally {
     await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('createRuntimeAssembly injects approved plan context across mode changes', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-approved-plan-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-approved-plan-home-'));
+  const originalCliqHome = process.env.CLIQ_HOME;
+  process.env.CLIQ_HOME = home;
+  try {
+    const session = createSession(cwd);
+    const draft = await createDraftPlan(cwd, session, {
+      title: 'Approved workflow',
+      contentMarkdown: '## Steps\n- Do the approved thing'
+    });
+    await finalizePlan(cwd, session, { planId: draft.id });
+    await approvePlan(cwd, session, { planId: draft.id, targetMode: 'accept-edits' });
+
+    const assembly = await createRuntimeAssembly({
+      cwd,
+      session,
+      policyMode: 'accept-edits',
+      cliSkillNames: []
+    });
+    const messages = await assembly.instructions(assembly.session);
+    const approved = messages.find((message) => message.source === 'plan:approved');
+
+    assert.equal(approved?.layer, 'core');
+    assert.match(approved?.content ?? '', /Approved workflow|approved plan/i);
+    assert.match(approved?.content ?? '', /Do the approved thing/);
+    assert.match(approved?.content ?? '', /accept-edits/);
+  } finally {
+    if (originalCliqHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = originalCliqHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   }
 });
 

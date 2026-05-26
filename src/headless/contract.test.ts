@@ -43,6 +43,7 @@ test('TxAbortedPayload includes appliedPartial when applicable', () => {
 test('emptyHeadlessArtifacts initializes transactions: []', () => {
   const a = emptyHeadlessArtifacts();
   assert.deepEqual(a.transactions, []);
+  assert.deepEqual(a.plans, []);
 });
 
 test('RuntimeErrorCode union includes the tx error codes', () => {

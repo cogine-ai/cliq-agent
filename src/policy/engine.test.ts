@@ -103,13 +103,20 @@ test('permission requests follow policy modes', async () => {
   }
 });
 
-test('plan denies write, exec, tx-apply, and permission-request subjects', async () => {
+test('plan allows plan artifacts and denies write, exec, tx-apply, and permission-request subjects', async () => {
   const policy = createPolicyEngine({ mode: 'plan' });
 
   assert.deepEqual(await policy.decide(toolSubject('read', 'read')), {
     behavior: 'allow',
     decidedBy: 'policy'
   });
+  assert.deepEqual(
+    await policy.decide(toolSubject('plan', 'plan', { plan: { op: 'draft', title: 'T', content: '## Plan' } })),
+    {
+      behavior: 'allow',
+      decidedBy: 'policy'
+    }
+  );
   assert.deepEqual(await policy.decide(toolSubject('edit', 'write')), {
     behavior: 'deny',
     reason: 'policy mode plan blocks write tools',

@@ -1,6 +1,7 @@
 import { loadExtensions } from '../extensions/loader.js';
 import { buildInstructionMessages, loadWorkspaceInstructionFiles } from '../instructions/builder.js';
 import { buildPolicyModeInstructionMessages } from '../instructions/modes.js';
+import { buildApprovedPlanInstructionMessages } from '../plans/instructions.js';
 import { BASE_SYSTEM_PROMPT } from '../prompt/system.js';
 import type { PolicyMode } from '../policy/types.js';
 import type { Session } from '../session/types.js';
@@ -134,11 +135,12 @@ export async function createRuntimeAssembly({
           )
         )
       ).flat();
+      const approvedPlanMessages = await buildApprovedPlanInstructionMessages(cwd, currentSession);
 
       return buildInstructionMessages({
         cwd,
         basePrompt: BASE_SYSTEM_PROMPT,
-        coreMessages: buildPolicyModeInstructionMessages(policyModeSnapshot),
+        coreMessages: [...buildPolicyModeInstructionMessages(policyModeSnapshot), ...approvedPlanMessages],
         workspaceInstructions,
         skills: instructionSkills.map((skill) => ({ name: skill.name, skillDir: skill.skillDir, prompt: skill.prompt })),
         extensionMessages

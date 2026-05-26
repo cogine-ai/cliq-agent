@@ -19,9 +19,11 @@ import {
   resolveTuiPreference,
   resolveTxIdForReview,
   notifyIfPackageUpdateAvailable,
+  hydratePendingPlanReview,
   ReportedCliError,
   runCli
 } from './cli.js';
+import { createDraftPlan, finalizePlan } from './plans/store.js';
 import { createCheckpoint } from './session/checkpoints.js';
 import { createSession, ensureSession, saveSession, sessionFilePath } from './session/store.js';
 import { WorkspaceTrustError } from './session/trust.js';
@@ -1883,6 +1885,42 @@ test('resolveTuiPreference precedence: --classic > --tui > CLIQ_TUI=0 > TTY defa
     resolveTuiPreference({ classic: true, tui: false, envOptOut: false, isTTY: false }),
     false
   );
+});
+
+test('hydratePendingPlanReview restores finalized active plans for TUI restart', async () => {
+  const previousHome = process.env.CLIQ_HOME;
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-tui-plan-ws-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-tui-plan-home-'));
+  process.env.CLIQ_HOME = home;
+  try {
+    const session = createSession(cwd);
+    const draft = await createDraftPlan(cwd, session, {
+      title: 'Restart plan',
+      contentMarkdown: '## Steps\n- Resume review'
+    });
+    await finalizePlan(cwd, session, { planId: draft.id });
+
+    const actions: UiAction[] = [];
+    await hydratePendingPlanReview(captureDispatchStore(actions), cwd, session);
+
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0]?.type, 'runtime-event');
+    if (actions[0]?.type === 'runtime-event') {
+      assert.equal(actions[0].event.type, 'plan-finalized');
+      if (actions[0].event.type === 'plan-finalized') {
+        assert.equal(actions[0].event.plan.id, draft.id);
+        assert.equal(actions[0].event.plan.contentMarkdown, '## Steps\n- Resume review');
+      }
+    }
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 function captureDispatchStore(actions: UiAction[]): UiStore {

@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import type { PolicyMode } from '../policy/types.js';
 import { ApprovalModal } from './components/approval-modal.js';
 import { InputBar } from './components/input-bar.js';
+import { PlanReviewModal } from './components/plan-review-modal.js';
 import { SlashPalette } from './components/slash-palette.js';
 import { StatusBar } from './components/status-bar.js';
 import { Transcript } from './components/transcript.js';
@@ -14,13 +15,24 @@ import { buildInputHint } from './hints.js';
 import { describePolicyMode } from './mode-language.js';
 import { nextPolicyMode } from './policy-rotation.js';
 import { buildHelpText, completeSlash, parseSlash } from './slash.js';
-import type { TranscriptEntry, UiApprovalDecision, UiState, UiStore } from './store.js';
+import type {
+  PendingPlanReview,
+  TranscriptEntry,
+  UiApprovalDecision,
+  UiPlanDecision,
+  UiState,
+  UiStore
+} from './store.js';
 
 export type AppProps = {
   store: UiStore;
   onSubmit: (text: string) => void | Promise<void>;
   onReset?: () => void | Promise<void>;
   onPolicyChange?: (mode: PolicyMode) => void | Promise<void>;
+  onPlanDecision?: (
+    review: PendingPlanReview,
+    decision: UiPlanDecision
+  ) => { message?: string; mode?: PolicyMode } | Promise<{ message?: string; mode?: PolicyMode }>;
   onCancelTurn?: () => void;
   onSkillsList?: () => string | Promise<string>;
   onSkillActivate?: (name: string) => string | Promise<string>;
@@ -31,6 +43,7 @@ export function App({
   onSubmit,
   onReset,
   onPolicyChange,
+  onPlanDecision,
   onCancelTurn,
   onSkillsList,
   onSkillActivate
@@ -71,7 +84,7 @@ export function App({
 
   async function handleSubmit(text: string) {
     const current = store.getState();
-    if (current.activeTurn || current.pendingApproval) return;
+    if (current.activeTurn || current.pendingApproval || current.pendingPlanReview) return;
     setInput('');
     resetHistoryNav();
     if (text.startsWith('/')) {
@@ -151,7 +164,7 @@ export function App({
     }
   }
 
-  const inputDisabled = state.activeTurn !== null || state.pendingApproval !== null;
+  const inputDisabled = state.activeTurn !== null || state.pendingApproval !== null || state.pendingPlanReview !== null;
   const completion = completeSlash(input);
   const terminalWidth = process.stdout.columns ?? 80;
   const expandableTool = findLatestExpandableTool(state);
@@ -192,6 +205,8 @@ export function App({
         denyPendingApproval();
         onCancelTurn?.();
         pushSystem('cancelling…');
+      } else if (store.getState().pendingPlanReview) {
+        void handlePlanDecision({ type: 'cancel' });
       } else if (store.getState().activeTurn) {
         // Cancel the active turn — bridge fires AbortController.abort().
         onCancelTurn?.();
@@ -205,7 +220,7 @@ export function App({
     },
     onCtrlD: () => {
       const current = store.getState();
-      if (current.activeTurn || current.pendingApproval) return;
+      if (current.activeTurn || current.pendingApproval || current.pendingPlanReview) return;
       if (input.length === 0) {
         exit();
       }
@@ -213,7 +228,7 @@ export function App({
     },
     onToggleBody: () => {
       const current = store.getState();
-      if (current.activeTurn || current.pendingApproval) return;
+      if (current.activeTurn || current.pendingApproval || current.pendingPlanReview) return;
       const target = findLatestExpandableTool(current);
       if (!target) {
         pushSystem('no tool output to expand');
@@ -224,7 +239,7 @@ export function App({
     },
     onRotatePolicy: () => {
       const current = store.getState();
-      if (current.activeTurn || current.pendingApproval) return;
+      if (current.activeTurn || current.pendingApproval || current.pendingPlanReview) return;
       void rotatePolicy();
     }
   });
@@ -243,6 +258,47 @@ export function App({
     store.dispatch({ type: 'approval-resolve', id: pending.id });
   }
 
+  async function startSyntheticTurn(text: string) {
+    const current = store.getState();
+    if (current.activeTurn || current.pendingApproval || current.pendingPlanReview) return;
+    store.dispatch({ type: 'user-input', text });
+    try {
+      await onSubmit(text);
+    } catch (error) {
+      store.dispatch({
+        type: 'runtime-event',
+        event: {
+          type: 'error',
+          stage: 'model',
+          message: `onSubmit failed: ${error instanceof Error ? error.message : String(error)}`
+        }
+      });
+    }
+  }
+
+  async function handlePlanDecision(decision: UiPlanDecision) {
+    const review = store.getState().pendingPlanReview;
+    if (!review) return;
+    try {
+      if (!onPlanDecision) {
+        throw new Error('No plan review handler is available in this TUI session.');
+      }
+      const result = await onPlanDecision(review, decision);
+      store.dispatch({ type: 'plan-review-resolve', id: review.id });
+      if (result?.mode) {
+        store.dispatch({ type: 'policy-change', mode: result.mode });
+      }
+      pushSystem(result?.message ?? fallbackPlanDecisionMessage(decision));
+      if (decision.type === 'approve') {
+        await startSyntheticTurn('Execute the approved plan.');
+      } else if (decision.type === 'reject') {
+        await startSyntheticTurn('Revise the rejected plan and finalize a new plan for review.');
+      }
+    } catch (error) {
+      pushSystem(`plan review failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   return (
     <Box flexDirection="column">
       <Transcript entries={state.transcript} activeTurn={state.activeTurn} />
@@ -253,6 +309,15 @@ export function App({
           policy={state.policy}
           activationKey={state.pendingApproval.id}
           onDecide={handleApprovalDecide}
+        />
+      ) : state.pendingPlanReview ? (
+        <PlanReviewModal
+          key={state.pendingPlanReview.id}
+          review={state.pendingPlanReview}
+          activationKey={state.pendingPlanReview.id}
+          onDecide={(decision) => {
+            void handlePlanDecision(decision);
+          }}
         />
       ) : (
         <>
@@ -272,6 +337,16 @@ export function App({
       <StatusBar state={state} />
     </Box>
   );
+}
+
+function fallbackPlanDecisionMessage(decision: UiPlanDecision) {
+  if (decision.type === 'approve') {
+    return `plan approved; running in ${describePolicyMode(decision.targetMode).label} (${decision.targetMode})`;
+  }
+  if (decision.type === 'reject') {
+    return 'plan rejected; continuing planning';
+  }
+  return 'plan review canceled';
 }
 
 function findLatestExpandableTool(state: UiState): Extract<TranscriptEntry, { kind: 'tool' }> | null {

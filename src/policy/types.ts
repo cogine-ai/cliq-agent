@@ -3,7 +3,7 @@ import type { DiffSummary, ValidatorResultSummary } from '../workspace/transacti
 
 export type PolicyMode = 'default' | 'accept-edits' | 'plan' | 'yolo';
 
-export type ToolAccess = 'read' | 'write' | 'exec';
+export type ToolAccess = 'read' | 'write' | 'exec' | 'plan';
 
 /**
  * Fine-grained "what is the model actually trying to do?" classification used by
@@ -41,7 +41,8 @@ export type AccessChannel =
       unsafeForAllow: boolean;
     }
   | { kind: 'mcp'; server: string; tool: string }
-  | { kind: 'network'; host?: string };
+  | { kind: 'network'; host?: string }
+  | { kind: 'plan'; op: 'draft' | 'update' | 'finalize'; planId?: string };
 
 export type AccessChannelKind = AccessChannel['kind'];
 

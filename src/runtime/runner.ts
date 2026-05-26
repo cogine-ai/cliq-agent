@@ -5,6 +5,7 @@ import type { InstructionMessage } from '../instructions/types.js';
 import { classifyContextOverflow } from '../model/errors.js';
 import { findKnownModelDescriptor } from '../model/registry.js';
 import type { ChatMessage, ModelClient, ModelCompletion, ResolvedModelConfig } from '../model/types.js';
+import { readPlanArtifact } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { buildToolApprovalSubject } from '../policy/subjects.js';
 import type { ApprovalDecision, PolicyConfirm } from '../policy/types.js';
@@ -277,6 +278,28 @@ export function createRunner({
 
         await runHooks(hooks, 'beforeTurn', session, userInput);
 
+        const finishWithFinalMessage = async (finalMessage: string): Promise<string> => {
+          await runHooks(hooks, 'afterTurn', session, finalMessage);
+          // Only finalize/validate/apply when this turn auto-opened the tx. For
+          // reused explicit tx (txOpenedThisTurn === false), the user drives
+          // lifecycle via `cliq tx validate/approve/apply`.
+          if (transactions && activeTxFromTxRunner && txOpenedThisTurn && coordinatorCtx) {
+            await finishTurnTx(coordinatorCtx, transactions, activeTxFromTxRunner, async (e) => {
+              await onEvent(e);
+            });
+          }
+          await runNonBlockingCommandHookEvent({
+            schemaVersion: 1,
+            hookEventName: 'Stop',
+            sessionId: session.id,
+            cwd,
+            finalMessage,
+            model: session.model?.model
+          });
+          await onEvent({ type: 'final', message: finalMessage });
+          return finalMessage;
+        };
+
         const autoCompactState: AutoCompactState = {
           thresholdCompactionsThisTurn: 0,
           thresholdSuppressed: false
@@ -506,25 +529,7 @@ export function createRunner({
 
           if ('message' in action) {
             const finalMessage = action.message.trim() || '(no content)';
-            await runHooks(hooks, 'afterTurn', session, finalMessage);
-            // Only finalize/validate/apply when this turn auto-opened the tx. For
-            // reused explicit tx (txOpenedThisTurn === false), the user drives
-            // lifecycle via `cliq tx validate/approve/apply`.
-            if (transactions && activeTxFromTxRunner && txOpenedThisTurn && coordinatorCtx) {
-              await finishTurnTx(coordinatorCtx, transactions, activeTxFromTxRunner, async (e) => {
-                await onEvent(e);
-              });
-            }
-            await runNonBlockingCommandHookEvent({
-              schemaVersion: 1,
-              hookEventName: 'Stop',
-              sessionId: session.id,
-              cwd,
-              finalMessage,
-              model: session.model?.model
-            });
-            await onEvent({ type: 'final', message: finalMessage });
-            return finalMessage;
+            return await finishWithFinalMessage(finalMessage);
           }
 
           const { definition } = registry.resolve(action);
@@ -690,12 +695,33 @@ export function createRunner({
           });
           await runHooks(hooks, 'afterTool', session, storedResult);
           await onEvent({ type: 'tool-end', tool: storedResult.tool, status: storedResult.status });
+          const finalizedPlanId =
+            storedResult.tool === 'plan' &&
+            storedResult.status === 'ok' &&
+            storedResult.meta.planStatus === 'finalized' &&
+            typeof storedResult.meta.planId === 'string'
+              ? storedResult.meta.planId
+              : null;
+          if (finalizedPlanId) {
+            const plan = await readPlanArtifact(cwd, session, finalizedPlanId);
+            await onEvent({
+              type: 'plan-finalized',
+              plan: {
+                id: plan.id,
+                title: plan.title,
+                contentMarkdown: plan.contentMarkdown,
+                path: plan.paths.json
+              }
+            });
+            return await finishWithFinalMessage(`Plan ready for review: ${plan.title}`);
+          }
           if (
             decision?.behavior === 'deny' &&
             decision.decidedBy === 'policy' &&
             policy.mode === 'plan' &&
             subject.kind === 'tool' &&
-            subject.access !== 'read'
+            subject.access !== 'read' &&
+            subject.access !== 'plan'
           ) {
             const blockedKey = `${subject.access}:${definition.name}`;
             const blockedCount = (repeatedReadOnlyDenials.get(blockedKey) ?? 0) + 1;

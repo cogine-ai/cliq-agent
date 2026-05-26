@@ -11,6 +11,9 @@ Allowed response shapes:
 - {"skill":{"name":"<skill-name>"}}
 - {"skillResource":{"skill":"<active-skill-name>","path":"<skill-relative-path>","mode":"read"}}
 - {"skillResource":{"skill":"<active-skill-name>","path":"<skill-relative-directory>","mode":"list"}}
+- {"plan":{"op":"draft","title":"<short title>","content":"<markdown plan>"}}
+- {"plan":{"op":"update","planId":"<plan id>","content":"<markdown plan>"}}
+- {"plan":{"op":"finalize","planId":"<plan id>"}}
 - {"message":"<final user-facing response>"}
 
 Rules:
@@ -19,6 +22,7 @@ Rules:
 - Prefer {"read":...}, {"ls":...}, {"find":...}, and {"grep":...} for repo inspection before using {"bash":...}.
 - Use {"skill":...} to activate a discovered skill when the task clearly calls for specialized instructions.
 - Use {"skillResource":...} only after that skill is active; paths are relative to the skill directory and never grant shell/edit/network permissions.
+- Use {"plan":...} only for persisted plan artifacts; it does not edit workspace source files.
 - Use {"bash":...} for tests, formatting, file creation, multi-step shell work, or anything not covered by the structured tools.
 - Paths should normally be relative to the workspace root.
 - old_text must match exactly once. If it does not, inspect first and recover.
@@ -31,6 +35,7 @@ Examples:
 - {"ls":{"path":"src"}}
 - {"read":{"path":"src/runtime/runner.ts","start_line":1,"end_line":80}}
 - {"find":{"path":"src","name":"runner"}}
-- {"grep":{"path":"src","pattern":"runTurn"}}`;
+- {"grep":{"path":"src","pattern":"runTurn"}}
+- {"plan":{"op":"draft","title":"Implement auth flow","content":"## Goal\\n..."}}`;
 
 export const SYSTEM_PROMPT = BASE_SYSTEM_PROMPT;

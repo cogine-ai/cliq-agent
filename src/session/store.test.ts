@@ -909,3 +909,19 @@ test('Session.activeTxId round-trips through saveSession/load', async () => {
   };
   assert.equal(onDisk.activeTxId, 'tx_round_trip_active');
 });
+
+test('Session plan refs round-trip through saveSession/load', async () => {
+  const cwd = await realpath(fileCliqHome!);
+  const session = createSession(cwd);
+  session.activePlanId = 'plan_active';
+  session.approvedPlanId = 'plan_approved';
+  await saveSession(cwd, session);
+
+  const target = sessionFilePath(session);
+  const onDisk = JSON.parse(await readFile(target, 'utf8')) as {
+    activePlanId?: string;
+    approvedPlanId?: string;
+  };
+  assert.equal(onDisk.activePlanId, 'plan_active');
+  assert.equal(onDisk.approvedPlanId, 'plan_approved');
+});

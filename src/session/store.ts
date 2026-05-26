@@ -527,6 +527,10 @@ function isSession(value: unknown): value is Session {
     (value as Session).app === 'cliq' &&
     isSessionModelLike((value as { model?: unknown }).model) &&
     typeof (value as Session).cwd === 'string' &&
+    ((value as { activePlanId?: unknown }).activePlanId === undefined ||
+      typeof (value as { activePlanId?: unknown }).activePlanId === 'string') &&
+    ((value as { approvedPlanId?: unknown }).approvedPlanId === undefined ||
+      typeof (value as { approvedPlanId?: unknown }).approvedPlanId === 'string') &&
     typeof (value as Session).createdAt === 'string' &&
     typeof (value as Session).updatedAt === 'string' &&
     !!(value as Session).lifecycle &&
