@@ -4,7 +4,7 @@ export const policyInstructionsExtension: CliqExtension = {
   name: 'policy-instructions',
   instructionSources: [
     async ({ policyMode }) => {
-      if (policyMode === 'yolo') {
+      if (policyMode !== 'plan') {
         return [];
       }
 

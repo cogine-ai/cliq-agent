@@ -97,6 +97,7 @@ export async function createRuntimeAssembly({
     commandHooks: workspaceConfig.hooks ?? {},
     session,
     async instructions(currentSession: Session) {
+      const policyModeSnapshot = currentPolicyMode;
       const retainedSkills: ActiveSkill[] = [];
       const instructionSkills: ActiveSkill[] = [];
       for (const skill of currentSession.activeSkills ?? []) {
@@ -120,7 +121,7 @@ export async function createRuntimeAssembly({
           extensions.flatMap((extension) =>
             (extension.instructionSources ?? []).map(async (source) => {
               try {
-                const messages = await source({ cwd, session: currentSession, policyMode: currentPolicyMode });
+                const messages = await source({ cwd, session: currentSession, policyMode: policyModeSnapshot });
                 return validateExtensionMessages(extension.name, messages);
               } catch (error) {
                 throw new Error(
@@ -137,7 +138,7 @@ export async function createRuntimeAssembly({
       return buildInstructionMessages({
         cwd,
         basePrompt: BASE_SYSTEM_PROMPT,
-        coreMessages: buildPolicyModeInstructionMessages(currentPolicyMode),
+        coreMessages: buildPolicyModeInstructionMessages(policyModeSnapshot),
         workspaceInstructions,
         skills: instructionSkills.map((skill) => ({ name: skill.name, skillDir: skill.skillDir, prompt: skill.prompt })),
         extensionMessages

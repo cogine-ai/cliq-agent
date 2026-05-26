@@ -14,6 +14,9 @@ import {
 
 const flush = () => new Promise<void>((r) => setImmediate(r));
 
+// createInitialState preserves the policy passed by the caller; this store uses
+// yolo intentionally so App tests can assert explicit UI policy rendering
+// without depending on production default fallback behavior.
 const makeStore = () =>
   createUiStore(
     createInitialState({

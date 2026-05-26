@@ -861,17 +861,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const cliAllow: PermissionRule[] = [];
   const cliDeny: PermissionRule[] = [];
   const cliAsk: PermissionRule[] = [];
-  const envPolicy = process.env.CLIQ_POLICY_MODE;
-  if (envPolicy !== undefined) {
-    if (!isPolicyMode(envPolicy)) {
-      const migration = policyModeMigrationHint(envPolicy);
-      throw new Error(
-        `Invalid CLIQ_POLICY_MODE: ${migration ?? `${envPolicy}; expected one of: ${POLICY_MODE_LIST}`}`
-      );
-    }
-    policy = envPolicy;
-    policyExplicit = true;
-  }
+  const rawEnvPolicy = process.env.CLIQ_POLICY_MODE;
 
   const args: string[] = [];
 
@@ -1122,6 +1112,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
 
     args.push(token);
+  }
+
+  if (policyFlagSeen === null && rawEnvPolicy !== undefined) {
+    if (!isPolicyMode(rawEnvPolicy)) {
+      const migration = policyModeMigrationHint(rawEnvPolicy);
+      throw new Error(
+        `Invalid CLIQ_POLICY_MODE: ${migration ?? `${rawEnvPolicy}; expected one of: ${POLICY_MODE_LIST}`}`
+      );
+    }
+    policy = rawEnvPolicy;
+    policyExplicit = true;
   }
 
   const cmd = args[0];

@@ -151,6 +151,9 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
       );
       lines.push(`validators: ${subject.validators.length}`);
       lines.push(`blocking failures: ${subject.blockingFailures.length}`);
+      if (subject.blockingFailures.length > 0) {
+        lines.push(`blocking failure details: ${subject.blockingFailures.join(', ')}`);
+      }
       lines.push(`artifact: ${subject.artifactRef}`);
       lines.push(`policy: ${mode}`);
       return lines.join('\n');

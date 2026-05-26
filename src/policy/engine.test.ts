@@ -25,7 +25,7 @@ function toolSubject(
   });
 }
 
-function txApplySubject(): ApprovalSubject {
+function txApplySubject(blockingFailures: string[] = []): ApprovalSubject {
   const snapshot = {
     tx: {
       id: 'tx_123',
@@ -45,7 +45,7 @@ function txApplySubject(): ApprovalSubject {
         deletes: []
       },
       validators: [{ name: 'tsc', severity: 'blocking', status: 'pass', durationMs: 12 }],
-      blockingFailures: []
+      blockingFailures
     },
     diff: null,
     audit: [],
@@ -352,6 +352,12 @@ test('tx-apply follows default, accept-edits, plan, and yolo modes', async () =>
     behavior: 'allow',
     decidedBy: 'policy'
   });
+  const acceptEditsWithFailures = await acceptEdits.decide(txApplySubject(['tsc failed']));
+  assert.equal(acceptEditsWithFailures.behavior, 'ask');
+  if (acceptEditsWithFailures.behavior === 'ask') {
+    assert.match(acceptEditsWithFailures.prompt, /tx_123/);
+    assert.match(acceptEditsWithFailures.prompt, /tsc failed/);
+  }
   assert.deepEqual(await plan.decide(txApplySubject()), {
     behavior: 'deny',
     reason: 'policy mode plan blocks transaction apply',

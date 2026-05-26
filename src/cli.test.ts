@@ -272,6 +272,23 @@ test('parseArgs rejects invalid CLIQ_POLICY_MODE values', () => {
   }
 });
 
+test('parseArgs lets explicit CLI policy override an invalid CLIQ_POLICY_MODE', () => {
+  const previous = process.env.CLIQ_POLICY_MODE;
+  process.env.CLIQ_POLICY_MODE = 'read-only';
+
+  try {
+    const parsed = parseArgs(['node', 'src/index.ts', '--policy', 'plan', 'chat']);
+    assert.equal(parsed.policy, 'plan');
+    assert.equal(parsed.policyExplicit, true);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CLIQ_POLICY_MODE;
+    } else {
+      process.env.CLIQ_POLICY_MODE = previous;
+    }
+  }
+});
+
 test('parseArgs rejects legacy CLIQ_POLICY_MODE values with migration guidance', () => {
   const previous = process.env.CLIQ_POLICY_MODE;
   process.env.CLIQ_POLICY_MODE = 'read-only';

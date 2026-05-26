@@ -85,6 +85,12 @@ Prefer exact edits over shell mutation when possible.`,
 test('createRuntimeAssembly injects Plan Mode guidance and updates it when policy changes', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-plan-mode-'));
   try {
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify({ extensions: ['builtin:policy-instructions'] }),
+      'utf8'
+    );
     const assembly = await createRuntimeAssembly({
       cwd,
       session: createSession(cwd),
@@ -94,6 +100,7 @@ test('createRuntimeAssembly injects Plan Mode guidance and updates it when polic
 
     const planMessages = await assembly.instructions(assembly.session);
     const planInstruction = planMessages.find((message) => message.source === 'mode:plan');
+    assert.equal(planMessages.some((message) => message.source === 'policy-instructions'), true);
     assert.equal(planInstruction?.layer, 'core');
     assert.match(planInstruction?.content ?? '', /Plan Mode/);
     assert.match(planInstruction?.content ?? '', /must not modify source files/i);
@@ -103,6 +110,15 @@ test('createRuntimeAssembly injects Plan Mode guidance and updates it when polic
     assembly.setPolicyMode('default');
     const defaultMessages = await assembly.instructions(assembly.session);
     assert.equal(defaultMessages.some((message) => message.source === 'mode:plan'), false);
+    assert.equal(defaultMessages.some((message) => message.source === 'policy-instructions'), false);
+
+    assembly.setPolicyMode('plan');
+    const reinjectedMessages = await assembly.instructions(assembly.session);
+    const reinjectedPlanInstruction = reinjectedMessages.find((message) => message.source === 'mode:plan');
+    assert.equal(reinjectedMessages.some((message) => message.source === 'policy-instructions'), true);
+    assert.equal(reinjectedPlanInstruction?.layer, 'core');
+    assert.match(reinjectedPlanInstruction?.content ?? '', /Plan Mode/);
+    assert.match(reinjectedPlanInstruction?.content ?? '', /must not modify source files/i);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

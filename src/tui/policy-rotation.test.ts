@@ -25,3 +25,7 @@ test('rotation includes yolo as the most dangerous mode', () => {
 test('rotation begins with the safest mode', () => {
   assert.equal(POLICY_ROTATION[0], 'plan');
 });
+
+test('unknown policy modes enter the rotation at the safest mode', () => {
+  assert.equal(nextPolicyMode('unknown' as never), 'plan');
+});
