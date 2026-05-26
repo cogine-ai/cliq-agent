@@ -13,58 +13,48 @@ export type PolicyModeDescription = {
 };
 
 const POLICY_MODE_ORDER: readonly PolicyMode[] = [
-  'auto',
-  'confirm-write',
-  'read-only',
-  'confirm-bash',
-  'confirm-all'
+  'default',
+  'accept-edits',
+  'plan',
+  'yolo'
 ];
 
 const POLICY_MODE_LANGUAGE: Record<PolicyMode, PolicyModeDescription> = {
-  auto: {
-    mode: 'auto',
-    label: 'YOLO Run',
-    shortLabel: 'YOLO',
-    description: 'Runs read, edit, and shell tools without asking first.',
-    risk: 'danger',
-    marker: '!',
-    color: 'red'
-  },
-  'confirm-write': {
-    mode: 'confirm-write',
-    label: 'Ask Edits',
-    shortLabel: 'Edits?',
-    description: 'Asks before file edits and transaction apply; read and shell tools can run.',
+  default: {
+    mode: 'default',
+    label: 'Default',
+    shortLabel: 'Default',
+    description: 'Asks before edits, shell commands, transaction apply, and permission requests.',
     risk: 'guarded',
     marker: '?',
     color: 'yellow'
   },
-  'read-only': {
-    mode: 'read-only',
-    label: 'Read Only',
-    shortLabel: 'Read',
-    description: 'Allows read/list/find/grep only; blocks writes, shell, and applies.',
+  'accept-edits': {
+    mode: 'accept-edits',
+    label: 'Accept Edits',
+    shortLabel: 'Edits',
+    description: 'Allows edits and successful transaction apply; asks before shell commands.',
+    risk: 'guarded',
+    marker: '+',
+    color: 'green'
+  },
+  plan: {
+    mode: 'plan',
+    label: 'Plan',
+    shortLabel: 'Plan',
+    description: 'Allows inspection and planning; blocks edits, shell commands, and transaction apply.',
     risk: 'safe',
     marker: '',
     color: 'cyan'
   },
-  'confirm-bash': {
-    mode: 'confirm-bash',
-    label: 'Ask Bash',
-    shortLabel: 'Bash?',
-    description: 'Asks before shell commands; read and edit tools can run.',
-    risk: 'guarded',
-    marker: '?',
-    color: 'yellow'
-  },
-  'confirm-all': {
-    mode: 'confirm-all',
-    label: 'Ask All',
-    shortLabel: 'Ask',
-    description: 'Asks before every tool action, including reads.',
-    risk: 'guarded',
-    marker: '?',
-    color: 'green'
+  yolo: {
+    mode: 'yolo',
+    label: 'YOLO',
+    shortLabel: 'YOLO',
+    description: 'Auto-approves normal tool calls and permission requests; deny rules still apply.',
+    risk: 'danger',
+    marker: '!',
+    color: 'red'
   }
 };
 

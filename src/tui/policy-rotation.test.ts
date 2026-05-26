@@ -14,17 +14,18 @@ test('nextPolicyMode walks the rotation in declared order and wraps', () => {
   assert.equal(seen[POLICY_ROTATION.length], POLICY_ROTATION[0]);
 });
 
-test('nextPolicyMode lands on the safest mode when called from confirm-all', () => {
-  // confirm-all is intentionally not in POLICY_ROTATION; it is the TUI default
-  // entry point. The first Shift+Tab from there enters the cycle at the safe
-  // end (read-only) so users discover "more friction" first.
-  assert.equal(nextPolicyMode('confirm-all'), POLICY_ROTATION[0]);
+test('rotation includes every canonical TUI mode', () => {
+  assert.deepEqual(POLICY_ROTATION, ['plan', 'default', 'accept-edits', 'yolo']);
 });
 
-test('rotation excludes confirm-all', () => {
-  assert.ok(!POLICY_ROTATION.includes('confirm-all'));
+test('rotation includes yolo as the most dangerous mode', () => {
+  assert.equal(POLICY_ROTATION[POLICY_ROTATION.length - 1], 'yolo');
 });
 
 test('rotation begins with the safest mode', () => {
-  assert.equal(POLICY_ROTATION[0], 'read-only');
+  assert.equal(POLICY_ROTATION[0], 'plan');
+});
+
+test('unknown policy modes enter the rotation at the safest mode', () => {
+  assert.equal(nextPolicyMode('unknown' as never), 'plan');
 });

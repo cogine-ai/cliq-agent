@@ -19,7 +19,7 @@ const flush = () => new Promise<void>((r) => setImmediate(r));
 const makeStore = (): UiStore =>
   createUiStore(
     createInitialState({
-      policy: 'confirm-bash',
+      policy: 'accept-edits',
       model: { provider: 'ollama', model: 'qwen3:4b' },
       session: { id: 'ses_smoke', cwd: '/tmp/smoke' }
     })

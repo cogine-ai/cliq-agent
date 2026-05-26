@@ -1,4 +1,5 @@
 import type { PolicyMode } from '../policy/types.js';
+import { policyModeMigrationHint } from '../policy/modes.js';
 import {
   formatModeForHelp,
   formatModeForStatus,
@@ -96,10 +97,13 @@ export function parseSlash(input: string): ParsedSlashCommand {
         };
       }
       if (!isPolicyMode(mode)) {
+        const migration = policyModeMigrationHint(mode);
         return {
           kind: 'invalid',
           head,
-          reason: `unknown policy mode "${mode}"; expected one of: ${formatPolicyModeChoices()}`
+          reason: migration
+            ? `${migration}; expected one of: ${formatPolicyModeChoices()}`
+            : `unknown policy mode "${mode}"; expected one of: ${formatPolicyModeChoices()}`
         };
       }
       return { kind: 'policy', mode };

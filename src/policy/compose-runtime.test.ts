@@ -43,7 +43,7 @@ test('composeRuntimePermissionTable stacks workspace config above builtin deny',
     const table = await composeRuntimePermissionTable({
       trustContext,
       workspaceConfigPermissions: {
-        preset: 'confirm-write',
+        preset: 'default',
         allow: [{ channel: 'bash', pattern: 'git *', source: 'workspace' }],
         deny: [{ channel: 'fs-write', pattern: '.env', source: 'workspace' }],
         ask: [{ channel: 'fs-write', pattern: 'src/*', source: 'workspace' }]

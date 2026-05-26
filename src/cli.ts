@@ -19,7 +19,7 @@ import { composeRuntimePermissionTable } from './policy/compose-runtime.js';
 import type { PermissionRule, PermissionTable } from './policy/decision-table.js';
 import { createPolicyEngine } from './policy/engine.js';
 import { createInteractivePolicyEngine } from './policy/interactive-policy.js';
-import { isPolicyMode, POLICY_MODE_LIST, POLICY_MODES } from './policy/modes.js';
+import { formatPolicyModeError, isPolicyMode, POLICY_MODE_LIST, policyModeMigrationHint } from './policy/modes.js';
 import { PermissionGrammarError, parsePermissionRuleString } from './policy/permissions-grammar.js';
 import type { ApprovalSubject, PolicyMode } from './policy/types.js';
 import { createRuntimeAssembly } from './runtime/assembly.js';
@@ -92,7 +92,7 @@ type ParsedArgsBase = {
   policy: PolicyMode;
   // True when the user explicitly set --policy, --preset, or CLIQ_POLICY_MODE;
   // lets the TUI dispatch override the global default with a more cautious
-  // default (confirm-all) without overruling explicit choices.
+  // default without overruling explicit choices.
   policyExplicit?: boolean;
   skills: string[];
   model: PartialModelConfig;
@@ -861,14 +861,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const cliAllow: PermissionRule[] = [];
   const cliDeny: PermissionRule[] = [];
   const cliAsk: PermissionRule[] = [];
-  const envPolicy = process.env.CLIQ_POLICY_MODE;
-  if (envPolicy !== undefined) {
-    if (!isPolicyMode(envPolicy)) {
-      throw new Error(`Invalid CLIQ_POLICY_MODE: ${envPolicy}; expected one of: ${POLICY_MODE_LIST}`);
-    }
-    policy = envPolicy;
-    policyExplicit = true;
-  }
+  const rawEnvPolicy = process.env.CLIQ_POLICY_MODE;
 
   const args: string[] = [];
 
@@ -942,7 +935,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
         throw new Error(`Missing value for --policy; expected one of: ${POLICY_MODE_LIST}`);
       }
       if (!isPolicyMode(value)) {
-        throw new Error(`Unknown policy mode: ${value}`);
+        throw new Error(formatPolicyModeError(value));
       }
       assertPolicyFlagNotConflicting(policyFlagSeen, '--policy');
       policy = value;
@@ -954,7 +947,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (token === '--policy') {
       const value = readFlagValue(raw, i, '--policy');
       if (!isPolicyMode(value)) {
-        throw new Error(`Unknown policy mode: ${value}`);
+        throw new Error(formatPolicyModeError(value));
       }
       assertPolicyFlagNotConflicting(policyFlagSeen, '--policy');
       policy = value;
@@ -974,7 +967,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
         throw new Error(`Missing value for --preset; expected one of: ${POLICY_MODE_LIST}`);
       }
       if (!isPolicyMode(value)) {
-        throw new Error(`Unknown policy mode: ${value}`);
+        throw new Error(formatPolicyModeError(value));
       }
       assertPolicyFlagNotConflicting(policyFlagSeen, '--preset');
       policy = value;
@@ -986,7 +979,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (token === '--preset') {
       const value = readFlagValue(raw, i, '--preset');
       if (!isPolicyMode(value)) {
-        throw new Error(`Unknown policy mode: ${value}`);
+        throw new Error(formatPolicyModeError(value));
       }
       assertPolicyFlagNotConflicting(policyFlagSeen, '--preset');
       policy = value;
@@ -1119,6 +1112,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
 
     args.push(token);
+  }
+
+  if (policyFlagSeen === null && rawEnvPolicy !== undefined) {
+    if (!isPolicyMode(rawEnvPolicy)) {
+      const migration = policyModeMigrationHint(rawEnvPolicy);
+      throw new Error(
+        `Invalid CLIQ_POLICY_MODE: ${migration ?? `${rawEnvPolicy}; expected one of: ${POLICY_MODE_LIST}`}`
+      );
+    }
+    policy = rawEnvPolicy;
+    policyExplicit = true;
   }
 
   const cmd = args[0];
@@ -1339,7 +1343,7 @@ Transaction subcommands:
                                     (use --restore-confirmed or --keep-partial for applied-partial)
 
 Options:
-  --policy MODE            auto | confirm-write | read-only | confirm-bash | confirm-all (mutually exclusive with --preset)
+  --policy MODE            default | accept-edits | plan | yolo (mutually exclusive with --preset)
   --preset MODE            Alias for --policy MODE; same values; mutually exclusive with --policy
   --allow "<rule>"         Add a permission rule layered on top of the preset. Repeatable.
   --deny  "<rule>"         Same as --allow but adds a deny rule (deny always wins).
@@ -1361,11 +1365,10 @@ Options:
   --classic                Force the legacy readline REPL instead of the TUI
 
 Policy modes:
-  auto                     Execute registered tools without confirmation
-  confirm-write            Ask before write tools
-  read-only                Allow read, ls, find, and grep only
-  confirm-bash             Ask before exec tools
-  confirm-all              Ask before every tool
+  default                  Ask before edits, exec, transaction apply, and permission requests
+  accept-edits             Allow edits and successful transaction apply; ask before exec
+  plan                     Inspect and produce a plan; block edits, exec, transaction apply, and permission requests
+  yolo                     Auto-approve normal tool calls and permission requests, subject to deny rules
 
 Streaming modes:
   auto                     Use provider default; compatible endpoints may fall back
@@ -1376,7 +1379,7 @@ RPC:
   cliq rpc                 Reads newline-delimited JSON-RPC 2.0 requests from stdin and writes protocol messages to stdout
 
 Examples:
-  cliq --policy read-only "inspect this repo"
+  cliq --policy plan "inspect this repo"
   cliq --provider ollama --model qwen3:4b "inspect this repo"
 
 Env:
@@ -2537,11 +2540,12 @@ export async function runCli(argv: string[]) {
   // CLIQ_POLICY_MODE. CLI / env always win to preserve the documented
   // override precedence; when neither is set, a workspace-declared preset
   // is treated as an explicit choice so the TUI's
-  // "confirm-all when nothing was set" default doesn't override it.
+  // TUI default doesn't override it.
   if (!parsed.policyExplicit && wsCfg.permissions?.preset) {
     policy = wsCfg.permissions.preset;
     parsed.policyExplicit = true;
   }
+  assembly.setPolicyMode(policy);
   const chatRecoveryResult = await coordRecoverAtStart(chatCoordinatorCtx);
   for (const skippedTxId of chatRecoveryResult.crossSessionSkipped) {
     process.stderr.write(`Warning: recovery skipped cross-session orphan ${skippedTxId}\n`);
@@ -2718,11 +2722,9 @@ type RunChatTuiSessionOpts = {
   trustContext: WorkspaceTrustContext;
 };
 
-// The TUI defaults to the most cautious mode that still lets the agent do
-// useful work — confirm-all asks before every tool call. Users who passed
-// --policy or set CLIQ_POLICY_MODE keep their choice; readline (--classic)
-// keeps the global DEFAULT_POLICY_MODE behaviour.
-const TUI_DEFAULT_POLICY: PolicyMode = 'confirm-all';
+// The TUI shares the canonical default unless the user explicitly chose a
+// different mode. Readline (--classic) uses the same global default.
+const TUI_DEFAULT_POLICY: PolicyMode = 'default';
 
 export function resolveTuiInitialPolicy(opts: {
   policy: PolicyMode;
@@ -2737,6 +2739,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     policy: opts.policy,
     policyExplicit: opts.policyExplicit
   });
+  opts.assembly.setPolicyMode(policy);
 
   // Lazy-import the TUI runtime surface so headless / RPC / one-shot paths
   // never pay the Ink + React module load cost. Enforced by the
@@ -2916,6 +2919,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     },
     onPolicyChange: async (mode) => {
       livePolicy.setMode(mode);
+      opts.assembly.setPolicyMode(mode);
     },
     onSkillsList: () => formatSkillCatalog(opts.assembly.skillCatalog, session.activeSkills ?? []),
     onSkillActivate: async (name: string) => {

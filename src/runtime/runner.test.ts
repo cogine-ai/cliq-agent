@@ -70,6 +70,7 @@ test('runner invokes hooks around assistant and tool execution', async () => {
         return completion('{"message":"done"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     registry: {
       definitions: [],
       resolve() {
@@ -282,6 +283,7 @@ test('runner appends tool results and replays them back to the model', async () 
         return completion('{"message":"done"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     registry: {
       definitions: [],
       resolve() {
@@ -332,6 +334,7 @@ test('runner caps stored tool result content before appending tool record', asyn
         return completion(calls === 1 ? '{"bash":"huge"}' : '{"message":"done"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     registry: {
       definitions: [],
       resolve() {
@@ -442,6 +445,7 @@ test('runner cancellation after beforeTool skips tool execution and tool record'
         return completion('{"bash":"pwd"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     signal: controller.signal,
     hooks: [
       {
@@ -490,6 +494,7 @@ test('runner cancellation during tool execution does not persist a tool error re
         return completion('{"bash":"pwd"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     signal: controller.signal,
     registry: {
       definitions: [],
@@ -526,6 +531,7 @@ test('runner treats tool AbortError as cancellation even when signal is not abor
         return completion('{"bash":"pwd"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     registry: {
       definitions: [],
       resolve() {
@@ -563,6 +569,7 @@ test('runner converts tool exceptions into tool error records and still calls af
         return completion(callCount === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     registry: {
       definitions: [],
       resolve() {
@@ -599,7 +606,7 @@ test('runner converts tool exceptions into tool error records and still calls af
   assert.deepEqual(afterToolEvents, ['bash:error']);
 });
 
-test('runner records a denied bash action when mode is read-only', async () => {
+test('runner records a denied bash action when mode is plan', async () => {
   const session = await createTempSession();
   const outputs: string[] = [];
   let confirmCalls = 0;
@@ -609,7 +616,7 @@ test('runner records a denied bash action when mode is read-only', async () => {
         return completion(outputs.length === 0 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
-    policy: createPolicyEngine({ mode: 'read-only' }),
+    policy: createPolicyEngine({ mode: 'plan' }),
     confirm: async () => {
       confirmCalls += 1;
       return true;
@@ -627,9 +634,9 @@ test('runner records a denied bash action when mode is read-only', async () => {
   const toolRecord = session.records.find((record) => record.kind === 'tool');
 
   assert.equal(finalMessage, 'done');
-  assert.match(outputs[0] ?? '', /policy mode read-only blocks exec tools/);
+  assert.match(outputs[0] ?? '', /policy mode plan blocks exec tools/);
   assert.equal(toolRecord?.status, 'error');
-  assert.equal(toolRecord?.meta?.reason, 'policy mode read-only blocks exec tools');
+  assert.equal(toolRecord?.meta?.reason, 'policy mode plan blocks exec tools');
   assert.equal(confirmCalls, 0);
 });
 
@@ -689,7 +696,7 @@ test('runner records policy decision failures as tool errors', async () => {
       }
     },
     policy: {
-      mode: 'confirm-all',
+      mode: 'default',
       async decide() {
         throw new Error('confirmation backend unavailable');
       }
@@ -708,12 +715,12 @@ test('runner records policy decision failures as tool errors', async () => {
 
   assert.equal(finalMessage, 'done');
   assert.equal(toolRecord?.status, 'error');
-  assert.match(toolRecord?.content ?? '', /policy=confirm-all/);
+  assert.match(toolRecord?.content ?? '', /policy=default/);
   assert.match(toolRecord?.content ?? '', /confirmation backend unavailable/);
   assert.deepEqual(afterToolEvents, ['bash:error']);
 });
 
-test('runner executes edit only after confirmation in confirm-write mode', async () => {
+test('runner executes edit only after confirmation in default mode', async () => {
   const session = await createTempSession();
   const prompts: string[] = [];
   const editExecutions: string[] = [];
@@ -745,7 +752,7 @@ test('runner executes edit only after confirmation in confirm-write mode', async
       }
     },
     policy: createPolicyEngine({
-      mode: 'confirm-write'
+      mode: 'default'
     }),
     confirm: async (prompt) => {
       prompts.push(prompt);
@@ -760,7 +767,7 @@ test('runner executes edit only after confirmation in confirm-write mode', async
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? '', /Allow edit\?/);
   assert.match(prompts[0] ?? '', /file\.txt/);
-  assert.match(prompts[0] ?? '', /policy: confirm-write/);
+  assert.match(prompts[0] ?? '', /policy: default/);
   assert.deepEqual(editExecutions, ['file.txt']);
 });
 
@@ -776,7 +783,7 @@ test('runner confirmation prompt for bash includes the actual command', async ()
         return completion(calls === 1 ? '{"bash":"npm test"}' : '{"message":"done"}');
       }
     },
-    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    policy: createPolicyEngine({ mode: 'accept-edits' }),
     confirm: async (prompt) => {
       prompts.push(prompt);
       return true;
@@ -789,7 +796,7 @@ test('runner confirmation prompt for bash includes the actual command', async ()
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? '', /Allow bash command\?/);
   assert.match(prompts[0] ?? '', /npm test/);
-  assert.match(prompts[0] ?? '', /policy: confirm-bash/);
+  assert.match(prompts[0] ?? '', /policy: accept-edits/);
 });
 
 test('runner runs PreToolUse and PostToolUse command hooks around tool execution', async () => {
@@ -840,6 +847,7 @@ process.stdin.on('end', () => {
         return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     commandHooks: {
       PreToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: preCommand }] }],
       PostToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: postCommand }] }]
@@ -914,6 +922,7 @@ test('runner blocks tool execution when PreToolUse command hook denies', async (
         return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     commandHooks: {
       PreToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: denyCommand }] }]
     },
@@ -947,7 +956,7 @@ test('runner blocks tool execution when PreToolUse command hook denies', async (
   assert.equal(toolRecord?.meta?.reason, 'blocked by pre hook');
 });
 
-test('runner stops read-only turns after repeated blocked exec requests', async () => {
+test('runner stops plan turns after repeated blocked exec requests', async () => {
   const session = await createTempSession();
   const events: Array<{ type: string; stage?: string; message?: string }> = [];
   let calls = 0;
@@ -960,7 +969,7 @@ test('runner stops read-only turns after repeated blocked exec requests', async 
         return completion('{"bash":"pwd"}');
       }
     },
-    policy: createPolicyEngine({ mode: 'read-only' }),
+    policy: createPolicyEngine({ mode: 'plan' }),
     onEvent(event) {
       if (event.type === 'error') events.push(event);
     },
@@ -984,12 +993,12 @@ test('runner stops read-only turns after repeated blocked exec requests', async 
     }
   });
 
-  await assert.rejects(() => runner.runTurn(session, 'run pwd'), /read-only mode repeatedly blocked exec tool bash/);
+  await assert.rejects(() => runner.runTurn(session, 'run pwd'), /plan mode repeatedly blocked exec tool bash/);
 
   assert.equal(calls, 2);
   assert.equal(executed, false);
   assert.equal(session.records.filter((record) => record.kind === 'tool').length, 2);
-  assert.match(events.at(-1)?.message ?? '', /read-only mode repeatedly blocked exec tool bash/);
+  assert.match(events.at(-1)?.message ?? '', /plan mode repeatedly blocked exec tool bash/);
 });
 
 test('runner warns and continues for non-required PreToolUse infrastructure errors', async () => {
@@ -1010,6 +1019,7 @@ test('runner warns and continues for non-required PreToolUse infrastructure erro
         return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     commandHooks: {
       PreToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: failingCommand }] }]
     },
@@ -1062,6 +1072,7 @@ test('runner blocks tool execution for required PreToolUse infrastructure errors
         return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
+    policy: createPolicyEngine({ mode: 'yolo' }),
     commandHooks: {
       PreToolUse: [{ matcher: 'bash', hooks: [{ type: 'command', command: failingCommand, required: true }] }]
     },
@@ -1112,7 +1123,7 @@ test('runner lets PermissionRequest command hooks allow policy asks without user
         return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
-    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    policy: createPolicyEngine({ mode: 'accept-edits' }),
     confirm: async () => {
       confirmCalls += 1;
       return false;
@@ -1183,7 +1194,7 @@ test('PermissionRequest hook allow with explicit scope is accepted (forward comp
           return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
         }
       },
-      policy: createPolicyEngine({ mode: 'confirm-bash' }),
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
       confirm: async () => false,
       commandHooks: {
         PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: cmd }] }]
@@ -1231,7 +1242,7 @@ test('runner lets PermissionRequest command hooks deny policy asks', async () =>
         return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
-    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    policy: createPolicyEngine({ mode: 'accept-edits' }),
     confirm: async () => {
       confirmCalls += 1;
       return true;
@@ -1285,7 +1296,7 @@ test('runner falls back to user confirmation when PermissionRequest hooks make n
         return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
-    policy: createPolicyEngine({ mode: 'confirm-bash' }),
+    policy: createPolicyEngine({ mode: 'accept-edits' }),
     confirm: async () => {
       confirmCalls += 1;
       return true;
@@ -1300,7 +1311,7 @@ test('runner falls back to user confirmation when PermissionRequest hooks make n
   assert.equal(confirmCalls, 1);
 });
 
-test('runner does not invoke PermissionRequest hooks for read-only hard denies', async () => {
+test('runner does not invoke PermissionRequest hooks for plan hard denies', async () => {
   const session = await createTempSession();
   let calls = 0;
   const markerPath = path.join(session.cwd, 'permission-hook-ran');
@@ -1317,7 +1328,7 @@ test('runner does not invoke PermissionRequest hooks for read-only hard denies',
         return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
       }
     },
-    policy: createPolicyEngine({ mode: 'read-only' }),
+    policy: createPolicyEngine({ mode: 'plan' }),
     commandHooks: {
       PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: markerCommand }] }]
     }

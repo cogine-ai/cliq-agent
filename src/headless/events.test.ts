@@ -29,7 +29,7 @@ test('createHeadlessEventFactory emits versioned envelopes with optional session
     'run-start',
     {
       cwd: '/workspace',
-      policy: 'auto',
+      policy: 'default',
       model: { provider: 'ollama', model: 'qwen3:4b', baseUrl: 'http://localhost:11434' }
     },
     { sessionId: 'sess_test', turn: 3 }

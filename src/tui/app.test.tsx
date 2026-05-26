@@ -14,10 +14,13 @@ import {
 
 const flush = () => new Promise<void>((r) => setImmediate(r));
 
+// createInitialState preserves the policy passed by the caller; this store uses
+// yolo intentionally so App tests can assert explicit UI policy rendering
+// without depending on production default fallback behavior.
 const makeStore = () =>
   createUiStore(
     createInitialState({
-      policy: 'auto',
+      policy: 'yolo',
       model: { provider: 'ollama', model: 'qwen3:4b' },
       session: { id: 'ses_smoke', cwd: '/tmp/smoke' }
     })
@@ -37,7 +40,7 @@ test('mounts and renders status bar segments', () => {
   const { lastFrame } = render(<App store={store} onSubmit={() => {}} />);
   const frame = lastFrame() ?? '';
   assert.match(frame, /ollama\/qwen3:4b/);
-  assert.match(frame, /! YOLO Run/);
+  assert.match(frame, /! YOLO/);
 });
 
 test('end-to-end: dispatches reach the rendered transcript', async () => {
@@ -109,13 +112,13 @@ test('/policy <mode> calls onPolicyChange and dispatches policy-change', async (
       }}
     />
   );
-  stdin.write('/policy read-only');
+  stdin.write('/policy plan');
   await flush();
   stdin.write('\r');
   await flush();
   await flush(); // extra tick for the awaited onPolicyChange chain
-  assert.deepEqual(captured, ['read-only']);
-  assert.equal(store.getState().policy, 'read-only');
+  assert.deepEqual(captured, ['plan']);
+  assert.equal(store.getState().policy, 'plan');
 });
 
 test('/skills calls onSkillsList and renders the result', async () => {
@@ -248,10 +251,10 @@ test('Shift+Tab rotates mode and confirms the user-facing mode label', async () 
   await flush();
   await flush();
 
-  assert.deepEqual(captured, ['read-only']);
-  assert.equal(store.getState().policy, 'read-only');
-  assert.match(lastFrame() ?? '', /mode → Read Only/);
-  assert.match(lastFrame() ?? '', /Read Only/);
+  assert.deepEqual(captured, ['plan']);
+  assert.equal(store.getState().policy, 'plan');
+  assert.match(lastFrame() ?? '', /mode → Plan/);
+  assert.match(lastFrame() ?? '', /Plan/);
 });
 
 test('Ctrl+O reports when no expandable tool output is available', async () => {
@@ -377,7 +380,7 @@ test('approval state ignores non-cancel global shortcuts', async () => {
   await flush();
 
   assert.deepEqual(policyChanges, []);
-  assert.equal(store.getState().policy, 'auto');
+  assert.equal(store.getState().policy, 'yolo');
   assert.equal(resolved, null);
   assert.equal(store.getState().pendingApproval, pending);
 });

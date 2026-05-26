@@ -17,7 +17,7 @@ const subject: ApprovalSubject = {
 const newStore = () =>
   createUiStore(
     createInitialState({
-      policy: 'confirm-bash',
+      policy: 'accept-edits',
       model: { provider: 'ollama', model: 'qwen3:4b' },
       session: { id: 'ses_t', cwd: '/tmp/t' }
     })

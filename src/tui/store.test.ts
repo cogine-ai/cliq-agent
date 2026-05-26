@@ -11,7 +11,7 @@ import {
 
 const baseInit = (): UiState =>
   createInitialState({
-    policy: 'auto',
+    policy: 'default',
     model: { provider: 'ollama', model: 'qwen3:4b' },
     session: { id: 'ses_test', cwd: '/repo' },
   });
@@ -21,7 +21,7 @@ test('createInitialState seeds an empty state with counter at 1', () => {
   assert.equal(s.transcript.length, 0);
   assert.equal(s.activeTurn, null);
   assert.equal(s.pendingApproval, null);
-  assert.equal(s.policy, 'auto');
+  assert.equal(s.policy, 'default');
   assert.equal(s.errors.length, 0);
   assert.equal(s.versionUpdate, null);
   assert.equal(s.nextEntryId, 1);
@@ -175,7 +175,7 @@ test('session-reset clears transcript/turn/approval/errors/tokens but preserves 
   // the previous session's running estimate.
   assert.equal(after.sessionTokens, null);
   assert.deepEqual(after.versionUpdate, { current: '0.9.0', latest: '0.10.0' });
-  assert.equal(after.policy, 'auto');
+  assert.equal(after.policy, 'default');
   assert.equal(after.session.id, 'ses_test');
   assert.equal(after.model.model, 'qwen3:4b');
 });
@@ -192,8 +192,8 @@ test('version-update stores and clears package update notice', () => {
 test('policy-change updates the policy mode and leaves transcript intact', () => {
   let s = baseInit();
   s = reduce(s, { type: 'user-input', text: 'a' });
-  const after = reduce(s, { type: 'policy-change', mode: 'read-only' });
-  assert.equal(after.policy, 'read-only');
+  const after = reduce(s, { type: 'policy-change', mode: 'plan' });
+  assert.equal(after.policy, 'plan');
   assert.equal(after.transcript.length, 1);
 });
 
@@ -338,8 +338,8 @@ test('tool-hook-end with no prior running entry synthesizes a finalized entry', 
     result: {
       tool: 'edit',
       status: 'error',
-      content: 'TOOL_RESULT edit ERROR\npolicy=read-only\nblocked',
-      meta: { policy: 'read-only', reason: 'blocked' }
+      content: 'TOOL_RESULT edit ERROR\npolicy=plan\nblocked',
+      meta: { policy: 'plan', reason: 'blocked' }
     }
   });
   assert.equal(s.transcript.length, 1);
@@ -347,7 +347,7 @@ test('tool-hook-end with no prior running entry synthesizes a finalized entry', 
   assert.equal(entry.kind, 'tool');
   if (entry.kind !== 'tool') return;
   assert.equal(entry.status, 'error');
-  assert.equal(entry.summary, 'policy=read-only blocked');
+  assert.equal(entry.summary, 'policy=plan blocked');
 });
 
 test('tx-* events update state.tx through the staging → finalized → validated → null lifecycle', () => {

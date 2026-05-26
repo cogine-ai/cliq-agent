@@ -38,22 +38,22 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-test('parseArgs accepts --policy=read-only', () => {
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--policy=read-only', 'chat']), {
+test('parseArgs accepts --policy=plan', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--policy=plan', 'chat']), {
     cmd: 'chat',
     prompt: '',
-    policy: 'read-only',
+    policy: 'plan',
     policyExplicit: true,
     skills: [],
     model: {}
   });
 });
 
-test('parseArgs accepts --policy confirm-all for one-shot prompt', () => {
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--policy', 'confirm-all', 'fix', 'tests']), {
+test('parseArgs accepts --policy accept-edits for one-shot prompt', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--policy', 'accept-edits', 'fix', 'tests']), {
     cmd: 'chat',
     prompt: 'fix tests',
-    policy: 'confirm-all',
+    policy: 'accept-edits',
     policyExplicit: true,
     skills: [],
     model: {}
@@ -65,7 +65,7 @@ test('parseArgs accepts command-scoped run --jsonl', () => {
     cmd: 'chat',
     prompt: 'inspect repo',
     jsonl: true,
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -74,20 +74,20 @@ test('parseArgs accepts command-scoped run --jsonl', () => {
 test('parseArgs accepts top-level version flags without stealing run prompts', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--version']), {
     cmd: 'version',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '-v']), {
     cmd: 'version',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', '-v']), {
     cmd: 'chat',
     prompt: '-v',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -101,7 +101,7 @@ test('parseArgs keeps --jsonl in the prompt after the first prompt token', () =>
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', 'inspect', '--jsonl']), {
     cmd: 'chat',
     prompt: 'inspect --jsonl',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -110,7 +110,7 @@ test('parseArgs keeps --jsonl in the prompt after the first prompt token', () =>
 test('parseArgs accepts rpc as a no-prompt command and rejects extra args', () => {
   assert.deepEqual(parseArgs(['node', 'cliq', 'rpc']), {
     cmd: 'rpc',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -121,7 +121,7 @@ test('parseArgs accepts ask as a prompt-only run alias', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'ask', '--literal', 'prompt']), {
     cmd: 'chat',
     prompt: '--literal prompt',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -142,14 +142,14 @@ test('parseArgs keeps --jsonl literal in prompt fallback paths', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'inspect', '--jsonl']), {
     cmd: 'chat',
     prompt: 'inspect --jsonl',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--jsonl', 'inspect']), {
     cmd: 'chat',
     prompt: '--jsonl inspect',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -157,6 +157,10 @@ test('parseArgs keeps --jsonl literal in prompt fallback paths', () => {
 
 test('parseArgs rejects invalid policy values', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--policy', 'invalid', 'chat']), /Unknown policy mode/i);
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--policy', 'read-only', 'chat']),
+    /read-only has been replaced by plan/i
+  );
 });
 
 test('parseArgs rejects missing policy values', () => {
@@ -164,19 +168,23 @@ test('parseArgs rejects missing policy values', () => {
 });
 
 test('parseArgs --preset is an alias for --policy and marks policy explicit', () => {
-  const flag = parseArgs(['node', 'src/index.ts', '--preset', 'confirm-write', 'chat']);
-  assert.equal(flag.policy, 'confirm-write');
+  const flag = parseArgs(['node', 'src/index.ts', '--preset', 'default', 'chat']);
+  assert.equal(flag.policy, 'default');
   assert.equal(flag.policyExplicit, true);
 
-  const eq = parseArgs(['node', 'src/index.ts', '--preset=read-only', 'chat']);
-  assert.equal(eq.policy, 'read-only');
+  const eq = parseArgs(['node', 'src/index.ts', '--preset=plan', 'chat']);
+  assert.equal(eq.policy, 'plan');
   assert.equal(eq.policyExplicit, true);
 });
 
 test('parseArgs rejects --preset xxx unknown mode and missing value', () => {
   assert.throws(
-    () => parseArgs(['node', 'src/index.ts', '--preset', 'yolo']),
+    () => parseArgs(['node', 'src/index.ts', '--preset', 'frobnicate']),
     /Unknown policy mode/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--preset', 'confirm-bash']),
+    /confirm-bash has been replaced by accept-edits/i
   );
   assert.throws(
     () => parseArgs(['node', 'src/index.ts', '--preset']),
@@ -186,21 +194,21 @@ test('parseArgs rejects --preset xxx unknown mode and missing value', () => {
 
 test('parseArgs refuses simultaneous --policy and --preset (either order)', () => {
   assert.throws(
-    () => parseArgs(['node', 'src/index.ts', '--policy', 'auto', '--preset', 'auto']),
+    () => parseArgs(['node', 'src/index.ts', '--policy', 'default', '--preset', 'default']),
     /--policy and --preset are mutually exclusive/i
   );
   assert.throws(
-    () => parseArgs(['node', 'src/index.ts', '--preset=auto', '--policy=auto']),
+    () => parseArgs(['node', 'src/index.ts', '--preset=yolo', '--policy=yolo']),
     /--preset and --policy are mutually exclusive/i
   );
 });
 
 test('parseArgs tolerates CLIQ_POLICY_MODE + --preset (env is not a CLI conflict)', () => {
   const previous = process.env.CLIQ_POLICY_MODE;
-  process.env.CLIQ_POLICY_MODE = 'auto';
+  process.env.CLIQ_POLICY_MODE = 'default';
   try {
-    const parsed = parseArgs(['node', 'src/index.ts', '--preset', 'read-only', 'chat']);
-    assert.equal(parsed.policy, 'read-only');
+    const parsed = parseArgs(['node', 'src/index.ts', '--preset', 'plan', 'chat']);
+    assert.equal(parsed.policy, 'plan');
     assert.equal(parsed.policyExplicit, true);
   } finally {
     if (previous === undefined) delete process.env.CLIQ_POLICY_MODE;
@@ -264,11 +272,46 @@ test('parseArgs rejects invalid CLIQ_POLICY_MODE values', () => {
   }
 });
 
+test('parseArgs lets explicit CLI policy override an invalid CLIQ_POLICY_MODE', () => {
+  const previous = process.env.CLIQ_POLICY_MODE;
+  process.env.CLIQ_POLICY_MODE = 'read-only';
+
+  try {
+    const parsed = parseArgs(['node', 'src/index.ts', '--policy', 'plan', 'chat']);
+    assert.equal(parsed.policy, 'plan');
+    assert.equal(parsed.policyExplicit, true);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CLIQ_POLICY_MODE;
+    } else {
+      process.env.CLIQ_POLICY_MODE = previous;
+    }
+  }
+});
+
+test('parseArgs rejects legacy CLIQ_POLICY_MODE values with migration guidance', () => {
+  const previous = process.env.CLIQ_POLICY_MODE;
+  process.env.CLIQ_POLICY_MODE = 'read-only';
+
+  try {
+    assert.throws(
+      () => parseArgs(['node', 'src/index.ts', 'chat']),
+      /Invalid CLIQ_POLICY_MODE: read-only has been replaced by plan/i
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CLIQ_POLICY_MODE;
+    } else {
+      process.env.CLIQ_POLICY_MODE = previous;
+    }
+  }
+});
+
 test('parseArgs collects repeated --skill flags', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--skill', 'reviewer', '--skill=safe-edit', 'chat']), {
     cmd: 'chat',
     prompt: '',
-    policy: 'auto',
+    policy: 'default',
     skills: ['reviewer', 'safe-edit'],
     model: {}
   });
@@ -283,7 +326,7 @@ test('parseArgs rejects missing --skill values', () => {
 
 test('parseArgs rejects --skill when the next token is another flag', () => {
   assert.throws(
-    () => parseArgs(['node', 'src/index.ts', '--skill', '--policy', 'read-only', 'chat']),
+    () => parseArgs(['node', 'src/index.ts', '--skill', '--policy', 'plan', 'chat']),
     /Missing value for --skill/i
   );
 });
@@ -291,7 +334,7 @@ test('parseArgs rejects --skill when the next token is another flag', () => {
 test('parseArgs keeps skills on non-chat commands for downstream assembly parity', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--skill', 'reviewer', 'history']), {
     cmd: 'history',
-    policy: 'auto',
+    policy: 'default',
     skills: ['reviewer'],
     model: {}
   });
@@ -302,7 +345,7 @@ test('parseArgs accepts checkpoint fork id and name', () => {
     cmd: 'checkpoint-fork',
     checkpointId: 'chk_123',
     name: 'alternate path',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -314,7 +357,7 @@ test('parseArgs accepts checkpoint fork id and name', () => {
       restoreFiles: true,
       yes: true,
       name: 'alternate path',
-      policy: 'auto',
+      policy: 'default',
       skills: [],
       model: {}
     }
@@ -333,13 +376,13 @@ test('parseArgs accepts workflow asset commands', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'create', 'before', 'edit']), {
     cmd: 'checkpoint-create',
     name: 'before edit',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'list']), {
     cmd: 'checkpoint-list',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -351,7 +394,7 @@ test('parseArgs accepts workflow asset commands', () => {
       scope: 'files',
       yes: true,
       allowStagedChanges: true,
-      policy: 'auto',
+      policy: 'default',
       skills: [],
       model: {}
     }
@@ -360,20 +403,20 @@ test('parseArgs accepts workflow asset commands', () => {
     cmd: 'compact-create',
     beforeCheckpointId: 'chk_1',
     summaryMarkdown: 'summary text',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', 'list']), {
     cmd: 'compact-list',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'handoff', 'create', '--checkpoint=chk_1']), {
     cmd: 'handoff-create',
     checkpointId: 'chk_1',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -383,35 +426,35 @@ test('parseArgs accepts workflow asset help commands', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint']), {
     cmd: 'help',
     topic: 'checkpoint',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'checkpoint', 'help']), {
     cmd: 'help',
     topic: 'checkpoint',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', '--help']), {
     cmd: 'help',
     topic: 'compact',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'handoff', '-h']), {
     cmd: 'help',
     topic: 'handoff',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'help', 'checkpoint']), {
     cmd: 'help',
     topic: 'checkpoint',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -421,7 +464,7 @@ test('parseArgs accepts leaf workflow asset help flags', () => {
   const expectedCheckpointHelp = {
     cmd: 'help',
     topic: 'checkpoint',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   };
@@ -432,21 +475,21 @@ test('parseArgs accepts leaf workflow asset help flags', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', 'create', '--help']), {
     cmd: 'help',
     topic: 'compact',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'compact', 'list', '-h']), {
     cmd: 'help',
     topic: 'compact',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'handoff', 'create', '--help']), {
     cmd: 'help',
     topic: 'handoff',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -691,28 +734,28 @@ test('parseArgs accepts transaction help spellings', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'tx', 'help']), {
     cmd: 'help',
     topic: 'tx',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'tx', '--help']), {
     cmd: 'help',
     topic: 'tx',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'help', 'tx']), {
     cmd: 'help',
     topic: 'tx',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'tx', 'apply', 'tx_abc', '--help']), {
     cmd: 'help',
     topic: 'tx',
-    policy: 'auto',
+    policy: 'default',
     skills: [],
     model: {}
   });
@@ -742,7 +785,7 @@ test('parseArgs accepts model provider flags', () => {
     {
       cmd: 'chat',
       prompt: '',
-      policy: 'auto',
+      policy: 'default',
       skills: [],
       model: {
         provider: 'ollama',
@@ -798,10 +841,14 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /-h, --help/);
   assert.match(output, /-v, --version/);
   assert.match(output, /--policy MODE/);
-  assert.match(output, /confirm-write/);
-  assert.match(output, /read-only/);
-  assert.match(output, /confirm-bash/);
-  assert.match(output, /confirm-all/);
+  assert.match(output, /default/);
+  assert.match(output, /accept-edits/);
+  assert.match(output, /plan/);
+  assert.match(output, /yolo/);
+  assert.doesNotMatch(output, /confirm-write/);
+  assert.doesNotMatch(output, /read-only/);
+  assert.doesNotMatch(output, /confirm-bash/);
+  assert.doesNotMatch(output, /confirm-all/);
   // #62-B permission surface — all four new flags must appear in help so
   // operators can discover them without reading the README.
   assert.match(output, /--preset MODE/);
@@ -846,14 +893,14 @@ test('formatToolResultLine surfaces policy denial context when no path exists', 
   const result: ToolResult = {
     tool: 'edit',
     status: 'error',
-    content: 'TOOL_RESULT edit ERROR\npolicy=confirm-write\nconfirmation denied',
+    content: 'TOOL_RESULT edit ERROR\npolicy=default\nconfirmation denied',
     meta: {
-      policy: 'confirm-write',
+      policy: 'default',
       reason: 'confirmation denied'
     }
   };
 
-  assert.equal(formatToolResultLine(result), '[edit error] policy=confirm-write confirmation denied');
+  assert.equal(formatToolResultLine(result), '[edit error] policy=default confirmation denied');
 });
 
 test('formatToolResultLine surfaces tool error reason alongside path', () => {
@@ -1774,34 +1821,34 @@ test('runCli checkpoint fork --restore-files creates a restore-safety checkpoint
 });
 
 test('parseArgs marks policy as explicit when --policy is set', () => {
-  const explicit = parseArgs(['node', 'index.js', '--policy', 'auto']);
-  assert.equal(explicit.policy, 'auto');
+  const explicit = parseArgs(['node', 'index.js', '--policy', 'yolo']);
+  assert.equal(explicit.policy, 'yolo');
   assert.equal(explicit.policyExplicit, true);
 
-  const equals = parseArgs(['node', 'index.js', '--policy=read-only']);
-  assert.equal(equals.policy, 'read-only');
+  const equals = parseArgs(['node', 'index.js', '--policy=plan']);
+  assert.equal(equals.policy, 'plan');
   assert.equal(equals.policyExplicit, true);
 
   const implicit = parseArgs(['node', 'index.js']);
-  assert.equal(implicit.policy, 'auto'); // global default
+  assert.equal(implicit.policy, 'default'); // global default
   assert.notEqual(implicit.policyExplicit, true);
 });
 
-test('resolveTuiInitialPolicy overrides the global default with confirm-all unless explicit', () => {
-  // No --policy → confirm-all (TUI safer default).
+test('resolveTuiInitialPolicy uses the canonical default unless explicit', () => {
+  // No --policy -> canonical default.
   assert.equal(
-    resolveTuiInitialPolicy({ policy: 'auto', policyExplicit: false }),
-    'confirm-all'
+    resolveTuiInitialPolicy({ policy: 'default', policyExplicit: false }),
+    'default'
   );
-  // Explicit --policy auto wins.
+  // Explicit --policy yolo wins.
   assert.equal(
-    resolveTuiInitialPolicy({ policy: 'auto', policyExplicit: true }),
-    'auto'
+    resolveTuiInitialPolicy({ policy: 'yolo', policyExplicit: true }),
+    'yolo'
   );
-  // Explicit --policy read-only also passes through.
+  // Explicit --policy plan also passes through.
   assert.equal(
-    resolveTuiInitialPolicy({ policy: 'read-only', policyExplicit: true }),
-    'read-only'
+    resolveTuiInitialPolicy({ policy: 'plan', policyExplicit: true }),
+    'plan'
   );
 });
 

@@ -376,13 +376,13 @@ test('parseWorkspaceConfig leaves permissions undefined when section is absent',
 test('parseWorkspaceConfig accepts preset + allow + deny + ask permission rules', () => {
   const parsed = parseWorkspaceConfig({
     permissions: {
-      preset: 'confirm-write',
+      preset: 'accept-edits',
       allow: ['bash: git *', 'fs-read: docs/*'],
       deny: ['fs-write: .env'],
       ask: ['fs-write: src/*']
     }
   });
-  assert.equal(parsed.permissions?.preset, 'confirm-write');
+  assert.equal(parsed.permissions?.preset, 'accept-edits');
   assert.deepEqual(parsed.permissions?.allow, [
     { channel: 'bash', pattern: 'git *', source: 'workspace' },
     { channel: 'fs-read', pattern: 'docs/*', source: 'workspace' }
@@ -397,8 +397,12 @@ test('parseWorkspaceConfig accepts preset + allow + deny + ask permission rules'
 
 test('parseWorkspaceConfig rejects an unknown PolicyMode in permissions.preset', () => {
   assert.throws(
-    () => parseWorkspaceConfig({ permissions: { preset: 'yolo' } }),
-    /permissions\.preset must be one of/
+    () => parseWorkspaceConfig({ permissions: { preset: 'frobnicate' } }),
+    /permissions\.preset.*expected one of/
+  );
+  assert.throws(
+    () => parseWorkspaceConfig({ permissions: { preset: 'read-only' } }),
+    /read-only has been replaced by plan/
   );
 });
 

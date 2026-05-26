@@ -33,8 +33,8 @@
  *
  *   2. Add an "unknown server defaults to deny" rule to BUILTIN_DENY in
  *      src/policy/decision-table.ts once we know the server identifier
- *      convention. Until then, fail-closed via the preset (confirm-* or
- *      read-only will refuse mcp; auto will allow). Document the choice
+ *      convention. Until then, fail-closed via the preset (plan refuses
+ *      non-read MCP; yolo allows normal MCP). Document the choice
  *      in README under ## Tool permissions.
  *
  *   3. Add `server` and `tool` fields to the ApprovalModal `ToolBody`

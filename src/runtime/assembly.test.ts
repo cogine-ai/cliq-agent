@@ -58,7 +58,7 @@ Prefer exact edits over shell mutation when possible.`,
     const assembly = await createRuntimeAssembly({
       cwd,
       session: createSession(cwd),
-      policyMode: 'read-only',
+      policyMode: 'plan',
       cliSkillNames: ['safe-edit']
     });
 
@@ -77,6 +77,48 @@ Prefer exact edits over shell mutation when possible.`,
       new RegExp(`Skill directory: ${path.join(cwd, '.cliq', 'skills', 'safe-edit').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
     );
     assert.equal(messages.some((message) => message.source === 'echo'), true);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('createRuntimeAssembly injects Plan Mode guidance and updates it when policy changes', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-assembly-plan-mode-'));
+  try {
+    await mkdir(path.join(cwd, '.cliq'), { recursive: true });
+    await writeFile(
+      path.join(cwd, '.cliq', 'config.json'),
+      JSON.stringify({ extensions: ['builtin:policy-instructions'] }),
+      'utf8'
+    );
+    const assembly = await createRuntimeAssembly({
+      cwd,
+      session: createSession(cwd),
+      policyMode: 'plan',
+      cliSkillNames: []
+    });
+
+    const planMessages = await assembly.instructions(assembly.session);
+    const planInstruction = planMessages.find((message) => message.source === 'mode:plan');
+    assert.equal(planMessages.some((message) => message.source === 'policy-instructions'), true);
+    assert.equal(planInstruction?.layer, 'core');
+    assert.match(planInstruction?.content ?? '', /Plan Mode/);
+    assert.match(planInstruction?.content ?? '', /must not modify source files/i);
+    assert.match(planInstruction?.content ?? '', /must not run bash\/exec/i);
+    assert.match(planInstruction?.content ?? '', /switching out of Plan Mode/i);
+
+    assembly.setPolicyMode('default');
+    const defaultMessages = await assembly.instructions(assembly.session);
+    assert.equal(defaultMessages.some((message) => message.source === 'mode:plan'), false);
+    assert.equal(defaultMessages.some((message) => message.source === 'policy-instructions'), false);
+
+    assembly.setPolicyMode('plan');
+    const reinjectedMessages = await assembly.instructions(assembly.session);
+    const reinjectedPlanInstruction = reinjectedMessages.find((message) => message.source === 'mode:plan');
+    assert.equal(reinjectedMessages.some((message) => message.source === 'policy-instructions'), true);
+    assert.equal(reinjectedPlanInstruction?.layer, 'core');
+    assert.match(reinjectedPlanInstruction?.content ?? '', /Plan Mode/);
+    assert.match(reinjectedPlanInstruction?.content ?? '', /must not modify source files/i);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -101,7 +143,7 @@ Original review prompt.`,
     const assembly = await createRuntimeAssembly({
       cwd,
       session: createSession(cwd),
-      policyMode: 'read-only',
+      policyMode: 'plan',
       cliSkillNames: ['reviewer']
     });
 
@@ -183,7 +225,7 @@ User skill prompt.`,
       const assembly = await createRuntimeAssembly({
         cwd,
         session: createSession(cwd),
-        policyMode: 'read-only',
+        policyMode: 'plan',
         cliSkillNames: []
       });
 
@@ -249,7 +291,7 @@ test('createRuntimeAssembly exposes workspace command hooks separately from exte
     const assembly = await createRuntimeAssembly({
       cwd,
       session: createSession(cwd),
-      policyMode: 'auto',
+      policyMode: 'yolo',
       cliSkillNames: []
     });
 
@@ -291,7 +333,7 @@ test('createRuntimeAssembly surfaces extension instruction source failures clear
     const assembly = await createRuntimeAssembly({
       cwd,
       session: createSession(cwd),
-      policyMode: 'auto',
+      policyMode: 'yolo',
       cliSkillNames: []
     });
 
@@ -328,7 +370,7 @@ test('createRuntimeAssembly rejects extension instruction sources that return no
     const assembly = await createRuntimeAssembly({
       cwd,
       session: createSession(cwd),
-      policyMode: 'auto',
+      policyMode: 'yolo',
       cliSkillNames: []
     });
 
@@ -365,7 +407,7 @@ test('createRuntimeAssembly rejects extension instruction sources that return in
     const assembly = await createRuntimeAssembly({
       cwd,
       session: createSession(cwd),
-      policyMode: 'auto',
+      policyMode: 'yolo',
       cliSkillNames: []
     });
 
