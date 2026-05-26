@@ -21,8 +21,30 @@ test('readJsonResponse parses success bodies and surfaces provider errors', asyn
   );
 });
 
+function abortAwareFetch(_url: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) {
+      return;
+    }
+
+    if (signal.aborted) {
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+      return;
+    }
+
+    signal.addEventListener(
+      'abort',
+      () => {
+        reject(new DOMException('The operation was aborted.', 'AbortError'));
+      },
+      { once: true }
+    );
+  });
+}
+
 test('fetchWithTimeout rejects with timeout message when the timer fires first', async () => {
-  const fetchMock = mock.method(globalThis, 'fetch', () => new Promise<Response>(() => {}));
+  const fetchMock = mock.method(globalThis, 'fetch', abortAwareFetch);
 
   try {
     await assert.rejects(fetchWithTimeout('https://example.test/slow', {}, 25), /Model request timed out after 25ms/);
@@ -33,17 +55,7 @@ test('fetchWithTimeout rejects with timeout message when the timer fires first',
 
 test('fetchWithTimeout rejects with cancellation message when aborted externally', async () => {
   const controller = new AbortController();
-  const fetchMock = mock.method(globalThis, 'fetch', (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    return new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener(
-        'abort',
-        () => {
-          reject(new DOMException('The operation was aborted.', 'AbortError'));
-        },
-        { once: true }
-      );
-    });
-  });
+  const fetchMock = mock.method(globalThis, 'fetch', abortAwareFetch);
 
   try {
     controller.abort();
