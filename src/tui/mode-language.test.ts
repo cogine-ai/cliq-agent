@@ -1,6 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { POLICY_MODES } from '../policy/modes.js';
 import type { PolicyMode } from '../policy/types.js';
 import {
   describePolicyMode,
@@ -31,6 +32,13 @@ test('status label marks yolo mode distinctly', () => {
   assert.match(formatModeForStatus('yolo'), /^! YOLO$/);
   assert.equal(describePolicyMode('yolo').risk, 'danger');
   assert.equal(describePolicyMode('plan').risk, 'safe');
+});
+
+test('mode language order matches canonical POLICY_MODES', () => {
+  assert.deepEqual(
+    listPolicyModeDescriptions().map((row) => row.mode),
+    [...POLICY_MODES]
+  );
 });
 
 test('help formatter uses the same labels as the mode descriptions', () => {
