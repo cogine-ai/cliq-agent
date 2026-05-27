@@ -10,6 +10,7 @@ import { createPolicyEngine } from '../policy/engine.js';
 import { createSession } from '../session/store.js';
 import { createToolRegistry } from '../tools/registry.js';
 import type { EditModelAction, ToolDefinition } from '../tools/types.js';
+import type { RuntimeEvent } from '../protocol/runtime/events.js';
 import { createRunner } from './runner.js';
 import type { TxRunnerOptions } from './tx-runner.js';
 
@@ -643,7 +644,7 @@ test('runner records a denied bash action when mode is plan', async () => {
 
 test('runner allows plan artifacts in plan mode and stops for TUI review after finalize', async () => {
   const session = await createTempSession();
-  const events: Array<{ type: string; plan?: { id: string; title: string; contentMarkdown: string } }> = [];
+  const events: RuntimeEvent[] = [];
   let calls = 0;
 
   const runner = createRunner({
@@ -658,11 +659,7 @@ test('runner allows plan artifacts in plan mode and stops for TUI review after f
     },
     policy: createPolicyEngine({ mode: 'plan' }),
     onEvent(event) {
-      if (event.type === 'plan-finalized') {
-        events.push({ type: event.type, plan: event.plan });
-      } else {
-        events.push({ type: event.type });
-      }
+      events.push(event);
     }
   });
 
@@ -672,7 +669,10 @@ test('runner allows plan artifacts in plan mode and stops for TUI review after f
   assert.equal(calls, 2);
   assert.equal(session.records.filter((record) => record.kind === 'tool' && record.tool === 'plan').length, 2);
   assert.equal(session.activePlanId?.startsWith('plan_'), true);
-  assert.equal(events.some((event) => event.type === 'plan-finalized'), true);
+  const finalizedEvent = events.find((event): event is Extract<RuntimeEvent, { type: 'plan-finalized' }> => event.type === 'plan-finalized');
+  assert.ok(finalizedEvent);
+  assert.deepEqual(finalizedEvent.plan.items, [{ id: 'item_1', title: 'One', status: 'pending' }]);
+  assert.match(finalizedEvent.plan.markdownPath, /plan\.md$/);
   const finalized = await readPlanArtifact(session.cwd, session, session.activePlanId!);
   assert.equal(finalized.status, 'finalized');
   assert.equal(finalized.contentMarkdown, '## Steps\n- One');

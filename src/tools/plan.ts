@@ -1,4 +1,4 @@
-import type { PlanAction } from '../protocol/model/actions.js';
+import { parsePlanItemAction, type PlanAction } from '../protocol/model/actions.js';
 import { createDraftPlan, finalizePlan, updatePlan } from '../plans/store.js';
 import type { PlanArtifact } from '../plans/types.js';
 import type { ToolDefinition, ToolResult } from './types.js';
@@ -96,20 +96,7 @@ function invalidPlanResult(op: unknown): ToolResult {
 function isPlanItemActionArray(value: unknown): boolean {
   if (value === undefined) return true;
   if (!Array.isArray(value)) return false;
-  return value.every((raw) => {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
-    const item = raw as { id?: unknown; title?: unknown; status?: unknown; notes?: unknown };
-    return (
-      (item.id === undefined || typeof item.id === 'string') &&
-      typeof item.title === 'string' &&
-      !!item.title.trim() &&
-      (item.status === undefined ||
-        item.status === 'pending' ||
-        item.status === 'in_progress' ||
-        item.status === 'completed') &&
-      (item.notes === undefined || typeof item.notes === 'string')
-    );
-  });
+  return value.every((raw) => parsePlanItemAction(raw) !== null);
 }
 
 function planResult(op: PlanAction['op'], artifact: PlanArtifact): ToolResult {
@@ -122,6 +109,7 @@ function planResult(op: PlanAction['op'], artifact: PlanArtifact): ToolResult {
       planStatus: artifact.status,
       title: artifact.title,
       path: artifact.paths.json,
+      planFile: artifact.paths.markdown,
       markdownPath: artifact.paths.markdown,
       itemCount: artifact.items.length
     },

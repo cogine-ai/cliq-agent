@@ -187,7 +187,7 @@ export async function readPlanArtifact(
   if (raw.paths.markdown !== undefined && raw.paths.markdown !== markdownTarget) {
     throw new Error(`plan artifact markdown path mismatch: ${target}`);
   }
-  const markdown = await readPlanMarkdown(markdownTarget);
+  const markdown = raw.status === 'draft' ? await readPlanMarkdown(markdownTarget) : null;
   const contentMarkdown = (markdown ?? raw.contentMarkdown).trim();
   const markdownWasEdited = markdown !== null && markdown.trim() !== raw.contentMarkdown.trim();
   return {

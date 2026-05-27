@@ -89,6 +89,32 @@ test('plan artifacts accept explicit items and editable markdown updates content
   ]);
 });
 
+test('finalized and approved plan artifacts freeze reviewed content despite later markdown edits', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Freeze reviewed plan',
+    contentMarkdown: '## Steps\n- Reviewed'
+  });
+
+  const finalized = await finalizePlan(cwd, session, { planId: draft.id });
+  await writeFile(finalized.paths.markdown, '## Tampered\n- Changed before approval', 'utf8');
+
+  const rereadFinalized = await readPlanArtifact(cwd, session, draft.id);
+  assert.equal(rereadFinalized.status, 'finalized');
+  assert.equal(rereadFinalized.contentMarkdown, '## Steps\n- Reviewed');
+  assert.deepEqual(rereadFinalized.items, [{ id: 'item_1', title: 'Reviewed', status: 'pending' }]);
+
+  const approved = await approvePlan(cwd, session, { planId: draft.id, targetMode: 'accept-edits' });
+  assert.equal(approved.contentMarkdown, '## Steps\n- Reviewed');
+  assert.deepEqual(approved.items, [{ id: 'item_1', title: 'Reviewed', status: 'pending' }]);
+
+  await writeFile(approved.paths.markdown, '## Tampered\n- Changed after approval', 'utf8');
+  const rereadApproved = await readPlanArtifact(cwd, session, draft.id);
+  assert.equal(rereadApproved.status, 'approved');
+  assert.equal(rereadApproved.contentMarkdown, '## Steps\n- Reviewed');
+  assert.deepEqual(rereadApproved.items, [{ id: 'item_1', title: 'Reviewed', status: 'pending' }]);
+});
+
 test('update resets finalized plans to draft and finalize marks them ready for review', async () => {
   const { cwd, session } = await tempScope();
   const draft = await createDraftPlan(cwd, session, {

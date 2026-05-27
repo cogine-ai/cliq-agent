@@ -250,30 +250,36 @@ export function parseModelAction(content: string): ModelAction {
   throw new Error(`Model returned unsupported action:\n${content}`);
 }
 
+export function parsePlanItemAction(value: unknown): PlanItemAction | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  if (typeof item.title !== 'string' || !item.title.trim()) return null;
+  if (item.id !== undefined && typeof item.id !== 'string') return null;
+  if (
+    item.status !== undefined &&
+    item.status !== 'pending' &&
+    item.status !== 'in_progress' &&
+    item.status !== 'completed'
+  ) {
+    return null;
+  }
+  if (item.notes !== undefined && typeof item.notes !== 'string') return null;
+  return {
+    ...(item.id !== undefined ? { id: item.id } : {}),
+    title: item.title,
+    ...(item.status !== undefined ? { status: item.status } : {}),
+    ...(item.notes !== undefined ? { notes: item.notes } : {})
+  };
+}
+
 function parsePlanItems(value: unknown): PlanItemAction[] | undefined | null {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) return null;
   const items: PlanItemAction[] = [];
   for (const raw of value) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-    const item = raw as Record<string, unknown>;
-    if (typeof item.title !== 'string' || !item.title.trim()) return null;
-    if (item.id !== undefined && typeof item.id !== 'string') return null;
-    if (
-      item.status !== undefined &&
-      item.status !== 'pending' &&
-      item.status !== 'in_progress' &&
-      item.status !== 'completed'
-    ) {
-      return null;
-    }
-    if (item.notes !== undefined && typeof item.notes !== 'string') return null;
-    items.push({
-      ...(item.id !== undefined ? { id: item.id } : {}),
-      title: item.title,
-      ...(item.status !== undefined ? { status: item.status } : {}),
-      ...(item.notes !== undefined ? { notes: item.notes } : {})
-    });
+    const item = parsePlanItemAction(raw);
+    if (item === null) return null;
+    items.push(item);
   }
   return items;
 }
