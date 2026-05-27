@@ -327,6 +327,26 @@ test('decision table: builtin deny blocks plain `rm` even when user adds a broad
   }
 });
 
+test('decision table: plan channel keys include op and plan id', async () => {
+  const policy = createPolicyEngine({
+    mode: 'yolo',
+    table: composePermissionTable({ deny: [wsRule('plan', 'finalize *')] })
+  });
+
+  const finalizeDecision = await policy.decide(
+    toolSubject('plan', 'plan', { plan: { op: 'finalize', planId: 'plan_1' } })
+  );
+  assert.equal(finalizeDecision.behavior, 'deny');
+  if (finalizeDecision.behavior === 'deny') {
+    assert.match(finalizeDecision.reason, /deny by workspace rule "plan: finalize \*"/);
+  }
+
+  const updateDecision = await policy.decide(
+    toolSubject('plan', 'plan', { plan: { op: 'update', planId: 'plan_1', content: '## Revised' } })
+  );
+  assert.equal(updateDecision.behavior, 'allow');
+});
+
 test('decision table: ask wins over preset yolo', async () => {
   const policy = createPolicyEngine({
     mode: 'yolo',

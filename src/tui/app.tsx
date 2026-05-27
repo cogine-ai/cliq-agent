@@ -1,5 +1,5 @@
 import { Box, useApp } from 'ink';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 
 import type { PolicyMode } from '../policy/types.js';
 import { ApprovalModal } from './components/approval-modal.js';
@@ -50,6 +50,7 @@ export function App({
 }: AppProps) {
   const state = useUiStore(store);
   const [input, setInput] = useState('');
+  const planDecisionInFlightRef = useRef(false);
   const { exit } = useApp();
 
   // Project the transcript down to the list of submitted user inputs in
@@ -277,8 +278,10 @@ export function App({
   }
 
   async function handlePlanDecision(decision: UiPlanDecision) {
+    if (planDecisionInFlightRef.current) return;
     const review = store.getState().pendingPlanReview;
     if (!review) return;
+    planDecisionInFlightRef.current = true;
     try {
       if (!onPlanDecision) {
         throw new Error('No plan review handler is available in this TUI session.');
@@ -296,6 +299,8 @@ export function App({
       }
     } catch (error) {
       pushSystem(`plan review failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      planDecisionInFlightRef.current = false;
     }
   }
 

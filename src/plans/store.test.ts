@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -133,4 +133,28 @@ test('readPlanArtifact rejects non-active arbitrary ids through update/finalize 
 
   const loaded = await readPlanArtifact(cwd, session, draft.id);
   assert.equal(loaded.id, draft.id);
+});
+
+test('readPlanArtifact rejects tampered identity and path fields', async () => {
+  const idScope = await tempScope();
+  const idDraft = await createDraftPlan(idScope.cwd, idScope.session, {
+    title: 'Tampered identity',
+    contentMarkdown: '## Plan'
+  });
+  const idRaw = JSON.parse(await readFile(idDraft.paths.json, 'utf8')) as Record<string, unknown>;
+  await writeFile(idDraft.paths.json, JSON.stringify({ ...idRaw, id: 'plan_other' }, null, 2), 'utf8');
+  await assert.rejects(() => readPlanArtifact(idScope.cwd, idScope.session, idDraft.id), /mismatched plan artifact/);
+
+  const pathScope = await tempScope();
+  const pathDraft = await createDraftPlan(pathScope.cwd, pathScope.session, {
+    title: 'Tampered path',
+    contentMarkdown: '## Plan'
+  });
+  const pathRaw = JSON.parse(await readFile(pathDraft.paths.json, 'utf8')) as Record<string, unknown>;
+  await writeFile(
+    pathDraft.paths.json,
+    JSON.stringify({ ...pathRaw, paths: { json: path.join(pathScope.home, 'plans', 'evil.json') } }, null, 2),
+    'utf8'
+  );
+  await assert.rejects(() => readPlanArtifact(pathScope.cwd, pathScope.session, pathDraft.id), /path mismatch/);
 });

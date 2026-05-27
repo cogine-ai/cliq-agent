@@ -1350,7 +1350,7 @@ Options:
   --deny  "<rule>"         Same as --allow but adds a deny rule (deny always wins).
   --ask   "<rule>"         Same as --allow but forces the preset to ask for the matching action.
                            Rule grammar: "<channel>: <pattern>" where
-                           <channel> is fs-read | fs-write | bash | mcp | network
+                           <channel> is fs-read | fs-write | bash | mcp | network | plan
                            and <pattern> is a literal, "*" wildcard, or "prefix *"
                            (e.g. "bash: npm *", "fs-write: .env", "fs-read: docs/*").
                            See README "## Tool permissions" for the full layer order.

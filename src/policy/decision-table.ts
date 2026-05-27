@@ -201,7 +201,7 @@ export function accessChannelPrimaryKey(channel: AccessChannel): string {
     case 'network':
       return channel.host ?? '';
     case 'plan':
-      return channel.planId ?? channel.op;
+      return channel.planId ? `${channel.op} ${channel.planId}` : channel.op;
   }
 }
 

@@ -7,25 +7,33 @@ export const planTool: ToolDefinition<{ plan: PlanAction }> = {
   name: 'plan',
   access: 'plan',
   supports(action): action is { plan: PlanAction } {
-    return typeof (action as { plan?: unknown }).plan === 'object' && !!(action as { plan?: unknown }).plan;
+    return isPlanAction((action as { plan?: unknown }).plan);
   },
   async execute(action, context): Promise<ToolResult> {
     try {
-      const artifact =
-        action.plan.op === 'draft'
-          ? await createDraftPlan(context.cwd, context.session, {
-              title: action.plan.title,
-              contentMarkdown: action.plan.content
-            })
-          : action.plan.op === 'update'
-            ? await updatePlan(context.cwd, context.session, {
-                ...(action.plan.planId !== undefined ? { planId: action.plan.planId } : {}),
-                ...(action.plan.title !== undefined ? { title: action.plan.title } : {}),
-                contentMarkdown: action.plan.content
-              })
-            : await finalizePlan(context.cwd, context.session, {
-                ...(action.plan.planId !== undefined ? { planId: action.plan.planId } : {})
-              });
+      let artifact: PlanArtifact;
+      switch (action.plan.op) {
+        case 'draft':
+          artifact = await createDraftPlan(context.cwd, context.session, {
+            title: action.plan.title,
+            contentMarkdown: action.plan.content
+          });
+          break;
+        case 'update':
+          artifact = await updatePlan(context.cwd, context.session, {
+            ...(action.plan.planId !== undefined ? { planId: action.plan.planId } : {}),
+            ...(action.plan.title !== undefined ? { title: action.plan.title } : {}),
+            contentMarkdown: action.plan.content
+          });
+          break;
+        case 'finalize':
+          artifact = await finalizePlan(context.cwd, context.session, {
+            ...(action.plan.planId !== undefined ? { planId: action.plan.planId } : {})
+          });
+          break;
+        default:
+          return invalidPlanResult((action.plan as { op?: unknown }).op);
+      }
 
       return planResult(action.plan.op, artifact);
     } catch (error) {
@@ -34,15 +42,47 @@ export const planTool: ToolDefinition<{ plan: PlanAction }> = {
         tool: 'plan',
         status: 'error',
         meta: {
-          op: action.plan.op,
+          op: String((action.plan as { op?: unknown }).op ?? ''),
           ...('planId' in action.plan && action.plan.planId ? { planId: action.plan.planId } : {}),
           error: message
         },
-        content: `TOOL_RESULT plan ERROR\nop=${action.plan.op}\n${message}`
+        content: `TOOL_RESULT plan ERROR\nop=${String((action.plan as { op?: unknown }).op ?? '')}\n${message}`
       };
     }
   }
 };
+
+function isPlanAction(value: unknown): value is PlanAction {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const plan = value as Partial<PlanAction> & { op?: unknown; planId?: unknown; title?: unknown; content?: unknown };
+  if (plan.op === 'draft') {
+    return typeof plan.title === 'string' && typeof plan.content === 'string';
+  }
+  if (plan.op === 'update') {
+    return (
+      (plan.planId === undefined || typeof plan.planId === 'string') &&
+      (plan.title === undefined || typeof plan.title === 'string') &&
+      typeof plan.content === 'string'
+    );
+  }
+  if (plan.op === 'finalize') {
+    return plan.planId === undefined || typeof plan.planId === 'string';
+  }
+  return false;
+}
+
+function invalidPlanResult(op: unknown): ToolResult {
+  const message = `unsupported plan op: ${String(op)}`;
+  return {
+    tool: 'plan',
+    status: 'error',
+    meta: {
+      op: String(op ?? ''),
+      error: message
+    },
+    content: `TOOL_RESULT plan ERROR\nop=${String(op ?? '')}\n${message}`
+  };
+}
 
 function planResult(op: PlanAction['op'], artifact: PlanArtifact): ToolResult {
   return {

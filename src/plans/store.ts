@@ -142,11 +142,18 @@ export async function readPlanArtifact(
   cliqHome = resolveCliqHome()
 ): Promise<PlanArtifact> {
   const target = await planArtifactPath(cwd, session, planId, cliqHome);
+  const ref = await resolvePlanStorageRef(cwd, session, cliqHome);
   const raw = await readJson(target);
   if (!isPlanArtifact(raw)) {
     throw new Error(`invalid plan artifact: ${target}`);
   }
-  return raw;
+  if (raw.id !== planId || raw.sessionId !== session.id || raw.workspaceId !== ref.workspaceId) {
+    throw new Error(`mismatched plan artifact: ${target}`);
+  }
+  if (raw.paths.json !== target) {
+    throw new Error(`plan artifact path mismatch: ${target}`);
+  }
+  return { ...raw, paths: { json: target } };
 }
 
 export async function readReferencedPlanArtifact(

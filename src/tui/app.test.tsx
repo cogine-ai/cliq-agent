@@ -451,6 +451,52 @@ test('plan review approval switches mode and auto-runs the approved plan', async
   assert.match(lastFrame() ?? '', /approved/);
 });
 
+test('plan review ignores duplicate decisions while one is in flight', async () => {
+  const store = makeStore();
+  store.dispatch({
+    type: 'runtime-event',
+    event: {
+      type: 'plan-finalized',
+      plan: {
+        id: 'plan_1',
+        title: 'Ship plan workflow',
+        contentMarkdown: '## Steps\n- Execute',
+        path: '/tmp/plan.json'
+      }
+    }
+  });
+  const decisions: string[] = [];
+  const submitted: string[] = [];
+  let resolveDecision: ((value: { mode: 'accept-edits'; message: string }) => void) | undefined;
+  const { stdin } = render(
+    <App
+      store={store}
+      onSubmit={(text) => {
+        submitted.push(text);
+      }}
+      onPlanDecision={(_review, decision) => {
+        decisions.push(decision.type === 'approve' ? decision.targetMode : decision.type);
+        return new Promise((resolve) => {
+          resolveDecision = resolve;
+        });
+      }}
+    />
+  );
+  await flush();
+
+  stdin.write('a');
+  await flush();
+  stdin.write('a');
+  await flush();
+
+  assert.deepEqual(decisions, ['accept-edits']);
+  resolveDecision?.({ mode: 'accept-edits', message: 'approved' });
+  await flush();
+  await flush();
+
+  assert.deepEqual(submitted, ['Execute the approved plan.']);
+});
+
 test('plan review rejection keeps plan mode and auto-runs revision prompt', async () => {
   const store = makeStore();
   store.dispatch({ type: 'policy-change', mode: 'plan' });

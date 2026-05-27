@@ -924,4 +924,8 @@ test('Session plan refs round-trip through saveSession/load', async () => {
   };
   assert.equal(onDisk.activePlanId, 'plan_active');
   assert.equal(onDisk.approvedPlanId, 'plan_approved');
+
+  const loaded = await ensureSession(cwd);
+  assert.equal(loaded.activePlanId, 'plan_active');
+  assert.equal(loaded.approvedPlanId, 'plan_approved');
 });
