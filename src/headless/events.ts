@@ -159,6 +159,18 @@ export function runtimeEventToHeadless(event: RuntimeEvent): RuntimeEventMapping
     };
   }
 
+  if (event.type === 'plan-finalized') {
+    return {
+      type: 'plan-finalized',
+      payload: {
+        planId: event.plan.id,
+        title: event.plan.title,
+        path: event.plan.path
+      },
+      artifacts: artifactsWith({ plans: [event.plan.id] })
+    };
+  }
+
   if (event.type === 'compact-start') {
     return {
       type: 'compact-start',

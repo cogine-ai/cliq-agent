@@ -57,6 +57,14 @@ function deriveChannel(
     return { kind: 'fs-write', path: action.edit.path, op: 'modify' };
   }
 
+  if ('plan' in action) {
+    return {
+      kind: 'plan',
+      op: action.plan.op,
+      ...('planId' in action.plan && action.plan.planId ? { planId: action.plan.planId } : {})
+    };
+  }
+
   const readPath = extractReadPath(action);
   if (readPath !== undefined) {
     return { kind: 'fs-read', path: readPath };
@@ -111,6 +119,13 @@ function buildToolDisplay(
     return {
       title: txEnabled ? 'Allow staged edit?' : 'Allow edit?',
       path: action.edit.path
+    };
+  }
+
+  if ('plan' in action) {
+    return {
+      title: 'Record plan artifact?',
+      detail: formatFallbackDetail(action)
     };
   }
 

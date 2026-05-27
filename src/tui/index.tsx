@@ -2,13 +2,17 @@ import { render } from 'ink';
 
 import type { PolicyMode } from '../policy/types.js';
 import { App } from './app.js';
-import type { UiStore } from './store.js';
+import type { PendingPlanReview, UiPlanDecision, UiStore } from './store.js';
 
 export type MountTuiOpts = {
   store: UiStore;
   onSubmit: (text: string) => void | Promise<void>;
   onReset?: () => void | Promise<void>;
   onPolicyChange?: (mode: PolicyMode) => void | Promise<void>;
+  onPlanDecision?: (
+    review: PendingPlanReview,
+    decision: UiPlanDecision
+  ) => { message?: string; mode?: PolicyMode } | Promise<{ message?: string; mode?: PolicyMode }>;
   onCancelTurn?: () => void;
   onSkillsList?: () => string | Promise<string>;
   onSkillActivate?: (name: string) => string | Promise<string>;
@@ -26,6 +30,7 @@ export function mountTui(opts: MountTuiOpts): MountedTui {
       onSubmit={opts.onSubmit}
       {...(opts.onReset ? { onReset: opts.onReset } : {})}
       {...(opts.onPolicyChange ? { onPolicyChange: opts.onPolicyChange } : {})}
+      {...(opts.onPlanDecision ? { onPlanDecision: opts.onPlanDecision } : {})}
       {...(opts.onCancelTurn ? { onCancelTurn: opts.onCancelTurn } : {})}
       {...(opts.onSkillsList ? { onSkillsList: opts.onSkillsList } : {})}
       {...(opts.onSkillActivate ? { onSkillActivate: opts.onSkillActivate } : {})}

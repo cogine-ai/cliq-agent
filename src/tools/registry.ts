@@ -4,13 +4,24 @@ import { editTool } from './edit.js';
 import { findTool } from './find.js';
 import { grepTool } from './grep.js';
 import { lsTool } from './ls.js';
+import { planTool } from './plan.js';
 import { readTool } from './read.js';
 import { skillTool } from './skill.js';
 import { skillResourceTool } from './skill-resource.js';
 import type { ToolDefinition } from './types.js';
 
 export function createToolRegistry(
-  definitions: ToolDefinition[] = [bashTool, editTool, readTool, lsTool, findTool, grepTool, skillTool, skillResourceTool]
+  definitions: ToolDefinition[] = [
+    bashTool,
+    editTool,
+    readTool,
+    lsTool,
+    findTool,
+    grepTool,
+    skillTool,
+    skillResourceTool,
+    planTool
+  ]
 ) {
   return {
     definitions,

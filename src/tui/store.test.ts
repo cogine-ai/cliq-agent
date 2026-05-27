@@ -21,6 +21,7 @@ test('createInitialState seeds an empty state with counter at 1', () => {
   assert.equal(s.transcript.length, 0);
   assert.equal(s.activeTurn, null);
   assert.equal(s.pendingApproval, null);
+  assert.equal(s.pendingPlanReview, null);
   assert.equal(s.policy, 'default');
   assert.equal(s.errors.length, 0);
   assert.equal(s.versionUpdate, null);
@@ -170,6 +171,7 @@ test('session-reset clears transcript/turn/approval/errors/tokens but preserves 
   assert.equal(after.transcript.length, 0);
   assert.equal(after.activeTurn, null);
   assert.equal(after.pendingApproval, null);
+  assert.equal(after.pendingPlanReview, null);
   assert.equal(after.errors.length, 0);
   // Token bar must hide after /reset so the new session is not labeled with
   // the previous session's running estimate.
@@ -178,6 +180,35 @@ test('session-reset clears transcript/turn/approval/errors/tokens but preserves 
   assert.equal(after.policy, 'default');
   assert.equal(after.session.id, 'ses_test');
   assert.equal(after.model.model, 'qwen3:4b');
+});
+
+test('runtime-event plan-finalized opens a pending plan review and records a system notice', () => {
+  const s = reduce(baseInit(), {
+    type: 'runtime-event',
+    event: {
+      type: 'plan-finalized',
+      plan: {
+        id: 'plan_1',
+        title: 'Ship Plan Mode',
+        contentMarkdown: '## Steps\n- Review',
+        path: '/tmp/plan.json'
+      }
+    }
+  });
+
+  assert.deepEqual(s.pendingPlanReview, {
+    id: 'pr1',
+    planId: 'plan_1',
+    title: 'Ship Plan Mode',
+    contentMarkdown: '## Steps\n- Review',
+    path: '/tmp/plan.json'
+  });
+  const last = s.transcript.at(-1);
+  assert.equal(last?.kind, 'system');
+  assert.match(last?.kind === 'system' ? last.text : '', /ready for review/);
+
+  const cleared = reduce(s, { type: 'plan-review-resolve', id: 'pr1' });
+  assert.equal(cleared.pendingPlanReview, null);
 });
 
 test('version-update stores and clears package update notice', () => {

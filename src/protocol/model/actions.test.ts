@@ -50,6 +50,24 @@ test('parses skill resource read and list actions', () => {
   });
 });
 
+test('parses plan draft, update, and finalize actions', () => {
+  assert.deepEqual(parseModelAction('{"plan":{"op":"draft","title":"T","content":"## Plan"}}'), {
+    plan: { op: 'draft', title: 'T', content: '## Plan' }
+  });
+  assert.deepEqual(parseModelAction('{"plan":{"op":"update","planId":"plan_1","content":"## Revised"}}'), {
+    plan: { op: 'update', planId: 'plan_1', content: '## Revised' }
+  });
+  assert.deepEqual(parseModelAction('{"plan":{"op":"finalize","planId":"plan_1"}}'), {
+    plan: { op: 'finalize', planId: 'plan_1' }
+  });
+});
+
+test('rejects invalid plan payloads', () => {
+  assert.throws(() => parseModelAction('{"plan":{"op":"draft","title":"T"}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"plan":{"op":"update","content":123}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"plan":{"op":"approve","planId":"plan_1"}}'), /unsupported action/i);
+});
+
 test('rejects invalid skill activation payloads', () => {
   assert.throws(() => parseModelAction('{"skill":{"name":123}}'), /unsupported action/i);
 });

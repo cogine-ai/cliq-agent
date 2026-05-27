@@ -15,6 +15,7 @@ test('toolNameFromAction maps each ModelAction variant to its registry name', ()
   assert.equal(toolNameFromAction({ ls: { path: '.' } }), 'ls');
   assert.equal(toolNameFromAction({ find: { name: '*.ts' } }), 'find');
   assert.equal(toolNameFromAction({ grep: { pattern: 'foo' } }), 'grep');
+  assert.equal(toolNameFromAction({ plan: { op: 'draft', title: 'T', content: '## Plan' } }), 'plan');
 });
 
 test('previewFromAction shows the most useful field per action kind', () => {
@@ -34,6 +35,7 @@ test('previewFromAction shows the most useful field per action kind', () => {
   assert.equal(previewFromAction({ find: { name: '*.ts', path: 'src' } }), '*.ts in src');
   assert.equal(previewFromAction({ grep: { pattern: 'foo' } }), 'foo');
   assert.equal(previewFromAction({ grep: { pattern: 'foo', path: 'src' } }), 'foo in src');
+  assert.equal(previewFromAction({ plan: { op: 'finalize', planId: 'plan_1' } }), 'finalize plan_1');
 });
 
 test('formatToolResultSummary prefers path; falls back to policy/error', () => {
@@ -65,6 +67,16 @@ test('formatToolResultSummary prefers path; falls back to policy/error', () => {
       meta: { policy: 'accept-edits', reason: 'user declined' }
     }),
     'policy=accept-edits user declined'
+  );
+
+  assert.equal(
+    formatToolResultSummary({
+      tool: 'plan',
+      status: 'ok',
+      content: '...',
+      meta: { planStatus: 'finalized', title: 'Ship plan' }
+    }),
+    'finalized: Ship plan'
   );
 
   assert.equal(

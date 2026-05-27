@@ -72,6 +72,7 @@ export type HeadlessArtifacts = {
   compactions: string[];
   handoffs: string[];
   transactions: string[];
+  plans: string[];
 };
 
 export function emptyHeadlessArtifacts(): HeadlessArtifacts {
@@ -80,7 +81,8 @@ export function emptyHeadlessArtifacts(): HeadlessArtifacts {
     workspaceCheckpoints: [],
     compactions: [],
     handoffs: [],
-    transactions: []
+    transactions: [],
+    plans: []
   };
 }
 
@@ -104,6 +106,7 @@ export type HeadlessRuntimeEventType =
   | 'model-end'
   | 'tool-start'
   | 'tool-end'
+  | 'plan-finalized'
   | 'compact-start'
   | 'compact-end'
   | 'compact-skip'
@@ -155,6 +158,12 @@ export type ToolStartPayload = {
 export type ToolEndPayload = {
   tool: string;
   status: 'ok' | 'error';
+};
+
+export type PlanFinalizedPayload = {
+  planId: string;
+  title: string;
+  path: string;
 };
 
 export type CompactStartPayload = {
@@ -241,6 +250,7 @@ export type HeadlessEventPayloadByType = {
   'model-end': ModelEndPayload;
   'tool-start': ToolStartPayload;
   'tool-end': ToolEndPayload;
+  'plan-finalized': PlanFinalizedPayload;
   'compact-start': CompactStartPayload;
   'compact-end': CompactEndPayload;
   'compact-skip': CompactSkipPayload;
@@ -441,6 +451,8 @@ export type SessionView = {
   };
   parentSessionId?: string;
   forkedFromCheckpointId?: string;
+  activePlanId?: string;
+  approvedPlanId?: string;
   records: SessionRecordView[];
   activeSkills: SkillView[];
   checkpoints: CheckpointView[];

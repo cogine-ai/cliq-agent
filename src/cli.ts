@@ -14,6 +14,7 @@ import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
+import { approvePlan, cancelPlan, readReferencedPlanArtifact, rejectPlan } from './plans/store.js';
 import { extendApprovalScope } from './policy/approval-scope.js';
 import { composeRuntimePermissionTable } from './policy/compose-runtime.js';
 import type { PermissionRule, PermissionTable } from './policy/decision-table.js';
@@ -1349,7 +1350,7 @@ Options:
   --deny  "<rule>"         Same as --allow but adds a deny rule (deny always wins).
   --ask   "<rule>"         Same as --allow but forces the preset to ask for the matching action.
                            Rule grammar: "<channel>: <pattern>" where
-                           <channel> is fs-read | fs-write | bash | mcp | network
+                           <channel> is fs-read | fs-write | bash | mcp | network | plan
                            and <pattern> is a literal, "*" wildcard, or "prefix *"
                            (e.g. "bash: npm *", "fs-write: .env", "fs-read: docs/*").
                            See README "## Tool permissions" for the full layer order.
@@ -2759,6 +2760,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       session: { id: session.id, cwd: session.cwd }
     })
   );
+  await hydratePendingPlanReview(store, cwd, session);
   void notifyIfPackageUpdateAvailable(store);
 
   const approvalBridge = createApprovalBridge(store);
@@ -2921,6 +2923,33 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       livePolicy.setMode(mode);
       opts.assembly.setPolicyMode(mode);
     },
+    onPlanDecision: async (review, decision) => {
+      if (decision.type === 'approve') {
+        await approvePlan(cwd, session, {
+          planId: review.planId,
+          targetMode: decision.targetMode
+        });
+        livePolicy.setMode(decision.targetMode);
+        opts.assembly.setPolicyMode(decision.targetMode);
+        return {
+          mode: decision.targetMode,
+          message: `plan approved; running in ${decision.targetMode}`
+        };
+      }
+
+      if (decision.type === 'reject') {
+        await rejectPlan(cwd, session, review.planId);
+        livePolicy.setMode('plan');
+        opts.assembly.setPolicyMode('plan');
+        return {
+          mode: 'plan',
+          message: 'plan rejected; continuing planning'
+        };
+      }
+
+      await cancelPlan(cwd, session, review.planId);
+      return { message: 'plan review canceled' };
+    },
     onSkillsList: () => formatSkillCatalog(opts.assembly.skillCatalog, session.activeSkills ?? []),
     onSkillActivate: async (name: string) => {
       const result = await activateSkill(cwd, session, name, {
@@ -2934,6 +2963,24 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
 
   await tui.waitUntilExit();
   await saveSession(cwd, session);
+}
+
+export async function hydratePendingPlanReview(store: UiStore, cwd: string, session: Session) {
+  if (!session.activePlanId) return;
+  const artifact = await readReferencedPlanArtifact(cwd, session, session.activePlanId);
+  if (!artifact || artifact.status !== 'finalized') return;
+  store.dispatch({
+    type: 'runtime-event',
+    event: {
+      type: 'plan-finalized',
+      plan: {
+        id: artifact.id,
+        title: artifact.title,
+        contentMarkdown: artifact.contentMarkdown,
+        path: artifact.paths.json
+      }
+    }
+  });
 }
 
 export async function notifyIfPackageUpdateAvailable(store: UiStore) {

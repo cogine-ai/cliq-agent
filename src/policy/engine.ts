@@ -94,7 +94,7 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
         decidedBy: 'policy'
       };
     }
-    if (subject.kind === 'tool' && subject.access !== 'read') {
+    if (subject.kind === 'tool' && subject.access !== 'read' && subject.access !== 'plan') {
       return {
         behavior: 'deny',
         reason: `policy mode plan blocks ${subject.access} tools`,

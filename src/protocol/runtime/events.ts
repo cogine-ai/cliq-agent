@@ -1,4 +1,5 @@
 import type { ProviderName } from '../../model/types.js';
+import type { PlanReviewSnapshot } from '../../plans/types.js';
 import type { AutoCompactSkipReason } from '../../session/auto-compaction.js';
 import type { SessionCheckpoint } from '../../session/types.js';
 import type { RuntimeErrorCode } from './errors.js';
@@ -21,6 +22,7 @@ export type RuntimeEvent =
   | { type: 'compact-error'; trigger: 'threshold' | 'overflow'; message: string }
   | { type: 'tool-start'; tool: string; preview?: string }
   | { type: 'tool-end'; tool: string; status: 'ok' | 'error' }
+  | { type: 'plan-finalized'; plan: PlanReviewSnapshot }
   | { type: 'final'; message: string }
   | {
       type: 'error';

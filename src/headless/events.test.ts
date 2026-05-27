@@ -74,7 +74,8 @@ test('runtimeEventToHeadless maps checkpoint-created artifacts', () => {
       workspaceCheckpoints: ['wchk_test'],
       compactions: [],
       handoffs: [],
-      transactions: []
+      transactions: [],
+      plans: []
     }
   });
 });
@@ -95,6 +96,27 @@ test('runtimeEventToHeadless maps tx-staging-start preserving trigger and option
     assert.equal(mapped.payload.trigger, 'auto-turn');
   }
   assert.deepEqual(mapped.artifacts?.transactions, ['tx_a']);
+});
+
+test('runtimeEventToHeadless maps plan-finalized artifacts', () => {
+  const mapped = runtimeEventToHeadless({
+    type: 'plan-finalized',
+    plan: {
+      id: 'plan_a',
+      title: 'Plan A',
+      contentMarkdown: '## Steps',
+      path: '/tmp/plan.json'
+    }
+  });
+  assert.equal(mapped.type, 'plan-finalized');
+  if (mapped.type === 'plan-finalized') {
+    assert.deepEqual(mapped.payload, {
+      planId: 'plan_a',
+      title: 'Plan A',
+      path: '/tmp/plan.json'
+    });
+  }
+  assert.deepEqual(mapped.artifacts?.plans, ['plan_a']);
 });
 
 test('runtimeEventToHeadless maps tx-applied with full payload', () => {
