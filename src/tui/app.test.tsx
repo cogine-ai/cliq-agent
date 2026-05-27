@@ -420,7 +420,9 @@ test('plan review approval switches mode and auto-runs the approved plan', async
         id: 'plan_1',
         title: 'Ship plan workflow',
         contentMarkdown: '## Steps\n- Execute',
-        path: '/tmp/plan.json'
+        items: [{ id: 'item_1', title: 'Execute', status: 'pending' }],
+        path: '/tmp/plan.json',
+        markdownPath: '/tmp/plan.md'
       }
     }
   });
@@ -461,7 +463,9 @@ test('plan review ignores duplicate decisions while one is in flight', async () 
         id: 'plan_1',
         title: 'Ship plan workflow',
         contentMarkdown: '## Steps\n- Execute',
-        path: '/tmp/plan.json'
+        items: [{ id: 'item_1', title: 'Execute', status: 'pending' }],
+        path: '/tmp/plan.json',
+        markdownPath: '/tmp/plan.md'
       }
     }
   });
@@ -508,7 +512,9 @@ test('plan review rejection keeps plan mode and auto-runs revision prompt', asyn
         id: 'plan_1',
         title: 'Rejected workflow',
         contentMarkdown: '## Steps\n- Wrong',
-        path: '/tmp/plan.json'
+        items: [{ id: 'item_1', title: 'Wrong', status: 'pending' }],
+        path: '/tmp/plan.json',
+        markdownPath: '/tmp/plan.md'
       }
     }
   });

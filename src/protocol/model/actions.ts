@@ -34,17 +34,26 @@ export type SkillResourceAction = {
   mode?: 'read' | 'list';
 };
 
+export type PlanItemAction = {
+  id?: string;
+  title: string;
+  status?: 'pending' | 'in_progress' | 'completed';
+  notes?: string;
+};
+
 export type PlanAction =
   | {
       op: 'draft';
       title: string;
       content: string;
+      items?: PlanItemAction[];
     }
   | {
       op: 'update';
       planId?: string;
       title?: string;
       content: string;
+      items?: PlanItemAction[];
     }
   | {
       op: 'finalize';
@@ -194,12 +203,17 @@ export function parseModelAction(content: string): ModelAction {
 
   if (record.plan && typeof record.plan === 'object' && !Array.isArray(record.plan)) {
     const plan = record.plan as Record<string, unknown>;
+    const items = parsePlanItems(plan.items);
+    if (items === null) {
+      throw new Error(`Model returned unsupported action:\n${content}`);
+    }
     if (plan.op === 'draft' && typeof plan.title === 'string' && typeof plan.content === 'string') {
       return {
         plan: {
           op: 'draft',
           title: plan.title,
-          content: plan.content
+          content: plan.content,
+          ...(items !== undefined ? { items } : {})
         }
       };
     }
@@ -214,7 +228,8 @@ export function parseModelAction(content: string): ModelAction {
           op: 'update',
           ...(plan.planId !== undefined ? { planId: plan.planId as string } : {}),
           ...(plan.title !== undefined ? { title: plan.title as string } : {}),
-          content: plan.content
+          content: plan.content,
+          ...(items !== undefined ? { items } : {})
         }
       };
     }
@@ -233,4 +248,38 @@ export function parseModelAction(content: string): ModelAction {
   }
 
   throw new Error(`Model returned unsupported action:\n${content}`);
+}
+
+export function parsePlanItemAction(value: unknown): PlanItemAction | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  if (typeof item.title !== 'string' || !item.title.trim()) return null;
+  if (item.id !== undefined && typeof item.id !== 'string') return null;
+  if (
+    item.status !== undefined &&
+    item.status !== 'pending' &&
+    item.status !== 'in_progress' &&
+    item.status !== 'completed'
+  ) {
+    return null;
+  }
+  if (item.notes !== undefined && typeof item.notes !== 'string') return null;
+  return {
+    ...(item.id !== undefined ? { id: item.id } : {}),
+    title: item.title,
+    ...(item.status !== undefined ? { status: item.status } : {}),
+    ...(item.notes !== undefined ? { notes: item.notes } : {})
+  };
+}
+
+function parsePlanItems(value: unknown): PlanItemAction[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return null;
+  const items: PlanItemAction[] = [];
+  for (const raw of value) {
+    const item = parsePlanItemAction(raw);
+    if (item === null) return null;
+    items.push(item);
+  }
+  return items;
 }

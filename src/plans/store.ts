@@ -6,10 +6,12 @@ import { withPathLock } from '../lib/path-lock.js';
 import type { PolicyMode } from '../policy/types.js';
 import { makeId, mutateSession, nowIso, resolveCliqHome, workspaceIdFromRealPath } from '../session/store.js';
 import type { Session } from '../session/types.js';
-import type { PlanArtifact, PlanStatus, PlanTargetMode } from './types.js';
+import { normalizePlanItems, normalizeStoredPlanItems } from './items.js';
+import type { PlanArtifact, PlanItemInput, PlanStatus, PlanTargetMode } from './types.js';
 
 const SAFE_ID = /^[A-Za-z0-9_-]+$/;
 const PLAN_FILE = 'plan.json';
+const PLAN_MARKDOWN_FILE = 'plan.md';
 
 export type PlanStorageRef = {
   workspaceId: string;
@@ -20,12 +22,14 @@ export type PlanStorageRef = {
 export type DraftPlanInput = {
   title: string;
   contentMarkdown: string;
+  items?: PlanItemInput[];
 };
 
 export type UpdatePlanInput = {
   planId?: string;
   title?: string;
   contentMarkdown: string;
+  items?: PlanItemInput[];
 };
 
 export type FinalizePlanInput = {
@@ -85,11 +89,34 @@ export async function planArtifactPath(
   return path.join(ref.sessionDir, planId, PLAN_FILE);
 }
 
+export async function planMarkdownPath(
+  cwd: string,
+  session: Pick<Session, 'id'>,
+  planId: string,
+  cliqHome = resolveCliqHome()
+) {
+  assertSafeId('plan', planId);
+  const ref = await resolvePlanStorageRef(cwd, session, cliqHome);
+  return path.join(ref.sessionDir, planId, PLAN_MARKDOWN_FILE);
+}
+
 async function atomicWriteJson(target: string, value: unknown) {
   await fs.mkdir(path.dirname(target), { recursive: true });
   const temp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
     await fs.writeFile(temp, JSON.stringify(value, null, 2), 'utf8');
+    await fs.rename(temp, target);
+  } catch (error) {
+    await fs.rm(temp, { force: true });
+    throw error;
+  }
+}
+
+async function atomicWriteText(target: string, value: string) {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const temp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  try {
+    await fs.writeFile(temp, value, 'utf8');
     await fs.rename(temp, target);
   } catch (error) {
     await fs.rm(temp, { force: true });
@@ -104,7 +131,7 @@ function isPlanStatus(value: unknown): value is PlanStatus {
 function isPlanArtifact(value: unknown): value is PlanArtifact {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const raw = value as Partial<PlanArtifact> & { paths?: unknown };
-  const paths = raw.paths as { json?: unknown } | undefined;
+  const paths = raw.paths as { json?: unknown; markdown?: unknown } | undefined;
   return (
     typeof raw.id === 'string' &&
     typeof raw.sessionId === 'string' &&
@@ -112,6 +139,7 @@ function isPlanArtifact(value: unknown): value is PlanArtifact {
     isPlanStatus(raw.status) &&
     typeof raw.title === 'string' &&
     typeof raw.contentMarkdown === 'string' &&
+    (raw.items === undefined || (Array.isArray(raw.items) && raw.items.every((item) => item && typeof item === 'object'))) &&
     typeof raw.createdAt === 'string' &&
     typeof raw.updatedAt === 'string' &&
     (raw.finalizedAt === undefined || typeof raw.finalizedAt === 'string') &&
@@ -121,7 +149,8 @@ function isPlanArtifact(value: unknown): value is PlanArtifact {
     (raw.approvedTargetMode === undefined || isTargetMode(raw.approvedTargetMode as PolicyMode)) &&
     !!paths &&
     typeof paths === 'object' &&
-    typeof paths.json === 'string'
+    typeof paths.json === 'string' &&
+    (paths.markdown === undefined || typeof paths.markdown === 'string')
   );
 }
 
@@ -132,6 +161,7 @@ async function readJson(target: string): Promise<unknown> {
 async function writePlanArtifact(artifact: PlanArtifact) {
   await withPathLock(artifact.paths.json, async () => {
     await atomicWriteJson(artifact.paths.json, artifact);
+    await atomicWriteText(artifact.paths.markdown, artifact.contentMarkdown);
   });
 }
 
@@ -142,6 +172,7 @@ export async function readPlanArtifact(
   cliqHome = resolveCliqHome()
 ): Promise<PlanArtifact> {
   const target = await planArtifactPath(cwd, session, planId, cliqHome);
+  const markdownTarget = await planMarkdownPath(cwd, session, planId, cliqHome);
   const ref = await resolvePlanStorageRef(cwd, session, cliqHome);
   const raw = await readJson(target);
   if (!isPlanArtifact(raw)) {
@@ -153,7 +184,27 @@ export async function readPlanArtifact(
   if (raw.paths.json !== target) {
     throw new Error(`plan artifact path mismatch: ${target}`);
   }
-  return { ...raw, paths: { json: target } };
+  if (raw.paths.markdown !== undefined && raw.paths.markdown !== markdownTarget) {
+    throw new Error(`plan artifact markdown path mismatch: ${target}`);
+  }
+  const markdown = raw.status === 'draft' ? await readPlanMarkdown(markdownTarget) : null;
+  const contentMarkdown = (markdown ?? raw.contentMarkdown).trim();
+  const markdownWasEdited = markdown !== null && markdown.trim() !== raw.contentMarkdown.trim();
+  return {
+    ...raw,
+    contentMarkdown,
+    items: markdownWasEdited ? normalizePlanItems(undefined, contentMarkdown) : normalizeStoredPlanItems(raw.items, contentMarkdown),
+    paths: { json: target, markdown: markdownTarget }
+  };
+}
+
+async function readPlanMarkdown(target: string): Promise<string | null> {
+  try {
+    return await fs.readFile(target, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
 }
 
 export async function readReferencedPlanArtifact(
@@ -184,17 +235,20 @@ export async function createDraftPlan(
   const ref = await resolvePlanStorageRef(cwd, session);
   const id = makeId('plan');
   const now = nowIso();
+  const contentMarkdown = input.contentMarkdown.trim();
   const jsonPath = path.join(ref.sessionDir, id, PLAN_FILE);
+  const markdownPath = path.join(ref.sessionDir, id, PLAN_MARKDOWN_FILE);
   const artifact: PlanArtifact = {
     id,
     sessionId: session.id,
     workspaceId: ref.workspaceId,
     status: 'draft',
     title: input.title.trim(),
-    contentMarkdown: input.contentMarkdown.trim(),
+    contentMarkdown,
+    items: normalizePlanItems(input.items, contentMarkdown),
     createdAt: now,
     updatedAt: now,
-    paths: { json: jsonPath }
+    paths: { json: jsonPath, markdown: markdownPath }
   };
 
   await writePlanArtifact(artifact);
@@ -232,11 +286,13 @@ export async function updatePlan(
   }
 
   const { finalizedAt: _finalizedAt, approvedAt: _approvedAt, rejectedAt: _rejectedAt, canceledAt: _canceledAt, approvedTargetMode: _approvedTargetMode, ...base } = current;
+  const contentMarkdown = input.contentMarkdown.trim();
   const next: PlanArtifact = {
     ...base,
     status: 'draft',
     title: input.title?.trim() ?? current.title,
-    contentMarkdown: input.contentMarkdown.trim(),
+    contentMarkdown,
+    items: normalizePlanItems(input.items, contentMarkdown),
     updatedAt: nowIso()
   };
 
@@ -255,6 +311,7 @@ export async function finalizePlan(
 ): Promise<PlanArtifact> {
   const planId = planIdForActiveSession(session, input.planId);
   const current = await readPlanArtifact(cwd, session, planId);
+  assertNonEmpty(current.contentMarkdown, 'plan content');
   if (current.status !== 'draft' && current.status !== 'finalized') {
     throw new Error(`cannot finalize a ${current.status} plan`);
   }

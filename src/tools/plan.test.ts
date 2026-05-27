@@ -6,10 +6,27 @@ import { planTool } from './plan.js';
 
 test('planTool.supports validates plan action shapes', () => {
   assert.equal(planTool.supports({ plan: { op: 'draft', title: 'T', content: '## Plan' } }), true);
+  assert.equal(
+    planTool.supports({
+      plan: { op: 'draft', title: 'T', content: '## Plan', items: [{ title: 'Inspect', status: 'pending' }] }
+    }),
+    true
+  );
   assert.equal(planTool.supports({ plan: { op: 'update', planId: 'plan_1', content: '## Plan' } }), true);
+  assert.equal(
+    planTool.supports({
+      plan: { op: 'update', planId: 'plan_1', content: '## Plan', items: [{ title: 'Inspect', status: 'pending' }] }
+    }),
+    true
+  );
   assert.equal(planTool.supports({ plan: { op: 'finalize', planId: 'plan_1' } }), true);
 
   assert.equal(planTool.supports({ plan: { op: 'draft', title: 'T' } } as never), false);
+  assert.equal(planTool.supports({ plan: { op: 'draft', title: 'T', content: 'x', items: [{ title: '' }] } } as never), false);
+  assert.equal(
+    planTool.supports({ plan: { op: 'update', planId: 'plan_1', content: 'x', items: [{ title: 'X', status: 'unknown' }] } } as never),
+    false
+  );
   assert.equal(planTool.supports({ plan: { op: 'approve', planId: 'plan_1' } } as never), false);
   assert.equal(planTool.supports({ plan: null } as never), false);
 });

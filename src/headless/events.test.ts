@@ -105,7 +105,9 @@ test('runtimeEventToHeadless maps plan-finalized artifacts', () => {
       id: 'plan_a',
       title: 'Plan A',
       contentMarkdown: '## Steps',
-      path: '/tmp/plan.json'
+      items: [{ id: 'item_1', title: 'Step one', status: 'pending' }],
+      path: '/tmp/plan.json',
+      markdownPath: '/tmp/plan.md'
     }
   });
   assert.equal(mapped.type, 'plan-finalized');
@@ -113,7 +115,9 @@ test('runtimeEventToHeadless maps plan-finalized artifacts', () => {
     assert.deepEqual(mapped.payload, {
       planId: 'plan_a',
       title: 'Plan A',
-      path: '/tmp/plan.json'
+      path: '/tmp/plan.json',
+      markdownPath: '/tmp/plan.md',
+      items: [{ id: 'item_1', title: 'Step one', status: 'pending' }]
     });
   }
   assert.deepEqual(mapped.artifacts?.plans, ['plan_a']);

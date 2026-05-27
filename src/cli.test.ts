@@ -1906,10 +1906,12 @@ test('hydratePendingPlanReview restores finalized active plans for TUI restart',
     assert.equal(actions.length, 1);
     assert.equal(actions[0]?.type, 'runtime-event');
     if (actions[0]?.type === 'runtime-event') {
-      assert.equal(actions[0].event.type, 'plan-finalized');
+        assert.equal(actions[0].event.type, 'plan-finalized');
       if (actions[0].event.type === 'plan-finalized') {
         assert.equal(actions[0].event.plan.id, draft.id);
         assert.equal(actions[0].event.plan.contentMarkdown, '## Steps\n- Resume review');
+        assert.deepEqual(actions[0].event.plan.items, [{ id: 'item_1', title: 'Resume review', status: 'pending' }]);
+        assert.match(actions[0].event.plan.markdownPath, /plan\.md$/);
       }
     }
   } finally {

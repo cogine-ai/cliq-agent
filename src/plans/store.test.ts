@@ -53,10 +53,66 @@ test('plan artifacts live under ~/.cliq/plans/<workspace>/<session> and update s
   assert.equal(session.activePlanId, draft.id);
   assert.equal(session.approvedPlanId, undefined);
   assert.equal(draft.paths.json.startsWith(path.join(home, 'plans', expectedWorkspaceId, session.id)), true);
+  assert.equal(draft.paths.markdown.endsWith(path.join(draft.id, 'plan.md')), true);
+  assert.deepEqual(draft.items, [{ id: 'item_1', title: 'Draft', status: 'pending' }]);
 
-  const raw = JSON.parse(await readFile(draft.paths.json, 'utf8')) as { id: string; contentMarkdown: string };
+  const raw = JSON.parse(await readFile(draft.paths.json, 'utf8')) as { id: string; contentMarkdown: string; items: unknown[] };
   assert.equal(raw.id, draft.id);
   assert.equal(raw.contentMarkdown, '## Steps\n- Draft');
+  assert.deepEqual(raw.items, [{ id: 'item_1', title: 'Draft', status: 'pending' }]);
+  assert.equal(await readFile(draft.paths.markdown, 'utf8'), '## Steps\n- Draft');
+});
+
+test('plan artifacts accept explicit items and editable markdown updates content and items', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Editable plan',
+    contentMarkdown: '## Steps\n- Inspect',
+    items: [
+      { id: 'inspect', title: 'Inspect current code', status: 'completed' },
+      { title: 'Implement follow-up', notes: 'after review' }
+    ]
+  });
+
+  assert.deepEqual(draft.items, [
+    { id: 'inspect', title: 'Inspect current code', status: 'completed' },
+    { id: 'item_2', title: 'Implement follow-up', status: 'pending', notes: 'after review' }
+  ]);
+
+  await writeFile(draft.paths.markdown, '## Edited\n- [~] Update plan review\n- [ ] Run tests\n', 'utf8');
+  const edited = await readPlanArtifact(cwd, session, draft.id);
+
+  assert.equal(edited.contentMarkdown, '## Edited\n- [~] Update plan review\n- [ ] Run tests');
+  assert.deepEqual(edited.items, [
+    { id: 'item_1', title: 'Update plan review', status: 'in_progress' },
+    { id: 'item_2', title: 'Run tests', status: 'pending' }
+  ]);
+});
+
+test('finalized and approved plan artifacts freeze reviewed content despite later markdown edits', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Freeze reviewed plan',
+    contentMarkdown: '## Steps\n- Reviewed'
+  });
+
+  const finalized = await finalizePlan(cwd, session, { planId: draft.id });
+  await writeFile(finalized.paths.markdown, '## Tampered\n- Changed before approval', 'utf8');
+
+  const rereadFinalized = await readPlanArtifact(cwd, session, draft.id);
+  assert.equal(rereadFinalized.status, 'finalized');
+  assert.equal(rereadFinalized.contentMarkdown, '## Steps\n- Reviewed');
+  assert.deepEqual(rereadFinalized.items, [{ id: 'item_1', title: 'Reviewed', status: 'pending' }]);
+
+  const approved = await approvePlan(cwd, session, { planId: draft.id, targetMode: 'accept-edits' });
+  assert.equal(approved.contentMarkdown, '## Steps\n- Reviewed');
+  assert.deepEqual(approved.items, [{ id: 'item_1', title: 'Reviewed', status: 'pending' }]);
+
+  await writeFile(approved.paths.markdown, '## Tampered\n- Changed after approval', 'utf8');
+  const rereadApproved = await readPlanArtifact(cwd, session, draft.id);
+  assert.equal(rereadApproved.status, 'approved');
+  assert.equal(rereadApproved.contentMarkdown, '## Steps\n- Reviewed');
+  assert.deepEqual(rereadApproved.items, [{ id: 'item_1', title: 'Reviewed', status: 'pending' }]);
 });
 
 test('update resets finalized plans to draft and finalize marks them ready for review', async () => {
@@ -157,4 +213,17 @@ test('readPlanArtifact rejects tampered identity and path fields', async () => {
     'utf8'
   );
   await assert.rejects(() => readPlanArtifact(pathScope.cwd, pathScope.session, pathDraft.id), /path mismatch/);
+
+  const markdownScope = await tempScope();
+  const markdownDraft = await createDraftPlan(markdownScope.cwd, markdownScope.session, {
+    title: 'Tampered markdown path',
+    contentMarkdown: '## Plan'
+  });
+  const markdownRaw = JSON.parse(await readFile(markdownDraft.paths.json, 'utf8')) as Record<string, unknown>;
+  await writeFile(
+    markdownDraft.paths.json,
+    JSON.stringify({ ...markdownRaw, paths: { ...markdownDraft.paths, markdown: path.join(markdownScope.home, 'plans', 'evil.md') } }, null, 2),
+    'utf8'
+  );
+  await assert.rejects(() => readPlanArtifact(markdownScope.cwd, markdownScope.session, markdownDraft.id), /markdown path mismatch/);
 });

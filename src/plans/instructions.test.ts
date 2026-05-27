@@ -85,6 +85,9 @@ test('buildApprovedPlanInstructionMessages returns approved plan context', async
     ['system', 'core', 'plan:approved']
   ]);
   assert.match(messages[0]?.content ?? '', new RegExp(draft.id));
+  assert.match(messages[0]?.content ?? '', /Plan file: .*plan\.md/);
+  assert.match(messages[0]?.content ?? '', /Plan items:/);
+  assert.match(messages[0]?.content ?? '', /\[pending\] Implement safely/);
   assert.match(messages[0]?.content ?? '', /Approved target mode: yolo/);
   assert.match(messages[0]?.content ?? '', /Implement safely/);
 });

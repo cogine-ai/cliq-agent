@@ -54,9 +54,41 @@ test('parses plan draft, update, and finalize actions', () => {
   assert.deepEqual(parseModelAction('{"plan":{"op":"draft","title":"T","content":"## Plan"}}'), {
     plan: { op: 'draft', title: 'T', content: '## Plan' }
   });
+  assert.deepEqual(
+    parseModelAction(
+      '{"plan":{"op":"draft","title":"T","content":"## Plan","items":[{"title":"Inspect code"},{"id":"ship","title":"Ship it","status":"in_progress","notes":"after review"}]}}'
+    ),
+    {
+      plan: {
+        op: 'draft',
+        title: 'T',
+        content: '## Plan',
+        items: [
+          { title: 'Inspect code' },
+          { id: 'ship', title: 'Ship it', status: 'in_progress', notes: 'after review' }
+        ]
+      }
+    }
+  );
   assert.deepEqual(parseModelAction('{"plan":{"op":"update","planId":"plan_1","content":"## Revised"}}'), {
     plan: { op: 'update', planId: 'plan_1', content: '## Revised' }
   });
+  assert.deepEqual(
+    parseModelAction(
+      '{"plan":{"op":"update","planId":"plan_1","content":"## Revised","items":[{"title":"Inspect code"},{"id":"ship","title":"Ship it","status":"in_progress","notes":"after review"}]}}'
+    ),
+    {
+      plan: {
+        op: 'update',
+        planId: 'plan_1',
+        content: '## Revised',
+        items: [
+          { title: 'Inspect code' },
+          { id: 'ship', title: 'Ship it', status: 'in_progress', notes: 'after review' }
+        ]
+      }
+    }
+  );
   assert.deepEqual(parseModelAction('{"plan":{"op":"finalize","planId":"plan_1"}}'), {
     plan: { op: 'finalize', planId: 'plan_1' }
   });
@@ -65,6 +97,24 @@ test('parses plan draft, update, and finalize actions', () => {
 test('rejects invalid plan payloads', () => {
   assert.throws(() => parseModelAction('{"plan":{"op":"draft","title":"T"}}'), /unsupported action/i);
   assert.throws(() => parseModelAction('{"plan":{"op":"update","content":123}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"plan":{"op":"draft","title":"T","content":"x","items":"nope"}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"plan":{"op":"update","content":"x","items":"nope"}}'), /unsupported action/i);
+  assert.throws(
+    () => parseModelAction('{"plan":{"op":"draft","title":"T","content":"x","items":[{"title":"   "}]}}'),
+    /unsupported action/i
+  );
+  assert.throws(
+    () => parseModelAction('{"plan":{"op":"update","content":"x","items":[{"title":"   "}]}}'),
+    /unsupported action/i
+  );
+  assert.throws(
+    () => parseModelAction('{"plan":{"op":"update","content":"x","items":[{"title":"A","status":1}]}}'),
+    /unsupported action/i
+  );
+  assert.throws(
+    () => parseModelAction('{"plan":{"op":"update","content":"x","items":[{"title":"A","notes":1}]}}'),
+    /unsupported action/i
+  );
   assert.throws(() => parseModelAction('{"plan":{"op":"approve","planId":"plan_1"}}'), /unsupported action/i);
 });
 

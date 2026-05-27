@@ -20,9 +20,13 @@ export async function buildApprovedPlanInstructionMessages(
       content: [
         'An approved plan is active for this session.',
         `Plan id: ${artifact.id}`,
+        `Plan file: ${artifact.paths.markdown}`,
         `Approved target mode: ${artifact.approvedTargetMode ?? 'default'}`,
         'Follow this plan during execution unless current evidence proves it invalid.',
         'If you deviate from the approved plan, explain the reason in the final response.',
+        ...(artifact.items.length > 0
+          ? ['', 'Plan items:', ...artifact.items.map((item) => `- [${item.status}] ${item.title}`)]
+          : []),
         '',
         artifact.contentMarkdown
       ].join('\n')
