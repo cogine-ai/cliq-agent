@@ -58,7 +58,16 @@ export function PlanReviewModal({ review, activationKey, onDecide }: PlanReviewM
         <Field label="title" value={review.title} />
         <Field label="plan" value={review.planId} />
         <Field label="artifact" value={review.path} />
+        <Field label="plan file" value={review.markdownPath} />
       </Box>
+      {review.items.length > 0 ? (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="cyan">Plan items</Text>
+          {review.items.map((item, index) => (
+            <Text key={item.id}>{`${index + 1}. ${statusMarker(item.status)} ${item.title}`}</Text>
+          ))}
+        </Box>
+      ) : null}
       <Box flexDirection="column" marginTop={1}>
         <Text>{review.contentMarkdown}</Text>
       </Box>
@@ -76,6 +85,12 @@ export function PlanReviewModal({ review, activationKey, onDecide }: PlanReviewM
       {!isActive ? <Text dimColor>Waiting for fresh input...</Text> : null}
     </Box>
   );
+}
+
+function statusMarker(status: PendingPlanReview['items'][number]['status']) {
+  if (status === 'completed') return '[x]';
+  if (status === 'in_progress') return '[*]';
+  return '[ ]';
 }
 
 function Field({ label, value }: { label: string; value: string }) {

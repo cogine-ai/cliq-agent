@@ -16,14 +16,16 @@ export const planTool: ToolDefinition<{ plan: PlanAction }> = {
         case 'draft':
           artifact = await createDraftPlan(context.cwd, context.session, {
             title: action.plan.title,
-            contentMarkdown: action.plan.content
+            contentMarkdown: action.plan.content,
+            ...(action.plan.items !== undefined ? { items: action.plan.items } : {})
           });
           break;
         case 'update':
           artifact = await updatePlan(context.cwd, context.session, {
             ...(action.plan.planId !== undefined ? { planId: action.plan.planId } : {}),
             ...(action.plan.title !== undefined ? { title: action.plan.title } : {}),
-            contentMarkdown: action.plan.content
+            contentMarkdown: action.plan.content,
+            ...(action.plan.items !== undefined ? { items: action.plan.items } : {})
           });
           break;
         case 'finalize':
@@ -54,15 +56,22 @@ export const planTool: ToolDefinition<{ plan: PlanAction }> = {
 
 function isPlanAction(value: unknown): value is PlanAction {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const plan = value as Partial<PlanAction> & { op?: unknown; planId?: unknown; title?: unknown; content?: unknown };
+  const plan = value as Partial<PlanAction> & {
+    op?: unknown;
+    planId?: unknown;
+    title?: unknown;
+    content?: unknown;
+    items?: unknown;
+  };
   if (plan.op === 'draft') {
-    return typeof plan.title === 'string' && typeof plan.content === 'string';
+    return typeof plan.title === 'string' && typeof plan.content === 'string' && isPlanItemActionArray(plan.items);
   }
   if (plan.op === 'update') {
     return (
       (plan.planId === undefined || typeof plan.planId === 'string') &&
       (plan.title === undefined || typeof plan.title === 'string') &&
-      typeof plan.content === 'string'
+      typeof plan.content === 'string' &&
+      isPlanItemActionArray(plan.items)
     );
   }
   if (plan.op === 'finalize') {
@@ -84,6 +93,25 @@ function invalidPlanResult(op: unknown): ToolResult {
   };
 }
 
+function isPlanItemActionArray(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value)) return false;
+  return value.every((raw) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+    const item = raw as { id?: unknown; title?: unknown; status?: unknown; notes?: unknown };
+    return (
+      (item.id === undefined || typeof item.id === 'string') &&
+      typeof item.title === 'string' &&
+      !!item.title.trim() &&
+      (item.status === undefined ||
+        item.status === 'pending' ||
+        item.status === 'in_progress' ||
+        item.status === 'completed') &&
+      (item.notes === undefined || typeof item.notes === 'string')
+    );
+  });
+}
+
 function planResult(op: PlanAction['op'], artifact: PlanArtifact): ToolResult {
   return {
     tool: 'plan',
@@ -93,7 +121,9 @@ function planResult(op: PlanAction['op'], artifact: PlanArtifact): ToolResult {
       planId: artifact.id,
       planStatus: artifact.status,
       title: artifact.title,
-      path: artifact.paths.json
+      path: artifact.paths.json,
+      markdownPath: artifact.paths.markdown,
+      itemCount: artifact.items.length
     },
     content: [
       'TOOL_RESULT plan OK',
@@ -101,6 +131,8 @@ function planResult(op: PlanAction['op'], artifact: PlanArtifact): ToolResult {
       `status=${artifact.status}`,
       `title=${artifact.title}`,
       `artifact=${artifact.paths.json}`,
+      `planFile=${artifact.paths.markdown}`,
+      `items=${artifact.items.length}`,
       '',
       artifact.contentMarkdown
     ].join('\n')

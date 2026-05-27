@@ -13,7 +13,12 @@ const review: PendingPlanReview = {
   planId: 'plan_1',
   title: 'Implement Plan Mode',
   contentMarkdown: '## Steps\n- Persist the plan\n- Review it',
-  path: '/tmp/.cliq/plans/ws/sess/plan_1/plan.json'
+  items: [
+    { id: 'item_1', title: 'Persist the plan', status: 'pending' },
+    { id: 'item_2', title: 'Review it', status: 'in_progress' }
+  ],
+  path: '/tmp/.cliq/plans/ws/sess/plan_1/plan.json',
+  markdownPath: '/tmp/.cliq/plans/ws/sess/plan_1/plan.md'
 };
 
 test('renders finalized plan content and deliberate approval choices', () => {
@@ -21,7 +26,11 @@ test('renders finalized plan content and deliberate approval choices', () => {
   const frame = lastFrame() ?? '';
   assert.match(frame, /Plan review/);
   assert.match(frame, /Implement Plan Mode/);
+  assert.match(frame, /Plan items/);
+  assert.match(frame, /1\. \[ \] Persist the plan/);
+  assert.match(frame, /2\. \[\*\] Review it/);
   assert.match(frame, /Persist the plan/);
+  assert.match(frame, /plan\.md/);
   assert.match(frame, /\[d\]efault Run/);
   assert.match(frame, /\[a\]ccept-edits Run/);
   assert.match(frame, /\[Y\]OLO Run/);

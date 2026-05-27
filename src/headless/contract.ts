@@ -1,5 +1,6 @@
 import type { PartialModelConfig } from '../model/config.js';
 import type { ProviderName } from '../model/types.js';
+import type { PlanItem } from '../plans/types.js';
 import type { PermissionRule } from '../policy/decision-table.js';
 import type { PolicyMode } from '../policy/types.js';
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
@@ -164,6 +165,8 @@ export type PlanFinalizedPayload = {
   planId: string;
   title: string;
   path: string;
+  markdownPath: string;
+  items: PlanItem[];
 };
 
 export type CompactStartPayload = {

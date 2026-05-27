@@ -710,7 +710,9 @@ export function createRunner({
                 id: plan.id,
                 title: plan.title,
                 contentMarkdown: plan.contentMarkdown,
-                path: plan.paths.json
+                items: plan.items,
+                path: plan.paths.json,
+                markdownPath: plan.paths.markdown
               }
             });
             return await finishWithFinalMessage(`Plan ready for review: ${plan.title}`);

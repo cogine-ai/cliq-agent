@@ -2977,7 +2977,9 @@ export async function hydratePendingPlanReview(store: UiStore, cwd: string, sess
         id: artifact.id,
         title: artifact.title,
         contentMarkdown: artifact.contentMarkdown,
-        path: artifact.paths.json
+        items: artifact.items,
+        path: artifact.paths.json,
+        markdownPath: artifact.paths.markdown
       }
     }
   });

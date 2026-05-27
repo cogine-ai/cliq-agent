@@ -676,6 +676,8 @@ test('runner allows plan artifacts in plan mode and stops for TUI review after f
   const finalized = await readPlanArtifact(session.cwd, session, session.activePlanId!);
   assert.equal(finalized.status, 'finalized');
   assert.equal(finalized.contentMarkdown, '## Steps\n- One');
+  assert.deepEqual(finalized.items, [{ id: 'item_1', title: 'One', status: 'pending' }]);
+  assert.match(finalized.paths.markdown, /plan\.md$/);
 });
 
 test('runner makes model-activated skills available as next-call instructions', async () => {

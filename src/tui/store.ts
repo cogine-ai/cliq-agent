@@ -1,5 +1,5 @@
 import type { ProviderName } from '../model/types.js';
-import type { PlanTargetMode } from '../plans/types.js';
+import type { PlanItem, PlanTargetMode } from '../plans/types.js';
 import type { InteractiveApprovalChoice } from '../policy/interactive-policy.js';
 import type { ApprovalSubject, PolicyMode } from '../policy/types.js';
 import type { ModelAction } from '../protocol/model/actions.js';
@@ -76,7 +76,9 @@ export type PendingPlanReview = {
   planId: string;
   title: string;
   contentMarkdown: string;
+  items: PlanItem[];
   path: string;
+  markdownPath: string;
 };
 
 export type UiPlanDecision =
@@ -390,7 +392,9 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
           planId: event.plan.id,
           title: event.plan.title,
           contentMarkdown: event.plan.contentMarkdown,
-          path: event.plan.path
+          items: event.plan.items,
+          path: event.plan.path,
+          markdownPath: event.plan.markdownPath
         }
       };
     }

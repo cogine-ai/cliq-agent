@@ -165,7 +165,9 @@ export function runtimeEventToHeadless(event: RuntimeEvent): RuntimeEventMapping
       payload: {
         planId: event.plan.id,
         title: event.plan.title,
-        path: event.plan.path
+        path: event.plan.path,
+        markdownPath: event.plan.markdownPath,
+        items: event.plan.items
       },
       artifacts: artifactsWith({ plans: [event.plan.id] })
     };

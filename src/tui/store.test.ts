@@ -191,7 +191,9 @@ test('runtime-event plan-finalized opens a pending plan review and records a sys
         id: 'plan_1',
         title: 'Ship Plan Mode',
         contentMarkdown: '## Steps\n- Review',
-        path: '/tmp/plan.json'
+        items: [{ id: 'item_1', title: 'Review', status: 'pending' }],
+        path: '/tmp/plan.json',
+        markdownPath: '/tmp/plan.md'
       }
     }
   });
@@ -201,7 +203,9 @@ test('runtime-event plan-finalized opens a pending plan review and records a sys
     planId: 'plan_1',
     title: 'Ship Plan Mode',
     contentMarkdown: '## Steps\n- Review',
-    path: '/tmp/plan.json'
+    items: [{ id: 'item_1', title: 'Review', status: 'pending' }],
+    path: '/tmp/plan.json',
+    markdownPath: '/tmp/plan.md'
   });
   const last = s.transcript.at(-1);
   assert.equal(last?.kind, 'system');
