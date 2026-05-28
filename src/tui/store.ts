@@ -390,6 +390,7 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
       return {
         ...next,
         nextEntryId,
+        planProgress: null,
         pendingPlanReview: {
           id,
           planId: event.plan.id,

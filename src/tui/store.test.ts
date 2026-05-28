@@ -261,6 +261,40 @@ test('session-reset clears planProgress', () => {
   assert.equal(after.planProgress, null);
 });
 
+test('plan-finalized clears stale planProgress for superseded approved plans', () => {
+  const withProgress = reduce(baseInit(), {
+    type: 'runtime-event',
+    event: {
+      type: 'plan-progress-updated',
+      progress: {
+        planId: 'plan_old',
+        title: 'Old tracker',
+        path: '/tmp/old-progress.json',
+        items: [{ id: 'item_1', title: 'Inspect', status: 'in_progress', activeForm: 'Inspecting' }]
+      }
+    }
+  });
+
+  const withNewReview = reduce(withProgress, {
+    type: 'runtime-event',
+    event: {
+      type: 'plan-finalized',
+      plan: {
+        id: 'plan_new',
+        title: 'New Plan',
+        contentMarkdown: '## Steps\n- Replan',
+        items: [{ id: 'item_1', title: 'Replan', status: 'pending' }],
+        path: '/tmp/new-plan.json',
+        markdownPath: '/tmp/new-plan.md'
+      }
+    }
+  });
+  assert.equal(withNewReview.planProgress, null);
+
+  const afterRejectedReview = reduce(withNewReview, { type: 'plan-review-resolve', id: 'pr1' });
+  assert.equal(afterRejectedReview.planProgress, null);
+});
+
 test('version-update stores and clears package update notice', () => {
   const notice = { current: '0.9.0', latest: '0.10.0' };
   const afterSet = reduce(baseInit(), { type: 'version-update', notice });

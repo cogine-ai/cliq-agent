@@ -207,6 +207,10 @@ async function readJson(target: string): Promise<unknown> {
   return JSON.parse(await fs.readFile(target, 'utf8')) as unknown;
 }
 
+function isMissingPath(error: unknown) {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
 async function writePlanArtifact(artifact: PlanArtifact) {
   await withPathLock(artifact.paths.json, async () => {
     await atomicWriteJson(artifact.paths.json, artifact);
@@ -304,7 +308,7 @@ export async function readReferencedPlanArtifact(
   try {
     return await readPlanArtifact(cwd, session, planId);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    if (isMissingPath(error)) {
       return null;
     }
     throw error;
@@ -322,10 +326,17 @@ export async function readReferencedPlanProgress(
   try {
     return await readPlanProgress(cwd, session, planId);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null;
+    if (!isMissingPath(error)) {
+      throw error;
     }
-    throw error;
+    try {
+      return await seedApprovedPlanProgress(cwd, session, planId);
+    } catch (seedError) {
+      if (isMissingPath(seedError)) {
+        return null;
+      }
+      throw seedError;
+    }
   }
 }
 
@@ -504,8 +515,13 @@ function planIdForApprovedSession(session: Session, planId?: string) {
   return resolved;
 }
 
-async function seedPlanProgress(cwd: string, session: Session, plan: PlanArtifact): Promise<PlanProgress> {
-  const progressPath = await planProgressPath(cwd, session, plan.id);
+async function seedPlanProgress(
+  cwd: string,
+  session: Pick<Session, 'id'>,
+  plan: PlanArtifact,
+  cliqHome = resolveCliqHome()
+): Promise<PlanProgress> {
+  const progressPath = await planProgressPath(cwd, session, plan.id, cliqHome);
   const now = nowIso();
   const progress: PlanProgress = {
     planId: plan.id,
@@ -522,13 +538,38 @@ async function seedPlanProgress(cwd: string, session: Session, plan: PlanArtifac
   return progress;
 }
 
+async function seedApprovedPlanProgress(
+  cwd: string,
+  session: Pick<Session, 'id'>,
+  planId: string,
+  cliqHome = resolveCliqHome()
+): Promise<PlanProgress | null> {
+  const artifact = await readPlanArtifact(cwd, session, planId, cliqHome);
+  if (artifact.status !== 'approved') {
+    return null;
+  }
+  return await seedPlanProgress(cwd, session, artifact, cliqHome);
+}
+
 export async function updatePlanProgress(
   cwd: string,
   session: Session,
   input: UpdatePlanProgressInput
 ): Promise<PlanProgress> {
   const planId = planIdForApprovedSession(session, input.planId);
-  const current = await readPlanProgress(cwd, session, planId);
+  let current: PlanProgress;
+  try {
+    current = await readPlanProgress(cwd, session, planId);
+  } catch (error) {
+    if (!isMissingPath(error)) {
+      throw error;
+    }
+    const seeded = await seedApprovedPlanProgress(cwd, session, planId);
+    if (!seeded) {
+      throw new Error(`approved plan progress is not available for ${planId}`);
+    }
+    current = seeded;
+  }
   const items = normalizePlanProgressItems(input.items);
   if (items.length !== input.items.length) {
     throw new Error('invalid plan progress items');

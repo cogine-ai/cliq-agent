@@ -26,7 +26,7 @@ import {
   ReportedCliError,
   runCli
 } from './cli.js';
-import { approvePlan, createDraftPlan, finalizePlan } from './plans/store.js';
+import { approvePlan, createDraftPlan, finalizePlan, planProgressPath } from './plans/store.js';
 import { createCheckpoint } from './session/checkpoints.js';
 import { createSession, ensureSession, saveSession, sessionFilePath } from './session/store.js';
 import { WorkspaceTrustError } from './session/trust.js';
@@ -1999,6 +1999,46 @@ test('hydratePlanProgressBestEffort does not fail plan approval when TUI hydrati
     );
     assert.equal(warnings.length, 1);
     assert.match(warnings[0] ?? '', /plan progress hydration failed/i);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('hydratePlanProgressBestEffort seeds and dispatches historical approved plans missing progress', async () => {
+  const previousHome = process.env.CLIQ_HOME;
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-tui-progress-missing-ws-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-tui-progress-missing-home-'));
+  process.env.CLIQ_HOME = home;
+  try {
+    const session = createSession(cwd);
+    const draft = await createDraftPlan(cwd, session, {
+      title: 'Historical progress',
+      contentMarkdown: '## Steps\n- Resume legacy work'
+    });
+    await finalizePlan(cwd, session, { planId: draft.id });
+    await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+    await rm(await planProgressPath(cwd, session, draft.id), { force: true });
+
+    const actions: UiAction[] = [];
+    await hydratePlanProgressBestEffort(captureDispatchStore(actions), cwd, session, draft.id);
+
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0]?.type, 'runtime-event');
+    if (actions[0]?.type === 'runtime-event') {
+      assert.equal(actions[0].event.type, 'plan-progress-updated');
+      if (actions[0].event.type === 'plan-progress-updated') {
+        assert.equal(actions[0].event.progress.planId, draft.id);
+        assert.deepEqual(actions[0].event.progress.items, [
+          { id: 'item_1', title: 'Resume legacy work', status: 'pending', activeForm: 'Working on Resume legacy work' }
+        ]);
+      }
+    }
   } finally {
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;

@@ -99,6 +99,31 @@ test('approvePlan does not mark the plan approved when progress seeding fails', 
   assert.equal(session.approvedPlanId, undefined);
 });
 
+test('updatePlanProgress lazily seeds historical approved plans missing progress', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Legacy tracker',
+    contentMarkdown: '## Steps\n- Inspect code\n- Implement tracker'
+  });
+  await finalizePlan(cwd, session);
+  const approved = await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+  await rm(await planProgressPath(cwd, session, approved.id), { force: true });
+
+  const updated = await updatePlanProgress(cwd, session, {
+    planId: approved.id,
+    items: [
+      { id: 'item_1', title: 'Inspect code', status: 'completed', activeForm: 'Inspecting code' },
+      { id: 'item_2', title: 'Implement tracker', status: 'in_progress', activeForm: 'Implementing tracker' }
+    ]
+  });
+
+  assert.equal(updated.planId, approved.id);
+  assert.deepEqual(updated.items.map((item) => [item.id, item.status]), [
+    ['item_1', 'completed'],
+    ['item_2', 'in_progress']
+  ]);
+});
+
 test('updatePlanProgress persists execution status without mutating the approved snapshot', async () => {
   const { cwd, session } = await tempScope();
   const draft = await createDraftPlan(cwd, session, {
