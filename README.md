@@ -395,7 +395,7 @@ Current preview limits:
 - `edit-tx` stages text replacements in existing files. File creation, deletion, rename, mode changes, and shell-driven mutations are still outside the staged diff.
 - `bash` runs against the real workspace. Its side effects are recorded as `BashEffect`s for review, but they are not rolled back if the tx is aborted.
 - Validator override names must match the validator result name exactly. Shell validators use the configured `name` as-is, for example `tsc`; Cliq does not add a `shell:` prefix.
-- `transactions.bashPolicy=confirm` is accepted by config, but the interactive prompt callback isn't yet wired into the tx-mode bash tool, so invocations conservatively deny. Use `passthrough` or `deny` until the prompt is connected to the TUI.
+- `transactions.bashPolicy=confirm` relies on the PolicyEngine approval path in interactive tx mode (the tx bash overlay does not prompt twice). In headless tx mode it promotes to deny as a CI safety net.
 
 When a transaction's apply leaves files partially written (e.g., a disk error mid-write), aborting requires an explicit `--restore-confirmed` (rolls back via the pre-apply ghost snapshot) or `--keep-partial` (leaves the partial state in place).
 
