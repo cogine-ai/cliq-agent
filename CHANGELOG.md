@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-29
+
+This release completes the first Plan Mode workflow slice and aligns Cliq's
+permission language around clearer policy modes. It adds artifact-backed plan
+review, editable plan files and plan items, and a Claude Code-style execution
+tracker that the model updates through the new todo action.
+
+### Added
+
+- **Artifact-backed Plan Mode workflow** with plan draft/finalize/review
+  storage, TUI review controls, approved-plan context injection, and explicit
+  execution-mode handoff after approval (#239).
+- **Editable plan files and structured plan items** stored under the Cliq plan
+  artifact directory, with reviewed snapshots frozen for stable approval
+  semantics (#254).
+- **Plan execution tracker** backed by persisted progress state, a new `todo`
+  model action, runtime/headless `plan-progress-updated` events, and TUI
+  tracker rendering (#259).
+- TUI discoverability improvements for mode state, command hints, slash
+  command affordances, and permission-policy status (#217).
+
+### Changed
+
+- Policy modes now use the canonical `default`, `accept-edits`, `plan`, and
+  `yolo` tokens across CLI/config/env, TUI, slash commands, docs, and internal
+  runtime policy state (#222).
+- Plan Mode now carries minimal system guidance that the model should analyze
+  and produce a plan without modifying files or running side-effecting commands
+  until the plan is approved (#222, #239).
+- Headless runtime events now use schema version `2` to reflect the added plan
+  progress event surface (#259).
+
+### Fixed
+
+- YOLO mode discovery and TUI labeling now match the current permission-mode
+  language (#218).
+- Plan approval seeds execution progress before committing approved state, so a
+  failed progress write no longer leaves a half-approved plan (#259).
+- Historical approved plans missing `progress.json` lazily seed progress on
+  hydration or todo updates, and the TUI clears stale progress when a new plan
+  review supersedes an approved plan (#259).
+- Reviewed plan artifacts keep their approved snapshot stable even when editable
+  plan files are changed later (#254).
+
 ## [0.11.2] - 2026-05-25
 
 This patch release focuses on permission-boundary correctness and cancellation
