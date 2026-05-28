@@ -2936,7 +2936,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
           planId: review.planId,
           targetMode: decision.targetMode
         });
-        await hydratePlanProgress(store, cwd, session, approved.id);
+        await hydratePlanProgressBestEffort(store, cwd, session, approved.id);
         livePolicy.setMode(decision.targetMode);
         opts.assembly.setPolicyMode(decision.targetMode);
         return {
@@ -3009,6 +3009,21 @@ export async function hydratePlanProgress(store: UiStore, cwd: string, session: 
       }
     }
   });
+}
+
+export async function hydratePlanProgressBestEffort(
+  store: UiStore,
+  cwd: string,
+  session: Session,
+  planId = session.approvedPlanId,
+  warn: (message: string) => void = console.warn
+) {
+  try {
+    await hydratePlanProgress(store, cwd, session, planId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    warn(`plan progress hydration failed: ${message}`);
+  }
 }
 
 export async function notifyIfPackageUpdateAvailable(store: UiStore) {

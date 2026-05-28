@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { RuntimeEvent } from '../protocol/runtime/events.js';
-import { emptyHeadlessArtifacts } from './contract.js';
+import { HEADLESS_SCHEMA_VERSION, emptyHeadlessArtifacts } from './contract.js';
 import { createHeadlessEventFactory, mergeArtifacts, runtimeEventToHeadless } from './events.js';
 
 test('createHeadlessEventFactory emits versioned envelopes with optional session fields', () => {
@@ -18,7 +18,7 @@ test('createHeadlessEventFactory emits versioned envelopes with optional session
     recoverable: false
   });
 
-  assert.equal(preSession.schemaVersion, 1);
+  assert.equal(preSession.schemaVersion, HEADLESS_SCHEMA_VERSION);
   assert.equal(preSession.runId, 'run_test');
   assert.equal(preSession.sessionId, undefined);
   assert.equal(preSession.turn, undefined);

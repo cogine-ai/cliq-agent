@@ -7,6 +7,7 @@ import test from 'node:test';
 import { mock } from 'node:test';
 import { promisify } from 'node:util';
 
+import { HEADLESS_SCHEMA_VERSION } from './headless/contract.js';
 import {
   cliExitCode,
   formatTxRuntimeEventLine,
@@ -19,6 +20,7 @@ import {
   resolveTuiPreference,
   resolveTxIdForReview,
   notifyIfPackageUpdateAvailable,
+  hydratePlanProgressBestEffort,
   hydratePendingPlanReview,
   hydratePlanProgress,
   ReportedCliError,
@@ -925,11 +927,11 @@ test('formatToolResultLine surfaces tool error reason alongside path', () => {
 
 test('formatTxRuntimeEventLine renders human-readable tx lifecycle lines', () => {
   const base = {
-    schemaVersion: 1 as const,
+    schemaVersion: HEADLESS_SCHEMA_VERSION,
     eventId: 'evt_1',
     runId: 'run_1',
     timestamp: '2026-05-11T00:00:00.000Z'
-  };
+  } as const;
 
   assert.equal(
     formatTxRuntimeEventLine({
@@ -1955,6 +1957,48 @@ test('hydratePlanProgress restores approved plan execution tracker for TUI resta
         ]);
       }
     }
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('hydratePlanProgressBestEffort does not fail plan approval when TUI hydration fails', async () => {
+  const previousHome = process.env.CLIQ_HOME;
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-tui-progress-best-effort-ws-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-tui-progress-best-effort-home-'));
+  process.env.CLIQ_HOME = home;
+  try {
+    const session = createSession(cwd);
+    const draft = await createDraftPlan(cwd, session, {
+      title: 'Best effort progress',
+      contentMarkdown: '## Steps\n- Resume work'
+    });
+    await finalizePlan(cwd, session, { planId: draft.id });
+    await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+    const warnings: string[] = [];
+
+    await assert.doesNotReject(() =>
+      hydratePlanProgressBestEffort(
+        {
+          ...captureDispatchStore([]),
+          dispatch() {
+            throw new Error('dispatch failed');
+          }
+        },
+        cwd,
+        session,
+        draft.id,
+        (message) => warnings.push(message)
+      )
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? '', /plan progress hydration failed/i);
   } finally {
     if (previousHome === undefined) {
       delete process.env.CLIQ_HOME;

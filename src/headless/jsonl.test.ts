@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { RuntimeEventEnvelope } from './contract.js';
+import { HEADLESS_SCHEMA_VERSION, type RuntimeEventEnvelope } from './contract.js';
 import { writeJsonlEvent } from './jsonl.js';
 
 test('writeJsonlEvent writes one parseable JSON object per line', () => {
   const chunks: string[] = [];
   const event: RuntimeEventEnvelope = {
-    schemaVersion: 1,
+    schemaVersion: HEADLESS_SCHEMA_VERSION,
     eventId: 'evt_1',
     runId: 'run_1',
     timestamp: '2026-05-03T00:00:00.000Z',

@@ -210,7 +210,7 @@ skills.list(params: { cwd: string }) -> { cwd, skills, activeSkills }
 Runtime events are emitted as notifications:
 
 ```json
-{"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":1,"eventId":"evt_001","runId":"run_abc","sessionId":"ses_123","turn":4,"timestamp":"2026-05-03T00:00:00.000Z","type":"run-start","payload":{"cwd":"/repo","policy":"default","model":{"provider":"openai","model":"example-model"}}}}
+{"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":2,"eventId":"evt_001","runId":"run_abc","sessionId":"ses_123","turn":4,"timestamp":"2026-05-03T00:00:00.000Z","type":"run-start","payload":{"cwd":"/repo","policy":"default","model":{"provider":"openai","model":"example-model"}}}}
 ```
 
 `run.cancel` returning `cancelled` means the abort signal was delivered. Clients should wait for the terminal `run.event` with `type: "run-end"` before treating the run as finished. Clients that send notification-style `run.start` requests without an `id` must read the `runId` from subsequent `run.event` notifications.

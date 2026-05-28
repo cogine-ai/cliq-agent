@@ -243,6 +243,24 @@ test('runtime-event plan-progress-updated stores execution tracker state', () =>
   });
 });
 
+test('session-reset clears planProgress', () => {
+  const s = reduce(baseInit(), {
+    type: 'runtime-event',
+    event: {
+      type: 'plan-progress-updated',
+      progress: {
+        planId: 'plan_1',
+        title: 'Ship tracker',
+        path: '/tmp/progress.json',
+        items: [{ id: 'item_1', title: 'Inspect', status: 'in_progress', activeForm: 'Inspecting' }]
+      }
+    }
+  });
+
+  const after = reduce(s, { type: 'session-reset' });
+  assert.equal(after.planProgress, null);
+});
+
 test('version-update stores and clears package update notice', () => {
   const notice = { current: '0.9.0', latest: '0.10.0' };
   const afterSet = reduce(baseInit(), { type: 'version-update', notice });

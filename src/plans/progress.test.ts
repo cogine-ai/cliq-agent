@@ -1,11 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 import { createSession } from '../session/store.js';
-import { approvePlan, createDraftPlan, finalizePlan, readPlanProgress, updatePlanProgress } from './store.js';
+import {
+  approvePlan,
+  createDraftPlan,
+  finalizePlan,
+  planProgressPath,
+  readPlanArtifact,
+  readPlanProgress,
+  updatePlanProgress
+} from './store.js';
 
 const originalCliqHome = process.env.CLIQ_HOME;
 const cleanupDirs: string[] = [];
@@ -70,6 +78,25 @@ test('approvePlan starts execution progress from pending regardless of review sn
     ['inspect', 'pending'],
     ['implement', 'pending']
   ]);
+});
+
+test('approvePlan does not mark the plan approved when progress seeding fails', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Progress failure',
+    contentMarkdown: '## Steps\n- Seed tracker'
+  });
+  await finalizePlan(cwd, session);
+  await mkdir(await planProgressPath(cwd, session, draft.id));
+
+  await assert.rejects(
+    () => approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' }),
+    /EISDIR|directory|EEXIST|not a file|illegal operation/i
+  );
+
+  const artifact = await readPlanArtifact(cwd, session, draft.id);
+  assert.equal(artifact.status, 'finalized');
+  assert.equal(session.approvedPlanId, undefined);
 });
 
 test('updatePlanProgress persists execution status without mutating the approved snapshot', async () => {

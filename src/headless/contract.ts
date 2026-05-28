@@ -7,7 +7,7 @@ import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
 import type { AutoCompactConfig } from '../session/auto-compact-config.js';
 import type { SessionModelRef } from '../session/types.js';
 
-export const HEADLESS_SCHEMA_VERSION = 1;
+export const HEADLESS_SCHEMA_VERSION = 2;
 export const HEADLESS_EXIT_SUCCESS = 0;
 export const HEADLESS_EXIT_FAILURE = 1;
 export const HEADLESS_EXIT_CANCELLED = 130;

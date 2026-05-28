@@ -476,8 +476,12 @@ export async function approvePlan(
   input: ApprovePlanInput
 ): Promise<PlanArtifact> {
   assertPlanTargetMode(input.targetMode);
+  const current = await readPlanArtifact(cwd, session, input.planId);
+  if (current.status !== 'finalized') {
+    throw new Error(`plan ${input.planId} must be finalized before it can be approved`);
+  }
+  await seedPlanProgress(cwd, session, current);
   const approved = await markReviewedPlan(cwd, session, input.planId, 'approved', input.targetMode);
-  await seedPlanProgress(cwd, session, approved);
   return approved;
 }
 
@@ -500,15 +504,15 @@ function planIdForApprovedSession(session: Session, planId?: string) {
   return resolved;
 }
 
-async function seedPlanProgress(cwd: string, session: Session, approved: PlanArtifact): Promise<PlanProgress> {
-  const progressPath = await planProgressPath(cwd, session, approved.id);
+async function seedPlanProgress(cwd: string, session: Session, plan: PlanArtifact): Promise<PlanProgress> {
+  const progressPath = await planProgressPath(cwd, session, plan.id);
   const now = nowIso();
   const progress: PlanProgress = {
-    planId: approved.id,
+    planId: plan.id,
     sessionId: session.id,
-    workspaceId: approved.workspaceId,
-    title: approved.title,
-    items: progressItemsFromPlanItems(approved.items),
+    workspaceId: plan.workspaceId,
+    title: plan.title,
+    items: progressItemsFromPlanItems(plan.items),
     createdAt: now,
     updatedAt: now,
     paths: { json: progressPath }
