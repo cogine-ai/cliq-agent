@@ -173,6 +173,19 @@ export function runtimeEventToHeadless(event: RuntimeEvent): RuntimeEventMapping
     };
   }
 
+  if (event.type === 'plan-progress-updated') {
+    return {
+      type: 'plan-progress-updated',
+      payload: {
+        planId: event.progress.planId,
+        title: event.progress.title,
+        path: event.progress.path,
+        items: event.progress.items
+      },
+      artifacts: artifactsWith({ plans: [event.progress.planId] })
+    };
+  }
+
   if (event.type === 'compact-start') {
     return {
       type: 'compact-start',

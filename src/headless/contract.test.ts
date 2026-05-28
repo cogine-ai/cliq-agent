@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
-import { emptyHeadlessArtifacts } from './contract.js';
+import { HEADLESS_SCHEMA_VERSION, emptyHeadlessArtifacts, type HeadlessRuntimeEventType } from './contract.js';
 import type {
   TxStagingStartPayload,
   TxAppliedPayload,
@@ -44,6 +44,12 @@ test('emptyHeadlessArtifacts initializes transactions: []', () => {
   const a = emptyHeadlessArtifacts();
   assert.deepEqual(a.transactions, []);
   assert.deepEqual(a.plans, []);
+});
+
+test('headless schema version and event union include plan execution tracker events', () => {
+  assert.equal(HEADLESS_SCHEMA_VERSION, 2);
+  const eventTypes: HeadlessRuntimeEventType[] = ['plan-progress-updated', 'compact-start'];
+  assert.deepEqual(eventTypes, ['plan-progress-updated', 'compact-start']);
 });
 
 test('RuntimeErrorCode union includes the tx error codes', () => {

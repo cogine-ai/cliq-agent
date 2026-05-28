@@ -1,13 +1,13 @@
 import type { PartialModelConfig } from '../model/config.js';
 import type { ProviderName } from '../model/types.js';
-import type { PlanItem } from '../plans/types.js';
+import type { PlanItem, PlanProgressItem } from '../plans/types.js';
 import type { PermissionRule } from '../policy/decision-table.js';
 import type { PolicyMode } from '../policy/types.js';
 import type { RuntimeErrorCode } from '../protocol/runtime/errors.js';
 import type { AutoCompactConfig } from '../session/auto-compact-config.js';
 import type { SessionModelRef } from '../session/types.js';
 
-export const HEADLESS_SCHEMA_VERSION = 1;
+export const HEADLESS_SCHEMA_VERSION = 2;
 export const HEADLESS_EXIT_SUCCESS = 0;
 export const HEADLESS_EXIT_FAILURE = 1;
 export const HEADLESS_EXIT_CANCELLED = 130;
@@ -108,6 +108,7 @@ export type HeadlessRuntimeEventType =
   | 'tool-start'
   | 'tool-end'
   | 'plan-finalized'
+  | 'plan-progress-updated'
   | 'compact-start'
   | 'compact-end'
   | 'compact-skip'
@@ -167,6 +168,13 @@ export type PlanFinalizedPayload = {
   path: string;
   markdownPath: string;
   items: PlanItem[];
+};
+
+export type PlanProgressUpdatedPayload = {
+  planId: string;
+  title: string;
+  path: string;
+  items: PlanProgressItem[];
 };
 
 export type CompactStartPayload = {
@@ -254,6 +262,7 @@ export type HeadlessEventPayloadByType = {
   'tool-start': ToolStartPayload;
   'tool-end': ToolEndPayload;
   'plan-finalized': PlanFinalizedPayload;
+  'plan-progress-updated': PlanProgressUpdatedPayload;
   'compact-start': CompactStartPayload;
   'compact-end': CompactEndPayload;
   'compact-skip': CompactSkipPayload;

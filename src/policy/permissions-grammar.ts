@@ -10,7 +10,7 @@ import type { AccessChannelKind } from './types.js';
  *
  * Grammar (v0):
  *   <rule>    ::= <channel> ":" SP* <pattern>
- *   <channel> ::= "fs-read" | "fs-write" | "bash" | "mcp" | "network" | "plan"
+ *   <channel> ::= "fs-read" | "fs-write" | "bash" | "mcp" | "network" | "plan" | "plan-progress"
  *   <pattern> ::= any non-empty string up to end-of-rule
  *
  * Examples:
@@ -32,7 +32,8 @@ const VALID_CHANNELS: ReadonlySet<AccessChannelKind> = new Set<AccessChannelKind
   'bash',
   'mcp',
   'network',
-  'plan'
+  'plan',
+  'plan-progress'
 ]);
 
 export class PermissionGrammarError extends Error {

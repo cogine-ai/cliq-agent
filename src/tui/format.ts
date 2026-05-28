@@ -21,6 +21,7 @@ export function toolNameFromAction(action: ModelAction): string {
   if ('skill' in action) return 'skill';
   if ('skillResource' in action) return 'skillResource';
   if ('plan' in action) return 'plan';
+  if ('todo' in action) return 'todo';
   if ('message' in action) return 'message';
   const _exhaustive: never = action;
   return _exhaustive;
@@ -56,6 +57,9 @@ export function previewFromAction(action: ModelAction): string {
     const id = 'planId' in action.plan ? action.plan.planId : undefined;
     return id ? `${action.plan.op} ${id}` : action.plan.op;
   }
+  if ('todo' in action) {
+    return action.todo.planId ? `update ${action.todo.planId}` : 'update';
+  }
   if ('message' in action) {
     // 'message' is not a tool action; if it slipped past the runner's
     // dispatch into a preview, render empty rather than crash. The
@@ -78,6 +82,15 @@ export function formatToolResultSummary(result: ToolResult): string {
 
   if (result.tool === 'plan' && planTitle) {
     detail = planStatus ? `${planStatus}: ${planTitle}` : planTitle;
+  }
+
+  if (result.tool === 'todo' && planTitle) {
+    const completed = result.meta.completed;
+    const itemCount = result.meta.itemCount;
+    detail =
+      typeof completed === 'number' && typeof itemCount === 'number'
+        ? `${planTitle}: ${completed}/${itemCount} done`
+        : planTitle;
   }
 
   if (detail && result.status === 'error' && errorDetail) {

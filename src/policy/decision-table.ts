@@ -202,6 +202,8 @@ export function accessChannelPrimaryKey(channel: AccessChannel): string {
       return channel.host ?? '';
     case 'plan':
       return channel.planId ? `${channel.op} ${channel.planId}` : channel.op;
+    case 'plan-progress':
+      return channel.planId ?? '';
   }
 }
 

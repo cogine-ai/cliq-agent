@@ -42,7 +42,8 @@ export type AccessChannel =
     }
   | { kind: 'mcp'; server: string; tool: string }
   | { kind: 'network'; host?: string }
-  | { kind: 'plan'; op: 'draft' | 'update' | 'finalize'; planId?: string };
+  | { kind: 'plan'; op: 'draft' | 'update' | 'finalize'; planId?: string }
+  | { kind: 'plan-progress'; planId?: string };
 
 export type AccessChannelKind = AccessChannel['kind'];
 

@@ -11,6 +11,7 @@ import {
   HEADLESS_EXIT_CANCELLED,
   HEADLESS_EXIT_FAILURE,
   HEADLESS_EXIT_SUCCESS,
+  HEADLESS_SCHEMA_VERSION,
   emptyHeadlessArtifacts
 } from './contract.js';
 import { createRpcServer, runStdioJsonRpcServer } from './rpc.js';
@@ -142,7 +143,7 @@ test('rpc run.start returns a run id and emits run events with the same id', asy
     makeRunId: () => 'run_rpc_1',
     async runHeadless(request: HeadlessRunRequest, options) {
       const event: RuntimeEventEnvelope = {
-        schemaVersion: 1,
+        schemaVersion: HEADLESS_SCHEMA_VERSION,
         eventId: 'evt_rpc_1',
         runId: options.runId!,
         timestamp: '2026-05-06T00:00:00.000Z',
@@ -374,7 +375,7 @@ test('stdio rpc aborts the active run and resolves when stdin closes', async () 
         await waitForAbort(options.signal);
         signalAborted = options.signal?.aborted ?? false;
         await options.onEvent?.({
-          schemaVersion: 1,
+          schemaVersion: HEADLESS_SCHEMA_VERSION,
           eventId: 'evt_rpc_stdin_close',
           runId: options.runId!,
           timestamp: '2026-05-06T00:00:00.000Z',
@@ -499,7 +500,7 @@ test('rpc write failures abort the active run and close future writes', async ()
     makeRunId: () => `run_rpc_write_${writes.length}`,
     async runHeadless(_request, options) {
       const event: RuntimeEventEnvelope = {
-        schemaVersion: 1,
+        schemaVersion: HEADLESS_SCHEMA_VERSION,
         eventId: 'evt_rpc_write',
         runId: options.runId!,
         timestamp: '2026-05-06T00:00:00.000Z',
@@ -559,7 +560,7 @@ test('rpc async write failures abort the active run and close future writes', as
     makeRunId: () => `run_rpc_async_write_${writes.length}`,
     async runHeadless(_request, options) {
       const event: RuntimeEventEnvelope = {
-        schemaVersion: 1,
+        schemaVersion: HEADLESS_SCHEMA_VERSION,
         eventId: 'evt_rpc_async_write',
         runId: options.runId!,
         timestamp: '2026-05-06T00:00:00.000Z',
@@ -630,7 +631,7 @@ test('rpc run.start notifications start a run and emit run events without result
     makeRunId: () => 'run_rpc_notification',
     async runHeadless(request: HeadlessRunRequest, options) {
       const event: RuntimeEventEnvelope = {
-        schemaVersion: 1,
+        schemaVersion: HEADLESS_SCHEMA_VERSION,
         eventId: 'evt_rpc_notification',
         runId: options.runId!,
         timestamp: '2026-05-06T00:00:00.000Z',

@@ -6,12 +6,26 @@ import { withPathLock } from '../lib/path-lock.js';
 import type { PolicyMode } from '../policy/types.js';
 import { makeId, mutateSession, nowIso, resolveCliqHome, workspaceIdFromRealPath } from '../session/store.js';
 import type { Session } from '../session/types.js';
-import { normalizePlanItems, normalizeStoredPlanItems } from './items.js';
-import type { PlanArtifact, PlanItemInput, PlanStatus, PlanTargetMode } from './types.js';
+import {
+  normalizePlanItems,
+  normalizePlanProgressItems,
+  normalizeStoredPlanItems,
+  normalizeStoredPlanProgressItems,
+  progressItemsFromPlanItems
+} from './items.js';
+import type {
+  PlanArtifact,
+  PlanItemInput,
+  PlanProgress,
+  PlanProgressItemInput,
+  PlanStatus,
+  PlanTargetMode
+} from './types.js';
 
 const SAFE_ID = /^[A-Za-z0-9_-]+$/;
 const PLAN_FILE = 'plan.json';
 const PLAN_MARKDOWN_FILE = 'plan.md';
+const PLAN_PROGRESS_FILE = 'progress.json';
 
 export type PlanStorageRef = {
   workspaceId: string;
@@ -39,6 +53,11 @@ export type FinalizePlanInput = {
 export type ApprovePlanInput = {
   planId: string;
   targetMode: PlanTargetMode;
+};
+
+export type UpdatePlanProgressInput = {
+  planId?: string;
+  items: PlanProgressItemInput[];
 };
 
 function assertSafeId(kind: string, id: string) {
@@ -100,6 +119,17 @@ export async function planMarkdownPath(
   return path.join(ref.sessionDir, planId, PLAN_MARKDOWN_FILE);
 }
 
+export async function planProgressPath(
+  cwd: string,
+  session: Pick<Session, 'id'>,
+  planId: string,
+  cliqHome = resolveCliqHome()
+) {
+  assertSafeId('plan', planId);
+  const ref = await resolvePlanStorageRef(cwd, session, cliqHome);
+  return path.join(ref.sessionDir, planId, PLAN_PROGRESS_FILE);
+}
+
 async function atomicWriteJson(target: string, value: unknown) {
   await fs.mkdir(path.dirname(target), { recursive: true });
   const temp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
@@ -154,14 +184,43 @@ function isPlanArtifact(value: unknown): value is PlanArtifact {
   );
 }
 
+function isPlanProgress(value: unknown): value is PlanProgress {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const raw = value as Partial<PlanProgress> & { paths?: unknown };
+  const paths = raw.paths as { json?: unknown } | undefined;
+  return (
+    typeof raw.planId === 'string' &&
+    typeof raw.sessionId === 'string' &&
+    typeof raw.workspaceId === 'string' &&
+    typeof raw.title === 'string' &&
+    Array.isArray(raw.items) &&
+    normalizeStoredPlanProgressItems(raw.items) !== null &&
+    typeof raw.createdAt === 'string' &&
+    typeof raw.updatedAt === 'string' &&
+    !!paths &&
+    typeof paths === 'object' &&
+    typeof paths.json === 'string'
+  );
+}
+
 async function readJson(target: string): Promise<unknown> {
   return JSON.parse(await fs.readFile(target, 'utf8')) as unknown;
+}
+
+function isMissingPath(error: unknown) {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
 async function writePlanArtifact(artifact: PlanArtifact) {
   await withPathLock(artifact.paths.json, async () => {
     await atomicWriteJson(artifact.paths.json, artifact);
     await atomicWriteText(artifact.paths.markdown, artifact.contentMarkdown);
+  });
+}
+
+async function writePlanProgress(progress: PlanProgress) {
+  await withPathLock(progress.paths.json, async () => {
+    await atomicWriteJson(progress.paths.json, progress);
   });
 }
 
@@ -198,6 +257,37 @@ export async function readPlanArtifact(
   };
 }
 
+export async function readPlanProgress(
+  cwd: string,
+  session: Pick<Session, 'id'>,
+  planId: string,
+  cliqHome = resolveCliqHome()
+): Promise<PlanProgress> {
+  const target = await planProgressPath(cwd, session, planId, cliqHome);
+  const ref = await resolvePlanStorageRef(cwd, session, cliqHome);
+  const raw = await readJson(target);
+  if (!isPlanProgress(raw)) {
+    throw new Error(`invalid plan progress: ${target}`);
+  }
+  if (raw.planId !== planId || raw.sessionId !== session.id || raw.workspaceId !== ref.workspaceId) {
+    throw new Error(`mismatched plan progress: ${target}`);
+  }
+  if (raw.paths.json !== target) {
+    throw new Error(`plan progress path mismatch: ${target}`);
+  }
+  const items = normalizeStoredPlanProgressItems(raw.items);
+  if (!items) {
+    throw new Error(`invalid plan progress items: ${target}`);
+  }
+  assertAtMostOneInProgress(items);
+  return {
+    ...raw,
+    title: raw.title.trim(),
+    items,
+    paths: { json: target }
+  };
+}
+
 async function readPlanMarkdown(target: string): Promise<string | null> {
   try {
     return await fs.readFile(target, 'utf8');
@@ -218,10 +308,35 @@ export async function readReferencedPlanArtifact(
   try {
     return await readPlanArtifact(cwd, session, planId);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    if (isMissingPath(error)) {
       return null;
     }
     throw error;
+  }
+}
+
+export async function readReferencedPlanProgress(
+  cwd: string,
+  session: Session,
+  planId: string
+): Promise<PlanProgress | null> {
+  if (session.approvedPlanId !== planId) {
+    return null;
+  }
+  try {
+    return await readPlanProgress(cwd, session, planId);
+  } catch (error) {
+    if (!isMissingPath(error)) {
+      throw error;
+    }
+    try {
+      return await seedApprovedPlanProgress(cwd, session, planId);
+    } catch (seedError) {
+      if (isMissingPath(seedError)) {
+        return null;
+      }
+      throw seedError;
+    }
   }
 }
 
@@ -372,7 +487,13 @@ export async function approvePlan(
   input: ApprovePlanInput
 ): Promise<PlanArtifact> {
   assertPlanTargetMode(input.targetMode);
-  return await markReviewedPlan(cwd, session, input.planId, 'approved', input.targetMode);
+  const current = await readPlanArtifact(cwd, session, input.planId);
+  if (current.status !== 'finalized') {
+    throw new Error(`plan ${input.planId} must be finalized before it can be approved`);
+  }
+  await seedPlanProgress(cwd, session, current);
+  const approved = await markReviewedPlan(cwd, session, input.planId, 'approved', input.targetMode);
+  return approved;
 }
 
 export async function rejectPlan(cwd: string, session: Session, planId: string): Promise<PlanArtifact> {
@@ -381,4 +502,91 @@ export async function rejectPlan(cwd: string, session: Session, planId: string):
 
 export async function cancelPlan(cwd: string, session: Session, planId: string): Promise<PlanArtifact> {
   return await markReviewedPlan(cwd, session, planId, 'canceled');
+}
+
+function planIdForApprovedSession(session: Session, planId?: string) {
+  const resolved = planId ?? session.approvedPlanId;
+  if (!resolved) {
+    throw new Error('no approved plan is available');
+  }
+  if (session.approvedPlanId !== resolved) {
+    throw new Error(`plan ${resolved} is not the approved plan for this session`);
+  }
+  return resolved;
+}
+
+async function seedPlanProgress(
+  cwd: string,
+  session: Pick<Session, 'id'>,
+  plan: PlanArtifact,
+  cliqHome = resolveCliqHome()
+): Promise<PlanProgress> {
+  const progressPath = await planProgressPath(cwd, session, plan.id, cliqHome);
+  const now = nowIso();
+  const progress: PlanProgress = {
+    planId: plan.id,
+    sessionId: session.id,
+    workspaceId: plan.workspaceId,
+    title: plan.title,
+    items: progressItemsFromPlanItems(plan.items),
+    createdAt: now,
+    updatedAt: now,
+    paths: { json: progressPath }
+  };
+  assertAtMostOneInProgress(progress.items);
+  await writePlanProgress(progress);
+  return progress;
+}
+
+async function seedApprovedPlanProgress(
+  cwd: string,
+  session: Pick<Session, 'id'>,
+  planId: string,
+  cliqHome = resolveCliqHome()
+): Promise<PlanProgress | null> {
+  const artifact = await readPlanArtifact(cwd, session, planId, cliqHome);
+  if (artifact.status !== 'approved') {
+    return null;
+  }
+  return await seedPlanProgress(cwd, session, artifact, cliqHome);
+}
+
+export async function updatePlanProgress(
+  cwd: string,
+  session: Session,
+  input: UpdatePlanProgressInput
+): Promise<PlanProgress> {
+  const planId = planIdForApprovedSession(session, input.planId);
+  let current: PlanProgress;
+  try {
+    current = await readPlanProgress(cwd, session, planId);
+  } catch (error) {
+    if (!isMissingPath(error)) {
+      throw error;
+    }
+    const seeded = await seedApprovedPlanProgress(cwd, session, planId);
+    if (!seeded) {
+      throw new Error(`approved plan progress is not available for ${planId}`);
+    }
+    current = seeded;
+  }
+  const items = normalizePlanProgressItems(input.items);
+  if (items.length !== input.items.length) {
+    throw new Error('invalid plan progress items');
+  }
+  assertAtMostOneInProgress(items);
+  const next: PlanProgress = {
+    ...current,
+    items,
+    updatedAt: nowIso()
+  };
+  await writePlanProgress(next);
+  return next;
+}
+
+function assertAtMostOneInProgress(items: readonly { status: string }[]) {
+  const count = items.filter((item) => item.status === 'in_progress').length;
+  if (count > 1) {
+    throw new Error('plan progress may have at most one in_progress item');
+  }
 }

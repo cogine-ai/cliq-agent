@@ -157,7 +157,9 @@ const VALID_CHANNELS = new Set<AccessChannelKind>([
   'fs-write',
   'bash',
   'mcp',
-  'network'
+  'network',
+  'plan',
+  'plan-progress'
 ]);
 
 function sanitizeRules(value: unknown): PersistedPermissionRule[] | null {
