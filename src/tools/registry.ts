@@ -8,6 +8,7 @@ import { planTool } from './plan.js';
 import { readTool } from './read.js';
 import { skillTool } from './skill.js';
 import { skillResourceTool } from './skill-resource.js';
+import { todoTool } from './todo.js';
 import type { ToolDefinition } from './types.js';
 
 export function createToolRegistry(
@@ -20,7 +21,8 @@ export function createToolRegistry(
     grepTool,
     skillTool,
     skillResourceTool,
-    planTool
+    planTool,
+    todoTool
   ]
 ) {
   return {

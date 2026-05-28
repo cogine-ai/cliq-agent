@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { ModelClient } from '../model/types.js';
-import { readPlanArtifact } from '../plans/store.js';
+import { approvePlan, createDraftPlan, finalizePlan, readPlanArtifact, readPlanProgress } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { createSession } from '../session/store.js';
 import { createToolRegistry } from '../tools/registry.js';
@@ -678,6 +678,55 @@ test('runner allows plan artifacts in plan mode and stops for TUI review after f
   assert.equal(finalized.contentMarkdown, '## Steps\n- One');
   assert.deepEqual(finalized.items, [{ id: 'item_1', title: 'One', status: 'pending' }]);
   assert.match(finalized.paths.markdown, /plan\.md$/);
+});
+
+test('runner emits plan-progress-updated after todo tool updates approved-plan progress', async () => {
+  const session = await createTempSession();
+  const draft = await createDraftPlan(session.cwd, session, {
+    title: 'Execute tracked plan',
+    contentMarkdown: '## Steps\n- Inspect\n- Implement'
+  });
+  await finalizePlan(session.cwd, session, { planId: draft.id });
+  await approvePlan(session.cwd, session, { planId: draft.id, targetMode: 'default' });
+  const events: RuntimeEvent[] = [];
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        if (calls === 1) {
+          return completion(
+            `{"todo":{"planId":"${draft.id}","items":[{"id":"item_1","title":"Inspect","status":"completed","activeForm":"Inspecting"},{"id":"item_2","title":"Implement","status":"in_progress","activeForm":"Implementing"}]}}`
+          );
+        }
+        return completion('{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'default' }),
+    onEvent(event) {
+      events.push(event);
+    }
+  });
+
+  const final = await runner.runTurn(session, 'execute plan');
+
+  assert.equal(final, 'done');
+  const progress = await readPlanProgress(session.cwd, session, draft.id);
+  assert.deepEqual(progress.items.map((item) => [item.title, item.status]), [
+    ['Inspect', 'completed'],
+    ['Implement', 'in_progress']
+  ]);
+  const progressEvent = events.find(
+    (event): event is Extract<RuntimeEvent, { type: 'plan-progress-updated' }> =>
+      event.type === 'plan-progress-updated'
+  );
+  assert.ok(progressEvent);
+  assert.equal(progressEvent.progress.planId, draft.id);
+  assert.deepEqual(progressEvent.progress.items.map((item) => [item.title, item.status]), [
+    ['Inspect', 'completed'],
+    ['Implement', 'in_progress']
+  ]);
 });
 
 test('runner makes model-activated skills available as next-call instructions', async () => {

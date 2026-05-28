@@ -5,7 +5,7 @@ import type { InstructionMessage } from '../instructions/types.js';
 import { classifyContextOverflow } from '../model/errors.js';
 import { findKnownModelDescriptor } from '../model/registry.js';
 import type { ChatMessage, ModelClient, ModelCompletion, ResolvedModelConfig } from '../model/types.js';
-import { readPlanArtifact } from '../plans/store.js';
+import { readPlanArtifact, readPlanProgress } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { buildToolApprovalSubject } from '../policy/subjects.js';
 import type { ApprovalDecision, PolicyConfirm } from '../policy/types.js';
@@ -695,6 +695,24 @@ export function createRunner({
           });
           await runHooks(hooks, 'afterTool', session, storedResult);
           await onEvent({ type: 'tool-end', tool: storedResult.tool, status: storedResult.status });
+          const updatedProgressPlanId =
+            storedResult.tool === 'todo' &&
+            storedResult.status === 'ok' &&
+            typeof storedResult.meta.planId === 'string'
+              ? storedResult.meta.planId
+              : null;
+          if (updatedProgressPlanId) {
+            const progress = await readPlanProgress(cwd, session, updatedProgressPlanId);
+            await onEvent({
+              type: 'plan-progress-updated',
+              progress: {
+                planId: progress.planId,
+                title: progress.title,
+                path: progress.paths.json,
+                items: progress.items
+              }
+            });
+          }
           const finalizedPlanId =
             storedResult.tool === 'plan' &&
             storedResult.status === 'ok' &&

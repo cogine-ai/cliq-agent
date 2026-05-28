@@ -215,6 +215,34 @@ test('runtime-event plan-finalized opens a pending plan review and records a sys
   assert.equal(cleared.pendingPlanReview, null);
 });
 
+test('runtime-event plan-progress-updated stores execution tracker state', () => {
+  const s = reduce(baseInit(), {
+    type: 'runtime-event',
+    event: {
+      type: 'plan-progress-updated',
+      progress: {
+        planId: 'plan_1',
+        title: 'Ship tracker',
+        path: '/tmp/progress.json',
+        items: [
+          { id: 'item_1', title: 'Inspect', status: 'completed', activeForm: 'Inspecting' },
+          { id: 'item_2', title: 'Implement', status: 'in_progress', activeForm: 'Implementing' }
+        ]
+      }
+    }
+  });
+
+  assert.deepEqual(s.planProgress, {
+    planId: 'plan_1',
+    title: 'Ship tracker',
+    path: '/tmp/progress.json',
+    items: [
+      { id: 'item_1', title: 'Inspect', status: 'completed', activeForm: 'Inspecting' },
+      { id: 'item_2', title: 'Implement', status: 'in_progress', activeForm: 'Implementing' }
+    ]
+  });
+});
+
 test('version-update stores and clears package update notice', () => {
   const notice = { current: '0.9.0', latest: '0.10.0' };
   const afterSet = reduce(baseInit(), { type: 'version-update', notice });

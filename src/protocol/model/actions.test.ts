@@ -94,6 +94,29 @@ test('parses plan draft, update, and finalize actions', () => {
   });
 });
 
+test('parses todo action for approved-plan execution tracking', () => {
+  assert.deepEqual(
+    parseModelAction(
+      '{"todo":{"planId":"plan_1","items":[{"id":"item_1","title":"Inspect code","status":"completed","activeForm":"Inspecting code"},{"id":"item_2","title":"Implement tracker","status":"in_progress","activeForm":"Implementing tracker","notes":"working"}]}}'
+    ),
+    {
+      todo: {
+        planId: 'plan_1',
+        items: [
+          { id: 'item_1', title: 'Inspect code', status: 'completed', activeForm: 'Inspecting code' },
+          {
+            id: 'item_2',
+            title: 'Implement tracker',
+            status: 'in_progress',
+            activeForm: 'Implementing tracker',
+            notes: 'working'
+          }
+        ]
+      }
+    }
+  );
+});
+
 test('rejects invalid plan payloads', () => {
   assert.throws(() => parseModelAction('{"plan":{"op":"draft","title":"T"}}'), /unsupported action/i);
   assert.throws(() => parseModelAction('{"plan":{"op":"update","content":123}}'), /unsupported action/i);
@@ -116,6 +139,13 @@ test('rejects invalid plan payloads', () => {
     /unsupported action/i
   );
   assert.throws(() => parseModelAction('{"plan":{"op":"approve","planId":"plan_1"}}'), /unsupported action/i);
+});
+
+test('rejects invalid todo payloads', () => {
+  assert.throws(() => parseModelAction('{"todo":{"items":"nope"}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"todo":{"items":[{"title":"Inspect","status":"unknown","activeForm":"Inspecting"}]}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"todo":{"items":[{"title":"Inspect","status":"pending"}]}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"todo":{"planId":1,"items":[]}}'), /unsupported action/i);
 });
 
 test('rejects invalid skill activation payloads', () => {

@@ -32,7 +32,8 @@ const VALID_CHANNELS: ReadonlySet<AccessChannelKind> = new Set<AccessChannelKind
   'bash',
   'mcp',
   'network',
-  'plan'
+  'plan',
+  'plan-progress'
 ]);
 
 export class PermissionGrammarError extends Error {

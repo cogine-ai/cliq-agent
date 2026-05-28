@@ -123,6 +123,28 @@ test('runtimeEventToHeadless maps plan-finalized artifacts', () => {
   assert.deepEqual(mapped.artifacts?.plans, ['plan_a']);
 });
 
+test('runtimeEventToHeadless maps plan-progress-updated artifacts', () => {
+  const mapped = runtimeEventToHeadless({
+    type: 'plan-progress-updated',
+    progress: {
+      planId: 'plan_a',
+      title: 'Plan A',
+      path: '/tmp/progress.json',
+      items: [{ id: 'item_1', title: 'Step one', status: 'in_progress', activeForm: 'Working on step one' }]
+    }
+  });
+  assert.equal(mapped.type, 'plan-progress-updated');
+  if (mapped.type === 'plan-progress-updated') {
+    assert.deepEqual(mapped.payload, {
+      planId: 'plan_a',
+      title: 'Plan A',
+      path: '/tmp/progress.json',
+      items: [{ id: 'item_1', title: 'Step one', status: 'in_progress', activeForm: 'Working on step one' }]
+    });
+  }
+  assert.deepEqual(mapped.artifacts?.plans, ['plan_a']);
+});
+
 test('runtimeEventToHeadless maps tx-applied with full payload', () => {
   const mapped = runtimeEventToHeadless({
     type: 'tx-applied',

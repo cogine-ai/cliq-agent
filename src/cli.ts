@@ -14,7 +14,13 @@ import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
-import { approvePlan, cancelPlan, readReferencedPlanArtifact, rejectPlan } from './plans/store.js';
+import {
+  approvePlan,
+  cancelPlan,
+  readReferencedPlanArtifact,
+  readReferencedPlanProgress,
+  rejectPlan
+} from './plans/store.js';
 import { extendApprovalScope } from './policy/approval-scope.js';
 import { composeRuntimePermissionTable } from './policy/compose-runtime.js';
 import type { PermissionRule, PermissionTable } from './policy/decision-table.js';
@@ -2761,6 +2767,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     })
   );
   await hydratePendingPlanReview(store, cwd, session);
+  await hydratePlanProgress(store, cwd, session);
   void notifyIfPackageUpdateAvailable(store);
 
   const approvalBridge = createApprovalBridge(store);
@@ -2925,10 +2932,11 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     },
     onPlanDecision: async (review, decision) => {
       if (decision.type === 'approve') {
-        await approvePlan(cwd, session, {
+        const approved = await approvePlan(cwd, session, {
           planId: review.planId,
           targetMode: decision.targetMode
         });
+        await hydratePlanProgress(store, cwd, session, approved.id);
         livePolicy.setMode(decision.targetMode);
         opts.assembly.setPolicyMode(decision.targetMode);
         return {
@@ -2980,6 +2988,24 @@ export async function hydratePendingPlanReview(store: UiStore, cwd: string, sess
         items: artifact.items,
         path: artifact.paths.json,
         markdownPath: artifact.paths.markdown
+      }
+    }
+  });
+}
+
+export async function hydratePlanProgress(store: UiStore, cwd: string, session: Session, planId = session.approvedPlanId) {
+  if (!planId) return;
+  const progress = await readReferencedPlanProgress(cwd, session, planId);
+  if (!progress) return;
+  store.dispatch({
+    type: 'runtime-event',
+    event: {
+      type: 'plan-progress-updated',
+      progress: {
+        planId: progress.planId,
+        title: progress.title,
+        path: progress.paths.json,
+        items: progress.items
       }
     }
   });

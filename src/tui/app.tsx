@@ -4,6 +4,7 @@ import { useMemo, useRef, useState } from 'react';
 import type { PolicyMode } from '../policy/types.js';
 import { ApprovalModal } from './components/approval-modal.js';
 import { InputBar } from './components/input-bar.js';
+import { PlanProgressView } from './components/plan-progress.js';
 import { PlanReviewModal } from './components/plan-review-modal.js';
 import { SlashPalette } from './components/slash-palette.js';
 import { StatusBar } from './components/status-bar.js';
@@ -307,6 +308,7 @@ export function App({
   return (
     <Box flexDirection="column">
       <Transcript entries={state.transcript} activeTurn={state.activeTurn} />
+      {state.planProgress && !state.pendingPlanReview ? <PlanProgressView progress={state.planProgress} /> : null}
       {state.pendingApproval ? (
         <ApprovalModal
           key={state.pendingApproval.id}

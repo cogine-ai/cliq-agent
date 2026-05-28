@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createSession } from '../session/store.js';
-import { approvePlan, createDraftPlan, finalizePlan } from './store.js';
+import { approvePlan, createDraftPlan, finalizePlan, updatePlanProgress } from './store.js';
 import { buildApprovedPlanInstructionMessages } from './instructions.js';
 
 const originalCliqHome = process.env.CLIQ_HOME;
@@ -90,4 +90,33 @@ test('buildApprovedPlanInstructionMessages returns approved plan context', async
   assert.match(messages[0]?.content ?? '', /\[pending\] Implement safely/);
   assert.match(messages[0]?.content ?? '', /Approved target mode: yolo/);
   assert.match(messages[0]?.content ?? '', /Implement safely/);
+});
+
+test('buildApprovedPlanInstructionMessages includes execution tracker state and update rules', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Tracked workflow',
+    contentMarkdown: '## Steps\n- Inspect code\n- Implement tracker'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: draft.id, targetMode: 'accept-edits' });
+  await updatePlanProgress(cwd, session, {
+    planId: draft.id,
+    items: [
+      { id: 'item_1', title: 'Inspect code', status: 'completed', activeForm: 'Inspecting code' },
+      { id: 'item_2', title: 'Implement tracker', status: 'in_progress', activeForm: 'Implementing tracker' }
+    ]
+  });
+
+  const messages = await buildApprovedPlanInstructionMessages(cwd, session);
+  const content = messages[0]?.content ?? '';
+
+  assert.match(content, /Plan execution tracker:/);
+  assert.match(content, /\[completed\] Inspect code/);
+  assert.match(content, /\[in_progress\] Implement tracker - Implementing tracker/);
+  assert.match(content, /Use the todo action to keep this tracker current/);
+  assert.match(content, /Todo action shape:/);
+  assert.match(content, /replaces the full tracker list/);
+  assert.match(content, /at most one item in_progress/);
+  assert.match(content, /Do not mark an item completed/);
 });

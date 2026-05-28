@@ -20,6 +20,22 @@ export type PlanItemInput = {
   notes?: string;
 };
 
+export type PlanProgressItem = {
+  id: string;
+  title: string;
+  status: PlanItemStatus;
+  activeForm: string;
+  notes?: string;
+};
+
+export type PlanProgressItemInput = {
+  id?: string;
+  title: string;
+  status?: PlanItemStatus;
+  activeForm: string;
+  notes?: string;
+};
+
 export type PlanArtifact = {
   id: string;
   sessionId: string;
@@ -41,6 +57,19 @@ export type PlanArtifact = {
   };
 };
 
+export type PlanProgress = {
+  planId: string;
+  sessionId: string;
+  workspaceId: string;
+  title: string;
+  items: PlanProgressItem[];
+  createdAt: string;
+  updatedAt: string;
+  paths: {
+    json: string;
+  };
+};
+
 export type PlanReviewSnapshot = {
   id: string;
   title: string;
@@ -48,4 +77,11 @@ export type PlanReviewSnapshot = {
   items: PlanItem[];
   path: string;
   markdownPath: string;
+};
+
+export type PlanProgressSnapshot = {
+  planId: string;
+  title: string;
+  path: string;
+  items: PlanProgressItem[];
 };

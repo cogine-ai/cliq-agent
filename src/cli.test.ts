@@ -20,10 +20,11 @@ import {
   resolveTxIdForReview,
   notifyIfPackageUpdateAvailable,
   hydratePendingPlanReview,
+  hydratePlanProgress,
   ReportedCliError,
   runCli
 } from './cli.js';
-import { createDraftPlan, finalizePlan } from './plans/store.js';
+import { approvePlan, createDraftPlan, finalizePlan } from './plans/store.js';
 import { createCheckpoint } from './session/checkpoints.js';
 import { createSession, ensureSession, saveSession, sessionFilePath } from './session/store.js';
 import { WorkspaceTrustError } from './session/trust.js';
@@ -1912,6 +1913,46 @@ test('hydratePendingPlanReview restores finalized active plans for TUI restart',
         assert.equal(actions[0].event.plan.contentMarkdown, '## Steps\n- Resume review');
         assert.deepEqual(actions[0].event.plan.items, [{ id: 'item_1', title: 'Resume review', status: 'pending' }]);
         assert.match(actions[0].event.plan.markdownPath, /plan\.md$/);
+      }
+    }
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.CLIQ_HOME;
+    } else {
+      process.env.CLIQ_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('hydratePlanProgress restores approved plan execution tracker for TUI restart', async () => {
+  const previousHome = process.env.CLIQ_HOME;
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-tui-progress-ws-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-tui-progress-home-'));
+  process.env.CLIQ_HOME = home;
+  try {
+    const session = createSession(cwd);
+    const draft = await createDraftPlan(cwd, session, {
+      title: 'Restart progress',
+      contentMarkdown: '## Steps\n- Resume work'
+    });
+    await finalizePlan(cwd, session, { planId: draft.id });
+    await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+
+    const actions: UiAction[] = [];
+    await hydratePlanProgress(captureDispatchStore(actions), cwd, session);
+
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0]?.type, 'runtime-event');
+    if (actions[0]?.type === 'runtime-event') {
+      assert.equal(actions[0].event.type, 'plan-progress-updated');
+      if (actions[0].event.type === 'plan-progress-updated') {
+        assert.equal(actions[0].event.progress.planId, draft.id);
+        assert.equal(actions[0].event.progress.title, 'Restart progress');
+        assert.deepEqual(actions[0].event.progress.items, [
+          { id: 'item_1', title: 'Resume work', status: 'pending', activeForm: 'Working on Resume work' }
+        ]);
       }
     }
   } finally {

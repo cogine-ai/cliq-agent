@@ -41,6 +41,14 @@ export type PlanItemAction = {
   notes?: string;
 };
 
+export type TodoItemAction = {
+  id?: string;
+  title: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  activeForm: string;
+  notes?: string;
+};
+
 export type PlanAction =
   | {
       op: 'draft';
@@ -60,6 +68,11 @@ export type PlanAction =
       planId?: string;
     };
 
+export type TodoAction = {
+  planId?: string;
+  items: TodoItemAction[];
+};
+
 import { repairJsonStrings } from './json-repair.js';
 
 export type ModelAction =
@@ -72,9 +85,10 @@ export type ModelAction =
   | { skill: SkillAction }
   | { skillResource: SkillResourceAction }
   | { plan: PlanAction }
+  | { todo: TodoAction }
   | { message: string };
 
-const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'skill', 'skillResource', 'plan', 'message'] as const;
+const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'skill', 'skillResource', 'plan', 'todo', 'message'] as const;
 
 export function parseModelAction(content: string): ModelAction {
   let parsed: unknown;
@@ -243,6 +257,22 @@ export function parseModelAction(content: string): ModelAction {
     }
   }
 
+  if (record.todo && typeof record.todo === 'object' && !Array.isArray(record.todo)) {
+    const todo = record.todo as Record<string, unknown>;
+    const items = parseTodoItems(todo.items);
+    if (
+      items !== null &&
+      (todo.planId === undefined || typeof todo.planId === 'string')
+    ) {
+      return {
+        todo: {
+          ...(todo.planId !== undefined ? { planId: todo.planId as string } : {}),
+          items
+        }
+      };
+    }
+  }
+
   if (!TOP_LEVEL_ACTIONS.includes(topLevelKey as (typeof TOP_LEVEL_ACTIONS)[number])) {
     throw new Error(`Unknown top-level key in model action: ${topLevelKey}\n${content}`);
   }
@@ -278,6 +308,34 @@ function parsePlanItems(value: unknown): PlanItemAction[] | undefined | null {
   const items: PlanItemAction[] = [];
   for (const raw of value) {
     const item = parsePlanItemAction(raw);
+    if (item === null) return null;
+    items.push(item);
+  }
+  return items;
+}
+
+export function parseTodoItemAction(value: unknown): TodoItemAction | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  if (item.id !== undefined && typeof item.id !== 'string') return null;
+  if (typeof item.title !== 'string' || !item.title.trim()) return null;
+  if (item.status !== 'pending' && item.status !== 'in_progress' && item.status !== 'completed') return null;
+  if (typeof item.activeForm !== 'string' || !item.activeForm.trim()) return null;
+  if (item.notes !== undefined && typeof item.notes !== 'string') return null;
+  return {
+    ...(item.id !== undefined ? { id: item.id } : {}),
+    title: item.title,
+    status: item.status,
+    activeForm: item.activeForm,
+    ...(item.notes !== undefined ? { notes: item.notes } : {})
+  };
+}
+
+function parseTodoItems(value: unknown): TodoItemAction[] | null {
+  if (!Array.isArray(value)) return null;
+  const items: TodoItemAction[] = [];
+  for (const raw of value) {
+    const item = parseTodoItemAction(raw);
     if (item === null) return null;
     items.push(item);
   }

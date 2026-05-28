@@ -1,5 +1,5 @@
 import type { ProviderName } from '../model/types.js';
-import type { PlanItem, PlanTargetMode } from '../plans/types.js';
+import type { PlanItem, PlanProgressSnapshot, PlanTargetMode } from '../plans/types.js';
 import type { InteractiveApprovalChoice } from '../policy/interactive-policy.js';
 import type { ApprovalSubject, PolicyMode } from '../policy/types.js';
 import type { ModelAction } from '../protocol/model/actions.js';
@@ -97,6 +97,7 @@ export type UiState = {
   activeTurn: ActiveTurn | null;
   pendingApproval: PendingApproval | null;
   pendingPlanReview: PendingPlanReview | null;
+  planProgress: PlanProgressSnapshot | null;
   policy: PolicyMode;
   model: { provider: ProviderName; model: string };
   session: { id: string; cwd: string };
@@ -151,6 +152,7 @@ export function createInitialState(opts: {
     activeTurn: null,
     pendingApproval: null,
     pendingPlanReview: null,
+    planProgress: null,
     policy: opts.policy,
     model: opts.model,
     session: opts.session,
@@ -221,6 +223,7 @@ export function reduce(state: UiState, action: UiAction): UiState {
         activeTurn: null,
         pendingApproval: null,
         pendingPlanReview: null,
+        planProgress: null,
         errors: [],
         // The token bar reflects "this session" — once /reset cuts a fresh
         // session, the previous count is stale. Hide the segment until the
@@ -398,6 +401,8 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
         }
       };
     }
+    case 'plan-progress-updated':
+      return { ...state, planProgress: event.progress };
     case 'checkpoint-created':
     case 'compact-start':
     case 'compact-skip':

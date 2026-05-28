@@ -65,6 +65,13 @@ function deriveChannel(
     };
   }
 
+  if ('todo' in action) {
+    return {
+      kind: 'plan-progress',
+      ...(action.todo.planId ? { planId: action.todo.planId } : {})
+    };
+  }
+
   const readPath = extractReadPath(action);
   if (readPath !== undefined) {
     return { kind: 'fs-read', path: readPath };
@@ -125,6 +132,13 @@ function buildToolDisplay(
   if ('plan' in action) {
     return {
       title: 'Record plan artifact?',
+      detail: formatFallbackDetail(action)
+    };
+  }
+
+  if ('todo' in action) {
+    return {
+      title: 'Update plan progress?',
       detail: formatFallbackDetail(action)
     };
   }
