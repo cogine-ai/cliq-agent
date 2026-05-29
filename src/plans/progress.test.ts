@@ -12,8 +12,11 @@ import {
   planProgressPath,
   readPlanArtifact,
   readPlanProgress,
+  readReferencedPlanProgress,
+  readOrSeedReferencedPlanProgress,
   updatePlanProgress
 } from './store.js';
+import { buildApprovedPlanInstructionMessages } from './instructions.js';
 
 const originalCliqHome = process.env.CLIQ_HOME;
 const cleanupDirs: string[] = [];
@@ -149,6 +152,57 @@ test('updatePlanProgress persists execution status without mutating the approved
     ['item_1', 'pending'],
     ['item_2', 'pending']
   ]);
+});
+
+test('readReferencedPlanProgress does not recreate progress while building instructions', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Tracked workflow',
+    contentMarkdown: '## Steps\n- Inspect code\n- Implement tracker'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+  await updatePlanProgress(cwd, session, {
+    planId: draft.id,
+    items: [
+      { id: 'item_1', title: 'Inspect code', status: 'completed', activeForm: 'Inspecting code' },
+      { id: 'item_2', title: 'Implement tracker', status: 'in_progress', activeForm: 'Implementing tracker' }
+    ]
+  });
+  await rm(await planProgressPath(cwd, session, draft.id), { force: true });
+
+  assert.equal(await readReferencedPlanProgress(cwd, session, draft.id), null);
+  await assert.rejects(() => readPlanProgress(cwd, session, draft.id), /ENOENT|no such file/i);
+
+  const messages = await buildApprovedPlanInstructionMessages(cwd, session);
+  assert.doesNotMatch(messages[0]?.content ?? '', /Plan execution tracker:/);
+  await assert.rejects(() => readPlanProgress(cwd, session, draft.id), /ENOENT|no such file/i);
+
+  const seeded = await readOrSeedReferencedPlanProgress(cwd, session, draft.id);
+  assert.ok(seeded);
+  assert.deepEqual(seeded.items.map((item) => [item.id, item.status]), [
+    ['item_1', 'pending'],
+    ['item_2', 'pending']
+  ]);
+});
+
+test('readOrSeedReferencedPlanProgress preserves existing execution progress', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Tracked workflow',
+    contentMarkdown: '## Steps\n- Inspect code'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+  await updatePlanProgress(cwd, session, {
+    planId: draft.id,
+    items: [{ id: 'item_1', title: 'Inspect code', status: 'completed', activeForm: 'Inspecting code' }]
+  });
+
+  const progress = await readPlanProgress(cwd, session, draft.id);
+  const seeded = await readOrSeedReferencedPlanProgress(cwd, session, draft.id);
+  assert.equal(seeded?.items[0]?.status, 'completed');
+  assert.equal(seeded?.updatedAt, progress.updatedAt);
 });
 
 test('updatePlanProgress rejects stale plan ids and multiple in-progress items', async () => {

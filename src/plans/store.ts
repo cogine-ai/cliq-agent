@@ -326,17 +326,29 @@ export async function readReferencedPlanProgress(
   try {
     return await readPlanProgress(cwd, session, planId);
   } catch (error) {
-    if (!isMissingPath(error)) {
-      throw error;
+    if (isMissingPath(error)) {
+      return null;
     }
-    try {
-      return await seedApprovedPlanProgress(cwd, session, planId);
-    } catch (seedError) {
-      if (isMissingPath(seedError)) {
-        return null;
-      }
-      throw seedError;
+    throw error;
+  }
+}
+
+export async function readOrSeedReferencedPlanProgress(
+  cwd: string,
+  session: Session,
+  planId: string
+): Promise<PlanProgress | null> {
+  const existing = await readReferencedPlanProgress(cwd, session, planId);
+  if (existing) {
+    return existing;
+  }
+  try {
+    return await seedApprovedPlanProgress(cwd, session, planId);
+  } catch (seedError) {
+    if (isMissingPath(seedError)) {
+      return null;
     }
+    throw seedError;
   }
 }
 
@@ -521,6 +533,13 @@ async function seedPlanProgress(
   plan: PlanArtifact,
   cliqHome = resolveCliqHome()
 ): Promise<PlanProgress> {
+  try {
+    return await readPlanProgress(cwd, session, plan.id, cliqHome);
+  } catch (error) {
+    if (!isMissingPath(error)) {
+      throw error;
+    }
+  }
   const progressPath = await planProgressPath(cwd, session, plan.id, cliqHome);
   const now = nowIso();
   const progress: PlanProgress = {

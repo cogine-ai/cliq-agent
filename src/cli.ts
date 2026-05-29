@@ -18,7 +18,7 @@ import {
   approvePlan,
   cancelPlan,
   readReferencedPlanArtifact,
-  readReferencedPlanProgress,
+  readOrSeedReferencedPlanProgress,
   rejectPlan
 } from './plans/store.js';
 import { extendApprovalScope } from './policy/approval-scope.js';
@@ -3023,7 +3023,7 @@ export async function hydratePendingPlanReview(store: UiStore, cwd: string, sess
 
 export async function hydratePlanProgress(store: UiStore, cwd: string, session: Session, planId = session.approvedPlanId) {
   if (!planId) return;
-  const progress = await readReferencedPlanProgress(cwd, session, planId);
+  const progress = await readOrSeedReferencedPlanProgress(cwd, session, planId);
   if (!progress) return;
   store.dispatch({
     type: 'runtime-event',
