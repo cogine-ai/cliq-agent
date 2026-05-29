@@ -70,18 +70,20 @@ test('renders update notice when a newer version is available', () => {
     versionUpdate: { current: '0.9.0', latest: '0.10.0' }
   };
   const { lastFrame } = render(<StatusBar state={state} />);
-  assert.match(lastFrame() ?? '', /update 0\.10\.0/);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /update 0\.10\.0/);
+  assert.ok(frame.trimEnd().endsWith('update 0.10.0'));
 });
 
-test('renders a running-state hint with the available cancel action', () => {
+test('keeps running-state hints out of the bottom status bar', () => {
   const state = init({ activeTurn: { modelChunks: 0, modelChars: 0 } });
   const { lastFrame } = render(<StatusBar state={state} />);
   const frame = lastFrame() ?? '';
-  assert.match(frame, /running/);
-  assert.match(frame, /Ctrl\+C cancel/);
+  assert.doesNotMatch(frame, /running/);
+  assert.doesNotMatch(frame, /Ctrl\+C cancel/);
 });
 
-test('renders an approval-state hint instead of normal input hints', () => {
+test('keeps approval-state hints out of the bottom status bar', () => {
   const state = init({
     pendingApproval: {
       id: 'pa_status',
@@ -98,7 +100,6 @@ test('renders an approval-state hint instead of normal input hints', () => {
   });
   const { lastFrame } = render(<StatusBar state={state} />);
   const frame = lastFrame() ?? '';
-  assert.match(frame, /approval/);
-  assert.match(frame, /Ctrl\+C cancel/);
-  assert.doesNotMatch(frame, /Ctrl\+D exits/);
+  assert.doesNotMatch(frame, /approval/);
+  assert.doesNotMatch(frame, /Ctrl\+C cancel/);
 });
