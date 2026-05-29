@@ -107,6 +107,7 @@ type ParsedArgsBase = {
   txApply?: TxApplyPolicy;
   tui?: boolean;
   classic?: boolean;
+  tuiDebug?: boolean;
   /**
    * Layered permission rules parsed from `--allow`/`--deny`/`--ask`
    * (repeatable). Source is always `'cli'`. The rules feed into the
@@ -858,6 +859,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let txApply: TxApplyPolicy | undefined;
   let tui = false;
   let classic = false;
+  let tuiDebug = false;
   let policyExplicit = false;
   // Track which CLI flag (if any) set the preset so we can refuse
   // simultaneous --policy + --preset. Both are aliases for the same setting;
@@ -934,6 +936,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
     if (token.startsWith('--classic=')) {
       throw new Error('--classic does not accept a value');
+    }
+
+    if (token === '--tui-debug') {
+      tuiDebug = true;
+      continue;
+    }
+
+    if (token.startsWith('--tui-debug=')) {
+      throw new Error('--tui-debug does not accept a value');
     }
 
     if (token.startsWith('--policy=')) {
@@ -1146,6 +1157,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(txApply !== undefined ? { txApply } : {}),
     ...(tui ? { tui } : {}),
     ...(classic ? { classic } : {}),
+    ...(tuiDebug ? { tuiDebug } : {}),
     ...(cliPermissions ? { cliPermissions } : {})
   };
   const baseExtras = {
@@ -1154,6 +1166,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(txApply !== undefined ? { txApply } : {}),
     ...(tui ? { tui } : {}),
     ...(classic ? { classic } : {}),
+    ...(tuiDebug ? { tuiDebug } : {}),
     ...(cliPermissions ? { cliPermissions } : {})
   };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
@@ -1369,6 +1382,7 @@ Options:
   --tx <off|edit>          Override workspace config transactions.mode for this run
   --tx-apply <policy>      Override transactions.applyPolicy (interactive | auto-on-pass | manual-only)
   --tui                    Force the Ink TUI (already the default on a TTY; overrides CLIQ_TUI=0)
+  --tui-debug              Show TUI mode-change notices in the transcript
   --classic                Force the legacy readline REPL instead of the TUI
 
 Policy modes:
@@ -1400,6 +1414,7 @@ Env:
   CLIQ_TRUST_WORKSPACE       trust | deny — non-interactive/CI shortcut to trust or forbid workspace runtime gates
                              (trusted | untrusted synonyms). Interactive chat still prompts unless set.
   CLIQ_TUI                  Set to "0" to fall back to the legacy readline REPL
+  CLIQ_TUI_DEBUG            Set to "1" to show TUI mode-change notices
 `);
 }
 
@@ -2580,6 +2595,10 @@ export async function runCli(argv: string[]) {
       wsCfg,
       txMode: parsed.txMode,
       txApply: parsed.txApply,
+      showModeChangeMessages: resolveTuiDebug({
+        tuiDebug: parsed.tuiDebug === true,
+        envDebug: process.env.CLIQ_TUI_DEBUG === '1'
+      }),
       coordinatorCtx: chatCoordinatorCtx,
       cliqHome,
       permissionTable: chatPermissionTable,
@@ -2699,6 +2718,13 @@ export function resolveTuiPreference(opts: {
   return opts.isTTY;
 }
 
+export function resolveTuiDebug(opts: {
+  tuiDebug: boolean;
+  envDebug: boolean;
+}): boolean {
+  return opts.tuiDebug || opts.envDebug;
+}
+
 type RunChatTuiSessionOpts = {
   cwd: string;
   session: Session;
@@ -2710,6 +2736,7 @@ type RunChatTuiSessionOpts = {
   wsCfg: WorkspaceConfig;
   txMode?: TxMode;
   txApply?: TxApplyPolicy;
+  showModeChangeMessages: boolean;
   coordinatorCtx: CoordinatorContext;
   cliqHome: string;
   /**
@@ -2892,6 +2919,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
 
   const tui = mountTui({
     store,
+    showModeChangeMessages: opts.showModeChangeMessages,
     onSubmit: async (text) => {
       const controller = new AbortController();
       currentTurn = controller;

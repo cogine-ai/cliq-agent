@@ -7,6 +7,7 @@ import type { PendingPlanReview, UiPlanDecision, UiStore } from './store.js';
 export type MountTuiOpts = {
   store: UiStore;
   onSubmit: (text: string) => void | Promise<void>;
+  showModeChangeMessages?: boolean;
   onReset?: () => void | Promise<void>;
   onPolicyChange?: (mode: PolicyMode) => void | Promise<void>;
   onPlanDecision?: (
@@ -28,6 +29,9 @@ export function mountTui(opts: MountTuiOpts): MountedTui {
     <App
       store={opts.store}
       onSubmit={opts.onSubmit}
+      {...(opts.showModeChangeMessages !== undefined
+        ? { showModeChangeMessages: opts.showModeChangeMessages }
+        : {})}
       {...(opts.onReset ? { onReset: opts.onReset } : {})}
       {...(opts.onPolicyChange ? { onPolicyChange: opts.onPolicyChange } : {})}
       {...(opts.onPlanDecision ? { onPlanDecision: opts.onPlanDecision } : {})}

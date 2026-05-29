@@ -28,6 +28,7 @@ import type {
 export type AppProps = {
   store: UiStore;
   onSubmit: (text: string) => void | Promise<void>;
+  showModeChangeMessages?: boolean;
   onReset?: () => void | Promise<void>;
   onPolicyChange?: (mode: PolicyMode) => void | Promise<void>;
   onPlanDecision?: (
@@ -42,6 +43,7 @@ export type AppProps = {
 export function App({
   store,
   onSubmit,
+  showModeChangeMessages = false,
   onReset,
   onPolicyChange,
   onPlanDecision,
@@ -130,7 +132,9 @@ export function App({
         try {
           await onPolicyChange?.(parsed.mode);
           store.dispatch({ type: 'policy-change', mode: parsed.mode });
-          pushSystem(`mode → ${describePolicyMode(parsed.mode).label} (${parsed.mode})`);
+          if (showModeChangeMessages) {
+            pushSystem(`mode → ${describePolicyMode(parsed.mode).label} (${parsed.mode})`);
+          }
         } catch (error) {
           pushSystem(`/policy failed: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -193,7 +197,9 @@ export function App({
     try {
       await onPolicyChange?.(next);
       store.dispatch({ type: 'policy-change', mode: next });
-      pushSystem(`mode → ${describePolicyMode(next).label} (${next})`);
+      if (showModeChangeMessages) {
+        pushSystem(`mode → ${describePolicyMode(next).label} (${next})`);
+      }
     } catch (error) {
       pushSystem(
         `policy rotation failed: ${error instanceof Error ? error.message : String(error)}`

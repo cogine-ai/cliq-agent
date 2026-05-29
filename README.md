@@ -51,10 +51,10 @@ Inside the TUI:
 - ↑ / ↓ recall previously submitted prompts while preserving any in-progress
   draft; ← / → move the cursor inside the input buffer.
 - The status line shows the current mode in user-facing language, such as
-  `Plan`, `? Default`, `+ Accept Edits`, or `! YOLO`.
-- Shift+Tab rotates through modes and confirms the new mode in the transcript;
-  Ctrl+C cancels an active turn or clears input; Ctrl+D exits on empty input;
-  Ctrl+O folds or unfolds the most recent tool output.
+  `Plan`, `Default`, `+ Accept Edits`, or `! YOLO`.
+- Shift+Tab rotates through modes; Ctrl+C cancels an active turn or clears
+  input; Ctrl+D exits on empty input; Ctrl+O folds or unfolds the most recent
+  tool output.
 - The input area shows short state-aware hints: idle hints point to `/help` and
   mode switching, slash input shows completion help, and active turns show the
   cancellation shortcut.
@@ -66,6 +66,10 @@ The TUI runs by default on a TTY, but you can opt in explicitly with `--tui` (us
 cliq --classic
 CLIQ_TUI=0 cliq chat
 ```
+
+By default, mode changes update the status line without adding transcript noise.
+To show mode-change notices in the transcript while debugging TUI state, use
+`--tui-debug` or `CLIQ_TUI_DEBUG=1`.
 
 One-shot runs (`cliq "task"`) and headless modes (`cliq run --jsonl`) are unaffected.
 
@@ -252,7 +256,7 @@ For day-to-day coding, `default` provides approval checkpoints; `accept-edits` l
 
 ## Policy modes
 
-- `? Default` (`default`): ask before edits, shell commands, transaction apply, and permission requests
+- `Default` (`default`): ask before edits, shell commands, transaction apply, and permission requests
 - `+ Accept Edits` (`accept-edits`): allow edits and successful transaction apply; ask before shell commands
 - `Plan` (`plan`): inspect and produce a plan; block edits, shell commands, transaction apply, and permission requests
 - `! YOLO` (`yolo`): auto-approve normal tool calls and permission requests, subject to built-in and explicit deny rules
