@@ -16,7 +16,7 @@ test('renders an active prompt glyph by default', () => {
   assert.match(lastFrame() ?? '', />/);
 });
 
-test('renders a compact context hint below the input row', () => {
+test('renders a compact context hint above the input row', () => {
   const { lastFrame } = render(
     <InputBar
       value=""
@@ -25,7 +25,9 @@ test('renders a compact context hint below the input row', () => {
       hint="/help · Shift+Tab mode"
     />
   );
-  assert.match(lastFrame() ?? '', /\/help · Shift\+Tab mode/);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /\/help · Shift\+Tab mode/);
+  assert.ok(frame.indexOf('/help') < frame.indexOf('>'));
 });
 
 test('renders a dimmed waiting glyph when disabled', () => {

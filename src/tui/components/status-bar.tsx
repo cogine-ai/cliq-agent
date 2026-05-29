@@ -12,11 +12,10 @@ export function StatusBar({ state }: { state: UiState }) {
   const cwdLabel = `/${path.basename(state.session.cwd)}`;
   const tokensLabel = state.sessionTokens !== null ? `${formatTokens(state.sessionTokens)} tok` : null;
   const hasError = state.errors.length > 0;
-  const interactionHint = formatInteractionHint(state);
 
   return (
     <Box width="100%" justifyContent="space-between">
-      <Box>
+      <Box flexShrink={1}>
         {hasError ? <Text color="red">● </Text> : null}
         <Text dimColor>{`${state.model.provider}/${state.model.model}`}</Text>
         <Sep />
@@ -34,11 +33,11 @@ export function StatusBar({ state }: { state: UiState }) {
           </>
         ) : null}
       </Box>
-      <Box>
-        {interactionHint ? <Text color={state.pendingApproval ? 'yellow' : 'cyan'}>{interactionHint}</Text> : null}
-        {interactionHint && state.versionUpdate ? <Text dimColor>{' · '}</Text> : null}
-        {state.versionUpdate ? <Text color="yellow">{`update ${state.versionUpdate.latest}`}</Text> : null}
-      </Box>
+      {state.versionUpdate ? (
+        <Box flexShrink={0} marginLeft={1}>
+          <Text color="yellow">{`update ${state.versionUpdate.latest}`}</Text>
+        </Box>
+      ) : null}
     </Box>
   );
 }
@@ -50,18 +49,6 @@ function Sep() {
 function formatTxStatus(tx: UiState['tx']): string {
   if (!tx) return 'tx idle';
   return `tx ${shortTxId(tx.txId)} ${tx.state}`;
-}
-
-function formatInteractionHint(state: UiState): string | null {
-  if (state.pendingApproval) {
-    return state.pendingApproval.subject.kind === 'tool'
-      ? 'approval: y/n/a/s/W · Ctrl+C cancel'
-      : 'approval: y/n/Esc · Ctrl+C cancel';
-  }
-  if (state.activeTurn) {
-    return 'running: Ctrl+C cancel';
-  }
-  return null;
 }
 
 function shortSessionId(id: string): string {

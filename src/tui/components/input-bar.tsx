@@ -184,6 +184,11 @@ export function InputBar({
 
   return (
     <Box flexDirection="column">
+      {hint ? (
+        <Box height={1} overflow="hidden">
+          <Text dimColor wrap="truncate">{hint}</Text>
+        </Box>
+      ) : null}
       <Box>
         <Text color={disabled ? 'gray' : 'cyan'}>{disabled ? '… ' : '> '}</Text>
         {disabled ? (
@@ -198,7 +203,6 @@ export function InputBar({
           />
         )}
       </Box>
-      {hint ? <Text dimColor>{hint}</Text> : null}
     </Box>
   );
 }
