@@ -19,6 +19,11 @@ test('parsePermissionRuleString parses the canonical "<channel>: <pattern>" form
     pattern: '.env',
     source: 'cli'
   });
+  assert.deepEqual(parsePermissionRuleString('plan-progress: plan_*', 'workspace', 'permissions.allow[1]'), {
+    channel: 'plan-progress',
+    pattern: 'plan_*',
+    source: 'workspace'
+  });
 });
 
 test('parsePermissionRuleString tolerates surrounding whitespace and stray spaces around the colon', () => {

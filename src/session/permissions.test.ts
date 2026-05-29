@@ -154,6 +154,20 @@ test('readPersistedWorkspacePermissions drops rules with unknown channels', asyn
   }
 });
 
+test('readPersistedWorkspacePermissions accepts plan-progress channel rules', async () => {
+  const { ctx, cleanup } = await freshCtx();
+  try {
+    await writePersistedWorkspacePermissions(ctx, {
+      allow: [{ channel: 'plan-progress', pattern: 'plan_*' }],
+      deny: []
+    });
+    const read = await readPersistedWorkspacePermissions(ctx);
+    assert.deepEqual(read?.allow, [{ channel: 'plan-progress', pattern: 'plan_*' }]);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('appendPersistedWorkspacePermission adds rules and dedupes exact matches', async () => {
   const { ctx, cleanup } = await freshCtx();
   try {
