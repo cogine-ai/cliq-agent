@@ -119,6 +119,20 @@ test('/policy <mode> calls onPolicyChange and dispatches policy-change', async (
   await flush(); // extra tick for the awaited onPolicyChange chain
   assert.deepEqual(captured, ['plan']);
   assert.equal(store.getState().policy, 'plan');
+  assert.equal(store.getState().transcript.length, 0);
+});
+
+test('/policy <mode> shows a transition notice when mode-change messages are enabled', async () => {
+  const store = makeStore();
+  const { stdin, lastFrame } = render(
+    <App store={store} onSubmit={() => {}} showModeChangeMessages />
+  );
+  stdin.write('/policy plan');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+  assert.match(lastFrame() ?? '', /mode → Plan/);
 });
 
 test('/skills calls onSkillsList and renders the result', async () => {
@@ -234,7 +248,7 @@ test('Ctrl+C during an active turn calls onCancelTurn and renders cancelling not
   assert.match(lastFrame() ?? '', /cancelling/);
 });
 
-test('Shift+Tab rotates mode and confirms the user-facing mode label', async () => {
+test('Shift+Tab rotates mode without adding a transition notice by default', async () => {
   const store = makeStore();
   const captured: string[] = [];
   const { stdin, lastFrame } = render(
@@ -253,8 +267,23 @@ test('Shift+Tab rotates mode and confirms the user-facing mode label', async () 
 
   assert.deepEqual(captured, ['plan']);
   assert.equal(store.getState().policy, 'plan');
-  assert.match(lastFrame() ?? '', /mode → Plan/);
+  assert.equal(store.getState().transcript.length, 0);
+  assert.doesNotMatch(lastFrame() ?? '', /mode → Plan/);
   assert.match(lastFrame() ?? '', /Plan/);
+});
+
+test('Shift+Tab shows a transition notice when mode-change messages are enabled', async () => {
+  const store = makeStore();
+  const { stdin, lastFrame } = render(
+    <App store={store} onSubmit={() => {}} showModeChangeMessages />
+  );
+
+  stdin.write('\x1b[Z');
+  await flush();
+  await flush();
+
+  assert.equal(store.getState().policy, 'plan');
+  assert.match(lastFrame() ?? '', /mode → Plan/);
 });
 
 test('Ctrl+O reports when no expandable tool output is available', async () => {

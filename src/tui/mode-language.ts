@@ -26,7 +26,7 @@ const POLICY_MODE_LANGUAGE: Record<PolicyMode, PolicyModeDescription> = {
     shortLabel: 'Default',
     description: 'Asks before edits, shell commands, transaction apply, and permission requests.',
     risk: 'guarded',
-    marker: '?',
+    marker: '',
     color: 'yellow'
   },
   'accept-edits': {

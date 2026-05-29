@@ -28,6 +28,7 @@ test('policy mode language maps every internal mode to a user-facing label', () 
 });
 
 test('status label marks yolo mode distinctly', () => {
+  assert.equal(formatModeForStatus('default'), 'Default');
   assert.match(formatModeForStatus('yolo'), /^! YOLO$/);
   assert.equal(describePolicyMode('yolo').risk, 'danger');
   assert.equal(describePolicyMode('plan').risk, 'safe');

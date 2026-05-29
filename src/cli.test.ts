@@ -16,6 +16,7 @@ import {
   parseArgs,
   printHelp,
   renderUnhandledError,
+  resolveTuiDebug,
   resolveTuiInitialPolicy,
   resolveTuiPreference,
   resolveTxIdForReview,
@@ -74,6 +75,21 @@ test('parseArgs accepts command-scoped run --jsonl', () => {
     skills: [],
     model: {}
   });
+});
+
+test('parseArgs accepts --tui-debug', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--tui-debug', 'chat']), {
+    cmd: 'chat',
+    prompt: '',
+    policy: 'default',
+    skills: [],
+    model: {},
+    tuiDebug: true
+  });
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--tui-debug=1', 'chat']),
+    /--tui-debug does not accept a value/
+  );
 });
 
 test('parseArgs accepts top-level version flags without stealing run prompts', () => {
@@ -866,6 +882,8 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /repeat/i);
   assert.match(output, /--streaming MODE/);
   assert.match(output, /--jsonl/);
+  assert.match(output, /--tui-debug/);
+  assert.match(output, /CLIQ_TUI_DEBUG/);
   assert.match(
     output,
     /cliq rpc\s+Reads newline-delimited JSON-RPC 2\.0 requests from stdin and writes protocol messages to stdout/
@@ -1888,6 +1906,12 @@ test('resolveTuiPreference precedence: --classic > --tui > CLIQ_TUI=0 > TTY defa
     resolveTuiPreference({ classic: true, tui: false, envOptOut: false, isTTY: false }),
     false
   );
+});
+
+test('resolveTuiDebug enables debug notices from CLI flag or env', () => {
+  assert.equal(resolveTuiDebug({ tuiDebug: false, envDebug: false }), false);
+  assert.equal(resolveTuiDebug({ tuiDebug: true, envDebug: false }), true);
+  assert.equal(resolveTuiDebug({ tuiDebug: false, envDebug: true }), true);
 });
 
 test('hydratePendingPlanReview restores finalized active plans for TUI restart', async () => {
