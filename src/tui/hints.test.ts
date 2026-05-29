@@ -31,6 +31,13 @@ test('approval hints focus on approval choices', () => {
   );
 });
 
+test('plan review hints focus on decision choices', () => {
+  assert.equal(
+    buildInputHint({ kind: 'plan-review', width: 90 }),
+    'Plan review: d default · a accept-edits · Y yolo · r reject · c cancel'
+  );
+});
+
 test('narrow hints stay compact', () => {
   assert.equal(
     buildInputHint({ kind: 'idle', hasInput: true, hasExpandableTool: false, width: 36 }),

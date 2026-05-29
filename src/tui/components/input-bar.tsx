@@ -2,6 +2,7 @@ import { Box, Text, useInput, type Key } from 'ink';
 import { useRef, useState } from 'react';
 
 import { isShiftTabInput } from '../hooks/use-keybindings.js';
+import { Divider } from './divider.js';
 
 // ink-text-input v6 inserts the bare letter for Ctrl+<letter> combinations
 // (its source only filters Ctrl+C explicitly), so Ctrl+O / Ctrl+G / Ctrl+L /
@@ -153,7 +154,7 @@ export function InputBar({
   onHistoryNext,
   disabled = false,
   completion = null,
-  hint = null
+  width
 }: {
   value: string;
   onChange: (next: string) => void;
@@ -162,7 +163,7 @@ export function InputBar({
   onHistoryNext?: () => void;
   disabled?: boolean;
   completion?: string | null;
-  hint?: string | null;
+  width?: number;
 }) {
   useInput(
     (_input, key) => {
@@ -184,12 +185,8 @@ export function InputBar({
 
   return (
     <Box flexDirection="column">
-      {hint ? (
-        <Box height={1} overflow="hidden">
-          <Text dimColor wrap="truncate">{hint}</Text>
-        </Box>
-      ) : null}
-      <Box>
+      <Divider width={width} />
+      <Box height={1} overflow="hidden">
         <Text color={disabled ? 'gray' : 'cyan'}>{disabled ? '… ' : '> '}</Text>
         {disabled ? (
           <Text dimColor>{value}</Text>
@@ -203,6 +200,7 @@ export function InputBar({
           />
         )}
       </Box>
+      <Divider width={width} />
     </Box>
   );
 }

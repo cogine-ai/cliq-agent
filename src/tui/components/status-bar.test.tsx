@@ -15,15 +15,20 @@ const init = (overrides: Partial<UiState> = {}): UiState => ({
   ...overrides,
 });
 
-test('renders provider/model · policy · short session · cwd basename · tx idle', () => {
-  const { lastFrame } = render(<StatusBar state={init()} />);
+test('renders mode and hint before technical status details', () => {
+  const { lastFrame } = render(
+    <StatusBar state={init()} hint="Shift+Tab cycle · Ctrl+D exit" />
+  );
   const frame = lastFrame() ?? '';
+  assert.match(frame, /bypass permissions on/);
+  assert.match(frame, /Shift\+Tab cycle/);
   assert.match(frame, /ollama\/qwen3:4b/);
-  assert.match(frame, /! YOLO/);
+  assert.doesNotMatch(frame, /! YOLO/);
   assert.doesNotMatch(frame, / · yolo · /);
   assert.match(frame, /ses_a1b2c3/);
   assert.match(frame, /repo/);
   assert.match(frame, /tx idle/);
+  assert.ok(frame.indexOf('bypass permissions on') < frame.indexOf('ollama/qwen3:4b'));
 });
 
 test('shows a red error indicator when errors are present', () => {
@@ -38,7 +43,7 @@ test('shows a red error indicator when errors are present', () => {
 
 test('reflects updated policy mode', () => {
   const { lastFrame } = render(<StatusBar state={init({ policy: 'plan' })} />);
-  assert.match(lastFrame() ?? '', /Plan/);
+  assert.match(lastFrame() ?? '', /plan mode/);
 });
 
 test('renders the active tx state when state.tx is set', () => {
@@ -75,7 +80,15 @@ test('renders update notice when a newer version is available', () => {
   assert.ok(frame.trimEnd().endsWith('update 0.10.0'));
 });
 
-test('keeps running-state hints out of the bottom status bar', () => {
+test('renders supplied running-state hints in the footer', () => {
+  const state = init({ activeTurn: { modelChunks: 0, modelChars: 0 } });
+  const { lastFrame } = render(<StatusBar state={state} hint="Running · Ctrl+C cancel" />);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /Running/);
+  assert.match(frame, /Ctrl\+C cancel/);
+});
+
+test('does not synthesize running-state hints without an explicit hint', () => {
   const state = init({ activeTurn: { modelChunks: 0, modelChars: 0 } });
   const { lastFrame } = render(<StatusBar state={state} />);
   const frame = lastFrame() ?? '';
@@ -83,7 +96,7 @@ test('keeps running-state hints out of the bottom status bar', () => {
   assert.doesNotMatch(frame, /Ctrl\+C cancel/);
 });
 
-test('keeps approval-state hints out of the bottom status bar', () => {
+test('does not synthesize approval-state hints without an explicit hint', () => {
   const state = init({
     pendingApproval: {
       id: 'pa_status',

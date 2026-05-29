@@ -16,18 +16,15 @@ test('renders an active prompt glyph by default', () => {
   assert.match(lastFrame() ?? '', />/);
 });
 
-test('renders a compact context hint above the input row', () => {
+test('frames the input row with top and bottom dividers', () => {
   const { lastFrame } = render(
-    <InputBar
-      value=""
-      onChange={() => {}}
-      onSubmit={() => {}}
-      hint="/help · Shift+Tab mode"
-    />
+    <InputBar value="" onChange={() => {}} onSubmit={() => {}} width={12} />
   );
   const frame = lastFrame() ?? '';
-  assert.match(frame, /\/help · Shift\+Tab mode/);
-  assert.ok(frame.indexOf('/help') < frame.indexOf('>'));
+  const lines = frame.split('\n');
+  assert.match(lines[0] ?? '', /─{12}/);
+  assert.match(lines[1] ?? '', />/);
+  assert.match(lines[2] ?? '', /─{12}/);
 });
 
 test('renders a dimmed waiting glyph when disabled', () => {

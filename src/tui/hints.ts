@@ -2,7 +2,8 @@ export type InputHintState =
   | { kind: 'idle'; hasInput: boolean; hasExpandableTool: boolean; width?: number }
   | { kind: 'slash-input'; width?: number }
   | { kind: 'active-turn'; width?: number }
-  | { kind: 'approval'; allowTurn: boolean; width?: number };
+  | { kind: 'approval'; allowTurn: boolean; width?: number }
+  | { kind: 'plan-review'; width?: number };
 
 const NARROW_WIDTH = 48;
 
@@ -20,6 +21,10 @@ export function buildInputHint(state: InputHintState): string {
         : narrow
           ? 'y/n'
           : 'Approval: y allow · n deny';
+    case 'plan-review':
+      return narrow
+        ? 'd/a/Y run · r reject · c cancel'
+        : 'Plan review: d default · a accept-edits · Y yolo · r reject · c cancel';
     case 'slash-input':
       return narrow ? 'Tab complete' : 'Slash commands · Tab complete · Enter run';
     case 'idle':
