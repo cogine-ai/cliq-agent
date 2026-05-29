@@ -176,14 +176,22 @@ export function App({
   const expandableTool = findLatestExpandableTool(state);
   const inputHint = state.activeTurn
     ? buildInputHint({ kind: 'active-turn', width: terminalWidth })
-    : input.startsWith('/')
-      ? buildInputHint({ kind: 'slash-input', width: terminalWidth })
-      : buildInputHint({
-          kind: 'idle',
-          hasInput: input.length > 0,
-          hasExpandableTool: expandableTool !== null,
+    : state.pendingApproval
+      ? buildInputHint({
+          kind: 'approval',
+          allowTurn: state.pendingApproval.subject.kind === 'tool',
           width: terminalWidth
-        });
+        })
+      : state.pendingPlanReview
+        ? buildInputHint({ kind: 'plan-review', width: terminalWidth })
+        : input.startsWith('/')
+          ? buildInputHint({ kind: 'slash-input', width: terminalWidth })
+          : buildInputHint({
+              kind: 'idle',
+              hasInput: input.length > 0,
+              hasExpandableTool: expandableTool !== null,
+              width: terminalWidth
+            });
 
   async function rotatePolicy() {
     // Read the current policy from the store rather than the rendered state
@@ -343,11 +351,11 @@ export function App({
             onHistoryNext={onHistoryNext}
             disabled={inputDisabled}
             completion={completion}
-            hint={inputHint}
+            width={terminalWidth}
           />
         </>
       )}
-      <StatusBar state={state} />
+      <StatusBar state={state} hint={inputHint} />
     </Box>
   );
 }

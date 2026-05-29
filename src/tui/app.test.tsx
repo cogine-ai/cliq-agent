@@ -40,7 +40,7 @@ test('mounts and renders status bar segments', () => {
   const { lastFrame } = render(<App store={store} onSubmit={() => {}} />);
   const frame = lastFrame() ?? '';
   assert.match(frame, /ollama\/qwen3:4b/);
-  assert.match(frame, /! YOLO/);
+  assert.match(frame, /bypass permissions on/);
 });
 
 test('end-to-end: dispatches reach the rendered transcript', async () => {
@@ -269,7 +269,7 @@ test('Shift+Tab rotates mode without adding a transition notice by default', asy
   assert.equal(store.getState().policy, 'plan');
   assert.equal(store.getState().transcript.length, 0);
   assert.doesNotMatch(lastFrame() ?? '', /mode → Plan/);
-  assert.match(lastFrame() ?? '', /Plan/);
+  assert.match(lastFrame() ?? '', /plan mode/);
 });
 
 test('Shift+Tab shows a transition notice when mode-change messages are enabled', async () => {
