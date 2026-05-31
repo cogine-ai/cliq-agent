@@ -1225,6 +1225,65 @@ test('runCli run --jsonl writes only JSONL events to stdout for model errors', a
   assert.equal(stderrChunks.join('').trim(), '');
 });
 
+test('runCli --classic prints provider-first setup guidance for missing model config', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-classic-setup-cwd-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-classic-setup-home-'));
+  const previousCwd = process.cwd();
+  const previousHome = process.env.CLIQ_HOME;
+  const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
+  const previousProvider = process.env.CLIQ_MODEL_PROVIDER;
+  const previousModel = process.env.CLIQ_MODEL;
+  const previousBaseUrl = process.env.CLIQ_MODEL_BASE_URL;
+  const previousStdoutWrite = process.stdout.write;
+  const previousStderrWrite = process.stderr.write;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ models: [] }));
+  let stdout = '';
+  let stderr = '';
+
+  process.chdir(cwd);
+  process.env.CLIQ_HOME = home;
+  process.env.CLIQ_TRUST_WORKSPACE = 'trust';
+  delete process.env.CLIQ_MODEL_PROVIDER;
+  delete process.env.CLIQ_MODEL;
+  delete process.env.CLIQ_MODEL_BASE_URL;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout += String(chunk);
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    await assert.rejects(() => runCli(['node', 'src/index.ts', '--classic']), isReportedCliError);
+  } finally {
+    process.stdout.write = previousStdoutWrite;
+    process.stderr.write = previousStderrWrite;
+    if (previousTrust === undefined) delete process.env.CLIQ_TRUST_WORKSPACE;
+    else process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+    if (previousHome === undefined) delete process.env.CLIQ_HOME;
+    else process.env.CLIQ_HOME = previousHome;
+    if (previousProvider === undefined) delete process.env.CLIQ_MODEL_PROVIDER;
+    else process.env.CLIQ_MODEL_PROVIDER = previousProvider;
+    if (previousModel === undefined) delete process.env.CLIQ_MODEL;
+    else process.env.CLIQ_MODEL = previousModel;
+    if (previousBaseUrl === undefined) delete process.env.CLIQ_MODEL_BASE_URL;
+    else process.env.CLIQ_MODEL_BASE_URL = previousBaseUrl;
+    process.chdir(previousCwd);
+    fetchMock.mock.restore();
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+
+  assert.equal(stdout, '');
+  assert.match(stderr, /Cliq needs a model provider before chat can start/i);
+  assert.match(stderr, /Provider configuration/i);
+  assert.match(stderr, /Model selection/i);
+  assert.match(stderr, /ollama pull qwen3\.5:4b/);
+  assert.doesNotMatch(stderr, /No model provider or local Ollama model configured/);
+});
+
 test('renderUnhandledError suppresses workspace trust sentinel errors', () => {
   assert.equal(renderUnhandledError(new WorkspaceTrustError('workspace trust declined', 0)), null);
 });

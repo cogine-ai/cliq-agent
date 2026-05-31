@@ -109,18 +109,18 @@ npm link
 Cliq is local-first. If you do not configure a provider or model, Cliq tries local Ollama first:
 
 ```bash
-ollama pull qwen3:4b
+ollama pull qwen3.5:4b
 cliq "inspect this repo"
 ```
 
-On startup, Cliq calls `http://localhost:11434/api/tags`. If local models exist, it chooses the first model whose name contains `qwen`; otherwise it uses the first model returned by Ollama. If Ollama has no models, Cliq prints a configuration error with next steps instead of silently falling back to a remote provider.
+On startup, Cliq calls `http://localhost:11434/api/tags`. If local models exist, it chooses the first model whose name contains `qwen`; otherwise it uses the first model returned by Ollama. If Ollama has no models, TTY startup opens a provider-first setup state with local and remote configuration options. Non-interactive commands return the same guidance as a deterministic configuration error instead of silently falling back to a remote provider.
 
 Select a provider from the CLI:
 
 ```bash
 cliq --provider anthropic --model claude-sonnet-4-20250514 "inspect this repo"
 cliq --provider openai --model gpt-5.2 "inspect this repo"
-cliq --provider ollama --model qwen3:4b "inspect this repo"
+cliq --provider ollama --model qwen3.5:4b "inspect this repo"
 ```
 
 Use `.cliq/config.json` for workspace defaults:
@@ -129,7 +129,7 @@ Use `.cliq/config.json` for workspace defaults:
 {
   "model": {
     "provider": "ollama",
-    "model": "qwen3:4b",
+    "model": "qwen3.5:4b",
     "baseUrl": "http://localhost:11434",
     "streaming": "auto"
   }
@@ -350,7 +350,7 @@ Cliq reads optional runtime config from `./.cliq/config.json` in the current wor
   "defaultSkills": ["reviewer"],
   "model": {
     "provider": "ollama",
-    "model": "qwen3:4b",
+    "model": "qwen3.5:4b",
     "baseUrl": "http://localhost:11434",
     "streaming": "auto"
   }

@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -576,6 +576,40 @@ test('runHeadless maps invalid model config to config-error', async () => {
   assert.equal(output.error?.code, 'config-error');
   assert.equal(output.error?.stage, 'assembly');
   assert.equal(output.error?.recoverable, true);
+});
+
+test('runHeadless maps first-run missing model setup to config-error guidance', async () => {
+  const { cwd } = await setupWorkspace();
+  const previousProvider = process.env.CLIQ_MODEL_PROVIDER;
+  const previousModel = process.env.CLIQ_MODEL;
+  const previousBaseUrl = process.env.CLIQ_MODEL_BASE_URL;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ models: [] }));
+
+  delete process.env.CLIQ_MODEL_PROVIDER;
+  delete process.env.CLIQ_MODEL;
+  delete process.env.CLIQ_MODEL_BASE_URL;
+
+  try {
+    const output = await runHeadless(
+      { cwd, prompt: 'say done', autoCompact: { enabled: 'off' } },
+      { modelClient: finalModel('done') }
+    );
+
+    assert.equal(output.status, 'failed');
+    assert.equal(output.error?.code, 'config-error');
+    assert.equal(output.error?.stage, 'assembly');
+    assert.equal(output.error?.recoverable, true);
+    assert.match(output.error?.message ?? '', /Cliq needs a model provider before chat can start/i);
+    assert.match(output.error?.message ?? '', /ollama pull qwen3\.5:4b/);
+  } finally {
+    fetchMock.mock.restore();
+    if (previousProvider === undefined) delete process.env.CLIQ_MODEL_PROVIDER;
+    else process.env.CLIQ_MODEL_PROVIDER = previousProvider;
+    if (previousModel === undefined) delete process.env.CLIQ_MODEL;
+    else process.env.CLIQ_MODEL = previousModel;
+    if (previousBaseUrl === undefined) delete process.env.CLIQ_MODEL_BASE_URL;
+    else process.env.CLIQ_MODEL_BASE_URL = previousBaseUrl;
+  }
 });
 
 test('runHeadless maps missing model credentials to model-auth-error', async () => {

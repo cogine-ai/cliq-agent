@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test, { mock } from 'node:test';
 
-import { resolveModelConfig } from './config.js';
+import {
+  formatModelSetupMessage,
+  isModelSetupRequiredError,
+  ModelSetupRequiredError,
+  resolveModelConfig
+} from './config.js';
 
 const MODEL_ENV_KEYS = [
   'CLIQ_MODEL_PROVIDER',
@@ -90,12 +95,80 @@ test('resolveModelConfig explains how to configure a model when local Ollama has
     await withEnv({}, async () => {
       await assert.rejects(
         () => resolveModelConfig({ workspace: {}, cli: {} }),
-        /No model provider or local Ollama model configured[\s\S]*ollama pull/i
+        /Cliq needs a model provider before chat can start[\s\S]*ollama pull qwen3\.5:4b/i
       );
     });
   } finally {
     fetchMock.mock.restore();
   }
+});
+
+test('resolveModelConfig exposes typed setup state when local Ollama has no models', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ models: [] }));
+
+  try {
+    await withEnv({}, async () => {
+      await assert.rejects(
+        () => resolveModelConfig({ workspace: {}, cli: {} }),
+        (error) => {
+          assert.ok(error instanceof ModelSetupRequiredError);
+          assert.ok(isModelSetupRequiredError(error));
+          assert.equal(error.reason, 'no-local-model');
+          assert.equal(error.provider, 'ollama');
+          assert.equal(error.baseUrl, 'http://localhost:11434');
+
+          const message = formatModelSetupMessage(error);
+          assert.match(message, /Cliq needs a model provider before chat can start/i);
+          assert.match(message, /Provider configuration/i);
+          assert.match(message, /Model selection/i);
+          assert.match(message, /ollama pull qwen3\.5:4b/);
+          assert.match(message, /OpenAI/i);
+          assert.doesNotMatch(message, /No model provider or local Ollama model configured/);
+          return true;
+        }
+      );
+    });
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('resolveModelConfig exposes typed setup state for selected provider missing credentials', async () => {
+  await withEnv({}, async () => {
+    await assert.rejects(
+      () => resolveModelConfig({ workspace: {}, cli: { provider: 'openrouter', model: 'test-model' } }),
+      (error) => {
+        assert.ok(error instanceof ModelSetupRequiredError);
+        assert.equal(error.reason, 'missing-provider-api-key');
+        assert.equal(error.provider, 'openrouter');
+        assert.equal(error.missingEnvVar, 'OPENROUTER_API_KEY');
+        const message = formatModelSetupMessage(error);
+        assert.match(message, /OpenRouter provider is selected/i);
+        assert.match(message, /OPENROUTER_API_KEY/);
+        assert.match(message, /Provider configuration/i);
+        assert.match(message, /Model selection/i);
+        return true;
+      }
+    );
+  });
+});
+
+test('resolveModelConfig exposes typed setup state when a selected provider still needs a model', async () => {
+  await withEnv({}, async () => {
+    await assert.rejects(
+      () => resolveModelConfig({ workspace: {}, cli: { provider: 'openai-compatible', baseUrl: 'http://localhost:4000/v1' } }),
+      (error) => {
+        assert.ok(error instanceof ModelSetupRequiredError);
+        assert.equal(error.reason, 'missing-model');
+        assert.equal(error.provider, 'openai-compatible');
+        const message = formatModelSetupMessage(error);
+        assert.match(message, /OpenAI-compatible provider is selected/i);
+        assert.match(message, /model id/i);
+        assert.match(message, /--model <model>/);
+        return true;
+      }
+    );
+  });
 });
 
 test('resolveModelConfig preserves explicit OpenRouter configuration', async () => {
@@ -137,7 +210,13 @@ test('resolveModelConfig requires model and baseUrl for openai-compatible', asyn
   await withEnv({}, async () => {
     await assert.rejects(
       () => resolveModelConfig({ workspace: {}, cli: { provider: 'openai-compatible', model: 'local' } }),
-      /baseUrl is required/i
+      (error) => {
+        assert.ok(error instanceof ModelSetupRequiredError);
+        assert.equal(error.reason, 'missing-base-url');
+        assert.equal(error.provider, 'openai-compatible');
+        assert.match(formatModelSetupMessage(error), /base URL/i);
+        return true;
+      }
     );
 
     await assert.rejects(
@@ -146,7 +225,13 @@ test('resolveModelConfig requires model and baseUrl for openai-compatible', asyn
           workspace: {},
           cli: { provider: 'openai-compatible', baseUrl: 'http://localhost:4000/v1' }
         }),
-      /model is required/i
+      (error) => {
+        assert.ok(error instanceof ModelSetupRequiredError);
+        assert.equal(error.reason, 'missing-model');
+        assert.equal(error.provider, 'openai-compatible');
+        assert.match(formatModelSetupMessage(error), /model id/i);
+        return true;
+      }
     );
   });
 });
