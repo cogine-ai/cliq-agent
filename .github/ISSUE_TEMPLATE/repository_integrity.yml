@@ -1,0 +1,35 @@
+name: Repository integrity report
+description: Report suspicious repository activity such as star brushing.
+title: "[Integrity]: "
+labels: ["type:feedback", "status:needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for repository-level integrity concerns, including suspected fake stars or coordinated account activity. Do not post private personal data.
+
+  - type: textarea
+    id: activity
+    attributes:
+      label: Suspicious activity
+      description: What did you notice?
+      placeholder: "Several recent stargazers appear to be coordinated or inauthentic."
+    validations:
+      required: true
+
+  - type: textarea
+    id: account-pattern
+    attributes:
+      label: Account pattern
+      description: Describe repeated username or profile patterns without sharing private information.
+      placeholder: "Usernames appear to follow a fixed letters-plus-numbers format."
+    validations:
+      required: true
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Public examples
+      description: Optional public account URLs, timestamps, screenshots, or other evidence maintainers can review.
+    validations:
+      required: false
