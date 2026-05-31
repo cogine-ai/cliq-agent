@@ -1,4 +1,5 @@
 import { DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_PROVIDER, MODEL, OLLAMA_DEFAULT_BASE_URL } from '../config.js';
+import { getProviderCatalogEntry, listModelDescriptors, resolveModelMetadata, toModelDescriptor } from './catalog/index.js';
 import type {
   ModelClient,
   ModelDescriptor,
@@ -27,32 +28,6 @@ export type DefaultModelConfig = {
   streaming: StreamingMode;
 };
 
-const TEXT_TO_TEXT = {
-  input: ['text'],
-  output: ['text'],
-  streaming: true,
-  reasoning: false,
-  toolCalling: false
-} satisfies ModelDescriptor['capabilities'];
-
-const CLAUDE_CONTEXT_WINDOW = 200_000;
-const OPENAI_DEFAULT_CONTEXT_WINDOW = 128_000;
-
-function withContextWindow(
-  capabilities: ModelDescriptor['capabilities'],
-  contextWindow: number
-): ModelDescriptor['capabilities'] {
-  return {
-    ...capabilities,
-    contextWindow
-  };
-}
-
-const TEXT_TO_TEXT_REASONING = {
-  ...TEXT_TO_TEXT,
-  reasoning: true
-} satisfies ModelDescriptor['capabilities'];
-
 export const DEFAULT_MODEL_CONFIG: DefaultModelConfig = {
   provider: DEFAULT_MODEL_PROVIDER,
   model: MODEL,
@@ -63,55 +38,34 @@ export const DEFAULT_MODEL_CONFIG: DefaultModelConfig = {
 const PROVIDERS: Record<ProviderName, ModelProviderDefinition> = {
   openrouter: {
     name: 'openrouter',
-    displayName: 'OpenRouter',
+    displayName: getProviderCatalogEntry('openrouter')?.displayName ?? 'OpenRouter',
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
     apiKeyEnv: 'OPENROUTER_API_KEY',
     requiresApiKey: true,
     getDefaultModel: () => MODEL,
-    getKnownModels: () => [
-      {
-        provider: 'openrouter',
-        model: MODEL,
-        displayName: 'Claude Sonnet 4.6 via OpenRouter',
-        capabilities: withContextWindow(TEXT_TO_TEXT_REASONING, CLAUDE_CONTEXT_WINDOW)
-      }
-    ]
+    getKnownModels: () => listModelDescriptors('openrouter')
   },
   anthropic: {
     name: 'anthropic',
-    displayName: 'Anthropic',
+    displayName: getProviderCatalogEntry('anthropic')?.displayName ?? 'Anthropic',
     defaultBaseUrl: 'https://api.anthropic.com',
     apiKeyEnv: 'ANTHROPIC_API_KEY',
     requiresApiKey: true,
     getDefaultModel: () => 'claude-sonnet-4-20250514',
-    getKnownModels: () => [
-      {
-        provider: 'anthropic',
-        model: 'claude-sonnet-4-20250514',
-        displayName: 'Claude Sonnet 4',
-        capabilities: withContextWindow(TEXT_TO_TEXT_REASONING, CLAUDE_CONTEXT_WINDOW)
-      }
-    ]
+    getKnownModels: () => listModelDescriptors('anthropic')
   },
   openai: {
     name: 'openai',
-    displayName: 'OpenAI',
+    displayName: getProviderCatalogEntry('openai')?.displayName ?? 'OpenAI',
     defaultBaseUrl: 'https://api.openai.com/v1',
     apiKeyEnv: 'OPENAI_API_KEY',
     requiresApiKey: true,
     getDefaultModel: () => 'gpt-5.2',
-    getKnownModels: () => [
-      {
-        provider: 'openai',
-        model: 'gpt-5.2',
-        displayName: 'GPT-5.2',
-        capabilities: withContextWindow(TEXT_TO_TEXT_REASONING, OPENAI_DEFAULT_CONTEXT_WINDOW)
-      }
-    ]
+    getKnownModels: () => listModelDescriptors('openai')
   },
   'openai-compatible': {
     name: 'openai-compatible',
-    displayName: 'OpenAI-compatible',
+    displayName: getProviderCatalogEntry('openai-compatible')?.displayName ?? 'OpenAI-compatible',
     defaultBaseUrl: '',
     apiKeyEnv: 'OPENAI_COMPATIBLE_API_KEY',
     requiresApiKey: false,
@@ -120,7 +74,7 @@ const PROVIDERS: Record<ProviderName, ModelProviderDefinition> = {
   },
   ollama: {
     name: 'ollama',
-    displayName: 'Ollama',
+    displayName: getProviderCatalogEntry('ollama')?.displayName ?? 'Ollama',
     defaultBaseUrl: OLLAMA_DEFAULT_BASE_URL,
     requiresApiKey: false,
     getDefaultModel: () => null,
@@ -154,7 +108,8 @@ export function getModelProvider(provider: ProviderName): ModelProvider {
 }
 
 export function findKnownModelDescriptor(provider: ProviderName, model: string): ModelDescriptor | null {
-  return getModelProvider(provider).getKnownModels().find((descriptor) => descriptor.model === model) ?? null;
+  const metadata = resolveModelMetadata(provider, model);
+  return metadata ? toModelDescriptor(metadata) : null;
 }
 
 export function listModelProviders(): ModelProvider[] {

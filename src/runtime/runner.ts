@@ -3,7 +3,7 @@ import { formatHookFailureReason, runCommandHooks, type CommandHookRunResult } f
 import type { HookEventName, HookInput, HooksConfig } from '../hooks/types.js';
 import type { InstructionMessage } from '../instructions/types.js';
 import { classifyContextOverflow } from '../model/errors.js';
-import { findKnownModelDescriptor } from '../model/registry.js';
+import { resolveModelMetadata } from '../model/catalog/index.js';
 import type { ChatMessage, ModelClient, ModelCompletion, ResolvedModelConfig } from '../model/types.js';
 import { readPlanArtifact, readPlanProgress } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
@@ -393,10 +393,10 @@ export function createRunner({
             return null;
           }
 
-          const descriptor = findKnownModelDescriptor(autoCompact.modelConfig.provider, autoCompact.modelConfig.model);
+          const metadata = resolveModelMetadata(autoCompact.modelConfig.provider, autoCompact.modelConfig.model);
           const resolvedAutoCompact = resolveAutoCompactConfig({
             config: autoCompact.config,
-            modelContextWindowTokens: descriptor?.capabilities.contextWindow,
+            modelContextWindowTokens: metadata?.capabilities.contextWindow,
             overflowContextWindowTokens
           });
 
@@ -454,14 +454,15 @@ export function createRunner({
           let overflowRetries = 0;
           while (!modelAttempt.ok) {
             const overflow = classifyContextOverflow(modelAttempt.error);
+            const metadata =
+              autoCompact === undefined
+                ? null
+                : resolveModelMetadata(autoCompact.modelConfig.provider, autoCompact.modelConfig.model);
             const resolvedOverflowLimit =
               autoCompact && overflow
                 ? resolveAutoCompactConfig({
                     config: autoCompact.config,
-                    modelContextWindowTokens: findKnownModelDescriptor(
-                      autoCompact.modelConfig.provider,
-                      autoCompact.modelConfig.model
-                    )?.capabilities.contextWindow,
+                    modelContextWindowTokens: metadata?.capabilities.contextWindow,
                     overflowContextWindowTokens: overflow.contextWindowTokens
                   }).maxOverflowRetriesPerModelCall
                 : 0;
