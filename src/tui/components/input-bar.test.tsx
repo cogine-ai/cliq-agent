@@ -11,20 +11,63 @@ import { InputBar } from './input-bar.js';
 // matches the helper already used in app.test.tsx.
 const flush = () => new Promise<void>((r) => setImmediate(r));
 
-test('renders an active prompt glyph by default', () => {
+test('renders a cursor-only input row by default', () => {
   const { lastFrame } = render(<InputBar value="" onChange={() => {}} onSubmit={() => {}} />);
-  assert.match(lastFrame() ?? '', />/);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /^│  /m);
+  assert.doesNotMatch(frame, /^│  >/m);
 });
 
-test('frames the input row with top and bottom dividers', () => {
+test('renders a two-row composer with a mode rail and model context', () => {
   const { lastFrame } = render(
-    <InputBar value="" onChange={() => {}} onSubmit={() => {}} width={12} />
+    <InputBar
+      value=""
+      onChange={() => {}}
+      onSubmit={() => {}}
+      policy="plan"
+      modelLabel="ollama/qwen3:4b"
+    />
   );
   const frame = lastFrame() ?? '';
-  const lines = frame.split('\n');
-  assert.match(lines[0] ?? '', /─{12}/);
-  assert.match(lines[1] ?? '', />/);
-  assert.match(lines[2] ?? '', /─{12}/);
+  assert.match(frame, /^│  /m);
+  assert.match(frame, /^│  Plan Mode > ollama\/qwen3:4b/m);
+  assert.doesNotMatch(frame, /─/);
+});
+
+test('composer metadata is not submitted with the prompt', async () => {
+  let value = '';
+  const submitted: string[] = [];
+  const { stdin, rerender } = render(
+    <InputBar
+      value={value}
+      onChange={(next) => {
+        value = next;
+      }}
+      onSubmit={(text) => {
+        submitted.push(text);
+      }}
+      policy="default"
+      modelLabel="ollama/qwen3:4b"
+    />
+  );
+  stdin.write('hello');
+  await flush();
+  rerender(
+    <InputBar
+      value={value}
+      onChange={(next) => {
+        value = next;
+      }}
+      onSubmit={(text) => {
+        submitted.push(text);
+      }}
+      policy="default"
+      modelLabel="ollama/qwen3:4b"
+    />
+  );
+  stdin.write('\r');
+  await flush();
+  assert.deepEqual(submitted, ['hello']);
 });
 
 test('renders a dimmed waiting glyph when disabled', () => {

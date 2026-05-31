@@ -18,7 +18,7 @@ export function Transcript({
     entries.length > MAX_VISIBLE_ENTRIES ? entries.slice(-MAX_VISIBLE_ENTRIES) : entries;
 
   if (visible.length === 0 && !activeTurn) {
-    return <EmptyState />;
+    return null;
   }
 
   return (
@@ -32,26 +32,6 @@ export function Transcript({
           <Text dimColor>{` thinking… ${activeTurn.modelChars} chars`}</Text>
         </Box>
       ) : null}
-    </Box>
-  );
-}
-
-function EmptyState() {
-  return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Text bold color="cyan">
-        Welcome to cliq.
-      </Text>
-      <Text dimColor>Type a prompt below, or try a slash command.</Text>
-      <Text dimColor>
-        {'  '}
-        <Text bold>/help</Text>
-        {' lists commands · '}
-        <Text bold>Ctrl+D</Text>
-        {' exits · '}
-        <Text bold>Ctrl+C</Text>
-        {' cancels a turn or clears input'}
-      </Text>
     </Box>
   );
 }

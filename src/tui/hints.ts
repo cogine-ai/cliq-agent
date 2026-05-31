@@ -32,7 +32,7 @@ export function buildInputHint(state: InputHintState): string {
         return state.hasInput ? '/help · Shift+Tab · Ctrl+C' : '/help · Shift+Tab · Ctrl+D';
       }
       return state.hasExpandableTool
-        ? 'Enter send · /help commands · Shift+Tab mode · Ctrl+O output'
+        ? 'Enter send · /help commands · Shift+Tab mode · Ctrl+O output · Ctrl+D exit'
         : 'Enter send · /help commands · Shift+Tab mode · Ctrl+D exit';
     default: {
       const _exhaustive: never = state;

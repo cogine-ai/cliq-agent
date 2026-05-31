@@ -1,8 +1,11 @@
 import { Box, Text, useInput, type Key } from 'ink';
 import { useRef, useState } from 'react';
 
+import type { PolicyMode } from '../../policy/types.js';
 import { isShiftTabInput } from '../hooks/use-keybindings.js';
-import { Divider } from './divider.js';
+import { formatModeForComposer, getModeColor } from '../mode-language.js';
+
+const PANEL_BACKGROUND = '#1d1b2a';
 
 // ink-text-input v6 inserts the bare letter for Ctrl+<letter> combinations
 // (its source only filters Ctrl+C explicitly), so Ctrl+O / Ctrl+G / Ctrl+L /
@@ -154,6 +157,8 @@ export function InputBar({
   onHistoryNext,
   disabled = false,
   completion = null,
+  policy = 'default',
+  modelLabel = '',
   width
 }: {
   value: string;
@@ -163,8 +168,12 @@ export function InputBar({
   onHistoryNext?: () => void;
   disabled?: boolean;
   completion?: string | null;
+  policy?: PolicyMode;
+  modelLabel?: string;
   width?: number;
 }) {
+  const policyColor = getModeColor(policy);
+
   useInput(
     (_input, key) => {
       if (disabled) return;
@@ -184,23 +193,36 @@ export function InputBar({
   }
 
   return (
-    <Box flexDirection="column">
-      <Divider width={width} />
-      <Box height={1} overflow="hidden">
-        <Text color={disabled ? 'gray' : 'cyan'}>{disabled ? '… ' : '> '}</Text>
-        {disabled ? (
-          <Text dimColor>{value}</Text>
-        ) : (
-          <MiniTextInput
-            value={value}
-            onChange={onChange}
-            onSubmit={handleSubmit}
-            onHistoryPrev={onHistoryPrev}
-            onHistoryNext={onHistoryNext}
-          />
-        )}
+    <Box
+      width={width ?? '100%'}
+      borderStyle="single"
+      borderTop={false}
+      borderRight={false}
+      borderBottom={false}
+      borderLeft
+      borderLeftColor={policyColor}
+      paddingLeft={1}
+    >
+      <Box flexDirection="column" flexGrow={1} backgroundColor={PANEL_BACKGROUND} paddingX={1}>
+        <Box height={1} overflow="hidden">
+          {disabled ? <Text color="gray">… </Text> : null}
+          {disabled ? (
+            <Text dimColor>{value}</Text>
+          ) : (
+            <MiniTextInput
+              value={value}
+              onChange={onChange}
+              onSubmit={handleSubmit}
+              onHistoryPrev={onHistoryPrev}
+              onHistoryNext={onHistoryNext}
+            />
+          )}
+        </Box>
+        <Box height={1} overflow="hidden">
+          <Text color={policyColor}>{formatModeForComposer(policy)}</Text>
+          {modelLabel ? <Text dimColor>{` > ${modelLabel}`}</Text> : null}
+        </Box>
       </Box>
-      <Divider width={width} />
     </Box>
   );
 }

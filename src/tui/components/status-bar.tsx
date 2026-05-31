@@ -2,43 +2,36 @@ import path from 'node:path';
 
 import { Box, Text } from 'ink';
 
-import { getModeColor } from '../mode-language.js';
 import type { UiState } from '../store.js';
 
-export function StatusBar({ state, hint = null }: { state: UiState; hint?: string | null }) {
-  const policyColor = getModeColor(state.policy);
+export function TopStatusBar({ hint = null }: { hint?: string | null }) {
+  if (!hint) return null;
+  return (
+    <Box width="100%" height={1} overflow="hidden">
+      <Text dimColor wrap="truncate">
+        {hint}
+      </Text>
+    </Box>
+  );
+}
+
+export function BottomStatusBar({ state }: { state: UiState }) {
   const txStatus = formatTxStatus(state.tx);
-  const sessionId = shortSessionId(state.session.id);
   const cwdLabel = `/${path.basename(state.session.cwd)}`;
   const tokensLabel = state.sessionTokens !== null ? `${formatTokens(state.sessionTokens)} tok` : null;
-  const detailLabel = [
-    `${state.model.provider}/${state.model.model}`,
-    sessionId,
-    cwdLabel,
-    txStatus,
-    tokensLabel
-  ]
+  const detailLabel = [cwdLabel, txStatus, tokensLabel]
     .filter((part): part is string => part !== null)
     .join(' · ');
   const hasError = state.errors.length > 0;
 
   return (
     <Box width="100%" height={1} overflow="hidden">
-      <Box flexShrink={0}>
-        {hasError ? <Text color="red">● </Text> : null}
-        <Text color={policyColor} bold={state.policy === 'yolo'}>
-          {formatModeForFooter(state.policy)}
-        </Text>
-      </Box>
-      {hint ? (
-        <Box flexShrink={1} overflow="hidden">
-          <Sep />
-          <Text dimColor wrap="truncate">
-            {hint}
-          </Text>
+      {hasError ? (
+        <Box flexShrink={0}>
+          <Text color="red">● </Text>
         </Box>
       ) : null}
-      <Box flexShrink={1} overflow="hidden" marginLeft={1}>
+      <Box flexShrink={1} overflow="hidden">
         <Text dimColor wrap="truncate">
           {detailLabel}
         </Text>
@@ -53,36 +46,9 @@ export function StatusBar({ state, hint = null }: { state: UiState; hint?: strin
   );
 }
 
-function Sep() {
-  return <Text dimColor>{' · '}</Text>;
-}
-
 function formatTxStatus(tx: UiState['tx']): string {
   if (!tx) return 'tx idle';
   return `tx ${shortTxId(tx.txId)} ${tx.state}`;
-}
-
-function formatModeForFooter(policy: UiState['policy']): string {
-  switch (policy) {
-    case 'default':
-      return 'default mode';
-    case 'accept-edits':
-      return 'accept edits on';
-    case 'plan':
-      return 'plan mode';
-    case 'yolo':
-      return 'bypass permissions on';
-    default: {
-      const _exhaustive: never = policy;
-      return _exhaustive;
-    }
-  }
-}
-
-function shortSessionId(id: string): string {
-  // Session ids look like "ses_abc123def456…"; show "ses_abc123" for compactness.
-  if (id.length <= 10) return id;
-  return id.slice(0, 10);
 }
 
 function shortTxId(id: string): string {

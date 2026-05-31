@@ -7,8 +7,9 @@ import { InputBar } from './components/input-bar.js';
 import { PlanProgressView } from './components/plan-progress.js';
 import { PlanReviewModal } from './components/plan-review-modal.js';
 import { SlashPalette } from './components/slash-palette.js';
-import { StatusBar } from './components/status-bar.js';
+import { BottomStatusBar, TopStatusBar } from './components/status-bar.js';
 import { Transcript } from './components/transcript.js';
+import { TuiHeader } from './components/tui-header.js';
 import { useInputHistory } from './hooks/use-input-history.js';
 import { useKeybindings } from './hooks/use-keybindings.js';
 import { useUiStore } from './hooks/use-ui-store.js';
@@ -321,6 +322,7 @@ export function App({
 
   return (
     <Box flexDirection="column">
+      <TuiHeader />
       <Transcript entries={state.transcript} activeTurn={state.activeTurn} />
       {state.planProgress && !state.pendingPlanReview ? <PlanProgressView progress={state.planProgress} /> : null}
       {state.pendingApproval ? (
@@ -343,6 +345,7 @@ export function App({
       ) : (
         <>
           {input.startsWith('/') ? <SlashPalette query={input} /> : null}
+          <TopStatusBar hint={inputHint} />
           <InputBar
             value={input}
             onChange={handleInputChange}
@@ -351,11 +354,14 @@ export function App({
             onHistoryNext={onHistoryNext}
             disabled={inputDisabled}
             completion={completion}
+            policy={state.policy}
+            modelLabel={`${state.model.provider}/${state.model.model}`}
             width={terminalWidth}
           />
+          <BottomStatusBar state={state} />
         </>
       )}
-      <StatusBar state={state} hint={inputHint} />
+      {state.pendingApproval || state.pendingPlanReview ? <BottomStatusBar state={state} /> : null}
     </Box>
   );
 }
