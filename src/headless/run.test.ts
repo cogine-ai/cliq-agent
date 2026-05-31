@@ -583,11 +583,13 @@ test('runHeadless maps first-run missing model setup to config-error guidance', 
   const previousProvider = process.env.CLIQ_MODEL_PROVIDER;
   const previousModel = process.env.CLIQ_MODEL;
   const previousBaseUrl = process.env.CLIQ_MODEL_BASE_URL;
+  const previousStreaming = process.env.CLIQ_MODEL_STREAMING;
   const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ models: [] }));
 
   delete process.env.CLIQ_MODEL_PROVIDER;
   delete process.env.CLIQ_MODEL;
   delete process.env.CLIQ_MODEL_BASE_URL;
+  delete process.env.CLIQ_MODEL_STREAMING;
 
   try {
     const output = await runHeadless(
@@ -609,6 +611,8 @@ test('runHeadless maps first-run missing model setup to config-error guidance', 
     else process.env.CLIQ_MODEL = previousModel;
     if (previousBaseUrl === undefined) delete process.env.CLIQ_MODEL_BASE_URL;
     else process.env.CLIQ_MODEL_BASE_URL = previousBaseUrl;
+    if (previousStreaming === undefined) delete process.env.CLIQ_MODEL_STREAMING;
+    else process.env.CLIQ_MODEL_STREAMING = previousStreaming;
   }
 });
 
