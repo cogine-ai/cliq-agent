@@ -34,13 +34,13 @@ test('omits the thinking row when activeTurn is null', () => {
   assert.doesNotMatch(lastFrame() ?? '', /thinking/);
 });
 
-test('renders the empty-state welcome when there are no entries and no active turn', () => {
+test('renders no duplicate home screen copy when there are no entries and no active turn', () => {
   const { lastFrame } = render(<Transcript entries={[]} activeTurn={null} />);
   const frame = lastFrame() ?? '';
-  assert.match(frame, /Welcome to cliq/);
-  assert.match(frame, /\/help/);
-  assert.match(frame, /Ctrl\+D/);
-  assert.match(frame, /Ctrl\+C/);
+  assert.doesNotMatch(frame, /Ready when you are/);
+  assert.doesNotMatch(frame, /\/help/);
+  assert.doesNotMatch(frame, /Ctrl\+D/);
+  assert.doesNotMatch(frame, /Ctrl\+C/);
 });
 
 test('caps visible entries at 200 (older entries fall to shell scrollback)', () => {

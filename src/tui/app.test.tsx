@@ -40,7 +40,36 @@ test('mounts and renders status bar segments', () => {
   const { lastFrame } = render(<App store={store} onSubmit={() => {}} />);
   const frame = lastFrame() ?? '';
   assert.match(frame, /ollama\/qwen3:4b/);
-  assert.match(frame, /bypass permissions on/);
+  assert.match(frame, /\/help commands/);
+  assert.doesNotMatch(frame, /bypass permissions on/);
+});
+
+test('renders the CLIQ header and composer model context', () => {
+  const store = makeStore();
+  const { lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /CCCCC/);
+  assert.match(frame, /LLLLL/);
+  assert.match(frame, /! YOLO Mode > ollama\/qwen3:4b/);
+  assert.doesNotMatch(frame, /Ready when you are/);
+  assert.doesNotMatch(frame, /bypass permissions on/);
+});
+
+test('renders top and bottom composer status bars adjacent to the text area', () => {
+  const store = makeStore();
+  const { lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+  const frame = lastFrame() ?? '';
+  const lines = frame.split('\n');
+  const topIndex = lines.findIndex((line) => line.includes('/help commands'));
+  const inputIndex = lines.findIndex((line) => line.startsWith('│'));
+  const modeIndex = lines.findIndex((line) => line.includes('! YOLO Mode > ollama/qwen3:4b'));
+  const bottomIndex = lines.findIndex((line) => line.includes('/smoke') && line.includes('tx idle'));
+
+  assert.equal(inputIndex, topIndex + 1);
+  assert.equal(modeIndex, inputIndex + 1);
+  assert.equal(bottomIndex, modeIndex + 1);
+  assert.equal((frame.match(/ollama\/qwen3:4b/g) ?? []).length, 1);
+  assert.doesNotMatch(frame, /ses_smoke/);
 });
 
 test('end-to-end: dispatches reach the rendered transcript', async () => {
@@ -269,7 +298,7 @@ test('Shift+Tab rotates mode without adding a transition notice by default', asy
   assert.equal(store.getState().policy, 'plan');
   assert.equal(store.getState().transcript.length, 0);
   assert.doesNotMatch(lastFrame() ?? '', /mode → Plan/);
-  assert.match(lastFrame() ?? '', /plan mode/);
+  assert.match(lastFrame() ?? '', /Plan Mode/);
 });
 
 test('Shift+Tab shows a transition notice when mode-change messages are enabled', async () => {
@@ -618,20 +647,20 @@ test('up arrow recalls the most recent submitted user input; down restores the d
   stdin.write('\x1b[A');
   await flush();
   const afterFirstUp = lastFrame() ?? '';
-  assert.match(afterFirstUp, /> bar/);
+  assert.match(afterFirstUp, /│  bar/);
 
   // ↑ again → older entry ('foo').
   stdin.write('\x1b[A');
   await flush();
   const afterSecondUp = lastFrame() ?? '';
-  assert.match(afterSecondUp, /> foo/);
+  assert.match(afterSecondUp, /│  foo/);
 
   // ↓ → back to 'bar'. ↓ once more → the saved draft.
   stdin.write('\x1b[B');
   await flush();
-  assert.match(lastFrame() ?? '', /> bar/);
+  assert.match(lastFrame() ?? '', /│  bar/);
   stdin.write('\x1b[B');
   await flush();
   const afterRestore = lastFrame() ?? '';
-  assert.match(afterRestore, /> draft/);
+  assert.match(afterRestore, /│  draft/);
 });

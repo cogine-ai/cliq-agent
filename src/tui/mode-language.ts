@@ -71,6 +71,12 @@ export function formatModeForStatus(mode: PolicyMode): string {
   return description.marker ? `${description.marker} ${description.label}` : description.label;
 }
 
+export function formatModeForComposer(mode: PolicyMode): string {
+  const description = describePolicyMode(mode);
+  const label = `${description.label} Mode`;
+  return description.marker ? `${description.marker} ${label}` : label;
+}
+
 export function formatModeForHelp(mode: PolicyMode): string {
   const description = describePolicyMode(mode);
   const label = formatModeForStatus(mode);

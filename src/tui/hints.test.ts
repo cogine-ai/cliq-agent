@@ -6,7 +6,7 @@ import { buildInputHint } from './hints.js';
 test('idle hints surface help, mode switching, and current shortcut', () => {
   assert.equal(
     buildInputHint({ kind: 'idle', hasInput: false, hasExpandableTool: true, width: 90 }),
-    'Enter send · /help commands · Shift+Tab mode · Ctrl+O output'
+    'Enter send · /help commands · Shift+Tab mode · Ctrl+O output · Ctrl+D exit'
   );
 });
 
