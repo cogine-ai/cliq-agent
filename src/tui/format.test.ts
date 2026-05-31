@@ -15,7 +15,18 @@ test('toolNameFromAction maps each ModelAction variant to its registry name', ()
   assert.equal(toolNameFromAction({ ls: { path: '.' } }), 'ls');
   assert.equal(toolNameFromAction({ find: { name: '*.ts' } }), 'find');
   assert.equal(toolNameFromAction({ grep: { pattern: 'foo' } }), 'grep');
+  assert.equal(toolNameFromAction({ skill: { name: 'reviewer' } }), 'skill');
+  assert.equal(toolNameFromAction({ skillResource: { skill: 'reviewer', path: 'refs.md' } }), 'skillResource');
   assert.equal(toolNameFromAction({ plan: { op: 'draft', title: 'T', content: '## Plan' } }), 'plan');
+  assert.equal(
+    toolNameFromAction({
+      todo: {
+        planId: 'plan_1',
+        items: [{ id: 'item_1', title: 'Inspect', status: 'pending', activeForm: 'Inspecting' }]
+      }
+    }),
+    'todo'
+  );
 });
 
 test('previewFromAction shows the most useful field per action kind', () => {
@@ -36,6 +47,23 @@ test('previewFromAction shows the most useful field per action kind', () => {
   assert.equal(previewFromAction({ grep: { pattern: 'foo' } }), 'foo');
   assert.equal(previewFromAction({ grep: { pattern: 'foo', path: 'src' } }), 'foo in src');
   assert.equal(previewFromAction({ plan: { op: 'finalize', planId: 'plan_1' } }), 'finalize plan_1');
+  assert.equal(previewFromAction({ skill: { name: 'reviewer' } }), 'reviewer');
+  assert.equal(previewFromAction({ skillResource: { skill: 'reviewer', path: 'refs.md' } }), 'reviewer:refs.md');
+  assert.equal(
+    previewFromAction({
+      todo: {
+        planId: 'plan_1',
+        items: [{ id: 'item_1', title: 'Inspect', status: 'pending', activeForm: 'Inspecting' }]
+      }
+    }),
+    'update plan_1'
+  );
+  assert.equal(
+    previewFromAction({
+      todo: { items: [{ id: 'item_1', title: 'Inspect', status: 'pending', activeForm: 'Inspecting' }] }
+    }),
+    'update'
+  );
 });
 
 test('formatToolResultSummary prefers path; falls back to policy/error', () => {
@@ -77,6 +105,16 @@ test('formatToolResultSummary prefers path; falls back to policy/error', () => {
       meta: { planStatus: 'finalized', title: 'Ship plan' }
     }),
     'finalized: Ship plan'
+  );
+
+  assert.equal(
+    formatToolResultSummary({
+      tool: 'todo',
+      status: 'ok',
+      content: '...',
+      meta: { title: 'Ship plan', completed: 2, itemCount: 5 }
+    }),
+    'Ship plan: 2/5 done'
   );
 
   assert.equal(

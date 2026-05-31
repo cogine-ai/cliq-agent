@@ -76,3 +76,31 @@ test('todoTool.execute updates approved-plan execution progress', async () => {
     ['Implement', 'in_progress']
   ]);
 });
+
+test('todoTool.execute returns structured errors for invalid progress updates', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Tracker',
+    contentMarkdown: '## Steps\n- Inspect'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+
+  const result = await todoTool.execute(
+    {
+      todo: {
+        planId: draft.id,
+        items: [
+          { id: 'item_1', title: 'Inspect', status: 'in_progress', activeForm: 'Inspecting' },
+          { id: 'item_2', title: 'Implement', status: 'in_progress', activeForm: 'Implementing' }
+        ]
+      }
+    },
+    { cwd, session }
+  );
+
+  assert.equal(result.status, 'error');
+  assert.equal(result.meta.planId, draft.id);
+  assert.match(String(result.meta.error), /in_progress/i);
+  assert.match(result.content, /^TOOL_RESULT todo ERROR/m);
+});
