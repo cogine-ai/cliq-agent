@@ -144,6 +144,9 @@ Supported providers:
 - `openai-compatible`: requires `--base-url` or `CLIQ_MODEL_BASE_URL`; uses `CLIQ_MODEL_API_KEY` when set
 - `ollama`: uses local `http://localhost:11434` by default, can auto-discover an installed model, and does not require an API key
 
+Provider/model display metadata, known context windows, and catalog update
+instructions live in [`docs/model-catalog.md`](docs/model-catalog.md).
+
 OpenAI-compatible streaming modes:
 
 - `auto` (default): first sends `stream: true`; if the endpoint rejects streaming before response-body consumption with a compatibility-style HTTP status (`400`, `404`, `405`, `415`, or `422`), Cliq retries once with `stream: false`

@@ -1580,6 +1580,47 @@ test('runner auto compacts before model call when threshold is exceeded', async 
   assert.equal(firstCallMessages.some((message) => message.content.includes('COMPACTED SESSION SUMMARY')), true);
 });
 
+test('runner auto compact can use catalog model metadata for context window', async () => {
+  const session = await createTempSession();
+  session.records.push(
+    { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
+    { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
+  );
+  let firstCallMessages: Array<{ role: string; content: string }> = [];
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+          return completion('## Objective\nSummarized');
+        }
+        firstCallMessages = messages;
+        return completion('{"message":"done"}');
+      }
+    },
+    autoCompact: {
+      config: {
+        enabled: 'on',
+        thresholdRatio: 0.002,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openai',
+        model: 'gpt-5.2',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'new request');
+
+  assert.equal(session.compactions.length, 1);
+  assert.equal(firstCallMessages.some((message) => message.content.includes('COMPACTED SESSION SUMMARY')), true);
+});
+
 test('runner cancellation during auto compaction stops before the main model call', async () => {
   const session = await createTempSession();
   const controller = new AbortController();
