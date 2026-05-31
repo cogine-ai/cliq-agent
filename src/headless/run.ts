@@ -27,7 +27,7 @@ import { stat, realpath } from 'node:fs/promises';
 import { DEFAULT_POLICY_MODE } from '../config.js';
 import { formatHookFailureReason, runCommandHooks } from '../hooks/runner.js';
 import type { HooksConfig } from '../hooks/types.js';
-import { resolveModelConfig } from '../model/config.js';
+import { isModelSetupRequiredError, resolveModelConfig } from '../model/config.js';
 import type { PartialModelConfig } from '../model/config.js';
 import { createModelClient } from '../model/index.js';
 import type { ModelClient, ResolvedModelConfig } from '../model/types.js';
@@ -165,6 +165,15 @@ function normalizeCaughtError(error: unknown): HeadlessRunError {
 
   if (error instanceof WorkspaceTrustError) {
     return errorFrom('invalid-input', 'session', error.message);
+  }
+
+  if (isModelSetupRequiredError(error)) {
+    return errorFrom(
+      error.reason === 'missing-provider-api-key' ? 'model-auth-error' : 'config-error',
+      'assembly',
+      error.message,
+      true
+    );
   }
 
   const message = error instanceof Error ? error.message : String(error);

@@ -10,7 +10,12 @@ import type { HeadlessRunStatus, RuntimeEventEnvelope } from './headless/contrac
 import { writeJsonlEvent } from './headless/jsonl.js';
 import { runStdioJsonRpcServer } from './headless/rpc.js';
 import { runHeadless } from './headless/run.js';
-import { resolveModelConfig, type PartialModelConfig } from './model/config.js';
+import {
+  formatModelSetupMessage,
+  isModelSetupRequiredError,
+  resolveModelConfig,
+  type PartialModelConfig
+} from './model/config.js';
 import { createModelClient } from './model/index.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
@@ -1405,7 +1410,7 @@ RPC:
 
 Examples:
   cliq --policy plan "inspect this repo"
-  cliq --provider ollama --model qwen3:4b "inspect this repo"
+  cliq --provider ollama --model qwen3.5:4b "inspect this repo"
 
 Env:
   OPENROUTER_API_KEY        Required for OpenRouter
@@ -2523,7 +2528,22 @@ export async function runCli(argv: string[]) {
     policyMode: policy,
     cliSkillNames: skills
   });
-  const modelConfig = await resolveModelConfig({ workspace: assembly.workspaceConfig, cli: cliModel });
+  let modelConfig: ResolvedModelConfig;
+  try {
+    modelConfig = await resolveModelConfig({ workspace: assembly.workspaceConfig, cli: cliModel });
+  } catch (error) {
+    if (isModelSetupRequiredError(error)) {
+      if (wantsTui) {
+        const { mountProviderSetupAndWait } = await import('./tui/provider-setup.js');
+        await mountProviderSetupAndWait(error);
+        return;
+      }
+
+      process.stderr.write(`${formatModelSetupMessage(error)}\n`);
+      throw new ReportedCliError(error, { exitCode: 1 });
+    }
+    throw error;
+  }
   const modelClient = createModelClient(modelConfig);
   session.model = {
     provider: modelConfig.provider,

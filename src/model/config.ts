@@ -17,8 +17,104 @@ export type ModelConfigInput = {
   cli: PartialModelConfig;
 };
 
+export type ModelSetupReason =
+  | 'no-local-model'
+  | 'missing-provider-api-key'
+  | 'missing-model'
+  | 'missing-base-url';
+
+export type ModelSetupDetails = {
+  reason: ModelSetupReason;
+  provider: ProviderName;
+  baseUrl?: string;
+  missingEnvVar?: string;
+  causeMessage?: string;
+};
+
+export class ModelSetupRequiredError extends Error {
+  readonly code = 'MODEL_SETUP_REQUIRED';
+  readonly reason: ModelSetupReason;
+  readonly provider: ProviderName;
+  readonly baseUrl?: string;
+  readonly missingEnvVar?: string;
+  readonly causeMessage?: string;
+
+  constructor(details: ModelSetupDetails, options: { cause?: unknown } = {}) {
+    super(formatModelSetupMessage(details), options);
+    this.name = 'ModelSetupRequiredError';
+    this.reason = details.reason;
+    this.provider = details.provider;
+    this.baseUrl = details.baseUrl;
+    this.missingEnvVar = details.missingEnvVar;
+    this.causeMessage = details.causeMessage;
+  }
+}
+
+export function isModelSetupRequiredError(error: unknown): error is ModelSetupRequiredError {
+  if (error instanceof ModelSetupRequiredError) {
+    return true;
+  }
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const candidate = error as {
+    code?: unknown;
+    reason?: unknown;
+    provider?: unknown;
+    message?: unknown;
+  };
+  return (
+    candidate.code === 'MODEL_SETUP_REQUIRED' &&
+    isModelSetupReason(candidate.reason) &&
+    typeof candidate.provider === 'string' &&
+    isProviderName(candidate.provider) &&
+    typeof candidate.message === 'string'
+  );
+}
+
+export function formatModelSetupMessage(details: ModelSetupDetails): string {
+  const status = formatSetupStatus(details);
+  return [
+    'Cliq needs a model provider before chat can start.',
+    '',
+    'Current status:',
+    `  ${status}`,
+    ...(details.causeMessage ? [`  Ollama discovery error: ${details.causeMessage}`] : []),
+    '',
+    'Provider configuration:',
+    '  Local Ollama:',
+    `    ollama pull ${OLLAMA_DEFAULT_MODEL_HINT}`,
+    `    cliq --provider ollama --model ${OLLAMA_DEFAULT_MODEL_HINT}`,
+    '  OpenAI:',
+    '    export OPENAI_API_KEY=...',
+    '    cliq --provider openai --model gpt-5.2',
+    '  Anthropic:',
+    '    export ANTHROPIC_API_KEY=...',
+    '    cliq --provider anthropic --model claude-sonnet-4-20250514',
+    '  OpenRouter:',
+    '    export OPENROUTER_API_KEY=...',
+    `    cliq --provider openrouter --model ${DEFAULT_MODEL_CONFIG.model}`,
+    '  OpenAI-compatible:',
+    '    cliq --provider openai-compatible --base-url http://localhost:4000/v1 --model <model>',
+    '',
+    'Model selection:',
+    '  Use --model <model>, CLIQ_MODEL, or .cliq/config model.model.',
+    '  No remote provider is selected automatically. Configure a provider/model, then run cliq again.'
+  ].join('\n');
+}
+
 export function isStreamingMode(value: string): value is StreamingMode {
   return value === 'auto' || value === 'on' || value === 'off';
+}
+
+function isModelSetupReason(value: unknown): value is ModelSetupReason {
+  return (
+    value === 'no-local-model' ||
+    value === 'missing-provider-api-key' ||
+    value === 'missing-model' ||
+    value === 'missing-base-url'
+  );
 }
 
 function firstDefined(...values: Array<string | undefined | null>): string | undefined {
@@ -42,30 +138,48 @@ function getProviderApiKey(provider: ProviderName) {
   return undefined;
 }
 
-function requireApiKey(provider: ProviderName, apiKey: string | undefined) {
-  if (provider === 'ollama' || provider === 'openai-compatible') {
-    return;
+function formatSetupStatus(details: ModelSetupDetails) {
+  const displayName = getModelProvider(details.provider).displayName;
+  switch (details.reason) {
+    case 'no-local-model':
+      return [
+        'No provider/model is configured.',
+        `Cliq checked local Ollama at ${details.baseUrl ?? 'http://localhost:11434'}, but no local model could be selected.`
+      ].join(' ');
+    case 'missing-provider-api-key':
+      return `${displayName} provider is selected, but ${details.missingEnvVar ?? 'the required API key'} is not set.`;
+    case 'missing-model':
+      return `${displayName} provider is selected, but no model id was configured.`;
+    case 'missing-base-url':
+      return `${displayName} provider is selected, but no base URL was configured.`;
+    default: {
+      const _exhaustive: never = details.reason;
+      return _exhaustive;
+    }
   }
+}
 
-  if (!apiKey) {
-    throw new Error(`${provider} API key is required`);
+function requireApiKey(provider: ProviderName, apiKey: string | undefined) {
+  const providerDef = getModelProvider(provider);
+  if (providerDef.requiresApiKey && !apiKey) {
+    throw new ModelSetupRequiredError({
+      reason: 'missing-provider-api-key',
+      provider,
+      missingEnvVar: providerDef.apiKeyEnv
+    });
   }
 }
 
 function buildNoLocalModelConfiguredError(baseUrl: string, cause?: unknown) {
   const causeMessage = cause instanceof Error ? cause.message : cause ? String(cause) : '';
-  return new Error(
-    [
-      'No model provider or local Ollama model configured.',
-      '',
-      `Cliq defaults to local Ollama at ${baseUrl} when no model provider is configured, but no local model could be selected.`,
-      '',
-      'Options:',
-      `  - Install a local model: ollama pull ${OLLAMA_DEFAULT_MODEL_HINT}`,
-      '  - Select an existing local model: cliq --provider ollama --model <model> run "prompt"',
-      '  - Configure a remote provider with --provider, --model, and the required API key',
-      ...(causeMessage ? ['', `Ollama discovery error: ${causeMessage}`] : [])
-    ].join('\n')
+  return new ModelSetupRequiredError(
+    {
+      reason: 'no-local-model',
+      provider: 'ollama',
+      baseUrl,
+      ...(causeMessage ? { causeMessage } : {})
+    },
+    { cause }
   );
 }
 
@@ -116,7 +230,10 @@ export async function resolveModelConfig({ workspace, cli }: ModelConfigInput): 
     providerDef.defaultBaseUrl
   );
   if (!baseUrl) {
-    throw new Error(`baseUrl is required for provider ${provider}`);
+    throw new ModelSetupRequiredError({
+      reason: 'missing-base-url',
+      provider
+    });
   }
 
   if (!model && provider === 'ollama') {
@@ -124,7 +241,11 @@ export async function resolveModelConfig({ workspace, cli }: ModelConfigInput): 
   }
 
   if (!model) {
-    throw new Error(`model is required for provider ${provider}`);
+    throw new ModelSetupRequiredError({
+      reason: 'missing-model',
+      provider,
+      baseUrl
+    });
   }
 
   const apiKey = getProviderApiKey(provider);
