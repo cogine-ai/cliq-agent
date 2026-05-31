@@ -1324,6 +1324,7 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-home-'));
   const previousCwd = process.cwd();
   const previousHome = process.env.CLIQ_HOME;
+  const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
   const previousLog = console.log;
   const previousStdoutWrite = process.stdout.write;
   const previousStderrWrite = process.stderr.write;
@@ -1331,6 +1332,7 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
   const stderr: string[] = [];
 
   process.chdir(cwd);
+  process.env.CLIQ_TRUST_WORKSPACE = 'trust';
   console.log = (value?: unknown) => {
     output.push(String(value));
   };
@@ -1361,6 +1363,11 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
       delete process.env.CLIQ_HOME;
     } else {
       process.env.CLIQ_HOME = previousHome;
+    }
+    if (previousTrust === undefined) {
+      delete process.env.CLIQ_TRUST_WORKSPACE;
+    } else {
+      process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
     }
     process.chdir(previousCwd);
     await rm(cwd, { recursive: true, force: true });
@@ -1458,6 +1465,35 @@ test('runCli tx validate --json emits trust refusal as stdout JSON instead of st
       /untrusted workspace|non-interactive mode/i.exec(payloads[0]?.message ?? ''),
       'expected gate copy to mention non-interactive refuse'
     );
+    assert.equal(env.stderrText().trim(), '');
+  });
+});
+
+test('runCli tx list --json refuses before crash recovery on untrusted workspace', async () => {
+  await withCliTestEnv('tx-list-trust-json', async (env) => {
+    const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
+    delete process.env.CLIQ_TRUST_WORKSPACE;
+
+    try {
+      await assert.rejects(() => runCli(['node', 'src/index.ts', 'tx', 'list', '--json']), isReportedCliError);
+    } finally {
+      if (previousTrust === undefined) {
+        delete process.env.CLIQ_TRUST_WORKSPACE;
+      } else {
+        process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+      }
+    }
+
+    const payloads = env.output
+      .join('')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { type?: string; message?: string });
+
+    assert.equal(payloads.length, 1);
+    assert.equal(payloads[0]?.type, 'error');
+    assert.ok(/untrusted workspace|non-interactive mode/i.exec(payloads[0]?.message ?? ''));
     assert.equal(env.stderrText().trim(), '');
   });
 });

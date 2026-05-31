@@ -2059,6 +2059,14 @@ export async function runCli(argv: string[]) {
       process.stdout.write(`${JSON.stringify(payload)}\n`);
     };
 
+    // Every tx subcommand may run crash recovery before its own logic; recovery
+    // can apply staged overlay files or finish partial aborts on the workspace.
+    // Require the same non-interactive trust gate as headless run / rpc.
+    await denyIfWorkspaceUntrustedNonInteractiveRuntime(
+      cwd,
+      wantsJson ? { writeJsonError: (msg) => writeJson({ type: 'error', message: msg }) } : undefined
+    );
+
     if (parsed.cmd === 'tx-open') {
       // Per spec §A.6: every tx subcommand handler runs crash recovery first.
       await coordRecoverAtStart(ctx);
@@ -2195,10 +2203,6 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-validate') {
-      await denyIfWorkspaceUntrustedNonInteractiveRuntime(
-        cwd,
-        wantsJson ? { writeJsonError: (msg) => writeJson({ type: 'error', message: msg }) } : undefined
-      );
       // Per spec §A.6: every tx subcommand handler runs crash recovery first.
       await coordRecoverAtStart(ctx);
       const wsCfg = await loadWorkspaceConfig(cwd);
@@ -2271,10 +2275,6 @@ export async function runCli(argv: string[]) {
     }
 
     if (parsed.cmd === 'tx-apply') {
-      await denyIfWorkspaceUntrustedNonInteractiveRuntime(
-        cwd,
-        wantsJson ? { writeJsonError: (msg) => writeJson({ type: 'error', message: msg }) } : undefined
-      );
       // Per spec §A.6: every tx subcommand handler runs crash recovery first.
       await coordRecoverAtStart(ctx);
 
