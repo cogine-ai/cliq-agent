@@ -245,7 +245,7 @@ Cliq runs tools on your local machine in the current workspace. It is not a sand
 Workspace trust decides whether Cliq enters the workspace runtime layer that reads `./.cliq/config.json`: hooks (including lifecycle command hooks), extension modules, validators, instructions, skills, etc. Trusted access is **orthogonal** to tool policy (`--policy` / `CLIQ_POLICY_MODE`): confirming trust does **not** auto-approve edits or shell commands—that remains policy’s job.
 
 - **Interactive terminals** (`cliq` / `cliq chat` when stdin+stdout are TTY): the first encounter with a canonical workspace prompts once; approvals persist under `CLIQ_HOME` (`workspaces/<workspaceId>/trust.json`), keyed by symlink-resolving real path.
-- **Non-interactive & automation** (`cliq run "prompt"`, `cliq run --jsonl`, `cliq rpc`, `cliq tx validate|apply`; legacy shortcut: `cliq "prompt"`): fail-closed unless the workspace already has a persisted `trusted` record or `CLIQ_TRUST_WORKSPACE=trust` is set deliberately (use `trust`/`trusted` synonyms; prefer `deny`/`untrusted` to forbid).
+- **Non-interactive & automation** (`cliq run "prompt"`, `cliq run --jsonl "prompt"`, `cliq rpc`, `cliq tx validate|apply`; legacy shortcut: `cliq "prompt"`): fail-closed unless the workspace already has a persisted `trusted` record or `CLIQ_TRUST_WORKSPACE=trust` is set deliberately (use `trust`/`trusted` synonyms; prefer `deny`/`untrusted` to forbid).
 - Ordering matters: Cliq resolves trust **before** reading repo-controlled `.cliq` config layers (supply-chain tooling should not get a loading-order shortcut).
 
 The default policy mode is `default`, which asks before edits, shell commands, transaction apply, and permission requests. For unfamiliar repositories or exploratory review, prefer:
