@@ -33,10 +33,10 @@ cliq
 
 Running `cliq` with no arguments starts interactive chat. `cliq chat` is the explicit equivalent.
 
-Run a one-shot task:
+Run a non-interactive prompt:
 
 ```bash
-cliq "inspect this repo and summarize the architecture"
+cliq run "inspect this repo and summarize the architecture"
 ```
 
 ### Interactive UI
@@ -71,7 +71,7 @@ By default, mode changes update the status line without adding transcript noise.
 To show mode-change notices in the transcript while debugging TUI state, use
 `--tui-debug` or `CLIQ_TUI_DEBUG=1`.
 
-One-shot runs (`cliq "task"`) and headless modes (`cliq run --jsonl`) are unaffected.
+Non-interactive runs (`cliq run "prompt"` and `cliq run --jsonl "prompt"`) are unaffected.
 
 #### Known limitation: terminal resize during an active turn
 
@@ -81,7 +81,7 @@ The TUI uses Ink's *inline* render mode (no alt-screen) so prior turns stay in t
 
 Cliq is intentionally small right now. It supports:
 
-- Interactive chat and one-shot tasks
+- Interactive chat and non-interactive runs
 - Machine-readable JSONL headless runs
 - Structured file inspection with read, list, find, and grep
 - Shell command execution
@@ -152,11 +152,13 @@ OpenAI-compatible streaming modes:
 
 ## Commands
 
-Run a one-shot task in the current directory:
+Run a non-interactive prompt in the current directory:
 
 ```bash
-cliq "inspect this repo and add a tiny README improvement"
+cliq run "inspect this repo and add a tiny README improvement"
 ```
+
+The older `cliq "prompt"` shorthand still works as a compatibility shortcut, but docs and automation should prefer `cliq run`.
 
 Start interactive chat:
 
@@ -180,16 +182,16 @@ cliq history
 Run with a stricter policy mode:
 
 ```bash
-cliq --policy plan "inspect the runner and explain how tool dispatch works"
+cliq --policy plan run "inspect the runner and explain how tool dispatch works"
 ```
 
 Activate one or more skills for a run:
 
 ```bash
-cliq --skill reviewer --skill safe-edit "inspect the runtime and suggest a minimal refactor"
+cliq --skill reviewer --skill safe-edit run "inspect the runtime and suggest a minimal refactor"
 ```
 
-Run a headless task with structured JSONL events:
+Run with structured JSONL events:
 
 ```bash
 cliq run --jsonl "inspect this repo"
@@ -243,7 +245,7 @@ Cliq runs tools on your local machine in the current workspace. It is not a sand
 Workspace trust decides whether Cliq enters the workspace runtime layer that reads `./.cliq/config.json`: hooks (including lifecycle command hooks), extension modules, validators, instructions, skills, etc. Trusted access is **orthogonal** to tool policy (`--policy` / `CLIQ_POLICY_MODE`): confirming trust does **not** auto-approve edits or shell commands—that remains policy’s job.
 
 - **Interactive terminals** (`cliq` / `cliq chat` when stdin+stdout are TTY): the first encounter with a canonical workspace prompts once; approvals persist under `CLIQ_HOME` (`workspaces/<workspaceId>/trust.json`), keyed by symlink-resolving real path.
-- **Non-interactive & automation** (`cliq "task…"`, `cliq run --jsonl`, `cliq rpc`, `cliq tx validate|apply`): fail-closed unless the workspace already has a persisted `trusted` record or `CLIQ_TRUST_WORKSPACE=trust` is set deliberately (use `trust`/`trusted` synonyms; prefer `deny`/`untrusted` to forbid).
+- **Non-interactive & automation** (`cliq run "prompt"`, `cliq run --jsonl`, `cliq rpc`, `cliq tx validate|apply`; legacy shortcut: `cliq "prompt"`): fail-closed unless the workspace already has a persisted `trusted` record or `CLIQ_TRUST_WORKSPACE=trust` is set deliberately (use `trust`/`trusted` synonyms; prefer `deny`/`untrusted` to forbid).
 - Ordering matters: Cliq resolves trust **before** reading repo-controlled `.cliq` config layers (supply-chain tooling should not get a loading-order shortcut).
 
 The default policy mode is `default`, which asks before edits, shell commands, transaction apply, and permission requests. For unfamiliar repositories or exploratory review, prefer:

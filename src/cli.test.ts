@@ -55,9 +55,9 @@ test('parseArgs accepts --policy=plan', () => {
   });
 });
 
-test('parseArgs accepts --policy accept-edits for one-shot prompt', () => {
+test('parseArgs accepts --policy accept-edits for prompt shorthand', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--policy', 'accept-edits', 'fix', 'tests']), {
-    cmd: 'chat',
+    cmd: 'run',
     prompt: 'fix tests',
     policy: 'accept-edits',
     policyExplicit: true,
@@ -68,7 +68,7 @@ test('parseArgs accepts --policy accept-edits for one-shot prompt', () => {
 
 test('parseArgs accepts command-scoped run --jsonl', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', '--jsonl', 'inspect', 'repo']), {
-    cmd: 'chat',
+    cmd: 'run',
     prompt: 'inspect repo',
     jsonl: true,
     policy: 'default',
@@ -92,6 +92,23 @@ test('parseArgs accepts --tui-debug', () => {
   );
 });
 
+test('parseArgs normalizes non-interactive prompt shortcuts to run', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'inspect', 'repo']), {
+    cmd: 'run',
+    prompt: 'inspect repo',
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'ask', '--literal', 'prompt']), {
+    cmd: 'run',
+    prompt: '--literal prompt',
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+});
+
 test('parseArgs accepts top-level version flags without stealing run prompts', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--version']), {
     cmd: 'version',
@@ -106,7 +123,7 @@ test('parseArgs accepts top-level version flags without stealing run prompts', (
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', '-v']), {
-    cmd: 'chat',
+    cmd: 'run',
     prompt: '-v',
     policy: 'default',
     skills: [],
@@ -120,7 +137,7 @@ test('parseArgs accepts top-level version flags without stealing run prompts', (
 
 test('parseArgs keeps --jsonl in the prompt after the first prompt token', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', 'inspect', '--jsonl']), {
-    cmd: 'chat',
+    cmd: 'run',
     prompt: 'inspect --jsonl',
     policy: 'default',
     skills: [],
@@ -138,16 +155,6 @@ test('parseArgs accepts rpc as a no-prompt command and rejects extra args', () =
   assert.throws(() => parseArgs(['node', 'cliq', 'rpc', 'extra']), /Unknown rpc argument: extra/i);
 });
 
-test('parseArgs accepts ask as a prompt-only run alias', () => {
-  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'ask', '--literal', 'prompt']), {
-    cmd: 'chat',
-    prompt: '--literal prompt',
-    policy: 'default',
-    skills: [],
-    model: {}
-  });
-});
-
 test('parseArgs requires a prompt for run aliases', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'run']), /missing prompt for cliq run/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'run', '--jsonl']), /missing prompt for cliq run/i);
@@ -161,14 +168,14 @@ test('parseArgs rejects --jsonl outside cliq run', () => {
 
 test('parseArgs keeps --jsonl literal in prompt fallback paths', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', 'inspect', '--jsonl']), {
-    cmd: 'chat',
+    cmd: 'run',
     prompt: 'inspect --jsonl',
     policy: 'default',
     skills: [],
     model: {}
   });
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--jsonl', 'inspect']), {
-    cmd: 'chat',
+    cmd: 'run',
     prompt: '--jsonl inspect',
     policy: 'default',
     skills: [],
@@ -843,9 +850,14 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
     console.log = previousLog;
   }
 
-  assert.match(output, /cliq run "task"/);
-  assert.match(output, /cliq run --jsonl "task"/);
-  assert.match(output, /cliq ask "task"/);
+  assert.match(output, /cliq run "prompt"/);
+  assert.match(output, /cliq run --jsonl "prompt"/);
+  assert.match(output, /Compatibility shortcuts/i);
+  assert.match(output, /cliq "prompt"/);
+  assert.match(output, /cliq ask "prompt"/);
+  assert.doesNotMatch(output, /cliq "task"/);
+  assert.doesNotMatch(output, /cliq run "task"/);
+  assert.doesNotMatch(output, /cliq ask "task"/);
   assert.match(output, /cliq rpc\s+Start stdio JSON-RPC mode/);
   assert.match(output, /cliq checkpoint create/);
   assert.match(output, /cliq checkpoint list/);

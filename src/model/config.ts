@@ -62,7 +62,7 @@ function buildNoLocalModelConfiguredError(baseUrl: string, cause?: unknown) {
       '',
       'Options:',
       `  - Install a local model: ollama pull ${OLLAMA_DEFAULT_MODEL_HINT}`,
-      '  - Select an existing local model: cliq --provider ollama --model <model> "task"',
+      '  - Select an existing local model: cliq --provider ollama --model <model> run "prompt"',
       '  - Configure a remote provider with --provider, --model, and the required API key',
       ...(causeMessage ? ['', `Ollama discovery error: ${causeMessage}`] : [])
     ].join('\n')
