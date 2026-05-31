@@ -123,6 +123,7 @@ type ParsedArgsBase = {
 
 export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'chat'; prompt: string; jsonl?: boolean }
+  | { cmd: 'run'; prompt: string; jsonl?: boolean }
   | { cmd: 'checkpoint-create'; name?: string; prompt?: undefined }
   | { cmd: 'checkpoint-list'; prompt?: undefined }
   | {
@@ -815,7 +816,7 @@ function parseRunArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     throw new Error('Missing prompt for cliq run');
   }
 
-  return { ...base, cmd: 'chat', prompt, ...(jsonl ? { jsonl } : {}) };
+  return { ...base, cmd: 'run', prompt, ...(jsonl ? { jsonl } : {}) };
 }
 
 function parseAskArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
@@ -823,7 +824,7 @@ function parseAskArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   if (!prompt) {
     throw new Error('Missing prompt for cliq ask');
   }
-  return { ...base, cmd: 'chat', prompt };
+  return { ...base, cmd: 'run', prompt };
 }
 
 function isKnownCommand(cmd: string | undefined) {
@@ -1171,7 +1172,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   };
   const hasJsonlArg = args.includes('--jsonl') || args.some((arg) => arg.startsWith('--jsonl='));
   if (hasJsonlArg && isKnownCommand(cmd) && cmd !== 'run') {
-    throw new Error('--jsonl is only supported with cliq run --jsonl "task"');
+    throw new Error('--jsonl is only supported with cliq run --jsonl "prompt"');
   }
   if (!cmd || cmd === 'chat') {
     return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model, ...baseExtras };
@@ -1216,10 +1217,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ensureNoExtraArgs(args, 1, cmd);
     return { cmd: 'version', policy, skills, model };
   }
-  // Fallback: any unrecognized first token gets treated as part of a chat
-  // prompt. baseExtras carry --tui/--classic/--policy explicit flags so the
-  // dispatch layer sees the same surface here as in the explicit `chat` path.
-  return { cmd: 'chat', prompt: args.join(' '), policy, skills, model, ...baseExtras };
+  // Fallback: any unrecognized first token is a compatibility shortcut for
+  // `cliq run`. baseExtras carry --tui/--classic/--policy explicit flags so the
+  // dispatch layer sees the same surface here as in the explicit command path.
+  return { cmd: 'run', prompt: args.join(' '), policy, skills, model, ...baseExtras };
 }
 
 function printCheckpointHelp() {
@@ -1323,11 +1324,10 @@ export function printHelp(topic?: HelpTopic) {
   console.log(`cliq - tiny local coding agent harness
 
 Usage:
-  cliq "task"              Run a task in the current directory
-  cliq run "task"          Alias for one-shot task execution
-  cliq run --jsonl "task"  Emit machine-readable JSONL runtime events
-  cliq ask "task"          Alias for one-shot task execution
-  cliq chat                Start interactive chat in the current directory
+  cliq run "prompt"        Run a non-interactive prompt in the current directory
+  cliq run --jsonl "prompt"  Emit machine-readable JSONL runtime events
+  cliq                     Start interactive chat in the current directory
+  cliq chat                Explicitly start interactive chat in the current directory
   cliq reset               Clear persisted conversation for this directory
   cliq history             Print persisted session for this directory
   cliq rpc                 Start stdio JSON-RPC mode
@@ -1347,6 +1347,10 @@ Usage:
   cliq help TOPIC          Print help for checkpoint, compact, handoff, or tx
   -h, --help               Print this help
   -v, --version            Print the Cliq version
+
+Compatibility shortcuts:
+  cliq "prompt"            Shortcut for cliq run "prompt" (prefer cliq run)
+  cliq ask "prompt"        Legacy alias for cliq run "prompt"
 
 Transaction subcommands:
   cliq tx open [name]               Open an explicit transaction (optional friendly name)
@@ -2775,7 +2779,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   });
   opts.assembly.setPolicyMode(policy);
 
-  // Lazy-import the TUI runtime surface so headless / RPC / one-shot paths
+  // Lazy-import the TUI runtime surface so headless / RPC / non-interactive paths
   // never pay the Ink + React module load cost. Enforced by the
   // import-isolation test under src/tui/. Types come from the top-level
   // type-only import (erased at compile time).
