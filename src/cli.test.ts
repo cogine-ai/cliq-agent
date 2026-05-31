@@ -1234,6 +1234,7 @@ test('runCli --classic prints provider-first setup guidance for missing model co
   const previousProvider = process.env.CLIQ_MODEL_PROVIDER;
   const previousModel = process.env.CLIQ_MODEL;
   const previousBaseUrl = process.env.CLIQ_MODEL_BASE_URL;
+  const previousStreaming = process.env.CLIQ_MODEL_STREAMING;
   const previousStdoutWrite = process.stdout.write;
   const previousStderrWrite = process.stderr.write;
   const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ models: [] }));
@@ -1246,6 +1247,7 @@ test('runCli --classic prints provider-first setup guidance for missing model co
   delete process.env.CLIQ_MODEL_PROVIDER;
   delete process.env.CLIQ_MODEL;
   delete process.env.CLIQ_MODEL_BASE_URL;
+  delete process.env.CLIQ_MODEL_STREAMING;
   process.stdout.write = ((chunk: string | Uint8Array) => {
     stdout += String(chunk);
     return true;
@@ -1270,6 +1272,8 @@ test('runCli --classic prints provider-first setup guidance for missing model co
     else process.env.CLIQ_MODEL = previousModel;
     if (previousBaseUrl === undefined) delete process.env.CLIQ_MODEL_BASE_URL;
     else process.env.CLIQ_MODEL_BASE_URL = previousBaseUrl;
+    if (previousStreaming === undefined) delete process.env.CLIQ_MODEL_STREAMING;
+    else process.env.CLIQ_MODEL_STREAMING = previousStreaming;
     process.chdir(previousCwd);
     fetchMock.mock.restore();
     await rm(cwd, { recursive: true, force: true });
