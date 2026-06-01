@@ -97,6 +97,22 @@ test('Pi model rows map to CLIQ model metadata entries with explicit provider id
   );
 });
 
+test('Pi model rows omit pricing when upstream cost metadata is incomplete', () => {
+  const mapped = mapPiModelToCatalogEntry({
+    provider: 'openai',
+    id: 'gpt-5.2-mini',
+    name: 'GPT-5.2 Mini',
+    api: 'openai-responses',
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0.25, output: 2 },
+    contextWindow: 128_000,
+    maxTokens: 16_384
+  });
+
+  assert.equal(mapped?.pricing, undefined);
+});
+
 test('OpenClaw provider rows map to CLIQ provider catalog entries', () => {
   assert.deepEqual(
     mapOpenClawProviderToCatalogEntry({
@@ -137,6 +153,50 @@ test('OpenClaw provider rows map to CLIQ provider catalog entries', () => {
         kind: 'openclaw',
         confidence: 'medium',
         upstreamProvider: 'openrouter'
+      }
+    }
+  );
+});
+
+test('OpenAI-compatible OpenClaw rows use user-config model list semantics', () => {
+  assert.deepEqual(
+    mapOpenClawProviderToCatalogEntry({
+      id: 'openai-compatible',
+      name: 'OpenAI-compatible',
+      docs: '/providers/openai-compatible',
+      categories: ['custom', 'llm'],
+      authChoices: [
+        {
+          method: 'api-key',
+          optionKey: 'modelApiKey',
+          cliOption: '--api-key <key>',
+          choiceHint: 'Use an optional compatible endpoint API key.'
+        }
+      ]
+    }),
+    {
+      id: 'openai-compatible',
+      displayName: 'OpenAI-compatible',
+      kind: 'openai-compatible',
+      auth: {
+        kind: 'api-key',
+        envVar: 'CLIQ_MODEL_API_KEY',
+        required: false
+      },
+      configSources: ['ENV', 'Workspace', 'Global', 'CLI'],
+      setup: {
+        primary: ['Set a base URL and model id for the OpenAI-compatible endpoint.'],
+        docsUrl: '/providers/openai-compatible'
+      },
+      modelListSource: {
+        kind: 'user-config',
+        description: 'User or workspace configuration supplies the model id.'
+      },
+      visibleModelLimit: 0,
+      source: {
+        kind: 'openclaw',
+        confidence: 'medium',
+        upstreamProvider: 'openai-compatible'
       }
     }
   );

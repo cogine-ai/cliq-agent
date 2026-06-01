@@ -24,13 +24,15 @@ type Args = {
   openclawDir?: string;
   out: string;
   generatedAt: string;
+  allowEmpty: boolean;
 };
 
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     piGenerated: DEFAULT_PI_MODELS_URL,
     out: path.join(repoRoot, 'src/model/catalog/snapshot.ts'),
-    generatedAt: new Date().toISOString()
+    generatedAt: new Date().toISOString(),
+    allowEmpty: false
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -48,6 +50,8 @@ function parseArgs(argv: string[]): Args {
     } else if (arg === '--generated-at' && next) {
       args.generatedAt = next;
       i += 1;
+    } else if (arg === '--allow-empty') {
+      args.allowEmpty = true;
     } else if (arg === '--help') {
       printHelp();
       process.exit(0);
@@ -67,6 +71,7 @@ Options:
   --openclaw-dir <path>      Optional OpenClaw checkout for provider metadata.
   --out <path>               Output snapshot module. Defaults to src/model/catalog/snapshot.ts
   --generated-at <iso>       Deterministic timestamp for tests/reproducible runs.
+  --allow-empty              Allow zero Pi model records and keep existing checked-in models.
 `);
 }
 
@@ -186,9 +191,16 @@ async function readOpenClawProviders(openclawDir: string): Promise<OpenClawProvi
       continue;
     }
 
-    const manifest = JSON.parse(raw) as {
-      providers?: unknown;
-    };
+    let manifest: { providers?: unknown };
+    try {
+      manifest = JSON.parse(raw) as {
+        providers?: unknown;
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Skipping invalid OpenClaw manifest ${manifestPath} (${name}): ${message}`);
+      continue;
+    }
     const manifestProviders = manifest.providers;
     if (Array.isArray(manifestProviders)) {
       for (const provider of manifestProviders) {
@@ -260,6 +272,11 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const piSource = await readText(args.piGenerated);
   const piRecords = parsePiGeneratedCatalog(piSource);
+  if (piRecords.length === 0 && !args.allowEmpty) {
+    throw new Error(
+      `Pi catalog input produced zero model records: ${args.piGenerated}. Pass --allow-empty only when intentionally preserving existing checked-in models.`
+    );
+  }
   const models = mergeModels(piRecords.flatMap((record) => mapPiModelToCatalogEntry(record) ?? []));
 
   const openClawProviders = args.openclawDir ? await readOpenClawProviders(args.openclawDir) : [];
