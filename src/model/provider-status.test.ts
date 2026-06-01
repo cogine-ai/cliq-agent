@@ -31,7 +31,9 @@ async function withEnv<T>(env: Record<string, string | undefined>, fn: () => T |
   }
 
   for (const [key, value] of Object.entries(env)) {
-    previous.set(key, process.env[key]);
+    if (!previous.has(key)) {
+      previous.set(key, process.env[key]);
+    }
     if (value === undefined) {
       delete process.env[key];
     } else {

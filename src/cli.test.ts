@@ -887,6 +887,8 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /cliq compact create/);
   assert.match(output, /cliq compact list/);
   assert.match(output, /cliq handoff create/);
+  assert.match(output, /cliq providers status/);
+  assert.match(output, /checkpoint, compact, handoff, providers, or tx/);
   assert.match(output, /cliq tx help/);
   assert.match(output, /cliq tx diff \[<txId>\]/);
   assert.match(output, /cliq tx show \[<txId>\] \[--json\]/);
@@ -1509,6 +1511,9 @@ test('runCli providers status --json emits safe provider status without starting
   await withCliTestEnv('providers-status-json', async (env) => {
     const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
     const previousOpenAi = process.env.OPENAI_API_KEY;
+    const previousModel = process.env.CLIQ_MODEL;
+    const previousBaseUrl = process.env.CLIQ_MODEL_BASE_URL;
+    const previousStreaming = process.env.CLIQ_MODEL_STREAMING;
     const fetchMock = mock.method(globalThis, 'fetch', async () => {
       throw new Error('Ollama unavailable in test');
     });
@@ -1516,6 +1521,9 @@ test('runCli providers status --json emits safe provider status without starting
     try {
       process.env.CLIQ_TRUST_WORKSPACE = 'trust';
       process.env.OPENAI_API_KEY = 'sk-secret';
+      delete process.env.CLIQ_MODEL;
+      delete process.env.CLIQ_MODEL_BASE_URL;
+      delete process.env.CLIQ_MODEL_STREAMING;
       await mkdir(path.join(env.cwd, '.cliq'), { recursive: true });
       await writeFile(
         path.join(env.cwd, '.cliq', 'config.json'),
@@ -1530,6 +1538,12 @@ test('runCli providers status --json emits safe provider status without starting
       else process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
       if (previousOpenAi === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousOpenAi;
+      if (previousModel === undefined) delete process.env.CLIQ_MODEL;
+      else process.env.CLIQ_MODEL = previousModel;
+      if (previousBaseUrl === undefined) delete process.env.CLIQ_MODEL_BASE_URL;
+      else process.env.CLIQ_MODEL_BASE_URL = previousBaseUrl;
+      if (previousStreaming === undefined) delete process.env.CLIQ_MODEL_STREAMING;
+      else process.env.CLIQ_MODEL_STREAMING = previousStreaming;
     }
 
     const payload = JSON.parse(env.outputText()) as {
@@ -1573,6 +1587,9 @@ test('runCli providers validate --json returns structured configuration failures
   await withCliTestEnv('providers-validate-json', async (env) => {
     const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
     const previousOpenAi = process.env.OPENAI_API_KEY;
+    const previousModel = process.env.CLIQ_MODEL;
+    const previousBaseUrl = process.env.CLIQ_MODEL_BASE_URL;
+    const previousStreaming = process.env.CLIQ_MODEL_STREAMING;
     const fetchMock = mock.method(globalThis, 'fetch', async () => {
       throw new Error('Ollama unavailable in test');
     });
@@ -1580,6 +1597,9 @@ test('runCli providers validate --json returns structured configuration failures
     try {
       process.env.CLIQ_TRUST_WORKSPACE = 'trust';
       delete process.env.OPENAI_API_KEY;
+      delete process.env.CLIQ_MODEL;
+      delete process.env.CLIQ_MODEL_BASE_URL;
+      delete process.env.CLIQ_MODEL_STREAMING;
       await mkdir(path.join(env.cwd, '.cliq'), { recursive: true });
       await writeFile(
         path.join(env.cwd, '.cliq', 'config.json'),
@@ -1597,6 +1617,12 @@ test('runCli providers validate --json returns structured configuration failures
       else process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
       if (previousOpenAi === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previousOpenAi;
+      if (previousModel === undefined) delete process.env.CLIQ_MODEL;
+      else process.env.CLIQ_MODEL = previousModel;
+      if (previousBaseUrl === undefined) delete process.env.CLIQ_MODEL_BASE_URL;
+      else process.env.CLIQ_MODEL_BASE_URL = previousBaseUrl;
+      if (previousStreaming === undefined) delete process.env.CLIQ_MODEL_STREAMING;
+      else process.env.CLIQ_MODEL_STREAMING = previousStreaming;
     }
 
     const payload = JSON.parse(env.outputText()) as {

@@ -1409,7 +1409,7 @@ Usage:
   cliq compact help        Print compact command help
   cliq handoff help        Print handoff command help
   cliq help                Print this help
-  cliq help TOPIC          Print help for checkpoint, compact, handoff, or tx
+  cliq help TOPIC          Print help for checkpoint, compact, handoff, providers, or tx
   -h, --help               Print this help
   -v, --version            Print the Cliq version
 
