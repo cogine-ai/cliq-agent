@@ -92,6 +92,16 @@ function withOptionalNumber<T extends Record<string, unknown>>(record: T, key: s
   };
 }
 
+function hasCompletePricing(cost: PiModelCatalogRecord['cost']): cost is Required<NonNullable<PiModelCatalogRecord['cost']>> {
+  return (
+    cost !== undefined &&
+    Number.isFinite(cost.input) &&
+    Number.isFinite(cost.output) &&
+    Number.isFinite(cost.cacheRead) &&
+    Number.isFinite(cost.cacheWrite)
+  );
+}
+
 export function mapPiModelToCatalogEntry(record: PiModelCatalogRecord): ModelCatalogEntry | null {
   const provider = PI_PROVIDER_MAP[record.provider];
   if (!provider) {
@@ -123,12 +133,16 @@ export function mapPiModelToCatalogEntry(record: PiModelCatalogRecord): ModelCat
       api: record.api,
       ...(record.baseUrl ? { baseUrl: record.baseUrl } : {})
     },
-    pricing: {
-      input: record.cost?.input ?? 0,
-      output: record.cost?.output ?? 0,
-      cacheRead: record.cost?.cacheRead ?? 0,
-      cacheWrite: record.cost?.cacheWrite ?? 0
-    },
+    ...(hasCompletePricing(record.cost)
+      ? {
+          pricing: {
+            input: record.cost.input,
+            output: record.cost.output,
+            cacheRead: record.cost.cacheRead,
+            cacheWrite: record.cost.cacheWrite
+          }
+        }
+      : {}),
     ...(record.compat ? { compat: record.compat } : {}),
     source: {
       kind: 'pi',
@@ -165,9 +179,27 @@ export function mapOpenClawProviderToCatalogEntry(record: OpenClawProviderRecord
         } as const);
 
   const setupPrimary =
-    auth.kind === 'none'
+    record.id === 'openai-compatible'
+      ? ['Set a base URL and model id for the OpenAI-compatible endpoint.']
+      : auth.kind === 'none'
       ? ['Run the local provider service before selecting a model.']
       : [`Set ${auth.envVar} or configure an ${record.name ?? record.id} credential.`];
+
+  const modelListSource =
+    record.id === 'ollama'
+      ? {
+          kind: 'ollama-tags' as const,
+          description: 'Local Ollama /api/tags discovery.'
+        }
+      : record.id === 'openai-compatible'
+        ? {
+            kind: 'user-config' as const,
+            description: 'User or workspace configuration supplies the model id.'
+          }
+        : {
+            kind: 'snapshot' as const,
+            description: 'Static CLIQ catalog generated from upstream metadata.'
+          };
 
   return {
     id: record.id,
@@ -180,13 +212,7 @@ export function mapOpenClawProviderToCatalogEntry(record: OpenClawProviderRecord
       primary: setupPrimary,
       ...(record.docs ? { docsUrl: record.docs } : {})
     },
-    modelListSource: {
-      kind: record.id === 'ollama' ? 'ollama-tags' : 'snapshot',
-      description:
-        record.id === 'ollama'
-          ? 'Local Ollama /api/tags discovery.'
-          : 'Static CLIQ catalog generated from upstream metadata.'
-    },
+    modelListSource,
     ...(PROVIDER_DEFAULT_MODELS[record.id] ? { defaultModelId: PROVIDER_DEFAULT_MODELS[record.id] } : {}),
     visibleModelLimit: record.id === 'openai-compatible' ? 0 : 12,
     source: {

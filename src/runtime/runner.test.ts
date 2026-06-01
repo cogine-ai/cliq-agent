@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { resolveModelMetadata } from '../model/catalog/index.js';
 import type { ModelClient } from '../model/types.js';
 import { approvePlan, createDraftPlan, finalizePlan, readPlanArtifact, readPlanProgress } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
@@ -1762,6 +1763,60 @@ test('runner retries once after recognized context overflow and successful compa
   assert.equal(final, 'done');
   assert.equal(normalCalls, 2);
   assert.equal(session.compactions.length, 1);
+});
+
+test('runner overflow retry can use catalog model metadata for context window', async () => {
+  const session = await createTempSession();
+  session.records.push({
+    id: 'u_old',
+    ts: '2026-04-30T00:00:00.000Z',
+    kind: 'user',
+    role: 'user',
+    content: 'old '.repeat(300)
+  });
+  let normalCalls = 0;
+
+  const catalogContextWindow = resolveModelMetadata('openai', 'gpt-5.2')?.capabilities.contextWindow;
+  assert.equal(catalogContextWindow, 128_000);
+
+  const runner = createRunner({
+    model: {
+      async complete(messages) {
+        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+          return completion('## Objective\nSummarized');
+        }
+        normalCalls += 1;
+        if (normalCalls === 1) {
+          throw new Error('context length exceeded');
+        }
+        return completion('{"message":"done"}');
+      }
+    },
+    autoCompact: {
+      config: {
+        enabled: 'on',
+        thresholdRatio: 0.99,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openai',
+        model: 'gpt-5.2',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    }
+  });
+
+  const final = await runner.runTurn(session, 'new request');
+
+  assert.equal(final, 'done');
+  assert.equal(normalCalls, 2);
+  assert.equal(session.compactions.length, 1);
+  assert.equal(session.compactions[0]?.auto?.trigger, 'overflow');
+  assert.equal(session.compactions[0]?.auto?.contextWindowTokens, catalogContextWindow);
+  assert.equal(session.compactions[0]?.auto?.contextWindowSource, 'model-descriptor');
 });
 
 test('createRunner refuses applyPolicy=interactive + headless at construction', () => {
