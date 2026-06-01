@@ -34,13 +34,9 @@ test('omits the thinking row when activeTurn is null', () => {
   assert.doesNotMatch(lastFrame() ?? '', /thinking/);
 });
 
-test('renders no duplicate home screen copy when there are no entries and no active turn', () => {
+test('renders nothing when there are no entries and no active turn', () => {
   const { lastFrame } = render(<Transcript entries={[]} activeTurn={null} />);
-  const frame = lastFrame() ?? '';
-  assert.doesNotMatch(frame, /Ready when you are/);
-  assert.doesNotMatch(frame, /\/help/);
-  assert.doesNotMatch(frame, /Ctrl\+D/);
-  assert.doesNotMatch(frame, /Ctrl\+C/);
+  assert.equal(lastFrame(), '');
 });
 
 test('caps visible entries at 200 (older entries fall to shell scrollback)', () => {
