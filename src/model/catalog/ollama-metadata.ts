@@ -77,7 +77,7 @@ async function readShow(baseUrl: string, model: string): Promise<unknown> {
       headers: {
         'content-type': 'application/json'
       },
-      body: JSON.stringify({ name: model })
+      body: JSON.stringify({ model })
     },
     OLLAMA_DISCOVERY_TIMEOUT_MS
   );

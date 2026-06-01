@@ -7,7 +7,7 @@ test('inspectOllamaModelMetadata distinguishes raw, configured, and loaded conte
   const fetchMock = mock.method(globalThis, 'fetch', async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
     if (String(url) === 'http://localhost:11434/api/show') {
       assert.equal(init?.method, 'POST');
-      assert.equal(init?.body, JSON.stringify({ name: 'qwen3:4b' }));
+      assert.equal(init?.body, JSON.stringify({ model: 'qwen3:4b' }));
       return Response.json({
         model_info: {
           'qwen.context_length': 32_768

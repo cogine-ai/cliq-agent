@@ -110,7 +110,8 @@ test('Pi model rows omit pricing when upstream cost metadata is incomplete', () 
     maxTokens: 16_384
   });
 
-  assert.equal(mapped?.pricing, undefined);
+  assert.ok(mapped);
+  assert.equal(mapped.pricing, undefined);
 });
 
 test('OpenClaw provider rows map to CLIQ provider catalog entries', () => {
