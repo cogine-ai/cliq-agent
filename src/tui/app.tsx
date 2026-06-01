@@ -1,11 +1,13 @@
 import { Box, useApp } from 'ink';
 import { useMemo, useRef, useState } from 'react';
 
+import type { ProviderStatusReport } from '../model/provider-status.js';
 import type { PolicyMode } from '../policy/types.js';
 import { ApprovalModal } from './components/approval-modal.js';
 import { InputBar } from './components/input-bar.js';
 import { PlanProgressView } from './components/plan-progress.js';
 import { PlanReviewModal } from './components/plan-review-modal.js';
+import { ProviderManagement } from './components/provider-management.js';
 import { SlashPalette } from './components/slash-palette.js';
 import { BottomStatusBar, TopStatusBar } from './components/status-bar.js';
 import { Transcript } from './components/transcript.js';
@@ -39,6 +41,7 @@ export type AppProps = {
   onCancelTurn?: () => void;
   onSkillsList?: () => string | Promise<string>;
   onSkillActivate?: (name: string) => string | Promise<string>;
+  onProviderStatus?: () => ProviderStatusReport | Promise<ProviderStatusReport>;
 };
 
 export function App({
@@ -50,11 +53,15 @@ export function App({
   onPlanDecision,
   onCancelTurn,
   onSkillsList,
-  onSkillActivate
+  onSkillActivate,
+  onProviderStatus
 }: AppProps) {
   const state = useUiStore(store);
   const [input, setInput] = useState('');
+  const [providerReport, setProviderReport] = useState<ProviderStatusReport | null>(null);
+  const [providerStatusPending, setProviderStatusPending] = useState(false);
   const planDecisionInFlightRef = useRef(false);
+  const providerInteractionActiveRef = useRef(false);
   const { exit } = useApp();
 
   // Project the transcript down to the list of submitted user inputs in
@@ -89,7 +96,9 @@ export function App({
 
   async function handleSubmit(text: string) {
     const current = store.getState();
-    if (current.activeTurn || current.pendingApproval || current.pendingPlanReview) return;
+    if (current.activeTurn || current.pendingApproval || current.pendingPlanReview || providerInteractionActiveRef.current) {
+      return;
+    }
     setInput('');
     resetHistoryNav();
     if (text.startsWith('/')) {
@@ -140,6 +149,22 @@ export function App({
           pushSystem(`/policy failed: ${error instanceof Error ? error.message : String(error)}`);
         }
         return;
+      case 'providers':
+        try {
+          if (!onProviderStatus) {
+            pushSystem('No provider management handler is available in this TUI session.');
+            return;
+          }
+          providerInteractionActiveRef.current = true;
+          setProviderStatusPending(true);
+          setProviderReport(await onProviderStatus());
+        } catch (error) {
+          providerInteractionActiveRef.current = false;
+          pushSystem(`/providers failed: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          setProviderStatusPending(false);
+        }
+        return;
       case 'skills':
         try {
           pushSystem(onSkillsList ? await onSkillsList() : 'No skill catalog is available in this TUI session.');
@@ -171,7 +196,12 @@ export function App({
     }
   }
 
-  const inputDisabled = state.activeTurn !== null || state.pendingApproval !== null || state.pendingPlanReview !== null;
+  const inputDisabled =
+    state.activeTurn !== null ||
+    state.pendingApproval !== null ||
+    state.pendingPlanReview !== null ||
+    providerStatusPending ||
+    providerReport !== null;
   const completion = completeSlash(input);
   const terminalWidth = process.stdout.columns ?? 80;
   const expandableTool = findLatestExpandableTool(state);
@@ -218,6 +248,7 @@ export function App({
 
   useKeybindings({
     onCtrlC: () => {
+      if (providerInteractionActiveRef.current) return;
       if (store.getState().pendingApproval) {
         denyPendingApproval();
         onCancelTurn?.();
@@ -237,7 +268,7 @@ export function App({
     },
     onCtrlD: () => {
       const current = store.getState();
-      if (current.activeTurn || current.pendingApproval || current.pendingPlanReview) return;
+      if (current.activeTurn || current.pendingApproval || current.pendingPlanReview || providerInteractionActiveRef.current) return;
       if (input.length === 0) {
         exit();
       }
@@ -245,7 +276,7 @@ export function App({
     },
     onToggleBody: () => {
       const current = store.getState();
-      if (current.activeTurn || current.pendingApproval || current.pendingPlanReview) return;
+      if (current.activeTurn || current.pendingApproval || current.pendingPlanReview || providerInteractionActiveRef.current) return;
       const target = findLatestExpandableTool(current);
       if (!target) {
         pushSystem('no tool output to expand');
@@ -256,7 +287,7 @@ export function App({
     },
     onRotatePolicy: () => {
       const current = store.getState();
-      if (current.activeTurn || current.pendingApproval || current.pendingPlanReview) return;
+      if (current.activeTurn || current.pendingApproval || current.pendingPlanReview || providerInteractionActiveRef.current) return;
       void rotatePolicy();
     }
   });
@@ -277,7 +308,7 @@ export function App({
 
   async function startSyntheticTurn(text: string) {
     const current = store.getState();
-    if (current.activeTurn || current.pendingApproval || current.pendingPlanReview) return;
+    if (current.activeTurn || current.pendingApproval || current.pendingPlanReview || providerInteractionActiveRef.current) return;
     store.dispatch({ type: 'user-input', text });
     try {
       await onSubmit(text);
@@ -291,6 +322,11 @@ export function App({
         }
       });
     }
+  }
+
+  function closeProviderManagement() {
+    providerInteractionActiveRef.current = false;
+    setProviderReport(null);
   }
 
   async function handlePlanDecision(decision: UiPlanDecision) {
@@ -342,6 +378,8 @@ export function App({
             void handlePlanDecision(decision);
           }}
         />
+      ) : providerReport ? (
+        <ProviderManagement report={providerReport} onClose={closeProviderManagement} />
       ) : (
         <>
           {input.startsWith('/') ? <SlashPalette query={input} /> : null}

@@ -22,6 +22,10 @@ test('parseSlash maps skill commands', () => {
   if (noArg.kind === 'invalid') assert.match(noArg.reason, /requires a skill name/);
 });
 
+test('parseSlash maps provider management command', () => {
+  assert.deepEqual(parseSlash('/providers'), { kind: 'providers' });
+});
+
 test('parseSlash /policy requires a known mode argument', () => {
   assert.deepEqual(parseSlash('/policy default'), { kind: 'policy', mode: 'default' });
   assert.deepEqual(parseSlash('/policy accept-edits'), { kind: 'policy', mode: 'accept-edits' });
@@ -61,19 +65,21 @@ test('parseSlash flags unknown commands without throwing', () => {
 test('matchSlash returns prefix-matching commands', () => {
   assert.deepEqual(
     matchSlash('/').map((c) => c.name).sort(),
-    ['/exit', '/help', '/policy', '/quit', '/reset', '/skill', '/skills']
+    ['/exit', '/help', '/policy', '/providers', '/quit', '/reset', '/skill', '/skills']
   );
   assert.deepEqual(
     matchSlash('/p').map((c) => c.name),
-    ['/policy']
+    ['/policy', '/providers']
   );
   assert.deepEqual(matchSlash('/zz'), []);
 });
 
 test('completeSlash returns the single match name (with trailing space when arg expected)', () => {
-  assert.equal(completeSlash('/p'), '/policy ');
+  assert.equal(completeSlash('/po'), '/policy ');
+  assert.equal(completeSlash('/pr'), '/providers');
   assert.equal(completeSlash('/r'), '/reset');
   assert.equal(completeSlash('/'), null); // multiple matches
+  assert.equal(completeSlash('/p'), null); // multiple matches
   assert.equal(completeSlash('/policy '), null); // already past the head
   assert.equal(completeSlash('not slash'), null);
   assert.equal(completeSlash('/zz'), null);
@@ -86,6 +92,7 @@ test('buildHelpText lists every command with its description', () => {
   assert.match(text, /\/reset/);
   assert.match(text, /\/help/);
   assert.match(text, /\/policy <mode>/);
+  assert.match(text, /\/providers/);
   assert.match(text, /\/skills/);
   assert.match(text, /\/skill <name>/);
   assert.match(text, /Modes:/);

@@ -155,6 +155,29 @@ test('parseArgs accepts rpc as a no-prompt command and rejects extra args', () =
   assert.throws(() => parseArgs(['node', 'cliq', 'rpc', 'extra']), /Unknown rpc argument: extra/i);
 });
 
+test('parseArgs accepts providers status and validation commands', () => {
+  assert.deepEqual(parseArgs(['node', 'cliq', 'providers']), {
+    cmd: 'providers-status',
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'cliq', 'providers', 'status', '--json']), {
+    cmd: 'providers-status',
+    json: true,
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'cliq', 'providers', 'validate', 'openai']), {
+    cmd: 'providers-validate',
+    provider: 'openai',
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+});
+
 test('parseArgs requires a prompt for run aliases', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'run']), /missing prompt for cliq run/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', 'run', '--jsonl']), /missing prompt for cliq run/i);
@@ -1479,6 +1502,117 @@ test('runCli bare chat surfaces CLIQ_TRUST_WORKSPACE=deny on stderr before exit'
 
     assert.match(env.stderrText(), /CLIQ_TRUST_WORKSPACE=deny/);
     assert.ok(env.stderrText().includes(env.cwd), 'message should cite the workspace path');
+  });
+});
+
+test('runCli providers status --json emits safe provider status without starting chat', async () => {
+  await withCliTestEnv('providers-status-json', async (env) => {
+    const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
+    const previousOpenAi = process.env.OPENAI_API_KEY;
+    const fetchMock = mock.method(globalThis, 'fetch', async () => {
+      throw new Error('Ollama unavailable in test');
+    });
+
+    try {
+      process.env.CLIQ_TRUST_WORKSPACE = 'trust';
+      process.env.OPENAI_API_KEY = 'sk-secret';
+      await mkdir(path.join(env.cwd, '.cliq'), { recursive: true });
+      await writeFile(
+        path.join(env.cwd, '.cliq', 'config.json'),
+        JSON.stringify({ model: { provider: 'openai', model: 'gpt-workspace' } }),
+        'utf8'
+      );
+
+      await runCli(['node', 'src/index.ts', 'providers', 'status', '--json']);
+    } finally {
+      fetchMock.mock.restore();
+      if (previousTrust === undefined) delete process.env.CLIQ_TRUST_WORKSPACE;
+      else process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+      if (previousOpenAi === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousOpenAi;
+    }
+
+    const payload = JSON.parse(env.outputText()) as {
+      type: string;
+      report: {
+        activeProvider: string;
+        providers: Array<{
+          provider: string;
+          displayName: string;
+          current: boolean;
+          state: string;
+          sources: string[];
+          issues: unknown[];
+          setup: string[];
+          model?: string;
+          baseUrl?: string;
+        }>;
+        credentialPersistence: { mode: string; supportsManagedCredentials: boolean };
+      };
+    };
+    assert.equal(payload.type, 'providers-status');
+    assert.equal(payload.report.activeProvider, 'openai');
+    const current = payload.report.providers[0]!;
+    assert.equal(current.provider, 'openai');
+    assert.equal(current.displayName, 'OpenAI');
+    assert.equal(current.current, true);
+    assert.equal(current.state, 'configured');
+    assert.deepEqual(current.sources, ['ENV', 'Workspace']);
+    assert.deepEqual(current.issues, []);
+    assert.equal(current.model, 'gpt-workspace');
+    assert.equal(current.baseUrl, 'https://api.openai.com/v1');
+    assert.ok(current.setup.some((line) => /OPENAI_API_KEY/.test(line)));
+    assert.equal(payload.report.credentialPersistence.mode, 'external-only');
+    assert.equal(payload.report.credentialPersistence.supportsManagedCredentials, false);
+    assert.doesNotMatch(env.outputText(), /sk-secret/);
+    assert.equal(env.stderrText(), '');
+  });
+});
+
+test('runCli providers validate --json returns structured configuration failures', async () => {
+  await withCliTestEnv('providers-validate-json', async (env) => {
+    const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
+    const previousOpenAi = process.env.OPENAI_API_KEY;
+    const fetchMock = mock.method(globalThis, 'fetch', async () => {
+      throw new Error('Ollama unavailable in test');
+    });
+
+    try {
+      process.env.CLIQ_TRUST_WORKSPACE = 'trust';
+      delete process.env.OPENAI_API_KEY;
+      await mkdir(path.join(env.cwd, '.cliq'), { recursive: true });
+      await writeFile(
+        path.join(env.cwd, '.cliq', 'config.json'),
+        JSON.stringify({ model: { provider: 'openai', model: 'gpt-workspace' } }),
+        'utf8'
+      );
+
+      await assert.rejects(
+        () => runCli(['node', 'src/index.ts', 'providers', 'validate', 'openai', '--json']),
+        isReportedCliError
+      );
+    } finally {
+      fetchMock.mock.restore();
+      if (previousTrust === undefined) delete process.env.CLIQ_TRUST_WORKSPACE;
+      else process.env.CLIQ_TRUST_WORKSPACE = previousTrust;
+      if (previousOpenAi === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousOpenAi;
+    }
+
+    const payload = JSON.parse(env.outputText()) as {
+      type: string;
+      ok: boolean;
+      provider: string;
+      state: string;
+      issues: Array<{ code: string; envVar?: string }>;
+    };
+    assert.equal(payload.type, 'provider-validation');
+    assert.equal(payload.ok, false);
+    assert.equal(payload.provider, 'openai');
+    assert.equal(payload.state, 'not-configured');
+    assert.deepEqual(payload.issues.map((issue) => issue.code), ['missing-api-key']);
+    assert.equal(payload.issues[0]?.envVar, 'OPENAI_API_KEY');
+    assert.equal(env.stderrText(), '');
   });
 });
 
