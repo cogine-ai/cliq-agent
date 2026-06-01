@@ -186,6 +186,19 @@ test('/providers opens a selectable provider management list', async () => {
   assert.match(frame, /OpenRouter\s+Not configured · needs OPENROUTER_API_KEY/);
   assert.match(frame, /Enter details/);
   assert.doesNotMatch(frame, /unknown command: \/providers/);
+
+  let readyFrame = frame;
+  for (let i = 0; i < 5 && /Waiting for fresh input/.test(readyFrame); i += 1) {
+    await flush();
+    readyFrame = lastFrame() ?? '';
+  }
+  assert.doesNotMatch(readyFrame, /Waiting for fresh input/);
+
+  stdin.write('\r');
+  await flush();
+  await flush();
+  assert.match(lastFrame() ?? '', /state:\s+Configured/);
+  assert.doesNotMatch(lastFrame() ?? '', /state:\s+configured/);
 });
 
 test('/providers blocks prompt submission while provider status is loading', async () => {

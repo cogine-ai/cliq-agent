@@ -393,7 +393,7 @@ export async function buildProviderStatusReport({
   };
 }
 
-function stateLabel(state: ProviderConfigState) {
+export function formatProviderStateLabel(state: ProviderConfigState) {
   if (state === 'configured') return 'Configured';
   if (state === 'not-configured') return 'Not configured';
   return 'Unavailable';
@@ -406,7 +406,7 @@ function plural(count: number, singular: string) {
 export function formatProviderStatusRow(status: ProviderStatus): string {
   const parts: string[] = [];
   if (status.current) parts.push('Current');
-  parts.push(stateLabel(status.state));
+  parts.push(formatProviderStateLabel(status.state));
 
   if (status.sources.length > 0) {
     parts.push(status.sources.join(', '));

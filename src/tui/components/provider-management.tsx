@@ -2,6 +2,7 @@ import { Box, Text, useInput, type Key } from 'ink';
 import { useEffect, useRef, useState } from 'react';
 
 import {
+  formatProviderStateLabel,
   formatProviderStatusRow,
   type ProviderStatus,
   type ProviderStatusReport
@@ -99,7 +100,7 @@ function ProviderDetail({ provider, report }: { provider: ProviderStatus; report
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text bold>{provider.displayName}</Text>
-      <Field label="state" value={provider.state} />
+      <Field label="state" value={formatProviderStateLabel(provider.state)} />
       {provider.sources.length > 0 ? <Field label="sources" value={provider.sources.join(', ')} /> : null}
       {provider.model ? <Field label="model" value={provider.model} /> : null}
       {provider.baseUrl ? <Field label="base URL" value={provider.baseUrl} /> : null}
