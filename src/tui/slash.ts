@@ -23,6 +23,7 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
   { name: '/reset', description: 'Reset the current session (drops transcript and records)' },
   { name: '/help', description: 'Show commands, shortcuts, modes, and skills' },
   { name: '/policy', args: '<mode>', description: 'Switch mode', details: POLICY_MODE_DETAILS },
+  { name: '/providers', description: 'Open provider management' },
   { name: '/skills', description: 'Show available and active skills' },
   { name: '/skill', args: '<name>', description: 'Activate a skill by name' }
 ];
@@ -44,6 +45,7 @@ export type ParsedSlashCommand =
   | { kind: 'reset' }
   | { kind: 'help' }
   | { kind: 'policy'; mode: PolicyMode }
+  | { kind: 'providers' }
   | { kind: 'skills' }
   | { kind: 'skill'; name: string }
   | { kind: 'unknown'; head: string }
@@ -67,6 +69,8 @@ export function parseSlash(input: string): ParsedSlashCommand {
       return { kind: 'reset' };
     case '/help':
       return { kind: 'help' };
+    case '/providers':
+      return { kind: 'providers' };
     case '/skills':
       return { kind: 'skills' };
     case '/skill': {

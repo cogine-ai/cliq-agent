@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import { render } from 'ink-testing-library';
 
+import type { ProviderStatusReport } from '../model/provider-status.js';
 import type { ApprovalSubject } from '../policy/types.js';
 import { App } from './app.js';
 import {
@@ -33,6 +34,45 @@ const approvalSubject: ApprovalSubject = {
   channel: { kind: 'bash', commandHead: 'ls', unsafeForAllow: false },
   action: { bash: 'ls' } as never,
   display: { title: 'Allow bash command?', command: 'ls' }
+};
+
+const providerReport: ProviderStatusReport = {
+  activeProvider: 'openai',
+  activeModel: 'gpt-workspace',
+  providers: [
+    {
+      provider: 'openai',
+      displayName: 'OpenAI',
+      current: true,
+      state: 'configured',
+      sources: ['ENV', 'Workspace'],
+      issues: [],
+      setup: [],
+      model: 'gpt-workspace',
+      baseUrl: 'https://api.openai.com/v1'
+    },
+    {
+      provider: 'openrouter',
+      displayName: 'OpenRouter',
+      current: false,
+      state: 'not-configured',
+      sources: [],
+      issues: [
+        {
+          code: 'missing-api-key',
+          requirement: 'OPENROUTER_API_KEY',
+          message: 'OpenRouter requires OPENROUTER_API_KEY.',
+          envVar: 'OPENROUTER_API_KEY'
+        }
+      ],
+      setup: []
+    }
+  ],
+  credentialPersistence: {
+    mode: 'external-only',
+    supportsManagedCredentials: false,
+    message: 'Cliq does not store provider secrets in this slice.'
+  }
 };
 
 test('mounts and renders status bar segments', () => {
@@ -117,6 +157,91 @@ test('typing an unknown slash command pushes an "unknown command" notice', async
   stdin.write('\r');
   await flush();
   assert.match(lastFrame() ?? '', /unknown command: \/banana/);
+});
+
+test('/providers opens a selectable provider management list', async () => {
+  const store = makeStore();
+  let calls = 0;
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onProviderStatus={() => {
+        calls += 1;
+        return providerReport;
+      }}
+    />
+  );
+
+  stdin.write('/providers');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+
+  const frame = lastFrame() ?? '';
+  assert.equal(calls, 1);
+  assert.match(frame, /Provider management/);
+  assert.match(frame, /> OpenAI\s+Current · Configured · ENV, Workspace · using gpt-workspace/);
+  assert.match(frame, /OpenRouter\s+Not configured · needs OPENROUTER_API_KEY/);
+  assert.match(frame, /Enter details/);
+  assert.doesNotMatch(frame, /unknown command: \/providers/);
+});
+
+test('/providers blocks prompt submission while provider status is loading', async () => {
+  const store = makeStore();
+  const submitted: string[] = [];
+  let resolveProvider!: (report: ProviderStatusReport) => void;
+  const pendingProviderStatus = new Promise<ProviderStatusReport>((resolve) => {
+    resolveProvider = resolve;
+  });
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={(text) => {
+        submitted.push(text);
+      }}
+      onProviderStatus={() => pendingProviderStatus}
+    />
+  );
+
+  stdin.write('/providers');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  stdin.write('hello while loading');
+  await flush();
+  stdin.write('\r');
+  await flush();
+
+  assert.deepEqual(submitted, []);
+
+  resolveProvider(providerReport);
+  await flush();
+  await flush();
+
+  assert.match(lastFrame() ?? '', /Provider management/);
+  assert.deepEqual(submitted, []);
+});
+
+test('/providers modal blocks global policy rotation shortcuts behind it', async () => {
+  const store = makeStore();
+  const { stdin, lastFrame } = render(
+    <App store={store} onSubmit={() => {}} onProviderStatus={() => providerReport} showModeChangeMessages />
+  );
+
+  stdin.write('/providers');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+  assert.match(lastFrame() ?? '', /Provider management/);
+
+  stdin.write('\x1b[Z');
+  await flush();
+
+  assert.equal(store.getState().policy, 'yolo');
+  assert.doesNotMatch(lastFrame() ?? '', /mode →/);
 });
 
 test('/policy without a mode argument surfaces an inline error', async () => {

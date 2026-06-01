@@ -45,9 +45,9 @@ When you launch `cliq` (or `cliq chat`) on a TTY, you enter the Ink-based TUI by
 
 Inside the TUI:
 
-- Slash commands (`/exit`, `/quit`, `/reset`, `/help`, `/policy <mode>`) open a
-  palette popover and support Tab completion. `/help` lists commands,
-  shortcuts, and mode behavior.
+- Slash commands (`/exit`, `/quit`, `/reset`, `/help`, `/policy <mode>`,
+  `/providers`) open a palette popover and support Tab completion. `/help`
+  lists commands, shortcuts, and mode behavior.
 - ↑ / ↓ recall previously submitted prompts while preserving any in-progress
   draft; ← / → move the cursor inside the input buffer.
 - The status line shows the current mode in user-facing language, such as
@@ -146,6 +146,25 @@ Supported providers:
 
 Provider/model display metadata, known context windows, and catalog update
 instructions live in [`docs/model-catalog.md`](docs/model-catalog.md).
+
+Provider management:
+
+- In the TUI, run `/providers` to open the provider management list. The active
+  provider is shown first and marked `Current`; rows use `Configured`,
+  `Not configured`, or `Unavailable`, and configured rows show sources such as
+  `ENV`, `Workspace`, `CLI`, or `Local service`.
+- For scripts and headless use, run `cliq providers status` or
+  `cliq providers status --json`. `cliq providers list` is an alias.
+- Run `cliq providers validate [provider]` to validate the current or named
+  provider configuration. `--json` returns structured issues such as
+  `missing-api-key`, `missing-base-url`, `missing-model`, or
+  `local-service-unavailable`.
+- Cliq does not store provider secrets in this slice. Use environment variables
+  for API keys and workspace config for non-secret defaults such as provider,
+  model, and base URL. Managed credentials or keychain storage require a
+  separate security decision before implementation.
+
+More design boundaries live in [`docs/provider-management.md`](docs/provider-management.md).
 
 OpenAI-compatible streaming modes:
 

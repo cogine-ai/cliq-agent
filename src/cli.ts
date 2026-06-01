@@ -17,6 +17,11 @@ import {
   type PartialModelConfig
 } from './model/config.js';
 import { createModelClient } from './model/index.js';
+import {
+  buildProviderStatusReport,
+  formatProviderStatusReport,
+  validateProviderStatus
+} from './model/provider-status.js';
 import { isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
 import {
@@ -90,7 +95,7 @@ import { promises as fsPromises } from 'node:fs';
 
 const STREAMING_MODES = ['auto', 'on', 'off'] as const;
 const RESTORE_SCOPES = ['session', 'files', 'both'] as const;
-const HELP_TOPICS = ['checkpoint', 'compact', 'handoff', 'tx'] as const;
+const HELP_TOPICS = ['checkpoint', 'compact', 'handoff', 'providers', 'tx'] as const;
 const TX_MODES = ['off', 'edit'] as const;
 const TX_APPLY_POLICIES = ['interactive', 'auto-on-pass', 'manual-only'] as const;
 const CLIQ_PACKAGE_NAME = '@cogineai/cliq';
@@ -154,6 +159,8 @@ export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'reset' | 'history' | 'rpc'; prompt?: undefined }
   | { cmd: 'help'; topic?: HelpTopic; prompt?: undefined }
   | { cmd: 'version'; prompt?: undefined }
+  | { cmd: 'providers-status'; json?: boolean; prompt?: undefined }
+  | { cmd: 'providers-validate'; provider?: ProviderName; json?: boolean; prompt?: undefined }
   | { cmd: 'tx-open'; name?: string; explicit: true; json?: boolean; headless?: boolean; prompt?: undefined }
   | { cmd: 'tx-status'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
   | { cmd: 'tx-list'; json?: boolean; headless?: boolean; prompt?: undefined }
@@ -244,6 +251,37 @@ function consumeRepeatable(args: string[], name: string): string[] {
     out.push(value);
   }
   return out;
+}
+
+function parseProvidersArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  const rest = args.slice(1);
+  const json = consumeFlag(rest, '--json');
+  const sub = rest[0];
+
+  if (sub === 'help' || sub === '--help' || sub === '-h' || hasHelpFlag(rest)) {
+    return { ...base, cmd: 'help', topic: 'providers' };
+  }
+
+  if (sub === undefined || sub === 'status' || sub === 'list') {
+    ensureNoExtraArgs(rest, sub === undefined ? 0 : 1, 'providers status');
+    return { ...base, cmd: 'providers-status', ...(json ? { json } : {}) };
+  }
+
+  if (sub === 'validate') {
+    const provider = rest[1];
+    if (provider !== undefined && !isProviderName(provider)) {
+      throw new Error(`Unknown model provider: ${provider}`);
+    }
+    ensureNoExtraArgs(rest, provider === undefined ? 1 : 2, 'providers validate');
+    return {
+      ...base,
+      cmd: 'providers-validate',
+      ...(provider !== undefined ? { provider } : {}),
+      ...(json ? { json } : {})
+    };
+  }
+
+  throw new Error('cliq providers requires a subcommand (status, list, validate, help)');
 }
 
 function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
@@ -848,6 +886,7 @@ function isKnownCommand(cmd: string | undefined) {
     cmd === 'history' ||
     cmd === 'rpc' ||
     cmd === 'help' ||
+    cmd === 'providers' ||
     cmd === 'tx' ||
     cmd === '--help' ||
     cmd === '-h' ||
@@ -1187,6 +1226,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (cmd === 'checkpoint') return parseCheckpointArgs(args, base);
   if (cmd === 'compact') return parseCompactGroupArgs(args, base);
   if (cmd === 'handoff') return parseHandoffGroupArgs(args, base);
+  if (cmd === 'providers') return parseProvidersArgs(args, base);
   if (cmd === 'tx') return parseTxArgs(args, base);
   if (cmd === 'checkpoints') {
     throw new Error('Command changed. Use "cliq checkpoint list".');
@@ -1277,6 +1317,20 @@ Notes:
 `);
 }
 
+function printProvidersHelp() {
+  console.log(`cliq providers - inspect model provider configuration
+
+Usage:
+  cliq providers status [--json]             Show provider configuration status
+  cliq providers list [--json]               Alias for status
+  cliq providers validate [provider] [--json] Validate current or named provider configuration
+  cliq providers help                        Print this help
+
+Notes:
+  provider status is non-interactive and never prompts for credentials
+`);
+}
+
 function printTxHelp() {
   console.log(`cliq tx - manage transactional workspace state
 
@@ -1321,6 +1375,11 @@ export function printHelp(topic?: HelpTopic) {
     return;
   }
 
+  if (topic === 'providers') {
+    printProvidersHelp();
+    return;
+  }
+
   if (topic === 'tx') {
     printTxHelp();
     return;
@@ -1344,6 +1403,7 @@ Usage:
   cliq compact create      Create a manual compaction summary
   cliq compact list        Print session compactions
   cliq handoff create      Export a handoff artifact
+  cliq providers status    Show provider configuration status
   cliq tx help             Print transaction command help
   cliq checkpoint help     Print checkpoint command help
   cliq compact help        Print compact command help
@@ -1411,6 +1471,7 @@ RPC:
 Examples:
   cliq --policy plan "inspect this repo"
   cliq --provider ollama --model qwen3.5:4b "inspect this repo"
+  cliq providers status
 
 Env:
   OPENROUTER_API_KEY        Required for OpenRouter
@@ -1874,6 +1935,52 @@ async function ensureInteractiveWorkspaceTrustedForRuntime(opts: {
   }
 }
 
+async function runProvidersCommand(
+  cwd: string,
+  parsed: Extract<ParsedArgs, { cmd: 'providers-status' | 'providers-validate' }>,
+  cliModel: PartialModelConfig
+) {
+  const writeJson = (payload: unknown) => {
+    process.stdout.write(`${JSON.stringify(payload)}\n`);
+  };
+  await denyIfWorkspaceUntrustedNonInteractiveRuntime(
+    cwd,
+    parsed.json ? { writeJsonError: (message) => writeJson({ type: 'error', message }) } : undefined
+  );
+  const workspaceConfig = await loadWorkspaceConfig(cwd);
+  const report = await buildProviderStatusReport({
+    workspace: workspaceConfig,
+    cli: cliModel
+  });
+
+  if (parsed.cmd === 'providers-status') {
+    if (parsed.json) {
+      writeJson({ type: 'providers-status', report });
+    } else {
+      process.stdout.write(`${formatProviderStatusReport(report)}\n`);
+    }
+    return;
+  }
+
+  const validation = validateProviderStatus(report, parsed.provider);
+  const payload = { type: 'provider-validation', ...validation };
+  if (parsed.json) {
+    writeJson(payload);
+  }
+  if (validation.ok) {
+    if (!parsed.json) {
+      process.stdout.write(`provider ${validation.provider} configured: ${validation.sources.join(', ') || 'no sources'}\n`);
+    }
+    return;
+  }
+
+  const message = validation.issues[0]?.message ?? `provider ${validation.provider} is not configured`;
+  if (!parsed.json) {
+    process.stderr.write(`${message}\n`);
+  }
+  throw new ReportedCliError(message, { exitCode: 1 });
+}
+
 export async function runCli(argv: string[]) {
   const parsed = parseArgs(argv);
   const { cmd, prompt, skills, model: cliModel } = parsed;
@@ -1911,6 +2018,11 @@ export async function runCli(argv: string[]) {
   if (cmd === 'rpc') {
     await denyIfWorkspaceUntrustedNonInteractiveRuntime(cwd);
     await runStdioJsonRpcServer();
+    return;
+  }
+
+  if (parsed.cmd === 'providers-status' || parsed.cmd === 'providers-validate') {
+    await runProvidersCommand(cwd, parsed, cliModel);
     return;
   }
 
@@ -2614,6 +2726,7 @@ export async function runCli(argv: string[]) {
       assembly,
       modelClient,
       modelConfig,
+      cliModel,
       policy,
       policyExplicit: parsed.policyExplicit === true,
       wsCfg,
@@ -2755,6 +2868,7 @@ type RunChatTuiSessionOpts = {
   assembly: Awaited<ReturnType<typeof createRuntimeAssembly>>;
   modelClient: ModelClient;
   modelConfig: ResolvedModelConfig;
+  cliModel: PartialModelConfig;
   policy: PolicyMode;
   policyExplicit: boolean;
   wsCfg: WorkspaceConfig;
@@ -3018,7 +3132,12 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       });
       await saveSession(cwd, session);
       return `skill ${result.skill.name} ${result.status}`;
-    }
+    },
+    onProviderStatus: () =>
+      buildProviderStatusReport({
+        workspace: opts.assembly.workspaceConfig,
+        cli: opts.cliModel
+      })
   });
 
   await tui.waitUntilExit();
