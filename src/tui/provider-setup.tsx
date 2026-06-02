@@ -1,9 +1,22 @@
 import { Box, render, Text, useApp, useInput } from 'ink';
 
 import { formatModelSetupMessage, type ModelSetupRequiredError } from '../model/config.js';
+import type { ModelPickerSnapshot } from '../model/model-picker.js';
+import type { ProviderAuthStore } from '../model/auth-store.js';
+import type { ResolvedModelConfig } from '../model/types.js';
+import { ModelSetupFlow, type ModelSetupApplyRequest } from './components/model-setup-flow.js';
 
 export type ProviderSetupProps = {
   error: ModelSetupRequiredError;
+};
+
+export type ProviderSetupResult =
+  | ProviderAuthStore
+  | { auth: ProviderAuthStore; modelConfig: ResolvedModelConfig };
+
+export type ProviderSetupInteractiveOptions = {
+  snapshot: ModelPickerSnapshot;
+  onApply: (request: ModelSetupApplyRequest) => ProviderSetupResult | Promise<ProviderSetupResult>;
 };
 
 export function ProviderSetup({ error }: ProviderSetupProps) {
@@ -26,7 +39,33 @@ export function ProviderSetup({ error }: ProviderSetupProps) {
   );
 }
 
-export async function mountProviderSetupAndWait(error: ModelSetupRequiredError) {
-  const instance = render(<ProviderSetup error={error} />, { exitOnCtrlC: false });
+export async function mountProviderSetupAndWait(
+  error: ModelSetupRequiredError,
+  options?: ProviderSetupInteractiveOptions
+): Promise<ProviderSetupResult | null> {
+  if (!options) {
+    const instance = render(<ProviderSetup error={error} />, { exitOnCtrlC: false });
+    await instance.waitUntilExit();
+    return null;
+  }
+
+  let result: ProviderSetupResult | null = null;
+  let instance: ReturnType<typeof render> | undefined;
+  const close = () => {
+    instance?.unmount();
+  };
+  instance = render(
+    <ModelSetupFlow
+      snapshot={options.snapshot}
+      onApply={async (request) => {
+        result = await options.onApply(request);
+        close();
+      }}
+      onClose={close}
+      initialProvider={error.provider}
+    />,
+    { exitOnCtrlC: false }
+  );
   await instance.waitUntilExit();
+  return result;
 }

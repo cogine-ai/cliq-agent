@@ -25,22 +25,31 @@ creates a shared provider status layer plus user-facing management entry points:
 ## Out of scope
 
 - No `/connect <provider>` slash command.
-- No model picker or model switching; that belongs to #53.
-- No first-run setup screen changes beyond exposing reusable status primitives.
 - No remote credential correctness checks against provider APIs.
 - No OAuth, provider-native login, OS keychain, or external password-manager
   integration.
 
-## Model Picker Handoff for #53
+## Model Picker and Setup Flow
 
-`/model` and `/models` should be aliases for the same model-selection flow. The
-flow should always open a lightweight provider step first, even when one or more
-providers are already configured. The currently active runtime provider should
-be selected by default, regardless of how many providers are configured.
+`/model` and `/models` are aliases for the same model-selection flow. The flow
+always opens a lightweight provider step first, even when one or more providers
+are already configured. The currently active runtime provider is selected by
+default, regardless of how many providers are configured.
 
 From that provider step, Enter or Right Arrow should continue into the model
-picker for the selected provider. This keeps the model picker provider-first
-without turning `/providers` into the model-selection surface.
+picker or provider setup for the selected provider. In the model step, `Enter`
+applies the highlighted provider/model to the current TUI session only, while
+`Space` saves the provider/model as the startup default in the local auth file
+and also applies it to the current session.
+
+`/providers` remains the provider management/status surface, but provider detail
+view exposes a configure action that reuses the same setup flow. It does not
+become the primary model-selection entry point.
+
+The picker source list is intentionally conservative: static catalog rows,
+local Ollama `/api/tags` rows, configured model ids from workspace/env/auth, and
+direct custom model-id entry. Remote dynamic model-list APIs and Ollama pull
+actions remain separate future work.
 
 ## Secret Persistence Decision
 
@@ -60,6 +69,10 @@ Environment variables such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 `OPENROUTER_API_KEY`, `CLIQ_MODEL_API_KEY`, or `OPENAI_COMPATIBLE_API_KEY` still
 work and take precedence over the auth file. Workspace config may hold
 non-secret defaults such as provider, model, base URL, and streaming mode.
+
+The TUI can also collect API keys with masked input. Persisting a secret still
+requires an explicit save action. For non-secret provider/model defaults, the
+`Space` save action is the confirmation; `Enter` is current-session only.
 
 Future OAuth/provider-native login, OS keychain storage, SecretRef-style
 external stores, or remote correctness checks need separate design and tests.
