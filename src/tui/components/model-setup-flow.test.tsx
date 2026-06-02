@@ -161,7 +161,7 @@ test('model setup flow masks API key input and never renders the secret', async 
   assert.doesNotMatch(frame, /sk-secret/);
 });
 
-test('model setup flow carries required API key into model selection and saves only on Space', async () => {
+test('model setup flow requires explicit confirmation before saving a required API key', async () => {
   const snapshot = makeSnapshot({
     selectedProvider: 'openai',
     providers: [
@@ -207,6 +207,13 @@ test('model setup flow carries required API key into model selection and saves o
 
   assert.deepEqual(applied, []);
   assert.match(lastFrame() ?? '', /GPT-5\.2/);
+  assert.doesNotMatch(lastFrame() ?? '', /sk-secret/);
+
+  stdin.write(' ');
+  await flush();
+
+  assert.deepEqual(applied, []);
+  assert.match(lastFrame() ?? '', /Save API key/i);
   assert.doesNotMatch(lastFrame() ?? '', /sk-secret/);
 
   stdin.write(' ');

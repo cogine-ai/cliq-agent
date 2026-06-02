@@ -26,6 +26,7 @@ type Step =
   | { kind: 'providers'; selectedIndex: number }
   | { kind: 'models'; provider: ProviderName; selectedIndex: number; draft?: SetupDraft }
   | { kind: 'custom-model'; provider: ProviderName; value: string; draft?: SetupDraft }
+  | { kind: 'secret-confirm'; provider: ProviderName; model: string; draft: SetupDraft }
   | {
       kind: 'setup-input';
       provider: ProviderName;
@@ -95,6 +96,11 @@ export function ModelSetupFlow({
       return;
     }
 
+    if (step.kind === 'secret-confirm') {
+      void handleSecretConfirmInput(input, key, step, onApply);
+      return;
+    }
+
     if (step.kind === 'custom-model') {
       void handleTextInput(input, key, step.value, (value) => {
         setStep({ ...step, value });
@@ -120,6 +126,8 @@ export function ModelSetupFlow({
         <ModelStep snapshot={snapshot} provider={step.provider} selectedIndex={step.selectedIndex} />
       ) : step.kind === 'custom-model' ? (
         <TextInputStep title={`Custom model for ${step.provider}`} value={step.value} secret={false} />
+      ) : step.kind === 'secret-confirm' ? (
+        <SecretConfirmStep provider={step.provider} model={step.model} />
       ) : (
         <TextInputStep
           title={setupTitle(step.provider, step.field, step.optional === true)}
@@ -214,7 +222,31 @@ async function handleModelInput(
     return;
   }
   if (row.kind === 'model' && input === ' ') {
+    if (step.draft?.apiKey) {
+      setStep({
+        kind: 'secret-confirm',
+        provider: row.provider,
+        model: row.model,
+        draft: step.draft
+      });
+      return;
+    }
     await onApply(buildApplyRequest(row.provider, row.model, true, step.draft));
+  }
+}
+
+async function handleSecretConfirmInput(
+  input: string,
+  key: Key,
+  step: Extract<Step, { kind: 'secret-confirm' }>,
+  onApply: (request: ModelSetupApplyRequest) => void | Promise<void>
+) {
+  if (input === ' ') {
+    await onApply(buildApplyRequest(step.provider, step.model, true, step.draft));
+    return;
+  }
+  if (key.return) {
+    await onApply(buildApplyRequest(step.provider, step.model, false, step.draft));
   }
 }
 
@@ -376,6 +408,15 @@ function TextInputStep({ title, value, secret }: { title: string; value: string;
   );
 }
 
+function SecretConfirmStep({ provider, model }: { provider: ProviderName; model: string }) {
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text bold>{`Save API key for ${provider}?`}</Text>
+      <Text>{`Model: ${model}`}</Text>
+    </Box>
+  );
+}
+
 function modelRows(snapshot: ModelPickerSnapshot, provider: ProviderName) {
   return snapshot.modelsByProvider[provider] ?? [];
 }
@@ -435,10 +476,16 @@ function footerForStep(step: Step) {
     return 'Provider step: Enter/Right models · Up/Down select · Esc/q close';
   }
   if (step.kind === 'models') {
+    if (step.draft?.apiKey) {
+      return 'Model step: Enter use now · Space review API key/default save · c custom model · Left back · Esc/q close';
+    }
     return 'Model step: Enter use now · Space save default provider/model · c custom model · Left back · Esc/q close';
   }
   if (step.kind === 'custom-model') {
     return 'Custom model: Enter use now · Esc/q close';
+  }
+  if (step.kind === 'secret-confirm') {
+    return 'Secret storage: Space save API key/default · Enter use now only · Esc/q close';
   }
   if (step.field === 'apiKey' && step.optional === true) {
     return 'Optional API key: Enter use now/skip · Space save default/secret · Esc/q close';
