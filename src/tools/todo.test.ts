@@ -43,6 +43,22 @@ test('todoTool.supports validates execution tracker payloads', () => {
   assert.equal(todoTool.supports({ todo: null } as never), false);
 });
 
+test('todoTool.execute surfaces store errors without an approved plan', async () => {
+  const { cwd, session } = await tempScope();
+  const result = await todoTool.execute(
+    {
+      todo: {
+        items: [{ id: 'item_1', title: 'Inspect', status: 'pending', activeForm: 'Inspecting' }]
+      }
+    },
+    { cwd, session }
+  );
+
+  assert.equal(result.status, 'error');
+  assert.match(result.content, /TOOL_RESULT todo ERROR/);
+  assert.match(result.content, /no approved plan is available/i);
+});
+
 test('todoTool.execute updates approved-plan execution progress', async () => {
   const { cwd, session } = await tempScope();
   const draft = await createDraftPlan(cwd, session, {
