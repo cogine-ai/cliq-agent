@@ -134,6 +134,16 @@ async function atomicWriteJson0600(target: string, value: unknown) {
   }
 }
 
+async function tightenExistingAuthFileMode(target: string) {
+  if (process.platform === 'win32') {
+    return;
+  }
+  const mode = (await fs.stat(target)).mode & 0o777;
+  if ((mode & 0o177) !== 0) {
+    await fs.chmod(target, 0o600);
+  }
+}
+
 export async function loadProviderAuthStore(options: ProviderAuthStoreOptions = {}): Promise<ProviderAuthStore> {
   return await loadProviderAuthStoreFromPath(resolveAuthFilePath(options));
 }
@@ -141,6 +151,7 @@ export async function loadProviderAuthStore(options: ProviderAuthStoreOptions = 
 async function loadProviderAuthStoreFromPath(target: string): Promise<ProviderAuthStore> {
   let raw: string;
   try {
+    await tightenExistingAuthFileMode(target);
     raw = await fs.readFile(target, 'utf8');
   } catch (error) {
     if (error && typeof error === 'object' && (error as { code?: unknown }).code === 'ENOENT') {
@@ -198,7 +209,7 @@ export function formatProviderAuthSummary(store: ProviderAuthStore, provider: Pr
   const entry = store.providers[provider];
   const details: string[] = [];
   if (entry?.model) details.push(`model ${entry.model}`);
-  if (entry?.baseUrl) details.push(`base URL ${entry.baseUrl}`);
+  if (entry?.baseUrl) details.push('base URL configured');
   if (entry?.streaming) details.push(`streaming ${entry.streaming}`);
   return `${displayName} credential saved${details.length > 0 ? ` (${details.join(', ')})` : ''}.`;
 }
