@@ -28,6 +28,14 @@ test('createInitialState seeds an empty state with counter at 1', () => {
   assert.equal(s.nextEntryId, 1);
 });
 
+test('model-change updates the rendered model identity', () => {
+  const s = reduce(baseInit(), {
+    type: 'model-change',
+    model: { provider: 'openai', model: 'gpt-5.2' }
+  });
+  assert.deepEqual(s.model, { provider: 'openai', model: 'gpt-5.2' });
+});
+
 test('user-input appends a user transcript entry with monotonic id', () => {
   let s = baseInit();
   s = reduce(s, { type: 'user-input', text: 'hello' });

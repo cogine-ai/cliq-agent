@@ -95,6 +95,20 @@ function firstDefined(...values: Array<string | undefined | null>): string | und
   return undefined;
 }
 
+export function sanitizeBaseUrlForDisplay(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    const sanitized = url.toString();
+    return baseUrl.endsWith('/') ? sanitized : sanitized.replace(/\/$/, '');
+  } catch {
+    return baseUrl.replace(/\/\/[^/@\s]+@/, '//').replace(/[?#].*$/, '');
+  }
+}
+
 function envModelConfig(env: Record<string, string | undefined>): PartialModelConfig {
   return {
     ...(env.CLIQ_MODEL_PROVIDER ? { provider: env.CLIQ_MODEL_PROVIDER } : {}),
@@ -292,7 +306,7 @@ function buildRemoteProviderStatus(opts: {
     issues,
     setup: providerSetup(opts.provider),
     ...(model ? { model } : {}),
-    ...(baseUrl ? { baseUrl } : {})
+    ...(baseUrl ? { baseUrl: sanitizeBaseUrlForDisplay(baseUrl) } : {})
   };
 }
 
@@ -325,7 +339,7 @@ async function buildOllamaProviderStatus(opts: {
         )
       ],
       setup,
-      ...(baseUrl ? { baseUrl } : {})
+      ...(baseUrl ? { baseUrl: sanitizeBaseUrlForDisplay(baseUrl) } : {})
     };
   }
 
@@ -339,7 +353,7 @@ async function buildOllamaProviderStatus(opts: {
       sources: ['Local service'],
       issues: [issue('local-models-missing', 'local model', 'Ollama is reachable, but no local models are installed.')],
       setup,
-      ...(baseUrl ? { baseUrl } : {})
+      ...(baseUrl ? { baseUrl: sanitizeBaseUrlForDisplay(baseUrl) } : {})
     };
   }
 
@@ -353,7 +367,7 @@ async function buildOllamaProviderStatus(opts: {
     setup,
     modelCount: models.length,
     ...(model ? { model } : {}),
-    ...(baseUrl ? { baseUrl } : {})
+    ...(baseUrl ? { baseUrl: sanitizeBaseUrlForDisplay(baseUrl) } : {})
   };
 }
 

@@ -26,6 +26,14 @@ test('parseSlash maps provider management command', () => {
   assert.deepEqual(parseSlash('/providers'), { kind: 'providers' });
 });
 
+test('parseSlash maps model picker commands', () => {
+  assert.deepEqual(parseSlash('/model'), { kind: 'model' });
+  assert.deepEqual(parseSlash('/models'), { kind: 'model' });
+  const withArg = parseSlash('/model openai');
+  assert.equal(withArg.kind, 'invalid');
+  if (withArg.kind === 'invalid') assert.match(withArg.reason, /does not accept arguments/);
+});
+
 test('parseSlash /policy requires a known mode argument', () => {
   assert.deepEqual(parseSlash('/policy default'), { kind: 'policy', mode: 'default' });
   assert.deepEqual(parseSlash('/policy accept-edits'), { kind: 'policy', mode: 'accept-edits' });
@@ -65,7 +73,11 @@ test('parseSlash flags unknown commands without throwing', () => {
 test('matchSlash returns prefix-matching commands', () => {
   assert.deepEqual(
     matchSlash('/').map((c) => c.name).sort(),
-    ['/exit', '/help', '/policy', '/providers', '/quit', '/reset', '/skill', '/skills']
+    ['/exit', '/help', '/model', '/models', '/policy', '/providers', '/quit', '/reset', '/skill', '/skills']
+  );
+  assert.deepEqual(
+    matchSlash('/mo').map((c) => c.name),
+    ['/model', '/models']
   );
   assert.deepEqual(
     matchSlash('/p').map((c) => c.name),
@@ -77,6 +89,9 @@ test('matchSlash returns prefix-matching commands', () => {
 test('completeSlash returns the single match name (with trailing space when arg expected)', () => {
   assert.equal(completeSlash('/po'), '/policy ');
   assert.equal(completeSlash('/pr'), '/providers');
+  assert.equal(completeSlash('/mod'), null);
+  assert.equal(completeSlash('/model'), '/model');
+  assert.equal(completeSlash('/models'), '/models');
   assert.equal(completeSlash('/r'), '/reset');
   assert.equal(completeSlash('/'), null); // multiple matches
   assert.equal(completeSlash('/p'), null); // multiple matches
@@ -91,6 +106,8 @@ test('buildHelpText lists every command with its description', () => {
   assert.match(text, /\/quit/);
   assert.match(text, /\/reset/);
   assert.match(text, /\/help/);
+  assert.match(text, /\/model/);
+  assert.match(text, /\/models/);
   assert.match(text, /\/policy <mode>/);
   assert.match(text, /\/providers/);
   assert.match(text, /\/skills/);
