@@ -3186,17 +3186,21 @@ export async function applyTuiModelSetupSelection(opts: {
 }): Promise<ApplyTuiModelSetupSelectionResult> {
   const request = opts.request;
   const authOptions = opts.cliqHome ? { cliqHome: opts.cliqHome } : {};
-  const auth = request.persist
-    ? await upsertProviderAuth(
-        {
-          provider: request.provider,
-          model: request.model,
-          ...(request.baseUrl ? { baseUrl: request.baseUrl } : {}),
-          ...(request.apiKey ? { apiKey: request.apiKey } : {})
-        },
-        authOptions
-      )
-    : withSessionOnlyProviderAuth(opts.auth, request);
+  let auth: ProviderAuthStore;
+  if (request.persist) {
+    const persistedAuth = await upsertProviderAuth(
+      {
+        provider: request.provider,
+        model: request.model,
+        ...(request.baseUrl ? { baseUrl: request.baseUrl } : {}),
+        ...(request.apiKey ? { apiKey: request.apiKey } : {})
+      },
+      authOptions
+    );
+    auth = mergePersistedAuthIntoSessionAuth(opts.auth, persistedAuth);
+  } else {
+    auth = withSessionOnlyProviderAuth(opts.auth, request);
+  }
   const baseUrl =
     request.baseUrl ??
     (request.provider === opts.currentModelConfig.provider ? opts.currentModelConfig.baseUrl : undefined);
@@ -3234,6 +3238,26 @@ function withSessionOnlyProviderAuth(
         apiKey: request.apiKey
       }
     }
+  };
+}
+
+function mergePersistedAuthIntoSessionAuth(
+  current: ProviderAuthStore,
+  persisted: ProviderAuthStore
+): ProviderAuthStore {
+  const providers: ProviderAuthStore['providers'] = { ...current.providers };
+  for (const rawProvider of Object.keys(persisted.providers)) {
+    if (!isProviderName(rawProvider)) continue;
+    providers[rawProvider] = {
+      ...(providers[rawProvider] ?? {}),
+      ...(persisted.providers[rawProvider] ?? {})
+    };
+  }
+  const activeProvider = persisted.activeProvider ?? current.activeProvider;
+  return {
+    version: 1,
+    ...(activeProvider ? { activeProvider } : {}),
+    providers
   };
 }
 
