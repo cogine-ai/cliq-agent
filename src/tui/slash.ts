@@ -22,6 +22,8 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
   { name: '/quit', description: 'Same as /exit' },
   { name: '/reset', description: 'Reset the current session (drops transcript and records)' },
   { name: '/help', description: 'Show commands, shortcuts, modes, and skills' },
+  { name: '/model', description: 'Open provider-first model setup' },
+  { name: '/models', description: 'Same as /model' },
   { name: '/policy', args: '<mode>', description: 'Switch mode', details: POLICY_MODE_DETAILS },
   { name: '/providers', description: 'Open provider management' },
   { name: '/skills', description: 'Show available and active skills' },
@@ -44,6 +46,7 @@ export type ParsedSlashCommand =
   | { kind: 'exit' }
   | { kind: 'reset' }
   | { kind: 'help' }
+  | { kind: 'model' }
   | { kind: 'policy'; mode: PolicyMode }
   | { kind: 'providers' }
   | { kind: 'skills' }
@@ -69,6 +72,12 @@ export function parseSlash(input: string): ParsedSlashCommand {
       return { kind: 'reset' };
     case '/help':
       return { kind: 'help' };
+    case '/model':
+    case '/models':
+      if (rest.length > 0) {
+        return { kind: 'invalid', head, reason: `${head} does not accept arguments yet` };
+      }
+      return { kind: 'model' };
     case '/providers':
       return { kind: 'providers' };
     case '/skills':
@@ -128,6 +137,7 @@ export function completeSlash(query: string): string | null {
   const head = query.split(/\s+/)[0]!;
   // Only complete the head; arg values are out of scope.
   if (query.length > head.length) return null;
+  if (SLASH_COMMANDS.some((c) => c.name === head)) return head;
   const matches = SLASH_COMMANDS.filter((c) => c.name.startsWith(head));
   if (matches.length !== 1) return null;
   const only = matches[0]!;

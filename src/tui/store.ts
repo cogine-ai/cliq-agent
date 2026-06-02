@@ -120,6 +120,7 @@ export type UiAction =
   | { type: 'tool-hook-end'; result: ToolResult }
   | { type: 'user-input'; text: string }
   | { type: 'system-message'; text: string }
+  | { type: 'model-change'; model: { provider: ProviderName; model: string } }
   | { type: 'session-tokens-update'; tokens: number }
   | { type: 'version-update'; notice: PackageUpdateNotice | null }
   | { type: 'toggle-tool-body' }
@@ -183,6 +184,8 @@ export function reduce(state: UiState, action: UiAction): UiState {
     }
     case 'system-message':
       return pushSystem(state, action.text);
+    case 'model-change':
+      return { ...state, model: action.model };
     case 'session-tokens-update':
       return { ...state, sessionTokens: action.tokens };
     case 'version-update':

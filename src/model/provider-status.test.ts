@@ -171,6 +171,36 @@ test('provider status prefers env model settings over local auth', async () => {
   );
 });
 
+test('provider status sanitizes auth-store base URLs before report output', async () => {
+  await withEnv({}, async () => {
+    const auth: ProviderAuthStore = {
+      version: 1,
+      activeProvider: 'openai-compatible',
+      providers: {
+        'openai-compatible': {
+          model: 'local-model',
+          baseUrl: 'https://user:pass@example.test/v1?token=secret#fragment'
+        }
+      }
+    };
+
+    const report = await buildProviderStatusReport({
+      workspace: {},
+      cli: {},
+      auth,
+      discoverOllamaModels: unavailableOllama
+    });
+
+    const compatible = report.providers.find((provider) => provider.provider === 'openai-compatible');
+    assert.equal(compatible?.baseUrl, 'https://example.test/v1');
+
+    const serialized = JSON.stringify(report);
+    const rendered = formatProviderStatusReport(report);
+    assert.doesNotMatch(serialized, /user:pass|token=secret|fragment/);
+    assert.doesNotMatch(rendered, /user:pass|token=secret|fragment/);
+  });
+});
+
 test('provider status reports structured missing requirements for OpenAI-compatible config', async () => {
   await withEnv(
     {
