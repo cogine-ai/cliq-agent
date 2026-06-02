@@ -161,6 +161,25 @@ test('runHeadless emits run-start through run-end for a completed run', async ()
   assert.deepEqual(events, ['run-start', 'checkpoint-created', 'model-start', 'model-end', 'final', 'run-end']);
 });
 
+test('runHeadless does not require local auth when request model config is explicit', async () => {
+  const { home, cwd } = await setupWorkspace();
+  await writeFile(path.join(home, 'auth.json'), '{bad json', 'utf8');
+
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'say done',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('done') }
+  );
+
+  assert.equal(output.status, 'completed');
+  assert.equal(output.exitCode, 0);
+  assert.equal(output.finalMessage, 'done');
+});
+
 test('runHeadless runs workspace SessionStart command hooks before the model turn', async () => {
   const { cwd } = await setupWorkspace();
   const markerPath = path.join(cwd, 'session-start.json');

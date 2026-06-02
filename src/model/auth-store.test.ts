@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -18,7 +18,8 @@ test('upsertProviderAuth writes a local auth file without exposing secrets in su
       {
         provider: 'openai',
         apiKey: 'sk-secret',
-        model: 'gpt-5.2'
+        model: 'gpt-5.2',
+        baseUrl: 'https://user:pass@example.test/v1?token=secret#fragment'
       },
       { cliqHome: home }
     );
@@ -41,7 +42,9 @@ test('upsertProviderAuth writes a local auth file without exposing secrets in su
     const summary = formatProviderAuthSummary(store, 'openai');
     assert.match(summary, /OpenAI credential saved/);
     assert.match(summary, /model gpt-5\.2/);
+    assert.match(summary, /base URL configured/);
     assert.doesNotMatch(summary, /sk-secret/);
+    assert.doesNotMatch(summary, /user:pass|token=secret|fragment|example\.test/);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -54,6 +57,36 @@ test('loadProviderAuthStore returns an empty store when auth.json is missing', a
       version: 1,
       providers: {}
     });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('loadProviderAuthStore tightens broad auth file permissions before reading', async () => {
+  if (process.platform === 'win32') {
+    return;
+  }
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-perms-'));
+  try {
+    const target = authFilePath(home);
+    await writeFile(
+      target,
+      JSON.stringify({
+        version: 1,
+        providers: {
+          openai: {
+            apiKey: 'sk-secret'
+          }
+        }
+      }),
+      { mode: 0o644 }
+    );
+    await chmod(target, 0o644);
+
+    const loaded = await loadProviderAuthStore({ cliqHome: home });
+    assert.equal(loaded.providers.openai?.apiKey, 'sk-secret');
+    const mode = (await stat(target)).mode & 0o777;
+    assert.equal(mode, 0o600);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

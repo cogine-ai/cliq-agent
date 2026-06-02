@@ -195,6 +195,36 @@ test('parseArgs accepts providers status and validation commands', () => {
     skills: [],
     model: {}
   });
+  assert.deepEqual(parseArgs(['node', 'cliq', 'providers', 'auth', 'set', 'openai', '--model', 'gpt-5.2']), {
+    cmd: 'providers-auth-set',
+    provider: 'openai',
+    authModel: { model: 'gpt-5.2' },
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(
+    parseArgs([
+      'node',
+      'cliq',
+      'providers',
+      'auth',
+      'set',
+      'openai-compatible',
+      '--base-url',
+      'http://localhost:4000/v1',
+      '--streaming',
+      'off'
+    ]),
+    {
+      cmd: 'providers-auth-set',
+      provider: 'openai-compatible',
+      authModel: { baseUrl: 'http://localhost:4000/v1', streaming: 'off' },
+      policy: 'default',
+      skills: [],
+      model: {}
+    }
+  );
   assert.throws(
     () => parseArgs(['node', 'cliq', 'providers', 'auth', 'set', 'openai', '--api-key', 'sk-secret']),
     /--api-key prompts securely and does not accept a value/i
@@ -202,6 +232,10 @@ test('parseArgs accepts providers status and validation commands', () => {
   assert.throws(
     () => parseArgs(['node', 'cliq', 'providers', 'auth', 'set', 'openai', '--api-key=sk-secret']),
     /--api-key prompts securely and does not accept a value/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'cliq', 'providers', 'auth', 'set', 'openai', '--json', '--model', 'gpt-5.2']),
+    /providers auth set does not support --json/i
   );
 });
 

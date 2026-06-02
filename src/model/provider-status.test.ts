@@ -128,6 +128,49 @@ test('provider status reports local auth credentials as managed without leaking 
   });
 });
 
+test('provider status prefers env model settings over local auth', async () => {
+  await withEnv(
+    {
+      CLIQ_MODEL: 'gpt-env',
+      CLIQ_MODEL_BASE_URL: 'https://env.example.test/v1',
+      OPENAI_API_KEY: 'sk-env'
+    },
+    async () => {
+      const auth: ProviderAuthStore = {
+        version: 1,
+        activeProvider: 'openai',
+        providers: {
+          openai: {
+            apiKey: 'sk-auth',
+            model: 'gpt-auth',
+            baseUrl: 'https://user:pass@auth.example.test/v1?token=secret#fragment'
+          }
+        }
+      };
+
+      const report = await buildProviderStatusReport({
+        workspace: {},
+        cli: {},
+        auth,
+        discoverOllamaModels: unavailableOllama
+      });
+
+      const current = report.providers[0]!;
+      assert.equal(report.activeProvider, 'openai');
+      assert.equal(report.activeModel, 'gpt-env');
+      assert.equal(current.provider, 'openai');
+      assert.equal(current.state, 'configured');
+      assert.deepEqual(current.sources, ['ENV', 'Managed credential']);
+      assert.equal(current.model, 'gpt-env');
+      assert.equal(current.baseUrl, 'https://env.example.test/v1');
+
+      const rendered = formatProviderStatusReport(report);
+      assert.doesNotMatch(JSON.stringify(report), /sk-auth|sk-env|user:pass|token=secret|fragment|auth\.example/);
+      assert.doesNotMatch(rendered, /sk-auth|sk-env|user:pass|token=secret|fragment|auth\.example/);
+    }
+  );
+});
+
 test('provider status reports structured missing requirements for OpenAI-compatible config', async () => {
   await withEnv(
     {

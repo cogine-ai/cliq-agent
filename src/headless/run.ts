@@ -199,6 +199,14 @@ function normalizeCaughtError(error: unknown): HeadlessRunError {
   return errorFrom('internal-error', 'assembly', message);
 }
 
+async function loadHeadlessProviderAuthStore() {
+  try {
+    return await loadProviderAuthStore();
+  } catch {
+    return undefined;
+  }
+}
+
 async function runHeadlessSessionStartHooks({
   commandHooks,
   cwd,
@@ -305,10 +313,11 @@ export async function runHeadless(
       policy = workspaceConfig.permissions.preset;
     }
     assembly.setPolicyMode(policy);
+    const auth = await loadHeadlessProviderAuthStore();
     const modelConfig = await resolveModelConfig({
       workspace: workspaceConfig,
       cli: (request.model ?? {}) as PartialModelConfig,
-      auth: await loadProviderAuthStore()
+      auth
     });
     session.model = {
       provider: modelConfig.provider,

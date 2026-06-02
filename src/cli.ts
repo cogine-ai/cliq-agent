@@ -300,6 +300,9 @@ function parseProvidersArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     if (authSub !== 'set') {
       throw new Error('cliq providers auth requires a subcommand (set)');
     }
+    if (json) {
+      throw new Error('cliq providers auth set does not support --json');
+    }
     const provider = rest[2];
     if (provider === undefined) {
       throw new Error('cliq providers auth set requires a provider');
@@ -332,7 +335,15 @@ function parseProvidersArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     if (authArgs.length > 0) {
       throw new Error(`Unknown providers auth set argument: ${authArgs[0]}`);
     }
-    if (!promptForApiKey && !apiKeyFromStdin && !model && !baseUrl && !streaming) {
+    const authModel: PartialModelConfig = {
+      ...(base.model.model ? { model: base.model.model } : {}),
+      ...(base.model.baseUrl ? { baseUrl: base.model.baseUrl } : {}),
+      ...(base.model.streaming ? { streaming: base.model.streaming } : {}),
+      ...(model ? { model } : {}),
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(streaming ? { streaming } : {})
+    };
+    if (!promptForApiKey && !apiKeyFromStdin && !authModel.model && !authModel.baseUrl && !authModel.streaming) {
       throw new Error('cliq providers auth set requires --api-key, --api-key-stdin, --model, --base-url, or --streaming');
     }
     return {
@@ -342,14 +353,7 @@ function parseProvidersArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
       provider,
       ...(promptForApiKey ? { apiKeySource: 'prompt' as const } : {}),
       ...(apiKeyFromStdin ? { apiKeySource: 'stdin' as const } : {}),
-      authModel: {
-        ...(base.model.model ? { model: base.model.model } : {}),
-        ...(base.model.baseUrl ? { baseUrl: base.model.baseUrl } : {}),
-        ...(base.model.streaming ? { streaming: base.model.streaming } : {}),
-        ...(model ? { model } : {}),
-        ...(baseUrl ? { baseUrl } : {}),
-        ...(streaming ? { streaming } : {})
-      }
+      authModel
     };
   }
 

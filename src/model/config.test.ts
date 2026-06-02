@@ -217,6 +217,42 @@ test('resolveModelConfig can use the active provider credential from local auth'
   }
 });
 
+test('resolveModelConfig prefers env model settings over local auth', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-config-env-'));
+  try {
+    await upsertProviderAuth(
+      {
+        provider: 'openai',
+        apiKey: 'sk-auth',
+        model: 'gpt-auth',
+        baseUrl: 'https://auth.example.test/v1',
+        streaming: 'off'
+      },
+      { cliqHome: home }
+    );
+
+    await withEnv(
+      {
+        CLIQ_MODEL: 'gpt-env',
+        CLIQ_MODEL_BASE_URL: 'https://env.example.test/v1',
+        CLIQ_MODEL_STREAMING: 'on',
+        OPENAI_API_KEY: 'sk-env'
+      },
+      async () => {
+        assert.deepEqual(await resolveModelConfig({ workspace: {}, cli: {}, auth: await loadProviderAuthStore({ cliqHome: home }) }), {
+          provider: 'openai',
+          model: 'gpt-env',
+          baseUrl: 'https://env.example.test/v1',
+          apiKey: 'sk-env',
+          streaming: 'on'
+        });
+      }
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('resolveModelConfig applies CLI over workspace over env', async () => {
   await withEnv(
     {
