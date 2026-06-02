@@ -3,9 +3,11 @@ import { test } from 'node:test';
 
 import { render } from 'ink-testing-library';
 
+import type { ModelPickerSnapshot } from '../model/model-picker.js';
 import type { ProviderStatusReport } from '../model/provider-status.js';
 import type { ApprovalSubject } from '../policy/types.js';
 import { App } from './app.js';
+import type { ModelSetupApplyRequest } from './components/model-setup-flow.js';
 import {
   createInitialState,
   createUiStore,
@@ -74,6 +76,33 @@ const providerReport: ProviderStatusReport = {
     message: 'Cliq does not store provider secrets in this slice.'
   }
 };
+
+function pickerSnapshot(provider: 'openai' | 'ollama' = 'ollama'): ModelPickerSnapshot {
+  return {
+    selectedProvider: provider,
+    providers: [
+      {
+        provider,
+        displayName: provider === 'ollama' ? 'Ollama' : 'OpenAI',
+        state: 'configured',
+        stateLabel: 'Configured',
+        current: true,
+        issues: []
+      }
+    ],
+    modelsByProvider: {
+      [provider]: [
+        {
+          kind: 'model',
+          provider,
+          model: provider === 'ollama' ? 'qwen3.5:4b' : 'gpt-5.2',
+          displayName: provider === 'ollama' ? 'qwen3.5:4b' : 'GPT-5.2',
+          labels: ['Current']
+        }
+      ]
+    }
+  };
+}
 
 test('mounts and renders status bar segments', () => {
   const store = makeStore();
@@ -255,6 +284,136 @@ test('/providers modal blocks global policy rotation shortcuts behind it', async
 
   assert.equal(store.getState().policy, 'yolo');
   assert.doesNotMatch(lastFrame() ?? '', /mode →/);
+});
+
+test('/model opens provider-first model setup', async () => {
+  const store = makeStore();
+  let calls = 0;
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onModelSetupSnapshot={() => {
+        calls += 1;
+        return pickerSnapshot();
+      }}
+      onModelSetupApply={() => {}}
+    />
+  );
+
+  stdin.write('/model');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+
+  assert.equal(calls, 1);
+  assert.match(lastFrame() ?? '', /Model setup/);
+  assert.match(lastFrame() ?? '', /> Ollama/);
+});
+
+test('/models is an alias for /model', async () => {
+  const store = makeStore();
+  let calls = 0;
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onModelSetupSnapshot={() => {
+        calls += 1;
+        return pickerSnapshot();
+      }}
+      onModelSetupApply={() => {}}
+    />
+  );
+
+  stdin.write('/models');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+
+  assert.equal(calls, 1);
+  assert.match(lastFrame() ?? '', /Model setup/);
+});
+
+test('/providers configure reuses model setup for selected provider', async () => {
+  const store = makeStore();
+  let modelSetupCalls = 0;
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onProviderStatus={() => providerReport}
+      onModelSetupSnapshot={() => {
+        modelSetupCalls += 1;
+        return pickerSnapshot('openai');
+      }}
+      onModelSetupApply={() => {}}
+    />
+  );
+
+  stdin.write('/providers');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+
+  let readyFrame = lastFrame() ?? '';
+  for (let i = 0; i < 5 && /Waiting for fresh input/.test(readyFrame); i += 1) {
+    await flush();
+    readyFrame = lastFrame() ?? '';
+  }
+
+  stdin.write('\r');
+  await flush();
+  await flush();
+  stdin.write('c');
+  await flush();
+  await flush();
+
+  assert.equal(modelSetupCalls, 1);
+  assert.match(lastFrame() ?? '', /Model setup/);
+  assert.match(lastFrame() ?? '', /OpenAI/);
+});
+
+test('/model Enter applies a current-session model and updates the composer label', async () => {
+  const store = makeStore();
+  const applied: ModelSetupApplyRequest[] = [];
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onModelSetupSnapshot={() => pickerSnapshot('openai')}
+      onModelSetupApply={(request) => {
+        applied.push(request);
+        store.dispatch({
+          type: 'model-change',
+          model: { provider: request.provider, model: request.model }
+        });
+      }}
+    />
+  );
+
+  stdin.write('/model');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+  let readyFrame = lastFrame() ?? '';
+  for (let i = 0; i < 5 && /Waiting for fresh input/.test(readyFrame); i += 1) {
+    await flush();
+    readyFrame = lastFrame() ?? '';
+  }
+
+  stdin.write('\r');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+
+  assert.deepEqual(applied, [{ provider: 'openai', model: 'gpt-5.2', persist: false }]);
+  assert.match(lastFrame() ?? '', /openai\/gpt-5\.2/);
 });
 
 test('/policy without a mode argument surfaces an inline error', async () => {

@@ -7,13 +7,15 @@ import {
   type ProviderStatus,
   type ProviderStatusReport
 } from '../../model/provider-status.js';
+import type { ProviderName } from '../../model/types.js';
 
 export type ProviderManagementProps = {
   report: ProviderStatusReport;
   onClose: () => void;
+  onConfigure?: (provider: ProviderName) => void;
 };
 
-export function ProviderManagement({ report, onClose }: ProviderManagementProps) {
+export function ProviderManagement({ report, onClose, onConfigure }: ProviderManagementProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [detail, setDetail] = useState<ProviderStatus | null>(null);
   const isActiveRef = useRef(false);
@@ -40,6 +42,10 @@ export function ProviderManagement({ report, onClose }: ProviderManagementProps)
     }
 
     if (detail) {
+      if ((input === 'c' || input === 'C') && onConfigure) {
+        onConfigure(detail.provider);
+        return;
+      }
       if (input === 'b' || input === 'B' || key.leftArrow || key.backspace || key.delete) {
         setDetail(null);
       }
@@ -69,6 +75,7 @@ export function ProviderManagement({ report, onClose }: ProviderManagementProps)
       <Box marginTop={1}>
         {detail ? (
           <>
+            {onConfigure ? <Text color="cyan">[c]onfigure </Text> : null}
             <Text color="cyan">[b]ack </Text>
             <Text dimColor> Esc/q close</Text>
           </>

@@ -1,10 +1,13 @@
 import { Box, useApp } from 'ink';
 import { useMemo, useRef, useState } from 'react';
 
+import type { ModelPickerSnapshot } from '../model/model-picker.js';
 import type { ProviderStatusReport } from '../model/provider-status.js';
+import type { ProviderName } from '../model/types.js';
 import type { PolicyMode } from '../policy/types.js';
 import { ApprovalModal } from './components/approval-modal.js';
 import { InputBar } from './components/input-bar.js';
+import { ModelSetupFlow, type ModelSetupApplyRequest } from './components/model-setup-flow.js';
 import { PlanProgressView } from './components/plan-progress.js';
 import { PlanReviewModal } from './components/plan-review-modal.js';
 import { ProviderManagement } from './components/provider-management.js';
@@ -42,6 +45,8 @@ export type AppProps = {
   onSkillsList?: () => string | Promise<string>;
   onSkillActivate?: (name: string) => string | Promise<string>;
   onProviderStatus?: () => ProviderStatusReport | Promise<ProviderStatusReport>;
+  onModelSetupSnapshot?: () => ModelPickerSnapshot | Promise<ModelPickerSnapshot>;
+  onModelSetupApply?: (request: ModelSetupApplyRequest) => void | Promise<void>;
 };
 
 export function App({
@@ -54,11 +59,14 @@ export function App({
   onCancelTurn,
   onSkillsList,
   onSkillActivate,
-  onProviderStatus
+  onProviderStatus,
+  onModelSetupSnapshot,
+  onModelSetupApply
 }: AppProps) {
   const state = useUiStore(store);
   const [input, setInput] = useState('');
   const [providerReport, setProviderReport] = useState<ProviderStatusReport | null>(null);
+  const [modelSetup, setModelSetup] = useState<{ snapshot: ModelPickerSnapshot; initialProvider?: ProviderName } | null>(null);
   const [providerStatusPending, setProviderStatusPending] = useState(false);
   const planDecisionInFlightRef = useRef(false);
   const providerInteractionActiveRef = useRef(false);
@@ -165,6 +173,9 @@ export function App({
           setProviderStatusPending(false);
         }
         return;
+      case 'model':
+        await openModelSetup();
+        return;
       case 'skills':
         try {
           pushSystem(onSkillsList ? await onSkillsList() : 'No skill catalog is available in this TUI session.');
@@ -201,7 +212,8 @@ export function App({
     state.pendingApproval !== null ||
     state.pendingPlanReview !== null ||
     providerStatusPending ||
-    providerReport !== null;
+    providerReport !== null ||
+    modelSetup !== null;
   const completion = completeSlash(input);
   const terminalWidth = process.stdout.columns ?? 80;
   const expandableTool = findLatestExpandableTool(state);
@@ -329,6 +341,42 @@ export function App({
     setProviderReport(null);
   }
 
+  function closeModelSetup() {
+    providerInteractionActiveRef.current = false;
+    setModelSetup(null);
+  }
+
+  async function openModelSetup(initialProvider?: ProviderName) {
+    try {
+      if (!onModelSetupSnapshot || !onModelSetupApply) {
+        pushSystem('No model setup handler is available in this TUI session.');
+        return;
+      }
+      providerInteractionActiveRef.current = true;
+      setProviderStatusPending(true);
+      const snapshot = await onModelSetupSnapshot();
+      setProviderReport(null);
+      setModelSetup(initialProvider ? { snapshot, initialProvider } : { snapshot });
+    } catch (error) {
+      providerInteractionActiveRef.current = false;
+      pushSystem(`/model failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setProviderStatusPending(false);
+    }
+  }
+
+  async function handleModelSetupApply(request: ModelSetupApplyRequest) {
+    try {
+      if (!onModelSetupApply) {
+        throw new Error('No model setup apply handler is available in this TUI session.');
+      }
+      await onModelSetupApply(request);
+      closeModelSetup();
+    } catch (error) {
+      pushSystem(`model setup failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   async function handlePlanDecision(decision: UiPlanDecision) {
     if (planDecisionInFlightRef.current) return;
     const review = store.getState().pendingPlanReview;
@@ -378,8 +426,27 @@ export function App({
             void handlePlanDecision(decision);
           }}
         />
+      ) : modelSetup ? (
+        <ModelSetupFlow
+          snapshot={modelSetup.snapshot}
+          onApply={(request) => {
+            void handleModelSetupApply(request);
+          }}
+          onClose={closeModelSetup}
+          {...(modelSetup.initialProvider ? { initialProvider: modelSetup.initialProvider } : {})}
+        />
       ) : providerReport ? (
-        <ProviderManagement report={providerReport} onClose={closeProviderManagement} />
+        <ProviderManagement
+          report={providerReport}
+          onClose={closeProviderManagement}
+          {...(onModelSetupSnapshot && onModelSetupApply
+            ? {
+                onConfigure: (provider) => {
+                  void openModelSetup(provider);
+                }
+              }
+            : {})}
+        />
       ) : (
         <>
           {input.startsWith('/') ? <SlashPalette query={input} /> : null}

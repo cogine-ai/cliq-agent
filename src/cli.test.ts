@@ -25,9 +25,14 @@ import {
   hydratePlanProgressBestEffort,
   hydratePendingPlanReview,
   hydratePlanProgress,
+  applyTuiModelSetupSelection,
+  buildTuiModelSetupSnapshot,
+  resolveModelConfigWithInteractiveSetup,
   ReportedCliError,
   runCli
 } from './cli.js';
+import { authFilePath } from './model/auth-store.js';
+import type { ModelClient, ResolvedModelConfig } from './model/types.js';
 import { approvePlan, createDraftPlan, finalizePlan, planProgressPath } from './plans/store.js';
 import { createCheckpoint } from './session/checkpoints.js';
 import { createSession, ensureSession, saveSession, sessionFilePath } from './session/store.js';
@@ -35,6 +40,7 @@ import { WorkspaceTrustError } from './session/trust.js';
 import type { ToolResult } from './tools/types.js';
 import type { UiAction, UiStore } from './tui/store.js';
 import { appendBashEffect } from './workspace/transactions/bash-effects.js';
+import type { WorkspaceConfig } from './workspace/config.js';
 import {
   createTx,
   resolveTxRoot,
@@ -1468,6 +1474,197 @@ async function withMockStdin(input: string, callback: () => Promise<void>) {
     }
   }
 }
+
+function fakeModelClientForConfig(
+  configs: ResolvedModelConfig[],
+  config: ResolvedModelConfig
+): ModelClient {
+  configs.push(config);
+  return {
+    async complete() {
+      return {
+        provider: config.provider,
+        model: config.model,
+        content: 'ok'
+      };
+    }
+  };
+}
+
+function emptyWorkspaceConfig(): WorkspaceConfig {
+  return {
+    instructionFiles: [],
+    extensions: [],
+    defaultSkills: [],
+    autoCompact: {}
+  };
+}
+
+test('applyTuiModelSetupSelection persists provider defaults and resolves a new OpenAI-compatible client', async () => {
+  await withCliTestEnv('tui-model-setup-persist', async (env) => {
+    const createdConfigs: ResolvedModelConfig[] = [];
+    const result = await applyTuiModelSetupSelection({
+      request: {
+        provider: 'openai-compatible',
+        model: 'direct-model-id',
+        baseUrl: 'http://localhost:4000/v1',
+        apiKey: 'sk-secret',
+        persist: true
+      },
+      currentModelConfig: {
+        provider: 'ollama',
+        model: 'qwen3.5:4b',
+        baseUrl: 'http://localhost:11434',
+        streaming: 'off'
+      },
+      workspaceConfig: emptyWorkspaceConfig(),
+      cliModel: { provider: 'ollama', model: 'qwen3.5:4b' },
+      auth: { version: 1, providers: {} },
+      cliqHome: env.home,
+      createModelClientImpl: (config) => fakeModelClientForConfig(createdConfigs, config)
+    });
+
+    assert.equal(result.auth.activeProvider, 'openai-compatible');
+    assert.equal(result.auth.providers['openai-compatible']?.model, 'direct-model-id');
+    assert.equal(result.auth.providers['openai-compatible']?.baseUrl, 'http://localhost:4000/v1');
+    assert.equal(result.auth.providers['openai-compatible']?.apiKey, 'sk-secret');
+    assert.equal(result.modelConfig.provider, 'openai-compatible');
+    assert.equal(result.modelConfig.model, 'direct-model-id');
+    assert.equal(result.modelConfig.baseUrl, 'http://localhost:4000/v1');
+    assert.equal(result.modelConfig.apiKey, 'sk-secret');
+    assert.equal(result.modelConfig.streaming, 'off');
+    assert.equal(createdConfigs.length, 1);
+    assert.deepEqual(createdConfigs[0], result.modelConfig);
+
+    const raw = await readFile(authFilePath(env.home), 'utf8');
+    const payload = JSON.parse(raw) as {
+      activeProvider?: string;
+      providers?: { 'openai-compatible'?: { apiKey?: string; model?: string; baseUrl?: string } };
+    };
+    assert.equal(payload.activeProvider, 'openai-compatible');
+    assert.equal(payload.providers?.['openai-compatible']?.model, 'direct-model-id');
+    assert.equal(payload.providers?.['openai-compatible']?.baseUrl, 'http://localhost:4000/v1');
+    assert.equal(payload.providers?.['openai-compatible']?.apiKey, 'sk-secret');
+  });
+});
+
+test('applyTuiModelSetupSelection applies Enter session-only without writing startup defaults', async () => {
+  await withCliTestEnv('tui-model-setup-session-only', async (env) => {
+    const createdConfigs: ResolvedModelConfig[] = [];
+    const result = await applyTuiModelSetupSelection({
+      request: {
+        provider: 'ollama',
+        model: 'qwen-session:4b',
+        persist: false
+      },
+      currentModelConfig: {
+        provider: 'ollama',
+        model: 'qwen3.5:4b',
+        baseUrl: 'http://localhost:11434',
+        streaming: 'auto'
+      },
+      workspaceConfig: emptyWorkspaceConfig(),
+      cliModel: {},
+      auth: { version: 1, providers: {} },
+      cliqHome: env.home,
+      createModelClientImpl: (config) => fakeModelClientForConfig(createdConfigs, config)
+    });
+
+    assert.equal(result.auth.activeProvider, undefined);
+    assert.deepEqual(result.auth.providers, {});
+    assert.equal(result.modelConfig.provider, 'ollama');
+    assert.equal(result.modelConfig.model, 'qwen-session:4b');
+    assert.equal(result.modelConfig.baseUrl, 'http://localhost:11434');
+    assert.equal(result.modelConfig.streaming, 'auto');
+    assert.equal(createdConfigs.length, 1);
+
+    await assert.rejects(() => readFile(authFilePath(env.home), 'utf8'), /ENOENT/);
+  });
+});
+
+test('applyTuiModelSetupSelection can use a session-only API key without writing auth.json', async () => {
+  await withCliTestEnv('tui-model-setup-session-key', async (env) => {
+    const createdConfigs: ResolvedModelConfig[] = [];
+    const result = await applyTuiModelSetupSelection({
+      request: {
+        provider: 'openai',
+        model: 'gpt-5.2',
+        apiKey: 'sk-session-only',
+        persist: false
+      },
+      currentModelConfig: {
+        provider: 'ollama',
+        model: 'qwen3.5:4b',
+        baseUrl: 'http://localhost:11434',
+        streaming: 'auto'
+      },
+      workspaceConfig: emptyWorkspaceConfig(),
+      cliModel: {},
+      auth: { version: 1, providers: {} },
+      cliqHome: env.home,
+      createModelClientImpl: (config) => fakeModelClientForConfig(createdConfigs, config)
+    });
+
+    assert.equal(result.modelConfig.provider, 'openai');
+    assert.equal(result.modelConfig.model, 'gpt-5.2');
+    assert.equal(result.modelConfig.apiKey, 'sk-session-only');
+    assert.equal(result.auth.providers.openai?.apiKey, 'sk-session-only');
+    assert.equal(createdConfigs.length, 1);
+    await assert.rejects(() => readFile(authFilePath(env.home), 'utf8'), /ENOENT/);
+  });
+});
+
+test('buildTuiModelSetupSnapshot includes discovered local Ollama models for the picker', async () => {
+  const snapshot = await buildTuiModelSetupSnapshot({
+    currentModelConfig: {
+      provider: 'ollama',
+      model: 'qwen-local:4b',
+      baseUrl: 'http://localhost:11434',
+      streaming: 'auto'
+    },
+    workspaceConfig: emptyWorkspaceConfig(),
+    cliModel: {},
+    auth: { version: 1, providers: {} },
+    env: {},
+    discoverOllamaModels: async (baseUrl) => {
+      assert.equal(baseUrl, 'http://localhost:11434');
+      return [{ name: 'qwen-local:4b' }, { name: 'other-local:latest' }];
+    }
+  });
+
+  assert.equal(snapshot.selectedProvider, 'ollama');
+  const rows = snapshot.modelsByProvider.ollama ?? [];
+  const qwen = rows.find((row) => row.kind === 'model' && row.model === 'qwen-local:4b');
+  const other = rows.find((row) => row.kind === 'model' && row.model === 'other-local:latest');
+  assert.ok(qwen);
+  assert.ok(qwen.labels.includes('Current'));
+  assert.ok(qwen.labels.includes('Local'));
+  assert.ok(other);
+  assert.ok(other.labels.includes('Local'));
+});
+
+test('interactive model setup can repair startup model config and continue', async () => {
+  const authAfterSetup = {
+    version: 1,
+    activeProvider: 'openai',
+    providers: {
+      openai: { apiKey: 'sk-secret', model: 'gpt-5.2' }
+    }
+  } as const;
+
+  const result = await resolveModelConfigWithInteractiveSetup({
+    workspaceConfig: emptyWorkspaceConfig(),
+    cliModel: { provider: 'openai' },
+    initialAuth: { version: 1, providers: {} },
+    wantsTui: true,
+    mountSetup: async () => authAfterSetup
+  });
+
+  assert.equal(result?.modelConfig.provider, 'openai');
+  assert.equal(result?.modelConfig.model, 'gpt-5.2');
+  assert.equal(result?.modelConfig.apiKey, 'sk-secret');
+  assert.equal(result?.auth.providers.openai?.apiKey, 'sk-secret');
+});
 
 async function createCliTxFixture(env: CliTestEnv) {
   const session = createSession(env.cwd);

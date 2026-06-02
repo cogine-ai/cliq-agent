@@ -15,6 +15,7 @@ import {
   formatModelSetupMessage,
   isModelSetupRequiredError,
   resolveModelConfig,
+  type ModelSetupRequiredError,
   type PartialModelConfig
 } from './model/config.js';
 import {
@@ -24,11 +25,16 @@ import {
 } from './model/auth-store.js';
 import { createModelClient } from './model/index.js';
 import {
+  buildModelPickerSnapshot,
+  type ModelPickerSnapshot
+} from './model/model-picker.js';
+import {
   buildProviderStatusReport,
   formatProviderStatusReport,
   validateProviderStatus
 } from './model/provider-status.js';
-import { isProviderName } from './model/registry.js';
+import { discoverOllamaModels as defaultDiscoverOllamaModels, type OllamaModelSummary } from './model/providers/ollama-discovery.js';
+import { getModelProvider, isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig, StreamingMode } from './model/types.js';
 import type { ProviderAuthStore } from './model/auth-store.js';
 import {
@@ -2785,18 +2791,49 @@ export async function runCli(argv: string[]) {
     policyMode: policy,
     cliSkillNames: skills
   });
-  const auth = await loadProviderAuthStore();
+  let auth = await loadProviderAuthStore();
   let modelConfig: ResolvedModelConfig;
   try {
-    modelConfig = await resolveModelConfig({ workspace: assembly.workspaceConfig, cli: cliModel, auth });
+    const setupResult = await resolveModelConfigWithInteractiveSetup({
+      workspaceConfig: assembly.workspaceConfig,
+      cliModel,
+      initialAuth: auth,
+      wantsTui,
+      mountSetup: async (error) => {
+        const setupModelConfig = modelConfigForSetupError(error);
+        const { mountProviderSetupAndWait } = await import('./tui/provider-setup.js');
+        return await mountProviderSetupAndWait(error, {
+          snapshot: await buildTuiModelSetupSnapshot({
+            currentModelConfig: setupModelConfig,
+            workspaceConfig: assembly.workspaceConfig,
+            cliModel,
+            auth
+          }),
+          onApply: async (request) => {
+            const applied = await applyTuiModelSetupSelection({
+              request,
+              currentModelConfig: setupModelConfig,
+              workspaceConfig: assembly.workspaceConfig,
+              cliModel,
+              auth,
+              cliqHome: resolveCliqHome()
+            });
+            auth = applied.auth;
+            return {
+              auth: applied.auth,
+              modelConfig: applied.modelConfig
+            };
+          }
+        });
+      }
+    });
+    if (!setupResult) {
+      return;
+    }
+    auth = setupResult.auth;
+    modelConfig = setupResult.modelConfig;
   } catch (error) {
     if (isModelSetupRequiredError(error)) {
-      if (wantsTui) {
-        const { mountProviderSetupAndWait } = await import('./tui/provider-setup.js');
-        await mountProviderSetupAndWait(error);
-        return;
-      }
-
       process.stderr.write(`${formatModelSetupMessage(error)}\n`);
       throw new ReportedCliError(error, { exitCode: 1 });
     }
@@ -3042,6 +3079,173 @@ type RunChatTuiSessionOpts = {
   trustContext: WorkspaceTrustContext;
 };
 
+export type TuiModelSetupSelectionRequest = {
+  provider: ProviderName;
+  model: string;
+  persist: boolean;
+  baseUrl?: string;
+  apiKey?: string;
+};
+
+export type ApplyTuiModelSetupSelectionResult = {
+  auth: ProviderAuthStore;
+  modelConfig: ResolvedModelConfig;
+  modelClient: ModelClient;
+};
+
+export type InteractiveModelSetupResult =
+  | ProviderAuthStore
+  | { auth: ProviderAuthStore; modelConfig: ResolvedModelConfig };
+
+export async function resolveModelConfigWithInteractiveSetup(opts: {
+  workspaceConfig: WorkspaceConfig;
+  cliModel: PartialModelConfig;
+  initialAuth: ProviderAuthStore;
+  wantsTui: boolean;
+  mountSetup: (error: ModelSetupRequiredError) => Promise<InteractiveModelSetupResult | null>;
+}): Promise<{ modelConfig: ResolvedModelConfig; auth: ProviderAuthStore } | null> {
+  try {
+    return {
+      modelConfig: await resolveModelConfig({
+        workspace: opts.workspaceConfig,
+        cli: opts.cliModel,
+        auth: opts.initialAuth
+      }),
+      auth: opts.initialAuth
+    };
+  } catch (error) {
+    if (!isModelSetupRequiredError(error) || !opts.wantsTui) {
+      throw error;
+    }
+    const setup = await opts.mountSetup(error);
+    if (!setup) {
+      return null;
+    }
+    if ('modelConfig' in setup) {
+      return setup;
+    }
+    return {
+      modelConfig: await resolveModelConfig({
+        workspace: opts.workspaceConfig,
+        cli: opts.cliModel,
+        auth: setup
+      }),
+      auth: setup
+    };
+  }
+}
+
+export async function buildTuiModelSetupSnapshot(opts: {
+  currentModelConfig: ResolvedModelConfig;
+  workspaceConfig: WorkspaceConfig;
+  cliModel: PartialModelConfig;
+  auth: ProviderAuthStore;
+  env?: Record<string, string | undefined>;
+  discoverOllamaModels?: (baseUrl: string) => Promise<OllamaModelSummary[]>;
+}): Promise<ModelPickerSnapshot> {
+  let ollamaModels: OllamaModelSummary[] = [];
+  const discoverOllamaModels = opts.discoverOllamaModels ?? defaultDiscoverOllamaModels;
+  const report = await buildProviderStatusReport({
+    workspace: opts.workspaceConfig,
+    cli: opts.cliModel,
+    auth: opts.auth,
+    env: opts.env,
+    discoverOllamaModels: async (baseUrl) => {
+      try {
+        ollamaModels = await discoverOllamaModels(baseUrl);
+        return ollamaModels;
+      } catch (error) {
+        ollamaModels = [];
+        throw error;
+      }
+    }
+  });
+
+  return buildModelPickerSnapshot({
+    report,
+    auth: opts.auth,
+    currentModel: {
+      provider: opts.currentModelConfig.provider,
+      model: opts.currentModelConfig.model
+    },
+    workspaceModel: opts.workspaceConfig.model,
+    cliModel: opts.cliModel,
+    env: opts.env,
+    ollamaModels
+  });
+}
+
+export async function applyTuiModelSetupSelection(opts: {
+  request: TuiModelSetupSelectionRequest;
+  currentModelConfig: ResolvedModelConfig;
+  workspaceConfig: WorkspaceConfig;
+  cliModel: PartialModelConfig;
+  auth: ProviderAuthStore;
+  cliqHome?: string;
+  createModelClientImpl?: (config: ResolvedModelConfig) => ModelClient;
+}): Promise<ApplyTuiModelSetupSelectionResult> {
+  const request = opts.request;
+  const authOptions = opts.cliqHome ? { cliqHome: opts.cliqHome } : {};
+  const auth = request.persist
+    ? await upsertProviderAuth(
+        {
+          provider: request.provider,
+          model: request.model,
+          ...(request.baseUrl ? { baseUrl: request.baseUrl } : {}),
+          ...(request.apiKey ? { apiKey: request.apiKey } : {})
+        },
+        authOptions
+      )
+    : withSessionOnlyProviderAuth(opts.auth, request);
+  const baseUrl =
+    request.baseUrl ??
+    (request.provider === opts.currentModelConfig.provider ? opts.currentModelConfig.baseUrl : undefined);
+  const sessionModel: PartialModelConfig = {
+    provider: request.provider,
+    model: request.model,
+    ...(baseUrl ? { baseUrl } : {}),
+    streaming: opts.currentModelConfig.streaming
+  };
+  const modelConfig = await resolveModelConfig({
+    workspace: { model: opts.workspaceConfig.model },
+    cli: sessionModel,
+    auth
+  });
+  const modelClient = (opts.createModelClientImpl ?? createModelClient)(modelConfig);
+
+  return {
+    auth,
+    modelConfig,
+    modelClient
+  };
+}
+
+function withSessionOnlyProviderAuth(
+  auth: ProviderAuthStore,
+  request: TuiModelSetupSelectionRequest
+): ProviderAuthStore {
+  if (!request.apiKey) return auth;
+  return {
+    ...auth,
+    providers: {
+      ...auth.providers,
+      [request.provider]: {
+        ...(auth.providers[request.provider] ?? {}),
+        apiKey: request.apiKey
+      }
+    }
+  };
+}
+
+function modelConfigForSetupError(error: ModelSetupRequiredError): ResolvedModelConfig {
+  return {
+    provider: error.provider,
+    model: '',
+    baseUrl: error.baseUrl ?? getModelProvider(error.provider).defaultBaseUrl,
+    streaming: 'auto'
+  };
+}
+
 // The TUI shares the canonical default unless the user explicitly chose a
 // different mode. Readline (--classic) uses the same global default.
 const TUI_DEFAULT_POLICY: PolicyMode = 'default';
@@ -3179,24 +3383,30 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     }
   ];
 
-  const runner = createRunner({
-    model: opts.modelClient,
-    hooks: [...opts.assembly.hooks, ...tuiHooks],
-    commandHooks: opts.assembly.commandHooks ?? {},
-    policy: livePolicy.engine,
-    // The modal owns 'ask' resolution; runner.confirm is only invoked if the
-    // wrapped engine ever returns 'ask' (it shouldn't), so this is a defense.
-    confirm: async () => false,
-    instructions: opts.assembly.instructions,
-    autoCompact: {
-      config: opts.assembly.workspaceConfig.autoCompact,
-      modelConfig: opts.modelConfig
-    },
-    ...(tuiTransactions ? { transactions: tuiTransactions } : {}),
-    async onEvent(event) {
-      store.dispatch({ type: 'runtime-event', event });
-    }
-  });
+  let currentAuth = opts.auth;
+  let currentModelConfig = opts.modelConfig;
+  let currentModelClient = opts.modelClient;
+
+  const buildTuiRunner = (modelClient: ModelClient, modelConfig: ResolvedModelConfig) =>
+    createRunner({
+      model: modelClient,
+      hooks: [...opts.assembly.hooks, ...tuiHooks],
+      commandHooks: opts.assembly.commandHooks ?? {},
+      policy: livePolicy.engine,
+      // The modal owns 'ask' resolution; runner.confirm is only invoked if the
+      // wrapped engine ever returns 'ask' (it shouldn't), so this is a defense.
+      confirm: async () => false,
+      instructions: opts.assembly.instructions,
+      autoCompact: {
+        config: opts.assembly.workspaceConfig.autoCompact,
+        modelConfig
+      },
+      ...(tuiTransactions ? { transactions: tuiTransactions } : {}),
+      async onEvent(event) {
+        store.dispatch({ type: 'runtime-event', event });
+      }
+    });
+  let runner = buildTuiRunner(currentModelClient, currentModelConfig);
 
   // Per-turn AbortController so Ctrl+C can cancel an in-flight turn without
   // poisoning subsequent turns. The runner's per-turn opts.signal channel
@@ -3235,9 +3445,9 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       const fresh = await ensureFresh(session.cwd);
       Object.assign(session, fresh);
       session.model = {
-        provider: opts.modelConfig.provider,
-        model: opts.modelConfig.model,
-        baseUrl: opts.modelConfig.baseUrl
+        provider: currentModelConfig.provider,
+        model: currentModelConfig.model,
+        baseUrl: currentModelConfig.baseUrl
       };
     },
     onPolicyChange: async (mode) => {
@@ -3285,8 +3495,42 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       buildProviderStatusReport({
         workspace: opts.assembly.workspaceConfig,
         cli: opts.cliModel,
-        auth: opts.auth
-      })
+        auth: currentAuth
+      }),
+    onModelSetupSnapshot: () =>
+      buildTuiModelSetupSnapshot({
+        currentModelConfig,
+        workspaceConfig: opts.assembly.workspaceConfig,
+        cliModel: opts.cliModel,
+        auth: currentAuth
+      }),
+    onModelSetupApply: async (request) => {
+      const applied = await applyTuiModelSetupSelection({
+        request,
+        currentModelConfig,
+        workspaceConfig: opts.assembly.workspaceConfig,
+        cliModel: opts.cliModel,
+        auth: currentAuth,
+        cliqHome: opts.cliqHome
+      });
+      currentAuth = applied.auth;
+      currentModelConfig = applied.modelConfig;
+      currentModelClient = applied.modelClient;
+      runner = buildTuiRunner(currentModelClient, currentModelConfig);
+      session.model = {
+        provider: currentModelConfig.provider,
+        model: currentModelConfig.model,
+        baseUrl: currentModelConfig.baseUrl
+      };
+      store.dispatch({
+        type: 'model-change',
+        model: {
+          provider: currentModelConfig.provider,
+          model: currentModelConfig.model
+        }
+      });
+      await saveSession(cwd, session);
+    }
   });
 
   await tui.waitUntilExit();

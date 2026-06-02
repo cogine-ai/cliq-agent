@@ -46,8 +46,8 @@ When you launch `cliq` (or `cliq chat`) on a TTY, you enter the Ink-based TUI by
 Inside the TUI:
 
 - Slash commands (`/exit`, `/quit`, `/reset`, `/help`, `/policy <mode>`,
-  `/providers`) open a palette popover and support Tab completion. `/help`
-  lists commands, shortcuts, and mode behavior.
+  `/model`, `/models`, `/providers`) open a palette popover and support Tab
+  completion. `/help` lists commands, shortcuts, and mode behavior.
 - ↑ / ↓ recall previously submitted prompts while preserving any in-progress
   draft; ← / → move the cursor inside the input buffer.
 - The status line shows the current mode in user-facing language, such as
@@ -149,20 +149,34 @@ instructions live in [`docs/model-catalog.md`](docs/model-catalog.md).
 
 Provider management:
 
+- In the TUI, run `/model` or `/models` to open provider-first setup and model
+  selection. The provider step always opens first and defaults to the current
+  runtime provider. In the model step, `Enter` applies the highlighted
+  provider/model to the current TUI session only; `Space` saves the provider and
+  model as the startup default in the local auth file and also applies it to
+  the current session.
 - In the TUI, run `/providers` to open the provider management list. The active
   provider is shown first and marked `Current`; rows use `Configured`,
   `Not configured`, or `Unavailable`, and configured rows show sources such as
-  `ENV`, `Workspace`, `CLI`, or `Local service`.
+  `ENV`, `Workspace`, `CLI`, or `Local service`. Provider details expose a
+  configure action that reuses the `/model` setup flow.
+- The model picker combines static catalog rows, local Ollama models from
+  `/api/tags`, model ids from workspace/env/auth defaults, and direct custom
+  model entry. Rows label `Current`, `Startup default`, `Provider default`,
+  `Catalog`, `Local`, `Configured`, or `Custom`.
 - For scripts and headless use, run `cliq providers status` or
   `cliq providers status --json`. `cliq providers list` is an alias.
 - Run `cliq providers validate [provider]` to validate the current or named
   provider configuration. `--json` returns structured issues such as
   `missing-api-key`, `missing-base-url`, `missing-model`, or
   `local-service-unavailable`.
-- Cliq does not store provider secrets in this slice. Use environment variables
-  for API keys and workspace config for non-secret defaults such as provider,
-  model, and base URL. Managed credentials or keychain storage require a
-  separate security decision before implementation.
+- TUI and CLI credential setup can save API keys to the local auth file at
+  `${CLIQ_HOME:-~/.cliq}/auth.json` through the existing auth-store path. TUI
+  secret input is masked and only persists after an explicit save action; direct
+  session use does not write the auth file.
+- OpenAI-compatible setup supports a base URL, a direct model id, and an
+  optional API key. Workspace config persistence, global-default layers, remote
+  dynamic provider model lists, and Ollama model pulling are outside this slice.
 
 More design boundaries live in [`docs/provider-management.md`](docs/provider-management.md).
 
