@@ -589,7 +589,7 @@ function makeSnapshot(overrides: Partial<ModelPickerSnapshot> = {}): ModelPicker
 
 test('model setup flow opens provider step first with current runtime provider selected', () => {
   const { lastFrame } = render(
-    <ModelSetupFlow snapshot={makeSnapshot()} onRefresh={makeSnapshot} onApply={() => {}} onClose={() => {}} />
+    <ModelSetupFlow snapshot={makeSnapshot()} onApply={() => {}} onClose={() => {}} />
   );
   const frame = lastFrame() ?? '';
   assert.match(frame, /Model setup/);
@@ -602,7 +602,6 @@ test('model setup flow moves to model step with Enter and applies current sessio
   const { stdin } = render(
     <ModelSetupFlow
       snapshot={makeSnapshot()}
-      onRefresh={makeSnapshot}
       onApply={(request) => applied.push(request)}
       onClose={() => {}}
     />
@@ -621,7 +620,6 @@ test('model setup flow saves startup default with Space', async () => {
   const { stdin } = render(
     <ModelSetupFlow
       snapshot={makeSnapshot()}
-      onRefresh={makeSnapshot}
       onApply={(request) => applied.push(request)}
       onClose={() => {}}
     />
@@ -651,7 +649,7 @@ test('model setup flow masks API key input and never renders the secret', async 
     modelsByProvider: { openai: [] }
   });
   const { stdin, lastFrame } = render(
-    <ModelSetupFlow snapshot={snapshot} onRefresh={() => snapshot} onApply={() => {}} onClose={() => {}} />
+    <ModelSetupFlow snapshot={snapshot} onApply={() => {}} onClose={() => {}} />
   );
 
   stdin.write('\r');
@@ -692,7 +690,6 @@ export type ModelSetupApplyRequest = {
 
 export type ModelSetupFlowProps = {
   snapshot: ModelPickerSnapshot;
-  onRefresh: () => ModelPickerSnapshot | Promise<ModelPickerSnapshot>;
   onApply: (request: ModelSetupApplyRequest) => void | Promise<void>;
   onClose: () => void;
   initialProvider?: ProviderName;
@@ -704,9 +701,10 @@ Implement states:
 ```ts
 type Step =
   | { kind: 'providers'; selectedIndex: number }
-  | { kind: 'models'; provider: ProviderName; selectedIndex: number }
-  | { kind: 'custom-model'; provider: ProviderName; value: string }
-  | { kind: 'setup-input'; provider: ProviderName; field: 'apiKey' | 'baseUrl' | 'model'; value: string; confirmSecret: boolean };
+  | { kind: 'models'; provider: ProviderName; selectedIndex: number; draft?: SetupDraft }
+  | { kind: 'custom-model'; provider: ProviderName; value: string; draft?: SetupDraft }
+  | { kind: 'secret-confirm'; provider: ProviderName; model: string; draft: SetupDraft }
+  | { kind: 'setup-input'; provider: ProviderName; field: 'apiKey' | 'baseUrl' | 'model'; value: string; draft?: SetupDraft };
 ```
 
 Use page-specific footers:
@@ -1076,7 +1074,7 @@ Expected: PASS.
 Add these tests to `src/tui/components/model-setup-flow.test.tsx`:
 
 ```ts
-test('missing required remote API key opens masked input and requires save confirmation', async () => {
+test('model setup flow requires explicit confirmation before saving a required API key', async () => {
   const applied: ModelSetupApplyRequest[] = [];
   const snapshot = makeSnapshot({
     selectedProvider: 'openai',
@@ -1105,7 +1103,6 @@ test('missing required remote API key opens masked input and requires save confi
   const { stdin, lastFrame } = render(
     <ModelSetupFlow
       snapshot={snapshot}
-      onRefresh={() => snapshot}
       onApply={(request) => applied.push(request)}
       onClose={() => {}}
     />
@@ -1117,10 +1114,17 @@ test('missing required remote API key opens masked input and requires save confi
   await flush();
   stdin.write('\r');
   await flush();
-  assert.match(lastFrame() ?? '', /Save API key to local auth file\? y\/N/);
+  assert.deepEqual(applied, []);
+  assert.match(lastFrame() ?? '', /GPT-5\.2/);
   assert.doesNotMatch(lastFrame() ?? '', /sk-secret/);
 
-  stdin.write('y');
+  stdin.write(' ');
+  await flush();
+  assert.deepEqual(applied, []);
+  assert.match(lastFrame() ?? '', /Save API key/i);
+  assert.doesNotMatch(lastFrame() ?? '', /sk-secret/);
+
+  stdin.write(' ');
   await flush();
   assert.deepEqual(applied, [{ provider: 'openai', model: 'gpt-5.2', persist: true, apiKey: 'sk-secret' }]);
   assert.doesNotMatch(lastFrame() ?? '', /sk-secret/);
@@ -1145,7 +1149,6 @@ test('openai-compatible collects base URL then direct model id', async () => {
   const { stdin } = render(
     <ModelSetupFlow
       snapshot={snapshot}
-      onRefresh={() => snapshot}
       onApply={(request) => applied.push(request)}
       onClose={() => {}}
     />
@@ -1161,18 +1164,20 @@ test('openai-compatible collects base URL then direct model id', async () => {
   await flush();
   stdin.write('\r');
   await flush();
+  stdin.write('\r');
+  await flush();
 
   assert.deepEqual(applied, [
     {
       provider: 'openai-compatible',
       model: 'local-model',
       baseUrl: 'http://localhost:4000/v1',
-      persist: true
+      persist: false
     }
   ]);
 });
 
-test('declining secret persistence does not apply provider credentials', async () => {
+test('model setup flow keeps required API key session-only on Enter', async () => {
   const applied: ModelSetupApplyRequest[] = [];
   const snapshot = makeSnapshot({
     selectedProvider: 'openai',
@@ -1186,12 +1191,21 @@ test('declining secret persistence does not apply provider credentials', async (
         issues: ['OPENAI_API_KEY']
       }
     ],
-    modelsByProvider: { openai: [] }
+    modelsByProvider: {
+      openai: [
+        {
+          kind: 'model',
+          provider: 'openai',
+          model: 'gpt-5.2',
+          displayName: 'GPT-5.2',
+          labels: ['Catalog']
+        }
+      ]
+    }
   });
   const { stdin, lastFrame } = render(
     <ModelSetupFlow
       snapshot={snapshot}
-      onRefresh={() => snapshot}
       onApply={(request) => applied.push(request)}
       onClose={() => {}}
     />
@@ -1203,10 +1217,10 @@ test('declining secret persistence does not apply provider credentials', async (
   await flush();
   stdin.write('\r');
   await flush();
-  stdin.write('n');
+  stdin.write('\r');
   await flush();
 
-  assert.deepEqual(applied, []);
+  assert.deepEqual(applied, [{ provider: 'openai', model: 'gpt-5.2', persist: false, apiKey: 'sk-secret' }]);
   assert.doesNotMatch(lastFrame() ?? '', /sk-secret/);
 });
 ```
@@ -1215,11 +1229,11 @@ test('declining secret persistence does not apply provider credentials', async (
 
 For selected provider:
 
-- If issue includes `missing-api-key`, ask API key with masked input and explicit `y/N` save confirmation.
+- If issue includes `missing-api-key`, ask API key with masked input and require an explicit save confirmation before persisting the secret.
 - If issue includes `missing-base-url`, ask base URL.
 - If issue includes `missing-model`, ask model id.
 - If provider is `openai-compatible`, always make custom model entry easy with `c`.
-- After successful setup apply/save, call `onRefresh()` and continue to model step for the same provider.
+- After successful provider setup, continue to model selection for the same provider.
 
 - [ ] **Step 3: Run setup flow tests**
 
