@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test, { mock } from 'node:test';
 
+import { loadProviderAuthStore, upsertProviderAuth } from './auth-store.js';
 import {
   formatModelSetupMessage,
   isModelSetupRequiredError,
@@ -14,6 +18,7 @@ const MODEL_ENV_KEYS = [
   'CLIQ_MODEL_BASE_URL',
   'CLIQ_MODEL_STREAMING',
   'CLIQ_MODEL_API_KEY',
+  'CLIQ_HOME',
   'OPENROUTER_API_KEY',
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
@@ -28,7 +33,9 @@ async function withEnv<T>(env: Record<string, string | undefined>, fn: () => T |
   }
 
   for (const [key, value] of Object.entries(env)) {
-    previous.set(key, process.env[key]);
+    if (!previous.has(key)) {
+      previous.set(key, process.env[key]);
+    }
     if (value === undefined) {
       delete process.env[key];
     } else {
@@ -181,6 +188,33 @@ test('resolveModelConfig preserves explicit OpenRouter configuration', async () 
       streaming: 'auto'
     });
   });
+});
+
+test('resolveModelConfig can use the active provider credential from local auth', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-config-'));
+  try {
+    await upsertProviderAuth(
+      {
+        provider: 'openai',
+        apiKey: 'sk-secret',
+        model: 'gpt-auth',
+        streaming: 'off'
+      },
+      { cliqHome: home }
+    );
+
+    await withEnv({}, async () => {
+      assert.deepEqual(await resolveModelConfig({ workspace: {}, cli: {}, auth: await loadProviderAuthStore({ cliqHome: home }) }), {
+        provider: 'openai',
+        model: 'gpt-auth',
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: 'sk-secret',
+        streaming: 'off'
+      });
+    });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test('resolveModelConfig applies CLI over workspace over env', async () => {

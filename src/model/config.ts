@@ -1,4 +1,5 @@
 import { OLLAMA_DEFAULT_MODEL_HINT } from '../config.js';
+import { EMPTY_PROVIDER_AUTH_STORE, getProviderAuthEntry, type ProviderAuthStore } from './auth-store.js';
 import { discoverOllamaModels, selectDefaultOllamaModel } from './providers/ollama-discovery.js';
 import { DEFAULT_MODEL_CONFIG, getModelProvider, isProviderName } from './registry.js';
 import type { ProviderName, ResolvedModelConfig, StreamingMode } from './types.js';
@@ -15,6 +16,7 @@ export type ModelConfigInput = {
     model?: PartialModelConfig;
   };
   cli: PartialModelConfig;
+  auth?: ProviderAuthStore;
 };
 
 export type ModelSetupReason =
@@ -87,20 +89,24 @@ export function formatModelSetupMessage(details: ModelSetupDetails): string {
     `    ollama pull ${OLLAMA_DEFAULT_MODEL_HINT}`,
     `    cliq --provider ollama --model ${OLLAMA_DEFAULT_MODEL_HINT}`,
     '  OpenAI:',
+    '    cliq providers auth set openai --api-key --model gpt-5.2',
     '    export OPENAI_API_KEY=...',
     '    cliq --provider openai --model gpt-5.2',
     '  Anthropic:',
+    '    cliq providers auth set anthropic --api-key --model claude-sonnet-4-20250514',
     '    export ANTHROPIC_API_KEY=...',
     '    cliq --provider anthropic --model claude-sonnet-4-20250514',
     '  OpenRouter:',
+    `    cliq providers auth set openrouter --api-key --model ${DEFAULT_MODEL_CONFIG.model}`,
     '    export OPENROUTER_API_KEY=...',
     `    cliq --provider openrouter --model ${DEFAULT_MODEL_CONFIG.model}`,
     '  OpenAI-compatible:',
+    '    cliq providers auth set openai-compatible --base-url http://localhost:4000/v1 --model <model> [--api-key]',
     '    cliq --provider openai-compatible --base-url http://localhost:4000/v1 --model <model>',
     '',
     'Model selection:',
-    '  Use --model <model>, CLIQ_MODEL, or .cliq/config model.model.',
-    '  No remote provider is selected automatically. Configure a provider/model, then run cliq again.'
+    '  Use cliq providers auth set, --model <model>, CLIQ_MODEL, or .cliq/config model.model.',
+    '  Configure a provider/model, then run cliq again.'
   ].join('\n');
 }
 
@@ -127,15 +133,19 @@ function firstDefined(...values: Array<string | undefined | null>): string | und
   return undefined;
 }
 
-function getProviderApiKey(provider: ProviderName) {
-  if (provider === 'openrouter') return process.env.OPENROUTER_API_KEY;
-  if (provider === 'anthropic') return process.env.ANTHROPIC_API_KEY;
-  if (provider === 'openai') return process.env.OPENAI_API_KEY;
+function getProviderApiKey(provider: ProviderName, auth: ProviderAuthStore) {
+  if (provider === 'openrouter') return firstDefined(process.env.OPENROUTER_API_KEY, getProviderAuthEntry(auth, provider)?.apiKey);
+  if (provider === 'anthropic') return firstDefined(process.env.ANTHROPIC_API_KEY, getProviderAuthEntry(auth, provider)?.apiKey);
+  if (provider === 'openai') return firstDefined(process.env.OPENAI_API_KEY, getProviderAuthEntry(auth, provider)?.apiKey);
   if (provider === 'openai-compatible') {
-    return firstDefined(process.env.CLIQ_MODEL_API_KEY, process.env.OPENAI_COMPATIBLE_API_KEY);
+    return firstDefined(
+      process.env.CLIQ_MODEL_API_KEY,
+      process.env.OPENAI_COMPATIBLE_API_KEY,
+      getProviderAuthEntry(auth, provider)?.apiKey
+    );
   }
 
-  return undefined;
+  return getProviderAuthEntry(auth, provider)?.apiKey;
 }
 
 function formatSetupStatus(details: ModelSetupDetails) {
@@ -199,8 +209,8 @@ async function discoverDefaultOllamaModel(baseUrl: string) {
   return selected;
 }
 
-export async function resolveModelConfig({ workspace, cli }: ModelConfigInput): Promise<ResolvedModelConfig> {
-  const rawProvider = firstDefined(cli.provider, workspace.model?.provider, process.env.CLIQ_MODEL_PROVIDER);
+export async function resolveModelConfig({ workspace, cli, auth = EMPTY_PROVIDER_AUTH_STORE }: ModelConfigInput): Promise<ResolvedModelConfig> {
+  const rawProvider = firstDefined(cli.provider, workspace.model?.provider, process.env.CLIQ_MODEL_PROVIDER, auth.activeProvider);
   let provider: ProviderName;
   if (rawProvider) {
     if (!isProviderName(rawProvider)) {
@@ -212,21 +222,24 @@ export async function resolveModelConfig({ workspace, cli }: ModelConfigInput): 
   }
 
   const providerDef = getModelProvider(provider);
+  const authEntry = getProviderAuthEntry(auth, provider);
   const rawStreaming = firstDefined(
     cli.streaming,
     workspace.model?.streaming,
     process.env.CLIQ_MODEL_STREAMING,
+    authEntry?.streaming,
     DEFAULT_MODEL_CONFIG.streaming
   );
   if (!rawStreaming || !isStreamingMode(rawStreaming)) {
     throw new Error(`Invalid streaming mode: ${rawStreaming ?? ''}`);
   }
 
-  let model = firstDefined(cli.model, workspace.model?.model, process.env.CLIQ_MODEL, providerDef.getDefaultModel());
+  let model = firstDefined(cli.model, workspace.model?.model, process.env.CLIQ_MODEL, authEntry?.model, providerDef.getDefaultModel());
   const baseUrl = firstDefined(
     cli.baseUrl,
     workspace.model?.baseUrl,
     process.env.CLIQ_MODEL_BASE_URL,
+    authEntry?.baseUrl,
     providerDef.defaultBaseUrl
   );
   if (!baseUrl) {
@@ -248,7 +261,7 @@ export async function resolveModelConfig({ workspace, cli }: ModelConfigInput): 
     });
   }
 
-  const apiKey = getProviderApiKey(provider);
+  const apiKey = getProviderApiKey(provider, auth);
   requireApiKey(provider, apiKey);
 
   return {

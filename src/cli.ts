@@ -1,6 +1,7 @@
 import { stdin as input, stdout as output } from 'node:process';
 import readline from 'node:readline';
 import { createInterface as createPromptInterface } from 'node:readline/promises';
+import { Writable } from 'node:stream';
 
 import { DEFAULT_POLICY_MODE } from './config.js';
 import { exportHandoff } from './handoff/export.js';
@@ -16,6 +17,11 @@ import {
   resolveModelConfig,
   type PartialModelConfig
 } from './model/config.js';
+import {
+  formatProviderAuthSummary,
+  loadProviderAuthStore,
+  upsertProviderAuth
+} from './model/auth-store.js';
 import { createModelClient } from './model/index.js';
 import {
   buildProviderStatusReport,
@@ -23,7 +29,8 @@ import {
   validateProviderStatus
 } from './model/provider-status.js';
 import { isProviderName } from './model/registry.js';
-import type { ModelClient, ProviderName, ResolvedModelConfig } from './model/types.js';
+import type { ModelClient, ProviderName, ResolvedModelConfig, StreamingMode } from './model/types.js';
+import type { ProviderAuthStore } from './model/auth-store.js';
 import {
   approvePlan,
   cancelPlan,
@@ -161,6 +168,13 @@ export type ParsedArgs = ParsedArgsBase & (
   | { cmd: 'version'; prompt?: undefined }
   | { cmd: 'providers-status'; json?: boolean; prompt?: undefined }
   | { cmd: 'providers-validate'; provider?: ProviderName; json?: boolean; prompt?: undefined }
+  | {
+      cmd: 'providers-auth-set';
+      provider: ProviderName;
+      apiKeySource?: 'prompt' | 'stdin';
+      authModel: PartialModelConfig;
+      prompt?: undefined;
+    }
   | { cmd: 'tx-open'; name?: string; explicit: true; json?: boolean; headless?: boolean; prompt?: undefined }
   | { cmd: 'tx-status'; txId?: string; json?: boolean; headless?: boolean; prompt?: undefined }
   | { cmd: 'tx-list'; json?: boolean; headless?: boolean; prompt?: undefined }
@@ -281,7 +295,65 @@ function parseProvidersArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     };
   }
 
-  throw new Error('cliq providers requires a subcommand (status, list, validate, help)');
+  if (sub === 'auth') {
+    const authSub = rest[1];
+    if (authSub !== 'set') {
+      throw new Error('cliq providers auth requires a subcommand (set)');
+    }
+    const provider = rest[2];
+    if (provider === undefined) {
+      throw new Error('cliq providers auth set requires a provider');
+    }
+    if (!isProviderName(provider)) {
+      throw new Error(`Unknown model provider: ${provider}`);
+    }
+    const authArgs = rest.slice(3);
+    if (authArgs.some((arg) => arg.startsWith('--api-key='))) {
+      throw new Error('cliq providers auth set --api-key prompts securely and does not accept a value; use --api-key-stdin for piped input');
+    }
+    const apiKeyFlagIndex = authArgs.indexOf('--api-key');
+    if (apiKeyFlagIndex !== -1) {
+      const next = authArgs[apiKeyFlagIndex + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        throw new Error('cliq providers auth set --api-key prompts securely and does not accept a value; use --api-key-stdin for piped input');
+      }
+    }
+    const promptForApiKey = consumeFlag(authArgs, '--api-key');
+    const apiKeyFromStdin = consumeFlag(authArgs, '--api-key-stdin');
+    if (promptForApiKey && apiKeyFromStdin) {
+      throw new Error('cliq providers auth set accepts only one API key source: --api-key or --api-key-stdin');
+    }
+    const model = consumeOption(authArgs, '--model');
+    const baseUrl = consumeOption(authArgs, '--base-url');
+    const streaming = consumeOption(authArgs, '--streaming');
+    if (streaming !== undefined && !isStreamingMode(streaming)) {
+      throw new Error(`Unknown streaming mode: ${streaming}; expected one of: auto, on, off`);
+    }
+    if (authArgs.length > 0) {
+      throw new Error(`Unknown providers auth set argument: ${authArgs[0]}`);
+    }
+    if (!promptForApiKey && !apiKeyFromStdin && !model && !baseUrl && !streaming) {
+      throw new Error('cliq providers auth set requires --api-key, --api-key-stdin, --model, --base-url, or --streaming');
+    }
+    return {
+      ...base,
+      model: {},
+      cmd: 'providers-auth-set',
+      provider,
+      ...(promptForApiKey ? { apiKeySource: 'prompt' as const } : {}),
+      ...(apiKeyFromStdin ? { apiKeySource: 'stdin' as const } : {}),
+      authModel: {
+        ...(base.model.model ? { model: base.model.model } : {}),
+        ...(base.model.baseUrl ? { baseUrl: base.model.baseUrl } : {}),
+        ...(base.model.streaming ? { streaming: base.model.streaming } : {}),
+        ...(model ? { model } : {}),
+        ...(baseUrl ? { baseUrl } : {}),
+        ...(streaming ? { streaming } : {})
+      }
+    };
+  }
+
+  throw new Error('cliq providers requires a subcommand (status, list, validate, auth, help)');
 }
 
 function parseTxArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
@@ -1324,10 +1396,15 @@ Usage:
   cliq providers status [--json]             Show provider configuration status
   cliq providers list [--json]               Alias for status
   cliq providers validate [provider] [--json] Validate current or named provider configuration
+  cliq providers auth set <provider> [--api-key | --api-key-stdin] [--model <id>] [--base-url <url>]
+                                             Save a provider credential in the local user auth file
   cliq providers help                        Print this help
 
 Notes:
   provider status is non-interactive and never prompts for credentials
+  provider auth set --api-key prompts securely and does not accept a value
+  provider auth set --api-key-stdin reads one key line from stdin
+  provider auth set never prints saved secret values
 `);
 }
 
@@ -1948,9 +2025,11 @@ async function runProvidersCommand(
     parsed.json ? { writeJsonError: (message) => writeJson({ type: 'error', message }) } : undefined
   );
   const workspaceConfig = await loadWorkspaceConfig(cwd);
+  const auth = await loadProviderAuthStore();
   const report = await buildProviderStatusReport({
     workspace: workspaceConfig,
-    cli: cliModel
+    cli: cliModel,
+    auth
   });
 
   if (parsed.cmd === 'providers-status') {
@@ -1979,6 +2058,63 @@ async function runProvidersCommand(
     process.stderr.write(`${message}\n`);
   }
   throw new ReportedCliError(message, { exitCode: 1 });
+}
+
+async function runProvidersAuthSetCommand(parsed: Extract<ParsedArgs, { cmd: 'providers-auth-set' }>) {
+  const apiKey = parsed.apiKeySource ? await readProviderApiKey(parsed.apiKeySource, parsed.provider) : undefined;
+  const store = await upsertProviderAuth({
+    provider: parsed.provider,
+    ...(apiKey ? { apiKey } : {}),
+    ...(parsed.authModel.model ? { model: parsed.authModel.model } : {}),
+    ...(parsed.authModel.baseUrl ? { baseUrl: parsed.authModel.baseUrl } : {}),
+    ...(parsed.authModel.streaming ? { streaming: parsed.authModel.streaming as StreamingMode } : {})
+  });
+  process.stdout.write(`${formatProviderAuthSummary(store, parsed.provider)}\n`);
+}
+
+async function readProviderApiKey(source: 'prompt' | 'stdin', provider: ProviderName) {
+  const value = source === 'stdin' ? await readProviderApiKeyFromStdin() : await promptProviderApiKey(provider);
+  if (!value) {
+    throw new Error('Provider API key cannot be empty');
+  }
+  return value;
+}
+
+async function readProviderApiKeyFromStdin() {
+  if (process.stdin.isTTY) {
+    throw new Error('cliq providers auth set --api-key-stdin requires piped stdin; use --api-key for a secure prompt');
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return (Buffer.concat(chunks).toString('utf8').split(/\r?\n/, 1)[0] ?? '').trim();
+}
+
+async function promptProviderApiKey(provider: ProviderName) {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    throw new Error('cliq providers auth set --api-key requires an interactive TTY; use --api-key-stdin for non-interactive setup');
+  }
+  const mutedOutput = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    }
+  });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: mutedOutput,
+    terminal: true
+  });
+  try {
+    process.stderr.write(`Enter ${provider} API key: `);
+    const answer = await new Promise<string>((resolve) => {
+      rl.question('', resolve);
+    });
+    process.stderr.write('\n');
+    return answer.trim();
+  } finally {
+    rl.close();
+  }
 }
 
 export async function runCli(argv: string[]) {
@@ -2023,6 +2159,11 @@ export async function runCli(argv: string[]) {
 
   if (parsed.cmd === 'providers-status' || parsed.cmd === 'providers-validate') {
     await runProvidersCommand(cwd, parsed, cliModel);
+    return;
+  }
+
+  if (parsed.cmd === 'providers-auth-set') {
+    await runProvidersAuthSetCommand(parsed);
     return;
   }
 
@@ -2640,9 +2781,10 @@ export async function runCli(argv: string[]) {
     policyMode: policy,
     cliSkillNames: skills
   });
+  const auth = await loadProviderAuthStore();
   let modelConfig: ResolvedModelConfig;
   try {
-    modelConfig = await resolveModelConfig({ workspace: assembly.workspaceConfig, cli: cliModel });
+    modelConfig = await resolveModelConfig({ workspace: assembly.workspaceConfig, cli: cliModel, auth });
   } catch (error) {
     if (isModelSetupRequiredError(error)) {
       if (wantsTui) {
@@ -2726,6 +2868,7 @@ export async function runCli(argv: string[]) {
       assembly,
       modelClient,
       modelConfig,
+      auth,
       cliModel,
       policy,
       policyExplicit: parsed.policyExplicit === true,
@@ -2868,6 +3011,7 @@ type RunChatTuiSessionOpts = {
   assembly: Awaited<ReturnType<typeof createRuntimeAssembly>>;
   modelClient: ModelClient;
   modelConfig: ResolvedModelConfig;
+  auth: ProviderAuthStore;
   cliModel: PartialModelConfig;
   policy: PolicyMode;
   policyExplicit: boolean;
@@ -3136,7 +3280,8 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     onProviderStatus: () =>
       buildProviderStatusReport({
         workspace: opts.assembly.workspaceConfig,
-        cli: opts.cliModel
+        cli: opts.cliModel,
+        auth: opts.auth
       })
   });
 

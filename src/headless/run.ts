@@ -29,6 +29,7 @@ import { formatHookFailureReason, runCommandHooks } from '../hooks/runner.js';
 import type { HooksConfig } from '../hooks/types.js';
 import { isModelSetupRequiredError, resolveModelConfig } from '../model/config.js';
 import type { PartialModelConfig } from '../model/config.js';
+import { loadProviderAuthStore } from '../model/auth-store.js';
 import { createModelClient } from '../model/index.js';
 import type { ModelClient, ResolvedModelConfig } from '../model/types.js';
 import { composeRuntimePermissionTable } from '../policy/compose-runtime.js';
@@ -306,7 +307,8 @@ export async function runHeadless(
     assembly.setPolicyMode(policy);
     const modelConfig = await resolveModelConfig({
       workspace: workspaceConfig,
-      cli: (request.model ?? {}) as PartialModelConfig
+      cli: (request.model ?? {}) as PartialModelConfig,
+      auth: await loadProviderAuthStore()
     });
     session.model = {
       provider: modelConfig.provider,

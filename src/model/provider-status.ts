@@ -1,4 +1,9 @@
 import type { PartialModelConfig } from './config.js';
+import {
+  EMPTY_PROVIDER_AUTH_STORE,
+  getProviderAuthEntry,
+  type ProviderAuthStore
+} from './auth-store.js';
 import { getProviderCatalogEntry, type ConfigSourceLabel } from './catalog/index.js';
 import { discoverOllamaModels as defaultDiscoverOllamaModels, selectDefaultOllamaModel, type OllamaModelSummary } from './providers/ollama-discovery.js';
 import { getModelProvider, isProviderName, listModelProviders } from './registry.js';
@@ -34,8 +39,8 @@ export type ProviderStatus = {
 };
 
 export type ProviderCredentialPersistence = {
-  mode: 'external-only';
-  supportsManagedCredentials: false;
+  mode: 'external-only' | 'local-auth-file';
+  supportsManagedCredentials: boolean;
   message: string;
 };
 
@@ -51,6 +56,7 @@ export type BuildProviderStatusReportOptions = {
     model?: PartialModelConfig;
   };
   cli: PartialModelConfig;
+  auth?: ProviderAuthStore;
   env?: Record<string, string | undefined>;
   discoverOllamaModels?: (baseUrl: string) => Promise<OllamaModelSummary[]>;
 };
@@ -125,10 +131,11 @@ function providerFromRaw(raw: string | undefined): ProviderName | undefined {
 function resolveActiveProvider(
   cli: PartialModelConfig,
   workspace: PartialModelConfig | undefined,
+  auth: ProviderAuthStore,
   env: Record<string, string | undefined>
 ) {
   return (
-    providerFromRaw(firstDefined(cli.provider, workspace?.provider, env.CLIQ_MODEL_PROVIDER)) ??
+    providerFromRaw(firstDefined(cli.provider, workspace?.provider, env.CLIQ_MODEL_PROVIDER, auth.activeProvider)) ??
     'ollama'
   );
 }
@@ -154,6 +161,10 @@ function hasEnvApiKey(provider: ProviderName, env: Record<string, string | undef
   return envApiKeyNames(provider).some((key) => Boolean(env[key]));
 }
 
+function hasAuthApiKey(provider: ProviderName, auth: ProviderAuthStore) {
+  return Boolean(getProviderAuthEntry(auth, provider)?.apiKey);
+}
+
 function addSource(sources: Set<ConfigSourceLabel>, source: ConfigSourceLabel) {
   sources.add(source);
 }
@@ -169,10 +180,14 @@ function configuredSourcesForProvider(opts: {
   workspace: PartialModelConfig | undefined;
   envConfig: PartialModelConfig;
   env: Record<string, string | undefined>;
+  auth: ProviderAuthStore;
 }) {
   const sources = new Set<ConfigSourceLabel>();
   if (hasEnvApiKey(opts.provider, opts.env) || configAppliesToProvider(opts.envConfig, opts.provider, opts.activeProvider)) {
     addSource(sources, 'ENV');
+  }
+  if (hasAuthApiKey(opts.provider, opts.auth) || getProviderAuthEntry(opts.auth, opts.provider)) {
+    addSource(sources, 'Managed credential');
   }
   if (configAppliesToProvider(opts.workspace, opts.provider, opts.activeProvider)) {
     addSource(sources, 'Workspace');
@@ -203,12 +218,15 @@ function resolveProviderModel(opts: {
   workspace: PartialModelConfig | undefined;
   envConfig: PartialModelConfig;
   ollamaModels?: OllamaModelSummary[];
+  auth: ProviderAuthStore;
 }) {
   const providerDef = getModelProvider(opts.provider);
+  const authEntry = getProviderAuthEntry(opts.auth, opts.provider);
   return firstDefined(
     sourceValue(opts.cli, opts.provider, opts.activeProvider, 'model'),
     sourceValue(opts.workspace, opts.provider, opts.activeProvider, 'model'),
     sourceValue(opts.envConfig, opts.provider, opts.activeProvider, 'model'),
+    authEntry?.model,
     providerDef.getDefaultModel(),
     opts.provider === 'ollama' ? selectDefaultOllamaModel(opts.ollamaModels ?? []) : undefined
   );
@@ -220,12 +238,15 @@ function resolveProviderBaseUrl(opts: {
   cli: PartialModelConfig;
   workspace: PartialModelConfig | undefined;
   envConfig: PartialModelConfig;
+  auth: ProviderAuthStore;
 }) {
   const providerDef = getModelProvider(opts.provider);
+  const authEntry = getProviderAuthEntry(opts.auth, opts.provider);
   return firstDefined(
     sourceValue(opts.cli, opts.provider, opts.activeProvider, 'baseUrl'),
     sourceValue(opts.workspace, opts.provider, opts.activeProvider, 'baseUrl'),
     sourceValue(opts.envConfig, opts.provider, opts.activeProvider, 'baseUrl'),
+    authEntry?.baseUrl,
     providerDef.defaultBaseUrl
   );
 }
@@ -237,13 +258,14 @@ function buildRemoteProviderStatus(opts: {
   workspace: PartialModelConfig | undefined;
   envConfig: PartialModelConfig;
   env: Record<string, string | undefined>;
+  auth: ProviderAuthStore;
 }): ProviderStatus {
   const providerDef = getModelProvider(opts.provider);
   const model = resolveProviderModel(opts);
   const baseUrl = resolveProviderBaseUrl(opts);
   const issues: ProviderStatusIssue[] = [];
 
-  if (providerDef.requiresApiKey && !hasEnvApiKey(opts.provider, opts.env)) {
+  if (providerDef.requiresApiKey && !hasEnvApiKey(opts.provider, opts.env) && !hasAuthApiKey(opts.provider, opts.auth)) {
     issues.push(
       issue(
         'missing-api-key',
@@ -279,6 +301,7 @@ async function buildOllamaProviderStatus(opts: {
   cli: PartialModelConfig;
   workspace: PartialModelConfig | undefined;
   envConfig: PartialModelConfig;
+  auth: ProviderAuthStore;
   discoverOllamaModels: (baseUrl: string) => Promise<OllamaModelSummary[]>;
 }): Promise<ProviderStatus> {
   const providerDef = getModelProvider('ollama');
@@ -352,11 +375,12 @@ function sortProviders(activeProvider: ProviderName, providers: ProviderStatus[]
 export async function buildProviderStatusReport({
   workspace,
   cli,
+  auth = EMPTY_PROVIDER_AUTH_STORE,
   env = process.env,
   discoverOllamaModels = defaultDiscoverOllamaModels
 }: BuildProviderStatusReportOptions): Promise<ProviderStatusReport> {
   const envConfig = envModelConfig(env);
-  const activeProvider = resolveActiveProvider(cli, workspace.model, env);
+  const activeProvider = resolveActiveProvider(cli, workspace.model, auth, env);
   const providers = await Promise.all(
     listModelProviders().map((provider) =>
       provider.name === 'ollama'
@@ -365,6 +389,7 @@ export async function buildProviderStatusReport({
             cli,
             workspace: workspace.model,
             envConfig,
+            auth,
             discoverOllamaModels
           })
         : buildRemoteProviderStatus({
@@ -373,7 +398,8 @@ export async function buildProviderStatusReport({
             cli,
             workspace: workspace.model,
             envConfig,
-            env
+            env,
+            auth
           })
     )
   );
@@ -385,10 +411,10 @@ export async function buildProviderStatusReport({
       : {}),
     providers: sorted,
     credentialPersistence: {
-      mode: 'external-only',
-      supportsManagedCredentials: false,
+      mode: 'local-auth-file',
+      supportsManagedCredentials: true,
       message:
-        'Cliq does not store provider secrets in this slice. Use environment variables or non-secret workspace model settings.'
+        'Cliq can store provider API keys in the local user auth file. Environment variables and non-secret workspace model settings still work.'
     }
   };
 }

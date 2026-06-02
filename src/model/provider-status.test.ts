@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { ProviderAuthStore } from './auth-store.js';
 import type { PartialModelConfig } from './config.js';
 import {
   buildProviderSetupSummary,
@@ -67,8 +68,8 @@ test('provider status puts the active provider first and reports safe configurat
     });
 
     assert.equal(report.activeProvider, 'openai');
-    assert.equal(report.credentialPersistence.mode, 'external-only');
-    assert.equal(report.credentialPersistence.supportsManagedCredentials, false);
+    assert.equal(report.credentialPersistence.mode, 'local-auth-file');
+    assert.equal(report.credentialPersistence.supportsManagedCredentials, true);
 
     const current = report.providers[0]!;
     assert.equal(current.provider, 'openai');
@@ -87,6 +88,43 @@ test('provider status puts the active provider first and reports safe configurat
     assert.doesNotMatch(rendered, /Connected/);
     assert.doesNotMatch(JSON.stringify(report), /sk-secret|or-secret/);
     assert.doesNotMatch(rendered, /sk-secret|or-secret/);
+  });
+});
+
+test('provider status reports local auth credentials as managed without leaking secrets', async () => {
+  await withEnv({}, async () => {
+    const auth: ProviderAuthStore = {
+      version: 1,
+      activeProvider: 'openai',
+      providers: {
+        openai: {
+          apiKey: 'sk-secret',
+          model: 'gpt-auth'
+        }
+      }
+    };
+
+    const report = await buildProviderStatusReport({
+      workspace: {},
+      cli: {},
+      auth,
+      discoverOllamaModels: unavailableOllama
+    });
+
+    assert.equal(report.activeProvider, 'openai');
+    assert.equal(report.credentialPersistence.mode, 'local-auth-file');
+    assert.equal(report.credentialPersistence.supportsManagedCredentials, true);
+
+    const current = report.providers[0]!;
+    assert.equal(current.provider, 'openai');
+    assert.equal(current.state, 'configured');
+    assert.deepEqual(current.sources, ['Managed credential']);
+    assert.equal(current.model, 'gpt-auth');
+
+    const rendered = formatProviderStatusReport(report);
+    assert.match(rendered, /Managed credential/);
+    assert.doesNotMatch(JSON.stringify(report), /sk-secret/);
+    assert.doesNotMatch(rendered, /sk-secret/);
   });
 });
 
@@ -113,7 +151,7 @@ test('provider status reports structured missing requirements for OpenAI-compati
       const setup = buildProviderSetupSummary(report, 'openai-compatible');
       assert.equal(setup.provider, 'openai-compatible');
       assert.deepEqual(setup.instructions, ['Set a base URL and model id for the OpenAI-compatible endpoint.']);
-      assert.equal(setup.credentialPersistence.mode, 'external-only');
+      assert.equal(setup.credentialPersistence.mode, 'local-auth-file');
 
       const validation = validateProviderStatus(report, 'openai-compatible');
       assert.equal(validation.ok, false);

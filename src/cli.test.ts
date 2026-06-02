@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import test from 'node:test';
 import { mock } from 'node:test';
 import { promisify } from 'node:util';
@@ -176,6 +177,32 @@ test('parseArgs accepts providers status and validation commands', () => {
     skills: [],
     model: {}
   });
+  assert.deepEqual(parseArgs(['node', 'cliq', 'providers', 'auth', 'set', 'openai', '--api-key', '--model', 'gpt-5.2']), {
+    cmd: 'providers-auth-set',
+    provider: 'openai',
+    apiKeySource: 'prompt',
+    authModel: { model: 'gpt-5.2' },
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'cliq', 'providers', 'auth', 'set', 'openai', '--api-key-stdin', '--model', 'gpt-5.2']), {
+    cmd: 'providers-auth-set',
+    provider: 'openai',
+    apiKeySource: 'stdin',
+    authModel: { model: 'gpt-5.2' },
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+  assert.throws(
+    () => parseArgs(['node', 'cliq', 'providers', 'auth', 'set', 'openai', '--api-key', 'sk-secret']),
+    /--api-key prompts securely and does not accept a value/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'cliq', 'providers', 'auth', 'set', 'openai', '--api-key=sk-secret']),
+    /--api-key prompts securely and does not accept a value/i
+  );
 });
 
 test('parseArgs requires a prompt for run aliases', () => {
@@ -1393,6 +1420,21 @@ async function withCliTestEnv(prefix: string, callback: (env: CliTestEnv) => Pro
   }
 }
 
+async function withMockStdin(input: string, callback: () => Promise<void>) {
+  const previousStdin = Object.getOwnPropertyDescriptor(process, 'stdin');
+  Object.defineProperty(process, 'stdin', {
+    configurable: true,
+    value: Readable.from([input])
+  });
+  try {
+    await callback();
+  } finally {
+    if (previousStdin) {
+      Object.defineProperty(process, 'stdin', previousStdin);
+    }
+  }
+}
+
 async function createCliTxFixture(env: CliTestEnv) {
   const session = createSession(env.cwd);
   const root = resolveTxRoot(env.home);
@@ -1576,8 +1618,45 @@ test('runCli providers status --json emits safe provider status without starting
     assert.equal(current.model, 'gpt-workspace');
     assert.equal(current.baseUrl, 'https://api.openai.com/v1');
     assert.ok(current.setup.some((line) => /OPENAI_API_KEY/.test(line)));
-    assert.equal(payload.report.credentialPersistence.mode, 'external-only');
-    assert.equal(payload.report.credentialPersistence.supportsManagedCredentials, false);
+    assert.equal(payload.report.credentialPersistence.mode, 'local-auth-file');
+    assert.equal(payload.report.credentialPersistence.supportsManagedCredentials, true);
+    assert.doesNotMatch(env.outputText(), /sk-secret/);
+    assert.equal(env.stderrText(), '');
+  });
+});
+
+test('runCli providers auth set writes local auth without echoing the API key', async () => {
+  await withCliTestEnv('providers-auth-set', async (env) => {
+    await withMockStdin('sk-secret\n', async () => {
+      await runCli([
+        'node',
+        'src/index.ts',
+        'providers',
+        'auth',
+        'set',
+        'openai',
+        '--api-key-stdin',
+        '--model',
+        'gpt-5.2'
+      ]);
+    });
+
+    const raw = await readFile(path.join(env.home, 'auth.json'), 'utf8');
+    const payload = JSON.parse(raw) as {
+      activeProvider?: string;
+      providers?: {
+        openai?: {
+          apiKey?: string;
+          model?: string;
+        };
+      };
+    };
+
+    assert.equal(payload.activeProvider, 'openai');
+    assert.equal(payload.providers?.openai?.apiKey, 'sk-secret');
+    assert.equal(payload.providers?.openai?.model, 'gpt-5.2');
+    assert.match(env.outputText(), /OpenAI credential saved/);
+    assert.match(env.outputText(), /model gpt-5\.2/);
     assert.doesNotMatch(env.outputText(), /sk-secret/);
     assert.equal(env.stderrText(), '');
   });
