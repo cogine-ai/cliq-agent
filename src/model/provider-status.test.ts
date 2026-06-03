@@ -6,6 +6,7 @@ import type { PartialModelConfig } from './config.js';
 import {
   buildProviderSetupSummary,
   buildProviderStatusReport,
+  formatProviderStateLabel,
   formatProviderStatusReport,
   formatProviderStatusRow,
   validateProviderStatus
@@ -58,6 +59,12 @@ async function withEnv<T>(env: Record<string, string | undefined>, fn: () => T |
 const unavailableOllama = async (): Promise<OllamaModelSummary[]> => {
   throw new Error('connect ECONNREFUSED 127.0.0.1:11434');
 };
+
+test('formatProviderStateLabel maps configuration states to UI labels', () => {
+  assert.equal(formatProviderStateLabel('configured'), 'Configured');
+  assert.equal(formatProviderStateLabel('not-configured'), 'Not configured');
+  assert.equal(formatProviderStateLabel('unavailable'), 'Unavailable');
+});
 
 test('provider status puts the active provider first and reports safe configuration sources', async () => {
   await withEnv({ OPENAI_API_KEY: 'sk-secret', OPENROUTER_API_KEY: 'or-secret' }, async () => {

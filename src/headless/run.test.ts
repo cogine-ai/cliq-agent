@@ -180,6 +180,36 @@ test('runHeadless does not require local auth when request model config is expli
   assert.equal(output.finalMessage, 'done');
 });
 
+test('runHeadless ignores corrupt local auth and still reports missing remote credentials', async () => {
+  const { home, cwd } = await setupWorkspace();
+  await writeFile(path.join(home, 'auth.json'), '{bad json', 'utf8');
+  const previousOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+
+  try {
+    const output = await runHeadless(
+      {
+        cwd,
+        prompt: 'say done',
+        model: { provider: 'openrouter', model: 'test-model', streaming: 'off' },
+        autoCompact: { enabled: 'off' }
+      },
+      { modelClient: finalModel('done') }
+    );
+
+    assert.equal(output.status, 'failed');
+    assert.equal(output.error?.code, 'model-auth-error');
+    assert.equal(output.error?.stage, 'assembly');
+    assert.equal(output.error?.recoverable, true);
+  } finally {
+    if (previousOpenRouterKey === undefined) {
+      delete process.env.OPENROUTER_API_KEY;
+    } else {
+      process.env.OPENROUTER_API_KEY = previousOpenRouterKey;
+    }
+  }
+});
+
 test('runHeadless runs workspace SessionStart command hooks before the model turn', async () => {
   const { cwd } = await setupWorkspace();
   const markerPath = path.join(cwd, 'session-start.json');

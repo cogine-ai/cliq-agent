@@ -1,12 +1,31 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { listModelProviders } from '../registry.js';
 import {
+  getProviderCatalogEntry,
+  listModelCatalogEntries,
   listProviderCatalog,
   mapOpenClawProviderToCatalogEntry,
   mapPiModelToCatalogEntry,
-  resolveModelMetadata
+  resolveModelMetadata,
+  toModelDescriptor
 } from './index.js';
+
+test('catalog snapshot resolves every built-in provider and known default models', () => {
+  for (const provider of listModelProviders()) {
+    const entry = getProviderCatalogEntry(provider.name);
+    assert.ok(entry, `missing provider catalog entry for ${provider.name}`);
+    assert.equal(entry.id, provider.name);
+  }
+
+  const openaiModels = listModelCatalogEntries('openai');
+  assert.ok(openaiModels.length > 0);
+  const descriptor = toModelDescriptor(openaiModels[0]!);
+  assert.equal(descriptor.provider, 'openai');
+  assert.equal(descriptor.model, openaiModels[0]!.model);
+  assert.equal(resolveModelMetadata('openai', descriptor.model)?.model, descriptor.model);
+});
 
 test('provider catalog covers every built-in provider with setup metadata', () => {
   const providers = listProviderCatalog();

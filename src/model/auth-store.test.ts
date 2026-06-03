@@ -92,6 +92,66 @@ test('loadProviderAuthStore tightens broad auth file permissions before reading'
   }
 });
 
+test('loadProviderAuthStore rejects malformed auth.json payloads', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-invalid-'));
+  try {
+    await writeFile(authFilePath(home), JSON.stringify({ version: 2, providers: {} }), 'utf8');
+    await assert.rejects(() => loadProviderAuthStore({ cliqHome: home }), /auth\.json version must be 1/);
+
+    await writeFile(
+      authFilePath(home),
+      JSON.stringify({
+        version: 1,
+        providers: {
+          'not-a-provider': { apiKey: 'sk-secret' }
+        }
+      }),
+      'utf8'
+    );
+    await assert.rejects(() => loadProviderAuthStore({ cliqHome: home }), /Unknown model provider in auth\.json/);
+
+    await writeFile(
+      authFilePath(home),
+      JSON.stringify({
+        version: 1,
+        activeProvider: 'openai',
+        providers: {
+          openai: { streaming: 'sometimes' }
+        }
+      }),
+      'utf8'
+    );
+    await assert.rejects(() => loadProviderAuthStore({ cliqHome: home }), /auth\.streaming must be one of/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('upsertProviderAuth preserves an existing API key when updating non-secret fields', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-partial-'));
+  try {
+    await upsertProviderAuth(
+      { provider: 'openai', apiKey: 'sk-secret', model: 'gpt-4', baseUrl: 'https://old.example.test/v1', streaming: 'off' },
+      { cliqHome: home }
+    );
+
+    const updated = await upsertProviderAuth(
+      { provider: 'openai', model: 'gpt-5.2', baseUrl: 'https://new.example.test/v1', streaming: 'on' },
+      { cliqHome: home }
+    );
+
+    assert.equal(updated.providers.openai?.apiKey, 'sk-secret');
+    assert.equal(updated.providers.openai?.model, 'gpt-5.2');
+    assert.equal(updated.providers.openai?.baseUrl, 'https://new.example.test/v1');
+    assert.equal(updated.providers.openai?.streaming, 'on');
+
+    const loaded = await loadProviderAuthStore({ cliqHome: home });
+    assert.deepEqual(loaded, updated);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('upsertProviderAuth preserves concurrent updates for different providers', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-concurrent-'));
   try {
