@@ -88,11 +88,13 @@ test('matchSlash returns prefix-matching commands', () => {
 
 test('completeSlash returns the single match name (with trailing space when arg expected)', () => {
   assert.equal(completeSlash('/po'), '/policy ');
+  assert.equal(completeSlash('/policy'), '/policy ');
   assert.equal(completeSlash('/pr'), '/providers');
   assert.equal(completeSlash('/mod'), null);
   assert.equal(completeSlash('/model'), '/model');
   assert.equal(completeSlash('/models'), '/models');
   assert.equal(completeSlash('/r'), '/reset');
+  assert.equal(completeSlash('/skill'), '/skill ');
   assert.equal(completeSlash('/'), null); // multiple matches
   assert.equal(completeSlash('/p'), null); // multiple matches
   assert.equal(completeSlash('/policy '), null); // already past the head

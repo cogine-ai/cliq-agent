@@ -137,7 +137,8 @@ export function completeSlash(query: string): string | null {
   const head = query.split(/\s+/)[0]!;
   // Only complete the head; arg values are out of scope.
   if (query.length > head.length) return null;
-  if (SLASH_COMMANDS.some((c) => c.name === head)) return head;
+  const exact = SLASH_COMMANDS.find((c) => c.name === head);
+  if (exact) return exact.args ? `${exact.name} ` : exact.name;
   const matches = SLASH_COMMANDS.filter((c) => c.name.startsWith(head));
   if (matches.length !== 1) return null;
   const only = matches[0]!;
