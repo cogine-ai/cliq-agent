@@ -341,14 +341,12 @@ Because `bash` side-effects bypass the gate, users who want a stricter posture c
 | Value | Behavior in tx mode |
 |---|---|
 | `passthrough` (default) | `bash` runs unchanged against real `cwd`. Side-effects flagged in `BashEffect` records. Preserves current cliq behavior. |
-| `confirm` | **Not supported in v0.8 (deferred to v0.9); current behavior: rejected at config-load time.** Designed semantics (for reference): each `bash` invocation prompts the user (interactive only); headless mode promotes `confirm` to `deny` and returns a clear error envelope. The interactive prompt callback is not yet plumbed through `ToolContext` in v0.8 — see §A.5 of the v0.8 runner-integration design doc. v0.9 will plumb a `confirmBash` callback through `ToolContextTxFacade`. |
+| `confirm` | Accepted by config validation. In interactive runner-driven tool execution, the tx overlay defers to the upstream tool-permission path after `PolicyEngine` has approved the `bash` action, so it does not show a second tx-specific prompt. In `--headless`, `confirm` promotes to `deny` and returns a clear error envelope so unattended runs cannot execute bash. |
 | `deny` | `bash` is rejected during a tx. Tools dependent on `bash` either fail or the user must abort the tx, run `bash` outside tx mode, then re-open. |
 
 `bashPolicy` is independent of the existing `--policy` modes (`auto`, `confirm-bash`, etc.). When both are configured, the stricter wins (e.g., `--policy confirm-bash` plus `bashPolicy: deny` results in `deny` because `deny` is strictly stronger than `confirm-bash`).
 
-This is the v0.8 honest tradeoff: edit-tx covers declarative file changes, `bash` is acknowledged and configurable but not contained. Users who want full containment use worktree-tx (deferred).
-
-> **v0.8 caveat — `bashPolicy: confirm` is not supported.** v0.8 ships the `passthrough` and `deny` policies; `confirm` is rejected at workspace-config load time because the interactive prompt callback isn't wired through `ToolContext` yet. The interactive-prompt flow described elsewhere in this section is v0.9 work and is documented here for design completeness.
+This is the current preview tradeoff: edit-tx covers declarative file changes, `bash` is acknowledged and configurable but not contained. Users who want full containment use worktree-tx (deferred).
 
 ## 10. Validators
 
@@ -1014,7 +1012,7 @@ These are the `cliq tx` subcommand exit codes. Exit codes for `cliq run --jsonl`
 | `mode` | `off`, `edit` | `off` | `worktree` is reserved; v1 only `off` and `edit` |
 | `auto` | `per-turn`, `manual` | `per-turn` | Implicit per-turn auto-open/finalize, or require explicit `tx open` |
 | `applyPolicy` | `interactive`, `auto-on-pass`, `manual-only` | `interactive` | Interactive prompts; auto-apply when blocking pass; never auto-apply |
-| `bashPolicy` | `passthrough`, `confirm`, `deny` | `passthrough` | Per-Section 9.4: passthrough preserves current cliq behavior; deny rejects `bash` during a tx. **`confirm` is not supported in v0.8** (rejected at config-load; deferred to v0.9 once the interactive prompt callback is plumbed through `ToolContext`). |
+| `bashPolicy` | `passthrough`, `confirm`, `deny` | `passthrough` | Per-Section 9.4: passthrough preserves current cliq behavior; confirm defers to the upstream tool-permission path in interactive mode and promotes to deny in `--headless`; deny rejects `bash` during a tx. |
 | `stagedView.copyMode` | `auto`, `reflink`, `copy` | `auto` | How non-bound files are materialized into the staged view (Section 9.3.1). `auto` tries reflink (`clonefile`/`FICLONE`) and falls back to byte copy with a one-time warning; `reflink` requires CoW filesystem support; `copy` always byte-copies. Hardlinks are never used because they share inodes with the real workspace and would silently leak validator writes. |
 | `stagedView.bindPaths` | array of workspace-relative paths | `["node_modules"]` | Paths symlinked from real workspace into staged-view (Section 9.3.2). Writes inside bind paths leak to real workspace; users tighten the list as needed. |
 | `validators.shell` | array | `[]` | Shell-hook validators |
@@ -1027,17 +1025,20 @@ When `transactions` is absent or `mode: "off"`, the entire feature is dormant; `
 ### 14.2 Configuration precedence
 
 ```text
-CLI flag > environment variable (CLIQ_TX_*) > workspace config > built-in default
+CLI flag > workspace config > built-in default
 ```
 
 `--tx off` always wins, providing a per-invocation kill switch even when the workspace defaults to `mode: edit`.
 
 ### 14.3 Environment variables
 
-- `CLIQ_TX_MODE`: same values as `transactions.mode`
-- `CLIQ_TX_APPLY_POLICY`: same values as `transactions.applyPolicy`
-- `CLIQ_TX_BASH_POLICY`: same values as `transactions.bashPolicy`
-- `CLIQ_TX_HEADLESS`: `"1"` is equivalent to `--headless`
+There are no runtime `CLIQ_TX_*` configuration overrides for tx mode, apply
+policy, bash policy, or headless mode. Use CLI flags such as `--tx` and
+`--tx-apply`, or workspace `transactions` config, for those settings.
+
+Shell validators still receive tx-scoped environment values such as
+`CLIQ_TX_ID`, `CLIQ_TX_DIFF_PATH`, and `CLIQ_WORKSPACE_REAL_PATH`; those are
+validator context exports, not configuration overrides.
 
 ## 15. Session Record Contract (Boundary with Auto-Compact)
 
@@ -1386,7 +1387,7 @@ Required tests grouped by concern:
 
 **Bash policy**
 - `bashPolicy: passthrough` runs `bash` unchanged (regression for current users)
-- `bashPolicy: confirm` prompts before each `bash` (interactive) and is promoted to `deny` in `--headless`
+- `bashPolicy: confirm` defers to the upstream tool-permission path in interactive mode and is promoted to `deny` in `--headless`
 - `bashPolicy: deny` rejects `bash` during a tx with a clear error
 - `--policy confirm-bash` plus `bashPolicy: deny`: stricter wins (deny)
 
