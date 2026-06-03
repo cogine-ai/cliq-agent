@@ -205,6 +205,27 @@ test('readOrSeedReferencedPlanProgress preserves existing execution progress', a
   assert.equal(seeded?.updatedAt, progress.updatedAt);
 });
 
+test('readOrSeedReferencedPlanProgress does not seed stale approved plans', async () => {
+  const { cwd, session } = await tempScope();
+  const oldDraft = await createDraftPlan(cwd, session, {
+    title: 'Old workflow',
+    contentMarkdown: '## Steps\n- Old work'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: oldDraft.id, targetMode: 'default' });
+  await rm(await planProgressPath(cwd, session, oldDraft.id), { force: true });
+
+  const currentDraft = await createDraftPlan(cwd, session, {
+    title: 'Current workflow',
+    contentMarkdown: '## Steps\n- Current work'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: currentDraft.id, targetMode: 'default' });
+
+  assert.equal(await readOrSeedReferencedPlanProgress(cwd, session, oldDraft.id), null);
+  await assert.rejects(() => readPlanProgress(cwd, session, oldDraft.id), /ENOENT|no such file/i);
+});
+
 test('updatePlanProgress rejects stale plan ids and multiple in-progress items', async () => {
   const { cwd, session } = await tempScope();
   const draft = await createDraftPlan(cwd, session, {
