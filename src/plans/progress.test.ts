@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -80,6 +80,47 @@ test('approvePlan starts execution progress from pending regardless of review sn
   assert.deepEqual(progress.items.map((item) => [item.id, item.status]), [
     ['inspect', 'pending'],
     ['implement', 'pending']
+  ]);
+});
+
+test('approvePlan reseeds existing progress from the current finalized artifact', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Reworked tracker',
+    contentMarkdown: '## Steps\n- Old work',
+    items: [{ id: 'old', title: 'Old work' }]
+  });
+  await finalizePlan(cwd, session);
+  const approved = await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+  await updatePlanProgress(cwd, session, {
+    planId: approved.id,
+    items: [{ id: 'old', title: 'Old work', status: 'completed', activeForm: 'Working on Old work' }]
+  });
+
+  const oldArtifact = await readPlanArtifact(cwd, session, approved.id);
+  const { approvedAt: _approvedAt, approvedTargetMode: _approvedTargetMode, ...base } = oldArtifact;
+  await writeFile(
+    oldArtifact.paths.json,
+    JSON.stringify(
+      {
+        ...base,
+        status: 'finalized',
+        contentMarkdown: '## Steps\n- New work',
+        items: [{ id: 'new', title: 'New work', status: 'completed' }],
+        updatedAt: new Date().toISOString()
+      },
+      null,
+      2
+    )
+  );
+  session.activePlanId = approved.id;
+  delete session.approvedPlanId;
+
+  await approvePlan(cwd, session, { planId: approved.id, targetMode: 'default' });
+  const progress = await readPlanProgress(cwd, session, approved.id);
+
+  assert.deepEqual(progress.items.map((item) => [item.id, item.title, item.status]), [
+    ['new', 'New work', 'pending']
   ]);
 });
 

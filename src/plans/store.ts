@@ -536,13 +536,6 @@ async function seedPlanProgress(
   plan: PlanArtifact,
   cliqHome = resolveCliqHome()
 ): Promise<PlanProgress> {
-  try {
-    return await readPlanProgress(cwd, session, plan.id, cliqHome);
-  } catch (error) {
-    if (!isMissingPath(error)) {
-      throw error;
-    }
-  }
   const progressPath = await planProgressPath(cwd, session, plan.id, cliqHome);
   const now = nowIso();
   const progress: PlanProgress = {
