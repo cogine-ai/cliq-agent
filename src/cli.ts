@@ -3279,7 +3279,8 @@ function withSessionOnlyProviderAuth(
         ...(auth.providers[request.provider] ?? {}),
         model: request.model,
         ...(request.baseUrl ? { baseUrl: request.baseUrl } : {}),
-        ...(request.apiKey ? { apiKey: request.apiKey } : {})
+        ...(request.apiKey ? { apiKey: request.apiKey } : {}),
+        transient: true
       }
     }
   };
@@ -3292,10 +3293,12 @@ function mergePersistedAuthIntoSessionAuth(
   const providers: ProviderAuthStore['providers'] = { ...current.providers };
   for (const rawProvider of Object.keys(persisted.providers)) {
     if (!isProviderName(rawProvider)) continue;
-    providers[rawProvider] = {
+    const next = {
       ...(providers[rawProvider] ?? {}),
       ...(persisted.providers[rawProvider] ?? {})
     };
+    delete next.transient;
+    providers[rawProvider] = next;
   }
   const activeProvider = persisted.activeProvider ?? current.activeProvider;
   return {
