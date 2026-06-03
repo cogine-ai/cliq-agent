@@ -196,12 +196,16 @@ function hasAuthApiKey(provider: ProviderName, auth: ProviderAuthStore) {
 
 function hasPersistedAuthApiKey(provider: ProviderName, auth: ProviderAuthStore) {
   const entry = getProviderAuthEntry(auth, provider);
-  return Boolean(entry?.apiKey && !entry.transient);
+  return Boolean(entry?.apiKey && !entry.transient && !entry.transientApiKey);
 }
 
 function hasPersistedAuthEntry(provider: ProviderName, auth: ProviderAuthStore) {
   const entry = getProviderAuthEntry(auth, provider);
-  return Boolean(entry && !entry.transient);
+  return Boolean(
+    entry &&
+      !entry.transient &&
+      (entry.model || entry.baseUrl || entry.streaming || (entry.apiKey && !entry.transientApiKey))
+  );
 }
 
 function addSource(sources: Set<ConfigSourceLabel>, source: ConfigSourceLabel) {

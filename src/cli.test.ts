@@ -27,11 +27,13 @@ import {
   hydratePlanProgress,
   applyTuiModelSetupSelection,
   buildTuiModelSetupSnapshot,
+  modelConfigForSetupError,
   resolveModelConfigWithInteractiveSetup,
   ReportedCliError,
   runCli
 } from './cli.js';
 import { authFilePath } from './model/auth-store.js';
+import { ModelSetupRequiredError } from './model/config.js';
 import type { ModelClient, ResolvedModelConfig } from './model/types.js';
 import { approvePlan, createDraftPlan, finalizePlan, planProgressPath } from './plans/store.js';
 import { createCheckpoint } from './session/checkpoints.js';
@@ -1672,7 +1674,7 @@ test('applyTuiModelSetupSelection preserves session-only API keys when saving st
       auth: {
         version: 1,
         providers: {
-          openai: { apiKey: 'sk-session-only' }
+          openai: { apiKey: 'sk-session-only', transient: true }
         }
       },
       cliqHome: env.home,
@@ -1845,7 +1847,7 @@ test('applyTuiModelSetupSelection can save a same-provider model default with a 
       auth: {
         version: 1,
         providers: {
-          openai: { apiKey: 'sk-session-only' }
+          openai: { apiKey: 'sk-session-only', transient: true }
         }
       },
       cliqHome: env.home,
@@ -1858,6 +1860,8 @@ test('applyTuiModelSetupSelection can save a same-provider model default with a 
     assert.equal(result.auth.activeProvider, 'openai');
     assert.equal(result.auth.providers.openai?.model, 'gpt-5.2');
     assert.equal(result.auth.providers.openai?.apiKey, 'sk-session-only');
+    assert.equal(result.auth.providers.openai?.transient, undefined);
+    assert.equal((result.auth.providers.openai as { transientApiKey?: boolean } | undefined)?.transientApiKey, true);
     assert.equal(createdConfigs.length, 1);
 
     const raw = await readFile(authFilePath(env.home), 'utf8');
@@ -1896,6 +1900,28 @@ test('buildTuiModelSetupSnapshot includes discovered local Ollama models for the
   assert.ok(qwen.labels.includes('Local'));
   assert.ok(other);
   assert.ok(other.labels.includes('Local'));
+});
+
+test('model setup error config preserves configured streaming mode', () => {
+  const config = modelConfigForSetupError(
+    new ModelSetupRequiredError({
+      reason: 'missing-provider-api-key',
+      provider: 'openai'
+    }),
+    {
+      workspaceConfig: {
+        ...emptyWorkspaceConfig(),
+        model: {
+          provider: 'openai',
+          streaming: 'off'
+        }
+      },
+      cliModel: {},
+      env: {}
+    }
+  );
+
+  assert.equal(config.streaming, 'off');
 });
 
 test('interactive model setup can repair startup model config and continue', async () => {
