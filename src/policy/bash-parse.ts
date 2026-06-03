@@ -145,7 +145,8 @@ function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consume
 
 function skipEnvOption(tokens: string[], index: number): number {
   const token = tokens[index]!;
-  if (token === '-' || token === '--') return index;
+  // Lone `-` / `--` mark the end of env options; keep scanning for `-S`.
+  if (token === '-' || token === '--') return index + 1;
   if (isEnvAssignment(token)) return index + 1;
   if (!token.startsWith('-')) return index;
   if (
