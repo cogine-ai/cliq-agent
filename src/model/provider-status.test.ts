@@ -165,6 +165,39 @@ test('provider status can use the current runtime model as the active provider',
   });
 });
 
+test('provider status does not label session-only auth as a managed credential source', async () => {
+  await withEnv({}, async () => {
+    const auth: ProviderAuthStore = {
+      version: 1,
+      activeProvider: 'ollama',
+      providers: {
+        openai: {
+          apiKey: 'sk-session-only',
+          model: 'gpt-session',
+          transient: true
+        }
+      }
+    };
+
+    const report = await buildProviderStatusReport({
+      workspace: {},
+      cli: {},
+      auth,
+      currentModel: {
+        provider: 'openai',
+        model: 'gpt-session',
+        baseUrl: 'https://api.openai.com/v1'
+      },
+      discoverOllamaModels: async () => [{ name: 'qwen3:4b' }]
+    });
+
+    const current = report.providers[0]!;
+    assert.equal(current.provider, 'openai');
+    assert.equal(current.state, 'configured');
+    assert.deepEqual(current.sources, []);
+  });
+});
+
 test('provider status prefers env model settings over local auth', async () => {
   await withEnv(
     {

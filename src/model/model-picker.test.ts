@@ -105,6 +105,34 @@ test('model picker labels current, startup default, provider default, catalog, l
   assert.deepEqual(ollama.find((row) => row.model === 'qwen3.5:4b')?.labels, ['Local']);
 });
 
+test('model picker does not label session-only auth as a saved default', () => {
+  const auth: ProviderAuthStore = {
+    version: 1,
+    activeProvider: 'ollama',
+    providers: {
+      'openai-compatible': {
+        model: 'session-compatible',
+        baseUrl: 'http://localhost:4000/v1',
+        transient: true
+      }
+    }
+  };
+
+  const snapshot = buildModelPickerSnapshot({
+    report,
+    auth,
+    currentModel: { provider: 'openai-compatible', model: 'session-compatible' },
+    workspaceModel: {},
+    cliModel: {},
+    env: {},
+    ollamaModels: []
+  });
+
+  const compatible = snapshot.modelsByProvider['openai-compatible'] ?? [];
+  const current = compatible.find((row) => row.model === 'session-compatible');
+  assert.deepEqual(current?.labels, ['Current', 'Configured']);
+});
+
 test('model picker treats provider-scoped cli and env model ids as configured rows only for that provider', () => {
   const workspaceModel: PartialModelConfig = { provider: 'openai', model: 'workspace-openai' };
   const snapshot = buildModelPickerSnapshot({

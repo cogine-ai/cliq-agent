@@ -194,6 +194,16 @@ function hasAuthApiKey(provider: ProviderName, auth: ProviderAuthStore) {
   return Boolean(getProviderAuthEntry(auth, provider)?.apiKey);
 }
 
+function hasPersistedAuthApiKey(provider: ProviderName, auth: ProviderAuthStore) {
+  const entry = getProviderAuthEntry(auth, provider);
+  return Boolean(entry?.apiKey && !entry.transient);
+}
+
+function hasPersistedAuthEntry(provider: ProviderName, auth: ProviderAuthStore) {
+  const entry = getProviderAuthEntry(auth, provider);
+  return Boolean(entry && !entry.transient);
+}
+
 function addSource(sources: Set<ConfigSourceLabel>, source: ConfigSourceLabel) {
   sources.add(source);
 }
@@ -215,7 +225,7 @@ function configuredSourcesForProvider(opts: {
   if (hasEnvApiKey(opts.provider, opts.env) || configAppliesToProvider(opts.envConfig, opts.provider, opts.activeProvider)) {
     addSource(sources, 'ENV');
   }
-  if (hasAuthApiKey(opts.provider, opts.auth) || getProviderAuthEntry(opts.auth, opts.provider)) {
+  if (hasPersistedAuthApiKey(opts.provider, opts.auth) || hasPersistedAuthEntry(opts.provider, opts.auth)) {
     addSource(sources, 'Managed credential');
   }
   if (configAppliesToProvider(opts.workspace, opts.provider, opts.activeProvider)) {

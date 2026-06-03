@@ -120,15 +120,16 @@ function buildModelRowsForProvider(opts: {
   }
 
   const authEntry = getProviderAuthEntry(opts.auth, opts.provider);
+  const isPersistedAuthEntry = Boolean(authEntry && !authEntry.transient);
   for (const row of rows.values()) {
     const labels: ModelRowLabel[] = [];
     if (opts.currentModel.provider === opts.provider && opts.currentModel.model === row.model) {
       labels.push('Current');
     }
-    if (opts.auth.activeProvider === opts.provider && authEntry?.model === row.model) {
+    if (isPersistedAuthEntry && opts.auth.activeProvider === opts.provider && authEntry?.model === row.model) {
       labels.push('Startup default');
     }
-    if (opts.auth.activeProvider !== opts.provider && authEntry?.model === row.model) {
+    if (isPersistedAuthEntry && opts.auth.activeProvider !== opts.provider && authEntry?.model === row.model) {
       labels.push('Provider default');
     }
     for (const label of row.labels) {

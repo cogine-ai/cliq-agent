@@ -1571,7 +1571,7 @@ test('applyTuiModelSetupSelection applies Enter session-only without writing sta
     });
 
     assert.equal(result.auth.activeProvider, undefined);
-    assert.deepEqual(result.auth.providers, { ollama: { model: 'qwen-session:4b' } });
+    assert.deepEqual(result.auth.providers, { ollama: { model: 'qwen-session:4b', transient: true } });
     assert.equal(result.modelConfig.provider, 'ollama');
     assert.equal(result.modelConfig.model, 'qwen-session:4b');
     assert.equal(result.modelConfig.baseUrl, 'http://localhost:11434');
