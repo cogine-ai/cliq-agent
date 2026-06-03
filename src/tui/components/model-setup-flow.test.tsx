@@ -131,6 +131,37 @@ test('model setup flow opens custom model input with c', async () => {
   assert.deepEqual(applied, [{ provider: 'ollama', model: 'custom-model', persist: false }]);
 });
 
+test('model setup flow allows q in custom model input without closing', async () => {
+  const applied: ModelSetupApplyRequest[] = [];
+  let closed = false;
+  const { stdin } = render(
+    <ModelSetupFlow
+      snapshot={makeSnapshot()}
+      onApply={(request) => {
+        applied.push(request);
+      }}
+      onClose={() => {
+        closed = true;
+      }}
+    />
+  );
+
+  await flush();
+  stdin.write('\r');
+  await flush();
+  stdin.write('c');
+  await flush();
+  stdin.write('q');
+  await flush();
+  stdin.write('wen-custom');
+  await flush();
+  stdin.write('\r');
+  await flush();
+
+  assert.equal(closed, false);
+  assert.deepEqual(applied, [{ provider: 'ollama', model: 'qwen-custom', persist: false }]);
+});
+
 test('model setup flow masks API key input and never renders the secret', async () => {
   const snapshot = makeSnapshot({
     selectedProvider: 'openai',
@@ -271,6 +302,13 @@ test('model setup flow configures OpenAI-compatible base URL, direct model id, a
   stdin.write('sk-compatible');
   await flush();
   assert.doesNotMatch(lastFrame() ?? '', /sk-compatible/);
+  stdin.write(' ');
+  await flush();
+
+  assert.deepEqual(applied, []);
+  assert.match(lastFrame() ?? '', /Save API key/i);
+  assert.doesNotMatch(lastFrame() ?? '', /sk-compatible/);
+
   stdin.write(' ');
   await flush();
 

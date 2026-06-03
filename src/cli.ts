@@ -3186,13 +3186,16 @@ export async function applyTuiModelSetupSelection(opts: {
 }): Promise<ApplyTuiModelSetupSelectionResult> {
   const request = opts.request;
   const authOptions = opts.cliqHome ? { cliqHome: opts.cliqHome } : {};
+  const baseUrl =
+    request.baseUrl ??
+    (request.provider === opts.currentModelConfig.provider ? opts.currentModelConfig.baseUrl : undefined);
   let auth: ProviderAuthStore;
   if (request.persist) {
     const persistedAuth = await upsertProviderAuth(
       {
         provider: request.provider,
         model: request.model,
-        ...(request.baseUrl ? { baseUrl: request.baseUrl } : {}),
+        ...(baseUrl ? { baseUrl } : {}),
         ...(request.apiKey ? { apiKey: request.apiKey } : {})
       },
       authOptions
@@ -3201,9 +3204,6 @@ export async function applyTuiModelSetupSelection(opts: {
   } else {
     auth = withSessionOnlyProviderAuth(opts.auth, request);
   }
-  const baseUrl =
-    request.baseUrl ??
-    (request.provider === opts.currentModelConfig.provider ? opts.currentModelConfig.baseUrl : undefined);
   const sessionModel: PartialModelConfig = {
     provider: request.provider,
     model: request.model,
@@ -3228,14 +3228,15 @@ function withSessionOnlyProviderAuth(
   auth: ProviderAuthStore,
   request: TuiModelSetupSelectionRequest
 ): ProviderAuthStore {
-  if (!request.apiKey) return auth;
   return {
     ...auth,
     providers: {
       ...auth.providers,
       [request.provider]: {
         ...(auth.providers[request.provider] ?? {}),
-        apiKey: request.apiKey
+        model: request.model,
+        ...(request.baseUrl ? { baseUrl: request.baseUrl } : {}),
+        ...(request.apiKey ? { apiKey: request.apiKey } : {})
       }
     }
   };

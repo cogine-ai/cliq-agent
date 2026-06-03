@@ -1571,7 +1571,7 @@ test('applyTuiModelSetupSelection applies Enter session-only without writing sta
     });
 
     assert.equal(result.auth.activeProvider, undefined);
-    assert.deepEqual(result.auth.providers, {});
+    assert.deepEqual(result.auth.providers, { ollama: { model: 'qwen-session:4b' } });
     assert.equal(result.modelConfig.provider, 'ollama');
     assert.equal(result.modelConfig.model, 'qwen-session:4b');
     assert.equal(result.modelConfig.baseUrl, 'http://localhost:11434');
@@ -1609,6 +1609,42 @@ test('applyTuiModelSetupSelection can use a session-only API key without writing
     assert.equal(result.modelConfig.model, 'gpt-5.2');
     assert.equal(result.modelConfig.apiKey, 'sk-session-only');
     assert.equal(result.auth.providers.openai?.apiKey, 'sk-session-only');
+    assert.equal(createdConfigs.length, 1);
+    await assert.rejects(() => readFile(authFilePath(env.home), 'utf8'), /ENOENT/);
+  });
+});
+
+test('applyTuiModelSetupSelection keeps session-only provider model and base URL in auth overlay', async () => {
+  await withCliTestEnv('tui-model-setup-session-compatible-overlay', async (env) => {
+    const createdConfigs: ResolvedModelConfig[] = [];
+    const result = await applyTuiModelSetupSelection({
+      request: {
+        provider: 'openai-compatible',
+        model: 'session-compatible-model',
+        baseUrl: 'http://localhost:4000/v1',
+        apiKey: 'sk-session-only',
+        persist: false
+      },
+      currentModelConfig: {
+        provider: 'ollama',
+        model: 'qwen3.5:4b',
+        baseUrl: 'http://localhost:11434',
+        streaming: 'auto'
+      },
+      workspaceConfig: emptyWorkspaceConfig(),
+      cliModel: {},
+      auth: { version: 1, providers: {} },
+      cliqHome: env.home,
+      createModelClientImpl: (config) => fakeModelClientForConfig(createdConfigs, config)
+    });
+
+    assert.equal(result.modelConfig.provider, 'openai-compatible');
+    assert.equal(result.modelConfig.model, 'session-compatible-model');
+    assert.equal(result.modelConfig.baseUrl, 'http://localhost:4000/v1');
+    assert.equal(result.modelConfig.apiKey, 'sk-session-only');
+    assert.equal(result.auth.providers['openai-compatible']?.model, 'session-compatible-model');
+    assert.equal(result.auth.providers['openai-compatible']?.baseUrl, 'http://localhost:4000/v1');
+    assert.equal(result.auth.providers['openai-compatible']?.apiKey, 'sk-session-only');
     assert.equal(createdConfigs.length, 1);
     await assert.rejects(() => readFile(authFilePath(env.home), 'utf8'), /ENOENT/);
   });
@@ -1656,6 +1692,50 @@ test('applyTuiModelSetupSelection preserves session-only API keys when saving st
     };
     assert.equal(payload.providers?.ollama?.model, 'qwen-save:4b');
     assert.equal(payload.providers?.openai?.apiKey, undefined);
+  });
+});
+
+test('applyTuiModelSetupSelection persists same-provider fallback base URL with startup defaults', async () => {
+  await withCliTestEnv('tui-model-setup-persist-fallback-base-url', async (env) => {
+    const createdConfigs: ResolvedModelConfig[] = [];
+    const result = await applyTuiModelSetupSelection({
+      request: {
+        provider: 'openai-compatible',
+        model: 'saved-compatible-model',
+        persist: true
+      },
+      currentModelConfig: {
+        provider: 'openai-compatible',
+        model: 'current-compatible-model',
+        baseUrl: 'http://localhost:4000/v1',
+        apiKey: 'sk-session-only',
+        streaming: 'auto'
+      },
+      workspaceConfig: emptyWorkspaceConfig(),
+      cliModel: {},
+      auth: {
+        version: 1,
+        providers: {
+          'openai-compatible': { apiKey: 'sk-session-only' }
+        }
+      },
+      cliqHome: env.home,
+      createModelClientImpl: (config) => fakeModelClientForConfig(createdConfigs, config)
+    });
+
+    assert.equal(result.modelConfig.provider, 'openai-compatible');
+    assert.equal(result.modelConfig.model, 'saved-compatible-model');
+    assert.equal(result.modelConfig.baseUrl, 'http://localhost:4000/v1');
+    assert.equal(result.auth.providers['openai-compatible']?.baseUrl, 'http://localhost:4000/v1');
+    assert.equal(createdConfigs.length, 1);
+
+    const raw = await readFile(authFilePath(env.home), 'utf8');
+    const payload = JSON.parse(raw) as {
+      providers?: { 'openai-compatible'?: { model?: string; baseUrl?: string; apiKey?: string } };
+    };
+    assert.equal(payload.providers?.['openai-compatible']?.model, 'saved-compatible-model');
+    assert.equal(payload.providers?.['openai-compatible']?.baseUrl, 'http://localhost:4000/v1');
+    assert.equal(payload.providers?.['openai-compatible']?.apiKey, undefined);
   });
 });
 

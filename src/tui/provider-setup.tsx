@@ -41,25 +41,32 @@ export function ProviderSetup({ error }: ProviderSetupProps) {
 
 export async function mountProviderSetupAndWait(
   error: ModelSetupRequiredError,
-  options?: ProviderSetupInteractiveOptions
+  options?: ProviderSetupInteractiveOptions,
+  renderImpl: typeof render = render
 ): Promise<ProviderSetupResult | null> {
   if (!options) {
-    const instance = render(<ProviderSetup error={error} />, { exitOnCtrlC: false });
+    const instance = renderImpl(<ProviderSetup error={error} />, { exitOnCtrlC: false });
     await instance.waitUntilExit();
     return null;
   }
 
   let result: ProviderSetupResult | null = null;
+  let resultError: unknown;
   let instance: ReturnType<typeof render> | undefined;
   const close = () => {
     instance?.unmount();
   };
-  instance = render(
+  instance = renderImpl(
     <ModelSetupFlow
       snapshot={options.snapshot}
       onApply={async (request) => {
-        result = await options.onApply(request);
-        close();
+        try {
+          result = await options.onApply(request);
+        } catch (error) {
+          resultError = error;
+        } finally {
+          close();
+        }
       }}
       onClose={close}
       initialProvider={error.provider}
@@ -67,5 +74,8 @@ export async function mountProviderSetupAndWait(
     { exitOnCtrlC: false }
   );
   await instance.waitUntilExit();
+  if (resultError) {
+    throw resultError;
+  }
   return result;
 }
