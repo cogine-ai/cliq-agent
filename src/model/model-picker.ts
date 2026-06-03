@@ -120,7 +120,11 @@ function buildModelRowsForProvider(opts: {
   }
 
   const authEntry = getProviderAuthEntry(opts.auth, opts.provider);
-  const isPersistedAuthEntry = Boolean(authEntry && !authEntry.transient);
+  const isPersistedAuthEntry = Boolean(
+    authEntry &&
+      !authEntry.transient &&
+      (authEntry.model || authEntry.baseUrl || authEntry.streaming || (authEntry.apiKey && !authEntry.transientApiKey))
+  );
   for (const row of rows.values()) {
     const labels: ModelRowLabel[] = [];
     if (opts.currentModel.provider === opts.provider && opts.currentModel.model === row.model) {

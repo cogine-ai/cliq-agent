@@ -222,7 +222,7 @@ export type ParsedArgs = ParsedArgsBase & (
     }
 );
 
-function isStreamingMode(value: string) {
+function isStreamingMode(value: string): value is StreamingMode {
   return (STREAMING_MODES as readonly string[]).includes(value);
 }
 
@@ -2801,7 +2801,11 @@ export async function runCli(argv: string[]) {
       initialAuth: auth,
       wantsTui,
       mountSetup: async (error) => {
-        const setupModelConfig = modelConfigForSetupError(error);
+        const setupModelConfig = modelConfigForSetupError(error, {
+          workspaceConfig: assembly.workspaceConfig,
+          cliModel,
+          auth
+        });
         const { mountProviderSetupAndWait } = await import('./tui/provider-setup.js');
         return await mountProviderSetupAndWait(error, {
           snapshot: await buildTuiModelSetupSnapshot({
@@ -3293,10 +3297,19 @@ function mergePersistedAuthIntoSessionAuth(
   const providers: ProviderAuthStore['providers'] = { ...current.providers };
   for (const rawProvider of Object.keys(persisted.providers)) {
     if (!isProviderName(rawProvider)) continue;
+    const currentEntry = providers[rawProvider];
+    const persistedEntry = persisted.providers[rawProvider] ?? {};
     const next = {
-      ...(providers[rawProvider] ?? {}),
-      ...(persisted.providers[rawProvider] ?? {})
+      ...(currentEntry ?? {}),
+      ...persistedEntry
     };
+    if (currentEntry?.transient && currentEntry.apiKey && !persistedEntry.apiKey) {
+      next.apiKey = currentEntry.apiKey;
+      next.transientApiKey = true;
+    }
+    if (persistedEntry.apiKey) {
+      delete next.transientApiKey;
+    }
     delete next.transient;
     providers[rawProvider] = next;
   }
@@ -3308,12 +3321,40 @@ function mergePersistedAuthIntoSessionAuth(
   };
 }
 
-function modelConfigForSetupError(error: ModelSetupRequiredError): ResolvedModelConfig {
+function streamingModeForSetupError(opts: {
+  error: ModelSetupRequiredError;
+  workspaceConfig?: WorkspaceConfig;
+  cliModel?: PartialModelConfig;
+  auth?: ProviderAuthStore;
+  env?: Record<string, string | undefined>;
+}): StreamingMode {
+  const rawStreaming = firstNonEmpty(
+    opts.cliModel?.streaming,
+    opts.workspaceConfig?.model?.streaming,
+    opts.env?.CLIQ_MODEL_STREAMING,
+    getProviderAuthEntry(opts.auth, opts.error.provider)?.streaming,
+    'auto'
+  );
+  if (!rawStreaming || !isStreamingMode(rawStreaming)) {
+    throw new Error(`Invalid streaming mode: ${rawStreaming ?? ''}`);
+  }
+  return rawStreaming;
+}
+
+export function modelConfigForSetupError(
+  error: ModelSetupRequiredError,
+  opts: {
+    workspaceConfig?: WorkspaceConfig;
+    cliModel?: PartialModelConfig;
+    auth?: ProviderAuthStore;
+    env?: Record<string, string | undefined>;
+  } = {}
+): ResolvedModelConfig {
   return {
     provider: error.provider,
     model: '',
     baseUrl: error.baseUrl ?? getModelProvider(error.provider).defaultBaseUrl,
-    streaming: 'auto'
+    streaming: streamingModeForSetupError({ error, ...opts, env: opts.env ?? process.env })
   };
 }
 

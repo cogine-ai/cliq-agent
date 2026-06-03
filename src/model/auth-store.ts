@@ -13,6 +13,7 @@ export type ProviderAuthEntry = {
   baseUrl?: string;
   streaming?: StreamingMode;
   transient?: boolean;
+  transientApiKey?: boolean;
 };
 
 export type ProviderAuthStore = {
