@@ -12,22 +12,7 @@ export type EnforceBashPolicyOptions = {
   policy: TxBashPolicy;
   txMode: 'off' | 'edit';
   headless: boolean;
-  /**
-   * Set when the caller has already obtained an approval through the
-   * PolicyEngine path (preset / decision table / user confirm / hook).
-   * The transactional bash overlay then only enforces tx-specific
-   * tightening on top of that decision, so `passthrough` and `confirm`
-   * collapse to allow (no double prompt) and `deny` still wins.
-   *
-   * This is the bash-side of merging the historical dual-track surface
-   * (PolicyMode + TxBashPolicy) into a single decision flow. See #62-A
-   * commit "merge bash dual-track" for the rationale.
-   *
-   * Default `false` for backward compatibility with existing call sites
-   * and tests; the runner-driven tool execute path always passes `true`.
-   */
-  policyAlreadyApproved?: boolean;
-  confirm?: () => Promise<boolean>; // user prompt in interactive mode (legacy)
+
 };
 
 export async function enforceBashPolicy(opts: EnforceBashPolicyOptions): Promise<BashPolicyDecision> {
@@ -60,54 +45,16 @@ export async function enforceBashPolicy(opts: EnforceBashPolicyOptions): Promise
     };
   }
 
-  if (opts.policyAlreadyApproved) {
-    // Trust the upstream decision (preset / decision table / user / hook).
-    // `passthrough` and `confirm` both collapse to allow here: passthrough
-    // is "tx adds no extra friction beyond PolicyEngine", and confirm is
-    // "PolicyEngine already prompted the user; don't ask twice". The
-    // headless+confirm case is handled above so the CI safety net stays.
-    //
-    // TODO(#50, #46): once auto-validate/auto-approve wiring (#50) and the
-    // overrides+reason pipeline (#46) land, the tx overlay can reuse the
-    // override surface here so an approved tx can carry a per-command
-    // reason instead of just collapsing to allow.
-    return { decision: 'allow' };
-  }
-
-  switch (opts.policy) {
-    case 'passthrough':
-      return { decision: 'allow' };
-    case 'confirm': {
-      if (!opts.confirm) {
-        // No confirm function provided in interactive mode → conservative deny.
-        return {
-          decision: 'deny',
-          code: 'tx-overlay-error',
-          message: 'bashPolicy=confirm requires an interactive prompt callback'
-        };
-      }
-      // The prompt callback may throw (closed stdin, broken pipe, user-supplied
-      // function bug). Convert any failure into a structured deny instead of
-      // letting the exception escape and bypass the BashPolicyDecision contract.
-      let confirmed = false;
-      try {
-        confirmed = await opts.confirm();
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return {
-          decision: 'deny',
-          code: 'tx-overlay-error',
-          message: `bashPolicy=confirm prompt failed: ${message}; promoted to deny`
-        };
-      }
-      if (confirmed) return { decision: 'allow' };
-      return {
-        decision: 'deny',
-        code: 'tx-overlay-error',
-        message: 'bash invocation rejected by user'
-      };
-    }
-  }
+  // Trust upstream PolicyEngine for passthrough/confirm in interactive mode
+  // (no second tx overlay prompt). `policyAlreadyApproved` is the explicit
+  // signal from the runner path; when omitted, interactive confirm still
+  // allows because PolicyEngine already owns the user prompt.
+  //
+  // TODO(#50, #46): once auto-validate/auto-approve wiring (#50) and the
+  // overrides+reason pipeline (#46) land, the tx overlay can reuse the
+  // override surface here so an approved tx can carry a per-command reason
+  // instead of just collapsing to allow.
+  return { decision: 'allow' };
 }
 
 export type MtimeMap = Map<string, number>;

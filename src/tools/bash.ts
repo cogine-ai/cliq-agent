@@ -90,15 +90,12 @@ export const bashTool: ToolDefinition<{ bash: string }> = {
     if (context.tx) {
       // The runner only invokes execute() after the PolicyEngine path has
       // already approved (preset / decision table / user confirm / hook).
-      // Pass policyAlreadyApproved so the tx overlay collapses passthrough
-      // and confirm to allow (no double prompt). `deny` still wins so the
-      // tx-specific hard limit is preserved. See bash-policy.ts and the
-      // #62-A "merge bash dual-track" commit message for the rationale.
+      // The tx overlay collapses passthrough/confirm to allow (no double
+      // prompt); `deny` still wins. See bash-policy.ts and #62-A.
       const decision = await enforceBashPolicy({
         policy: context.tx.bashPolicy,
         txMode: context.tx.mode,
-        headless: context.tx.headless,
-        policyAlreadyApproved: true
+        headless: context.tx.headless
       });
       if (decision.decision === 'deny') {
         return {
