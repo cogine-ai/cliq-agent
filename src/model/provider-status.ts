@@ -51,6 +51,12 @@ export type ProviderStatusReport = {
   credentialPersistence: ProviderCredentialPersistence;
 };
 
+export type CurrentProviderStatusModel = {
+  provider: ProviderName;
+  model?: string;
+  baseUrl?: string;
+};
+
 export type BuildProviderStatusReportOptions = {
   workspace: {
     model?: PartialModelConfig;
@@ -58,6 +64,7 @@ export type BuildProviderStatusReportOptions = {
   cli: PartialModelConfig;
   auth?: ProviderAuthStore;
   env?: Record<string, string | undefined>;
+  currentModel?: CurrentProviderStatusModel;
   discoverOllamaModels?: (baseUrl: string) => Promise<OllamaModelSummary[]>;
 };
 
@@ -163,6 +170,14 @@ function sourceValue(
   return configAppliesToProvider(config, provider, activeProvider) ? config?.[key] : undefined;
 }
 
+function currentModelValue(
+  currentModel: CurrentProviderStatusModel | undefined,
+  provider: ProviderName,
+  key: 'model' | 'baseUrl'
+) {
+  return currentModel?.provider === provider ? currentModel[key] : undefined;
+}
+
 function envApiKeyNames(provider: ProviderName): string[] {
   if (provider === 'openai-compatible') {
     return ['CLIQ_MODEL_API_KEY', 'OPENAI_COMPATIBLE_API_KEY'];
@@ -228,6 +243,7 @@ function providerSetup(provider: ProviderName): string[] {
 function resolveProviderModel(opts: {
   provider: ProviderName;
   activeProvider: ProviderName;
+  currentModel?: CurrentProviderStatusModel;
   cli: PartialModelConfig;
   workspace: PartialModelConfig | undefined;
   envConfig: PartialModelConfig;
@@ -237,6 +253,7 @@ function resolveProviderModel(opts: {
   const providerDef = getModelProvider(opts.provider);
   const authEntry = getProviderAuthEntry(opts.auth, opts.provider);
   return firstDefined(
+    currentModelValue(opts.currentModel, opts.provider, 'model'),
     sourceValue(opts.cli, opts.provider, opts.activeProvider, 'model'),
     sourceValue(opts.workspace, opts.provider, opts.activeProvider, 'model'),
     sourceValue(opts.envConfig, opts.provider, opts.activeProvider, 'model'),
@@ -249,6 +266,7 @@ function resolveProviderModel(opts: {
 function resolveProviderBaseUrl(opts: {
   provider: ProviderName;
   activeProvider: ProviderName;
+  currentModel?: CurrentProviderStatusModel;
   cli: PartialModelConfig;
   workspace: PartialModelConfig | undefined;
   envConfig: PartialModelConfig;
@@ -257,6 +275,7 @@ function resolveProviderBaseUrl(opts: {
   const providerDef = getModelProvider(opts.provider);
   const authEntry = getProviderAuthEntry(opts.auth, opts.provider);
   return firstDefined(
+    currentModelValue(opts.currentModel, opts.provider, 'baseUrl'),
     sourceValue(opts.cli, opts.provider, opts.activeProvider, 'baseUrl'),
     sourceValue(opts.workspace, opts.provider, opts.activeProvider, 'baseUrl'),
     sourceValue(opts.envConfig, opts.provider, opts.activeProvider, 'baseUrl'),
@@ -268,6 +287,7 @@ function resolveProviderBaseUrl(opts: {
 function buildRemoteProviderStatus(opts: {
   provider: ProviderName;
   activeProvider: ProviderName;
+  currentModel?: CurrentProviderStatusModel;
   cli: PartialModelConfig;
   workspace: PartialModelConfig | undefined;
   envConfig: PartialModelConfig;
@@ -312,6 +332,7 @@ function buildRemoteProviderStatus(opts: {
 
 async function buildOllamaProviderStatus(opts: {
   activeProvider: ProviderName;
+  currentModel?: CurrentProviderStatusModel;
   cli: PartialModelConfig;
   workspace: PartialModelConfig | undefined;
   envConfig: PartialModelConfig;
@@ -391,15 +412,17 @@ export async function buildProviderStatusReport({
   cli,
   auth = EMPTY_PROVIDER_AUTH_STORE,
   env = process.env,
+  currentModel,
   discoverOllamaModels = defaultDiscoverOllamaModels
 }: BuildProviderStatusReportOptions): Promise<ProviderStatusReport> {
   const envConfig = envModelConfig(env);
-  const activeProvider = resolveActiveProvider(cli, workspace.model, auth, env);
+  const activeProvider = currentModel?.provider ?? resolveActiveProvider(cli, workspace.model, auth, env);
   const providers = await Promise.all(
     listModelProviders().map((provider) =>
       provider.name === 'ollama'
         ? buildOllamaProviderStatus({
             activeProvider,
+            currentModel,
             cli,
             workspace: workspace.model,
             envConfig,
@@ -409,6 +432,7 @@ export async function buildProviderStatusReport({
         : buildRemoteProviderStatus({
             provider: provider.name,
             activeProvider,
+            currentModel,
             cli,
             workspace: workspace.model,
             envConfig,

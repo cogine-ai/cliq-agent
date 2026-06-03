@@ -1739,6 +1739,91 @@ test('applyTuiModelSetupSelection persists same-provider fallback base URL with 
   });
 });
 
+test('applyTuiModelSetupSelection persists workspace base URL for non-current compatible defaults', async () => {
+  await withCliTestEnv('tui-model-setup-persist-workspace-compatible-base-url', async (env) => {
+    const createdConfigs: ResolvedModelConfig[] = [];
+    const result = await applyTuiModelSetupSelection({
+      request: {
+        provider: 'openai-compatible',
+        model: 'workspace-compatible-model',
+        persist: true
+      },
+      currentModelConfig: {
+        provider: 'ollama',
+        model: 'qwen3.5:4b',
+        baseUrl: 'http://localhost:11434',
+        streaming: 'auto'
+      },
+      workspaceConfig: {
+        ...emptyWorkspaceConfig(),
+        model: {
+          provider: 'openai-compatible',
+          baseUrl: 'http://localhost:4000/v1'
+        }
+      },
+      cliModel: {},
+      auth: { version: 1, providers: {} },
+      cliqHome: env.home,
+      env: {},
+      createModelClientImpl: (config) => fakeModelClientForConfig(createdConfigs, config)
+    });
+
+    assert.equal(result.modelConfig.provider, 'openai-compatible');
+    assert.equal(result.modelConfig.model, 'workspace-compatible-model');
+    assert.equal(result.modelConfig.baseUrl, 'http://localhost:4000/v1');
+    assert.equal(result.auth.providers['openai-compatible']?.baseUrl, 'http://localhost:4000/v1');
+    assert.equal(createdConfigs.length, 1);
+
+    const raw = await readFile(authFilePath(env.home), 'utf8');
+    const payload = JSON.parse(raw) as {
+      providers?: { 'openai-compatible'?: { model?: string; baseUrl?: string } };
+    };
+    assert.equal(payload.providers?.['openai-compatible']?.model, 'workspace-compatible-model');
+    assert.equal(payload.providers?.['openai-compatible']?.baseUrl, 'http://localhost:4000/v1');
+  });
+});
+
+test('applyTuiModelSetupSelection persists env base URL for non-current compatible defaults', async () => {
+  await withCliTestEnv('tui-model-setup-persist-env-compatible-base-url', async (env) => {
+    const createdConfigs: ResolvedModelConfig[] = [];
+    const result = await applyTuiModelSetupSelection({
+      request: {
+        provider: 'openai-compatible',
+        model: 'env-compatible-model',
+        persist: true
+      },
+      currentModelConfig: {
+        provider: 'ollama',
+        model: 'qwen3.5:4b',
+        baseUrl: 'http://localhost:11434',
+        streaming: 'auto'
+      },
+      workspaceConfig: emptyWorkspaceConfig(),
+      cliModel: {},
+      auth: { version: 1, providers: {} },
+      cliqHome: env.home,
+      env: {
+        CLIQ_MODEL_PROVIDER: 'openai-compatible',
+        CLIQ_MODEL_BASE_URL: 'http://localhost:5000/v1'
+      },
+      createModelClientImpl: (config) => fakeModelClientForConfig(createdConfigs, config)
+    });
+
+    assert.equal(result.modelConfig.provider, 'openai-compatible');
+    assert.equal(result.modelConfig.model, 'env-compatible-model');
+    assert.equal(result.modelConfig.baseUrl, 'http://localhost:5000/v1');
+    assert.equal(result.auth.providers['openai-compatible']?.baseUrl, 'http://localhost:5000/v1');
+    assert.equal(createdConfigs.length, 1);
+
+    const raw = await readFile(authFilePath(env.home), 'utf8');
+    const payload = JSON.parse(raw) as {
+      providers?: { 'openai-compatible'?: { model?: string; baseUrl?: string } };
+    };
+    assert.equal(payload.providers?.['openai-compatible']?.model, 'env-compatible-model');
+    assert.equal(payload.providers?.['openai-compatible']?.baseUrl, 'http://localhost:5000/v1');
+  });
+});
+
 test('applyTuiModelSetupSelection can save a same-provider model default with a session-only API key', async () => {
   await withCliTestEnv('tui-model-setup-save-same-provider-session-key', async (env) => {
     const createdConfigs: ResolvedModelConfig[] = [];

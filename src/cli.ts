@@ -20,6 +20,7 @@ import {
 } from './model/config.js';
 import {
   formatProviderAuthSummary,
+  getProviderAuthEntry,
   loadProviderAuthStore,
   upsertProviderAuth
 } from './model/auth-store.js';
@@ -3150,6 +3151,7 @@ export async function buildTuiModelSetupSnapshot(opts: {
     cli: opts.cliModel,
     auth: opts.auth,
     env: opts.env,
+    currentModel: opts.currentModelConfig,
     discoverOllamaModels: async (baseUrl) => {
       try {
         ollamaModels = await discoverOllamaModels(baseUrl);
@@ -3175,20 +3177,61 @@ export async function buildTuiModelSetupSnapshot(opts: {
   });
 }
 
+function firstNonEmpty(...values: Array<string | undefined | null>): string | undefined {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== '') {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function providerScopedBaseUrl(config: PartialModelConfig | undefined, provider: ProviderName) {
+  return config?.provider === provider ? config.baseUrl : undefined;
+}
+
+function envBaseUrlForProvider(env: Record<string, string | undefined>, provider: ProviderName) {
+  return env.CLIQ_MODEL_PROVIDER === provider ? env.CLIQ_MODEL_BASE_URL : undefined;
+}
+
+function selectionBaseUrl(opts: {
+  request: TuiModelSetupSelectionRequest;
+  currentModelConfig: ResolvedModelConfig;
+  workspaceConfig: WorkspaceConfig;
+  cliModel: PartialModelConfig;
+  auth: ProviderAuthStore;
+  env: Record<string, string | undefined>;
+}) {
+  return firstNonEmpty(
+    opts.request.baseUrl,
+    opts.request.provider === opts.currentModelConfig.provider ? opts.currentModelConfig.baseUrl : undefined,
+    providerScopedBaseUrl(opts.cliModel, opts.request.provider),
+    providerScopedBaseUrl(opts.workspaceConfig.model, opts.request.provider),
+    envBaseUrlForProvider(opts.env, opts.request.provider),
+    getProviderAuthEntry(opts.auth, opts.request.provider)?.baseUrl
+  );
+}
+
 export async function applyTuiModelSetupSelection(opts: {
   request: TuiModelSetupSelectionRequest;
   currentModelConfig: ResolvedModelConfig;
   workspaceConfig: WorkspaceConfig;
   cliModel: PartialModelConfig;
   auth: ProviderAuthStore;
+  env?: Record<string, string | undefined>;
   cliqHome?: string;
   createModelClientImpl?: (config: ResolvedModelConfig) => ModelClient;
 }): Promise<ApplyTuiModelSetupSelectionResult> {
   const request = opts.request;
   const authOptions = opts.cliqHome ? { cliqHome: opts.cliqHome } : {};
-  const baseUrl =
-    request.baseUrl ??
-    (request.provider === opts.currentModelConfig.provider ? opts.currentModelConfig.baseUrl : undefined);
+  const baseUrl = selectionBaseUrl({
+    request,
+    currentModelConfig: opts.currentModelConfig,
+    workspaceConfig: opts.workspaceConfig,
+    cliModel: opts.cliModel,
+    auth: opts.auth,
+    env: opts.env ?? process.env
+  });
   let auth: ProviderAuthStore;
   if (request.persist) {
     const persistedAuth = await upsertProviderAuth(
@@ -3520,7 +3563,8 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       buildProviderStatusReport({
         workspace: opts.assembly.workspaceConfig,
         cli: opts.cliModel,
-        auth: currentAuth
+        auth: currentAuth,
+        currentModel: currentModelConfig
       }),
     onModelSetupSnapshot: () =>
       buildTuiModelSetupSnapshot({
