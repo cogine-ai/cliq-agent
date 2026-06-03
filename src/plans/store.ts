@@ -338,6 +338,9 @@ export async function readOrSeedReferencedPlanProgress(
   session: Session,
   planId: string
 ): Promise<PlanProgress | null> {
+  if (session.approvedPlanId !== planId) {
+    return null;
+  }
   const existing = await readReferencedPlanProgress(cwd, session, planId);
   if (existing) {
     return existing;
