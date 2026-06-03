@@ -359,6 +359,7 @@ export function App({
       setModelSetup(initialProvider ? { snapshot, initialProvider } : { snapshot });
     } catch (error) {
       providerInteractionActiveRef.current = false;
+      setProviderReport(null);
       pushSystem(`/model failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setProviderStatusPending(false);

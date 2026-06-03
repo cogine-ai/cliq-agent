@@ -377,6 +377,44 @@ test('/providers configure reuses model setup for selected provider', async () =
   assert.match(lastFrame() ?? '', /OpenAI/);
 });
 
+test('/providers configure failure closes provider management before reporting the error', async () => {
+  const store = makeStore();
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={() => {}}
+      onProviderStatus={() => providerReport}
+      onModelSetupSnapshot={() => {
+        throw new Error('snapshot unavailable');
+      }}
+      onModelSetupApply={() => {}}
+    />
+  );
+
+  stdin.write('/providers');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  await flush();
+
+  let readyFrame = lastFrame() ?? '';
+  for (let i = 0; i < 5 && /Waiting for fresh input/.test(readyFrame); i += 1) {
+    await flush();
+    readyFrame = lastFrame() ?? '';
+  }
+
+  stdin.write('\r');
+  await flush();
+  await flush();
+  stdin.write('c');
+  await flush();
+  await flush();
+
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /\/model failed: snapshot unavailable/);
+  assert.doesNotMatch(frame, /Provider management/);
+});
+
 test('/model Enter applies a current-session model and updates the composer label', async () => {
   const store = makeStore();
   const applied: ModelSetupApplyRequest[] = [];

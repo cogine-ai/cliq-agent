@@ -81,7 +81,7 @@ export function ModelSetupFlow({
 
   useInput((input: string, key: Key) => {
     if (!isActiveRef.current) return;
-    if (input === 'q' || input === 'Q' || key.escape) {
+    if (key.escape || (!isEditingStep(step) && (input === 'q' || input === 'Q'))) {
       onClose();
       return;
     }
@@ -263,6 +263,16 @@ async function handleSetupInput(
     return;
   }
   if (step.field === 'apiKey' && step.optional === true && input === ' ') {
+    const draft = optionalApiKeyDraft(step);
+    if (draft.apiKey && draft.model) {
+      setStep({
+        kind: 'secret-confirm',
+        provider: step.provider,
+        model: draft.model,
+        draft
+      });
+      return;
+    }
     await submitOptionalApiKey(step, true, onApply);
     return;
   }
@@ -336,7 +346,7 @@ async function submitOptionalApiKey(
   persist: boolean,
   onApply: (request: ModelSetupApplyRequest) => void | Promise<void>
 ) {
-  const draft = mergeDraft(step.draft, step.value.trim() ? { apiKey: step.value.trim() } : {});
+  const draft = optionalApiKeyDraft(step);
   if (!draft.model) return;
   await onApply(buildApplyRequest(step.provider, draft.model, persist, draft));
 }
@@ -421,6 +431,10 @@ function modelRows(snapshot: ModelPickerSnapshot, provider: ProviderName) {
   return snapshot.modelsByProvider[provider] ?? [];
 }
 
+function isEditingStep(step: Step) {
+  return step.kind === 'custom-model' || step.kind === 'setup-input';
+}
+
 function shouldCollectDirectModel(snapshot: ModelPickerSnapshot, provider: ProviderName) {
   return modelRows(snapshot, provider).filter((row) => row.kind === 'model').length === 0;
 }
@@ -441,6 +455,10 @@ function mergeDraft(current: SetupDraft | undefined, next: SetupDraft): SetupDra
     ...(current ?? {}),
     ...next
   };
+}
+
+function optionalApiKeyDraft(step: Extract<Step, { kind: 'setup-input' }>) {
+  return mergeDraft(step.draft, step.value.trim() ? { apiKey: step.value.trim() } : {});
 }
 
 function buildApplyRequest(
