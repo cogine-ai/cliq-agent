@@ -35,8 +35,7 @@ export async function enforceBashPolicy(opts: EnforceBashPolicyOptions): Promise
   // Headless + bashPolicy=confirm is an explicit CI safety net: even when the
   // upstream PolicyEngine has approved (e.g. via preset='auto' or a decision
   // table allow), the operator deliberately set bashPolicy=confirm so that
-  // unattended runs can't execute bash. That guarantee must hold regardless
-  // of policyAlreadyApproved.
+  // unattended runs can't execute bash.
   if (opts.policy === 'confirm' && opts.headless) {
     return {
       decision: 'deny',
@@ -46,9 +45,7 @@ export async function enforceBashPolicy(opts: EnforceBashPolicyOptions): Promise
   }
 
   // Trust upstream PolicyEngine for passthrough/confirm in interactive mode
-  // (no second tx overlay prompt). `policyAlreadyApproved` is the explicit
-  // signal from the runner path; when omitted, interactive confirm still
-  // allows because PolicyEngine already owns the user prompt.
+  // (no second tx overlay prompt).
   //
   // TODO(#50, #46): once auto-validate/auto-approve wiring (#50) and the
   // overrides+reason pipeline (#46) land, the tx overlay can reuse the
