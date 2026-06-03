@@ -18,6 +18,7 @@ import { useUiStore } from './hooks/use-ui-store.js';
 import { buildInputHint } from './hints.js';
 import { describePolicyMode } from './mode-language.js';
 import { nextPolicyMode } from './policy-rotation.js';
+import { buildLocalReportMarkdown } from './report.js';
 import { buildHelpText, completeSlash, parseSlash } from './slash.js';
 import type {
   PendingPlanReview,
@@ -128,6 +129,12 @@ export function App({
         return;
       case 'help':
         pushSystem(buildHelpText());
+        return;
+      case 'bug':
+        pushSystem(await buildLocalReportMarkdown(store.getState(), { kind: 'bug' }));
+        return;
+      case 'feedback':
+        pushSystem(await buildLocalReportMarkdown(store.getState(), { kind: 'feedback' }));
         return;
       case 'reset':
         try {

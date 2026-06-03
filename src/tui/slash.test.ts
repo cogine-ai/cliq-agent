@@ -9,9 +9,11 @@ test('parseSlash maps /exit and /quit to exit', () => {
   assert.deepEqual(parseSlash('  /exit  '), { kind: 'exit' });
 });
 
-test('parseSlash maps /reset and /help', () => {
+test('parseSlash maps /reset, /help, /bug, and /feedback', () => {
   assert.deepEqual(parseSlash('/reset'), { kind: 'reset' });
   assert.deepEqual(parseSlash('/help'), { kind: 'help' });
+  assert.deepEqual(parseSlash('/bug'), { kind: 'bug' });
+  assert.deepEqual(parseSlash('/feedback'), { kind: 'feedback' });
 });
 
 test('parseSlash maps skill commands', () => {
@@ -65,7 +67,18 @@ test('parseSlash flags unknown commands without throwing', () => {
 test('matchSlash returns prefix-matching commands', () => {
   assert.deepEqual(
     matchSlash('/').map((c) => c.name).sort(),
-    ['/exit', '/help', '/policy', '/providers', '/quit', '/reset', '/skill', '/skills']
+    [
+      '/bug',
+      '/exit',
+      '/feedback',
+      '/help',
+      '/policy',
+      '/providers',
+      '/quit',
+      '/reset',
+      '/skill',
+      '/skills'
+    ]
   );
   assert.deepEqual(
     matchSlash('/p').map((c) => c.name),
@@ -91,6 +104,8 @@ test('buildHelpText lists every command with its description', () => {
   assert.match(text, /\/quit/);
   assert.match(text, /\/reset/);
   assert.match(text, /\/help/);
+  assert.match(text, /\/bug\s+Create a local redacted bug report draft/);
+  assert.match(text, /\/feedback\s+Create a local redacted feedback draft/);
   assert.match(text, /\/policy <mode>/);
   assert.match(text, /\/providers/);
   assert.match(text, /\/skills/);

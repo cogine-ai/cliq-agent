@@ -15,6 +15,23 @@ import {
 
 const flush = () => new Promise<void>((r) => setImmediate(r));
 
+async function waitForSystemText(
+  store: ReturnType<typeof makeStore>,
+  pattern: RegExp
+): Promise<string> {
+  for (let i = 0; i < 20; i += 1) {
+    const transcript = store.getState().transcript;
+    for (let idx = transcript.length - 1; idx >= 0; idx -= 1) {
+      const entry = transcript[idx]!;
+      if (entry.kind === 'system' && pattern.test(entry.text)) {
+        return entry.text;
+      }
+    }
+    await flush();
+  }
+  throw new Error(`system message matching ${pattern} was not rendered`);
+}
+
 // createInitialState preserves the policy passed by the caller; this store uses
 // yolo intentionally so App tests can assert explicit UI policy rendering
 // without depending on production default fallback behavior.
@@ -147,6 +164,63 @@ test('typing /help and submitting renders the help block in the transcript', asy
   const frame = lastFrame() ?? '';
   assert.match(frame, /Available slash commands/);
   assert.match(frame, /\/policy <mode>/);
+  assert.match(frame, /\/bug/);
+  assert.match(frame, /\/feedback/);
+});
+
+test('typing /bug renders a local redacted bug report without submitting a prompt', async () => {
+  const store = makeStore();
+  store.dispatch({
+    type: 'runtime-event',
+    event: {
+      type: 'error',
+      stage: 'model',
+      message: 'failed with OPENAI_API_KEY=sk-test-abcdefghijklmnopqrstuvwxyz123456'
+    }
+  });
+  const submitted: string[] = [];
+  const { stdin, lastFrame } = render(
+    <App
+      store={store}
+      onSubmit={(text) => {
+        submitted.push(text);
+      }}
+    />
+  );
+
+  stdin.write('/bug');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  const report = await waitForSystemText(store, /Cliq Bug Report Draft/);
+
+  const frame = lastFrame() ?? '';
+  assert.deepEqual(submitted, []);
+  assert.match(frame, /Cliq Bug Report Draft/);
+  assert.match(report, /Local draft only/);
+  assert.match(report, /Cliq has not submitted or uploaded this report/);
+  assert.match(report, /Workspace:\s+smoke/);
+  assert.match(report, /Provider\/model:\s+ollama\/qwen3:4b/);
+  assert.match(report, /Policy\/mode:\s+yolo/);
+  assert.match(report, /\[REDACTED\]/);
+  assert.doesNotMatch(report, /sk-test-/);
+  assert.doesNotMatch(report, /\/tmp\/smoke/);
+});
+
+test('typing /feedback renders a local feedback draft', async () => {
+  const store = makeStore();
+  const { stdin, lastFrame } = render(<App store={store} onSubmit={() => {}} />);
+
+  stdin.write('/feedback');
+  await flush();
+  stdin.write('\r');
+  await flush();
+  const report = await waitForSystemText(store, /Cliq Feedback Draft/);
+
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /Cliq Feedback Draft/);
+  assert.match(report, /## Feedback/);
+  assert.match(report, /Local draft only/);
 });
 
 test('typing an unknown slash command pushes an "unknown command" notice', async () => {

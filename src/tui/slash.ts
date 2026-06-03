@@ -22,6 +22,8 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
   { name: '/quit', description: 'Same as /exit' },
   { name: '/reset', description: 'Reset the current session (drops transcript and records)' },
   { name: '/help', description: 'Show commands, shortcuts, modes, and skills' },
+  { name: '/bug', description: 'Create a local redacted bug report draft' },
+  { name: '/feedback', description: 'Create a local redacted feedback draft' },
   { name: '/policy', args: '<mode>', description: 'Switch mode', details: POLICY_MODE_DETAILS },
   { name: '/providers', description: 'Open provider management' },
   { name: '/skills', description: 'Show available and active skills' },
@@ -44,6 +46,8 @@ export type ParsedSlashCommand =
   | { kind: 'exit' }
   | { kind: 'reset' }
   | { kind: 'help' }
+  | { kind: 'bug' }
+  | { kind: 'feedback' }
   | { kind: 'policy'; mode: PolicyMode }
   | { kind: 'providers' }
   | { kind: 'skills' }
@@ -69,6 +73,10 @@ export function parseSlash(input: string): ParsedSlashCommand {
       return { kind: 'reset' };
     case '/help':
       return { kind: 'help' };
+    case '/bug':
+      return { kind: 'bug' };
+    case '/feedback':
+      return { kind: 'feedback' };
     case '/providers':
       return { kind: 'providers' };
     case '/skills':
