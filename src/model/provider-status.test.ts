@@ -128,6 +128,43 @@ test('provider status reports local auth credentials as managed without leaking 
   });
 });
 
+test('provider status can use the current runtime model as the active provider', async () => {
+  await withEnv({}, async () => {
+    const auth: ProviderAuthStore = {
+      version: 1,
+      activeProvider: 'ollama',
+      providers: {
+        openai: {
+          apiKey: 'sk-session-only',
+          model: 'gpt-session'
+        }
+      }
+    };
+
+    const report = await buildProviderStatusReport({
+      workspace: {},
+      cli: {},
+      auth,
+      currentModel: {
+        provider: 'openai',
+        model: 'gpt-session',
+        baseUrl: 'https://api.openai.com/v1'
+      },
+      discoverOllamaModels: async () => [{ name: 'qwen3:4b' }]
+    });
+
+    assert.equal(report.activeProvider, 'openai');
+    assert.equal(auth.activeProvider, 'ollama');
+    const current = report.providers[0]!;
+    assert.equal(current.provider, 'openai');
+    assert.equal(current.current, true);
+    assert.equal(current.state, 'configured');
+    assert.equal(current.model, 'gpt-session');
+    const ollama = report.providers.find((provider) => provider.provider === 'ollama');
+    assert.equal(ollama?.current, false);
+  });
+});
+
 test('provider status prefers env model settings over local auth', async () => {
   await withEnv(
     {
