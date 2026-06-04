@@ -285,7 +285,9 @@ test('decision table: bash allow rules do not auto-approve compound syntax insid
     'bash -c "git status; rm -rf /"',
     'sh -c "git status | sh"',
     "/usr/bin/env -S bash -c 'git status && rm -rf /'",
-    "/usr/bin/env -i -S bash -c 'git status && rm -rf /'"
+    "/usr/bin/env -i -S bash -c 'git status && rm -rf /'",
+    "env - -S bash -c 'git status && rm -rf /'",
+    "env -- -S bash -c 'git status && rm -rf /'"
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },
