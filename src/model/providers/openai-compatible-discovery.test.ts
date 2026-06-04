@@ -26,6 +26,25 @@ test('discoverOpenAICompatibleModels reads OpenAI-compatible /models responses',
   }
 });
 
+test('discoverOpenAICompatibleModels omits authorization when no API key is provided', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    assert.equal(String(_url), 'http://localhost:4000/v1/models');
+    assert.equal(init?.method, 'GET');
+    assert.equal((init?.headers as Record<string, string> | undefined)?.authorization, undefined);
+    return Response.json({
+      data: [{ id: 'local-coder:latest' }]
+    });
+  });
+
+  try {
+    assert.deepEqual(await discoverOpenAICompatibleModels('http://localhost:4000/v1'), [
+      { id: 'local-coder:latest' }
+    ]);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
 test('discoverOpenAICompatibleModels rejects malformed model list responses clearly', async () => {
   const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ data: null }));
 
