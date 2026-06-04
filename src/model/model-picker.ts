@@ -10,6 +10,7 @@ export type ModelRowLabel =
   | 'Startup default'
   | 'Provider default'
   | 'Catalog'
+  | 'Provider API'
   | 'Local'
   | 'Configured'
   | 'Custom';

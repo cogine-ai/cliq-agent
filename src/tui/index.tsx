@@ -4,7 +4,7 @@ import type { ModelPickerSnapshot } from '../model/model-picker.js';
 import type { ProviderStatusReport } from '../model/provider-status.js';
 import type { PolicyMode } from '../policy/types.js';
 import { App } from './app.js';
-import type { ModelSetupApplyRequest } from './components/model-setup-flow.js';
+import type { ModelSetupApplyRequest, ModelSetupFlowProps } from './components/model-setup-flow.js';
 import type { PendingPlanReview, UiPlanDecision, UiStore } from './store.js';
 
 export type MountTuiOpts = {
@@ -23,6 +23,7 @@ export type MountTuiOpts = {
   onProviderStatus?: () => ProviderStatusReport | Promise<ProviderStatusReport>;
   onModelSetupSnapshot?: () => ModelPickerSnapshot | Promise<ModelPickerSnapshot>;
   onModelSetupApply?: (request: ModelSetupApplyRequest) => void | Promise<void>;
+  onModelSetupDiscoverModels?: ModelSetupFlowProps['onDiscoverModels'];
 };
 
 export type MountedTui = {
@@ -47,6 +48,9 @@ export function mountTui(opts: MountTuiOpts): MountedTui {
       {...(opts.onProviderStatus ? { onProviderStatus: opts.onProviderStatus } : {})}
       {...(opts.onModelSetupSnapshot ? { onModelSetupSnapshot: opts.onModelSetupSnapshot } : {})}
       {...(opts.onModelSetupApply ? { onModelSetupApply: opts.onModelSetupApply } : {})}
+      {...(opts.onModelSetupDiscoverModels
+        ? { onModelSetupDiscoverModels: opts.onModelSetupDiscoverModels }
+        : {})}
     />,
     // Defer Ctrl+C handling to <App> via useKeybindings so we can either
     // cancel the active turn or clear the input buffer per spec A.9.

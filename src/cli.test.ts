@@ -27,6 +27,7 @@ import {
   hydratePlanProgress,
   applyTuiModelSetupSelection,
   buildTuiModelSetupSnapshot,
+  discoverTuiModelSetupModels,
   modelConfigForSetupError,
   resolveModelConfigWithInteractiveSetup,
   ReportedCliError,
@@ -1900,6 +1901,74 @@ test('buildTuiModelSetupSnapshot includes discovered local Ollama models for the
   assert.ok(qwen.labels.includes('Local'));
   assert.ok(other);
   assert.ok(other.labels.includes('Local'));
+});
+
+test('discoverTuiModelSetupModels maps OpenAI-compatible provider models into picker rows', async () => {
+  const rows = await discoverTuiModelSetupModels({
+    provider: 'openai-compatible',
+    baseUrl: 'http://localhost:4000/v1',
+    apiKey: 'sk-local',
+    discoverOpenAICompatibleModels: async (baseUrl, apiKey) => {
+      assert.equal(baseUrl, 'http://localhost:4000/v1');
+      assert.equal(apiKey, 'sk-local');
+      return [{ id: 'local-coder:latest' }, { id: 'qwen3.5:4b' }];
+    }
+  });
+
+  assert.deepEqual(rows, [
+    {
+      kind: 'model',
+      provider: 'openai-compatible',
+      model: 'local-coder:latest',
+      displayName: 'local-coder:latest',
+      labels: ['Provider API']
+    },
+    {
+      kind: 'model',
+      provider: 'openai-compatible',
+      model: 'qwen3.5:4b',
+      displayName: 'qwen3.5:4b',
+      labels: ['Provider API']
+    }
+  ]);
+});
+
+test('discoverTuiModelSetupModels uses configured OpenAI-compatible API keys when draft omits one', async () => {
+  const apiKeys: Array<string | undefined> = [];
+  const discoverOpenAICompatibleModels = async (_baseUrl: string, apiKey?: string) => {
+    apiKeys.push(apiKey);
+    return [{ id: 'local-coder:latest' }];
+  };
+
+  await discoverTuiModelSetupModels({
+    provider: 'openai-compatible',
+    baseUrl: 'http://localhost:4000/v1',
+    auth: {
+      version: 1,
+      providers: {
+        'openai-compatible': { apiKey: 'sk-auth' }
+      }
+    },
+    env: {
+      CLIQ_MODEL_API_KEY: 'sk-env',
+      OPENAI_COMPATIBLE_API_KEY: 'sk-compatible-env'
+    },
+    discoverOpenAICompatibleModels
+  });
+  await discoverTuiModelSetupModels({
+    provider: 'openai-compatible',
+    baseUrl: 'http://localhost:4000/v1',
+    auth: {
+      version: 1,
+      providers: {
+        'openai-compatible': { apiKey: 'sk-auth' }
+      }
+    },
+    env: {},
+    discoverOpenAICompatibleModels
+  });
+
+  assert.deepEqual(apiKeys, ['sk-env', 'sk-auth']);
 });
 
 test('model setup error config preserves configured streaming mode', () => {

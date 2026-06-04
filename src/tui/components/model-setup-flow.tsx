@@ -15,16 +15,23 @@ export type ModelSetupApplyRequest = {
   apiKey?: string;
 };
 
+export type ModelSetupModelDiscoveryRequest = {
+  provider: ProviderName;
+  baseUrl?: string;
+  apiKey?: string;
+};
+
 export type ModelSetupFlowProps = {
   snapshot: ModelPickerSnapshot;
   onApply: (request: ModelSetupApplyRequest) => void | Promise<void>;
+  onDiscoverModels?: (request: ModelSetupModelDiscoveryRequest) => ModelPickerModelRow[] | Promise<ModelPickerModelRow[]>;
   onClose: () => void;
   initialProvider?: ProviderName;
 };
 
 type Step =
   | { kind: 'providers'; selectedIndex: number }
-  | { kind: 'models'; provider: ProviderName; selectedIndex: number; draft?: SetupDraft }
+  | { kind: 'models'; provider: ProviderName; selectedIndex: number; draft?: SetupDraft; discoveredRows?: ModelPickerModelRow[] }
   | { kind: 'custom-model'; provider: ProviderName; value: string; draft?: SetupDraft }
   | { kind: 'secret-confirm'; provider: ProviderName; model: string; draft: SetupDraft }
   | {
@@ -49,6 +56,7 @@ const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
 export function ModelSetupFlow({
   snapshot,
   onApply,
+  onDiscoverModels,
   onClose,
   initialProvider
 }: ModelSetupFlowProps) {
@@ -107,12 +115,17 @@ export function ModelSetupFlow({
       }, async (value) => {
         const model = value.trim();
         if (!model) return;
+        const optionalApiKeyStep = optionalOpenAICompatibleApiKeyStep(step.provider, model, step.draft);
+        if (optionalApiKeyStep) {
+          setStep(optionalApiKeyStep);
+          return;
+        }
         await onApply(buildApplyRequest(step.provider, model, false, step.draft));
       });
       return;
     }
 
-    void handleSetupInput(input, key, step, snapshot, onApply, setStep);
+    void handleSetupInput(input, key, step, snapshot, onApply, setStep, onDiscoverModels);
   });
 
   return (
@@ -123,7 +136,12 @@ export function ModelSetupFlow({
       {step.kind === 'providers' ? (
         <ProviderStep snapshot={snapshot} selectedIndex={step.selectedIndex} />
       ) : step.kind === 'models' ? (
-        <ModelStep snapshot={snapshot} provider={step.provider} selectedIndex={step.selectedIndex} />
+        <ModelStep
+          snapshot={snapshot}
+          provider={step.provider}
+          selectedIndex={step.selectedIndex}
+          discoveredRows={step.discoveredRows}
+        />
       ) : step.kind === 'custom-model' ? (
         <TextInputStep title={`Custom model for ${step.provider}`} value={step.value} secret={false} />
       ) : step.kind === 'secret-confirm' ? (
@@ -184,7 +202,7 @@ async function handleModelInput(
   onApply: (request: ModelSetupApplyRequest) => void | Promise<void>,
   setStep: (step: Step) => void
 ) {
-  const rows = modelRows(snapshot, step.provider);
+  const rows = modelRows(snapshot, step.provider, step.discoveredRows);
   if (key.leftArrow || key.backspace || key.delete) {
     setStep({ kind: 'providers', selectedIndex: providerIndex(snapshot, step.provider) });
     return;
@@ -218,6 +236,11 @@ async function handleModelInput(
     return;
   }
   if (row.kind === 'model' && key.return) {
+    const optionalApiKeyStep = optionalOpenAICompatibleApiKeyStep(row.provider, row.model, step.draft);
+    if (optionalApiKeyStep) {
+      setStep(optionalApiKeyStep);
+      return;
+    }
     await onApply(buildApplyRequest(row.provider, row.model, false, step.draft));
     return;
   }
@@ -229,6 +252,11 @@ async function handleModelInput(
         model: row.model,
         draft: step.draft
       });
+      return;
+    }
+    const optionalApiKeyStep = optionalOpenAICompatibleApiKeyStep(row.provider, row.model, step.draft);
+    if (optionalApiKeyStep) {
+      setStep(optionalApiKeyStep);
       return;
     }
     await onApply(buildApplyRequest(row.provider, row.model, true, step.draft));
@@ -256,7 +284,8 @@ async function handleSetupInput(
   step: Extract<Step, { kind: 'setup-input' }>,
   snapshot: ModelPickerSnapshot,
   onApply: (request: ModelSetupApplyRequest) => void | Promise<void>,
-  setStep: (step: Step) => void
+  setStep: (step: Step) => void,
+  onDiscoverModels: ModelSetupFlowProps['onDiscoverModels']
 ) {
   if (step.field === 'model' && input === ' ') {
     await submitSetupModel(step, true, onApply, setStep);
@@ -292,11 +321,12 @@ async function handleSetupInput(
         }
         const apiKey = step.value.trim();
         if (!apiKey) return;
-        setStep({
-          kind: 'models',
+        await continueToModelsOrModelInput({
+          snapshot,
           provider: step.provider,
-          selectedIndex: 0,
-          draft: mergeDraft(step.draft, { apiKey })
+          draft: mergeDraft(step.draft, { apiKey }),
+          setStep,
+          onDiscoverModels
         });
         return;
       }
@@ -305,11 +335,13 @@ async function handleSetupInput(
         const baseUrl = step.value.trim();
         if (!baseUrl) return;
         const draft = mergeDraft(step.draft, { baseUrl });
-        if (step.provider === 'openai-compatible' || shouldCollectDirectModel(snapshot, step.provider)) {
-          setStep({ kind: 'setup-input', provider: step.provider, field: 'model', value: '', draft });
-          return;
-        }
-        setStep({ kind: 'models', provider: step.provider, selectedIndex: 0, draft });
+        await continueToModelsOrModelInput({
+          snapshot,
+          provider: step.provider,
+          draft,
+          setStep,
+          onDiscoverModels
+        });
         return;
       }
 
@@ -372,6 +404,54 @@ async function handleTextInput(
   onChange(value + printable);
 }
 
+async function continueToModelsOrModelInput(opts: {
+  snapshot: ModelPickerSnapshot;
+  provider: ProviderName;
+  draft: SetupDraft;
+  setStep: (step: Step) => void;
+  onDiscoverModels: ModelSetupFlowProps['onDiscoverModels'];
+}) {
+  const discoveredRows = await discoverModelRows(opts.provider, opts.draft, opts.onDiscoverModels);
+  if (!shouldCollectDirectModel(opts.snapshot, opts.provider) || discoveredRows.length > 0) {
+    opts.setStep({
+      kind: 'models',
+      provider: opts.provider,
+      selectedIndex: 0,
+      draft: opts.draft,
+      ...(discoveredRows.length > 0 ? { discoveredRows } : {})
+    });
+    return;
+  }
+
+  opts.setStep({
+    kind: 'setup-input',
+    provider: opts.provider,
+    field: 'model',
+    value: '',
+    draft: opts.draft
+  });
+}
+
+async function discoverModelRows(
+  provider: ProviderName,
+  draft: SetupDraft,
+  onDiscoverModels: ModelSetupFlowProps['onDiscoverModels']
+) {
+  if (!onDiscoverModels) return [];
+  try {
+    const rows = await onDiscoverModels({
+      provider,
+      ...(draft.baseUrl ? { baseUrl: draft.baseUrl } : {}),
+      ...(draft.apiKey ? { apiKey: draft.apiKey } : {})
+    });
+    return rows.filter(
+      (row) => row.kind === 'model' && row.provider === provider && row.model.trim() !== ''
+    );
+  } catch {
+    return [];
+  }
+}
+
 function ProviderStep({ snapshot, selectedIndex }: { snapshot: ModelPickerSnapshot; selectedIndex: number }) {
   return (
     <Box flexDirection="column" marginTop={1}>
@@ -387,13 +467,15 @@ function ProviderStep({ snapshot, selectedIndex }: { snapshot: ModelPickerSnapsh
 function ModelStep({
   snapshot,
   provider,
-  selectedIndex
+  selectedIndex,
+  discoveredRows
 }: {
   snapshot: ModelPickerSnapshot;
   provider: ProviderName;
   selectedIndex: number;
+  discoveredRows?: ModelPickerModelRow[];
 }) {
-  const rows = modelRows(snapshot, provider);
+  const rows = modelRows(snapshot, provider, discoveredRows);
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text bold>{provider}</Text>
@@ -427,8 +509,44 @@ function SecretConfirmStep({ provider, model }: { provider: ProviderName; model:
   );
 }
 
-function modelRows(snapshot: ModelPickerSnapshot, provider: ProviderName) {
-  return snapshot.modelsByProvider[provider] ?? [];
+function modelRows(
+  snapshot: ModelPickerSnapshot,
+  provider: ProviderName,
+  discoveredRows: ModelPickerModelRow[] | undefined = []
+) {
+  const baseRows = snapshot.modelsByProvider[provider] ?? [];
+  if (discoveredRows.length === 0) return baseRows;
+
+  const rows = new Map<string, ModelPickerModelRow>();
+  let customRow: ModelPickerModelRow | undefined;
+  const addRow = (row: ModelPickerModelRow) => {
+    if (row.kind === 'custom') {
+      customRow = row;
+      return;
+    }
+    const existing = rows.get(row.model);
+    if (existing) {
+      for (const label of row.labels) {
+        if (!existing.labels.includes(label)) existing.labels.push(label);
+      }
+      return;
+    }
+    rows.set(row.model, { ...row, labels: [...row.labels] });
+  };
+
+  for (const row of baseRows) addRow(row);
+  for (const row of discoveredRows) addRow(row);
+
+  return [
+    ...rows.values(),
+    customRow ?? {
+      kind: 'custom',
+      provider,
+      model: '',
+      displayName: 'Custom model id',
+      labels: ['Custom']
+    }
+  ];
 }
 
 function isEditingStep(step: Step) {
@@ -459,6 +577,22 @@ function mergeDraft(current: SetupDraft | undefined, next: SetupDraft): SetupDra
 
 function optionalApiKeyDraft(step: Extract<Step, { kind: 'setup-input' }>) {
   return mergeDraft(step.draft, step.value.trim() ? { apiKey: step.value.trim() } : {});
+}
+
+function optionalOpenAICompatibleApiKeyStep(
+  provider: ProviderName,
+  model: string,
+  draft: SetupDraft | undefined
+): Step | null {
+  if (provider !== 'openai-compatible' || draft?.apiKey) return null;
+  return {
+    kind: 'setup-input',
+    provider,
+    field: 'apiKey',
+    value: '',
+    draft: mergeDraft(draft, { model }),
+    optional: true
+  };
 }
 
 function buildApplyRequest(

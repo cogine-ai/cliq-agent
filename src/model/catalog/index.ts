@@ -180,7 +180,7 @@ export function mapOpenClawProviderToCatalogEntry(record: OpenClawProviderRecord
 
   const setupPrimary =
     record.id === 'openai-compatible'
-      ? ['Set a base URL and model id for the OpenAI-compatible endpoint.']
+      ? ['Set a base URL, then choose a discovered or custom model for the OpenAI-compatible endpoint.']
       : auth.kind === 'none'
       ? ['Run the local provider service before selecting a model.']
       : [`Set ${auth.envVar} or configure an ${record.name ?? record.id} credential.`];
@@ -193,8 +193,8 @@ export function mapOpenClawProviderToCatalogEntry(record: OpenClawProviderRecord
         }
       : record.id === 'openai-compatible'
         ? {
-            kind: 'user-config' as const,
-            description: 'User or workspace configuration supplies the model id.'
+            kind: 'provider-api' as const,
+            description: 'OpenAI-compatible /models discovery when the endpoint supports it.'
           }
         : {
             kind: 'snapshot' as const,

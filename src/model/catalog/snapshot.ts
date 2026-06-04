@@ -65,11 +65,11 @@ export const CATALOG_SNAPSHOT = {
       auth: { kind: 'api-key', envVar: 'CLIQ_MODEL_API_KEY', required: false },
       configSources: ['ENV', 'Workspace', 'Global', 'CLI'],
       setup: {
-        primary: ['Set a base URL and model id for the OpenAI-compatible endpoint.']
+        primary: ['Set a base URL, then choose a discovered or custom model for the OpenAI-compatible endpoint.']
       },
       modelListSource: {
-        kind: 'user-config',
-        description: 'User or workspace configuration supplies the model id.'
+        kind: 'provider-api',
+        description: 'OpenAI-compatible /models discovery when the endpoint supports it.'
       },
       visibleModelLimit: 0,
       source: { kind: 'cliq-overlay', confidence: 'high' }
