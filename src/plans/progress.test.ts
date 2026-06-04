@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -265,6 +265,29 @@ test('readOrSeedReferencedPlanProgress does not seed stale approved plans', asyn
 
   assert.equal(await readOrSeedReferencedPlanProgress(cwd, session, oldDraft.id), null);
   await assert.rejects(() => readPlanProgress(cwd, session, oldDraft.id), /ENOENT|no such file/i);
+});
+
+test('readPlanProgress rejects tampered identity and path fields', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Tampered progress',
+    contentMarkdown: '## Steps\n- One'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+
+  const progressPath = await planProgressPath(cwd, session, draft.id);
+  const raw = JSON.parse(await readFile(progressPath, 'utf8')) as Record<string, unknown>;
+  await writeFile(progressPath, JSON.stringify({ ...raw, planId: 'plan_other' }, null, 2), 'utf8');
+  await assert.rejects(() => readPlanProgress(cwd, session, draft.id), /mismatched plan progress/);
+
+  const pathRaw = JSON.parse(await readFile(progressPath, 'utf8')) as Record<string, unknown>;
+  await writeFile(
+    progressPath,
+    JSON.stringify({ ...pathRaw, planId: draft.id, paths: { json: path.join(path.dirname(progressPath), 'evil.json') } }, null, 2),
+    'utf8'
+  );
+  await assert.rejects(() => readPlanProgress(cwd, session, draft.id), /plan progress path mismatch/);
 });
 
 test('updatePlanProgress rejects stale plan ids and multiple in-progress items', async () => {

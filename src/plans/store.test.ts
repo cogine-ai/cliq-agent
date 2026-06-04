@@ -191,6 +191,21 @@ test('readPlanArtifact rejects non-active arbitrary ids through update/finalize 
   assert.equal(loaded.id, draft.id);
 });
 
+test('approvePlan rejects non-approval policy modes as target mode', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Invalid approval mode',
+    contentMarkdown: '## Plan'
+  });
+  await finalizePlan(cwd, session, { planId: draft.id });
+
+  await assert.rejects(
+    () => approvePlan(cwd, session, { planId: draft.id, targetMode: 'plan' as never }),
+    /plan approval target mode must be default, accept-edits, or yolo/
+  );
+  assert.equal(session.approvedPlanId, undefined);
+});
+
 test('readPlanArtifact rejects tampered identity and path fields', async () => {
   const idScope = await tempScope();
   const idDraft = await createDraftPlan(idScope.cwd, idScope.session, {

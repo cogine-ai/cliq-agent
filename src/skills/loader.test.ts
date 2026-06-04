@@ -1,10 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { activateSkill, discoverSkillCatalog, loadSkills, mergeSkillNames, parseSkillMarkdown } from './loader.js';
+import {
+  activateSkill,
+  discoverSkillCatalog,
+  formatSkillCatalog,
+  loadSkills,
+  mergeSkillNames,
+  parseSkillMarkdown,
+  refreshActiveSkill
+} from './loader.js';
+import type { ActiveSkill } from './types.js';
 import { createSession } from '../session/store.js';
 
 const NO_BUILTINS = { builtinRoot: null };
@@ -465,6 +474,97 @@ test('loadSkills can require project-owned skills for workspace defaultSkills', 
   } finally {
     await rm(cwd, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('formatSkillCatalog marks active skills and lists scope/status metadata', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-format-catalog-'));
+  try {
+    await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer');
+    const catalog = await discoverSkillCatalog(cwd, NO_BUILTINS);
+    const session = createSession(cwd);
+    await activateSkill(cwd, session, 'reviewer', { catalog, activatedBy: 'cli' });
+
+    const formatted = formatSkillCatalog(catalog, session.activeSkills ?? []);
+    assert.match(formatted, /^Skills:/);
+    assert.match(formatted, /\* reviewer \[project\/available\]/);
+
+    const inactive = formatSkillCatalog(catalog, []);
+    assert.match(inactive, / reviewer \[project\/available\]/);
+    assert.doesNotMatch(inactive, /^\* reviewer/m);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('refreshActiveSkill returns updated prompt content and diagnostics', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-refresh-'));
+  try {
+    await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer', 'Original prompt.');
+    const [loaded] = await loadSkills(cwd, ['reviewer'], { discovery: NO_BUILTINS });
+    const active: ActiveSkill = {
+      ...loaded!,
+      activatedBy: 'model',
+      activatedAt: new Date().toISOString()
+    };
+
+    await writeFile(
+      loaded!.skillFile,
+      `---
+name: reviewer
+description: reviewer: use focused instructions
+---
+
+Updated prompt.`,
+      'utf8'
+    );
+
+    const refreshed = await refreshActiveSkill(active);
+    assert.match(refreshed.skill?.prompt ?? '', /Updated prompt/);
+    assert.equal(refreshed.diagnostics.some((item) => item.level === 'error'), false);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('refreshActiveSkill returns null when the skill file is missing or name mismatches', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-refresh-failure-'));
+  try {
+    await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer');
+    const [loaded] = await loadSkills(cwd, ['reviewer'], { discovery: NO_BUILTINS });
+    const active: ActiveSkill = {
+      ...loaded!,
+      activatedBy: 'model',
+      activatedAt: new Date().toISOString()
+    };
+
+    await rm(loaded!.skillFile);
+    const missing = await refreshActiveSkill(active);
+    assert.equal(missing.skill, null);
+    assert.equal(missing.diagnostics.some((item) => item.code === 'active-skill-unavailable'), true);
+
+    await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer');
+    const [reloaded] = await loadSkills(cwd, ['reviewer'], { discovery: NO_BUILTINS });
+    const mismatchedActive: ActiveSkill = {
+      ...reloaded!,
+      activatedBy: 'model',
+      activatedAt: new Date().toISOString()
+    };
+    await writeFile(
+      reloaded!.skillFile,
+      `---
+name: other
+description: mismatched
+---
+
+Prompt.`,
+      'utf8'
+    );
+    const mismatched = await refreshActiveSkill(mismatchedActive);
+    assert.equal(mismatched.skill, null);
+    assert.equal(mismatched.diagnostics.some((item) => item.code === 'name-mismatch'), true);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
   }
 });
 
