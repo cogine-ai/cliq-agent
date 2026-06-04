@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-04
+
+This release completes the provider-first model configuration slice and hardens
+Plan progress state after the v0.12 Plan Mode rollout.
+
+### Added
+
+- **Provider/model catalog** with checked-in provider and model metadata,
+  dynamic local Ollama metadata inspection, and a development-only
+  `npm run catalog:update` snapshot generator (#54).
+- **Provider management surfaces** in the TUI and CLI, including `/providers`,
+  `cliq providers status`, `cliq providers list`, `cliq providers validate`,
+  and `cliq providers auth set` for local provider credential setup (#52).
+- **Provider-first model setup and picker** through `/model` and `/models`,
+  with current-session model selection, explicit startup-default saving, custom
+  model entry, and startup setup when no usable provider/model is configured
+  (#49).
+- Documentation for provider management, model catalog ownership, local auth
+  persistence, and updated non-interactive `cliq run` examples.
+
+### Changed
+
+- The TUI now keeps provider/model selection reachable from slash commands and
+  provider detail actions, while keeping headless and one-shot commands
+  non-interactive.
+- The composer/status layout and empty transcript frame received additional
+  polish after the v0.12.1 status-bar patch.
+- Removed stale transaction launch-gate docs and orphan `CLIQ_TX_*`
+  compatibility exports that no longer match current transaction policy
+  behavior.
+
+### Fixed
+
+- Plan instruction reads no longer reset execution progress, and fresh plan
+  approval progress seeding is scoped to the current approval only.
+- Provider setup preserves session-only auth choices, compatible defaults,
+  streaming settings, TUI API-key persistence, and slash-completion argument
+  spacing.
+- Added regression coverage for plan items, progress guards, policy modes,
+  permission grammar, provider status, model setup, provider credentials, and
+  catalog metadata.
+
 ## [0.12.1] - 2026-05-29
 
 This patch release polishes the TUI status layout for the Plan Mode release.
@@ -283,7 +325,10 @@ payload-aware approvals, and a steady stream of TUI polish.
   [GitHub Releases](https://github.com/cogine-ai/cliq-agent/releases); this
   file starts with v0.9.0.
 
-[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.12.1...v0.13.0
+[0.12.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.12.0...v0.12.1
+[0.12.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.2...v0.12.0
 [0.11.2]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.10.0...v0.11.0
