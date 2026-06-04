@@ -98,6 +98,29 @@ test('bash tool with bashPolicy=passthrough preserves non-zero exit code in Bash
   }
 });
 
+test('bash tool with bashPolicy=confirm in interactive mode records BashEffect', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-bash-confirm-'));
+  try {
+    const recorded: BashEffect[] = [];
+    const ctx = makeCtx(dir, {
+      tx: {
+        mode: 'edit',
+        bashPolicy: 'confirm',
+        txId: 'tx_confirm',
+        headless: false,
+        recordBashEffect: async (eff: BashEffect) => {
+          recorded.push(eff);
+        }
+      }
+    });
+    const result = await bashTool.execute({ bash: 'echo confirmed' }, ctx);
+    assert.equal(result.status, 'ok');
+    assert.equal(recorded.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('bash tool with bashPolicy=confirm + headless promotes to deny', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-bash-confirm-headless-'));
   try {
