@@ -190,3 +190,21 @@ test('buildTxApplyApprovalSubject copies transaction review fields', () => {
     artifactRef: 'tx/tx_apply/'
   });
 });
+
+test('buildToolApprovalSubject maps todo actions to plan-progress channels', () => {
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'todo', access: 'plan' },
+    action: {
+      todo: {
+        planId: 'plan_123',
+        items: [{ id: 'item_1', title: 'Inspect', status: 'pending', activeForm: 'Inspecting' }]
+      }
+    }
+  });
+
+  if (subject.kind === 'tool') {
+    assert.deepEqual(subject.channel, { kind: 'plan-progress', planId: 'plan_123' });
+  } else {
+    assert.fail('expected tool subject');
+  }
+});
