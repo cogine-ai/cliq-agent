@@ -324,7 +324,9 @@ test('provider status reports structured missing requirements for OpenAI-compati
 
       const setup = buildProviderSetupSummary(report, 'openai-compatible');
       assert.equal(setup.provider, 'openai-compatible');
-      assert.deepEqual(setup.instructions, ['Set a base URL and model id for the OpenAI-compatible endpoint.']);
+      assert.deepEqual(setup.instructions, [
+        'Set a base URL, then choose a discovered or custom model for the OpenAI-compatible endpoint.'
+      ]);
       assert.equal(setup.credentialPersistence.mode, 'local-auth-file');
 
       const validation = validateProviderStatus(report, 'openai-compatible');

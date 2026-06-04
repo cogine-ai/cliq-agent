@@ -27,6 +27,7 @@ import {
 import { createModelClient } from './model/index.js';
 import {
   buildModelPickerSnapshot,
+  type ModelPickerModelRow,
   type ModelPickerSnapshot
 } from './model/model-picker.js';
 import {
@@ -35,6 +36,10 @@ import {
   validateProviderStatus
 } from './model/provider-status.js';
 import { discoverOllamaModels as defaultDiscoverOllamaModels, type OllamaModelSummary } from './model/providers/ollama-discovery.js';
+import {
+  discoverOpenAICompatibleModels as defaultDiscoverOpenAICompatibleModels,
+  type OpenAICompatibleModelSummary
+} from './model/providers/openai-compatible-discovery.js';
 import { getModelProvider, isProviderName } from './model/registry.js';
 import type { ModelClient, ProviderName, ResolvedModelConfig, StreamingMode } from './model/types.js';
 import type { ProviderAuthStore } from './model/auth-store.js';
@@ -2828,7 +2833,8 @@ export async function runCli(argv: string[]) {
               auth: applied.auth,
               modelConfig: applied.modelConfig
             };
-          }
+          },
+          onDiscoverModels: (request) => discoverTuiModelSetupModelsWithAuth(request, auth)
         });
       }
     });
@@ -3179,6 +3185,69 @@ export async function buildTuiModelSetupSnapshot(opts: {
     env: opts.env,
     ollamaModels
   });
+}
+
+export async function discoverTuiModelSetupModels(opts: {
+  provider: ProviderName;
+  baseUrl?: string;
+  apiKey?: string;
+  auth?: ProviderAuthStore;
+  env?: Record<string, string | undefined>;
+  discoverOpenAICompatibleModels?: (
+    baseUrl: string,
+    apiKey?: string
+  ) => Promise<OpenAICompatibleModelSummary[]>;
+}): Promise<ModelPickerModelRow[]> {
+  if (opts.provider !== 'openai-compatible' || !opts.baseUrl) {
+    return [];
+  }
+
+  const discoverOpenAICompatibleModels =
+    opts.discoverOpenAICompatibleModels ?? defaultDiscoverOpenAICompatibleModels;
+  const models = await discoverOpenAICompatibleModels(
+    opts.baseUrl,
+    openAICompatibleDiscoveryApiKey({
+      requestApiKey: opts.apiKey,
+      auth: opts.auth,
+      env: opts.env ?? process.env
+    })
+  );
+  return models.map((model) => ({
+    kind: 'model' as const,
+    provider: 'openai-compatible' as const,
+    model: model.id,
+    displayName: model.id,
+    labels: ['Provider API' as const]
+  }));
+}
+
+function discoverTuiModelSetupModelsWithAuth(
+  request: {
+    provider: ProviderName;
+    baseUrl?: string;
+    apiKey?: string;
+  },
+  auth: ProviderAuthStore,
+  env: Record<string, string | undefined> = process.env
+) {
+  return discoverTuiModelSetupModels({
+    ...request,
+    auth,
+    env
+  });
+}
+
+function openAICompatibleDiscoveryApiKey(opts: {
+  requestApiKey?: string;
+  auth?: ProviderAuthStore;
+  env: Record<string, string | undefined>;
+}) {
+  return firstNonEmpty(
+    opts.requestApiKey,
+    opts.env.CLIQ_MODEL_API_KEY,
+    opts.env.OPENAI_COMPATIBLE_API_KEY,
+    getProviderAuthEntry(opts.auth, 'openai-compatible')?.apiKey
+  );
 }
 
 function firstNonEmpty(...values: Array<string | undefined | null>): string | undefined {
@@ -3617,6 +3686,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
         cliModel: opts.cliModel,
         auth: currentAuth
       }),
+    onModelSetupDiscoverModels: (request) => discoverTuiModelSetupModelsWithAuth(request, currentAuth),
     onModelSetupApply: async (request) => {
       const applied = await applyTuiModelSetupSelection({
         request,

@@ -4,7 +4,11 @@ import { formatModelSetupMessage, type ModelSetupRequiredError } from '../model/
 import type { ModelPickerSnapshot } from '../model/model-picker.js';
 import type { ProviderAuthStore } from '../model/auth-store.js';
 import type { ResolvedModelConfig } from '../model/types.js';
-import { ModelSetupFlow, type ModelSetupApplyRequest } from './components/model-setup-flow.js';
+import {
+  ModelSetupFlow,
+  type ModelSetupApplyRequest,
+  type ModelSetupFlowProps
+} from './components/model-setup-flow.js';
 
 export type ProviderSetupProps = {
   error: ModelSetupRequiredError;
@@ -17,6 +21,7 @@ export type ProviderSetupResult =
 export type ProviderSetupInteractiveOptions = {
   snapshot: ModelPickerSnapshot;
   onApply: (request: ModelSetupApplyRequest) => ProviderSetupResult | Promise<ProviderSetupResult>;
+  onDiscoverModels?: ModelSetupFlowProps['onDiscoverModels'];
 };
 
 export function ProviderSetup({ error }: ProviderSetupProps) {
@@ -68,6 +73,7 @@ export async function mountProviderSetupAndWait(
           close();
         }
       }}
+      onDiscoverModels={options.onDiscoverModels}
       onClose={close}
       initialProvider={error.provider}
     />,

@@ -159,7 +159,7 @@ test('OpenClaw provider rows map to CLIQ provider catalog entries', () => {
   );
 });
 
-test('OpenAI-compatible OpenClaw rows use user-config model list semantics', () => {
+test('OpenAI-compatible OpenClaw rows use provider API model list semantics', () => {
   assert.deepEqual(
     mapOpenClawProviderToCatalogEntry({
       id: 'openai-compatible',
@@ -186,12 +186,12 @@ test('OpenAI-compatible OpenClaw rows use user-config model list semantics', () 
       },
       configSources: ['ENV', 'Workspace', 'Global', 'CLI'],
       setup: {
-        primary: ['Set a base URL and model id for the OpenAI-compatible endpoint.'],
+        primary: ['Set a base URL, then choose a discovered or custom model for the OpenAI-compatible endpoint.'],
         docsUrl: '/providers/openai-compatible'
       },
       modelListSource: {
-        kind: 'user-config',
-        description: 'User or workspace configuration supplies the model id.'
+        kind: 'provider-api',
+        description: 'OpenAI-compatible /models discovery when the endpoint supports it.'
       },
       visibleModelLimit: 0,
       source: {

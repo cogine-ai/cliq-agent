@@ -7,7 +7,11 @@ import type { ProviderName } from '../model/types.js';
 import type { PolicyMode } from '../policy/types.js';
 import { ApprovalModal } from './components/approval-modal.js';
 import { InputBar } from './components/input-bar.js';
-import { ModelSetupFlow, type ModelSetupApplyRequest } from './components/model-setup-flow.js';
+import {
+  ModelSetupFlow,
+  type ModelSetupApplyRequest,
+  type ModelSetupFlowProps
+} from './components/model-setup-flow.js';
 import { PlanProgressView } from './components/plan-progress.js';
 import { PlanReviewModal } from './components/plan-review-modal.js';
 import { ProviderManagement } from './components/provider-management.js';
@@ -47,6 +51,7 @@ export type AppProps = {
   onProviderStatus?: () => ProviderStatusReport | Promise<ProviderStatusReport>;
   onModelSetupSnapshot?: () => ModelPickerSnapshot | Promise<ModelPickerSnapshot>;
   onModelSetupApply?: (request: ModelSetupApplyRequest) => void | Promise<void>;
+  onModelSetupDiscoverModels?: ModelSetupFlowProps['onDiscoverModels'];
 };
 
 export function App({
@@ -61,7 +66,8 @@ export function App({
   onSkillActivate,
   onProviderStatus,
   onModelSetupSnapshot,
-  onModelSetupApply
+  onModelSetupApply,
+  onModelSetupDiscoverModels
 }: AppProps) {
   const state = useUiStore(store);
   const [input, setInput] = useState('');
@@ -433,6 +439,7 @@ export function App({
           onApply={(request) => {
             void handleModelSetupApply(request);
           }}
+          onDiscoverModels={onModelSetupDiscoverModels}
           onClose={closeModelSetup}
           {...(modelSetup.initialProvider ? { initialProvider: modelSetup.initialProvider } : {})}
         />

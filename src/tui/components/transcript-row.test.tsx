@@ -39,7 +39,48 @@ test('renders a tool entry without a summary (running, no preview yet)', () => {
   assert.doesNotMatch(frame, /—/); // no detail separator without a summary
 });
 
-test('renders bash body folded to 20 lines with a "more lines" marker', () => {
+test('renders short tool output folded to one line', () => {
+  const lines = Array.from({ length: 6 }, (_, i) => `line-${i + 1}`).join('\n');
+  const { lastFrame } = render(
+    <TranscriptRow
+      entry={{
+        kind: 'tool',
+        id: 't1',
+        tool: 'ls',
+        status: 'ok',
+        summary: 'src',
+        body: lines
+      }}
+    />
+  );
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /line-1\b/);
+  assert.doesNotMatch(frame, /line-2\b/);
+  assert.match(frame, /5 more lines/);
+});
+
+test('renders medium tool output folded to two lines', () => {
+  const lines = Array.from({ length: 12 }, (_, i) => `line-${i + 1}`).join('\n');
+  const { lastFrame } = render(
+    <TranscriptRow
+      entry={{
+        kind: 'tool',
+        id: 't1',
+        tool: 'grep',
+        status: 'ok',
+        summary: 'pattern in src',
+        body: lines
+      }}
+    />
+  );
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /line-1\b/);
+  assert.match(frame, /line-2\b/);
+  assert.doesNotMatch(frame, /line-3\b/);
+  assert.match(frame, /10 more lines/);
+});
+
+test('renders long tool output folded to at most four lines', () => {
   const lines = Array.from({ length: 25 }, (_, i) => `line-${i + 1}`).join('\n');
   const { lastFrame } = render(
     <TranscriptRow
@@ -55,20 +96,23 @@ test('renders bash body folded to 20 lines with a "more lines" marker', () => {
   );
   const frame = lastFrame() ?? '';
   assert.match(frame, /line-1\b/);
-  assert.match(frame, /line-20\b/);
-  assert.doesNotMatch(frame, /line-21\b/);
-  assert.match(frame, /5 more lines/);
+  assert.match(frame, /line-4\b/);
+  assert.doesNotMatch(frame, /line-5\b/);
+  assert.match(frame, /21 more lines/);
 });
 
 test('a trailing newline in bash body does not inflate the "more lines" count', () => {
-  // 5 real lines plus a trailing newline — the fold should report 0 more.
+  // 5 real lines plus a trailing newline — the fold should report 4 more,
+  // not count the trailing newline as a sixth row.
   const body = ['a', 'b', 'c', 'd', 'e'].join('\n') + '\n';
   const { lastFrame } = render(
     <TranscriptRow
       entry={{ kind: 'tool', id: 't1', tool: 'bash', status: 'ok', summary: 'cmd', body }}
     />
   );
-  assert.doesNotMatch(lastFrame() ?? '', /more line/);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /4 more lines/);
+  assert.doesNotMatch(frame, /5 more lines/);
 });
 
 test('renders the full bash body when entry.expanded is true', () => {

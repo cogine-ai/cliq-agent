@@ -174,9 +174,10 @@ Provider management:
   `${CLIQ_HOME:-~/.cliq}/auth.json` through the existing auth-store path. TUI
   secret input is masked and only persists after an explicit save action; direct
   session use does not write the auth file.
-- OpenAI-compatible setup supports a base URL, a direct model id, and an
-  optional API key. Workspace config persistence, global-default layers, remote
-  dynamic provider model lists, and Ollama model pulling are outside this slice.
+- OpenAI-compatible setup supports a base URL, `/models` discovery when the
+  endpoint exposes it, direct custom model entry, and an optional API key.
+  Workspace config persistence, global-default layers, broader remote dynamic
+  provider model lists, and Ollama model pulling are outside this slice.
 
 More design boundaries live in [`docs/provider-management.md`](docs/provider-management.md).
 

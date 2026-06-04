@@ -322,3 +322,73 @@ test('model setup flow configures OpenAI-compatible base URL, direct model id, a
     }
   ]);
 });
+
+test('model setup flow discovers selectable models after OpenAI-compatible base URL entry', async () => {
+  const snapshot = makeSnapshot({
+    selectedProvider: 'openai-compatible',
+    providers: [
+      {
+        provider: 'openai-compatible',
+        displayName: 'OpenAI-compatible',
+        state: 'not-configured',
+        stateLabel: 'Not configured',
+        current: true,
+        issues: ['base URL', 'model']
+      }
+    ],
+    modelsByProvider: { 'openai-compatible': [] }
+  });
+  const discovered: Array<{ provider: string; baseUrl?: string; apiKey?: string }> = [];
+  const applied: ModelSetupApplyRequest[] = [];
+  const { stdin, lastFrame } = render(
+    <ModelSetupFlow
+      snapshot={snapshot}
+      onApply={(request) => {
+        applied.push(request);
+      }}
+      onDiscoverModels={async (request) => {
+        discovered.push(request);
+        return [
+          {
+            kind: 'model',
+            provider: 'openai-compatible',
+            model: 'local-coder:latest',
+            displayName: 'local-coder:latest',
+            labels: ['Provider API']
+          }
+        ];
+      }}
+      onClose={() => {}}
+    />
+  );
+
+  await flush();
+  stdin.write('\r');
+  await flush();
+  stdin.write('http://localhost:4000/v1');
+  await flush();
+  stdin.write('\r');
+  await flush();
+
+  assert.deepEqual(discovered, [{ provider: 'openai-compatible', baseUrl: 'http://localhost:4000/v1' }]);
+  assert.match(lastFrame() ?? '', /local-coder:latest/);
+  assert.doesNotMatch(lastFrame() ?? '', /Enter openai-compatible model id/);
+
+  stdin.write('\r');
+  await flush();
+
+  assert.deepEqual(applied, []);
+  assert.match(lastFrame() ?? '', /optional API key/i);
+
+  stdin.write('\r');
+  await flush();
+
+  assert.deepEqual(applied, [
+    {
+      provider: 'openai-compatible',
+      baseUrl: 'http://localhost:4000/v1',
+      model: 'local-coder:latest',
+      persist: false
+    }
+  ]);
+});
