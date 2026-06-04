@@ -33,8 +33,16 @@ test('bottom status bar renders cwd and technical details without model, session
   assert.doesNotMatch(frame, /! YOLO/);
   assert.doesNotMatch(frame, / · yolo · /);
   assert.doesNotMatch(frame, /ses_a1b2c3/);
-  assert.match(frame, /repo/);
+  assert.match(frame, /\/tmp\/repo/);
   assert.match(frame, /tx idle/);
+});
+
+test('bottom status bar preserves the full cwd instead of only the basename', () => {
+  const cwd = '/Users/kiedis/Coding/AI/cliq-agent';
+  const { lastFrame } = render(<BottomStatusBar state={init({ session: { id: 'ses_x', cwd } })} />);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /\/Users\/kiedis\/Coding\/AI\/cliq-agent/);
+  assert.doesNotMatch(frame, /(^| · )\/cliq-agent( · |$)/);
 });
 
 test('shows a red error indicator when errors are present', () => {
@@ -64,15 +72,23 @@ test('renders the active tx state when state.tx is set', () => {
 test('renders the session token estimate when sessionTokens is non-null', () => {
   // Just over the 1k boundary to exercise the k-suffix formatter.
   const { lastFrame } = render(<BottomStatusBar state={init({ sessionTokens: 12345 })} />);
-  assert.match(lastFrame() ?? '', /12\.3k tok/);
+  assert.match(lastFrame() ?? '', /session 12\.3k tok/);
 
   // Below 1k stays as raw integer.
   const small = render(<BottomStatusBar state={init({ sessionTokens: 850 })} />);
-  assert.match(small.lastFrame() ?? '', /850 tok/);
+  assert.match(small.lastFrame() ?? '', /session 850 tok/);
 
   // null hides the segment entirely.
   const none = render(<BottomStatusBar state={init({ sessionTokens: null })} />);
   assert.doesNotMatch(none.lastFrame() ?? '', /tok/);
+});
+
+test('keeps the session token estimate visible when cwd is long', () => {
+  const cwd = '/Users/kiedis/Coding/AI/some/deeply/nested/workspace/with/a/very/long/project/name/that/exceeds/terminal/width';
+  const { lastFrame } = render(<BottomStatusBar state={init({ session: { id: 'ses_x', cwd }, sessionTokens: 12345 })} />);
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /session 12\.3k tok/);
+  assert.match(frame, /\/Users\/kiedis\/Coding\/AI/);
 });
 
 test('renders update notice when a newer version is available', () => {
