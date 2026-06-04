@@ -3,7 +3,8 @@ import { Box, Text } from 'ink';
 import type { TranscriptEntry } from '../store.js';
 
 const TOOL_GLYPH = { running: '▸', ok: '✓', error: '✗' } as const;
-const FOLDED_BODY_LINES = 20;
+const TOOL_BODY_FOLD_BUCKET = 8;
+const MAX_FOLDED_BODY_LINES = 4;
 
 export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
   switch (entry.kind) {
@@ -27,14 +28,16 @@ export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
       const color = entry.status === 'error' ? 'red' : entry.status === 'ok' ? 'green' : 'yellow';
       return (
         <Box flexDirection="column">
-          <Box>
+          <Box width="100%" overflow="hidden">
             <Text color={color}>{glyph} </Text>
             <Text dimColor>tool: </Text>
             <Text>{entry.tool}</Text>
             {entry.summary ? (
               <>
                 <Text dimColor>{' — '}</Text>
-                <Text dimColor>{entry.summary}</Text>
+                <Text dimColor wrap="truncate">
+                  {entry.summary}
+                </Text>
               </>
             ) : null}
           </Box>
@@ -61,15 +64,16 @@ function ToolBody({ body, expanded }: { body: string; expanded: boolean }) {
   // Bash output usually ends with a trailing newline; without trimming it the
   // split produces a phantom empty line that inflates the "N more lines" count
   // and renders a blank row when expanded.
-  const lines = body.replace(/\n$/, '').split('\n');
-  const visible = expanded ? lines : lines.slice(0, FOLDED_BODY_LINES);
+  const lines = body.replace(/\n+$/, '').split('\n');
+  const visibleLimit = expanded ? lines.length : foldedBodyLineLimit(lines.length);
+  const visible = lines.slice(0, visibleLimit);
   const remaining = lines.length - visible.length;
   return (
-    <Box flexDirection="column" marginLeft={2}>
+    <Box flexDirection="column" marginLeft={2} overflow="hidden">
       {visible.map((line, idx) => (
         // Body lines are indexed by position (no entry.id needed beyond row).
         // eslint-disable-next-line react/no-array-index-key
-        <Text key={idx} dimColor>
+        <Text key={idx} dimColor wrap="truncate">
           {line}
         </Text>
       ))}
@@ -80,4 +84,9 @@ function ToolBody({ body, expanded }: { body: string; expanded: boolean }) {
       ) : null}
     </Box>
   );
+}
+
+function foldedBodyLineLimit(totalLines: number): number {
+  if (totalLines <= 1) return totalLines;
+  return Math.min(MAX_FOLDED_BODY_LINES, Math.max(1, Math.ceil(totalLines / TOOL_BODY_FOLD_BUCKET)));
 }

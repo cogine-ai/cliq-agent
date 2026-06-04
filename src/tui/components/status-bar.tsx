@@ -17,11 +17,8 @@ export function TopStatusBar({ hint = null }: { hint?: string | null }) {
 
 export function BottomStatusBar({ state }: { state: UiState }) {
   const txStatus = formatTxStatus(state.tx);
-  const cwdLabel = `/${path.basename(state.session.cwd)}`;
-  const tokensLabel = state.sessionTokens !== null ? `${formatTokens(state.sessionTokens)} tok` : null;
-  const detailLabel = [cwdLabel, txStatus, tokensLabel]
-    .filter((part): part is string => part !== null)
-    .join(' · ');
+  const cwdLabel = formatCwdLabel(state.session.cwd);
+  const tokensLabel = state.sessionTokens !== null ? `session ${formatTokens(state.sessionTokens)} tok` : null;
   const hasError = state.errors.length > 0;
 
   return (
@@ -31,17 +28,27 @@ export function BottomStatusBar({ state }: { state: UiState }) {
           <Text color="red">● </Text>
         </Box>
       ) : null}
-      <Box flexShrink={1} overflow="hidden">
+      <Box flexShrink={1} minWidth={0} overflow="hidden">
         <Text dimColor wrap="truncate">
-          {detailLabel}
+          {cwdLabel}
         </Text>
       </Box>
+      <StatusSegment label={txStatus} />
+      {tokensLabel ? <StatusSegment label={tokensLabel} /> : null}
       {state.versionUpdate ? (
         <Box flexShrink={0} marginLeft={1}>
           <Text dimColor>{'· '}</Text>
           <Text color="yellow">{`update ${state.versionUpdate.latest}`}</Text>
         </Box>
       ) : null}
+    </Box>
+  );
+}
+
+function StatusSegment({ label }: { label: string }) {
+  return (
+    <Box flexShrink={0} marginLeft={1}>
+      <Text dimColor>{`· ${label}`}</Text>
     </Box>
   );
 }
@@ -55,6 +62,11 @@ function shortTxId(id: string): string {
   // tx_abc123def... → tx_abc123 for compactness in the status bar
   if (id.length <= 9) return id;
   return id.slice(0, 9);
+}
+
+function formatCwdLabel(cwd: string): string {
+  const resolved = path.resolve(cwd);
+  return resolved === path.parse(resolved).root ? resolved : resolved.replace(/\/+$/, '');
 }
 
 function formatTokens(tokens: number): string {
