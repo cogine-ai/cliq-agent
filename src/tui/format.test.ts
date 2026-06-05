@@ -15,6 +15,7 @@ test('toolNameFromAction maps each ModelAction variant to its registry name', ()
   assert.equal(toolNameFromAction({ ls: { path: '.' } }), 'ls');
   assert.equal(toolNameFromAction({ find: { name: '*.ts' } }), 'find');
   assert.equal(toolNameFromAction({ grep: { pattern: 'foo' } }), 'grep');
+  assert.equal(toolNameFromAction({ mcp: { server: 'context7', tool: 'search' } }), 'mcp');
   assert.equal(toolNameFromAction({ plan: { op: 'draft', title: 'T', content: '## Plan' } }), 'plan');
 });
 
@@ -35,6 +36,7 @@ test('previewFromAction shows the most useful field per action kind', () => {
   assert.equal(previewFromAction({ find: { name: '*.ts', path: 'src' } }), '*.ts in src');
   assert.equal(previewFromAction({ grep: { pattern: 'foo' } }), 'foo');
   assert.equal(previewFromAction({ grep: { pattern: 'foo', path: 'src' } }), 'foo in src');
+  assert.equal(previewFromAction({ mcp: { server: 'context7', tool: 'search' } }), 'context7/search');
   assert.equal(previewFromAction({ plan: { op: 'finalize', planId: 'plan_1' } }), 'finalize plan_1');
 });
 

@@ -109,6 +109,28 @@ test('buildToolApprovalSubject creates fallback display detail for other tools',
   }
 });
 
+test('buildToolApprovalSubject derives mcp channel from the action call target', () => {
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'mcp', access: 'exec' },
+    action: {
+      mcp: {
+        server: 'context7',
+        tool: 'search',
+        arguments: { query: 'approval subject' }
+      }
+    }
+  });
+
+  assert.equal(subject.kind, 'tool');
+  assert.equal(subject.display.title, 'Allow MCP tool?');
+  assert.equal(subject.display.server, 'context7');
+  assert.equal(subject.display.tool, 'search');
+  assert.equal(subject.display.detail, '{"mcp":{"server":"context7","tool":"search","arguments":{"query":"approval subject"}}}');
+  if (subject.kind === 'tool') {
+    assert.deepEqual(subject.channel, { kind: 'mcp', server: 'context7', tool: 'search' });
+  }
+});
+
 test('buildToolApprovalSubject derives fs-read channel for read/ls/find with omitted path', () => {
   const ls = buildToolApprovalSubject({
     definition: { name: 'ls', access: 'read' },

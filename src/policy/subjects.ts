@@ -72,6 +72,10 @@ function deriveChannel(
     };
   }
 
+  if ('mcp' in action) {
+    return { kind: 'mcp', server: action.mcp.server, tool: action.mcp.tool };
+  }
+
   const readPath = extractReadPath(action);
   if (readPath !== undefined) {
     return { kind: 'fs-read', path: readPath };
@@ -139,6 +143,15 @@ function buildToolDisplay(
   if ('todo' in action) {
     return {
       title: 'Update plan progress?',
+      detail: formatFallbackDetail(action)
+    };
+  }
+
+  if ('mcp' in action) {
+    return {
+      title: 'Allow MCP tool?',
+      server: action.mcp.server,
+      tool: action.mcp.tool,
       detail: formatFallbackDetail(action)
     };
   }

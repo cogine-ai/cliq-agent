@@ -13,14 +13,13 @@ export type ToolAccess = 'read' | 'write' | 'exec' | 'plan';
  * the existing PolicyMode preset relies on, while `channel` is the surface that
  * allow/deny/ask rules match against.
  *
- * Channels are open-ended on purpose so we can land MCP and network later
- * without re-shaping the subject type.
+ * Channels are open-ended on purpose so we can land MCP and network runtime
+ * execution later without re-shaping the subject type.
  *
- * TODO(no-issue: MCP runtime): `mcp` channel is wired through the type system
- * but no MCP server runtime exists in tree as of #62-A. When MCP lands, build
- * subjects with `channel: { kind: 'mcp', server, tool }` from the MCP call
- * site and register default deny rules for unknown servers in
- * `src/policy/decision-table.ts` BUILTIN_DENY.
+ * MCP action subjects are derivable from the model action shape, but no MCP
+ * server runtime exists in tree yet. Do not add broad unknown-server deny
+ * rules to BUILTIN_DENY until the runtime defines a stable server identifier
+ * convention.
  *
  * TODO(#63): `network` channel only records the model's stated intent here.
  * Real enforcement (DNS allowlist, egress firewall, sandbox netns) is the
@@ -66,6 +65,8 @@ export type ApprovalSubject =
         detail?: string;
         path?: string;
         command?: string;
+        server?: string;
+        tool?: string;
       };
       tx?: {
         enabled: boolean;

@@ -37,6 +37,20 @@ const txSubject: Extract<ApprovalSubject, { kind: 'tx-apply' }> = {
   artifactRef: 'tx_123'
 };
 
+const mcpSubject: Extract<ApprovalSubject, { kind: 'tool' }> = {
+  kind: 'tool',
+  toolName: 'mcp',
+  access: 'exec',
+  channel: { kind: 'mcp', server: 'context7', tool: 'search' },
+  action: { mcp: { server: 'context7', tool: 'search', arguments: { query: 'typescript' } } } as never,
+  display: {
+    title: 'Allow MCP tool?',
+    server: 'context7',
+    tool: 'search',
+    detail: '{"mcp":{"server":"context7","tool":"search","arguments":{"query":"typescript"}}}'
+  }
+};
+
 test('renders the tool subject with command, access, and policy', () => {
   const { lastFrame } = render(
     <ApprovalModal subject={toolSubject} policy="accept-edits" onDecide={() => {}} />
@@ -48,6 +62,18 @@ test('renders the tool subject with command, access, and policy', () => {
   assert.match(frame, /command: rm -rf \//);
   assert.match(frame, /policy: accept-edits/);
   assert.match(frame, /\[a\]llow this turn/);
+});
+
+test('renders an MCP tool subject with server and tool target before approval', () => {
+  const { lastFrame } = render(
+    <ApprovalModal subject={mcpSubject} policy="default" onDecide={() => {}} />
+  );
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /Allow MCP tool\?/);
+  assert.match(frame, /tool: mcp/);
+  assert.match(frame, /server: context7/);
+  assert.match(frame, /mcp tool: search/);
+  assert.match(frame, /policy: default/);
 });
 
 test('renders the tx-apply subject with diff, validators, and blocking failures', () => {

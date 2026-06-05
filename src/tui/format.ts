@@ -20,6 +20,7 @@ export function toolNameFromAction(action: ModelAction): string {
   if ('grep' in action) return 'grep';
   if ('skill' in action) return 'skill';
   if ('skillResource' in action) return 'skillResource';
+  if ('mcp' in action) return 'mcp';
   if ('plan' in action) return 'plan';
   if ('todo' in action) return 'todo';
   if ('message' in action) return 'message';
@@ -53,6 +54,7 @@ export function previewFromAction(action: ModelAction): string {
     const r = action.skillResource;
     return `${r.skill}:${r.path ?? '.'}`;
   }
+  if ('mcp' in action) return `${action.mcp.server}/${action.mcp.tool}`;
   if ('plan' in action) {
     const id = 'planId' in action.plan ? action.plan.planId : undefined;
     return id ? `${action.plan.op} ${id}` : action.plan.op;
