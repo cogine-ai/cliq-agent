@@ -38,3 +38,36 @@ test('discoverOpenAICompatibleModels rejects malformed model list responses clea
     fetchMock.mock.restore();
   }
 });
+
+test('discoverOpenAICompatibleModels filters invalid model entries and omits auth without a key', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    assert.equal(init?.method, 'GET');
+    assert.equal((init?.headers as Record<string, string> | undefined)?.authorization, undefined);
+    return Response.json({
+      data: [
+        { id: 'valid-model' },
+        { id: '' },
+        { id: '   ' },
+        { owned_by: 'local' },
+        null,
+        'not-an-object'
+      ]
+    });
+  });
+
+  try {
+    assert.deepEqual(await discoverOpenAICompatibleModels('http://localhost:4000/v1'), [{ id: 'valid-model' }]);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('discoverOpenAICompatibleModels returns an empty list when the endpoint reports no models', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ data: [] }));
+
+  try {
+    assert.deepEqual(await discoverOpenAICompatibleModels('http://localhost:4000/v1', 'sk-local'), []);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
