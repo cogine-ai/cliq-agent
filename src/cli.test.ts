@@ -1964,11 +1964,25 @@ test('discoverTuiModelSetupModels uses configured OpenAI-compatible API keys whe
         'openai-compatible': { apiKey: 'sk-auth' }
       }
     },
+    env: {
+      OPENAI_COMPATIBLE_API_KEY: 'sk-compatible-env'
+    },
+    discoverOpenAICompatibleModels
+  });
+  await discoverTuiModelSetupModels({
+    provider: 'openai-compatible',
+    baseUrl: 'http://localhost:4000/v1',
+    auth: {
+      version: 1,
+      providers: {
+        'openai-compatible': { apiKey: 'sk-auth' }
+      }
+    },
     env: {},
     discoverOpenAICompatibleModels
   });
 
-  assert.deepEqual(apiKeys, ['sk-env', 'sk-auth']);
+  assert.deepEqual(apiKeys, ['sk-env', 'sk-compatible-env', 'sk-auth']);
 });
 
 test('model setup error config preserves configured streaming mode', () => {
