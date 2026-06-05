@@ -83,6 +83,21 @@ function runBashChild(action: { bash: string }, context: ToolContext): Promise<T
 export const bashTool: ToolDefinition<{ bash: string }> = {
   name: 'bash',
   access: 'exec',
+  modelSpec: {
+    name: 'bash',
+    description: 'Run a shell command in the workspace.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Shell command to execute with bash -lc.' }
+      },
+      required: ['command'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return { bash: typeof input.command === 'string' ? input.command : '' };
+    }
+  },
   supports(action): action is { bash: string } {
     return typeof (action as { bash?: unknown }).bash === 'string';
   },

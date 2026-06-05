@@ -14,6 +14,20 @@ export type ChatMessage = {
   content: string;
 };
 
+export type JsonSchema = {
+  type?: string | string[];
+  description?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  additionalProperties?: boolean | JsonSchema;
+  items?: JsonSchema;
+  enum?: unknown[];
+  oneOf?: JsonSchema[];
+  anyOf?: JsonSchema[];
+  const?: unknown;
+  [key: string]: unknown;
+};
+
 export type ModelCapabilities = {
   input: ModelModality[];
   output: ModelModality[];
@@ -44,6 +58,9 @@ export type ModelCompletion = {
   content: string;
   provider: ProviderName;
   model: string;
+  toolCalls?: ModelToolCall[];
+  structuredOutput?: ModelStructuredOutput;
+  effectiveRequest?: EffectiveModelRequest;
 };
 
 export type ModelStreamEvent =
@@ -57,6 +74,99 @@ export type ModelCompleteOptions = {
   signal?: AbortSignal;
 };
 
+export type ModelToolSpec = {
+  name: string;
+  description: string;
+  inputSchema: JsonSchema;
+};
+
+export type ModelToolCall = {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+};
+
+export type ModelStructuredOutput =
+  | {
+      type: 'final';
+      message: string;
+    }
+  | {
+      type: 'tool';
+      tool: string;
+      arguments: Record<string, unknown>;
+      callId?: string;
+    };
+
+export type ModelPromptInputItem =
+  | {
+      kind: 'message';
+      role: ChatMessage['role'];
+      content: string;
+      toolCalls?: ModelToolCall[];
+    }
+  | {
+      kind: 'tool_result';
+      toolName: string;
+      status: 'ok' | 'error';
+      content: string;
+      callId?: string;
+      meta?: Record<string, string | number | boolean | null>;
+    };
+
+export type ModelBaseInstructions = {
+  messages: ChatMessage[];
+  text: string;
+};
+
+export type ModelOutputSchema = {
+  name: string;
+  schema: JsonSchema;
+  strict: boolean;
+};
+
+export type ModelProviderCapabilities = {
+  nativeToolCalling: boolean;
+  structuredOutput: boolean;
+  streaming: boolean;
+};
+
+export type TextActionFallback = {
+  mode: 'disabled' | 'bounded';
+  maxAttempts: number;
+  reason?: string;
+};
+
+export type ModelRequestMode = 'legacy-chat' | 'native-tools' | 'structured-output' | 'text-action';
+
+export type EffectiveModelRequest = {
+  provider: ProviderName;
+  model: string;
+  mode: ModelRequestMode;
+  streaming: boolean;
+  baseInstructionChars: number;
+  inputItemCount: number;
+  toolNames: string[];
+  outputSchema?: string;
+  textActionFallback?: TextActionFallback;
+};
+
+export type ModelPromptRequest = {
+  kind: 'model-prompt-request';
+  model: ResolvedModelConfig;
+  baseInstructions: ModelBaseInstructions;
+  input: ModelPromptInputItem[];
+  toolSpecs: ModelToolSpec[];
+  outputSchema: ModelOutputSchema;
+  providerCapabilities: ModelProviderCapabilities;
+  streaming: {
+    mode: StreamingMode;
+  };
+  textActionFallback: TextActionFallback;
+};
+
+export type ModelCompleteRequest = ChatMessage[] | ModelPromptRequest;
+
 export type ModelClient = {
-  complete(messages: ChatMessage[], options?: ModelCompleteOptions): Promise<ModelCompletion>;
+  complete(request: ModelCompleteRequest, options?: ModelCompleteOptions): Promise<ModelCompletion>;
 };

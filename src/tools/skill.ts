@@ -5,6 +5,25 @@ import type { ToolDefinition, ToolResult } from './types.js';
 export const skillTool: ToolDefinition<{ skill: SkillAction }> = {
   name: 'skill',
   access: 'read',
+  modelSpec: {
+    name: 'skill',
+    description: 'Activate a discovered Cliq skill for specialized instructions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Skill name to activate.' }
+      },
+      required: ['name'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return {
+        skill: {
+          name: typeof input.name === 'string' ? input.name : ''
+        }
+      };
+    }
+  },
   supports(action): action is { skill: SkillAction } {
     return typeof (action as { skill?: unknown }).skill === 'object' && !!(action as { skill?: unknown }).skill;
   },

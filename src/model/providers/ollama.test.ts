@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test, { mock } from 'node:test';
 
+import type { ModelCapabilities, ResolvedModelConfig } from '../types.js';
+import { buildModelPromptRequest } from '../prompt.js';
+import { createToolRegistry } from '../../tools/registry.js';
 import { createOllamaClient } from './ollama.js';
 
 async function expectModelCancellation(promise: Promise<unknown>) {
@@ -13,6 +16,31 @@ async function expectModelCancellation(promise: Promise<unknown>) {
     ]),
     /Model request cancelled/
   );
+}
+
+const ollamaConfig: ResolvedModelConfig = {
+  provider: 'ollama',
+  model: 'qwen3:14b',
+  baseUrl: 'http://localhost:11434',
+  streaming: 'auto'
+};
+
+const ollamaWeakCapabilities: ModelCapabilities = {
+  input: ['text'],
+  output: ['text'],
+  streaming: true,
+  reasoning: false,
+  toolCalling: false
+};
+
+function ollamaPrompt() {
+  return buildModelPromptRequest({
+    modelConfig: ollamaConfig,
+    modelCapabilities: ollamaWeakCapabilities,
+    instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+    input: [{ kind: 'message', role: 'user', content: 'hello' }],
+    registry: createToolRegistry()
+  });
 }
 
 test('ollama client sends native chat request', async () => {
@@ -37,6 +65,30 @@ test('ollama client sends native chat request', async () => {
       provider: 'ollama',
       model: 'qwen3:14b'
     });
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('ollama typed prompt uses structured format before weak-model text-action fallback', async () => {
+  const seen: { body?: Record<string, unknown> } = {};
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    seen.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response('{"message":{"content":"{\\"type\\":\\"final\\",\\"message\\":\\"ok\\"}"}}\n');
+  });
+
+  try {
+    const client = createOllamaClient(ollamaConfig);
+    const result = await client.complete(ollamaPrompt());
+
+    const messages = seen.body?.messages as Array<{ role: string; content: string }>;
+    assert.equal(seen.body?.stream, true);
+    assert.equal((seen.body?.format as { type?: string }).type, 'object');
+    assert.equal(messages.some((message) => message.content.includes('STRUCTURED TOOL SCHEMA MODE') && message.content.includes('bash')), true);
+    assert.deepEqual(result.structuredOutput, { type: 'final', message: 'ok' });
+    assert.equal(result.effectiveRequest?.mode, 'structured-output');
+    assert.equal(result.effectiveRequest?.streaming, true);
+    assert.equal(result.effectiveRequest?.textActionFallback?.maxAttempts, 2);
   } finally {
     fetchMock.mock.restore();
   }

@@ -5,6 +5,29 @@ import { resolveWorkspacePath, WORKSPACE_PATH_ERROR } from './path.js';
 export const editTool: ToolDefinition<EditModelAction> = {
   name: 'edit',
   access: 'write',
+  modelSpec: {
+    name: 'edit',
+    description: 'Replace one exact text span in a workspace file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative file path.' },
+        old_text: { type: 'string', description: 'Exact text to replace. Must match once.' },
+        new_text: { type: 'string', description: 'Replacement text.' }
+      },
+      required: ['path', 'old_text', 'new_text'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return {
+        edit: {
+          path: typeof input.path === 'string' ? input.path : '',
+          old_text: typeof input.old_text === 'string' ? input.old_text : '',
+          new_text: typeof input.new_text === 'string' ? input.new_text : ''
+        }
+      };
+    }
+  },
   supports(action): action is EditModelAction {
     return typeof (action as { edit?: unknown }).edit === 'object' && !!(action as { edit?: unknown }).edit;
   },

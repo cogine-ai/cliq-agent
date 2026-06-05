@@ -6,6 +6,36 @@ import type { ToolDefinition, ToolResult } from './types.js';
 export const todoTool: ToolDefinition<{ todo: TodoAction }> = {
   name: 'todo',
   access: 'plan',
+  modelSpec: {
+    name: 'todo',
+    description: 'Update progress items for an approved plan.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        planId: { type: 'string' },
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              title: { type: 'string' },
+              status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+              activeForm: { type: 'string' },
+              notes: { type: 'string' }
+            },
+            required: ['title', 'status', 'activeForm'],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ['items'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return { todo: input as unknown as TodoAction };
+    }
+  },
   supports(action): action is { todo: TodoAction } {
     return isTodoAction((action as { todo?: unknown }).todo);
   },

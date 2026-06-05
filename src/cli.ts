@@ -124,6 +124,24 @@ type HelpTopic = (typeof HELP_TOPICS)[number];
 type TxMode = (typeof TX_MODES)[number];
 type TxApplyPolicy = (typeof TX_APPLY_POLICIES)[number];
 
+function sessionModelFromConfig(config: ResolvedModelConfig): Session['model'] {
+  return {
+    provider: config.provider,
+    model: config.model,
+    baseUrl: config.baseUrl,
+    streaming: config.streaming
+  };
+}
+
+async function persistSessionModelConfig(cwd: string, session: Session, config: ResolvedModelConfig) {
+  session.model = sessionModelFromConfig(config);
+  await saveSession(cwd, session);
+}
+
+function applySessionModelConfig(session: Session, config: ResolvedModelConfig) {
+  session.model = sessionModelFromConfig(config);
+}
+
 type ParsedArgsBase = {
   policy: PolicyMode;
   // True when the user explicitly set --policy, --preset, or CLIQ_POLICY_MODE;
@@ -2851,11 +2869,7 @@ export async function runCli(argv: string[]) {
     throw error;
   }
   const modelClient = createModelClient(modelConfig);
-  session.model = {
-    provider: modelConfig.provider,
-    model: modelConfig.model,
-    baseUrl: modelConfig.baseUrl
-  };
+  await persistSessionModelConfig(cwd, session, modelConfig);
 
   // §A.6: build CoordinatorContext, run crash recovery before constructing the
   // interactive runner so own-session orphans converge and cross-session
@@ -3006,11 +3020,7 @@ export async function runCli(argv: string[]) {
     if (input === '/reset') {
       const fresh = await ensureFresh(session.cwd);
       Object.assign(session, fresh);
-      session.model = {
-        provider: modelConfig.provider,
-        model: modelConfig.model,
-        baseUrl: modelConfig.baseUrl
-      };
+      await persistSessionModelConfig(session.cwd, session, modelConfig);
       console.log('session reset');
       rl.prompt();
       continue;
@@ -3625,11 +3635,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
     onReset: async () => {
       const fresh = await ensureFresh(session.cwd);
       Object.assign(session, fresh);
-      session.model = {
-        provider: currentModelConfig.provider,
-        model: currentModelConfig.model,
-        baseUrl: currentModelConfig.baseUrl
-      };
+      await persistSessionModelConfig(session.cwd, session, currentModelConfig);
     },
     onPolicyChange: async (mode) => {
       livePolicy.setMode(mode);
@@ -3700,11 +3706,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       currentModelConfig = applied.modelConfig;
       currentModelClient = applied.modelClient;
       runner = buildTuiRunner(currentModelClient, currentModelConfig);
-      session.model = {
-        provider: currentModelConfig.provider,
-        model: currentModelConfig.model,
-        baseUrl: currentModelConfig.baseUrl
-      };
+      applySessionModelConfig(session, currentModelConfig);
       store.dispatch({
         type: 'model-change',
         model: {

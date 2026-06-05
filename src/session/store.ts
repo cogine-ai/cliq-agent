@@ -306,14 +306,15 @@ function isSessionModelLike(value: unknown): value is string | SessionModelRef {
     return true;
   }
 
-  const model = value as { provider?: unknown; model?: unknown; baseUrl?: unknown };
+  const model = value as { provider?: unknown; model?: unknown; baseUrl?: unknown; streaming?: unknown };
   return (
     !!value &&
     typeof value === 'object' &&
     typeof model.provider === 'string' &&
     isProviderName(model.provider) &&
     typeof model.model === 'string' &&
-    (model.baseUrl === undefined || typeof model.baseUrl === 'string')
+    (model.baseUrl === undefined || typeof model.baseUrl === 'string') &&
+    (model.streaming === undefined || model.streaming === 'auto' || model.streaming === 'on' || model.streaming === 'off')
   );
 }
 

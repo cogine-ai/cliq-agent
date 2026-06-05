@@ -8,6 +8,29 @@ import { resolveWorkspacePath } from './path.js';
 export const readTool: ToolDefinition<{ read: ReadAction }> = {
   name: 'read',
   access: 'read',
+  modelSpec: {
+    name: 'read',
+    description: 'Read a line range from a workspace file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative file path.' },
+        start_line: { type: 'number', description: '1-based first line to include.' },
+        end_line: { type: 'number', description: '1-based final line to include.' }
+      },
+      required: ['path'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return {
+        read: {
+          path: typeof input.path === 'string' ? input.path : '',
+          ...(typeof input.start_line === 'number' ? { start_line: input.start_line } : {}),
+          ...(typeof input.end_line === 'number' ? { end_line: input.end_line } : {})
+        }
+      };
+    }
+  },
   supports(action): action is { read: ReadAction } {
     return typeof (action as { read?: unknown }).read === 'object' && !!(action as { read?: unknown }).read;
   },

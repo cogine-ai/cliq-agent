@@ -1,5 +1,5 @@
 import type { InstructionMessage } from '../instructions/types.js';
-import type { ChatMessage } from '../model/types.js';
+import type { ChatMessage, ModelPromptInputItem } from '../model/types.js';
 import type { CompactionArtifact, Session, SessionRecord } from '../session/types.js';
 
 function recordToMessage(record: SessionRecord): ChatMessage {
@@ -18,6 +18,33 @@ function activeCompaction(session: Session): CompactionArtifact | null {
 
 function compactionSummaryMessage(artifact: CompactionArtifact): ChatMessage {
   return {
+    role: 'system',
+    content: `COMPACTED SESSION SUMMARY\n${artifact.summaryMarkdown}`
+  };
+}
+
+function recordToPromptInput(record: SessionRecord): ModelPromptInputItem {
+  if (record.kind === 'tool') {
+    return {
+      kind: 'tool_result',
+      toolName: record.tool,
+      status: record.status,
+      content: record.content,
+      ...(typeof record.meta?.modelToolCallId === 'string' ? { callId: record.meta.modelToolCallId } : {}),
+      ...(record.meta ? { meta: record.meta } : {})
+    };
+  }
+  return {
+    kind: 'message',
+    role: record.role,
+    content: record.content,
+    ...(record.kind === 'assistant' && record.toolCalls ? { toolCalls: record.toolCalls } : {})
+  };
+}
+
+function compactionSummaryInput(artifact: CompactionArtifact): ModelPromptInputItem {
+  return {
+    kind: 'message',
     role: 'system',
     content: `COMPACTED SESSION SUMMARY\n${artifact.summaryMarkdown}`
   };
@@ -42,5 +69,17 @@ export function buildContextMessages(session: Session, instructions: Instruction
     ...head,
     compactionSummaryMessage(artifact),
     ...tailRecords(session, artifact).map(recordToMessage)
+  ];
+}
+
+export function buildPromptInput(session: Session): ModelPromptInputItem[] {
+  const artifact = activeCompaction(session);
+  if (!artifact) {
+    return session.records.map(recordToPromptInput);
+  }
+
+  return [
+    compactionSummaryInput(artifact),
+    ...tailRecords(session, artifact).map(recordToPromptInput)
   ];
 }

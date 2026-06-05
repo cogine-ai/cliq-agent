@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test, { mock } from 'node:test';
 
+import type { ModelCapabilities, ResolvedModelConfig } from '../types.js';
+import { buildModelPromptRequest } from '../prompt.js';
+import { createToolRegistry } from '../../tools/registry.js';
 import { createAnthropicClient } from './anthropic.js';
 
 async function expectModelCancellation(promise: Promise<unknown>) {
@@ -14,6 +17,22 @@ async function expectModelCancellation(promise: Promise<unknown>) {
     /Model request cancelled/
   );
 }
+
+const typedAnthropicConfig: ResolvedModelConfig = {
+  provider: 'anthropic',
+  model: 'claude-sonnet-4-20250514',
+  baseUrl: 'https://api.anthropic.com',
+  apiKey: 'anthropic-key',
+  streaming: 'off'
+};
+
+const typedAnthropicCapabilities: ModelCapabilities = {
+  input: ['text'],
+  output: ['text'],
+  streaming: true,
+  reasoning: false,
+  toolCalling: true
+};
 
 test('anthropic client sends messages request', async () => {
   const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -47,6 +66,54 @@ test('anthropic client sends messages request', async () => {
     assert.equal(result.provider, 'anthropic');
     assert.equal(result.model, 'claude-sonnet-4-20250514');
     assert.deepEqual(events, []);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('anthropic typed prompt serializes native tool history as content blocks', async () => {
+  const seen: { body?: Record<string, unknown> } = {};
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    seen.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({ content: [{ type: 'text', text: '{"type":"final","message":"ok"}' }] });
+  });
+
+  try {
+    const prompt = buildModelPromptRequest({
+      modelConfig: typedAnthropicConfig,
+      modelCapabilities: typedAnthropicCapabilities,
+      instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+      input: [
+        {
+          kind: 'message',
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call_1', name: 'bash', arguments: { command: 'pwd' } }]
+        },
+        {
+          kind: 'tool_result',
+          toolName: 'bash',
+          status: 'ok',
+          content: 'TOOL_RESULT bash OK\n/Users/example',
+          callId: 'call_1'
+        }
+      ],
+      registry: createToolRegistry()
+    });
+    const client = createAnthropicClient(typedAnthropicConfig);
+    const result = await client.complete(prompt);
+
+    const messages = seen.body?.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    assert.equal((seen.body?.tools as Array<{ name: string }>)[0]?.name, 'bash');
+    assert.deepEqual(messages[0], {
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'call_1', name: 'bash', input: { command: 'pwd' } }]
+    });
+    assert.deepEqual(messages[1], {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'TOOL_RESULT bash OK\n/Users/example' }]
+    });
+    assert.equal(result.effectiveRequest?.mode, 'native-tools');
   } finally {
     fetchMock.mock.restore();
   }

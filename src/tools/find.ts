@@ -59,6 +59,27 @@ async function collectMatches(
 export const findTool: ToolDefinition<{ find: FindAction }> = {
   name: 'find',
   access: 'read',
+  modelSpec: {
+    name: 'find',
+    description: 'Find workspace entries whose names contain a substring.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative root path. Defaults to the workspace root.' },
+        name: { type: 'string', description: 'Filename substring to search for.' }
+      },
+      required: ['name'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return {
+        find: {
+          ...(typeof input.path === 'string' ? { path: input.path } : {}),
+          name: typeof input.name === 'string' ? input.name : ''
+        }
+      };
+    }
+  },
   supports(action): action is { find: FindAction } {
     return typeof (action as { find?: unknown }).find === 'object' && !!(action as { find?: unknown }).find;
   },

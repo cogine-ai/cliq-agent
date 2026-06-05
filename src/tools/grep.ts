@@ -77,6 +77,27 @@ async function collectGrepMatches(
 export const grepTool: ToolDefinition<{ grep: GrepAction }> = {
   name: 'grep',
   access: 'read',
+  modelSpec: {
+    name: 'grep',
+    description: 'Search text files under a workspace path for a literal substring.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative file or directory. Defaults to the workspace root.' },
+        pattern: { type: 'string', description: 'Literal substring to search for.' }
+      },
+      required: ['pattern'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return {
+        grep: {
+          ...(typeof input.path === 'string' ? { path: input.path } : {}),
+          pattern: typeof input.pattern === 'string' ? input.pattern : ''
+        }
+      };
+    }
+  },
   supports(action): action is { grep: GrepAction } {
     return typeof (action as { grep?: unknown }).grep === 'object' && !!(action as { grep?: unknown }).grep;
   },
