@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-06-05
+
+This patch release improves OpenAI-compatible model setup and TUI status output
+after the v0.13.0 provider-first rollout.
+
+### Added
+
+- **OpenAI-compatible `/models` discovery** during TUI provider setup, merging
+  discovered rows into the model picker while preserving direct custom model
+  entry (#296).
+- Regression coverage for OpenAI-compatible discovery without an API key and
+  API-key fallback order across request input, environment, and saved provider
+  auth (#297).
+
+### Changed
+
+- OpenAI-compatible setup now offers optional API-key entry after selecting a
+  discovered or custom model when no key has already been supplied (#296).
+- The TUI bottom status bar now keeps the current working directory separate
+  from fixed tx and token segments, improving truncation and scanability (#296).
+- Documentation now describes OpenAI-compatible `/models` discovery alongside
+  direct custom model entry and optional API keys (#296).
+
 ## [0.13.0] - 2026-06-04
 
 This release completes the provider-first model configuration slice and hardens
@@ -325,7 +348,8 @@ payload-aware approvals, and a steady stream of TUI polish.
   [GitHub Releases](https://github.com/cogine-ai/cliq-agent/releases); this
   file starts with v0.9.0.
 
-[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.11.2...v0.12.0
