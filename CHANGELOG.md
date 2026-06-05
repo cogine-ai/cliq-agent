@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **PermissionRequest hook scopes** — Interactive TUI runs now honor hook
+  `permissionDecision.scope` values of `session` and `workspace` through the
+  same `extendApprovalScope` path as the approval modal. Headless and
+  one-shot paths still coerce those scopes to `once` and never write
+  `permissions.json` (#62).
+
 ## [0.13.1] - 2026-06-05
 
 This patch release improves OpenAI-compatible model setup and TUI status output

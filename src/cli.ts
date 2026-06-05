@@ -3577,6 +3577,21 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       // The modal owns 'ask' resolution; runner.confirm is only invoked if the
       // wrapped engine ever returns 'ask' (it shouldn't), so this is a defense.
       confirm: async () => false,
+      extendHookAllow: async (subject, scope) => {
+        const result = await extendApprovalScope(
+          opts.trustContext,
+          opts.permissionTable,
+          subject,
+          scope
+        );
+        if (result.ok) {
+          livePolicy.rebuildForExtendedAllow();
+        }
+        return result;
+      },
+      onExtendHookAllowFailure: ({ scope, reason }) => {
+        process.stderr.write(`cliq: could not extend hook approval to ${scope}: ${reason}\n`);
+      },
       instructions: opts.assembly.instructions,
       autoCompact: {
         config: opts.assembly.workspaceConfig.autoCompact,

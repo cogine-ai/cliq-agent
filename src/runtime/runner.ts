@@ -7,8 +7,9 @@ import { resolveModelMetadata } from '../model/catalog/index.js';
 import type { ChatMessage, ModelClient, ModelCompletion, ResolvedModelConfig } from '../model/types.js';
 import { readPlanArtifact, readPlanProgress } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
+import type { ExtendApprovalScopeResult } from '../policy/approval-scope.js';
 import { buildToolApprovalSubject } from '../policy/subjects.js';
-import type { ApprovalDecision, PolicyConfirm } from '../policy/types.js';
+import type { ApprovalDecision, ApprovalSubject, PolicyConfirm } from '../policy/types.js';
 import { parseModelAction } from '../protocol/model/actions.js';
 import { resolveAutoCompactConfig, type AutoCompactConfig } from '../session/auto-compact-config.js';
 import { maybeAutoCompact, type AutoCompactState } from '../session/auto-compaction.js';
@@ -56,6 +57,16 @@ function isAbortError(error: unknown) {
   );
 }
 
+export type ExtendHookAllowFn = (
+  subject: ApprovalSubject,
+  scope: 'session' | 'workspace'
+) => Promise<ExtendApprovalScopeResult>;
+
+export type ExtendHookAllowFailure = {
+  scope: 'session' | 'workspace';
+  reason: string;
+};
+
 export function createRunner({
   model,
   registry = createToolRegistry(),
@@ -67,7 +78,9 @@ export function createRunner({
   autoCompact,
   signal: defaultSignal,
   transactions,
-  confirm
+  confirm,
+  extendHookAllow,
+  onExtendHookAllowFailure
 }: {
   model: ModelClient;
   registry?: ReturnType<typeof createToolRegistry>;
@@ -80,6 +93,14 @@ export function createRunner({
   autoCompact?: AutoCompactRunnerOptions;
   signal?: AbortSignal;
   transactions?: TxRunnerOptions;
+  /**
+   * When set (interactive TUI), PermissionRequest hooks may return
+   * `permissionDecision.scope` of `session` or `workspace` to extend the
+   * composed permission table the same way the approval modal does.
+   * Headless / one-shot callers omit this so hook scopes degrade to `once`.
+   */
+  extendHookAllow?: ExtendHookAllowFn;
+  onExtendHookAllowFailure?: (failure: ExtendHookAllowFailure) => void;
 }) {
   if (transactions) {
     assertHeadlessCompatible(transactions);
@@ -140,13 +161,13 @@ export function createRunner({
       }
       const permissionDecision = run.result.output?.permissionDecision;
       if (permissionDecision?.behavior === 'allow') {
-        // Coerce scope: missing/unknown → 'once'. Per #62-A, only 'once'
-        // has runtime effect today; 'session' and 'workspace' are accepted
-        // from the hook (so authors can start emitting them) but treated
-        // as 'once' until the session/workspace allowlist persistence
-        // surface ships in #62-B.
-        const _scope = coerceHookPermissionScope(permissionDecision.scope);
-        void _scope; // TODO(#62-B): plumb scope into the session/workspace allowlist
+        const scope = coerceHookPermissionScope(permissionDecision.scope);
+        if (scope !== 'once' && extendHookAllow && input.approvalSubject) {
+          const result = await extendHookAllow(input.approvalSubject, scope);
+          if (!result.ok) {
+            onExtendHookAllowFailure?.({ scope, reason: result.reason });
+          }
+        }
         return {
           behavior: 'allow',
           reason: permissionDecision.message,
@@ -175,10 +196,7 @@ export function createRunner({
    * Normalize a hook-provided scope value. Missing → 'once'. Unknown /
    * non-string values are also coerced to 'once' rather than rejected so a
    * forward-compatible hook (emitting e.g. 'forever') gracefully degrades to
-   * one-shot on older runners.
-   *
-   * TODO(#62-B): when the session/workspace allowlist surface lands, change
-   * the return type to a richer enum that the runner actually acts on.
+   * one-shot when `extendHookAllow` is not wired (headless / one-shot paths).
    */
   function coerceHookPermissionScope(value: unknown): 'once' | 'session' | 'workspace' {
     if (value === 'session' || value === 'workspace') return value;

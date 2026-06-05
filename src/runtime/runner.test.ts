@@ -1248,12 +1248,10 @@ test('runner lets PermissionRequest command hooks allow policy asks without user
 });
 
 test('PermissionRequest hook allow with explicit scope is accepted (forward compat)', async () => {
-  // v0 only acts on 'once'; 'session' and 'workspace' are accepted from the
-  // hook so authors can start emitting them, but treated as 'once' by the
-  // runner until #62-B lands. The hook must still complete the turn cleanly.
-  // Non-string scope values are also exercised here (regression pin for
-  // PR #71 nitpick) to lock in coerceHookPermissionScope's "unknown/non-string
-  // → 'once'" guarantee.
+  // Without extendHookAllow, session/workspace scopes still allow the current
+  // tool once. Non-string scope values are also exercised here (regression pin
+  // for PR #71 nitpick) to lock in coerceHookPermissionScope's
+  // "unknown/non-string → 'once'" guarantee.
   const session = await createTempSession();
   let calls = 0;
   let executed = false;
@@ -1312,6 +1310,59 @@ test('PermissionRequest hook allow with explicit scope is accepted (forward comp
     await runner.runTurn(session, 'show cwd');
     assert.equal(executed, true, `executed for scope=${scope ?? 'missing'}`);
   }
+});
+
+test('PermissionRequest hook session/workspace scope calls extendHookAllow when wired', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+  let executed = false;
+  const extendedScopes: Array<'session' | 'workspace'> = [];
+  const cmd = await writeHookScript(
+    session.cwd,
+    'allow-session-scope.js',
+    `process.stdout.write(JSON.stringify({ permissionDecision: { behavior: 'allow', message: 'ok', scope: 'session' } }));`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'accept-edits' }),
+    confirm: async () => false,
+    extendHookAllow: async (_subject, scope) => {
+      extendedScopes.push(scope);
+      return { ok: true };
+    },
+    commandHooks: {
+      PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: cmd }] }]
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executed = true;
+              return { tool: 'bash', status: 'ok' as const, content: 'TOOL_RESULT bash OK', meta: {} };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'show cwd');
+
+  assert.equal(executed, true);
+  assert.deepEqual(extendedScopes, ['session']);
 });
 
 test('runner lets PermissionRequest command hooks deny policy asks', async () => {
