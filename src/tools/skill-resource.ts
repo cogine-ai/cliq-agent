@@ -85,6 +85,29 @@ async function readResource(skill: ActiveSkill, inputPath: string) {
 export const skillResourceTool: ToolDefinition<{ skillResource: SkillResourceAction }> = {
   name: 'skillResource',
   access: 'read',
+  modelSpec: {
+    name: 'skillResource',
+    description: 'Read or list a resource file from an already-active skill.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        skill: { type: 'string', description: 'Active skill name.' },
+        path: { type: 'string', description: 'Skill-relative file or directory path.' },
+        mode: { type: 'string', enum: ['read', 'list'], description: 'Read a file or list a directory.' }
+      },
+      required: ['skill'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return {
+        skillResource: {
+          skill: typeof input.skill === 'string' ? input.skill : '',
+          ...(typeof input.path === 'string' ? { path: input.path } : {}),
+          ...(input.mode === 'read' || input.mode === 'list' ? { mode: input.mode } : {})
+        }
+      };
+    }
+  },
   supports(action): action is { skillResource: SkillResourceAction } {
     return (
       typeof (action as { skillResource?: unknown }).skillResource === 'object' &&

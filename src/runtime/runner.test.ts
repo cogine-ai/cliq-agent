@@ -23,6 +23,29 @@ function completion(content: string) {
   };
 }
 
+function requestMessages(request: unknown): Array<{ role: string; content: string }> {
+  if (Array.isArray(request)) {
+    return request as Array<{ role: string; content: string }>;
+  }
+  const typed = request as {
+    baseInstructions?: { messages?: Array<{ role: string; content: string }> };
+    input?: Array<{ kind: string; role?: string; content: string }>;
+  };
+  return [
+    ...(typed.baseInstructions?.messages ?? []),
+    ...(typed.input ?? []).map((item) => ({
+      role: item.kind === 'tool_result' ? 'user' : (item.role ?? 'user'),
+      content: item.content
+    }))
+  ];
+}
+
+function requestHasContent(request: unknown, pattern: string | RegExp) {
+  return requestMessages(request).some((message) =>
+    typeof pattern === 'string' ? message.content.includes(pattern) : pattern.test(message.content)
+  );
+}
+
 const originalCliqHome = process.env.CLIQ_HOME;
 const runnerCliqHome = await mkdtemp(path.join(os.tmpdir(), 'cliq-runner-home-'));
 const cleanupDirs: string[] = [runnerCliqHome];
@@ -272,17 +295,17 @@ test('runner cancellation after parsing assistant output skips assistant append'
 test('runner appends tool results and replays them back to the model', async () => {
   const session = await createTempSession();
   let callCount = 0;
-  let secondCallMessages: Array<{ role: string; content: string }> = [];
+  let secondCallRequest: unknown;
 
   const runner = createRunner({
     model: {
-      async complete(messages) {
+      async complete(request) {
         callCount += 1;
         if (callCount === 1) {
           return completion('{"bash":"pwd"}');
         }
 
-        secondCallMessages = messages;
+        secondCallRequest = request;
         return completion('{"message":"done"}');
       }
     },
@@ -321,9 +344,114 @@ test('runner appends tool results and replays them back to the model', async () 
     session.lifecycle.lastAssistantOutputAt
   );
   assert.equal(
-    secondCallMessages.some((message) => message.role === 'user' && message.content.includes('TOOL_RESULT bash OK')),
+    requestHasContent(secondCallRequest, 'TOOL_RESULT bash OK'),
     true
   );
+});
+
+test('runner prioritizes structured tool calls and replays typed tool results before plain final text', async () => {
+  const session = await createTempSession();
+  session.model = {
+    provider: 'openrouter',
+    model: 'anthropic/claude-sonnet-4.6',
+    baseUrl: 'https://openrouter.ai/api/v1'
+  };
+  const requests: unknown[] = [];
+  let callCount = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete(request) {
+        requests.push(request);
+        callCount += 1;
+        if (callCount === 1) {
+          return {
+            content: 'not-json',
+            provider: 'openrouter' as const,
+            model: 'test-model',
+            toolCalls: [
+              {
+                id: 'call_1',
+                name: 'bash',
+                arguments: { command: 'pwd' }
+              }
+            ]
+          };
+        }
+
+        return completion('done');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'yolo' })
+  });
+
+  const finalMessage = await runner.runTurn(session, 'show cwd');
+  assert.equal(finalMessage, 'done');
+  assert.equal(callCount, 2);
+  assert.equal(
+    (requests[0] as { toolSpecs?: Array<{ name: string }> }).toolSpecs?.some((spec) => spec.name === 'bash'),
+    true
+  );
+  assert.equal(
+    (requests[1] as { input?: Array<{ kind: string; toolName?: string; callId?: string }> }).input?.some(
+      (item) => item.kind === 'tool_result' && item.toolName === 'bash' && item.callId === 'call_1'
+    ),
+    true
+  );
+});
+
+test('runner carries session streaming mode into typed prompt requests', async () => {
+  const session = await createTempSession();
+  session.model = {
+    provider: 'openai-compatible',
+    model: 'local-model',
+    baseUrl: 'http://localhost:4000/v1',
+    streaming: 'off'
+  };
+  let firstRequest: unknown;
+
+  const runner = createRunner({
+    model: {
+      async complete(request) {
+        firstRequest = request;
+        return completion('{"message":"done"}');
+      }
+    }
+  });
+
+  const finalMessage = await runner.runTurn(session, 'say done');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal((firstRequest as { streaming?: { mode?: string } }).streaming?.mode, 'off');
+});
+
+test('runner uses inferred typed request streaming for fallback model-start events', async () => {
+  const session = await createTempSession();
+  session.model = {
+    provider: 'openai-compatible',
+    model: 'local-model',
+    baseUrl: 'http://localhost:4000/v1',
+    streaming: 'auto'
+  };
+  let modelStart: Extract<RuntimeEvent, { type: 'model-start' }> | undefined;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    onEvent(event) {
+      if (event.type === 'model-start') {
+        modelStart = event;
+      }
+    }
+  });
+
+  const finalMessage = await runner.runTurn(session, 'say done');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal(modelStart?.streaming, true);
 });
 
 test('runner caps stored tool result content before appending tool record', async () => {
@@ -372,12 +500,12 @@ test('runner caps stored tool result content before appending tool record', asyn
 
 test('runner prepends composed instruction messages before replayed session records', async () => {
   const session = await createTempSession();
-  let seenMessages: Array<{ role: string; content: string }> = [];
+  let seenRequest: unknown;
 
   const runner = createRunner({
     model: {
-      async complete(messages) {
-        seenMessages = messages;
+      async complete(request) {
+        seenRequest = request;
         return completion('{"message":"done"}');
       }
     },
@@ -389,6 +517,7 @@ test('runner prepends composed instruction messages before replayed session reco
 
   await runner.runTurn(session, 'say done');
 
+  const seenMessages = requestMessages(seenRequest);
   assert.equal(seenMessages[0]?.content, 'BASE');
   assert.equal(seenMessages[1]?.content, 'SKILL');
   assert.equal(seenMessages[2]?.content, 'say done');
@@ -748,12 +877,14 @@ Use reviewer workflow.`,
   let sawSkillInstruction = false;
   const runner = createRunner({
     model: {
-      async complete(messages) {
+      async complete(request) {
         calls += 1;
         if (calls === 1) {
           return completion('{"skill":{"name":"reviewer"}}');
         }
-        sawSkillInstruction = messages.some((message) => message.role === 'system' && /Use reviewer workflow/.test(message.content));
+        sawSkillInstruction = requestMessages(request).some(
+          (message) => message.role === 'system' && /Use reviewer workflow/.test(message.content)
+        );
         return completion('{"message":"done"}');
       }
     },
@@ -1541,17 +1672,17 @@ test('runner auto compacts before model call when threshold is exceeded', async 
     { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
     { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
   );
-  let firstCallMessages: Array<{ role: string; content: string }> = [];
+  let firstCallRequest: unknown;
   let summarizerSignal: AbortSignal | undefined;
 
   const runner = createRunner({
     model: {
-      async complete(messages, options) {
-        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+      async complete(request, options) {
+        if (requestHasContent(request, 'Records to summarize')) {
           summarizerSignal = options?.signal;
           return completion('## Objective\nSummarized');
         }
-        firstCallMessages = messages;
+        firstCallRequest = request;
         return completion('{"message":"done"}');
       }
     },
@@ -1578,7 +1709,7 @@ test('runner auto compacts before model call when threshold is exceeded', async 
 
   assert.equal(session.compactions.length, 1);
   assert.equal(summarizerSignal, controller.signal);
-  assert.equal(firstCallMessages.some((message) => message.content.includes('COMPACTED SESSION SUMMARY')), true);
+  assert.equal(requestHasContent(firstCallRequest, 'COMPACTED SESSION SUMMARY'), true);
 });
 
 test('runner auto compact can use catalog model metadata for context window', async () => {
@@ -1587,15 +1718,15 @@ test('runner auto compact can use catalog model metadata for context window', as
     { id: 'u_old', ts: '2026-04-30T00:00:00.000Z', kind: 'user', role: 'user', content: 'old '.repeat(300) },
     { id: 'u_tail', ts: '2026-04-30T00:00:01.000Z', kind: 'user', role: 'user', content: 'tail' }
   );
-  let firstCallMessages: Array<{ role: string; content: string }> = [];
+  let firstCallRequest: unknown;
 
   const runner = createRunner({
     model: {
-      async complete(messages) {
-        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+      async complete(request) {
+        if (requestHasContent(request, 'Records to summarize')) {
           return completion('## Objective\nSummarized');
         }
-        firstCallMessages = messages;
+        firstCallRequest = request;
         return completion('{"message":"done"}');
       }
     },
@@ -1619,7 +1750,7 @@ test('runner auto compact can use catalog model metadata for context window', as
   await runner.runTurn(session, 'new request');
 
   assert.equal(session.compactions.length, 1);
-  assert.equal(firstCallMessages.some((message) => message.content.includes('COMPACTED SESSION SUMMARY')), true);
+  assert.equal(requestHasContent(firstCallRequest, 'COMPACTED SESSION SUMMARY'), true);
 });
 
 test('runner cancellation during auto compaction stops before the main model call', async () => {
@@ -1634,8 +1765,8 @@ test('runner cancellation during auto compaction stops before the main model cal
 
   const runner = createRunner({
     model: {
-      async complete(messages) {
-        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+      async complete(request) {
+        if (requestHasContent(request, 'Records to summarize')) {
           controller.abort();
           return completion('## Objective\nShould not persist');
         }
@@ -1682,11 +1813,8 @@ test('runner treats auto compact off as a hard disable without compact events', 
 
   const runner = createRunner({
     model: {
-      async complete(messages) {
-        assert.equal(
-          messages.some((message) => message.content.includes('Records to summarize')),
-          false
-        );
+      async complete(request) {
+        assert.equal(requestHasContent(request, 'Records to summarize'), false);
         return completion('{"message":"done"}');
       }
     },
@@ -1729,8 +1857,8 @@ test('runner retries once after recognized context overflow and successful compa
 
   const runner = createRunner({
     model: {
-      async complete(messages) {
-        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+      async complete(request) {
+        if (requestHasContent(request, 'Records to summarize')) {
           return completion('## Objective\nSummarized');
         }
         normalCalls += 1;
@@ -1781,8 +1909,8 @@ test('runner overflow retry can use catalog model metadata for context window', 
 
   const runner = createRunner({
     model: {
-      async complete(messages) {
-        if (messages.some((message) => message.content.includes('Records to summarize'))) {
+      async complete(request) {
+        if (requestHasContent(request, 'Records to summarize')) {
           return completion('## Objective\nSummarized');
         }
         normalCalls += 1;

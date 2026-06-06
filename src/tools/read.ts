@@ -5,9 +5,57 @@ import type { ReadAction } from '../protocol/model/actions.js';
 import type { ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspacePath } from './path.js';
 
+function requireString(input: Record<string, unknown>, field: string) {
+  const value = input[field];
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid read tool arguments: ${field} must be a string`);
+  }
+  return value;
+}
+
+function optionalPositiveInteger(input: Record<string, unknown>, field: string) {
+  const value = input[field];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || (value as number) < 1) {
+    throw new Error(`Invalid read tool arguments: ${field} must be an integer >= 1`);
+  }
+  return value as number;
+}
+
 export const readTool: ToolDefinition<{ read: ReadAction }> = {
   name: 'read',
   access: 'read',
+  modelSpec: {
+    name: 'read',
+    description: 'Read a line range from a workspace file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative file path.' },
+        start_line: { type: 'integer', minimum: 1, description: '1-based first line to include.' },
+        end_line: { type: 'integer', minimum: 1, description: '1-based final line to include.' }
+      },
+      required: ['path'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return {
+        read: {
+          path: requireString(input, 'path'),
+          ...(() => {
+            const startLine = optionalPositiveInteger(input, 'start_line');
+            return startLine === undefined ? {} : { start_line: startLine };
+          })(),
+          ...(() => {
+            const endLine = optionalPositiveInteger(input, 'end_line');
+            return endLine === undefined ? {} : { end_line: endLine };
+          })()
+        }
+      };
+    }
+  },
   supports(action): action is { read: ReadAction } {
     return typeof (action as { read?: unknown }).read === 'object' && !!(action as { read?: unknown }).read;
   },

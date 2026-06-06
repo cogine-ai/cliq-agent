@@ -6,6 +6,38 @@ import type { ToolDefinition, ToolResult } from './types.js';
 export const planTool: ToolDefinition<{ plan: PlanAction }> = {
   name: 'plan',
   access: 'plan',
+  modelSpec: {
+    name: 'plan',
+    description: 'Create, update, or finalize a persisted plan artifact.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        op: { type: 'string', enum: ['draft', 'update', 'finalize'] },
+        planId: { type: 'string' },
+        title: { type: 'string' },
+        content: { type: 'string' },
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              title: { type: 'string' },
+              status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+              notes: { type: 'string' }
+            },
+            required: ['title'],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ['op'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return { plan: input as unknown as PlanAction };
+    }
+  },
   supports(action): action is { plan: PlanAction } {
     return isPlanAction((action as { plan?: unknown }).plan);
   },

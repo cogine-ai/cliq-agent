@@ -1,4 +1,4 @@
-import type { ProviderName } from '../model/types.js';
+import type { ModelToolCall, ProviderName, StreamingMode } from '../model/types.js';
 import type { ModelAction } from '../protocol/model/actions.js';
 import type { ActiveSkill } from '../skills/types.js';
 import type { AutoCompactContextWindowSource } from './auto-compact-config.js';
@@ -7,6 +7,7 @@ export type SessionModelRef = {
   provider: ProviderName;
   model: string;
   baseUrl?: string;
+  streaming?: StreamingMode;
 };
 
 export type SessionRecord =
@@ -24,6 +25,7 @@ export type SessionRecord =
       role: 'assistant';
       content: string;
       action: ModelAction | null;
+      toolCalls?: ModelToolCall[];
     }
   | {
       id: string;

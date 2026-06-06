@@ -76,12 +76,30 @@ type ReadJsonOptions = {
   tolerateSyntaxError?: boolean;
 };
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isModelToolCallRecord(value: unknown) {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  return typeof value.id === 'string' && typeof value.name === 'string' && isPlainObject(value.arguments);
+}
+
+function hasValidAssistantToolCalls(record: Record<string, unknown>) {
+  if (record.toolCalls === undefined) {
+    return true;
+  }
+  return Array.isArray(record.toolCalls) && record.toolCalls.every(isModelToolCallRecord);
+}
+
 export function isSessionRecord(value: unknown): value is SessionRecord {
-  if (!value || typeof value !== 'object') {
+  if (!isPlainObject(value)) {
     return false;
   }
 
-  const record = value as SessionRecord;
+  const record = value as Record<string, unknown>;
   if (typeof record.id !== 'string' || typeof record.ts !== 'string' || typeof record.kind !== 'string' || typeof record.role !== 'string') {
     return false;
   }
@@ -91,7 +109,7 @@ export function isSessionRecord(value: unknown): value is SessionRecord {
   }
 
   if (record.kind === 'assistant') {
-    return record.role === 'assistant' && typeof record.content === 'string' && 'action' in record;
+    return record.role === 'assistant' && typeof record.content === 'string' && 'action' in record && hasValidAssistantToolCalls(record);
   }
 
   if (record.kind === 'tool') {
@@ -306,14 +324,15 @@ function isSessionModelLike(value: unknown): value is string | SessionModelRef {
     return true;
   }
 
-  const model = value as { provider?: unknown; model?: unknown; baseUrl?: unknown };
+  const model = value as { provider?: unknown; model?: unknown; baseUrl?: unknown; streaming?: unknown };
   return (
     !!value &&
     typeof value === 'object' &&
     typeof model.provider === 'string' &&
     isProviderName(model.provider) &&
     typeof model.model === 'string' &&
-    (model.baseUrl === undefined || typeof model.baseUrl === 'string')
+    (model.baseUrl === undefined || typeof model.baseUrl === 'string') &&
+    (model.streaming === undefined || model.streaming === 'auto' || model.streaming === 'on' || model.streaming === 'off')
   );
 }
 

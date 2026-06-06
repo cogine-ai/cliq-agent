@@ -4,7 +4,19 @@ import type { HookEventName, HookInput, HooksConfig } from '../hooks/types.js';
 import type { InstructionMessage } from '../instructions/types.js';
 import { classifyContextOverflow } from '../model/errors.js';
 import { resolveModelMetadata } from '../model/catalog/index.js';
-import type { ChatMessage, ModelClient, ModelCompletion, ResolvedModelConfig } from '../model/types.js';
+import { buildModelPromptRequest } from '../model/prompt.js';
+import type {
+  ChatMessage,
+  EffectiveModelRequest,
+  ModelCapabilities,
+  ModelClient,
+  ModelCompletion,
+  ModelPromptRequest,
+  ModelRequestMode,
+  ModelStructuredOutput,
+  ModelToolCall,
+  ResolvedModelConfig
+} from '../model/types.js';
 import { readPlanArtifact, readPlanProgress } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { buildToolApprovalSubject } from '../policy/subjects.js';
@@ -21,7 +33,7 @@ import type { ToolContextTxFacade, ToolResult } from '../tools/types.js';
 import { appendBashEffect } from '../workspace/transactions/bash-effects.js';
 import { createOverlayWriter } from '../workspace/transactions/overlay.js';
 import { overlayDir, resolveTxRoot } from '../workspace/transactions/store.js';
-import { buildContextMessages } from './context.js';
+import { buildContextMessages, buildPromptInput } from './context.js';
 import type { RuntimeEventSink } from '../protocol/runtime/events.js';
 import { runHooks, type RuntimeHook } from './hooks.js';
 import {
@@ -38,9 +50,21 @@ type AutoCompactRunnerOptions = {
   modelConfig: ResolvedModelConfig;
 };
 
+type BuiltInToolRegistry = ReturnType<typeof createToolRegistry>;
+type RuntimeToolRegistry = Pick<BuiltInToolRegistry, 'definitions' | 'resolve'> &
+  Partial<Pick<BuiltInToolRegistry, 'modelVisibleToolSpecs' | 'resolveToolCall'>>;
+
 type ModelAttemptResult =
   | { ok: true; completion: ModelCompletion }
   | { ok: false; error: unknown; sawModelError: boolean };
+
+const FALLBACK_MODEL_CAPABILITIES: ModelCapabilities = {
+  input: ['text'],
+  output: ['text'],
+  streaming: true,
+  reasoning: false,
+  toolCalling: false
+};
 
 function isAbortError(error: unknown) {
   if (!error || typeof error !== 'object') {
@@ -54,6 +78,63 @@ function isAbortError(error: unknown) {
     candidate.code === 'ERR_ABORTED' ||
     candidate.code === 'ABORT_ERR'
   );
+}
+
+function runtimeModelConfig(session: Session): ResolvedModelConfig {
+  return {
+    provider: session.model.provider,
+    model: session.model.model,
+    baseUrl: session.model.baseUrl ?? '',
+    streaming: session.model.streaming ?? 'auto'
+  };
+}
+
+function runtimeModelCapabilities(session: Session): ModelCapabilities {
+  return resolveModelMetadata(session.model.provider, session.model.model)?.capabilities ?? FALLBACK_MODEL_CAPABILITIES;
+}
+
+function toolCallFromStructuredOutput(output: Extract<ModelStructuredOutput, { type: 'tool' }>): ModelToolCall {
+  return {
+    id: output.callId ?? makeId('call'),
+    name: output.tool,
+    arguments: output.arguments
+  };
+}
+
+function requestModeForPrompt(request: ModelPromptRequest): ModelRequestMode {
+  if (request.providerCapabilities.nativeToolCalling && request.toolSpecs.length > 0) {
+    return 'native-tools';
+  }
+  if (request.providerCapabilities.structuredOutput) {
+    return 'structured-output';
+  }
+  return 'text-action';
+}
+
+function promptRequestShouldStream(request: ModelPromptRequest) {
+  return request.streaming.mode !== 'off' && request.providerCapabilities.streaming;
+}
+
+function inferredEffectiveRequest(request: ModelPromptRequest): EffectiveModelRequest {
+  const mode = requestModeForPrompt(request);
+  return {
+    provider: request.model.provider,
+    model: request.model.model,
+    mode,
+    streaming: promptRequestShouldStream(request),
+    baseInstructionChars: request.baseInstructions.text.length,
+    inputItemCount: request.input.length,
+    toolNames: request.toolSpecs.map((tool) => tool.name),
+    outputSchema: mode === 'structured-output' ? request.outputSchema.name : undefined,
+    textActionFallback: request.textActionFallback
+  };
+}
+
+function resolveStructuredToolCall(registry: RuntimeToolRegistry, call: ModelToolCall) {
+  if (!registry.resolveToolCall) {
+    throw new Error(`Runtime registry cannot resolve structured tool call: ${call.name}`);
+  }
+  return registry.resolveToolCall(call);
 }
 
 export function createRunner({
@@ -70,7 +151,7 @@ export function createRunner({
   confirm
 }: {
   model: ModelClient;
-  registry?: ReturnType<typeof createToolRegistry>;
+  registry?: RuntimeToolRegistry;
   hooks?: RuntimeHook[];
   commandHooks?: HooksConfig;
   policy?: ReturnType<typeof createPolicyEngine>;
@@ -325,7 +406,14 @@ export function createRunner({
 
           try {
             await throwIfCancelled();
-            const completion = await model.complete(buildContextMessages(session, currentInstructions), {
+            const promptRequest = buildModelPromptRequest({
+              modelConfig: runtimeModelConfig(session),
+              modelCapabilities: runtimeModelCapabilities(session),
+              instructions: currentInstructions,
+              input: buildPromptInput(session),
+              registry
+            });
+            const completion = await model.complete(promptRequest, {
               signal,
               async onEvent(event) {
                 if (event.type === 'start') {
@@ -353,22 +441,29 @@ export function createRunner({
                 }
               }
             });
+            const effectiveCompletion = completion.effectiveRequest
+              ? completion
+              : {
+                  ...completion,
+                  effectiveRequest: inferredEffectiveRequest(promptRequest)
+                };
+            const effectiveRequest = effectiveCompletion.effectiveRequest!;
             await throwIfCancelled();
 
             if (!sawModelStart) {
               await onEvent({
                 type: 'model-start',
-                provider: completion.provider,
-                model: completion.model,
-                streaming: false
+                provider: effectiveCompletion.provider,
+                model: effectiveCompletion.model,
+                streaming: effectiveRequest.streaming
               });
             }
 
             if (!sawModelEnd) {
-              await onEvent({ type: 'model-end', provider: completion.provider, model: completion.model });
+              await onEvent({ type: 'model-end', provider: effectiveCompletion.provider, model: effectiveCompletion.model });
             }
 
-            return { ok: true, completion };
+            return { ok: true, completion: effectiveCompletion };
           } catch (error) {
             if (signal?.aborted) {
               await throwIfCancelled();
@@ -501,9 +596,25 @@ export function createRunner({
           await throwIfCancelled();
 
           const rawContent = completion.content;
+          let modelToolCall: ModelToolCall | undefined;
           let action;
           try {
-            action = parseModelAction(rawContent);
+            const firstToolCall = completion.toolCalls?.[0];
+            if (firstToolCall) {
+              modelToolCall = firstToolCall;
+              action = resolveStructuredToolCall(registry, firstToolCall).action;
+            } else if (completion.structuredOutput) {
+              if (completion.structuredOutput.type === 'final') {
+                action = { message: completion.structuredOutput.message };
+              } else {
+                modelToolCall = toolCallFromStructuredOutput(completion.structuredOutput);
+                action = resolveStructuredToolCall(registry, modelToolCall).action;
+              }
+            } else if (completion.effectiveRequest?.mode === 'native-tools') {
+              action = { message: rawContent };
+            } else {
+              action = parseModelAction(rawContent);
+            }
           } catch (error) {
             await onEvent({
               type: 'error',
@@ -521,7 +632,8 @@ export function createRunner({
             kind: 'assistant',
             role: 'assistant',
             content: rawContent,
-            action
+            action,
+            ...(modelToolCall ? { toolCalls: [modelToolCall] } : {})
           });
           session.lifecycle.lastAssistantOutputAt = assistantTs;
 
@@ -672,7 +784,16 @@ export function createRunner({
             throw new Error(`No tool result produced for ${definition.name}`);
           }
 
-          const storedResult = normalizeToolResultForStorage(result);
+          let storedResult = normalizeToolResultForStorage(result);
+          if (modelToolCall) {
+            storedResult = {
+              ...storedResult,
+              meta: {
+                ...storedResult.meta,
+                modelToolCallId: modelToolCall.id
+              }
+            };
+          }
           await appendRecord(cwd, session, {
             id: makeId('tool'),
             ts: nowIso(),

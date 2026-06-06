@@ -8,6 +8,25 @@ import { resolveWorkspacePath } from './path.js';
 export const lsTool: ToolDefinition<{ ls: LsAction }> = {
   name: 'ls',
   access: 'read',
+  modelSpec: {
+    name: 'ls',
+    description: 'List files and directories under a workspace path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative directory path. Defaults to the workspace root.' }
+      },
+      required: [],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return {
+        ls: {
+          ...(typeof input.path === 'string' ? { path: input.path } : {})
+        }
+      };
+    }
+  },
   supports(action): action is { ls: LsAction } {
     return typeof (action as { ls?: unknown }).ls === 'object' && !!(action as { ls?: unknown }).ls;
   },

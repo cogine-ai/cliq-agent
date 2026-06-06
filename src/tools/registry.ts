@@ -1,4 +1,5 @@
 import type { ModelAction } from '../protocol/model/actions.js';
+import type { ModelToolCall } from '../model/types.js';
 import { bashTool } from './bash.js';
 import { editTool } from './edit.js';
 import { findTool } from './find.js';
@@ -27,6 +28,29 @@ export function createToolRegistry(
 ) {
   return {
     definitions,
+    modelVisibleToolSpecs() {
+      return definitions
+        .filter((definition) => definition.modelSpec !== undefined)
+        .map((definition) => {
+          const modelSpec = definition.modelSpec!;
+          return {
+            name: modelSpec.name,
+            description: modelSpec.description,
+            inputSchema: modelSpec.inputSchema
+          };
+        });
+    },
+    resolveToolCall(call: ModelToolCall) {
+      const definition = definitions.find((candidate) => candidate.modelSpec?.name === call.name);
+      if (!definition?.modelSpec) {
+        throw new Error(`No tool registered for structured tool call: ${call.name}`);
+      }
+      const action = definition.modelSpec.actionFromInput(call.arguments);
+      if (!definition.supports(action)) {
+        throw new Error(`Structured tool call did not produce a supported action: ${JSON.stringify(call)}`);
+      }
+      return { definition, action };
+    },
     resolve(action: ModelAction) {
       const definition = definitions.find((candidate) => candidate.supports(action));
       if (!definition) {

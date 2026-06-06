@@ -1,4 +1,5 @@
 import type { EditAction, ModelAction } from '../protocol/model/actions.js';
+import type { JsonSchema, ModelToolSpec } from '../model/types.js';
 import type { ToolAccess } from '../policy/types.js';
 import type { WorkspaceWriter } from '../runtime/workspace-writer.js';
 import type { Session } from '../session/types.js';
@@ -30,9 +31,15 @@ export type ToolContext = {
   tx?: ToolContextTxFacade;
 };
 
+export type ToolModelSpec<TAction extends ModelAction = ModelAction> = ModelToolSpec & {
+  inputSchema: JsonSchema;
+  actionFromInput(input: Record<string, unknown>): TAction;
+};
+
 export type ToolDefinition<TAction extends ModelAction = ModelAction> = {
   name: string;
   access: ToolAccess;
+  modelSpec?: ToolModelSpec<TAction>;
   supports(action: ModelAction): action is TAction;
   execute(action: TAction, context: ToolContext): Promise<ToolResult>;
 };

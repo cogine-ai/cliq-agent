@@ -2,9 +2,40 @@ import { createPassthroughWriter, type WorkspaceWriter } from '../runtime/worksp
 import type { EditModelAction, ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspacePath, WORKSPACE_PATH_ERROR } from './path.js';
 
+function requireString(input: Record<string, unknown>, field: string) {
+  const value = input[field];
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid edit tool arguments: ${field} must be a string`);
+  }
+  return value;
+}
+
 export const editTool: ToolDefinition<EditModelAction> = {
   name: 'edit',
   access: 'write',
+  modelSpec: {
+    name: 'edit',
+    description: 'Replace one exact text span in a workspace file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative file path.' },
+        old_text: { type: 'string', description: 'Exact text to replace. Must match once.' },
+        new_text: { type: 'string', description: 'Replacement text.' }
+      },
+      required: ['path', 'old_text', 'new_text'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return {
+        edit: {
+          path: requireString(input, 'path'),
+          old_text: requireString(input, 'old_text'),
+          new_text: requireString(input, 'new_text')
+        }
+      };
+    }
+  },
   supports(action): action is EditModelAction {
     return typeof (action as { edit?: unknown }).edit === 'object' && !!(action as { edit?: unknown }).edit;
   },

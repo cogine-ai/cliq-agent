@@ -41,7 +41,7 @@ import { createRuntimeAssembly } from '../runtime/assembly.js';
 import type { RuntimeHook } from '../runtime/hooks.js';
 import { createRunner } from '../runtime/runner.js';
 import type { TxRunnerOptions } from '../runtime/tx-runner.js';
-import { ensureFresh, ensureSession, makeId, resolveCliqHome, workspaceIdFromRealPath } from '../session/store.js';
+import { ensureFresh, ensureSession, makeId, resolveCliqHome, saveSession, workspaceIdFromRealPath } from '../session/store.js';
 import type { Session } from '../session/types.js';
 import {
   createWorkspaceTrustContext,
@@ -322,8 +322,10 @@ export async function runHeadless(
     session.model = {
       provider: modelConfig.provider,
       model: modelConfig.model,
-      baseUrl: modelConfig.baseUrl
+      baseUrl: modelConfig.baseUrl,
+      streaming: modelConfig.streaming
     };
+    await saveSession(request.cwd, session);
     const runScope: RunScope = {
       session,
       modelConfig,

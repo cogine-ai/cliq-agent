@@ -719,6 +719,40 @@ test('isSessionRecord accepts tx-applied records', () => {
   assert.equal(isSessionRecord(record), true);
 });
 
+test('isSessionRecord validates assistant structured tool calls', () => {
+  const baseRecord = {
+    id: 'assistant_01H',
+    ts: nowIso(),
+    kind: 'assistant' as const,
+    role: 'assistant' as const,
+    content: 'calling tool',
+    action: null
+  };
+
+  assert.equal(
+    isSessionRecord({
+      ...baseRecord,
+      toolCalls: [{ id: 'call_1', name: 'bash', arguments: { command: 'pwd' } }]
+    }),
+    true
+  );
+  assert.equal(isSessionRecord({ ...baseRecord, toolCalls: 'not-array' }), false);
+  assert.equal(
+    isSessionRecord({
+      ...baseRecord,
+      toolCalls: [{ id: 'call_1', name: 'bash', arguments: [] }]
+    }),
+    false
+  );
+  assert.equal(
+    isSessionRecord({
+      ...baseRecord,
+      toolCalls: [{ id: 'call_1', arguments: { command: 'pwd' } }]
+    }),
+    false
+  );
+});
+
 test('isSessionRecord rejects tx-applied records missing validators', () => {
   // toSessionRecordView dereferences meta.validators.blocking unconditionally.
   // The guard must reject records that omit it, otherwise loadSession will

@@ -8,6 +8,14 @@ import { resolveWorkspaceEntry, resolveWorkspacePath } from './path.js';
 
 type ResolvedWorkspaceEntry = NonNullable<Awaited<ReturnType<typeof resolveWorkspaceEntry>>>;
 
+function requireNonEmptyString(input: Record<string, unknown>, field: string) {
+  const value = input[field];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Invalid grep tool arguments: ${field} must be a non-empty string`);
+  }
+  return value;
+}
+
 async function collectFileMatches(entry: ResolvedWorkspaceEntry, pattern: string, out: string[]) {
   if (out.length >= GREP_MAX_MATCHES) {
     return;
@@ -77,6 +85,27 @@ async function collectGrepMatches(
 export const grepTool: ToolDefinition<{ grep: GrepAction }> = {
   name: 'grep',
   access: 'read',
+  modelSpec: {
+    name: 'grep',
+    description: 'Search text files under a workspace path for a literal substring.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative file or directory. Defaults to the workspace root.' },
+        pattern: { type: 'string', minLength: 1, description: 'Literal substring to search for.' }
+      },
+      required: ['pattern'],
+      additionalProperties: false
+    },
+    actionFromInput(input) {
+      return {
+        grep: {
+          ...(typeof input.path === 'string' ? { path: input.path } : {}),
+          pattern: requireNonEmptyString(input, 'pattern')
+        }
+      };
+    }
+  },
   supports(action): action is { grep: GrepAction } {
     return typeof (action as { grep?: unknown }).grep === 'object' && !!(action as { grep?: unknown }).grep;
   },
