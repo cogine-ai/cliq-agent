@@ -1985,6 +1985,45 @@ test('discoverTuiModelSetupModels uses configured OpenAI-compatible API keys whe
   assert.deepEqual(apiKeys, ['sk-env', 'sk-compatible-env', 'sk-auth']);
 });
 
+test('discoverTuiModelSetupModels returns no rows for non-compatible providers or missing base URLs', async () => {
+  assert.deepEqual(
+    await discoverTuiModelSetupModels({
+      provider: 'openai',
+      baseUrl: 'http://localhost:4000/v1',
+      discoverOpenAICompatibleModels: async () => {
+        throw new Error('discovery should not run');
+      }
+    }),
+    []
+  );
+  assert.deepEqual(
+    await discoverTuiModelSetupModels({
+      provider: 'openai-compatible',
+      discoverOpenAICompatibleModels: async () => {
+        throw new Error('discovery should not run');
+      }
+    }),
+    []
+  );
+});
+
+test('discoverTuiModelSetupModels prefers OPENAI_COMPATIBLE_API_KEY when CLIQ_MODEL_API_KEY is unset', async () => {
+  const apiKeys: Array<string | undefined> = [];
+  await discoverTuiModelSetupModels({
+    provider: 'openai-compatible',
+    baseUrl: 'http://localhost:4000/v1',
+    env: {
+      OPENAI_COMPATIBLE_API_KEY: 'sk-compatible-env'
+    },
+    discoverOpenAICompatibleModels: async (_baseUrl, apiKey) => {
+      apiKeys.push(apiKey);
+      return [];
+    }
+  });
+
+  assert.deepEqual(apiKeys, ['sk-compatible-env']);
+});
+
 test('model setup error config preserves configured streaming mode', () => {
   const config = modelConfigForSetupError(
     new ModelSetupRequiredError({

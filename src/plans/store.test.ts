@@ -11,6 +11,7 @@ import {
   createDraftPlan,
   finalizePlan,
   readPlanArtifact,
+  readReferencedPlanArtifact,
   rejectPlan,
   resolvePlanStorageRef,
   updatePlan
@@ -204,6 +205,35 @@ test('approvePlan rejects non-approval policy modes as target mode', async () =>
     /plan approval target mode must be default, accept-edits, or yolo/
   );
   assert.equal(session.approvedPlanId, undefined);
+});
+
+test('readReferencedPlanArtifact only returns artifacts referenced by the session', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Referenced plan',
+    contentMarkdown: '## Plan'
+  });
+
+  const active = await readReferencedPlanArtifact(cwd, session, draft.id);
+  assert.ok(active);
+  assert.equal(active.id, draft.id);
+  assert.equal(active.status, 'draft');
+
+  delete session.activePlanId;
+  delete session.approvedPlanId;
+  assert.equal(await readReferencedPlanArtifact(cwd, session, draft.id), null);
+
+  session.activePlanId = draft.id;
+  assert.ok(await readReferencedPlanArtifact(cwd, session, draft.id));
+
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+  delete session.activePlanId;
+
+  const approved = await readReferencedPlanArtifact(cwd, session, draft.id);
+  assert.ok(approved);
+  assert.equal(approved.status, 'approved');
+  assert.equal(await readReferencedPlanArtifact(cwd, session, 'plan_other'), null);
 });
 
 test('readPlanArtifact rejects tampered identity and path fields', async () => {
