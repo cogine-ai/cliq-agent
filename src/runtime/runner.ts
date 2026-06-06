@@ -111,13 +111,17 @@ function requestModeForPrompt(request: ModelPromptRequest): ModelRequestMode {
   return 'text-action';
 }
 
+function promptRequestShouldStream(request: ModelPromptRequest) {
+  return request.streaming.mode !== 'off' && request.providerCapabilities.streaming;
+}
+
 function inferredEffectiveRequest(request: ModelPromptRequest): EffectiveModelRequest {
   const mode = requestModeForPrompt(request);
   return {
     provider: request.model.provider,
     model: request.model.model,
     mode,
-    streaming: false,
+    streaming: promptRequestShouldStream(request),
     baseInstructionChars: request.baseInstructions.text.length,
     inputItemCount: request.input.length,
     toolNames: request.toolSpecs.map((tool) => tool.name),
@@ -443,6 +447,7 @@ export function createRunner({
                   ...completion,
                   effectiveRequest: inferredEffectiveRequest(promptRequest)
                 };
+            const effectiveRequest = effectiveCompletion.effectiveRequest!;
             await throwIfCancelled();
 
             if (!sawModelStart) {
@@ -450,7 +455,7 @@ export function createRunner({
                 type: 'model-start',
                 provider: effectiveCompletion.provider,
                 model: effectiveCompletion.model,
-                streaming: false
+                streaming: effectiveRequest.streaming
               });
             }
 

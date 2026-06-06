@@ -13,9 +13,17 @@ function clip(text: string) {
   return text.length <= MAX_OUTPUT ? text : text.slice(-MAX_OUTPUT);
 }
 
+function requireNonEmptyString(input: Record<string, unknown>, field: string) {
+  const value = input[field];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Invalid bash tool arguments: ${field} must be a non-empty string`);
+  }
+  return value;
+}
+
 function runBashChild(action: { bash: string }, context: ToolContext): Promise<ToolResult> {
   return new Promise((resolve) => {
-    const child = spawn('bash', ['-lc', action.bash], { cwd: context.cwd, env: process.env });
+    const child = spawn('bash', ['-lc', action.bash], { cwd: context.cwd, env: process.env, detached: true });
     let out = '';
     let timedOut = false;
     let settled = false;
@@ -34,6 +42,21 @@ function runBashChild(action: { bash: string }, context: ToolContext): Promise<T
       resolve(result);
     };
 
+    const killChildProcessGroup = (signal: NodeJS.Signals) => {
+      if (!child.pid) {
+        child.kill(signal);
+        return;
+      }
+
+      try {
+        process.kill(-child.pid, signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+          child.kill(signal);
+        }
+      }
+    };
+
     const onData = (chunk: Buffer) => {
       out += chunk.toString();
       out = clip(out);
@@ -44,10 +67,10 @@ function runBashChild(action: { bash: string }, context: ToolContext): Promise<T
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
+      killChildProcessGroup('SIGTERM');
       killTimer = setTimeout(() => {
         if (!settled) {
-          child.kill('SIGKILL');
+          killChildProcessGroup('SIGKILL');
         }
       }, 250);
       out = clip(`${out}\n[process timed out after ${BASH_TIMEOUT_MS}ms]`);
@@ -89,13 +112,13 @@ export const bashTool: ToolDefinition<{ bash: string }> = {
     inputSchema: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: 'Shell command to execute with bash -lc.' }
+        command: { type: 'string', minLength: 1, description: 'Shell command to execute with bash -lc.' }
       },
       required: ['command'],
       additionalProperties: false
     },
     actionFromInput(input) {
-      return { bash: typeof input.command === 'string' ? input.command : '' };
+      return { bash: requireNonEmptyString(input, 'command') };
     }
   },
   supports(action): action is { bash: string } {

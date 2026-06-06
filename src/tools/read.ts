@@ -5,6 +5,25 @@ import type { ReadAction } from '../protocol/model/actions.js';
 import type { ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspacePath } from './path.js';
 
+function requireString(input: Record<string, unknown>, field: string) {
+  const value = input[field];
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid read tool arguments: ${field} must be a string`);
+  }
+  return value;
+}
+
+function optionalPositiveInteger(input: Record<string, unknown>, field: string) {
+  const value = input[field];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || (value as number) < 1) {
+    throw new Error(`Invalid read tool arguments: ${field} must be an integer >= 1`);
+  }
+  return value as number;
+}
+
 export const readTool: ToolDefinition<{ read: ReadAction }> = {
   name: 'read',
   access: 'read',
@@ -15,8 +34,8 @@ export const readTool: ToolDefinition<{ read: ReadAction }> = {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Workspace-relative file path.' },
-        start_line: { type: 'number', description: '1-based first line to include.' },
-        end_line: { type: 'number', description: '1-based final line to include.' }
+        start_line: { type: 'integer', minimum: 1, description: '1-based first line to include.' },
+        end_line: { type: 'integer', minimum: 1, description: '1-based final line to include.' }
       },
       required: ['path'],
       additionalProperties: false
@@ -24,9 +43,15 @@ export const readTool: ToolDefinition<{ read: ReadAction }> = {
     actionFromInput(input) {
       return {
         read: {
-          path: typeof input.path === 'string' ? input.path : '',
-          ...(typeof input.start_line === 'number' ? { start_line: input.start_line } : {}),
-          ...(typeof input.end_line === 'number' ? { end_line: input.end_line } : {})
+          path: requireString(input, 'path'),
+          ...(() => {
+            const startLine = optionalPositiveInteger(input, 'start_line');
+            return startLine === undefined ? {} : { start_line: startLine };
+          })(),
+          ...(() => {
+            const endLine = optionalPositiveInteger(input, 'end_line');
+            return endLine === undefined ? {} : { end_line: endLine };
+          })()
         }
       };
     }

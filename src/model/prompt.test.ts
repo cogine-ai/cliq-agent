@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { ModelCapabilities, ResolvedModelConfig } from './types.js';
-import { buildModelPromptRequest } from './prompt.js';
+import { buildModelPromptRequest, parseStructuredOutput } from './prompt.js';
 import { createToolRegistry } from '../tools/registry.js';
 
 const modelConfig: ResolvedModelConfig = {
@@ -47,4 +47,21 @@ test('buildModelPromptRequest separates base instructions, context, tools, outpu
   assert.equal(request.providerCapabilities.structuredOutput, true);
   assert.equal(request.streaming.mode, 'auto');
   assert.equal(request.textActionFallback.mode, 'disabled');
+});
+
+test('parseStructuredOutput accepts only object tool arguments', () => {
+  assert.deepEqual(parseStructuredOutput('{"type":"tool","tool":"bash","arguments":{}}'), {
+    type: 'tool',
+    tool: 'bash',
+    arguments: {}
+  });
+
+  assert.throws(
+    () => parseStructuredOutput('{"type":"tool","tool":"bash","arguments":[]}'),
+    /structured output does not match Cliq response schema/
+  );
+  assert.throws(
+    () => parseStructuredOutput('{"type":"tool","tool":"bash","arguments":null}'),
+    /structured output does not match Cliq response schema/
+  );
 });

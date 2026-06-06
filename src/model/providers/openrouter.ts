@@ -58,6 +58,13 @@ function typedChatBody(request: ModelPromptRequest, mode: ReturnType<typeof sele
   };
 }
 
+async function openRouterStreamHttpError(response: Response) {
+  const raw = await response.text();
+  const detail = raw.trim();
+  const statusText = response.statusText ? ` ${response.statusText}` : '';
+  return new Error(`OpenRouter stream error ${response.status}${statusText}${detail ? `: ${detail}` : ''}`);
+}
+
 async function completeTypedWithoutStreaming(config: ResolvedModelConfig, request: ModelPromptRequest, options?: ModelCompleteOptions) {
   const mode = selectTypedRequestMode(request);
   await options?.onEvent?.({
@@ -112,6 +119,10 @@ async function completeTypedWithStreaming(config: ResolvedModelConfig, request: 
     body: JSON.stringify(typedChatBody(request, mode, true)),
     signal: options?.signal
   });
+
+  if (!response.ok) {
+    throw await openRouterStreamHttpError(response);
+  }
 
   const toolCallParts = new Map();
   const content = (

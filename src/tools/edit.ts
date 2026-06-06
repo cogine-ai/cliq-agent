@@ -2,6 +2,14 @@ import { createPassthroughWriter, type WorkspaceWriter } from '../runtime/worksp
 import type { EditModelAction, ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspacePath, WORKSPACE_PATH_ERROR } from './path.js';
 
+function requireString(input: Record<string, unknown>, field: string) {
+  const value = input[field];
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid edit tool arguments: ${field} must be a string`);
+  }
+  return value;
+}
+
 export const editTool: ToolDefinition<EditModelAction> = {
   name: 'edit',
   access: 'write',
@@ -21,9 +29,9 @@ export const editTool: ToolDefinition<EditModelAction> = {
     actionFromInput(input) {
       return {
         edit: {
-          path: typeof input.path === 'string' ? input.path : '',
-          old_text: typeof input.old_text === 'string' ? input.old_text : '',
-          new_text: typeof input.new_text === 'string' ? input.new_text : ''
+          path: requireString(input, 'path'),
+          old_text: requireString(input, 'old_text'),
+          new_text: requireString(input, 'new_text')
         }
       };
     }

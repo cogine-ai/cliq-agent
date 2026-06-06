@@ -153,6 +153,10 @@ function schemaForPrompt(schema: JsonSchema) {
   return JSON.stringify(schema);
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 function toolSchemaLines(request: ModelPromptRequest) {
   if (request.toolSpecs.length === 0) {
     return ['- No runtime tools are available for this request.'];
@@ -186,21 +190,21 @@ export function buildTextActionFallbackInstructions(request: ModelPromptRequest)
 
 export function parseStructuredOutput(content: string) {
   const parsed = JSON.parse(content) as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!isPlainObject(parsed)) {
     throw new Error(`structured output must be an object: ${content}`);
   }
-  const value = parsed as Record<string, unknown>;
+  const value = parsed;
   if (value.type === 'final' && typeof value.message === 'string') {
     return {
       type: 'final' as const,
       message: value.message
     };
   }
-  if (value.type === 'tool' && typeof value.tool === 'string' && value.arguments && typeof value.arguments === 'object') {
+  if (value.type === 'tool' && typeof value.tool === 'string' && isPlainObject(value.arguments)) {
     return {
       type: 'tool' as const,
       tool: value.tool,
-      arguments: value.arguments as Record<string, unknown>,
+      arguments: value.arguments,
       ...(typeof value.callId === 'string' ? { callId: value.callId } : {})
     };
   }

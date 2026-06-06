@@ -2,6 +2,14 @@ import type { SkillAction } from '../protocol/model/actions.js';
 import { activateSkill } from '../skills/loader.js';
 import type { ToolDefinition, ToolResult } from './types.js';
 
+function requireNonEmptyString(input: Record<string, unknown>, field: string) {
+  const value = input[field];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Invalid skill tool arguments: ${field} must be a non-empty string`);
+  }
+  return value;
+}
+
 export const skillTool: ToolDefinition<{ skill: SkillAction }> = {
   name: 'skill',
   access: 'read',
@@ -11,7 +19,7 @@ export const skillTool: ToolDefinition<{ skill: SkillAction }> = {
     inputSchema: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: 'Skill name to activate.' }
+        name: { type: 'string', minLength: 1, description: 'Skill name to activate.' }
       },
       required: ['name'],
       additionalProperties: false
@@ -19,7 +27,7 @@ export const skillTool: ToolDefinition<{ skill: SkillAction }> = {
     actionFromInput(input) {
       return {
         skill: {
-          name: typeof input.name === 'string' ? input.name : ''
+          name: requireNonEmptyString(input, 'name')
         }
       };
     }

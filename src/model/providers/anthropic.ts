@@ -156,10 +156,11 @@ async function completeTypedWithoutStreaming(config: ResolvedModelConfig, reques
           ? (block.input as Record<string, unknown>)
           : {}
     }));
-  const content =
-    json.content
-      .find((block) => block.type === 'text' && typeof block.text === 'string')
-      ?.text?.trim() ?? '';
+  const content = json.content
+    .filter((block) => block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text!)
+    .join('')
+    .trim();
   if (!content && toolCalls.length === 0) {
     throw new Error(`Anthropic response missing text/tool content: ${JSON.stringify(json)}`);
   }

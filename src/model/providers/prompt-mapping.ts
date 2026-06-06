@@ -179,15 +179,19 @@ export function openAIJsonSchemaResponseFormat(request: ModelPromptRequest) {
   };
 }
 
-function parseToolArguments(value: unknown): Record<string, unknown> {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseToolArguments(value: unknown): Record<string, unknown> | null {
   if (typeof value === 'string') {
     const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    return isPlainObject(parsed) ? parsed : null;
   }
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
+  if (isPlainObject(value)) {
+    return value;
   }
-  return {};
+  return null;
 }
 
 export function captureOpenAIToolCallDeltas(json: unknown, accumulator: OpenAIToolCallDeltaAccumulator): string | null {
@@ -244,11 +248,19 @@ export function parseOpenAIToolCalls(message: {
 }): ModelToolCall[] {
   return (message.tool_calls ?? [])
     .filter((call) => typeof call.id === 'string' && typeof call.function?.name === 'string')
-    .map((call) => ({
-      id: call.id!,
-      name: call.function!.name!,
-      arguments: parseToolArguments(call.function?.arguments)
-    }));
+    .flatMap((call) => {
+      const args = parseToolArguments(call.function?.arguments);
+      if (!args) {
+        return [];
+      }
+      return [
+        {
+          id: call.id!,
+          name: call.function!.name!,
+          arguments: args
+        }
+      ];
+    });
 }
 
 export function parseOllamaToolCalls(message: {
@@ -262,11 +274,19 @@ export function parseOllamaToolCalls(message: {
 }): ModelToolCall[] {
   return (message.tool_calls ?? [])
     .filter((call) => typeof call.function?.name === 'string')
-    .map((call, index) => ({
-      id: typeof call.id === 'string' ? call.id : `ollama_call_${index + 1}`,
-      name: call.function!.name!,
-      arguments: parseToolArguments(call.function?.arguments)
-    }));
+    .flatMap((call, index) => {
+      const args = parseToolArguments(call.function?.arguments);
+      if (!args) {
+        return [];
+      }
+      return [
+        {
+          id: typeof call.id === 'string' ? call.id : `ollama_call_${index + 1}`,
+          name: call.function!.name!,
+          arguments: args
+        }
+      ];
+    });
 }
 
 export function maybeParseStructuredOutput(mode: ModelRequestMode, content: string): ModelStructuredOutput | undefined {

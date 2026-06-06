@@ -6,6 +6,14 @@ import type { FindAction } from '../protocol/model/actions.js';
 import type { ToolDefinition, ToolResult } from './types.js';
 import { resolveWorkspaceEntry, resolveWorkspacePath } from './path.js';
 
+function requireNonEmptyString(input: Record<string, unknown>, field: string) {
+  const value = input[field];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Invalid find tool arguments: ${field} must be a non-empty string`);
+  }
+  return value;
+}
+
 async function collectMatches(
   root: string,
   query: string,
@@ -66,7 +74,7 @@ export const findTool: ToolDefinition<{ find: FindAction }> = {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Workspace-relative root path. Defaults to the workspace root.' },
-        name: { type: 'string', description: 'Filename substring to search for.' }
+        name: { type: 'string', minLength: 1, description: 'Filename substring to search for.' }
       },
       required: ['name'],
       additionalProperties: false
@@ -75,7 +83,7 @@ export const findTool: ToolDefinition<{ find: FindAction }> = {
       return {
         find: {
           ...(typeof input.path === 'string' ? { path: input.path } : {}),
-          name: typeof input.name === 'string' ? input.name : ''
+          name: requireNonEmptyString(input, 'name')
         }
       };
     }

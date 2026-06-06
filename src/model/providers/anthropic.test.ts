@@ -119,6 +119,39 @@ test('anthropic typed prompt serializes native tool history as content blocks', 
   }
 });
 
+test('anthropic typed prompt concatenates all text blocks before structured parsing', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    return Response.json({
+      content: [
+        { type: 'text', text: '{"type":"final",' },
+        { type: 'text', text: '"message":"ok"}' }
+      ]
+    });
+  });
+
+  try {
+    const prompt = buildModelPromptRequest({
+      modelConfig: typedAnthropicConfig,
+      modelCapabilities: typedAnthropicCapabilities,
+      providerCapabilities: {
+        nativeToolCalling: false,
+        structuredOutput: true,
+        streaming: false
+      },
+      instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+      input: [{ kind: 'message', role: 'user', content: 'hello' }],
+      registry: createToolRegistry()
+    });
+    const client = createAnthropicClient(typedAnthropicConfig);
+    const result = await client.complete(prompt);
+
+    assert.equal(result.content, '{"type":"final","message":"ok"}');
+    assert.deepEqual(result.structuredOutput, { type: 'final', message: 'ok' });
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
 test('anthropic streaming cancels provider response body on abort', async () => {
   let cancelled = false;
   const fetchMock = mock.method(globalThis, 'fetch', async () => {

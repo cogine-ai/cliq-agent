@@ -425,6 +425,35 @@ test('runner carries session streaming mode into typed prompt requests', async (
   assert.equal((firstRequest as { streaming?: { mode?: string } }).streaming?.mode, 'off');
 });
 
+test('runner uses inferred typed request streaming for fallback model-start events', async () => {
+  const session = await createTempSession();
+  session.model = {
+    provider: 'openai-compatible',
+    model: 'local-model',
+    baseUrl: 'http://localhost:4000/v1',
+    streaming: 'auto'
+  };
+  let modelStart: Extract<RuntimeEvent, { type: 'model-start' }> | undefined;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"done"}');
+      }
+    },
+    onEvent(event) {
+      if (event.type === 'model-start') {
+        modelStart = event;
+      }
+    }
+  });
+
+  const finalMessage = await runner.runTurn(session, 'say done');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal(modelStart?.streaming, true);
+});
+
 test('runner caps stored tool result content before appending tool record', async () => {
   const session = await createTempSession();
   let calls = 0;
