@@ -45,6 +45,28 @@ test('discoverOpenAICompatibleModels omits authorization when no API key is prov
   }
 });
 
+test('discoverOpenAICompatibleModels skips invalid model entries in the data array', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async () =>
+    Response.json({
+      data: [
+        { id: '' },
+        { id: '   ' },
+        { owned_by: 'local' },
+        { id: 'valid-model', owned_by: 'local' },
+        null
+      ]
+    })
+  );
+
+  try {
+    assert.deepEqual(await discoverOpenAICompatibleModels('http://localhost:4000/v1'), [
+      { id: 'valid-model', owned_by: 'local' }
+    ]);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
 test('discoverOpenAICompatibleModels rejects malformed model list responses clearly', async () => {
   const fetchMock = mock.method(globalThis, 'fetch', async () => Response.json({ data: null }));
 

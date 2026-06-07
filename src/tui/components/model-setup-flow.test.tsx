@@ -323,6 +323,44 @@ test('model setup flow configures OpenAI-compatible base URL, direct model id, a
   ]);
 });
 
+test('model setup flow falls back to direct model input when discovery fails', async () => {
+  const snapshot = makeSnapshot({
+    selectedProvider: 'openai-compatible',
+    providers: [
+      {
+        provider: 'openai-compatible',
+        displayName: 'OpenAI-compatible',
+        state: 'not-configured',
+        stateLabel: 'Not configured',
+        current: true,
+        issues: ['base URL', 'model']
+      }
+    ],
+    modelsByProvider: { 'openai-compatible': [] }
+  });
+  const { stdin, lastFrame } = render(
+    <ModelSetupFlow
+      snapshot={snapshot}
+      onApply={() => {}}
+      onDiscoverModels={async () => {
+        throw new Error('discovery unavailable');
+      }}
+      onClose={() => {}}
+    />
+  );
+
+  await flush();
+  stdin.write('\r');
+  await flush();
+  stdin.write('http://localhost:4000/v1');
+  await flush();
+  stdin.write('\r');
+  await flush();
+
+  assert.match(lastFrame() ?? '', /model id/);
+  assert.doesNotMatch(lastFrame() ?? '', /local-coder:latest/);
+});
+
 test('model setup flow discovers selectable models after OpenAI-compatible base URL entry', async () => {
   const snapshot = makeSnapshot({
     selectedProvider: 'openai-compatible',

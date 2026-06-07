@@ -1903,6 +1903,28 @@ test('buildTuiModelSetupSnapshot includes discovered local Ollama models for the
   assert.ok(other.labels.includes('Local'));
 });
 
+test('discoverTuiModelSetupModels returns no rows for unsupported providers or missing base URLs', async () => {
+  const discoverOpenAICompatibleModels = async () => {
+    throw new Error('should not be called');
+  };
+
+  assert.deepEqual(
+    await discoverTuiModelSetupModels({
+      provider: 'ollama',
+      baseUrl: 'http://localhost:11434',
+      discoverOpenAICompatibleModels
+    }),
+    []
+  );
+  assert.deepEqual(
+    await discoverTuiModelSetupModels({
+      provider: 'openai-compatible',
+      discoverOpenAICompatibleModels
+    }),
+    []
+  );
+});
+
 test('discoverTuiModelSetupModels maps OpenAI-compatible provider models into picker rows', async () => {
   const rows = await discoverTuiModelSetupModels({
     provider: 'openai-compatible',
