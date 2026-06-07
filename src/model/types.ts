@@ -137,7 +137,7 @@ export type TextActionFallback = {
   reason?: string;
 };
 
-export type ModelRequestMode = 'legacy-chat' | 'native-tools' | 'structured-output' | 'text-action';
+export type ModelRequestMode = 'native-tools' | 'structured-output' | 'text-action';
 
 export type EffectiveModelRequest = {
   provider: ProviderName;
