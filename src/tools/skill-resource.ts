@@ -122,8 +122,9 @@ export const skillResourceTool: ToolDefinition<{ skillResource: SkillResourceAct
         throw new Error(`Skill ${request.skill} is not active`);
       }
       const resourcePath = request.path ?? '.';
+      const mode = request.mode ?? (request.path ? 'read' : 'list');
       const resource =
-        request.mode === 'list'
+        mode === 'list'
           ? await listResource(activeSkill, resourcePath)
           : await readResource(activeSkill, resourcePath);
 
@@ -133,7 +134,7 @@ export const skillResourceTool: ToolDefinition<{ skillResource: SkillResourceAct
         meta: {
           skill: activeSkill.name,
           path: resource.relativePath,
-          mode: request.mode ?? 'read'
+          mode
         },
         content:
           `TOOL_RESULT skillResource OK\n` +

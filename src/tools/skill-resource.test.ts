@@ -24,6 +24,31 @@ Use bundled references when needed.`,
   await writeFile(path.join(dir, 'references', 'guide.md'), 'Guide text.\n', 'utf8');
 }
 
+test('skillResourceTool lists the active skill root for schema-minimal model input', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-resource-minimal-'));
+  try {
+    await writeSkill(path.join(cwd, '.cliq', 'skills'), 'reviewer');
+    const session = createSession(cwd);
+    await activateSkill(cwd, session, 'reviewer', { activatedBy: 'model' });
+
+    const modelSpec = skillResourceTool.modelSpec;
+    assert.ok(modelSpec);
+    const action = modelSpec.actionFromInput({ skill: 'reviewer' });
+
+    assert.deepEqual(action, { skillResource: { skill: 'reviewer' } });
+
+    const result = await skillResourceTool.execute(action, { cwd, session });
+
+    assert.equal(result.status, 'ok');
+    assert.equal(result.meta.path, '.');
+    assert.equal(result.meta.mode, 'list');
+    assert.match(result.content, /SKILL\.md/);
+    assert.match(result.content, /references/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('skillResourceTool reads resources relative to an activated skill directory', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-skill-resource-'));
   try {
