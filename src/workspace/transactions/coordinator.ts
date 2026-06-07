@@ -41,19 +41,15 @@ import type { TxValidatorsConfig, TxStagedViewConfig } from '../config.js';
 import type { ValidatorResult } from '../../validators/types.js';
 
 /**
- * Coordinator scope (v0.8 Phase 12 Task 48):
+ * Transaction coordinator — manual CLI operations and runner turn lifecycle.
  *
- * This module exposes manual operations only -- openTx, getTxStatus, listTx,
- * applyTx, abortTx -- intended to be driven from the CLI. Auto-open at turn
- * start, auto-finalize/auto-validate at turn end, and auto-apply per
- * applyPolicy require runner integration (OverlayWriter injection,
- * turn-boundary hooks) and are deferred to a follow-up task.
+ * Exposes openTx, getTxStatus, listTx, finalizeTx, validateTx, approveTx,
+ * applyTx, and abortTx. The interactive runner drives implicit per-turn txs
+ * through src/runtime/tx-runner.ts (finalize → validate → approve → apply).
  *
- * Likewise the validate/approve/finalize stages of the tx lifecycle are
- * deferred. v0.8's `applyTx` requires the underlying tx to already be in
- * 'approved' state (Stage A guard). For now the coordinator surfaces this
- * as a 'rejected' result and the operator/test must construct an approved
- * tx with diff manually. TODO(post-v0.8): wire auto-validate/auto-approve.
+ * Direct `applyTx` still requires state=approved (Stage A guard). The CLI
+ * `tx apply` subcommand runs the forward transitions first; the runner path
+ * does the same automatically at turn end.
  */
 
 export type CoordinatorContext = {
@@ -176,14 +172,10 @@ export type CoordinatorApplyResult =
 
 export async function applyTx(
   ctx: CoordinatorContext,
-  txId: string,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _opts: { overrides?: string[]; reason?: string } = {}
+  txId: string
 ): Promise<CoordinatorApplyResult> {
-  // For v0.8: tx must already be 'approved'. The auto-validate/auto-approve
-  // pipeline is deferred to runner integration. CLI users can run this
-  // against a manually-prepared tx for testing or wait for the full pipeline.
-  // TODO(post-v0.8): plumb overrides/reason into the validate/approve stage.
+  // Tx must already be approved. Overrides and approval reason are recorded
+  // during approveTx; apply only executes the staged write plan.
   try {
     const result = await runApplyTx({
       root: txRootFor(ctx),

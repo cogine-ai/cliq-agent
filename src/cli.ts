@@ -2749,10 +2749,7 @@ export async function runCli(argv: string[]) {
           state = 'approved';
         }
         if (state === 'approved') {
-          const result = await coordApplyTx(ctx, parsed.txId, {
-            overrides: parsed.overrides,
-            ...(parsed.reason !== undefined ? { reason: parsed.reason } : {})
-          });
+          const result = await coordApplyTx(ctx, parsed.txId);
           if (result.ok) {
             if (parsed.headless || parsed.json) {
               writeJson({

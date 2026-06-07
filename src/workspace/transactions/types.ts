@@ -1,4 +1,4 @@
-export type TxKind = 'edit'; // 'worktree' deferred to v0.9
+export type TxKind = 'edit'; // 'worktree' reserved for a future tx mode
 
 export type TxState =
   | 'staging'

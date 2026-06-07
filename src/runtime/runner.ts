@@ -226,8 +226,8 @@ export function createRunner({
         // from the hook (so authors can start emitting them) but treated
         // as 'once' until the session/workspace allowlist persistence
         // surface ships in #62-B.
-        const _scope = coerceHookPermissionScope(permissionDecision.scope);
-        void _scope; // TODO(#62-B): plumb scope into the session/workspace allowlist
+        // TODO(#62-B): act on scope when session/workspace allowlist lands.
+        coerceHookPermissionScope(permissionDecision.scope);
         return {
           behavior: 'allow',
           reason: permissionDecision.message,
