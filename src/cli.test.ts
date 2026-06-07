@@ -128,6 +128,33 @@ test('parseArgs accepts explicit resume options for cliq run', () => {
     skills: [],
     model: {}
   });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', '--resume=sess_123', 'inspect']), {
+    cmd: 'run',
+    prompt: 'inspect',
+    session: { mode: 'id', id: 'sess_123' },
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs rejects conflicting run session selectors', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', 'run', '--continue', '--resume', 'sess_123', 'inspect']),
+    /cannot be combined with another resume option/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', 'run', '--continue', '--resume=sess_123', 'inspect']),
+    /cannot be combined with another resume option/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', 'run', '--resume', 'sess_123', '--continue', 'inspect']),
+    /cannot be combined with another resume option/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', 'run', '--resume=sess_123', '--continue', 'inspect']),
+    /cannot be combined with another resume option/i
+  );
 });
 
 test('parseArgs accepts --tui-debug', () => {
