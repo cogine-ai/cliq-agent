@@ -90,6 +90,61 @@ export const CATALOG_SNAPSHOT = {
       },
       visibleModelLimit: 8,
       source: { kind: 'cliq-overlay', confidence: 'high' }
+    },
+    {
+      id: 'cliq-models',
+      displayName: 'Cliq Models',
+      kind: 'local-runtime',
+      auth: { kind: 'none' },
+      configSources: ['Local service', 'Workspace', 'Global', 'CLI'],
+      setup: {
+        primary: [
+          'Choose a curated Cliq Models entry before using the managed local runtime.',
+          'Cliq Models v1 does not mirror arbitrary Ollama tags or Hugging Face repositories.'
+        ]
+      },
+      modelListSource: {
+        kind: 'curated-local',
+        description: 'Cliq-managed curated local model allowlist.'
+      },
+      visibleModelLimit: 8,
+      runtime: {
+        id: 'cliq-managed-ollama',
+        engine: 'ollama-derived',
+        managedDistribution: {
+          name: 'Cliq Managed Ollama Runtime',
+          version: '0.11.x'
+        },
+        supportedPlatforms: [
+          { os: 'darwin', arch: 'arm64' },
+          { os: 'darwin', arch: 'x64' },
+          { os: 'linux', arch: 'arm64' },
+          { os: 'linux', arch: 'x64' },
+          { os: 'win32', arch: 'x64' }
+        ],
+        installationChannels: [
+          {
+            kind: 'managed-binary',
+            displayName: 'Cliq-managed runtime bundle',
+            versionRequirement: '0.11.x'
+          },
+          {
+            kind: 'existing-user-ollama',
+            displayName: 'Existing user Ollama service',
+            versionRequirement: '>=0.11.0'
+          }
+        ],
+        compatibility: {
+          ollamaApi: 'native-chat',
+          minimumOllamaVersion: '0.11.0'
+        },
+        ownershipModes: ['cliq-managed', 'existing-user-ollama', 'unsupported'],
+        endpoint: {
+          defaultBaseUrl: 'http://localhost:11434',
+          port: 11434
+        }
+      },
+      source: { kind: 'cliq-models', confidence: 'high' }
     }
   ],
   models: [
@@ -181,6 +236,154 @@ export const CATALOG_SNAPSHOT = {
         confidence: 'medium',
         upstreamProvider: 'openai',
         upstreamModelId: 'gpt-5.2'
+      }
+    },
+    {
+      provider: 'cliq-models',
+      model: 'qwen2.5-coder-3b-instruct-q4-k-m',
+      displayName: 'Qwen2.5 Coder 3B Instruct Q4_K_M',
+      capabilities: {
+        input: ['text'],
+        output: ['text'],
+        streaming: true,
+        reasoning: true,
+        toolCalling: false,
+        contextWindow: 32_768,
+        maxOutputTokens: 4096
+      },
+      routing: {
+        api: 'ollama-chat',
+        baseUrl: 'http://localhost:11434'
+      },
+      cliqModel: {
+        selectable: true,
+        visibility: 'recommended',
+        family: 'Qwen2.5 Coder',
+        baseModel: 'Qwen2.5-Coder-3B-Instruct',
+        parameterSize: '3.09B',
+        quantization: 'Q4_K_M',
+        artifact: {
+          source: {
+            type: 'hugging-face-gguf',
+            repository: 'Qwen/Qwen2.5-Coder-3B-Instruct-GGUF',
+            filename: 'qwen2.5-coder-3b-instruct-q4_k_m.gguf',
+            revision: '0176a16b23a3b49e84001eb37c99b0e5d5939492',
+            url: 'https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/0176a16b23a3b49e84001eb37c99b0e5d5939492/qwen2.5-coder-3b-instruct-q4_k_m.gguf'
+          },
+          checksum: {
+            algorithm: 'sha256',
+            value: '724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7'
+          },
+          downloadSizeBytes: 2_100_000_000,
+          diskSizeBytes: 2_300_000_000,
+          license: {
+            name: 'Qwen Research License',
+            url: 'https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/blob/main/LICENSE'
+          }
+        },
+        requirements: {
+          recommendedRamBytes: 8_000_000_000,
+          recommendedVramBytes: 0
+        },
+        runtimeOptions: {
+          contextWindow: 32_768
+        },
+        runtimeImport: {
+          runtimeId: 'cliq-managed-ollama',
+          targetModelTag: 'cliq/qwen2.5-coder:3b-instruct-q4-k-m',
+          modelfileTemplate: [
+            'FROM ./qwen2.5-coder-3b-instruct-q4_k_m.gguf',
+            'PARAMETER num_ctx 32768',
+            'SYSTEM You are a helpful coding assistant.'
+          ],
+          instructions: [
+            'Download the GGUF artifact and verify its SHA-256 digest before import.',
+            'Create the managed Ollama model from the Modelfile template and verified GGUF file.'
+          ]
+        },
+        prompts: {
+          disk: 'Download requires about 2.1 GB and about 2.3 GB of local disk after import.',
+          license: 'Show the Qwen Research License before download and require user acknowledgement.',
+          checksum: 'Verify SHA-256 724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7 before import.'
+        }
+      },
+      source: {
+        kind: 'cliq-models',
+        confidence: 'high',
+        upstreamProvider: 'huggingface',
+        upstreamModelId: 'Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf'
+      }
+    },
+    {
+      provider: 'cliq-models',
+      model: 'qwen2.5-coder-3b-instruct-ollama-q4-k-m',
+      displayName: 'Qwen2.5 Coder 3B Instruct via Ollama Library',
+      capabilities: {
+        input: ['text'],
+        output: ['text'],
+        streaming: true,
+        reasoning: true,
+        toolCalling: false,
+        contextWindow: 32_768,
+        maxOutputTokens: 4096
+      },
+      routing: {
+        api: 'ollama-chat',
+        baseUrl: 'http://localhost:11434'
+      },
+      cliqModel: {
+        selectable: true,
+        visibility: 'experimental',
+        family: 'Qwen2.5 Coder',
+        baseModel: 'qwen2.5-coder:3b-instruct',
+        parameterSize: '3.09B',
+        quantization: 'Q4_K_M',
+        artifact: {
+          source: {
+            type: 'ollama-library',
+            model: 'qwen2.5-coder:3b-instruct',
+            manifestDigest: 'f72c60cabf62',
+            url: 'https://ollama.com/library/qwen2.5-coder:3b-instruct'
+          },
+          checksum: {
+            algorithm: 'ollama-blob-digest',
+            value: '4a188102020e'
+          },
+          downloadSizeBytes: 1_900_000_000,
+          diskSizeBytes: 2_100_000_000,
+          license: {
+            name: 'Qwen Research License',
+            url: 'https://ollama.com/library/qwen2.5-coder:3b-instruct'
+          }
+        },
+        requirements: {
+          recommendedRamBytes: 8_000_000_000,
+          recommendedVramBytes: 0
+        },
+        runtimeOptions: {
+          contextWindow: 32_768
+        },
+        runtimeImport: {
+          runtimeId: 'cliq-managed-ollama',
+          sourceModelTag: 'qwen2.5-coder:3b-instruct',
+          targetModelTag: 'cliq/qwen2.5-coder:3b-instruct-q4-k-m',
+          instructions: [
+            'Pull the approved Ollama library model qwen2.5-coder:3b-instruct.',
+            'Verify the resolved model layer digest before exposing the Cliq-managed alias.',
+            'Create or alias the managed tag cliq/qwen2.5-coder:3b-instruct-q4-k-m.'
+          ]
+        },
+        prompts: {
+          disk: 'Download requires about 1.9 GB and about 2.1 GB of local disk after import.',
+          license: 'Show the Qwen Research License from the Ollama library manifest before download.',
+          checksum: 'Verify Ollama model blob digest 4a188102020e before exposing the managed alias.'
+        }
+      },
+      source: {
+        kind: 'cliq-models',
+        confidence: 'high',
+        upstreamProvider: 'ollama-library',
+        upstreamModelId: 'qwen2.5-coder:3b-instruct'
       }
     }
   ]

@@ -14,7 +14,7 @@ export type ProviderAuth =
       kind: 'none';
     };
 
-export type ModelListSourceKind = 'snapshot' | 'ollama-tags' | 'provider-api' | 'user-config';
+export type ModelListSourceKind = 'snapshot' | 'ollama-tags' | 'provider-api' | 'user-config' | 'curated-local';
 
 export type ModelListSource = {
   kind: ModelListSourceKind;
@@ -26,6 +26,7 @@ export type CatalogSourceKind =
   | 'pi'
   | 'openclaw'
   | 'openrouter'
+  | 'cliq-models'
   | 'cliq-overlay'
   | 'ollama-show'
   | 'ollama-unavailable'
@@ -51,6 +52,101 @@ export type ContextWindowSource = {
   confidence: CatalogSourceConfidence;
 };
 
+export type ManagedRuntimePlatform = {
+  os: 'darwin' | 'linux' | 'win32';
+  arch: 'arm64' | 'x64';
+};
+
+export type ManagedRuntimeInstallationChannel = {
+  kind: 'managed-binary' | 'existing-user-ollama';
+  displayName: string;
+  versionRequirement?: string;
+};
+
+export type ManagedRuntimeOwnershipMode = 'cliq-managed' | 'existing-user-ollama' | 'unsupported';
+
+export type ManagedRuntimeCatalog = {
+  id: string;
+  engine: 'ollama-derived';
+  managedDistribution: {
+    name: string;
+    version: string;
+  };
+  supportedPlatforms: ManagedRuntimePlatform[];
+  installationChannels: ManagedRuntimeInstallationChannel[];
+  compatibility: {
+    ollamaApi: 'native-chat';
+    minimumOllamaVersion: string;
+  };
+  ownershipModes: ManagedRuntimeOwnershipMode[];
+  endpoint: {
+    defaultBaseUrl: string;
+    port?: number;
+    socketPath?: string;
+  };
+};
+
+export type CliqModelVisibility = 'recommended' | 'experimental' | 'hidden' | 'deprecated' | 'disabled';
+
+export type CliqModelArtifactSource =
+  | {
+      type: 'hugging-face-gguf';
+      repository: string;
+      filename: string;
+      revision?: string;
+      url: string;
+    }
+  | {
+      type: 'ollama-library';
+      model: string;
+      manifestDigest: string;
+      url: string;
+    };
+
+export type CliqModelChecksum = {
+  algorithm: 'sha256' | 'ollama-blob-digest';
+  value: string;
+};
+
+export type CliqModelCatalogMetadata = {
+  selectable: true;
+  visibility: CliqModelVisibility;
+  family: string;
+  baseModel: string;
+  parameterSize: string;
+  quantization: string;
+  artifact: {
+    source: CliqModelArtifactSource;
+    checksum: CliqModelChecksum;
+    downloadSizeBytes: number;
+    diskSizeBytes: number;
+    license: {
+      name: string;
+      url?: string;
+    };
+  };
+  requirements: {
+    recommendedRamBytes: number;
+    recommendedVramBytes?: number;
+  };
+  runtimeOptions: {
+    contextWindow: number;
+    numGpuLayers?: number;
+  };
+  runtimeImport: {
+    runtimeId: string;
+    targetModelTag: string;
+    sourceModelTag?: string;
+    modelfileTemplate?: string[];
+    instructions: string[];
+  };
+  prompts: {
+    disk: string;
+    license: string;
+    checksum: string;
+  };
+};
+
 export type ProviderCatalogEntry = {
   id: ProviderName;
   displayName: string;
@@ -64,6 +160,7 @@ export type ProviderCatalogEntry = {
   modelListSource: ModelListSource;
   defaultModelId?: string;
   visibleModelLimit?: number;
+  runtime?: ManagedRuntimeCatalog;
   source: CatalogSource;
 };
 
@@ -83,6 +180,7 @@ export type ModelCatalogEntry = {
     cacheWrite: number;
   };
   compat?: Record<string, unknown>;
+  cliqModel?: CliqModelCatalogMetadata;
   source: CatalogSource;
   contextWindowSources?: ContextWindowSource[];
 };

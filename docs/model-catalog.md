@@ -26,6 +26,15 @@ display name, modalities, streaming, reasoning, tool calling, context window,
 max output tokens, routing metadata, pricing, compatibility hints, and source
 provenance.
 
+`cliq-models` entries add first-party local metadata on top of the common model
+shape. Provider metadata describes the Cliq-managed Ollama-derived runtime:
+supported OS/architecture pairs, installation channels, managed distribution
+version, Ollama API compatibility, ownership modes, and the expected local
+endpoint. Model metadata carries the curated allowlist fields needed by setup
+UI: source type, source URL or manifest entry, checksum, license, download and
+disk sizes, RAM/VRAM guidance, runtime context options, and Ollama
+create/import instructions.
+
 ## Source Priority
 
 Provider metadata:
@@ -45,6 +54,17 @@ Model metadata:
 OpenRouter is not used as a fuzzy metadata source for native providers. An
 OpenRouter row like `anthropic/claude-sonnet-4.6` belongs to the OpenRouter
 provider unless a CLIQ overlay adds an explicit curated alias.
+
+## Cliq Models Allowlist
+
+`cliq-models` is separate from raw `ollama`. Raw `ollama` discovers whatever is
+already installed through `/api/tags`; `cliq-models` exposes only checked-in
+catalog entries that pass `parseCliqModelCatalogEntry`.
+
+The v1 picker should use `listCliqModelCatalogEntries` or
+`isSelectableCliqModel`. Arbitrary Ollama tags, arbitrary Hugging Face GGUF
+files, and local Modelfiles must stay outside the `cliq-models` picker until a
+curated catalog entry is added.
 
 ## Updating
 

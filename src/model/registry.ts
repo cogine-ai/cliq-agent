@@ -79,6 +79,14 @@ const PROVIDERS: Record<ProviderName, ModelProviderDefinition> = {
     requiresApiKey: false,
     getDefaultModel: () => null,
     getKnownModels: () => []
+  },
+  'cliq-models': {
+    name: 'cliq-models',
+    displayName: getProviderCatalogEntry('cliq-models')?.displayName ?? 'Cliq Models',
+    defaultBaseUrl: OLLAMA_DEFAULT_BASE_URL,
+    requiresApiKey: false,
+    getDefaultModel: () => null,
+    getKnownModels: () => listModelDescriptors('cliq-models')
   }
 };
 

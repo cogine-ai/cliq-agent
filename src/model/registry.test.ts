@@ -9,6 +9,7 @@ test('registry recognizes built-in providers', () => {
   assert.equal(isProviderName('openai'), true);
   assert.equal(isProviderName('openai-compatible'), true);
   assert.equal(isProviderName('ollama'), true);
+  assert.equal(isProviderName('cliq-models'), true);
   assert.equal(isProviderName('unknown'), false);
   assert.equal(isProviderName('toString'), false);
 });
@@ -22,13 +23,14 @@ test('registry exposes safe defaults for the default provider', () => {
   });
 });
 
-test('registry requires explicit model for ollama and openai-compatible', () => {
+test('registry requires explicit model for ollama, cliq-models, and openai-compatible', () => {
   assert.equal(getModelProvider('ollama').getDefaultModel(), null);
+  assert.equal(getModelProvider('cliq-models').getDefaultModel(), null);
   assert.equal(getModelProvider('openai-compatible').getDefaultModel(), null);
 });
 
 test('known model descriptors are text-to-text compatible', () => {
-  for (const provider of ['openrouter', 'anthropic', 'openai'] as const) {
+  for (const provider of ['openrouter', 'anthropic', 'openai', 'cliq-models'] as const) {
     const descriptors = getModelProvider(provider).getKnownModels();
     assert.equal(descriptors.length > 0, true);
     assert.equal(descriptors.every((descriptor) => descriptor.capabilities.input.includes('text')), true);
@@ -48,5 +50,6 @@ test('known default model descriptors expose context windows', () => {
 
 test('findKnownModelDescriptor returns null for unknown models', () => {
   assert.equal(findKnownModelDescriptor('ollama', 'qwen3:4b'), null);
+  assert.equal(findKnownModelDescriptor('cliq-models', 'qwen3:4b'), null);
   assert.equal(findKnownModelDescriptor('openai-compatible', 'local-model'), null);
 });

@@ -3,7 +3,8 @@ export type ProviderName =
   | 'anthropic'
   | 'openai'
   | 'openai-compatible'
-  | 'ollama';
+  | 'ollama'
+  | 'cliq-models';
 
 export type ModelModality = 'text' | 'image' | 'audio' | 'video';
 

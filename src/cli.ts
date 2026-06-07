@@ -1524,8 +1524,8 @@ Options:
                            (e.g. "bash: npm *", "fs-write: .env", "fs-read: docs/*").
                            See README "## Tool permissions" for the full layer order.
   --skill NAME             Activate a skill; repeat to load multiple skills
-  --provider NAME          openrouter | anthropic | openai | openai-compatible | ollama
-  --model ID               Provider model id; required for openai-compatible; auto-discovered for ollama
+  --provider NAME          openrouter | anthropic | openai | openai-compatible | ollama | cliq-models
+  --model ID               Provider model id; required for openai-compatible and cliq-models; auto-discovered for ollama
   --base-url URL           Required for openai-compatible; optional provider override
   --streaming MODE         auto | on | off
   --jsonl                  With cliq run only, write structured JSONL events to stdout

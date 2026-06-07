@@ -12,7 +12,7 @@ test('provider catalog covers every built-in provider with setup metadata', () =
   const providers = listProviderCatalog();
   const byId = new Map(providers.map((provider) => [provider.id, provider]));
 
-  for (const id of ['openrouter', 'anthropic', 'openai', 'openai-compatible', 'ollama'] as const) {
+  for (const id of ['openrouter', 'anthropic', 'openai', 'openai-compatible', 'ollama', 'cliq-models'] as const) {
     const provider = byId.get(id);
     assert.ok(provider, `missing provider catalog entry for ${id}`);
     assert.equal(typeof provider.displayName, 'string');
