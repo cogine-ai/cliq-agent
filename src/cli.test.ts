@@ -87,6 +87,49 @@ test('parseArgs accepts command-scoped run --jsonl', () => {
   });
 });
 
+test('parseArgs accepts explicit resume and continue session commands', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'resume', 'sess_123']), {
+    cmd: 'resume',
+    session: { mode: 'id', id: 'sess_123' },
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'resume', '--last']), {
+    cmd: 'resume',
+    session: { mode: 'active' },
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'continue']), {
+    cmd: 'continue',
+    session: { mode: 'active' },
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs accepts explicit resume options for cliq run', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', '--continue', 'inspect', 'repo']), {
+    cmd: 'run',
+    prompt: 'inspect repo',
+    session: { mode: 'active' },
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', '--resume', 'sess_123', 'inspect']), {
+    cmd: 'run',
+    prompt: 'inspect',
+    session: { mode: 'id', id: 'sess_123' },
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+});
+
 test('parseArgs accepts --tui-debug', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--tui-debug', 'chat']), {
     cmd: 'chat',

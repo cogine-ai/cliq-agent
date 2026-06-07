@@ -41,7 +41,15 @@ import { createRuntimeAssembly } from '../runtime/assembly.js';
 import type { RuntimeHook } from '../runtime/hooks.js';
 import { createRunner } from '../runtime/runner.js';
 import type { TxRunnerOptions } from '../runtime/tx-runner.js';
-import { ensureFresh, ensureSession, makeId, resolveCliqHome, saveSession, workspaceIdFromRealPath } from '../session/store.js';
+import {
+  ensureFresh,
+  loadActiveSession,
+  loadSessionById,
+  makeId,
+  resolveCliqHome,
+  saveSession,
+  workspaceIdFromRealPath
+} from '../session/store.js';
 import type { Session } from '../session/types.js';
 import {
   createWorkspaceTrustContext,
@@ -137,13 +145,50 @@ async function validateRequest(request: HeadlessRunRequest) {
 
   const sessionKeys = request.session ? Object.keys(request.session) : [];
   for (const key of sessionKeys) {
-    if (key !== 'mode') {
+    if (key !== 'mode' && key !== 'id' && key !== 'last') {
       throw errorFrom('invalid-input', 'input', `unknown session field: ${key}`);
     }
   }
   if (request.session?.mode && request.session.mode !== 'active' && request.session.mode !== 'new') {
     throw errorFrom('invalid-input', 'input', `unknown session mode: ${request.session.mode}`);
   }
+  if (request.session?.id !== undefined && (typeof request.session.id !== 'string' || !request.session.id.trim())) {
+    throw errorFrom('invalid-input', 'input', 'session id must be a non-empty string');
+  }
+  if (request.session?.last !== undefined && typeof request.session.last !== 'boolean') {
+    throw errorFrom('invalid-input', 'input', 'session last must be a boolean');
+  }
+  if (request.session?.id !== undefined && (request.session.mode !== undefined || request.session.last !== undefined)) {
+    throw errorFrom('invalid-input', 'input', 'session id cannot be combined with mode or last');
+  }
+  if (request.session?.last === true && request.session.mode === 'new') {
+    throw errorFrom('invalid-input', 'input', 'session last cannot be combined with mode new');
+  }
+}
+
+async function resolveRequestedSession(request: HeadlessRunRequest): Promise<Session> {
+  const sessionRequest = request.session;
+  if (!sessionRequest || sessionRequest.mode === 'new') {
+    return await ensureFresh(request.cwd);
+  }
+
+  if (sessionRequest.id !== undefined) {
+    const session = await loadSessionById(request.cwd, sessionRequest.id.trim());
+    if (!session) {
+      throw errorFrom('invalid-input', 'session', `Session not found: ${sessionRequest.id}`);
+    }
+    return session;
+  }
+
+  if (sessionRequest.mode === 'active' || sessionRequest.last === true) {
+    const session = await loadActiveSession(request.cwd);
+    if (!session) {
+      throw errorFrom('invalid-input', 'session', 'No session found to continue');
+    }
+    return session;
+  }
+
+  return await ensureFresh(request.cwd);
 }
 
 function scopeEnvelope(scope: RunScope | undefined) {
@@ -290,7 +335,7 @@ export async function runHeadless(
       throw errorFrom('invalid-input', 'session', trustVerdict.message);
     }
 
-    const session = request.session?.mode === 'new' ? await ensureFresh(request.cwd) : await ensureSession(request.cwd);
+    const session = await resolveRequestedSession(request);
     // Caller-supplied policy (from cli.ts via parsed.policy, or a programmatic
     // SDK request) always wins. When neither was given, the workspace's
     // permissions.preset takes over as the default friction level for this

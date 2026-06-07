@@ -21,6 +21,8 @@ export type HeadlessRunRequest = {
   autoCompact?: AutoCompactConfig;
   session?: {
     mode?: 'active' | 'new';
+    id?: string;
+    last?: boolean;
   };
   metadata?: Record<string, string | number | boolean | null>;
   txMode?: 'off' | 'edit';

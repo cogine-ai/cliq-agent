@@ -161,6 +161,75 @@ test('runHeadless emits run-start through run-end for a completed run', async ()
   assert.deepEqual(events, ['run-start', 'checkpoint-created', 'model-start', 'model-end', 'final', 'run-end']);
 });
 
+test('runHeadless creates a fresh session by default even when the workspace has an active session', async () => {
+  const { cwd } = await setupWorkspace();
+
+  const first = await runHeadless(
+    {
+      cwd,
+      prompt: 'first',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('first done') }
+  );
+  const second = await runHeadless(
+    {
+      cwd,
+      prompt: 'second',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('second done') }
+  );
+
+  assert.equal(first.status, 'completed');
+  assert.equal(second.status, 'completed');
+  assert.notEqual(second.sessionId, first.sessionId);
+});
+
+test('runHeadless resumes an existing session only when explicitly requested', async () => {
+  const { cwd } = await setupWorkspace();
+
+  const first = await runHeadless(
+    {
+      cwd,
+      prompt: 'first',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('first done') }
+  );
+  assert.equal(first.status, 'completed');
+  assert.ok(first.sessionId);
+
+  const active = await runHeadless(
+    {
+      cwd,
+      prompt: 'active',
+      model: { provider: 'ollama', model: 'test-model' },
+      session: { mode: 'active' },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('active done') }
+  );
+  const byId = await runHeadless(
+    {
+      cwd,
+      prompt: 'by id',
+      model: { provider: 'ollama', model: 'test-model' },
+      session: { id: first.sessionId },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('id done') }
+  );
+
+  assert.equal(active.status, 'completed');
+  assert.equal(byId.status, 'completed');
+  assert.equal(active.sessionId, first.sessionId);
+  assert.equal(byId.sessionId, first.sessionId);
+});
+
 test('runHeadless does not require local auth when request model config is explicit', async () => {
   const { home, cwd } = await setupWorkspace();
   await writeFile(path.join(home, 'auth.json'), '{bad json', 'utf8');
@@ -574,7 +643,7 @@ test('runHeadless rejects unknown session request fields', async () => {
   const { cwd } = await setupWorkspace();
 
   const output = await runHeadless(
-    { cwd, prompt: 'say done', session: { mode: 'active', id: 'sess_1' } as never },
+    { cwd, prompt: 'say done', session: { mode: 'active', unknown: 'sess_1' } as never },
     { modelClient: finalModel('done') }
   );
 

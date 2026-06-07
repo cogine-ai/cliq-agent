@@ -84,7 +84,15 @@ import {
   writePersistedWorkspaceTrust
 } from './session/trust.js';
 import type { WorkspaceTrustContext } from './session/trust.js';
-import { ensureFresh, ensureSession, resolveCliqHome, saveSession, workspaceIdFromRealPath } from './session/store.js';
+import {
+  ensureFresh,
+  ensureSession,
+  loadActiveSession,
+  loadSessionById,
+  resolveCliqHome,
+  saveSession,
+  workspaceIdFromRealPath
+} from './session/store.js';
 import type { Session } from './session/types.js';
 import type { ToolResult } from './tools/types.js';
 import type { UiStore } from './tui/store.js';
@@ -168,9 +176,13 @@ type ParsedArgsBase = {
   };
 };
 
+type ParsedSessionSelection = { mode: 'active' } | { mode: 'id'; id: string };
+
 export type ParsedArgs = ParsedArgsBase & (
-  | { cmd: 'chat'; prompt: string; jsonl?: boolean }
-  | { cmd: 'run'; prompt: string; jsonl?: boolean }
+  | { cmd: 'chat'; prompt: string; jsonl?: boolean; session?: ParsedSessionSelection }
+  | { cmd: 'run'; prompt: string; jsonl?: boolean; session?: ParsedSessionSelection }
+  | { cmd: 'resume'; session: ParsedSessionSelection; prompt?: undefined }
+  | { cmd: 'continue'; session: { mode: 'active' }; prompt?: undefined }
   | { cmd: 'checkpoint-create'; name?: string; prompt?: undefined }
   | { cmd: 'checkpoint-list'; prompt?: undefined }
   | {
@@ -945,6 +957,7 @@ function parseHandoffGroupArgs(args: string[], base: ParsedArgsBase): ParsedArgs
 function parseRunArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   const promptParts: string[] = [];
   let jsonl = false;
+  let session: ParsedSessionSelection | undefined;
   let parsingFlags = true;
 
   for (let i = 1; i < args.length; i += 1) {
@@ -956,6 +969,30 @@ function parseRunArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     if (parsingFlags && token.startsWith('--jsonl=')) {
       throw new Error('--jsonl does not accept a value');
     }
+    if (parsingFlags && (token === '--continue' || token === '-c')) {
+      session = setRunSessionSelection(session, { mode: 'active' }, token);
+      continue;
+    }
+    if (parsingFlags && token.startsWith('--continue=')) {
+      throw new Error('--continue does not accept a value');
+    }
+    if (parsingFlags && token.startsWith('--resume=')) {
+      const id = token.slice('--resume='.length);
+      if (!id) {
+        throw new Error('--resume requires a session id');
+      }
+      session = setRunSessionSelection(session, { mode: 'id', id }, '--resume');
+      continue;
+    }
+    if (parsingFlags && token === '--resume') {
+      const id = args[i + 1];
+      if (id === undefined || id.startsWith('--')) {
+        throw new Error('--resume requires a session id');
+      }
+      session = setRunSessionSelection(session, { mode: 'id', id }, '--resume');
+      i += 1;
+      continue;
+    }
     parsingFlags = false;
     promptParts.push(token);
   }
@@ -965,7 +1002,34 @@ function parseRunArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     throw new Error('Missing prompt for cliq run');
   }
 
-  return { ...base, cmd: 'run', prompt, ...(jsonl ? { jsonl } : {}) };
+  return { ...base, cmd: 'run', prompt, ...(jsonl ? { jsonl } : {}), ...(session ? { session } : {}) };
+}
+
+function setRunSessionSelection(
+  current: ParsedSessionSelection | undefined,
+  next: ParsedSessionSelection,
+  flag: string
+): ParsedSessionSelection {
+  if (current) {
+    throw new Error(`${flag} cannot be combined with another resume option`);
+  }
+  return next;
+}
+
+function parseResumeArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
+  const rest = args.slice(1);
+  const last = consumeFlag(rest, '--last');
+  if (last) {
+    ensureNoExtraArgs(rest, 0, 'resume --last');
+    return { ...base, cmd: 'resume', session: { mode: 'active' } };
+  }
+
+  const id = rest[0];
+  if (id === undefined || id.startsWith('--')) {
+    throw new Error('cliq resume requires a session id or --last');
+  }
+  ensureNoExtraArgs(rest, 1, 'resume');
+  return { ...base, cmd: 'resume', session: { mode: 'id', id } };
 }
 
 function parseAskArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
@@ -980,6 +1044,8 @@ function isKnownCommand(cmd: string | undefined) {
   return (
     cmd === 'chat' ||
     cmd === 'run' ||
+    cmd === 'resume' ||
+    cmd === 'continue' ||
     cmd === 'ask' ||
     cmd === 'checkpoint' ||
     cmd === 'compact' ||
@@ -1328,6 +1394,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
     return { cmd: 'chat', prompt: args.slice(1).join(' '), policy, skills, model, ...baseExtras };
   }
   if (cmd === 'run') return parseRunArgs(args, base);
+  if (cmd === 'resume') return parseResumeArgs(args, base);
+  if (cmd === 'continue') {
+    ensureNoExtraArgs(args, 1, 'continue');
+    return { ...base, cmd: 'continue', session: { mode: 'active' } };
+  }
   if (cmd === 'ask') return parseAskArgs(args, base);
   if (cmd === 'checkpoint') return parseCheckpointArgs(args, base);
   if (cmd === 'compact') return parseCompactGroupArgs(args, base);
@@ -1499,10 +1570,15 @@ export function printHelp(topic?: HelpTopic) {
   console.log(`cliq - tiny local coding agent harness
 
 Usage:
-  cliq run "prompt"        Run a non-interactive prompt in the current directory
+  cliq run "prompt"          Run a non-interactive prompt in a new session
   cliq run --jsonl "prompt"  Emit machine-readable JSONL runtime events
-  cliq                     Start interactive chat in the current directory
-  cliq chat                Explicitly start interactive chat in the current directory
+  cliq run --continue "prompt"  Continue the active session in non-interactive mode
+  cliq run --resume SESSION "prompt"  Resume a session in non-interactive mode
+  cliq                       Start interactive chat in a new session
+  cliq chat                  Explicitly start interactive chat in a new session
+  cliq resume SESSION        Resume a previous session interactively
+  cliq resume --last         Resume the active session interactively
+  cliq continue              Continue the active session interactively
   cliq reset               Clear persisted conversation for this directory
   cliq history             Print persisted session for this directory
   cliq rpc                 Start stdio JSON-RPC mode
@@ -1657,6 +1733,44 @@ async function runCliSessionStartHooks({
       }
     }
   }
+}
+
+function parsedSessionSelection(parsed: ParsedArgs): ParsedSessionSelection | undefined {
+  return 'session' in parsed ? parsed.session : undefined;
+}
+
+function headlessSessionRequest(selection: ParsedSessionSelection | undefined) {
+  if (!selection) {
+    return { mode: 'new' as const };
+  }
+  if (selection.mode === 'active') {
+    return { mode: 'active' as const };
+  }
+  return { id: selection.id };
+}
+
+async function resolveInteractiveSession(cwd: string, selection: ParsedSessionSelection | undefined): Promise<Session> {
+  if (!selection) {
+    return await ensureFresh(cwd);
+  }
+
+  if (selection.mode === 'active') {
+    const active = await loadActiveSession(cwd);
+    if (!active) {
+      const message = 'No session found to continue. Start a new session with `cliq` or use `cliq resume <session-id>`.';
+      process.stderr.write(`${message}\n`);
+      throw new ReportedCliError(message, { exitCode: 1 });
+    }
+    return active;
+  }
+
+  const resumed = await loadSessionById(cwd, selection.id);
+  if (!resumed) {
+    const message = `Session not found: ${selection.id}`;
+    process.stderr.write(`${message}\n`);
+    throw new ReportedCliError(message, { exitCode: 1 });
+  }
+  return resumed;
 }
 
 function firstLine(value: unknown) {
@@ -2728,6 +2842,7 @@ export async function runCli(argv: string[]) {
           policy,
           skills,
           model: cliModel,
+          session: headlessSessionRequest(parsedSessionSelection(parsed)),
           txMode: parsed.txMode,
           txApply: parsed.txApply,
           ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
@@ -2756,6 +2871,7 @@ export async function runCli(argv: string[]) {
         policy,
         skills,
         model: cliModel,
+        session: headlessSessionRequest(parsedSessionSelection(parsed)),
         txMode: parsed.txMode,
         txApply: parsed.txApply,
         ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
@@ -2808,7 +2924,7 @@ export async function runCli(argv: string[]) {
     preferInkTui: wantsTui
   });
 
-  const session = await ensureSession(cwd);
+  const session = await resolveInteractiveSession(cwd, parsedSessionSelection(parsed));
   const assembly = await createRuntimeAssembly({
     cwd,
     session,
