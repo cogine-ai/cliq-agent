@@ -191,6 +191,34 @@ test('bash tool with bashPolicy=confirm + headless promotes to deny', async () =
   }
 });
 
+test('bash tool aborts running child process group when signal is aborted', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-bash-abort-'));
+  const pidFile = path.join(cwd, 'child.pid');
+  const controller = new AbortController();
+  let childPid: number | undefined;
+
+  try {
+    const resultPromise = bashTool.execute(
+      { bash: `sleep 30 & echo $! > ${JSON.stringify(pidFile)}; wait` },
+      { cwd, session: createSession(cwd), signal: controller.signal }
+    );
+    childPid = Number((await waitForText(pidFile)).trim());
+    controller.abort();
+
+    await assert.rejects(resultPromise, (error: unknown) => error instanceof Error && error.name === 'AbortError');
+    await waitForProcessExit(childPid);
+  } finally {
+    if (childPid) {
+      try {
+        process.kill(childPid, 'SIGKILL');
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('bash timeout terminates descendant process group', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-bash-timeout-'));
   const pidFile = path.join(cwd, 'child.pid');

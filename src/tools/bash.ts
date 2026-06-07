@@ -21,13 +21,70 @@ function requireNonEmptyString(input: Record<string, unknown>, field: string) {
   return value;
 }
 
+function abortError() {
+  const error = new Error('aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
 function runBashChild(action: { bash: string }, context: ToolContext): Promise<ToolResult> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    const signal = context.signal;
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+
     const child = spawn('bash', ['-lc', action.bash], { cwd: context.cwd, env: process.env, detached: true });
     let out = '';
     let timedOut = false;
     let settled = false;
     let killTimer: NodeJS.Timeout | undefined;
+
+    const killChildProcessGroup = (killSignal: NodeJS.Signals) => {
+      if (!child.pid) {
+        child.kill(killSignal);
+        return;
+      }
+
+      try {
+        process.kill(-child.pid, killSignal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+          child.kill(killSignal);
+        }
+      }
+    };
+
+    const cleanupAbortListener = () => {
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    const rejectAborted = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanupAbortListener();
+      clearTimeout(timer);
+      if (killTimer) {
+        clearTimeout(killTimer);
+      }
+      reject(abortError());
+    };
+
+    const onAbort = () => {
+      killChildProcessGroup('SIGTERM');
+      killTimer = setTimeout(() => {
+        if (!settled) {
+          killChildProcessGroup('SIGKILL');
+        }
+      }, 250);
+      rejectAborted();
+    };
+
+    signal?.addEventListener('abort', onAbort, { once: true });
 
     const finish = (result: ToolResult) => {
       if (settled) {
@@ -35,26 +92,12 @@ function runBashChild(action: { bash: string }, context: ToolContext): Promise<T
       }
 
       settled = true;
+      cleanupAbortListener();
       clearTimeout(timer);
       if (killTimer) {
         clearTimeout(killTimer);
       }
       resolve(result);
-    };
-
-    const killChildProcessGroup = (signal: NodeJS.Signals) => {
-      if (!child.pid) {
-        child.kill(signal);
-        return;
-      }
-
-      try {
-        process.kill(-child.pid, signal);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
-          child.kill(signal);
-        }
-      }
     };
 
     const onData = (chunk: Buffer) => {
