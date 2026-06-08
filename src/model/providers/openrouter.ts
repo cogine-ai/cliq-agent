@@ -11,7 +11,8 @@ import {
   parseOpenAIToolCalls,
   selectTypedRequestMode,
   toolSpecsToOpenAIChatTools,
-  typedPromptToOpenAIMessages
+  typedPromptToOpenAIMessages,
+  typedRequestShouldStream
 } from './prompt-mapping.js';
 
 type OpenRouterResp = {
@@ -37,10 +38,6 @@ function openRouterHeaders(config: ResolvedModelConfig) {
     'HTTP-Referer': 'https://local.cliq',
     'X-Title': 'cliq-agent'
   };
-}
-
-function typedRequestShouldStream(request: ModelPromptRequest) {
-  return request.streaming.mode !== 'off' && request.providerCapabilities.streaming;
 }
 
 function typedChatBody(request: ModelPromptRequest, mode: ReturnType<typeof selectTypedRequestMode>, stream: boolean) {

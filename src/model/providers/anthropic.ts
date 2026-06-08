@@ -7,7 +7,8 @@ import {
   maybeParseStructuredOutput,
   selectTypedRequestMode,
   toolSpecsToAnthropicTools,
-  typedPromptToAnthropicInput
+  typedPromptToAnthropicInput,
+  typedRequestShouldStream
 } from './prompt-mapping.js';
 
 type AnthropicResp = {
@@ -35,10 +36,6 @@ function messagesUrl(baseUrl: string) {
   return baseUrl.replace(/\/+$/, '').endsWith('/v1')
     ? joinUrl(baseUrl, '/messages')
     : joinUrl(baseUrl, '/v1/messages');
-}
-
-function typedRequestShouldStream(request: ModelPromptRequest) {
-  return request.streaming.mode !== 'off' && request.providerCapabilities.streaming;
 }
 
 function typedBody(config: ResolvedModelConfig, request: ModelPromptRequest, stream: boolean) {

@@ -5,14 +5,13 @@ import type { InstructionMessage } from '../instructions/types.js';
 import { classifyContextOverflow } from '../model/errors.js';
 import { resolveModelMetadata } from '../model/catalog/index.js';
 import { buildModelPromptRequest } from '../model/prompt.js';
+import { effectiveTypedRequest, selectTypedRequestMode, typedRequestShouldStream } from '../model/providers/prompt-mapping.js';
 import type {
   ChatMessage,
-  EffectiveModelRequest,
   ModelCapabilities,
   ModelClient,
   ModelCompletion,
   ModelPromptRequest,
-  ModelRequestMode,
   ModelStructuredOutput,
   ModelToolCall,
   ResolvedModelConfig
@@ -98,35 +97,6 @@ function toolCallFromStructuredOutput(output: Extract<ModelStructuredOutput, { t
     id: output.callId ?? makeId('call'),
     name: output.tool,
     arguments: output.arguments
-  };
-}
-
-function requestModeForPrompt(request: ModelPromptRequest): ModelRequestMode {
-  if (request.providerCapabilities.nativeToolCalling && request.toolSpecs.length > 0) {
-    return 'native-tools';
-  }
-  if (request.providerCapabilities.structuredOutput) {
-    return 'structured-output';
-  }
-  return 'text-action';
-}
-
-function promptRequestShouldStream(request: ModelPromptRequest) {
-  return request.streaming.mode !== 'off' && request.providerCapabilities.streaming;
-}
-
-function inferredEffectiveRequest(request: ModelPromptRequest): EffectiveModelRequest {
-  const mode = requestModeForPrompt(request);
-  return {
-    provider: request.model.provider,
-    model: request.model.model,
-    mode,
-    streaming: promptRequestShouldStream(request),
-    baseInstructionChars: request.baseInstructions.text.length,
-    inputItemCount: request.input.length,
-    toolNames: request.toolSpecs.map((tool) => tool.name),
-    outputSchema: mode === 'structured-output' ? request.outputSchema.name : undefined,
-    textActionFallback: request.textActionFallback
   };
 }
 
@@ -445,7 +415,11 @@ export function createRunner({
               ? completion
               : {
                   ...completion,
-                  effectiveRequest: inferredEffectiveRequest(promptRequest)
+                  effectiveRequest: effectiveTypedRequest(
+                    promptRequest,
+                    selectTypedRequestMode(promptRequest),
+                    typedRequestShouldStream(promptRequest)
+                  )
                 };
             const effectiveRequest = effectiveCompletion.effectiveRequest!;
             await throwIfCancelled();
