@@ -65,6 +65,10 @@ export function selectTypedRequestMode(request: ModelPromptRequest): ModelReques
   return 'text-action';
 }
 
+export function typedRequestShouldStream(request: ModelPromptRequest) {
+  return request.streaming.mode !== 'off' && request.providerCapabilities.streaming;
+}
+
 export function effectiveTypedRequest(
   request: ModelPromptRequest,
   mode: ModelRequestMode,

@@ -11,7 +11,8 @@ import {
   parseOpenAIToolCalls,
   selectTypedRequestMode,
   toolSpecsToOpenAIChatTools,
-  typedPromptToOpenAIMessages
+  typedPromptToOpenAIMessages,
+  typedRequestShouldStream
 } from './prompt-mapping.js';
 
 type ChatCompletionsResp = {
@@ -97,10 +98,6 @@ async function completeWithoutStreaming(config: ResolvedModelConfig, messages: C
     provider: config.provider,
     model: config.model
   };
-}
-
-function typedRequestShouldStream(request: ModelPromptRequest) {
-  return request.streaming.mode !== 'off' && request.providerCapabilities.streaming;
 }
 
 function typedChatBody(request: ModelPromptRequest, mode: ReturnType<typeof selectTypedRequestMode>, stream: boolean) {

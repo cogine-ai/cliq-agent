@@ -8,7 +8,8 @@ import {
   parseOllamaToolCalls,
   selectTypedRequestMode,
   toolSpecsToOpenAIChatTools,
-  typedPromptToOpenAIMessages
+  typedPromptToOpenAIMessages,
+  typedRequestShouldStream
 } from './prompt-mapping.js';
 
 type OllamaResp = {
@@ -31,10 +32,6 @@ type OllamaToolCallPart = {
     arguments?: unknown;
   };
 };
-
-function typedRequestShouldStream(request: ModelPromptRequest) {
-  return request.streaming.mode !== 'off' && request.providerCapabilities.streaming;
-}
 
 function typedChatBody(request: ModelPromptRequest, mode: ReturnType<typeof selectTypedRequestMode>, stream: boolean) {
   return {

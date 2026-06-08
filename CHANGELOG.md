@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed duplicate typed prompt mode/streaming helpers from the runner and
+  provider clients after the typed `ModelPromptRequest` protocol rollout. Mode
+  selection and streaming inference now share `selectTypedRequestMode` and
+  `typedRequestShouldStream` from `prompt-mapping.ts`.
+
 ## [0.13.1] - 2026-06-05
 
 This patch release improves OpenAI-compatible model setup and TUI status output
