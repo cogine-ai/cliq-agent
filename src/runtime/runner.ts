@@ -5,7 +5,6 @@ import type { InstructionMessage } from '../instructions/types.js';
 import { classifyContextOverflow } from '../model/errors.js';
 import { resolveModelMetadata } from '../model/catalog/index.js';
 import { buildModelPromptRequest } from '../model/prompt.js';
-import { effectiveTypedRequest, selectTypedRequestMode, typedRequestShouldStream } from '../model/providers/prompt-mapping.js';
 import type {
   ChatMessage,
   ModelCapabilities,
@@ -411,33 +410,23 @@ export function createRunner({
                 }
               }
             });
-            const effectiveCompletion = completion.effectiveRequest
-              ? completion
-              : {
-                  ...completion,
-                  effectiveRequest: effectiveTypedRequest(
-                    promptRequest,
-                    selectTypedRequestMode(promptRequest),
-                    typedRequestShouldStream(promptRequest)
-                  )
-                };
-            const effectiveRequest = effectiveCompletion.effectiveRequest!;
+            const effectiveRequest = completion.effectiveRequest;
             await throwIfCancelled();
 
             if (!sawModelStart) {
               await onEvent({
                 type: 'model-start',
-                provider: effectiveCompletion.provider,
-                model: effectiveCompletion.model,
-                streaming: effectiveRequest.streaming
+                provider: completion.provider,
+                model: completion.model,
+                streaming: effectiveRequest?.streaming ?? false
               });
             }
 
             if (!sawModelEnd) {
-              await onEvent({ type: 'model-end', provider: effectiveCompletion.provider, model: effectiveCompletion.model });
+              await onEvent({ type: 'model-end', provider: completion.provider, model: completion.model });
             }
 
-            return { ok: true, completion: effectiveCompletion };
+            return { ok: true, completion };
           } catch (error) {
             if (signal?.aborted) {
               await throwIfCancelled();
