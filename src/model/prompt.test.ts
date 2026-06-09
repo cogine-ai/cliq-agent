@@ -126,6 +126,15 @@ test('parseStructuredOutput accepts only object tool arguments', () => {
     tool: 'bash',
     arguments: {}
   });
+  assert.deepEqual(
+    parseStructuredOutput('{"type":"tool","tool":"bash","arguments":{},"callId":"call_1"}'),
+    {
+      type: 'tool',
+      tool: 'bash',
+      arguments: {},
+      callId: 'call_1'
+    }
+  );
 
   assert.throws(
     () => parseStructuredOutput('{"type":"tool","tool":"bash","arguments":[]}'),

@@ -652,6 +652,61 @@ test('runHeadless rejects unknown session request fields', async () => {
   assert.match(output.error?.message ?? '', /unknown session field/i);
 });
 
+test('runHeadless rejects conflicting session selectors', async () => {
+  const { cwd } = await setupWorkspace();
+  const model = { modelClient: finalModel('done') };
+
+  const unknownMode = await runHeadless(
+    { cwd, prompt: 'say done', session: { mode: 'stale' as 'active' } },
+    model
+  );
+  assert.equal(unknownMode.status, 'failed');
+  assert.equal(unknownMode.error?.code, 'invalid-input');
+  assert.match(unknownMode.error?.message ?? '', /unknown session mode/i);
+
+  const idWithMode = await runHeadless(
+    { cwd, prompt: 'say done', session: { id: 'sess_123', mode: 'active' } },
+    model
+  );
+  assert.equal(idWithMode.status, 'failed');
+  assert.match(idWithMode.error?.message ?? '', /cannot be combined with mode or last/i);
+
+  const lastWithNew = await runHeadless(
+    { cwd, prompt: 'say done', session: { mode: 'new', last: true } },
+    model
+  );
+  assert.equal(lastWithNew.status, 'failed');
+  assert.match(lastWithNew.error?.message ?? '', /cannot be combined with mode new/i);
+});
+
+test('runHeadless honors explicit session mode new even when an active session exists', async () => {
+  const { cwd } = await setupWorkspace();
+
+  const first = await runHeadless(
+    {
+      cwd,
+      prompt: 'first',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('first done') }
+  );
+  const explicitNew = await runHeadless(
+    {
+      cwd,
+      prompt: 'second',
+      model: { provider: 'ollama', model: 'test-model' },
+      session: { mode: 'new' },
+      autoCompact: { enabled: 'off' }
+    },
+    { modelClient: finalModel('second done') }
+  );
+
+  assert.equal(first.status, 'completed');
+  assert.equal(explicitNew.status, 'completed');
+  assert.notEqual(explicitNew.sessionId, first.sessionId);
+});
+
 test('runHeadless maps invalid model config to config-error', async () => {
   const { cwd } = await setupWorkspace();
 
