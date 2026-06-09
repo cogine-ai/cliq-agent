@@ -86,6 +86,21 @@ async function setupApprovedTx(
   return root;
 }
 
+async function writeIndexCleanBaseline(root: string, txId: string, ws: string): Promise<void> {
+  const baseline = await indexClean.run({
+    txId,
+    workspaceView: ws,
+    realCwd: ws,
+    signal: new AbortController().signal
+  });
+  await mkdir(validatorsDir(root, txId), { recursive: true });
+  await writeFile(
+    path.join(validatorsDir(root, txId), 'builtin_index-clean.json'),
+    JSON.stringify(baseline, null, 2),
+    'utf8'
+  );
+}
+
 test('Stage A1a rejects when tx state !== approved', async () => {
   await withFakeCliqHome(async (home) => {
     const ws = await setupGitWorkspace();
@@ -178,19 +193,7 @@ test('Stage A2 rejects when the Git index changed since index-clean validation',
       const root = await setupApprovedTx(home, ws, 'tx_index_changed', [
         { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
       ]);
-
-      const baseline = await indexClean.run({
-        txId: 'tx_index_changed',
-        workspaceView: ws,
-        realCwd: ws,
-        signal: new AbortController().signal
-      });
-      await mkdir(validatorsDir(root, 'tx_index_changed'), { recursive: true });
-      await writeFile(
-        path.join(validatorsDir(root, 'tx_index_changed'), 'builtin_index-clean.json'),
-        JSON.stringify(baseline, null, 2),
-        'utf8'
-      );
+      await writeIndexCleanBaseline(root, 'tx_index_changed', ws);
 
       await writeFile(path.join(ws, 'b.txt'), 'staged after validation', 'utf8');
       await execFileAsync('git', ['add', 'b.txt'], { cwd: ws });
@@ -202,6 +205,39 @@ test('Stage A2 rejects when the Git index changed since index-clean validation',
           /Git index changed since builtin:index-clean validation/.test((err as Error).message)
       );
       assert.equal(await readApplyProgress(root, 'tx_index_changed'), null);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('Stage A2 rejects when staged index content changes with the same path and status text', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'base\n', 'utf8');
+      await writeFile(path.join(ws, 'c.txt'), 'old\n', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+      await writeFile(path.join(ws, 'a.txt'), 'staged at validation\n', 'utf8');
+      await execFileAsync('git', ['add', 'a.txt'], { cwd: ws });
+
+      const root = await setupApprovedTx(home, ws, 'tx_index_dirty_restaged', [
+        { path: 'c.txt', oldContent: 'old\n', newContent: 'new\n' }
+      ]);
+      await writeIndexCleanBaseline(root, 'tx_index_dirty_restaged', ws);
+
+      await writeFile(path.join(ws, 'a.txt'), 'restaged before apply\n', 'utf8');
+      await execFileAsync('git', ['add', 'a.txt'], { cwd: ws });
+
+      await assert.rejects(
+        runStageA({ root, txId: 'tx_index_dirty_restaged', cwd: ws }),
+        (err: unknown) =>
+          err instanceof ApplyRejected &&
+          /Git index changed since builtin:index-clean validation/.test((err as Error).message)
+      );
+      assert.equal(await readApplyProgress(root, 'tx_index_dirty_restaged'), null);
     } finally {
       await rm(ws, { recursive: true, force: true });
     }

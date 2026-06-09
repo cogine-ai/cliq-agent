@@ -11,6 +11,12 @@ import { indexClean } from './index-clean.js';
 const execFileAsync = promisify(execFile);
 const ctx = (cwd: string) => ({ txId: 'tx_test', workspaceView: cwd, realCwd: cwd, signal: new AbortController().signal });
 
+function assertHasIndexFingerprint(result: Awaited<ReturnType<typeof indexClean.run>>): void {
+  const fingerprint = result.metadata?.indexFingerprint as Record<string, unknown> | undefined;
+  assert.equal(fingerprint?.version, 'git-index-v1');
+  assert.equal(typeof fingerprint?.entriesSha256, 'string');
+}
+
 test('index-clean passes on a clean repo', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-clean-'));
   try {
@@ -22,6 +28,7 @@ test('index-clean passes on a clean repo', async () => {
     await execFileAsync('git', ['commit', '-m', 'init'], { cwd: dir });
     const result = await indexClean.run(ctx(dir));
     assert.equal(result.status, 'pass');
+    assertHasIndexFingerprint(result);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -41,6 +48,7 @@ test('index-clean fails when index has staged changes', async () => {
     const result = await indexClean.run(ctx(dir));
     assert.equal(result.status, 'fail');
     assert.ok(result.findings && result.findings.length > 0);
+    assertHasIndexFingerprint(result);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -52,6 +60,7 @@ test('index-clean returns pass with skip message when not a git repo', async () 
     const result = await indexClean.run(ctx(dir));
     assert.equal(result.status, 'pass');
     assert.match(result.message ?? '', /not a git repository/);
+    assert.equal(result.metadata, undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -84,7 +93,7 @@ test('index-clean returns blocking fail when git execution fails for reasons oth
   // than the not-a-repo skip path.
   const result = await indexClean.run(ctx('/nonexistent/path/that/does/not/exist'));
   assert.equal(result.status, 'fail');
-  assert.match(result.message ?? '', /git status failed/);
+  assert.match(result.message ?? '', /git (status|index fingerprint) failed/);
 });
 
 test('index-clean preserves spaces in renamed paths (porcelain v2 "2 " parsing)', async () => {

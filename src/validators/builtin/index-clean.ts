@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { Validator, Finding, ValidatorResult } from '../types.js';
 import { validatorsDir } from '../../workspace/transactions/store.js';
@@ -14,10 +15,14 @@ type CheckIndexUnchangedOptions = {
   realCwd: string;
 };
 
-type ComparableIndexState = {
-  status: ValidatorResult['status'];
-  message: string;
-  findings: Finding[];
+type GitIndexFingerprint = {
+  version: 'git-index-v1';
+  entriesSha256: string;
+  tree?: string;
+};
+
+type IndexCleanMetadata = {
+  indexFingerprint: GitIndexFingerprint;
 };
 
 export class IndexChangedSinceValidation extends Error {
@@ -25,6 +30,88 @@ export class IndexChangedSinceValidation extends Error {
     super(message);
     this.name = 'IndexChangedSinceValidation';
   }
+}
+
+function isGitIndexFingerprint(value: unknown): value is GitIndexFingerprint {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate.version === 'git-index-v1' &&
+    typeof candidate.entriesSha256 === 'string' &&
+    (candidate.tree === undefined || typeof candidate.tree === 'string')
+  );
+}
+
+function gitIndexFingerprintsEqual(
+  left: GitIndexFingerprint,
+  right: GitIndexFingerprint
+): boolean {
+  return (
+    left.version === right.version &&
+    left.entriesSha256 === right.entriesSha256 &&
+    left.tree === right.tree
+  );
+}
+
+function isNotGitRepositoryError(err: unknown): boolean {
+  const e = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
+  const stderr = (e.stderr ?? '').toString();
+  const errMsg = e.message ?? String(err);
+  return /not a git repository/i.test(stderr) || /not a git repository/i.test(errMsg);
+}
+
+function execFileBuffer(
+  file: string,
+  args: string[],
+  opts: { cwd: string; timeout: number }
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { ...opts, encoding: 'buffer' }, (err, stdout, stderr) => {
+      if (err) {
+        const enriched = err as NodeJS.ErrnoException & {
+          stdout?: Buffer | string;
+          stderr?: Buffer | string;
+        };
+        enriched.stdout = stdout;
+        enriched.stderr = stderr;
+        reject(enriched);
+        return;
+      }
+      resolve(Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout));
+    });
+  });
+}
+
+async function computeGitIndexFingerprint(realCwd: string): Promise<GitIndexFingerprint | null> {
+  let entries: Buffer;
+  try {
+    entries = await execFileBuffer('git', ['ls-files', '-s', '-z'], {
+      cwd: realCwd,
+      timeout: 10_000
+    });
+  } catch (err) {
+    if (isNotGitRepositoryError(err)) return null;
+    throw err;
+  }
+
+  let tree: string | undefined;
+  try {
+    const result = await execFileAsync('git', ['write-tree'], {
+      cwd: realCwd,
+      timeout: 10_000
+    });
+    const trimmed = result.stdout.trim();
+    if (trimmed) tree = trimmed;
+  } catch {
+    // Unmerged indexes can make write-tree fail. The raw index-entry hash
+    // remains comparable and includes staged blob ids plus stages.
+  }
+
+  return {
+    version: 'git-index-v1',
+    entriesSha256: createHash('sha256').update(entries).digest('hex'),
+    ...(tree ? { tree } : {})
+  };
 }
 
 /**
@@ -103,6 +190,22 @@ export const indexClean: Validator = {
   defaultSeverity: 'blocking',
   async run(ctx) {
     const start = Date.now();
+    let indexFingerprint: GitIndexFingerprint | null;
+    try {
+      indexFingerprint = await computeGitIndexFingerprint(ctx.realCwd);
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
+      const stderr = (e.stderr ?? '').toString();
+      const detail = stderr.trim() ? ` (stderr: ${stderr.trim().slice(0, 256)})` : '';
+      return {
+        name: INDEX_CLEAN_NAME,
+        severity: 'blocking',
+        status: 'fail',
+        durationMs: Date.now() - start,
+        message: `git index fingerprint failed: ${e.message ?? String(err)}${detail}`
+      };
+    }
+
     let stdout: string;
     try {
       ({ stdout } = await execFileAsync(
@@ -123,8 +226,7 @@ export const indexClean: Validator = {
       const e = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
       const stderr = (e.stderr ?? '').toString();
       const errMsg = e.message ?? String(err);
-      const isNotRepo = /not a git repository/i.test(stderr) || /not a git repository/i.test(errMsg);
-      if (isNotRepo) {
+      if (isNotGitRepositoryError(err)) {
         return {
           name: INDEX_CLEAN_NAME,
           severity: 'blocking',
@@ -160,7 +262,10 @@ export const indexClean: Validator = {
       severity: 'blocking',
       status: findings.length === 0 ? 'pass' : 'fail',
       durationMs: Date.now() - start,
-      findings: findings.length ? findings : undefined
+      findings: findings.length ? findings : undefined,
+      ...(indexFingerprint
+        ? { metadata: { indexFingerprint } satisfies IndexCleanMetadata }
+        : {})
     };
   }
 };
@@ -174,13 +279,35 @@ export async function checkIndexUnchanged(opts: CheckIndexUnchangedOptions): Pro
     );
   }
 
-  const current = await indexClean.run({
-    txId: opts.txId,
-    workspaceView: opts.realCwd,
-    realCwd: opts.realCwd,
-    signal: new AbortController().signal
-  });
-  if (!sameIndexState(baseline, current)) {
+  const baselineFingerprint = baseline.metadata?.indexFingerprint;
+  if (!isGitIndexFingerprint(baselineFingerprint)) {
+    if (/not a git repository/i.test(baseline.message ?? '')) return;
+    throw new IndexChangedSinceValidation(
+      'builtin:index-clean validation baseline is missing index fingerprint; re-run cliq tx validate before apply'
+    );
+  }
+
+  let currentFingerprint: GitIndexFingerprint | null;
+  try {
+    currentFingerprint = await computeGitIndexFingerprint(opts.realCwd);
+  } catch (err) {
+    throw new IndexChangedSinceValidation(
+      `could not compute current Git index fingerprint; re-run cliq tx validate before apply (${err instanceof Error ? err.message : String(err)})`
+    );
+  }
+  if (!currentFingerprint) {
+    throw new IndexChangedSinceValidation(
+      'current Git index fingerprint is unavailable; re-run cliq tx validate before apply'
+    );
+  }
+
+  if (!gitIndexFingerprintsEqual(baselineFingerprint, currentFingerprint)) {
+    const current = await indexClean.run({
+      txId: opts.txId,
+      workspaceView: opts.realCwd,
+      realCwd: opts.realCwd,
+      signal: new AbortController().signal
+    });
     throw new IndexChangedSinceValidation(
       `Git index changed since builtin:index-clean validation; re-run cliq tx validate before apply${formatCurrentIndexDetail(current)}`
     );
@@ -203,26 +330,6 @@ async function readIndexCleanBaseline(root: string, txId: string): Promise<Valid
 function indexCleanBaselinePath(root: string, txId: string): string {
   const sanitized = INDEX_CLEAN_NAME.replace(/[^A-Za-z0-9_.-]/g, '_');
   return path.join(validatorsDir(root, txId), `${sanitized}.json`);
-}
-
-function sameIndexState(a: ValidatorResult, b: ValidatorResult): boolean {
-  return JSON.stringify(comparableIndexState(a)) === JSON.stringify(comparableIndexState(b));
-}
-
-function comparableIndexState(result: ValidatorResult): ComparableIndexState {
-  return {
-    status: result.status,
-    message: result.message ?? '',
-    findings: [...(result.findings ?? [])]
-      .map((finding) => ({
-        path: finding.path,
-        line: finding.line,
-        column: finding.column,
-        severity: finding.severity,
-        message: finding.message
-      }))
-      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
-  };
 }
 
 function formatCurrentIndexDetail(result: ValidatorResult): string {

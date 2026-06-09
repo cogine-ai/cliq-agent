@@ -18,6 +18,7 @@ export type ValidatorResult = {
   message?: string;
   findings?: Finding[];
   artifactPath?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type ValidatorContext = {
