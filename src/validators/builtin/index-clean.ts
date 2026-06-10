@@ -270,6 +270,31 @@ export const indexClean: Validator = {
   }
 };
 
+function baselineSkippedNonGitRepo(baseline: ValidatorResult): boolean {
+  return /not a git repository/i.test(baseline.message ?? '');
+}
+
+async function runIndexCleanAtApply(opts: CheckIndexUnchangedOptions): Promise<ValidatorResult> {
+  return indexClean.run({
+    txId: opts.txId,
+    workspaceView: opts.realCwd,
+    realCwd: opts.realCwd,
+    signal: new AbortController().signal
+  });
+}
+
+async function requireCleanGitIndexAtApply(
+  opts: CheckIndexUnchangedOptions,
+  reason: string
+): Promise<void> {
+  const current = await runIndexCleanAtApply(opts);
+  if (current.status !== 'pass') {
+    throw new IndexChangedSinceValidation(
+      `${reason}; re-run cliq tx validate before apply${formatCurrentIndexDetail(current)}`
+    );
+  }
+}
+
 export async function checkIndexUnchanged(opts: CheckIndexUnchangedOptions): Promise<void> {
   const baseline = await readIndexCleanBaseline(opts.root, opts.txId);
   if (!baseline) return;
@@ -281,7 +306,22 @@ export async function checkIndexUnchanged(opts: CheckIndexUnchangedOptions): Pro
 
   const baselineFingerprint = baseline.metadata?.indexFingerprint;
   if (!isGitIndexFingerprint(baselineFingerprint)) {
-    if (/not a git repository/i.test(baseline.message ?? '')) return;
+    if (baselineSkippedNonGitRepo(baseline)) {
+      let currentFingerprint: GitIndexFingerprint | null;
+      try {
+        currentFingerprint = await computeGitIndexFingerprint(opts.realCwd);
+      } catch (err) {
+        throw new IndexChangedSinceValidation(
+          `could not compute current Git index fingerprint; re-run cliq tx validate before apply (${err instanceof Error ? err.message : String(err)})`
+        );
+      }
+      if (!currentFingerprint) return;
+      await requireCleanGitIndexAtApply(
+        opts,
+        'Git repository initialized since builtin:index-clean validation with a dirty index'
+      );
+      return;
+    }
     throw new IndexChangedSinceValidation(
       'builtin:index-clean validation baseline is missing index fingerprint; re-run cliq tx validate before apply'
     );
@@ -302,15 +342,7 @@ export async function checkIndexUnchanged(opts: CheckIndexUnchangedOptions): Pro
   }
 
   if (!gitIndexFingerprintsEqual(baselineFingerprint, currentFingerprint)) {
-    const current = await indexClean.run({
-      txId: opts.txId,
-      workspaceView: opts.realCwd,
-      realCwd: opts.realCwd,
-      signal: new AbortController().signal
-    });
-    throw new IndexChangedSinceValidation(
-      `Git index changed since builtin:index-clean validation; re-run cliq tx validate before apply${formatCurrentIndexDetail(current)}`
-    );
+    await requireCleanGitIndexAtApply(opts, 'Git index changed since builtin:index-clean validation');
   }
 }
 

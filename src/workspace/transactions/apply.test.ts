@@ -211,6 +211,62 @@ test('Stage A2 rejects when the Git index changed since index-clean validation',
   });
 });
 
+test('Stage A2 rejects when git is initialized with staged changes after non-git validation', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-apply-nongit-'));
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      const root = await setupApprovedTx(home, ws, 'tx_nongit_to_git', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      await writeIndexCleanBaseline(root, 'tx_nongit_to_git', ws);
+
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: ws });
+      await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: ws });
+      await execFileAsync('git', ['config', 'user.name', 't'], { cwd: ws });
+      await writeFile(path.join(ws, 'b.txt'), 'staged after init', 'utf8');
+      await execFileAsync('git', ['add', 'b.txt'], { cwd: ws });
+
+      await assert.rejects(
+        runStageA({ root, txId: 'tx_nongit_to_git', cwd: ws }),
+        (err: unknown) =>
+          err instanceof ApplyRejected &&
+          /Git repository initialized since builtin:index-clean validation with a dirty index/.test(
+            (err as Error).message
+          )
+      );
+      assert.equal(await readApplyProgress(root, 'tx_nongit_to_git'), null);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+test('Stage A2 allows apply when git is initialized with a clean index after non-git validation', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await mkdtemp(path.join(os.tmpdir(), 'cliq-apply-nongit-clean-'));
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      const root = await setupApprovedTx(home, ws, 'tx_nongit_to_git_clean', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      await writeIndexCleanBaseline(root, 'tx_nongit_to_git_clean', ws);
+
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: ws });
+      await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: ws });
+      await execFileAsync('git', ['config', 'user.name', 't'], { cwd: ws });
+      await execFileAsync('git', ['add', 'a.txt'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+      const stageA = await runStageA({ root, txId: 'tx_nongit_to_git_clean', cwd: ws });
+      assert.equal(stageA.plan.length, 1);
+      assert.equal(stageA.plan[0]?.path, 'a.txt');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
 test('Stage A2 rejects when staged index content changes with the same path and status text', async () => {
   await withFakeCliqHome(async (home) => {
     const ws = await setupGitWorkspace();
