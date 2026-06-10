@@ -296,6 +296,28 @@ test('Stage A success: writes apply-progress with phase=apply-pending and return
   });
 });
 
+test('Stage A succeeds when an index-clean baseline exists and the Git index is unchanged', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', 'a.txt'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTx(home, ws, 'tx_index_ok', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      await writeIndexCleanBaseline(root, 'tx_index_ok', ws);
+
+      const outcome = await runStageA({ root, txId: 'tx_index_ok', cwd: ws });
+      assert.equal(outcome.plan.length, 1);
+      const ap = await readApplyProgress(root, 'tx_index_ok');
+      assert.equal(ap?.phase, 'apply-pending');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
 test('Stage B writes each planned file via tmp+rename, fsyncs, and reaches apply-committed', async () => {
   await withFakeCliqHome(async (home) => {
     const ws = await setupGitWorkspace();

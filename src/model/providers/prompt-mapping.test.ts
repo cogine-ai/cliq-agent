@@ -11,7 +11,8 @@ import {
   openAIToolCallsFromDeltaParts,
   parseOllamaToolCalls,
   parseOpenAIToolCalls,
-  selectTypedRequestMode
+  selectTypedRequestMode,
+  typedRequestShouldStream
 } from './prompt-mapping.js';
 
 const modelCapabilities: ModelCapabilities = {
@@ -91,6 +92,25 @@ test('effectiveTypedRequest summarizes the resolved provider request shape', () 
   assert.equal(effective.inputItemCount, 1);
   assert.ok(effective.toolNames.includes('bash'));
   assert.equal(effective.outputSchema, undefined);
+});
+
+test('typedRequestShouldStream is false when streaming mode is off', () => {
+  const request = promptRequest('openai-compatible');
+  request.streaming.mode = 'off';
+  assert.equal(typedRequestShouldStream(request), false);
+});
+
+test('typedRequestShouldStream is false when the provider does not support streaming', () => {
+  const request = promptRequest('openai-compatible');
+  request.providerCapabilities.streaming = false;
+  assert.equal(typedRequestShouldStream(request), false);
+});
+
+test('typedRequestShouldStream is true when streaming is enabled and the provider supports it', () => {
+  const request = promptRequest('openai-compatible');
+  request.streaming.mode = 'on';
+  request.providerCapabilities.streaming = true;
+  assert.equal(typedRequestShouldStream(request), true);
 });
 
 test('maybeParseStructuredOutput only parses in structured-output and text-action modes', () => {
