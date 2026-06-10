@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider clients after the typed `ModelPromptRequest` protocol rollout. Mode
   selection and streaming inference now share `selectTypedRequestMode` and
   `typedRequestShouldStream` from `prompt-mapping.ts`.
+- Removed the unused `coerceHookPermissionScope` helper from the runner.
+  PermissionRequest hook `scope` values remain accepted for forward compatibility
+  (#62-A) but still have no persistent effect until the #62-B allowlist surface
+  ships; headless one-shot behavior is unchanged.
 
 ## [0.13.1] - 2026-06-05
 
