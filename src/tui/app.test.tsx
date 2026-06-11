@@ -117,8 +117,10 @@ test('renders the CLIQ header and composer model context', () => {
   const store = makeStore();
   const { lastFrame } = render(<App store={store} onSubmit={() => {}} />);
   const frame = lastFrame() ?? '';
-  assert.match(frame, /CCCCC/);
-  assert.match(frame, /LLLLL/);
+  assert.ok(frame.includes('____ _     ___ ___'));
+  assert.ok(frame.includes('/ ___| |   |_ _/ _ \\'));
+  assert.ok(frame.includes('| |___| |___ | | |_| |'));
+  assert.ok(frame.includes('\\____|_____|___\\__\\_\\'));
   assert.match(frame, /! YOLO Mode > ollama\/qwen3:4b/);
   assert.doesNotMatch(frame, /Ready when you are/);
   assert.doesNotMatch(frame, /bypass permissions on/);

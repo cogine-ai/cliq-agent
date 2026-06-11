@@ -1,11 +1,11 @@
 import { Box, Text } from 'ink';
 
 const CLIQ_LOGO = [
-  '  CCCCC  L      III  QQQQ ',
-  ' C       L       I  Q    Q',
-  ' C       L       I  Q Q  Q',
-  ' C       L       I  Q  Q Q',
-  '  CCCCC  LLLLL  III  QQQQ '
+  '   ____ _     ___ ___  ',
+  '  / ___| |   |_ _/ _ \\ ',
+  ' | |   | |    | | | | |',
+  ' | |___| |___ | | |_| |',
+  '  \\____|_____|___\\__\\_\\'
 ];
 
 export function TuiHeader() {
