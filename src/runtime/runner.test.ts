@@ -762,14 +762,86 @@ test('runner records a denied bash action when mode is plan', async () => {
     ]
   });
 
-  const finalMessage = await runner.runTurn(session, 'inspect repo');
+  await assert.rejects(
+    () => runner.runTurn(session, 'inspect repo'),
+    /Plan Mode requires a plan artifact before returning a final message/
+  );
   const toolRecord = session.records.find((record) => record.kind === 'tool');
 
-  assert.equal(finalMessage, 'done');
   assert.match(outputs[0] ?? '', /policy mode plan blocks exec tools/);
   assert.equal(toolRecord?.status, 'error');
   assert.equal(toolRecord?.meta?.reason, 'policy mode plan blocks exec tools');
   assert.equal(confirmCalls, 0);
+});
+
+test('runner rejects plan-mode final messages when no plan artifact was created', async () => {
+  const session = await createTempSession();
+  const events: RuntimeEvent[] = [];
+  const runner = createRunner({
+    model: {
+      async complete() {
+        return completion('{"message":"Here is the answer without a plan."}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'plan' }),
+    onEvent(event) {
+      events.push(event);
+    }
+  });
+
+  await assert.rejects(
+    () => runner.runTurn(session, 'make a plan'),
+    /Plan Mode requires a plan artifact before returning a final message/
+  );
+
+  assert.equal(session.activePlanId, undefined);
+  assert.equal(events.some((event) => event.type === 'final'), false);
+  assert.equal(
+    events.some(
+      (event) =>
+        event.type === 'error' &&
+        event.stage === 'policy' &&
+        /Plan Mode requires a plan artifact/.test(event.message)
+    ),
+    true
+  );
+});
+
+test('runner finalizes a plan-mode draft when the model tries to answer instead of requesting review', async () => {
+  const session = await createTempSession();
+  const events: RuntimeEvent[] = [];
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        if (calls === 1) {
+          return completion('{"plan":{"op":"draft","title":"TUI plan","content":"## Steps\\n- Inspect\\n- Summarize"}}');
+        }
+        if (calls === 2) {
+          return completion('{"ls":{"path":"."}}');
+        }
+        return completion('{"message":"I inspected the workspace and here is the answer."}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'plan' }),
+    onEvent(event) {
+      events.push(event);
+    }
+  });
+
+  const final = await runner.runTurn(session, 'make a plan');
+
+  assert.equal(final, 'Plan ready for review: TUI plan');
+  assert.equal(calls, 3);
+  assert.equal(session.records.filter((record) => record.kind === 'tool' && record.tool === 'plan').length, 1);
+  assert.equal(session.records.filter((record) => record.kind === 'tool' && record.tool === 'ls').length, 1);
+  const finalizedEvent = events.find((event): event is Extract<RuntimeEvent, { type: 'plan-finalized' }> => event.type === 'plan-finalized');
+  assert.ok(finalizedEvent);
+  assert.equal(finalizedEvent.plan.title, 'TUI plan');
+  const finalized = await readPlanArtifact(session.cwd, session, session.activePlanId!);
+  assert.equal(finalized.status, 'finalized');
 });
 
 test('runner allows plan artifacts in plan mode and stops for TUI review after finalize', async () => {
@@ -1555,7 +1627,10 @@ test('runner does not invoke PermissionRequest hooks for plan hard denies', asyn
     }
   });
 
-  await runner.runTurn(session, 'show cwd');
+  await assert.rejects(
+    () => runner.runTurn(session, 'show cwd'),
+    /Plan Mode requires a plan artifact before returning a final message/
+  );
 
   await assert.rejects(() => readFile(markerPath, 'utf8'), /ENOENT/);
 });

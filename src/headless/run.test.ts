@@ -454,7 +454,8 @@ test('runHeadless falls back to workspace permissions.preset when request.policy
     }
   );
 
-  assert.equal(output.status, 'completed', 'run still completes after deny');
+  assert.equal(output.status, 'failed', 'plan mode cannot complete with a final message after denying the edit');
+  assert.match(output.error?.message ?? '', /Plan Mode requires a plan artifact/);
   // PolicyEngine deny under plan surfaces as a tool-end with status
   // 'error'. Without the workspace preset fallback the edit would run
   // cleanly and tool-end.status would be 'ok'.

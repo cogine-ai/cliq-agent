@@ -15,4 +15,6 @@ test('buildPolicyModeInstructionMessages returns plan-mode guidance only in plan
   assert.match(messages[0]?.content ?? '', /Plan Mode is active/);
   assert.match(messages[0]?.content ?? '', /must not modify source files/);
   assert.match(messages[0]?.content ?? '', /plan\.md as editable only while the artifact is draft/);
+  assert.doesNotMatch(messages[0]?.content ?? '', /Ask concise blocking questions/);
+  assert.match(messages[0]?.content ?? '', /Capture missing information as assumptions and open questions inside the plan artifact/);
 });

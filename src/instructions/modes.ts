@@ -4,7 +4,7 @@ import type { InstructionMessage } from './types.js';
 const PLAN_MODE_INSTRUCTION = [
   'Plan Mode is active.',
   'Inspect and analyze the workspace before drafting a plan.',
-  'Ask concise blocking questions only when the missing answer prevents a useful plan.',
+  'Capture missing information as assumptions and open questions inside the plan artifact instead of asking as a separate message.',
   'You must not modify source files.',
   'You must not run bash/exec or other side-effecting commands.',
   'Use only read/ls/find/grep/skill/skillResource plus the dedicated plan action while planning.',
