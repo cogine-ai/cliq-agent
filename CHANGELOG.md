@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider clients after the typed `ModelPromptRequest` protocol rollout. Mode
   selection and streaming inference now share `selectTypedRequestMode` and
   `typedRequestShouldStream` from `prompt-mapping.ts`.
+- Removed the runner's `effectiveRequest` synthesis fallback now that every
+  typed provider client returns `effectiveRequest` on `ModelPromptRequest`
+  completions.
+- Removed the pre-`permissionDecision` `HookOutput.decision` allow branch from
+  `PermissionRequest` hook handling; hooks must emit `permissionDecision`.
 
 ## [0.13.1] - 2026-06-05
 

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { resolveModelMetadata } from '../model/catalog/index.js';
-import type { ModelClient } from '../model/types.js';
+import type { EffectiveModelRequest, ModelClient } from '../model/types.js';
 import { approvePlan, createDraftPlan, finalizePlan, readPlanArtifact, readPlanProgress } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { createSession } from '../session/store.js';
@@ -15,11 +15,22 @@ import type { RuntimeEvent } from '../protocol/runtime/events.js';
 import { createRunner } from './runner.js';
 import type { TxRunnerOptions } from './tx-runner.js';
 
+const TEST_EFFECTIVE_REQUEST: EffectiveModelRequest = {
+  provider: 'openrouter',
+  model: 'test-model',
+  mode: 'text-action',
+  streaming: false,
+  baseInstructionChars: 0,
+  inputItemCount: 0,
+  toolNames: []
+};
+
 function completion(content: string) {
   return {
     content,
     provider: 'openrouter' as const,
-    model: 'test-model'
+    model: 'test-model',
+    effectiveRequest: TEST_EFFECTIVE_REQUEST
   };
 }
 
@@ -369,6 +380,7 @@ test('runner prioritizes structured tool calls and replays typed tool results be
             content: 'not-json',
             provider: 'openrouter' as const,
             model: 'test-model',
+            effectiveRequest: { ...TEST_EFFECTIVE_REQUEST, mode: 'native-tools' },
             toolCalls: [
               {
                 id: 'call_1',
@@ -379,7 +391,10 @@ test('runner prioritizes structured tool calls and replays typed tool results be
           };
         }
 
-        return completion('done');
+        return {
+          ...completion('done'),
+          effectiveRequest: { ...TEST_EFFECTIVE_REQUEST, mode: 'native-tools' }
+        };
       }
     },
     policy: createPolicyEngine({ mode: 'yolo' })
@@ -425,7 +440,7 @@ test('runner carries session streaming mode into typed prompt requests', async (
   assert.equal((firstRequest as { streaming?: { mode?: string } }).streaming?.mode, 'off');
 });
 
-test('runner uses inferred typed request streaming for fallback model-start events', async () => {
+test('runner uses provider effectiveRequest.streaming for model-start events', async () => {
   const session = await createTempSession();
   session.model = {
     provider: 'openai-compatible',
@@ -438,7 +453,10 @@ test('runner uses inferred typed request streaming for fallback model-start even
   const runner = createRunner({
     model: {
       async complete() {
-        return completion('{"message":"done"}');
+        return {
+          ...completion('{"message":"done"}'),
+          effectiveRequest: { ...TEST_EFFECTIVE_REQUEST, streaming: true }
+        };
       }
     },
     onEvent(event) {

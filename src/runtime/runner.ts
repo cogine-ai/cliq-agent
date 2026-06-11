@@ -5,7 +5,6 @@ import type { InstructionMessage } from '../instructions/types.js';
 import { classifyContextOverflow } from '../model/errors.js';
 import { resolveModelMetadata } from '../model/catalog/index.js';
 import { buildModelPromptRequest } from '../model/prompt.js';
-import { effectiveTypedRequest, selectTypedRequestMode, typedRequestShouldStream } from '../model/providers/prompt-mapping.js';
 import type {
   ChatMessage,
   ModelCapabilities,
@@ -211,13 +210,6 @@ export function createRunner({
           decidedBy: 'hook'
         };
       }
-      if (run.result.output?.decision === 'allow') {
-        return {
-          behavior: 'allow',
-          reason: run.result.output.reason,
-          decidedBy: 'hook'
-        };
-      }
     }
     return null;
   }
@@ -411,33 +403,26 @@ export function createRunner({
                 }
               }
             });
-            const effectiveCompletion = completion.effectiveRequest
-              ? completion
-              : {
-                  ...completion,
-                  effectiveRequest: effectiveTypedRequest(
-                    promptRequest,
-                    selectTypedRequestMode(promptRequest),
-                    typedRequestShouldStream(promptRequest)
-                  )
-                };
-            const effectiveRequest = effectiveCompletion.effectiveRequest!;
+            const effectiveRequest = completion.effectiveRequest;
+            if (!effectiveRequest) {
+              throw new Error('ModelClient.complete must return effectiveRequest');
+            }
             await throwIfCancelled();
 
             if (!sawModelStart) {
               await onEvent({
                 type: 'model-start',
-                provider: effectiveCompletion.provider,
-                model: effectiveCompletion.model,
+                provider: completion.provider,
+                model: completion.model,
                 streaming: effectiveRequest.streaming
               });
             }
 
             if (!sawModelEnd) {
-              await onEvent({ type: 'model-end', provider: effectiveCompletion.provider, model: effectiveCompletion.model });
+              await onEvent({ type: 'model-end', provider: completion.provider, model: completion.model });
             }
 
-            return { ok: true, completion: effectiveCompletion };
+            return { ok: true, completion };
           } catch (error) {
             if (signal?.aborted) {
               await throwIfCancelled();
@@ -584,7 +569,7 @@ export function createRunner({
                 modelToolCall = toolCallFromStructuredOutput(completion.structuredOutput);
                 action = resolveStructuredToolCall(registry, modelToolCall).action;
               }
-            } else if (completion.effectiveRequest?.mode === 'native-tools') {
+            } else if (completion.effectiveRequest!.mode === 'native-tools') {
               action = { message: rawContent };
             } else {
               action = parseModelAction(rawContent);
