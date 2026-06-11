@@ -16,7 +16,7 @@ import type {
   ModelToolCall,
   ResolvedModelConfig
 } from '../model/types.js';
-import { readPlanArtifact, readPlanProgress } from '../plans/store.js';
+import { finalizePlan, readPlanArtifact, readPlanProgress } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { buildToolApprovalSubject } from '../policy/subjects.js';
 import type { ApprovalDecision, PolicyConfirm } from '../policy/types.js';
@@ -351,11 +351,28 @@ export function createRunner({
           return finalMessage;
         };
 
+        const finishPlanForReview = async (planId: string): Promise<string> => {
+          const plan = await readPlanArtifact(cwd, session, planId);
+          await onEvent({
+            type: 'plan-finalized',
+            plan: {
+              id: plan.id,
+              title: plan.title,
+              contentMarkdown: plan.contentMarkdown,
+              items: plan.items,
+              path: plan.paths.json,
+              markdownPath: plan.paths.markdown
+            }
+          });
+          return await finishWithFinalMessage(`Plan ready for review: ${plan.title}`);
+        };
+
         const autoCompactState: AutoCompactState = {
           thresholdCompactionsThisTurn: 0,
           thresholdSuppressed: false
         };
         const repeatedReadOnlyDenials = new Map<string, number>();
+        let lastPlanIdThisTurn: string | null = null;
 
         const emitModelError = async (error: unknown) => {
           await onEvent({
@@ -615,6 +632,15 @@ export function createRunner({
           await throwIfCancelled();
 
           if ('message' in action) {
+            if (policy.mode === 'plan') {
+              if (lastPlanIdThisTurn) {
+                await finalizePlan(cwd, session, { planId: lastPlanIdThisTurn });
+                return await finishPlanForReview(lastPlanIdThisTurn);
+              }
+              const message = 'Plan Mode requires a plan artifact before returning a final message.';
+              await onEvent({ type: 'error', stage: 'policy', message });
+              throw new Error(message);
+            }
             const finalMessage = action.message.trim() || '(no content)';
             return await finishWithFinalMessage(finalMessage);
           }
@@ -791,6 +817,15 @@ export function createRunner({
           });
           await runHooks(hooks, 'afterTool', session, storedResult);
           await onEvent({ type: 'tool-end', tool: storedResult.tool, status: storedResult.status });
+          const completedPlanId =
+            storedResult.tool === 'plan' &&
+            storedResult.status === 'ok' &&
+            typeof storedResult.meta.planId === 'string'
+              ? storedResult.meta.planId
+              : null;
+          if (completedPlanId) {
+            lastPlanIdThisTurn = completedPlanId;
+          }
           const updatedProgressPlanId =
             storedResult.tool === 'todo' &&
             storedResult.status === 'ok' &&
@@ -817,19 +852,7 @@ export function createRunner({
               ? storedResult.meta.planId
               : null;
           if (finalizedPlanId) {
-            const plan = await readPlanArtifact(cwd, session, finalizedPlanId);
-            await onEvent({
-              type: 'plan-finalized',
-              plan: {
-                id: plan.id,
-                title: plan.title,
-                contentMarkdown: plan.contentMarkdown,
-                items: plan.items,
-                path: plan.paths.json,
-                markdownPath: plan.paths.markdown
-              }
-            });
-            return await finishWithFinalMessage(`Plan ready for review: ${plan.title}`);
+            return await finishPlanForReview(finalizedPlanId);
           }
           if (
             decision?.behavior === 'deny' &&
