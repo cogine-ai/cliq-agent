@@ -7,12 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-06-12
+
+This release completes the typed prompt protocol rollout, tightens Plan Mode
+completion semantics, and hardens transaction apply safety after the v0.13
+provider-first model setup releases.
+
+### Added
+
+- **Typed model prompt protocol** for provider requests, including explicit
+  instructions, context, tool schemas, output schemas, provider capabilities,
+  streaming preferences, and fallback metadata (#304).
+- **Native tool-call and structured-output dispatch** through the runtime tool
+  registry, with provider mappings for Anthropic, Ollama, OpenAI-compatible
+  providers, and OpenRouter (#304).
+- **Explicit session selection controls** for interactive and headless runs,
+  including `resume` / `continue` commands and matching run selectors (#310).
+- **Git index fingerprints** in `builtin:index-clean` validator metadata so
+  transaction apply can compare the real index captured at validation time
+  against the index present at apply time (#131).
+
 ### Changed
 
 - Removed duplicate typed prompt mode/streaming helpers from the runner and
   provider clients after the typed `ModelPromptRequest` protocol rollout. Mode
   selection and streaming inference now share `selectTypedRequestMode` and
   `typedRequestShouldStream` from `prompt-mapping.ts`.
+- CLI interactive and headless prompt runs now start in a fresh session by
+  default unless the user explicitly resumes or continues a prior session
+  (#310).
+- Plan Mode guidance now captures missing information as plan assumptions and
+  open questions instead of letting the model complete without a reviewable
+  plan artifact (#323).
+- The TUI header wordmark has been tightened for the current CLIQ branding
+  (#323).
+- Stale transaction bash-confirm callback plumbing and unused typed prompt
+  mode branches were removed after the active policy and typed prompt paths
+  became the only production paths (#307, #315).
+
+### Fixed
+
+- Plan Mode now rejects final answers that do not create or update a plan
+  artifact, and auto-finalizes draft/update plans when the model tries to
+  answer before requesting review (#323).
+- Transaction Stage A now rejects apply attempts when the Git index changed
+  after validation, including same-path restages that would otherwise preserve
+  the same status text (#131).
+- Schema-minimal `skillResource` calls now list the active skill root instead
+  of trying to read `.` as a file (#311).
+
+### Tests
+
+- Added focused regression coverage for workspace path containment, typed
+  prompt mode selection, structured-output parsing, OpenAI streaming tool-call
+  assembly, provider fallback policy, session selection, Plan Mode artifact
+  enforcement, and Git index fingerprint guards (#314, #323, #131).
 
 ## [0.13.1] - 2026-06-05
 
@@ -355,7 +404,8 @@ payload-aware approvals, and a steady stream of TUI polish.
   [GitHub Releases](https://github.com/cogine-ai/cliq-agent/releases); this
   file starts with v0.9.0.
 
-[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.12.0...v0.12.1
