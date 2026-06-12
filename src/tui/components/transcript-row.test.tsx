@@ -19,6 +19,15 @@ test('renders an assistant entry plain', () => {
   assert.doesNotMatch(lastFrame() ?? '', />/);
 });
 
+test('renders an assistant output token estimate when present', () => {
+  const { lastFrame } = render(
+    <TranscriptRow entry={{ kind: 'assistant', id: 'a1', text: 'response', outputTokenEstimate: 321 }} />
+  );
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /response/);
+  assert.match(frame, /~ 321 tok/);
+});
+
 test('renders a tool entry with status glyph, name, and summary', () => {
   const { lastFrame } = render(
     <TranscriptRow

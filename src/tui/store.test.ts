@@ -69,6 +69,36 @@ test('runtime-event model-progress updates counters within active turn', () => {
   assert.deepEqual(s.activeTurn, { modelChunks: 3, modelChars: 120 });
 });
 
+test('runtime-event final keeps output token estimate from active progress', () => {
+  let s = reduce(baseInit(), {
+    type: 'runtime-event',
+    event: { type: 'model-start', provider: 'ollama', model: 'qwen3:4b', streaming: true },
+  });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'model-progress', chunks: 3, chars: 120 },
+  });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'final', message: 'ok' },
+  });
+
+  assert.deepEqual(s.transcript[0], { kind: 'assistant', id: 'a1', text: 'ok', outputTokenEstimate: 30 });
+});
+
+test('runtime-event final falls back to final message for output token estimate', () => {
+  let s = reduce(baseInit(), {
+    type: 'runtime-event',
+    event: { type: 'model-start', provider: 'ollama', model: 'qwen3:4b', streaming: false },
+  });
+  s = reduce(s, {
+    type: 'runtime-event',
+    event: { type: 'final', message: '12345678' },
+  });
+
+  assert.deepEqual(s.transcript[0], { kind: 'assistant', id: 'a1', text: '12345678', outputTokenEstimate: 2 });
+});
+
 test('runtime-event model-progress without an active turn is a no-op', () => {
   const s = reduce(baseInit(), {
     type: 'runtime-event',
@@ -85,7 +115,7 @@ test('runtime-event final appends assistant entry and clears activeTurn', () => 
   s = reduce(s, { type: 'runtime-event', event: { type: 'final', message: 'done' } });
   assert.equal(s.activeTurn, null);
   assert.equal(s.transcript.length, 1);
-  assert.deepEqual(s.transcript[0], { kind: 'assistant', id: 'a1', text: 'done' });
+  assert.deepEqual(s.transcript[0], { kind: 'assistant', id: 'a1', text: 'done', outputTokenEstimate: 1 });
 });
 
 test('runtime-event error records visible transcript entry, caps history at 20, clears activeTurn', () => {
