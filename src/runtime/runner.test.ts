@@ -1604,6 +1604,58 @@ test('runner falls back to user confirmation when PermissionRequest hooks make n
   assert.equal(confirmCalls, 1);
 });
 
+test('runner ignores legacy PermissionRequest decision allow and falls back to user confirmation', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+  let executed = false;
+  let confirmCalls = 0;
+  const legacyAllowCommand = await writeHookScript(
+    session.cwd,
+    'legacy-allow-permission-request.js',
+    `process.stdout.write(JSON.stringify({ decision: 'allow', reason: 'legacy hook allow' }));`
+  );
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(calls === 1 ? '{"bash":"pwd"}' : '{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'accept-edits' }),
+    confirm: async () => {
+      confirmCalls += 1;
+      return true;
+    },
+    commandHooks: {
+      PermissionRequest: [{ matcher: 'bash', hooks: [{ type: 'command', command: legacyAllowCommand }] }]
+    },
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec',
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute() {
+              executed = true;
+              return { tool: 'bash', status: 'ok' as const, content: 'TOOL_RESULT bash OK', meta: {} };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  await runner.runTurn(session, 'show cwd');
+
+  assert.equal(confirmCalls, 1);
+  assert.equal(executed, true);
+});
+
 test('runner does not invoke PermissionRequest hooks for plan hard denies', async () => {
   const session = await createTempSession();
   let calls = 0;

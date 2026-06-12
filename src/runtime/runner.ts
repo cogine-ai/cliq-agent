@@ -211,13 +211,6 @@ export function createRunner({
           decidedBy: 'hook'
         };
       }
-      if (run.result.output?.decision === 'allow') {
-        return {
-          behavior: 'allow',
-          reason: run.result.output.reason,
-          decidedBy: 'hook'
-        };
-      }
     }
     return null;
   }

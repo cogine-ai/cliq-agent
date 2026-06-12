@@ -57,11 +57,10 @@ body:
     attributes:
       label: Policy mode
       options:
-        - auto
-        - confirm-write
-        - read-only
-        - confirm-bash
-        - confirm-all
+        - default
+        - accept-edits
+        - plan
+        - yolo
         - unknown
     validations:
       required: true
@@ -72,7 +71,7 @@ body:
       label: Steps to reproduce
       description: Give the smallest command/config that reproduces the behavior.
       placeholder: |
-        1. Run `cliq --policy read-only "..."`
+        1. Run `cliq --policy plan "..."`
         2. Observe ...
     validations:
       required: true

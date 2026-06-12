@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed the legacy PermissionRequest hook allow branch that read
+  `decision: 'allow'` from hook stdout. Hooks must emit
+  `permissionDecision.behavior` instead; the active approval path is unchanged
+  for hooks already on the typed protocol (#6475).
+- Updated the bug report template policy-mode dropdown to the current
+  `default | accept-edits | plan | yolo` presets (#6475).
+
 ## [0.14.0] - 2026-06-12
 
 This release completes the typed prompt protocol rollout, tightens Plan Mode
