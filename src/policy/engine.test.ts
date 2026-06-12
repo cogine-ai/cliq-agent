@@ -285,7 +285,9 @@ test('decision table: bash allow rules do not auto-approve compound syntax insid
     'bash -c "git status; rm -rf /"',
     'sh -c "git status | sh"',
     "/usr/bin/env -S bash -c 'git status && rm -rf /'",
-    "/usr/bin/env -i -S bash -c 'git status && rm -rf /'"
+    "/usr/bin/env -i -S bash -c 'git status && rm -rf /'",
+    "env - -S bash -c 'git status && rm -rf /'",
+    "env -- -S bash -c 'git status && rm -rf /'"
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },
@@ -293,6 +295,22 @@ test('decision table: bash allow rules do not auto-approve compound syntax insid
     });
     const decision = await policy.decide(subject);
     assert.equal(decision.behavior, 'ask', bash);
+  }
+});
+
+test('decision table: env end-of-options -S wrapper cannot bypass bash allow rules', async () => {
+  for (const mode of ['default', 'accept-edits'] as const) {
+    const policy = createPolicyEngine({
+      mode,
+      table: composePermissionTable({ allow: [wsRule('bash', '*')] })
+    });
+    const bash = "env - -S bash -c 'git status && rm -rf /'";
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+    const decision = await policy.decide(subject);
+    assert.equal(decision.behavior, 'ask', mode);
   }
 });
 
