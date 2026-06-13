@@ -11,7 +11,8 @@ import {
   openAIToolCallsFromDeltaParts,
   parseOllamaToolCalls,
   parseOpenAIToolCalls,
-  selectTypedRequestMode
+  selectTypedRequestMode,
+  typedRequestShouldStream
 } from './prompt-mapping.js';
 
 const modelCapabilities: ModelCapabilities = {
@@ -77,6 +78,59 @@ test('selectTypedRequestMode falls back to structured output when native tools a
 test('selectTypedRequestMode uses text-action when neither native tools nor structured output apply', () => {
   const request = promptRequest('anthropic', false);
   assert.equal(selectTypedRequestMode(request), 'text-action');
+});
+
+test('typedRequestShouldStream returns false when session streaming mode is off', () => {
+  const request = buildModelPromptRequest({
+    modelConfig: {
+      provider: 'openai-compatible',
+      model: 'test-model',
+      baseUrl: 'http://localhost:4000/v1',
+      streaming: 'off'
+    },
+    modelCapabilities,
+    instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+    input: [{ kind: 'message', role: 'user', content: 'hello' }],
+    registry: createToolRegistry()
+  });
+
+  assert.equal(typedRequestShouldStream(request), false);
+});
+
+test('typedRequestShouldStream returns false when the provider lacks streaming capability', () => {
+  const request = buildModelPromptRequest({
+    modelConfig: {
+      provider: 'openai-compatible',
+      model: 'test-model',
+      baseUrl: 'http://localhost:4000/v1',
+      streaming: 'auto'
+    },
+    modelCapabilities: { ...modelCapabilities, streaming: false },
+    instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+    input: [{ kind: 'message', role: 'user', content: 'hello' }],
+    registry: createToolRegistry()
+  });
+
+  assert.equal(typedRequestShouldStream(request), false);
+});
+
+test('typedRequestShouldStream returns true for on/auto when the provider supports streaming', () => {
+  const autoRequest = promptRequest('openai-compatible');
+  const onRequest = buildModelPromptRequest({
+    modelConfig: {
+      provider: 'openai-compatible',
+      model: 'test-model',
+      baseUrl: 'http://localhost:4000/v1',
+      streaming: 'on'
+    },
+    modelCapabilities,
+    instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+    input: [{ kind: 'message', role: 'user', content: 'hello' }],
+    registry: createToolRegistry()
+  });
+
+  assert.equal(typedRequestShouldStream(autoRequest), true);
+  assert.equal(typedRequestShouldStream(onRequest), true);
 });
 
 test('effectiveTypedRequest summarizes the resolved provider request shape', () => {

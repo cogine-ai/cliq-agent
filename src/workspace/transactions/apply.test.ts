@@ -211,6 +211,30 @@ test('Stage A2 rejects when the Git index changed since index-clean validation',
   });
 });
 
+test('Stage A2 allows apply when the index-clean baseline fingerprint still matches', async () => {
+  await withFakeCliqHome(async (home) => {
+    const ws = await setupGitWorkspace();
+    try {
+      await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+      await execFileAsync('git', ['add', '.'], { cwd: ws });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+      const root = await setupApprovedTx(home, ws, 'tx_index_ok', [
+        { path: 'a.txt', oldContent: 'one', newContent: 'ONE' }
+      ]);
+      await writeIndexCleanBaseline(root, 'tx_index_ok', ws);
+
+      const outcome = await runStageA({ root, txId: 'tx_index_ok', cwd: ws });
+
+      assert.equal(outcome.plan.length, 1);
+      assert.equal(outcome.plan[0]?.path, 'a.txt');
+      const ap = await readApplyProgress(root, 'tx_index_ok');
+      assert.equal(ap?.phase, 'apply-pending');
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
 test('Stage A2 rejects when staged index content changes with the same path and status text', async () => {
   await withFakeCliqHome(async (home) => {
     const ws = await setupGitWorkspace();
