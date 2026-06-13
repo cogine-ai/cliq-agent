@@ -11,6 +11,7 @@ import {
   normalizePlanProgressItems,
   normalizeStoredPlanItems,
   normalizeStoredPlanProgressItems,
+  activeFormForTitle,
   progressItemsFromPlanItems
 } from './items.js';
 import type {
@@ -585,7 +586,7 @@ export async function updatePlanProgress(
     }
     current = seeded;
   }
-  const items = normalizePlanProgressItems(input.items);
+  const items = normalizePlanProgressItems(fillMissingProgressActiveForms(input.items, current.items));
   if (items.length !== input.items.length) {
     throw new Error('invalid plan progress items');
   }
@@ -597,6 +598,23 @@ export async function updatePlanProgress(
   };
   await writePlanProgress(next);
   return next;
+}
+
+function fillMissingProgressActiveForms(
+  items: readonly PlanProgressItemInput[],
+  currentItems: readonly { id: string; activeForm: string }[]
+): PlanProgressItemInput[] {
+  const activeFormsById = new Map(currentItems.map((item) => [item.id, item.activeForm]));
+  return items.map((item) => {
+    if (!item || typeof item !== 'object' || typeof item.title !== 'string') return item;
+    const explicit = typeof item.activeForm === 'string' ? item.activeForm.trim() : '';
+    if (explicit) return item;
+    const previous = typeof item.id === 'string' ? activeFormsById.get(item.id) : undefined;
+    return {
+      ...item,
+      activeForm: previous ?? activeFormForTitle(item.title)
+    };
+  });
 }
 
 function assertAtMostOneInProgress(items: readonly { status: string }[]) {

@@ -195,6 +195,36 @@ test('updatePlanProgress persists execution status without mutating the approved
   ]);
 });
 
+test('updatePlanProgress fills missing activeForm from existing tracker or title', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Execute tracker',
+    contentMarkdown: '## Steps\n- Inspect code\n- 汇总生成项目清单'
+  });
+  await finalizePlan(cwd, session);
+  const approved = await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+  await updatePlanProgress(cwd, session, {
+    planId: approved.id,
+    items: [
+      { id: 'item_1', title: 'Inspect code', status: 'pending', activeForm: 'Checking code' },
+      { id: 'item_2', title: '汇总生成项目清单', status: 'pending', activeForm: 'Working on 汇总生成项目清单' }
+    ]
+  });
+
+  const updated = await updatePlanProgress(cwd, session, {
+    planId: approved.id,
+    items: [
+      { id: 'item_1', title: 'Inspect code', status: 'completed' },
+      { id: 'report', title: '汇总生成项目清单', status: 'in_progress' }
+    ]
+  });
+
+  assert.deepEqual(updated.items, [
+    { id: 'item_1', title: 'Inspect code', status: 'completed', activeForm: 'Checking code' },
+    { id: 'report', title: '汇总生成项目清单', status: 'in_progress', activeForm: 'Working on 汇总生成项目清单' }
+  ]);
+});
+
 test('readReferencedPlanProgress does not recreate progress while building instructions', async () => {
   const { cwd, session } = await tempScope();
   const draft = await createDraftPlan(cwd, session, {
@@ -318,5 +348,14 @@ test('updatePlanProgress rejects stale plan ids and multiple in-progress items',
         ]
       }),
     /at most one in_progress/
+  );
+
+  await assert.rejects(
+    () =>
+      updatePlanProgress(cwd, session, {
+        planId: draft.id,
+        items: [{ status: 'pending' }] as never
+      }),
+    /invalid plan progress items/
   );
 });

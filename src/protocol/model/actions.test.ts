@@ -115,6 +115,20 @@ test('parses todo action for approved-plan execution tracking', () => {
       }
     }
   );
+  assert.deepEqual(
+    parseModelAction(
+      '{"todo":{"planId":"plan_1","items":[{"id":"item_1","title":"Inspect code","status":"completed"},{"id":"item_2","title":"Implement tracker","status":"in_progress"}]}}'
+    ),
+    {
+      todo: {
+        planId: 'plan_1',
+        items: [
+          { id: 'item_1', title: 'Inspect code', status: 'completed' },
+          { id: 'item_2', title: 'Implement tracker', status: 'in_progress' }
+        ]
+      }
+    }
+  );
 });
 
 test('rejects invalid plan payloads', () => {
@@ -144,7 +158,7 @@ test('rejects invalid plan payloads', () => {
 test('rejects invalid todo payloads', () => {
   assert.throws(() => parseModelAction('{"todo":{"items":"nope"}}'), /unsupported action/i);
   assert.throws(() => parseModelAction('{"todo":{"items":[{"title":"Inspect","status":"unknown","activeForm":"Inspecting"}]}}'), /unsupported action/i);
-  assert.throws(() => parseModelAction('{"todo":{"items":[{"title":"Inspect","status":"pending"}]}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"todo":{"items":[{"title":"Inspect","status":"pending","activeForm":1}]}}'), /unsupported action/i);
   assert.throws(() => parseModelAction('{"todo":{"planId":1,"items":[]}}'), /unsupported action/i);
 });
 

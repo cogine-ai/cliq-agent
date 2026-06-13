@@ -38,7 +38,8 @@ test('todoTool.supports validates execution tracker payloads', () => {
     }),
     true
   );
-  assert.equal(todoTool.supports({ todo: { items: [{ title: 'Inspect', status: 'pending' }] } } as never), false);
+  assert.equal(todoTool.supports({ todo: { items: [{ title: 'Inspect', status: 'pending' }] } } as never), true);
+  assert.equal(todoTool.supports({ todo: { items: [{ title: 'Inspect', status: 'pending', activeForm: 1 }] } } as never), false);
   assert.equal(todoTool.supports({ todo: { items: 'nope' } } as never), false);
   assert.equal(todoTool.supports({ todo: null } as never), false);
 });

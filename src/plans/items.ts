@@ -146,7 +146,7 @@ function stripMarkdownMarkerText(value: string) {
     .trim();
 }
 
-function activeFormForTitle(title: string) {
+export function activeFormForTitle(title: string) {
   const trimmed = title.trim();
   const [first = '', ...restParts] = trimmed.split(/\s+/);
   const rest = restParts.join(' ');
