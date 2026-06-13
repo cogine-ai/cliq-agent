@@ -13,10 +13,11 @@ import {
   previewFromAction,
   toolNameFromAction
 } from './format.js';
+import { estimateOutputTokensFromChars } from './token-estimate.js';
 
 export type TranscriptEntry =
   | { kind: 'user'; id: string; text: string }
-  | { kind: 'assistant'; id: string; text: string }
+  | { kind: 'assistant'; id: string; text: string; outputTokenEstimate?: number }
   | {
       kind: 'tool';
       id: string;
@@ -338,11 +339,20 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
       return state;
     case 'final': {
       const { id, nextEntryId } = mintId(state, 'a');
+      const outputTokenEstimate = estimateFinalOutputTokens(state.activeTurn, event.message);
       return {
         ...state,
         activeTurn: null,
         nextEntryId,
-        transcript: [...state.transcript, { kind: 'assistant', id, text: event.message }],
+        transcript: [
+          ...state.transcript,
+          {
+            kind: 'assistant',
+            id,
+            text: event.message,
+            ...(outputTokenEstimate > 0 ? { outputTokenEstimate } : {})
+          }
+        ],
       };
     }
     case 'error': {
@@ -465,6 +475,11 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
     default:
       return assertNever(event);
   }
+}
+
+function estimateFinalOutputTokens(activeTurn: ActiveTurn | null, message: string) {
+  const outputChars = activeTurn && activeTurn.modelChars > 0 ? activeTurn.modelChars : message.length;
+  return estimateOutputTokensFromChars(outputChars);
 }
 
 function formatRuntimeErrorMessage(

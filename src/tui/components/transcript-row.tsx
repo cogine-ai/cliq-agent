@@ -1,6 +1,7 @@
 import { Box, Text } from 'ink';
 
 import type { TranscriptEntry } from '../store.js';
+import { formatApproxOutputTokens } from '../token-estimate.js';
 
 const TOOL_GLYPH = { running: '▸', ok: '✓', error: '✗' } as const;
 const TOOL_BODY_FOLD_BUCKET = 8;
@@ -17,12 +18,15 @@ export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
           <Text>{entry.text}</Text>
         </Box>
       );
-    case 'assistant':
+    case 'assistant': {
+      const outputTokens = formatApproxOutputTokens(entry.outputTokenEstimate ?? 0);
       return (
-        <Box>
+        <Box flexDirection="column">
           <Text>{entry.text}</Text>
+          {outputTokens ? <Text dimColor>{outputTokens}</Text> : null}
         </Box>
       );
+    }
     case 'tool': {
       const glyph = TOOL_GLYPH[entry.status];
       const color = entry.status === 'error' ? 'red' : entry.status === 'ok' ? 'green' : 'yellow';

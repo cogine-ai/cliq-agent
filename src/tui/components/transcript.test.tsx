@@ -24,7 +24,19 @@ test('renders an active-turn thinking row when activeTurn is present', () => {
   );
   const frame = lastFrame() ?? '';
   assert.match(frame, /thinking/);
-  assert.match(frame, /842/);
+  assert.match(frame, /0s/);
+  assert.match(frame, /~ 211 tok/);
+  assert.doesNotMatch(frame, /chars/);
+});
+
+test('omits active-turn token label before output is observed', () => {
+  const { lastFrame } = render(
+    <Transcript entries={[]} activeTurn={{ modelChunks: 0, modelChars: 0 }} />
+  );
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /thinking/);
+  assert.match(frame, /0s/);
+  assert.doesNotMatch(frame, /~ 0 tok/);
 });
 
 test('omits the thinking row when activeTurn is null', () => {
