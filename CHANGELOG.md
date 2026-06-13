@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed stale PermissionRequest hook forward-compat plumbing that never
+  affected runtime behavior: the unused `coerceHookPermissionScope` helper,
+  the legacy `decision: 'allow'` allow path (superseded by
+  `permissionDecision`), and the type-only `additionalAllowlistEntries` field.
+  Hook allows remain one-shot; session/workspace persistence stays TUI-only.
+
 ## [0.14.0] - 2026-06-12
 
 This release completes the typed prompt protocol rollout, tightens Plan Mode
