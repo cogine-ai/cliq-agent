@@ -18,7 +18,7 @@ export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
           <Text>{entry.text}</Text>
         </Box>
       );
-    case 'assistant':
+    case 'assistant': {
       const outputTokens = formatApproxOutputTokens(entry.outputTokenEstimate ?? 0);
       return (
         <Box flexDirection="column">
@@ -26,6 +26,7 @@ export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
           {outputTokens ? <Text dimColor>{outputTokens}</Text> : null}
         </Box>
       );
+    }
     case 'tool': {
       const glyph = TOOL_GLYPH[entry.status];
       const color = entry.status === 'error' ? 'red' : entry.status === 'ok' ? 'green' : 'yellow';
