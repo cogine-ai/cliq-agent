@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-06-14
+
+This patch release improves Plan Mode execution tracking tolerance and adds
+clearer TUI feedback while the model is thinking.
+
+### Changed
+
+- Plan Mode todo updates can now omit `activeForm`; Cliq keeps the previous
+  active phrase for the same item or derives one from the item title (#331).
+- The TUI thinking row now shows elapsed time and an approximate output-token
+  estimate instead of raw streamed character counts (#326).
+- Assistant transcript entries can display the final approximate output-token
+  estimate when available (#326).
+
+### Fixed
+
+- Invalid todo `activeForm` values are still rejected, while valid todo updates
+  without `activeForm` are accepted across parsed model actions and structured
+  tool calls (#331).
+
 ## [0.14.0] - 2026-06-12
 
 This release completes the typed prompt protocol rollout, tightens Plan Mode
@@ -404,7 +424,8 @@ payload-aware approvals, and a steady stream of TUI polish.
   [GitHub Releases](https://github.com/cogine-ai/cliq-agent/releases); this
   file starts with v0.9.0.
 
-[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.12.1...v0.13.0
