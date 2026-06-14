@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { mock } from 'node:test';
 
-import { BASH_TIMEOUT_MS } from '../config.js';
+import { BASH_TIMEOUT_MS, MAX_OUTPUT } from '../config.js';
 import { createSession } from '../session/store.js';
 import type { BashEffect } from '../workspace/transactions/types.js';
 import { bashTool } from './bash.js';
@@ -219,6 +219,22 @@ test('bash timeout terminates descendant process group', async () => {
         // Best-effort cleanup; the assertion above already proves the expected path.
       }
     }
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('bash output is clipped to the trailing MAX_OUTPUT characters', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-bash-clip-'));
+  try {
+    const body = `HEAD_MARKER${'A'.repeat(20_000)}TAIL_MARKER`;
+    const script = `process.stdout.write(${JSON.stringify(body)})`;
+    const result = await bashTool.execute({ bash: `node -e ${JSON.stringify(script)}` }, makeCtx(cwd));
+    assert.equal(result.status, 'ok');
+    const rawOutput = result.content.split('\n').slice(3).join('\n');
+    assert.doesNotMatch(rawOutput, /HEAD_MARKER/);
+    assert.match(rawOutput, /TAIL_MARKER/);
+    assert.ok(rawOutput.length <= MAX_OUTPUT);
+  } finally {
     await rm(cwd, { recursive: true, force: true });
   }
 });

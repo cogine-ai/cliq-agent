@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { indexClean } from './index-clean.js';
+import { validatorsDir } from '../../workspace/transactions/store.js';
+import { checkIndexUnchanged, indexClean, IndexChangedSinceValidation } from './index-clean.js';
 
 const execFileAsync = promisify(execFile);
 const ctx = (cwd: string) => ({ txId: 'tx_test', workspaceView: cwd, realCwd: cwd, signal: new AbortController().signal });
@@ -15,6 +16,27 @@ function assertHasIndexFingerprint(result: Awaited<ReturnType<typeof indexClean.
   const fingerprint = result.metadata?.indexFingerprint as Record<string, unknown> | undefined;
   assert.equal(fingerprint?.version, 'git-index-v1');
   assert.equal(typeof fingerprint?.entriesSha256, 'string');
+}
+
+async function writeIndexCleanBaselineFile(
+  txRoot: string,
+  txId: string,
+  baseline: Record<string, unknown>
+): Promise<void> {
+  const dir = validatorsDir(txRoot, txId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'builtin_index-clean.json'), JSON.stringify(baseline), 'utf8');
+}
+
+async function setupCleanGitRepo(): Promise<string> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-baseline-'));
+  await execFileAsync('git', ['init', '-b', 'main'], { cwd: dir });
+  await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+  await execFileAsync('git', ['config', 'user.name', 't'], { cwd: dir });
+  await writeFile(path.join(dir, 'a.txt'), 'a', 'utf8');
+  await execFileAsync('git', ['add', 'a.txt'], { cwd: dir });
+  await execFileAsync('git', ['commit', '-m', 'init'], { cwd: dir });
+  return dir;
 }
 
 test('index-clean passes on a clean repo', async () => {
@@ -148,5 +170,126 @@ test('index-clean reports unmerged conflict files (porcelain v2 "u " records)', 
     assert.ok(result.findings?.some((f) => f.path === 'a.txt'));
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkIndexUnchanged is a no-op when no validation baseline exists', async () => {
+  const repo = await setupCleanGitRepo();
+  const txRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-txroot-'));
+  try {
+    await checkIndexUnchanged({ root: txRoot, txId: 'tx_missing', realCwd: repo });
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(txRoot, { recursive: true, force: true });
+  }
+});
+
+test('checkIndexUnchanged rejects baselines with the wrong validator name', async () => {
+  const repo = await setupCleanGitRepo();
+  const txRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-txroot-'));
+  try {
+    await writeIndexCleanBaselineFile(txRoot, 'tx_wrong_name', {
+      name: 'builtin:wrong',
+      status: 'pass'
+    });
+    await assert.rejects(
+      () => checkIndexUnchanged({ root: txRoot, txId: 'tx_wrong_name', realCwd: repo }),
+      (err: unknown) =>
+        err instanceof IndexChangedSinceValidation &&
+        /invalid builtin:index-clean validation baseline/.test(err.message)
+    );
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(txRoot, { recursive: true, force: true });
+  }
+});
+
+test('checkIndexUnchanged rejects git baselines that omit the index fingerprint', async () => {
+  const repo = await setupCleanGitRepo();
+  const txRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-txroot-'));
+  try {
+    await writeIndexCleanBaselineFile(txRoot, 'tx_no_fp', {
+      name: 'builtin:index-clean',
+      status: 'pass'
+    });
+    await assert.rejects(
+      () => checkIndexUnchanged({ root: txRoot, txId: 'tx_no_fp', realCwd: repo }),
+      (err: unknown) =>
+        err instanceof IndexChangedSinceValidation &&
+        /missing index fingerprint/.test(err.message)
+    );
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(txRoot, { recursive: true, force: true });
+  }
+});
+
+test('checkIndexUnchanged skips when the baseline recorded a non-git skip', async () => {
+  const repo = await setupCleanGitRepo();
+  const txRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-txroot-'));
+  try {
+    await writeIndexCleanBaselineFile(txRoot, 'tx_skip', {
+      name: 'builtin:index-clean',
+      status: 'pass',
+      message: 'not a git repository — index check skipped'
+    });
+    await checkIndexUnchanged({ root: txRoot, txId: 'tx_skip', realCwd: repo });
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(txRoot, { recursive: true, force: true });
+  }
+});
+
+test('checkIndexUnchanged rejects unreadable baseline JSON', async () => {
+  const repo = await setupCleanGitRepo();
+  const txRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-txroot-'));
+  try {
+    const dir = validatorsDir(txRoot, 'tx_corrupt');
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'builtin_index-clean.json'), '{not json', 'utf8');
+    await assert.rejects(
+      () => checkIndexUnchanged({ root: txRoot, txId: 'tx_corrupt', realCwd: repo }),
+      (err: unknown) =>
+        err instanceof IndexChangedSinceValidation &&
+        /could not read builtin:index-clean validation baseline/.test(err.message)
+    );
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(txRoot, { recursive: true, force: true });
+  }
+});
+
+test('checkIndexUnchanged passes when the current index fingerprint matches the baseline', async () => {
+  const repo = await setupCleanGitRepo();
+  const txRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-txroot-'));
+  try {
+    const baseline = await indexClean.run(ctx(repo));
+    await writeIndexCleanBaselineFile(txRoot, 'tx_match', baseline as Record<string, unknown>);
+    await checkIndexUnchanged({ root: txRoot, txId: 'tx_match', realCwd: repo });
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(txRoot, { recursive: true, force: true });
+  }
+});
+
+test('checkIndexUnchanged rejects when the index fingerprint changed since validation', async () => {
+  const repo = await setupCleanGitRepo();
+  const txRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-txroot-'));
+  try {
+    const baseline = await indexClean.run(ctx(repo));
+    await writeIndexCleanBaselineFile(txRoot, 'tx_changed', baseline as Record<string, unknown>);
+
+    await writeFile(path.join(repo, 'b.txt'), 'staged after validation', 'utf8');
+    await execFileAsync('git', ['add', 'b.txt'], { cwd: repo });
+
+    await assert.rejects(
+      () => checkIndexUnchanged({ root: txRoot, txId: 'tx_changed', realCwd: repo }),
+      (err: unknown) =>
+        err instanceof IndexChangedSinceValidation &&
+        /Git index changed since builtin:index-clean validation/.test(err.message)
+    );
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(txRoot, { recursive: true, force: true });
   }
 });

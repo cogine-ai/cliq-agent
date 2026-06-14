@@ -844,6 +844,32 @@ test('runner finalizes a plan-mode draft when the model tries to answer instead 
   assert.equal(finalized.status, 'finalized');
 });
 
+test('runner finalizes a plan-mode draft when the model answers immediately after drafting', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        if (calls === 1) {
+          return completion('{"plan":{"op":"draft","title":"Immediate plan","content":"## Steps\\n- Draft\\n- Review"}}');
+        }
+        return completion('{"message":"Here is the answer without any inspection tools."}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'plan' })
+  });
+
+  const final = await runner.runTurn(session, 'make a plan');
+
+  assert.equal(final, 'Plan ready for review: Immediate plan');
+  assert.equal(calls, 2);
+  assert.equal(session.records.filter((record) => record.kind === 'tool' && record.tool === 'plan').length, 1);
+  const finalized = await readPlanArtifact(session.cwd, session, session.activePlanId!);
+  assert.equal(finalized.status, 'finalized');
+});
+
 test('runner allows plan artifacts in plan mode and stops for TUI review after finalize', async () => {
   const session = await createTempSession();
   const events: RuntimeEvent[] = [];

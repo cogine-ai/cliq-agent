@@ -9,6 +9,8 @@ import {
   ensureFresh,
   ensureSession,
   isSessionRecord,
+  loadActiveSession,
+  loadSessionById,
   mutateSession,
   nowIso,
   resolveCliqHome,
@@ -962,4 +964,119 @@ test('Session plan refs round-trip through saveSession/load', async () => {
   const loaded = await ensureSession(cwd);
   assert.equal(loaded.activePlanId, 'plan_active');
   assert.equal(loaded.approvedPlanId, 'plan_approved');
+});
+
+test('loadSessionById rejects recent session refs from another workspace', async () => {
+  const workspaceA = await mkdtemp(path.join(os.tmpdir(), 'cliq-session-ws-a-'));
+  const workspaceB = await mkdtemp(path.join(os.tmpdir(), 'cliq-session-ws-b-'));
+  try {
+    const session = createSession(workspaceA);
+    await saveSession(workspaceA, session);
+
+    const workspaceRealPath = await realpath(workspaceB);
+    const statePath = await workspaceStatePath(workspaceB);
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify(
+        {
+          version: 1,
+          workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+          workspaceRealPath,
+          recentSessions: [
+            {
+              id: session.id,
+              path: sessionFilePath(session),
+              createdAt: session.createdAt,
+              updatedAt: session.updatedAt
+            }
+          ],
+          lastSeenAt: nowIso()
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    assert.equal(await loadSessionById(workspaceB, session.id), null);
+  } finally {
+    await rm(workspaceA, { recursive: true, force: true });
+    await rm(workspaceB, { recursive: true, force: true });
+  }
+});
+
+test('loadActiveSession rejects non-canonical active session paths', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-session-active-path-'));
+  try {
+    const session = createSession(cwd);
+    await saveSession(cwd, session);
+
+    const canonicalPath = sessionFilePath(session);
+    const aliasPath = path.join(path.dirname(canonicalPath), 'alias-session.json');
+    await writeFile(aliasPath, JSON.stringify(session, null, 2), 'utf8');
+
+    const workspaceRealPath = await realpath(cwd);
+    const statePath = await workspaceStatePath(cwd);
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify(
+        {
+          version: 1,
+          workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+          workspaceRealPath,
+          activeSessionId: session.id,
+          activeSessionPath: aliasPath,
+          recentSessions: [],
+          lastSeenAt: nowIso()
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    assert.equal(await loadActiveSession(cwd), null);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('loadSessionById rejects recent session refs whose file id does not match', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-session-id-mismatch-'));
+  try {
+    const session = createSession(cwd);
+    await saveSession(cwd, session);
+
+    const workspaceRealPath = await realpath(cwd);
+    const statePath = await workspaceStatePath(cwd);
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(
+      statePath,
+      JSON.stringify(
+        {
+          version: 1,
+          workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+          workspaceRealPath,
+          recentSessions: [
+            {
+              id: 'session_wrong_id',
+              path: sessionFilePath(session),
+              createdAt: session.createdAt,
+              updatedAt: session.updatedAt
+            }
+          ],
+          lastSeenAt: nowIso()
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    assert.equal(await loadSessionById(cwd, 'session_wrong_id'), null);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });

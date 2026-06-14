@@ -11,7 +11,10 @@ import {
   openAIToolCallsFromDeltaParts,
   parseOllamaToolCalls,
   parseOpenAIToolCalls,
-  selectTypedRequestMode
+  selectTypedRequestMode,
+  typedPromptToAnthropicInput,
+  typedPromptToOpenAIMessages,
+  typedRequestShouldStream
 } from './prompt-mapping.js';
 
 const modelCapabilities: ModelCapabilities = {
@@ -143,4 +146,110 @@ test('captureOpenAIToolCallDeltas assembles streaming tool call fragments', () =
   assert.deepEqual(openAIToolCallsFromDeltaParts(accumulator), [
     { id: 'call_1', name: 'bash', arguments: { command: 'pwd' } }
   ]);
+});
+
+test('typedRequestShouldStream respects provider capability and explicit off mode', () => {
+  const request = promptRequest('openai-compatible');
+  assert.equal(typedRequestShouldStream(request), true);
+
+  const streamingOff = {
+    ...request,
+    streaming: { mode: 'off' as const }
+  };
+  assert.equal(typedRequestShouldStream(streamingOff), false);
+
+  const providerNoStream = {
+    ...request,
+    providerCapabilities: { ...request.providerCapabilities, streaming: false }
+  };
+  assert.equal(typedRequestShouldStream(providerNoStream), false);
+});
+
+test('typedPromptToOpenAIMessages maps native tool results and assistant tool calls', () => {
+  const request = {
+    ...promptRequest('openai-compatible'),
+    input: [
+      {
+        kind: 'message' as const,
+        role: 'assistant' as const,
+        content: '',
+        toolCalls: [{ id: 'call_1', name: 'bash', arguments: { command: 'pwd' } }]
+      },
+      {
+        kind: 'tool_result' as const,
+        toolName: 'bash',
+        status: 'ok' as const,
+        content: '/workspace',
+        callId: 'call_1'
+      },
+      {
+        kind: 'tool_result' as const,
+        toolName: 'bash',
+        status: 'error' as const,
+        content: 'command failed',
+        callId: undefined
+      }
+    ]
+  };
+
+  const messages = typedPromptToOpenAIMessages(request, 'native-tools');
+  const assistant = messages.find((message) => message.role === 'assistant' && message.tool_calls?.length);
+  const nativeTool = messages.find((message) => message.role === 'tool' && message.tool_call_id === 'call_1');
+  const fallbackTool = messages.find(
+    (message) => message.role === 'user' && message.content === 'command failed'
+  );
+
+  assert.deepEqual(assistant?.tool_calls, [
+    {
+      id: 'call_1',
+      type: 'function',
+      function: { name: 'bash', arguments: '{"command":"pwd"}' }
+    }
+  ]);
+  assert.equal(nativeTool?.content, '/workspace');
+  assert.ok(fallbackTool);
+});
+
+test('typedPromptToOpenAIMessages injects structured-output instructions in structured-output mode', () => {
+  const request = promptRequest('openai-compatible', false);
+  const messages = typedPromptToOpenAIMessages(request, 'structured-output');
+  assert.ok(messages.some((message) => message.role === 'system' && /STRUCTURED TOOL SCHEMA MODE/.test(message.content)));
+});
+
+test('typedPromptToAnthropicInput maps error tool results and omits empty assistant text blocks', () => {
+  const request = {
+    ...promptRequest('anthropic'),
+    input: [
+      {
+        kind: 'message' as const,
+        role: 'assistant' as const,
+        content: '',
+        toolCalls: [{ id: 'call_1', name: 'bash', arguments: { command: 'pwd' } }]
+      },
+      {
+        kind: 'tool_result' as const,
+        toolName: 'bash',
+        status: 'error' as const,
+        content: 'permission denied',
+        callId: 'call_1'
+      }
+    ]
+  };
+
+  const mapped = typedPromptToAnthropicInput(request, 'native-tools');
+  const assistant = mapped.messages.find((message) => message.role === 'assistant');
+  const toolResult = mapped.messages
+    .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+    .find((block) => block.type === 'tool_result');
+
+  assert.ok(Array.isArray(assistant?.content));
+  assert.equal(assistant?.content.length, 1);
+  assert.equal(assistant?.content[0]?.type, 'tool_use');
+  assert.equal(toolResult?.is_error, true);
+});
+
+test('typedPromptToAnthropicInput injects text-action fallback into system text', () => {
+  const request = promptRequest('anthropic', false);
+  const mapped = typedPromptToAnthropicInput(request, 'text-action');
+  assert.match(mapped.system, /TEXT ACTION FALLBACK MODE/);
 });
