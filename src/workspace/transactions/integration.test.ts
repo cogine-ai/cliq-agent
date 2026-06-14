@@ -30,14 +30,35 @@ import type { Session } from '../../session/types.js';
 import { createRunner } from '../../runtime/runner.js';
 import type { RuntimeEvent } from '../../protocol/runtime/events.js';
 import type { TxRunnerOptions } from '../../runtime/tx-runner.js';
-import type { ChatMessage, ModelClient, ModelCompleteOptions, ModelCompletion } from '../../model/types.js';
+import type {
+  ChatMessage,
+  EffectiveModelRequest,
+  ModelClient,
+  ModelCompleteOptions,
+  ModelCompletion
+} from '../../model/types.js';
+
+const INTEGRATION_TEST_EFFECTIVE_REQUEST: EffectiveModelRequest = {
+  provider: 'openrouter',
+  model: 'test-model',
+  mode: 'text-action',
+  streaming: false,
+  baseInstructionChars: 0,
+  inputItemCount: 0,
+  toolNames: []
+};
 
 function scriptedModel(actions: string[]): ModelClient {
   let i = 0;
   return {
     async complete(_messages: ChatMessage[], _options?: ModelCompleteOptions): Promise<ModelCompletion> {
       const text = actions[i++] ?? '{"message":"final"}';
-      return { content: text, provider: 'openrouter', model: 'test-model' };
+      return {
+        content: text,
+        provider: 'openrouter',
+        model: 'test-model',
+        effectiveRequest: INTEGRATION_TEST_EFFECTIVE_REQUEST
+      };
     }
   };
 }

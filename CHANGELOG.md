@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed stale PermissionRequest hook forward-compat plumbing that never
+  affected runtime behavior: the unused `coerceHookPermissionScope` helper,
+  the legacy `decision: 'allow'` allow path (superseded by
+  `permissionDecision`), and the type-only `additionalAllowlistEntries` field.
+  Hook allows remain one-shot; session/workspace persistence stays TUI-only.
+- Removed the runner's `effectiveRequest` synthesis fallback now that every
+  typed provider client returns `effectiveRequest` on `ModelPromptRequest`
+  completions.
+
 ## [0.14.1] - 2026-06-14
 
 This patch release improves Plan Mode execution tracking tolerance and adds
