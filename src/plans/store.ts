@@ -607,8 +607,7 @@ function fillMissingProgressActiveForms(
   const activeFormsById = new Map(currentItems.map((item) => [item.id, item.activeForm]));
   return items.map((item) => {
     if (!item || typeof item !== 'object' || typeof item.title !== 'string') return item;
-    const explicit = typeof item.activeForm === 'string' ? item.activeForm.trim() : '';
-    if (explicit) return item;
+    if (item.activeForm !== undefined) return item;
     const previous = typeof item.id === 'string' ? activeFormsById.get(item.id) : undefined;
     return {
       ...item,

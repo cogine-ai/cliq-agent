@@ -358,4 +358,22 @@ test('updatePlanProgress rejects stale plan ids and multiple in-progress items',
       }),
     /invalid plan progress items/
   );
+
+  await assert.rejects(
+    () =>
+      updatePlanProgress(cwd, session, {
+        planId: draft.id,
+        items: [{ title: 'One', status: 'pending', activeForm: 1 }] as never
+      }),
+    /invalid plan progress items/
+  );
+
+  await assert.rejects(
+    () =>
+      updatePlanProgress(cwd, session, {
+        planId: draft.id,
+        items: [{ title: 'One', status: 'pending', activeForm: '   ' }]
+      }),
+    /invalid plan progress items/
+  );
 });
