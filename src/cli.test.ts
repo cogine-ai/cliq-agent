@@ -35,7 +35,7 @@ import {
 } from './cli.js';
 import { authFilePath } from './model/auth-store.js';
 import { ModelSetupRequiredError } from './model/config.js';
-import type { ModelClient, ResolvedModelConfig } from './model/types.js';
+import type { EffectiveModelRequest, ModelClient, ResolvedModelConfig } from './model/types.js';
 import { approvePlan, createDraftPlan, finalizePlan, planProgressPath } from './plans/store.js';
 import { createCheckpoint } from './session/checkpoints.js';
 import { createSession, ensureSession, saveSession, sessionFilePath } from './session/store.js';
@@ -1553,12 +1553,22 @@ function fakeModelClientForConfig(
   config: ResolvedModelConfig
 ): ModelClient {
   configs.push(config);
+  const effectiveRequest: EffectiveModelRequest = {
+    provider: config.provider,
+    model: config.model,
+    mode: 'text-action',
+    streaming: false,
+    baseInstructionChars: 0,
+    inputItemCount: 0,
+    toolNames: []
+  };
   return {
     async complete() {
       return {
         provider: config.provider,
         model: config.model,
-        content: 'ok'
+        content: 'ok',
+        effectiveRequest
       };
     }
   };
