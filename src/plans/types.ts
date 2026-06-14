@@ -32,7 +32,7 @@ export type PlanProgressItemInput = {
   id?: string;
   title: string;
   status?: PlanItemStatus;
-  activeForm: string;
+  activeForm?: string;
   notes?: string;
 };
 

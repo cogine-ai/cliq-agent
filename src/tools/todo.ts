@@ -24,7 +24,7 @@ export const todoTool: ToolDefinition<{ todo: TodoAction }> = {
               activeForm: { type: 'string' },
               notes: { type: 'string' }
             },
-            required: ['title', 'status', 'activeForm'],
+            required: ['title', 'status'],
             additionalProperties: false
           }
         }

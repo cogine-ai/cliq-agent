@@ -45,7 +45,7 @@ export type TodoItemAction = {
   id?: string;
   title: string;
   status: 'pending' | 'in_progress' | 'completed';
-  activeForm: string;
+  activeForm?: string;
   notes?: string;
 };
 
@@ -320,13 +320,14 @@ export function parseTodoItemAction(value: unknown): TodoItemAction | null {
   if (item.id !== undefined && typeof item.id !== 'string') return null;
   if (typeof item.title !== 'string' || !item.title.trim()) return null;
   if (item.status !== 'pending' && item.status !== 'in_progress' && item.status !== 'completed') return null;
-  if (typeof item.activeForm !== 'string' || !item.activeForm.trim()) return null;
+  if (item.activeForm !== undefined && typeof item.activeForm !== 'string') return null;
+  const activeForm = typeof item.activeForm === 'string' ? item.activeForm.trim() : '';
   if (item.notes !== undefined && typeof item.notes !== 'string') return null;
   return {
     ...(item.id !== undefined ? { id: item.id } : {}),
     title: item.title,
     status: item.status,
-    activeForm: item.activeForm,
+    ...(activeForm ? { activeForm } : {}),
     ...(item.notes !== undefined ? { notes: item.notes } : {})
   };
 }

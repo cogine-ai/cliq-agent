@@ -18,6 +18,33 @@ test('registry exposes model-visible tool schemas and maps structured tool calls
     }).action,
     { bash: 'pwd' }
   );
+
+  const todoSpec = registry.modelVisibleToolSpecs().find((spec) => spec.name === 'todo');
+  const todoItemsSchema = todoSpec?.inputSchema.properties?.items.items;
+  assert.ok(todoItemsSchema);
+  assert.deepEqual(todoItemsSchema.required, ['title', 'status']);
+  assert.deepEqual(
+    registry.resolveToolCall({
+      id: 'call_todo',
+      name: 'todo',
+      arguments: {
+        planId: 'plan_1',
+        items: [
+          { id: 'scan', title: 'Scan projects', status: 'in_progress' },
+          { id: 'report', title: 'Summarize results', status: 'pending' }
+        ]
+      }
+    }).action,
+    {
+      todo: {
+        planId: 'plan_1',
+        items: [
+          { id: 'scan', title: 'Scan projects', status: 'in_progress' },
+          { id: 'report', title: 'Summarize results', status: 'pending' }
+        ]
+      }
+    }
+  );
 });
 
 test('registry rejects unknown structured tool names', () => {
