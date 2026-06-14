@@ -145,7 +145,9 @@ function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consume
 
 function skipEnvOption(tokens: string[], index: number): number {
   const token = tokens[index]!;
-  if (token === '-' || token === '--') return index;
+  // POSIX end-of-options markers must be consumed so a following `-S` split
+  // string is visible to expandEnvSplitString (e.g. `env - -S bash -c '...'`).
+  if (token === '-' || token === '--') return index + 1;
   if (isEnvAssignment(token)) return index + 1;
   if (!token.startsWith('-')) return index;
   if (
