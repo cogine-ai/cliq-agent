@@ -116,6 +116,10 @@ function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consume
   let i = wrapperIndex + 1;
   while (i < tokens.length) {
     const token = tokens[i]!;
+    if (token === '-' || token === '--') {
+      i += 1;
+      continue;
+    }
     if (token === '-S' || token === '--split-string') {
       splitFlagIndex = i;
       break;
@@ -295,6 +299,8 @@ export function parseBashCommandHead(commandLine: string): string | null {
   // Strip directory prefix and trailing args; we only want the basename so
   // `/usr/local/bin/python` and `python` collapse to the same matcher key.
   const basename = head.includes('/') ? head.split('/').filter(Boolean).pop()! : head;
+  // Option-looking heads (e.g. env - -- -S … mis-parse) must not match allow rules.
+  if (basename.startsWith('-')) return null;
   return basename || null;
 }
 
@@ -368,9 +374,11 @@ function skipEnvWrapperFlags(tokens: string[], start: number): number {
   let i = start;
   while (i < tokens.length) {
     const token = tokens[i]!;
+    // POSIX/GNU env treat a lone `-` or `--` as end-of-options; keep scanning
+    // so a following `-S` / `--split-string` is still visible to the parser.
     if (token === '-' || token === '--') {
       i += 1;
-      break;
+      continue;
     }
 
     const skipped = skipEnvOption(tokens, i);

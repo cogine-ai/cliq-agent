@@ -6,6 +6,8 @@ import {
   extractShellInlineScript,
   parseBashCommandHead
 } from './bash-parse.js';
+import { composePermissionTable, matchAgainstTable } from './decision-table.js';
+import { createPolicyEngine } from './engine.js';
 
 test('parseBashCommandHead returns the plain command for a simple invocation', () => {
   assert.equal(parseBashCommandHead('npm test'), 'npm');
@@ -29,8 +31,8 @@ test('parseBashCommandHead unwraps sudo and env style wrappers', () => {
   assert.equal(parseBashCommandHead("env FOO=bar -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead("env -u VAR -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead("env --split-string='bash -c \"git status\"'"), 'bash');
-  assert.equal(parseBashCommandHead("env - -S bash -c 'git status'"), '-S');
-  assert.equal(parseBashCommandHead("env -- -S bash -c 'git status'"), '-S');
+  assert.equal(parseBashCommandHead("env - -S bash -c 'git status'"), 'bash');
+  assert.equal(parseBashCommandHead("env -- -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead('doas pacman -Syu'), 'pacman');
 });
 
@@ -139,8 +141,8 @@ test('extractShellInlineScript returns the -c script for shell interpreters', ()
   assert.equal(extractShellInlineScript("env -u VAR -S bash -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript('env --split-string=\'bash -c "git status"\''), 'git status');
   assert.equal(extractShellInlineScript('env -S bash -c'), null);
-  assert.equal(extractShellInlineScript("env - -S bash -c 'git status'"), null);
-  assert.equal(extractShellInlineScript("env -- -S bash -c 'git status'"), null);
+  assert.equal(extractShellInlineScript("env - -S bash -c 'git status'"), 'git status');
+  assert.equal(extractShellInlineScript("env -- -S bash -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript('npm test'), null);
 });
 
@@ -159,11 +161,37 @@ test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c s
     "/usr/bin/env -i -S bash -c 'git status && rm -rf /'",
     "env FOO=bar -S bash -c 'git status && rm -rf /'",
     "env -u VAR -S bash -c 'git status && rm -rf /'",
-    'env --split-string=\'bash -c "git status && rm -rf /"\''
+    'env --split-string=\'bash -c "git status && rm -rf /"\'',
+    "env - -S bash -c 'git status && rm -rf /'",
+    "env -- -S bash -c 'git status && rm -rf /'"
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }
   assert.equal(bashCommandHasUnsafeAllowSyntax("bash -c 'git status'"), false);
-  assert.equal(bashCommandHasUnsafeAllowSyntax("env - -S bash -c 'git status && rm -rf /'"), false);
-  assert.equal(bashCommandHasUnsafeAllowSyntax("env -- -S bash -c 'git status && rm -rf /'"), false);
+});
+
+test('bash allowlist bypass: env - -S bash -c cannot auto-approve compound scripts via bash: *', async () => {
+  const command = "env - -S bash -c 'git status && rm -rf /'";
+  const table = composePermissionTable({
+    allow: [{ channel: 'bash', pattern: '*', source: 'workspace' }]
+  });
+  const channel = {
+    kind: 'bash' as const,
+    commandHead: parseBashCommandHead(command) ?? '',
+    unsafeForAllow: bashCommandHasUnsafeAllowSyntax(command)
+  };
+  assert.equal(channel.commandHead, 'bash');
+  assert.equal(channel.unsafeForAllow, true);
+  assert.equal(matchAgainstTable(table, channel).kind, 'ask');
+
+  const policy = createPolicyEngine({ mode: 'default', table });
+  const decision = await policy.decide({
+    kind: 'tool',
+    toolName: 'bash',
+    access: 'exec',
+    channel,
+    action: { bash: command },
+    display: { title: 'Allow bash command?', command }
+  });
+  assert.equal(decision.behavior, 'ask');
 });
