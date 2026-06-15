@@ -12,8 +12,9 @@
  *     PolicyEngine is constructed without the `livePolicy` proxy that the
  *     TUI uses to mutate the permission table.
  *   - PermissionRequest hooks that try to return `scope: 'session'` /
- *     `'workspace'` are coerced down to `'once'` by
- *     `coerceHookPermissionScope` in src/runtime/runner.ts (#62-A).
+ *     `'workspace'` are accepted on the wire but have no scope effect in
+ *     headless: every hook allow is one-shot. Session/workspace persistence
+ *     is only reachable through the TUI ApprovalModal (`extendApprovalScope`).
  *   - `appendPersistedWorkspacePermission` is never invoked from this file,
  *     so a non-interactive run cannot silently accumulate "always allow"
  *     entries in `~/.cliq/workspaces/<id>/permissions.json`.

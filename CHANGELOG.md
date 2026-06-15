@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed dead hook permission forward-compat plumbing after the typed prompt
+  protocol and TUI `extendApprovalScope` paths became the only production
+  surfaces: `coerceHookPermissionScope`, legacy `HookOutput.decision: 'allow'`
+  in PermissionRequest handling, type-only `additionalAllowlistEntries`, and
+  runner `effectiveRequest` synthesis fallback for providers that omit the field.
+
 ## [0.14.1] - 2026-06-14
 
 This patch release improves Plan Mode execution tracking tolerance and adds

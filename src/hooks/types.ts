@@ -87,21 +87,6 @@ export type HookOutput = {
      */
     scope?: HookPermissionScope;
   };
-  /**
-   * Optional additional allowlist entries that the hook wants to append to
-   * the current session's in-process permission table. Each entry uses the
-   * same "<channel>: <pattern>" grammar as the CLI/workspace config in
-   * #62-B. **Type-only today** (#62-A): the runner does not yet read this
-   * field and does not emit a warning when a hook sends one — the field
-   * exists purely so hook authors can start adopting it before #62-B lands.
-   *
-   * TODO(#62-B): wire end-to-end via composePermissionTable's session
-   * layer (see src/policy/decision-table.ts) — the runner will consume
-   * these entries during PermissionRequest handling (see runner.ts), and
-   * unknown / malformed entries will surface a single non-blocking warning
-   * via emitCommandHookWarning so older hooks don't break the turn.
-   */
-  additionalAllowlistEntries?: string[];
   [key: string]: unknown;
 };
 
