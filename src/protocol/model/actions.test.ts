@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseModelAction } from './actions.js';
+import { parseModelAction, parseTodoItemAction } from './actions.js';
 
 test('parses bash action', () => {
   assert.deepEqual(parseModelAction('{"bash":"npm test"}'), { bash: 'npm test' });
@@ -208,4 +208,15 @@ test('does not extract JSON from code fences', () => {
     () => parseModelAction('```json\n{"bash":"pwd"}\n```'),
     /invalid json|unexpected token/i
   );
+});
+
+test('parseTodoItemAction treats whitespace-only activeForm as omitted', () => {
+  assert.deepEqual(parseTodoItemAction({ title: 'Inspect', status: 'pending', activeForm: '   ' }), {
+    title: 'Inspect',
+    status: 'pending'
+  });
+  assert.deepEqual(parseTodoItemAction({ title: 'Inspect', status: 'in_progress' }), {
+    title: 'Inspect',
+    status: 'in_progress'
+  });
 });

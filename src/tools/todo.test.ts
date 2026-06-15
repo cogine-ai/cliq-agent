@@ -93,3 +93,46 @@ test('todoTool.execute updates approved-plan execution progress', async () => {
     ['Implement', 'in_progress']
   ]);
 });
+
+test('todoTool.execute fills omitted activeForm from existing tracker values', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Tracker',
+    contentMarkdown: '## Steps\n- Inspect\n- Implement'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+
+  await todoTool.execute(
+    {
+      todo: {
+        planId: draft.id,
+        items: [
+          { id: 'item_1', title: 'Inspect', status: 'pending', activeForm: 'Checking code' },
+          { id: 'item_2', title: 'Implement', status: 'pending', activeForm: 'Implementing tracker' }
+        ]
+      }
+    },
+    { cwd, session }
+  );
+
+  const result = await todoTool.execute(
+    {
+      todo: {
+        planId: draft.id,
+        items: [
+          { id: 'item_1', title: 'Inspect', status: 'completed' },
+          { id: 'item_2', title: 'Implement', status: 'in_progress' }
+        ]
+      }
+    },
+    { cwd, session }
+  );
+
+  assert.equal(result.status, 'ok');
+  const progress = await readPlanProgress(cwd, session, draft.id);
+  assert.deepEqual(progress.items, [
+    { id: 'item_1', title: 'Inspect', status: 'completed', activeForm: 'Checking code' },
+    { id: 'item_2', title: 'Implement', status: 'in_progress', activeForm: 'Implementing tracker' }
+  ]);
+});

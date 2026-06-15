@@ -377,3 +377,29 @@ test('updatePlanProgress rejects stale plan ids and multiple in-progress items',
     /invalid plan progress items/
   );
 });
+
+test('updatePlanProgress rejects explicit whitespace activeForm instead of reusing tracker values', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Execute tracker',
+    contentMarkdown: '## Steps\n- One'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+  await updatePlanProgress(cwd, session, {
+    planId: draft.id,
+    items: [{ id: 'item_1', title: 'One', status: 'pending', activeForm: 'Doing one' }]
+  });
+
+  await assert.rejects(
+    () =>
+      updatePlanProgress(cwd, session, {
+        planId: draft.id,
+        items: [{ id: 'item_1', title: 'One', status: 'in_progress', activeForm: '   ' }]
+      }),
+    /invalid plan progress items/
+  );
+
+  const progress = await readPlanProgress(cwd, session, draft.id);
+  assert.deepEqual(progress.items, [{ id: 'item_1', title: 'One', status: 'pending', activeForm: 'Doing one' }]);
+});
