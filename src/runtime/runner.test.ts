@@ -71,6 +71,31 @@ function commandFor(scriptPath: string): string {
   return `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
 }
 
+function bashOkRegistry() {
+  return {
+    definitions: [],
+    resolve() {
+      return {
+        definition: {
+          name: 'bash',
+          access: 'exec' as const,
+          supports(action: unknown): action is { bash: string } {
+            return typeof (action as { bash?: unknown }).bash === 'string';
+          },
+          async execute(action: { bash: string }) {
+            return {
+              tool: 'bash',
+              status: 'ok' as const,
+              content: `TOOL_RESULT bash OK\n$ ${action.bash}\n(exit=0 signal=none)\nok`,
+              meta: { exit: 0, signal: 'none', timed_out: false }
+            };
+          }
+        }
+      };
+    }
+  };
+}
+
 async function writeHookScript(cwd: string, name: string, source: string) {
   const hooksDir = path.join(cwd, '.cliq', 'hooks');
   await mkdir(hooksDir, { recursive: true });
@@ -161,6 +186,79 @@ test('runner emits checkpoint-created after automatic checkpoint creation', asyn
 
   assert.equal(events[0], 'checkpoint-created');
   assert.equal(session.checkpoints.length, 1);
+});
+
+test('runner default max turns allows long local tasks up to 100 model iterations', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        if (calls < 100) {
+          return completion(JSON.stringify({ bash: `echo ${calls}` }));
+        }
+        return completion(JSON.stringify({ message: 'done' }));
+      }
+    },
+    policy: createPolicyEngine({ mode: 'yolo' }),
+    registry: bashOkRegistry()
+  });
+
+  const finalMessage = await runner.runTurn(session, 'do a long task');
+
+  assert.equal(finalMessage, 'done');
+  assert.equal(calls, 100);
+  assert.equal(session.records.filter((record) => record.kind === 'tool').length, 99);
+});
+
+test('runner honors explicit maxTurns before the default max turns limit', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(JSON.stringify({ bash: `echo ${calls}` }));
+      }
+    },
+    maxTurns: 2,
+    policy: createPolicyEngine({ mode: 'yolo' }),
+    registry: bashOkRegistry()
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'stop after two tool loops'), /Exceeded max turns \(2\)/);
+  assert.equal(calls, 2);
+});
+
+test('runner detects repeated identical tool action/result doom loops', async () => {
+  const session = await createTempSession();
+  const errors: Extract<RuntimeEvent, { type: 'error' }>[] = [];
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(JSON.stringify({ bash: 'pwd' }));
+      }
+    },
+    maxTurns: 100,
+    policy: createPolicyEngine({ mode: 'yolo' }),
+    registry: bashOkRegistry(),
+    onEvent(event) {
+      if (event.type === 'error') {
+        errors.push(event);
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'repeat a command'), /Doom loop detected/i);
+  assert.equal(calls, 3);
+  assert.match(errors.at(-1)?.message ?? '', /repeated identical bash action/i);
+  assert.equal(errors.at(-1)?.stage, 'model');
 });
 
 test('per-turn signal in runTurn opts cancels the turn without poisoning the runner', async () => {

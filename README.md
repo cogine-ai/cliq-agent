@@ -236,6 +236,16 @@ cliq run --jsonl "inspect this repo"
 
 `--jsonl` writes one JSON object per line to stdout and keeps human terminal text out of the event stream. The event stream is versioned and includes run lifecycle, model lifecycle, tool lifecycle, checkpoint, compaction, final, and error events. Exit codes are stable: `0` for completed runs, `1` for failed runs, and `130` for cancelled runs.
 
+Long automation can raise or lower the per-turn model/tool iteration cap with
+`--max-turns N` or an environment default:
+
+```bash
+CLIQ_MAX_TURNS=120 cliq run --jsonl "complete the benchmark sweep"
+cliq run --max-turns 40 "inspect this repo"
+```
+
+The built-in default is 100 turns.
+
 ### Stdio JSON-RPC
 
 `cliq rpc` starts a newline-delimited JSON-RPC 2.0 server over stdio. It is intended for local GUI, gateway, automation, and future subagent orchestrators that need to start runs, subscribe to events, cancel work, and query stable artifacts without scraping terminal output.

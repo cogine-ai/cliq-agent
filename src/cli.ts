@@ -160,6 +160,7 @@ type ParsedArgsBase = {
   model: PartialModelConfig;
   txMode?: TxMode;
   txApply?: TxApplyPolicy;
+  maxTurns?: number;
   tui?: boolean;
   classic?: boolean;
   tuiDebug?: boolean;
@@ -657,6 +658,14 @@ function readFlagValue(raw: string[], index: number, flag: string) {
   return value;
 }
 
+function parsePositiveIntegerOption(name: string, raw: string): number {
+  if (!/^[1-9]\d*$/.test(raw)) {
+    const label = name === '--max-turns' ? 'max turns' : `${name} max turns`;
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return Number(raw);
+}
+
 /**
  * Refuse simultaneous --policy + --preset on the same CLI invocation. Both
  * flags set the PolicyMode preset; accepting both at once would force a
@@ -958,6 +967,7 @@ function parseRunArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
   const promptParts: string[] = [];
   let jsonl = false;
   let session: ParsedSessionSelection | undefined;
+  let maxTurns = base.maxTurns;
   let parsingFlags = true;
 
   for (let i = 1; i < args.length; i += 1) {
@@ -968,6 +978,15 @@ function parseRunArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     }
     if (parsingFlags && token.startsWith('--jsonl=')) {
       throw new Error('--jsonl does not accept a value');
+    }
+    if (parsingFlags && token.startsWith('--max-turns=')) {
+      maxTurns = parsePositiveIntegerOption('--max-turns', token.slice('--max-turns='.length));
+      continue;
+    }
+    if (parsingFlags && token === '--max-turns') {
+      maxTurns = parsePositiveIntegerOption('--max-turns', readFlagValue(args, i, '--max-turns'));
+      i += 1;
+      continue;
     }
     if (parsingFlags && (token === '--continue' || token === '-c')) {
       session = setRunSessionSelection(session, { mode: 'active' }, token);
@@ -1002,7 +1021,14 @@ function parseRunArgs(args: string[], base: ParsedArgsBase): ParsedArgs {
     throw new Error('Missing prompt for cliq run');
   }
 
-  return { ...base, cmd: 'run', prompt, ...(jsonl ? { jsonl } : {}), ...(session ? { session } : {}) };
+  return {
+    ...base,
+    cmd: 'run',
+    prompt,
+    ...(jsonl ? { jsonl } : {}),
+    ...(session ? { session } : {}),
+    ...(maxTurns !== undefined ? { maxTurns } : {})
+  };
 }
 
 function setRunSessionSelection(
@@ -1074,6 +1100,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const model: PartialModelConfig = {};
   let txMode: TxMode | undefined;
   let txApply: TxApplyPolicy | undefined;
+  let maxTurns: number | undefined;
   let tui = false;
   let classic = false;
   let tuiDebug = false;
@@ -1088,6 +1115,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const cliDeny: PermissionRule[] = [];
   const cliAsk: PermissionRule[] = [];
   const rawEnvPolicy = process.env.CLIQ_POLICY_MODE;
+  const rawEnvMaxTurns = process.env.CLIQ_MAX_TURNS;
 
   const args: string[] = [];
 
@@ -1162,6 +1190,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
     if (token.startsWith('--tui-debug=')) {
       throw new Error('--tui-debug does not accept a value');
+    }
+
+    if (token.startsWith('--max-turns=')) {
+      maxTurns = parsePositiveIntegerOption('--max-turns', token.slice('--max-turns='.length));
+      continue;
+    }
+
+    if (token === '--max-turns') {
+      maxTurns = parsePositiveIntegerOption('--max-turns', readFlagValue(raw, i, '--max-turns'));
+      i += 1;
+      continue;
     }
 
     if (token.startsWith('--policy=')) {
@@ -1360,6 +1399,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     policyExplicit = true;
   }
 
+  if (maxTurns === undefined && rawEnvMaxTurns !== undefined) {
+    maxTurns = parsePositiveIntegerOption('CLIQ_MAX_TURNS', rawEnvMaxTurns);
+  }
+
   const cmd = args[0];
   const cliPermissions =
     cliAllow.length === 0 && cliDeny.length === 0 && cliAsk.length === 0
@@ -1372,6 +1415,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     model,
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(tui ? { tui } : {}),
     ...(classic ? { classic } : {}),
     ...(tuiDebug ? { tuiDebug } : {}),
@@ -1381,6 +1425,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(policyExplicit ? { policyExplicit } : {}),
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(tui ? { tui } : {}),
     ...(classic ? { classic } : {}),
     ...(tuiDebug ? { tuiDebug } : {}),
@@ -1635,6 +1680,7 @@ Options:
   --base-url URL           Required for openai-compatible; optional provider override
   --streaming MODE         auto | on | off
   --jsonl                  With cliq run only, write structured JSONL events to stdout
+  --max-turns N            Maximum model/tool iterations per turn (default 100)
   --tx <off|edit>          Override workspace config transactions.mode for this run
   --tx-apply <policy>      Override transactions.applyPolicy (interactive | auto-on-pass | manual-only)
   --tui                    Force the Ink TUI (already the default on a TTY; overrides CLIQ_TUI=0)
@@ -1668,6 +1714,7 @@ Env:
   OPENAI_COMPATIBLE_API_KEY Optional for openai-compatible
   CLIQ_MODEL_*              Optional provider/model/base URL/streaming defaults
   CLIQ_POLICY_MODE          Optional default policy mode
+  CLIQ_MAX_TURNS            Optional max-turns default; useful for CI/headless automation
   CLIQ_TRUST_WORKSPACE       trust | deny — non-interactive/CI shortcut to trust or forbid workspace runtime gates
                              (trusted | untrusted synonyms). Interactive chat still prompts unless set.
   CLIQ_TUI                  Set to "0" to fall back to the legacy readline REPL
@@ -2845,6 +2892,7 @@ export async function runCli(argv: string[]) {
           session: headlessSessionRequest(parsedSessionSelection(parsed)),
           txMode: parsed.txMode,
           txApply: parsed.txApply,
+          maxTurns: parsed.maxTurns,
           ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
         },
         {
@@ -2874,6 +2922,7 @@ export async function runCli(argv: string[]) {
         session: headlessSessionRequest(parsedSessionSelection(parsed)),
         txMode: parsed.txMode,
         txApply: parsed.txApply,
+        maxTurns: parsed.maxTurns,
         ...(parsed.cliPermissions ? { cliPermissions: parsed.cliPermissions } : {})
       },
       {
@@ -3057,6 +3106,7 @@ export async function runCli(argv: string[]) {
       wsCfg,
       txMode: parsed.txMode,
       txApply: parsed.txApply,
+      maxTurns: parsed.maxTurns,
       showModeChangeMessages: resolveTuiDebug({
         tuiDebug: parsed.tuiDebug === true,
         envDebug: process.env.CLIQ_TUI_DEBUG === '1'
@@ -3107,6 +3157,7 @@ export async function runCli(argv: string[]) {
     policy: createPolicyEngine({ mode: policy, table: chatPermissionTable }),
     confirm: createConfirmTool(rl),
     instructions: assembly.instructions,
+    maxTurns: parsed.maxTurns,
     autoCompact: {
       config: assembly.workspaceConfig.autoCompact,
       modelConfig
@@ -3196,6 +3247,7 @@ type RunChatTuiSessionOpts = {
   wsCfg: WorkspaceConfig;
   txMode?: TxMode;
   txApply?: TxApplyPolicy;
+  maxTurns?: number;
   showModeChangeMessages: boolean;
   coordinatorCtx: CoordinatorContext;
   cliqHome: string;
@@ -3564,6 +3616,10 @@ export function resolveTuiInitialPolicy(opts: {
   return opts.policyExplicit ? opts.policy : TUI_DEFAULT_POLICY;
 }
 
+export function buildTuiRunnerMaxTurnsOption(maxTurns: number | undefined): { maxTurns?: number } {
+  return maxTurns === undefined ? {} : { maxTurns };
+}
+
 async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
   const { wsCfg, session, cwd } = opts;
   const policy = resolveTuiInitialPolicy({
@@ -3704,6 +3760,7 @@ async function runChatTuiSession(opts: RunChatTuiSessionOpts) {
       // wrapped engine ever returns 'ask' (it shouldn't), so this is a defense.
       confirm: async () => false,
       instructions: opts.assembly.instructions,
+      ...buildTuiRunnerMaxTurnsOption(opts.maxTurns),
       autoCompact: {
         config: opts.assembly.workspaceConfig.autoCompact,
         modelConfig

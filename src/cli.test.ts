@@ -17,6 +17,7 @@ import {
   parseArgs,
   printHelp,
   renderUnhandledError,
+  buildTuiRunnerMaxTurnsOption,
   resolveTuiDebug,
   resolveTuiInitialPolicy,
   resolveTuiPreference,
@@ -85,6 +86,53 @@ test('parseArgs accepts command-scoped run --jsonl', () => {
     skills: [],
     model: {}
   });
+});
+
+test('parseArgs accepts max turns for headless run invocations', () => {
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', 'run', '--jsonl', '--max-turns', '64', 'inspect', 'repo']), {
+    cmd: 'run',
+    prompt: 'inspect repo',
+    jsonl: true,
+    maxTurns: 64,
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+
+  assert.deepEqual(parseArgs(['node', 'src/index.ts', '--max-turns=75', 'run', 'inspect', 'repo']), {
+    cmd: 'run',
+    prompt: 'inspect repo',
+    maxTurns: 75,
+    policy: 'default',
+    skills: [],
+    model: {}
+  });
+});
+
+test('parseArgs reads CLIQ_MAX_TURNS for CI/headless defaults and lets flags override it', () => {
+  const previous = process.env.CLIQ_MAX_TURNS;
+  process.env.CLIQ_MAX_TURNS = '88';
+  try {
+    assert.equal(parseArgs(['node', 'src/index.ts', 'run', '--jsonl', 'inspect']).maxTurns, 88);
+    assert.equal(parseArgs(['node', 'src/index.ts', 'run', '--jsonl', '--max-turns', '40', 'inspect']).maxTurns, 40);
+  } finally {
+    if (previous === undefined) delete process.env.CLIQ_MAX_TURNS;
+    else process.env.CLIQ_MAX_TURNS = previous;
+  }
+});
+
+test('parseArgs rejects invalid max turns values', () => {
+  assert.throws(() => parseArgs(['node', 'src/index.ts', 'run', '--max-turns', '0', 'inspect']), /max turns/i);
+  assert.throws(() => parseArgs(['node', 'src/index.ts', '--max-turns=abc', 'run', 'inspect']), /max turns/i);
+
+  const previous = process.env.CLIQ_MAX_TURNS;
+  process.env.CLIQ_MAX_TURNS = '-1';
+  try {
+    assert.throws(() => parseArgs(['node', 'src/index.ts', 'run', '--jsonl', 'inspect']), /CLIQ_MAX_TURNS/i);
+  } finally {
+    if (previous === undefined) delete process.env.CLIQ_MAX_TURNS;
+    else process.env.CLIQ_MAX_TURNS = previous;
+  }
 });
 
 test('parseArgs accepts explicit resume and continue session commands', () => {
@@ -2852,6 +2900,11 @@ test('resolveTuiInitialPolicy uses the canonical default unless explicit', () =>
     resolveTuiInitialPolicy({ policy: 'plan', policyExplicit: true }),
     'plan'
   );
+});
+
+test('buildTuiRunnerMaxTurnsOption carries explicit max turns into TUI runner options', () => {
+  assert.deepEqual(buildTuiRunnerMaxTurnsOption(undefined), {});
+  assert.deepEqual(buildTuiRunnerMaxTurnsOption(42), { maxTurns: 42 });
 });
 
 test('resolveTuiPreference precedence: --classic > --tui > CLIQ_TUI=0 > TTY default', () => {

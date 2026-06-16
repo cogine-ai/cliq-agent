@@ -1,4 +1,4 @@
-import { DEFAULT_POLICY_MODE, MAX_LOOPS } from '../config.js';
+import { DEFAULT_DOOM_LOOP_REPEATED_ACTION_LIMIT, DEFAULT_MAX_TURNS, DEFAULT_POLICY_MODE } from '../config.js';
 import { formatHookFailureReason, runCommandHooks, type CommandHookRunResult } from '../hooks/runner.js';
 import type { HookEventName, HookInput, HooksConfig } from '../hooks/types.js';
 import type { InstructionMessage } from '../instructions/types.js';
@@ -52,6 +52,10 @@ type AutoCompactRunnerOptions = {
 type BuiltInToolRegistry = ReturnType<typeof createToolRegistry>;
 type RuntimeToolRegistry = Pick<BuiltInToolRegistry, 'definitions' | 'resolve'> &
   Partial<Pick<BuiltInToolRegistry, 'modelVisibleToolSpecs' | 'resolveToolCall'>>;
+
+type DoomLoopOptions = {
+  repeatedActionLimit?: number;
+};
 
 type ModelAttemptResult =
   | { ok: true; completion: ModelCompletion }
@@ -107,6 +111,21 @@ function resolveStructuredToolCall(registry: RuntimeToolRegistry, call: ModelToo
   return registry.resolveToolCall(call);
 }
 
+function assertPositiveInteger(name: string, value: number) {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+}
+
+function actionLoopSignature(tool: string, action: unknown, result: ToolResult) {
+  return JSON.stringify({
+    tool,
+    action,
+    status: result.status,
+    content: result.content
+  });
+}
+
 export function createRunner({
   model,
   registry = createToolRegistry(),
@@ -118,6 +137,8 @@ export function createRunner({
   autoCompact,
   signal: defaultSignal,
   transactions,
+  maxTurns = DEFAULT_MAX_TURNS,
+  doomLoop = {},
   confirm
 }: {
   model: ModelClient;
@@ -131,7 +152,13 @@ export function createRunner({
   autoCompact?: AutoCompactRunnerOptions;
   signal?: AbortSignal;
   transactions?: TxRunnerOptions;
+  maxTurns?: number;
+  doomLoop?: DoomLoopOptions;
 }) {
+  assertPositiveInteger('maxTurns', maxTurns);
+  const repeatedActionLimit = doomLoop.repeatedActionLimit ?? DEFAULT_DOOM_LOOP_REPEATED_ACTION_LIMIT;
+  assertPositiveInteger('doomLoop.repeatedActionLimit', repeatedActionLimit);
+
   if (transactions) {
     assertHeadlessCompatible(transactions);
   }
@@ -373,6 +400,8 @@ export function createRunner({
         };
         const repeatedReadOnlyDenials = new Map<string, number>();
         let lastPlanIdThisTurn: string | null = null;
+        let lastActionLoopSignature: string | null = null;
+        let repeatedActionCount = 0;
 
         const emitModelError = async (error: unknown) => {
           await onEvent({
@@ -525,7 +554,7 @@ export function createRunner({
           return compactResult;
         };
 
-        for (let i = 0; i < MAX_LOOPS; i += 1) {
+        for (let i = 0; i < maxTurns; i += 1) {
           await throwIfCancelled();
           let completion: ModelCompletion;
           let currentInstructions = await instructions(session);
@@ -817,6 +846,14 @@ export function createRunner({
           });
           await runHooks(hooks, 'afterTool', session, storedResult);
           await onEvent({ type: 'tool-end', tool: storedResult.tool, status: storedResult.status });
+          const loopSignature = actionLoopSignature(storedResult.tool, action, storedResult);
+          repeatedActionCount = loopSignature === lastActionLoopSignature ? repeatedActionCount + 1 : 1;
+          lastActionLoopSignature = loopSignature;
+          if (repeatedActionCount >= repeatedActionLimit) {
+            const message = `Doom loop detected: repeated identical ${storedResult.tool} action and result ${repeatedActionCount} times.`;
+            await onEvent({ type: 'error', stage: 'model', message, recoverable: true });
+            throw new Error(message);
+          }
           const completedPlanId =
             storedResult.tool === 'plan' &&
             storedResult.status === 'ok' &&
@@ -874,7 +911,9 @@ export function createRunner({
           await throwIfCancelled();
         }
 
-        throw new Error('Exceeded action loop limit');
+        const message = `Exceeded max turns (${maxTurns})`;
+        await onEvent({ type: 'error', stage: 'model', message, recoverable: true });
+        throw new Error(message);
       } finally {
         if (!checkpointCreated) {
           session.lifecycle.status = previousLifecycle.status;
