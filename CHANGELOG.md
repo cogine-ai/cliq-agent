@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the runner's `effectiveRequest` synthesis fallback now that every
   typed provider client returns `effectiveRequest` on `ModelPromptRequest`
   completions.
+- Removed stale doc references to unshipped `CLIQ_TUI_EMOJI` and removed
+  `CLIQ_TX_*` env overrides from the v0.8 implementation plan.
 
 ## [0.14.1] - 2026-06-14
 
