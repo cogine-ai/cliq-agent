@@ -29,8 +29,8 @@ test('parseBashCommandHead unwraps sudo and env style wrappers', () => {
   assert.equal(parseBashCommandHead("env FOO=bar -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead("env -u VAR -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead("env --split-string='bash -c \"git status\"'"), 'bash');
-  assert.equal(parseBashCommandHead("env - -S bash -c 'git status'"), '-S');
-  assert.equal(parseBashCommandHead("env -- -S bash -c 'git status'"), '-S');
+  assert.equal(parseBashCommandHead("env - -S bash -c 'git status'"), 'bash');
+  assert.equal(parseBashCommandHead("env -- -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead('doas pacman -Syu'), 'pacman');
 });
 
@@ -139,8 +139,8 @@ test('extractShellInlineScript returns the -c script for shell interpreters', ()
   assert.equal(extractShellInlineScript("env -u VAR -S bash -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript('env --split-string=\'bash -c "git status"\''), 'git status');
   assert.equal(extractShellInlineScript('env -S bash -c'), null);
-  assert.equal(extractShellInlineScript("env - -S bash -c 'git status'"), null);
-  assert.equal(extractShellInlineScript("env -- -S bash -c 'git status'"), null);
+  assert.equal(extractShellInlineScript("env - -S bash -c 'git status'"), 'git status');
+  assert.equal(extractShellInlineScript("env -- -S bash -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript('npm test'), null);
 });
 
@@ -164,6 +164,31 @@ test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c s
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }
   assert.equal(bashCommandHasUnsafeAllowSyntax("bash -c 'git status'"), false);
-  assert.equal(bashCommandHasUnsafeAllowSyntax("env - -S bash -c 'git status && rm -rf /'"), false);
-  assert.equal(bashCommandHasUnsafeAllowSyntax("env -- -S bash -c 'git status && rm -rf /'"), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax("env - -S bash -c 'git status && rm -rf /'"), true);
+  assert.equal(bashCommandHasUnsafeAllowSyntax("env -- -S bash -c 'git status && rm -rf /'"), true);
+});
+
+test('bashCommandHasUnsafeAllowSyntax treats shell delegation metacommands as unsafe for allow rules', () => {
+  for (const command of [
+    'exec bash -c "git status && rm -rf /"',
+    'eval "rm -rf /"',
+    'command bash -c "git status && rm -rf /"',
+    '. ./script.sh',
+    'source ./script.sh',
+    'xargs rm -rf /'
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
+  }
+});
+
+test('bashCommandHasUnsafeAllowSyntax treats script interpreters with inline code as unsafe for allow rules', () => {
+  for (const command of [
+    "python -c 'import os; os.system(\"rm -rf /\")'",
+    "node -e 'require(\"child_process\").execSync(\"rm -rf /\")'",
+    "perl -e 'system(\"rm -rf /\")'",
+    "ruby -e 'system(\"rm -rf /\")'"
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
+  }
+  assert.equal(bashCommandHasUnsafeAllowSyntax('python --version'), false);
 });
