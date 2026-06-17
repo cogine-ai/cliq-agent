@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  activeFormForTitle,
   extractPlanItems,
   isPlanItem,
   isPlanItemStatus,
@@ -124,6 +125,13 @@ test('progressItemsFromPlanItems seeds pending execution rows with active forms'
       }
     ]
   );
+});
+
+test('activeFormForTitle maps known verbs and falls back for unknown titles', () => {
+  assert.equal(activeFormForTitle('Inspect code'), 'Inspecting code');
+  assert.equal(activeFormForTitle('Implement tracker'), 'Implementing tracker');
+  assert.equal(activeFormForTitle('Ship custom milestone'), 'Working on Ship custom milestone');
+  assert.equal(activeFormForTitle('汇总生成项目清单'), 'Working on 汇总生成项目清单');
 });
 
 test('normalizeStoredPlanProgressItems returns null for invalid stored progress', () => {

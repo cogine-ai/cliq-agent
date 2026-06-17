@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseModelAction } from './actions.js';
+import { parseModelAction, parseTodoItemAction } from './actions.js';
 
 test('parses bash action', () => {
   assert.deepEqual(parseModelAction('{"bash":"npm test"}'), { bash: 'npm test' });
@@ -160,6 +160,23 @@ test('rejects invalid todo payloads', () => {
   assert.throws(() => parseModelAction('{"todo":{"items":[{"title":"Inspect","status":"unknown","activeForm":"Inspecting"}]}}'), /unsupported action/i);
   assert.throws(() => parseModelAction('{"todo":{"items":[{"title":"Inspect","status":"pending","activeForm":1}]}}'), /unsupported action/i);
   assert.throws(() => parseModelAction('{"todo":{"planId":1,"items":[]}}'), /unsupported action/i);
+});
+
+test('parseTodoItemAction treats whitespace-only activeForm as omitted', () => {
+  assert.deepEqual(parseTodoItemAction({ title: 'Inspect', status: 'pending', activeForm: '   ' }), {
+    title: 'Inspect',
+    status: 'pending'
+  });
+  assert.deepEqual(parseTodoItemAction({ title: 'Inspect', status: 'pending' }), {
+    title: 'Inspect',
+    status: 'pending'
+  });
+  assert.equal(parseTodoItemAction({ title: 'Inspect', status: 'pending', activeForm: 1 }), null);
+  assert.deepEqual(parseTodoItemAction({ title: 'Inspect', status: 'pending', activeForm: 'Inspecting' }), {
+    title: 'Inspect',
+    status: 'pending',
+    activeForm: 'Inspecting'
+  });
 });
 
 test('rejects invalid skill activation payloads', () => {
