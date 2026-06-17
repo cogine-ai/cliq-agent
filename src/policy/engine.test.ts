@@ -296,6 +296,27 @@ test('decision table: bash allow rules do not auto-approve compound syntax insid
   }
 });
 
+test('decision table: bash allow rules do not auto-approve delegation or interpreter wrappers', async () => {
+  const policy = createPolicyEngine({
+    mode: 'default',
+    table: composePermissionTable({ allow: [wsRule('bash', '*')] })
+  });
+
+  for (const bash of [
+    'exec bash -c "git status && rm -rf /"',
+    'eval "rm -rf /"',
+    "python -c 'import os; os.system(\"rm -rf /\")'",
+    "env - -S bash -c 'git status && rm -rf /'"
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+    const decision = await policy.decide(subject);
+    assert.equal(decision.behavior, 'ask', bash);
+  }
+});
+
 test('decision table: bash without identifiable head never matches allow (no silent approve)', async () => {
   const policy = createPolicyEngine({
     mode: 'default',
