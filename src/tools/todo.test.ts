@@ -93,3 +93,70 @@ test('todoTool.execute updates approved-plan execution progress', async () => {
     ['Implement', 'in_progress']
   ]);
 });
+
+test('todoTool.execute fills omitted activeForm from prior tracker state or title', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Tracker',
+    contentMarkdown: '## Steps\n- Inspect\n- Implement'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+
+  await todoTool.execute(
+    {
+      todo: {
+        planId: draft.id,
+        items: [
+          { id: 'item_1', title: 'Inspect', status: 'pending', activeForm: 'Checking code' },
+          { id: 'item_2', title: 'Implement tracker', status: 'pending', activeForm: 'Implementing tracker' }
+        ]
+      }
+    },
+    { cwd, session }
+  );
+
+  const result = await todoTool.execute(
+    {
+      todo: {
+        planId: draft.id,
+        items: [
+          { id: 'item_1', title: 'Inspect', status: 'completed' },
+          { id: 'item_2', title: 'Implement tracker', status: 'in_progress' }
+        ]
+      }
+    },
+    { cwd, session }
+  );
+
+  assert.equal(result.status, 'ok');
+
+  const progress = await readPlanProgress(cwd, session, draft.id);
+  assert.deepEqual(progress.items, [
+    { id: 'item_1', title: 'Inspect', status: 'completed', activeForm: 'Checking code' },
+    { id: 'item_2', title: 'Implement tracker', status: 'in_progress', activeForm: 'Implementing tracker' }
+  ]);
+});
+
+test('todoTool.execute rejects explicit blank activeForm values', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Tracker',
+    contentMarkdown: '## Steps\n- Inspect'
+  });
+  await finalizePlan(cwd, session);
+  await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+
+  const result = await todoTool.execute(
+    {
+      todo: {
+        planId: draft.id,
+        items: [{ id: 'item_1', title: 'Inspect', status: 'pending', activeForm: '   ' }]
+      }
+    },
+    { cwd, session }
+  );
+
+  assert.equal(result.status, 'error');
+  assert.match(result.content, /invalid plan progress items/i);
+});

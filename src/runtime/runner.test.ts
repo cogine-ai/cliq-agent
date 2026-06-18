@@ -931,6 +931,54 @@ test('runner emits plan-progress-updated after todo tool updates approved-plan p
   ]);
 });
 
+test('runner preserves activeForm when todo update omits it', async () => {
+  const session = await createTempSession();
+  const draft = await createDraftPlan(session.cwd, session, {
+    title: 'Execute tracked plan',
+    contentMarkdown: '## Steps\n- Inspect code\n- 汇总生成项目清单'
+  });
+  await finalizePlan(session.cwd, session, { planId: draft.id });
+  await approvePlan(session.cwd, session, { planId: draft.id, targetMode: 'default' });
+  const events: RuntimeEvent[] = [];
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        if (calls === 1) {
+          return completion(
+            `{"todo":{"planId":"${draft.id}","items":[{"id":"item_1","title":"Inspect code","status":"completed"},{"id":"item_2","title":"汇总生成项目清单","status":"in_progress"}]}}`
+          );
+        }
+        return completion('{"message":"done"}');
+      }
+    },
+    policy: createPolicyEngine({ mode: 'default' }),
+    onEvent(event) {
+      events.push(event);
+    }
+  });
+
+  const final = await runner.runTurn(session, 'execute plan');
+
+  assert.equal(final, 'done');
+  const progress = await readPlanProgress(session.cwd, session, draft.id);
+  assert.deepEqual(progress.items, [
+    { id: 'item_1', title: 'Inspect code', status: 'completed', activeForm: 'Inspecting code' },
+    { id: 'item_2', title: '汇总生成项目清单', status: 'in_progress', activeForm: 'Working on 汇总生成项目清单' }
+  ]);
+  const progressEvent = events.find(
+    (event): event is Extract<RuntimeEvent, { type: 'plan-progress-updated' }> =>
+      event.type === 'plan-progress-updated'
+  );
+  assert.ok(progressEvent);
+  assert.deepEqual(progressEvent.progress.items.map((item) => [item.id, item.activeForm]), [
+    ['item_1', 'Inspecting code'],
+    ['item_2', 'Working on 汇总生成项目清单']
+  ]);
+});
+
 test('runner makes model-activated skills available as next-call instructions', async () => {
   const session = await createTempSession();
   await mkdir(path.join(session.cwd, '.cliq', 'skills', 'reviewer'), { recursive: true });

@@ -225,6 +225,34 @@ test('updatePlanProgress fills missing activeForm from existing tracker or title
   ]);
 });
 
+test('updatePlanProgress rejects explicit blank activeForm instead of inheriting prior tracker phrase', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Execute tracker',
+    contentMarkdown: '## Steps\n- Inspect code'
+  });
+  await finalizePlan(cwd, session);
+  const approved = await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+  await updatePlanProgress(cwd, session, {
+    planId: approved.id,
+    items: [{ id: 'item_1', title: 'Inspect code', status: 'pending', activeForm: 'Checking code' }]
+  });
+
+  await assert.rejects(
+    () =>
+      updatePlanProgress(cwd, session, {
+        planId: approved.id,
+        items: [{ id: 'item_1', title: 'Inspect code', status: 'in_progress', activeForm: '   ' }]
+      }),
+    /invalid plan progress items/
+  );
+
+  const progress = await readPlanProgress(cwd, session, approved.id);
+  assert.deepEqual(progress.items, [
+    { id: 'item_1', title: 'Inspect code', status: 'pending', activeForm: 'Checking code' }
+  ]);
+});
+
 test('readReferencedPlanProgress does not recreate progress while building instructions', async () => {
   const { cwd, session } = await tempScope();
   const draft = await createDraftPlan(cwd, session, {

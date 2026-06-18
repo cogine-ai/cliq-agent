@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  activeFormForTitle,
   extractPlanItems,
   isPlanItem,
   isPlanItemStatus,
+  isPlanProgressItem,
   normalizePlanItems,
   normalizePlanProgressItems,
   normalizeStoredPlanItems,
@@ -124,6 +126,25 @@ test('progressItemsFromPlanItems seeds pending execution rows with active forms'
       }
     ]
   );
+});
+
+test('activeFormForTitle maps known verbs and falls back for unknown titles', () => {
+  assert.equal(activeFormForTitle('Inspect code'), 'Inspecting code');
+  assert.equal(activeFormForTitle('implement tracker'), 'Implementing tracker');
+  assert.equal(activeFormForTitle('FIX regression'), 'Fixing regression');
+  assert.equal(activeFormForTitle('Ship custom milestone'), 'Working on Ship custom milestone');
+  assert.equal(activeFormForTitle('  test suite  '), 'Testing suite');
+  assert.equal(activeFormForTitle('汇总生成项目清单'), 'Working on 汇总生成项目清单');
+});
+
+test('isPlanProgressItem requires a non-empty activeForm string', () => {
+  assert.equal(
+    isPlanProgressItem({ id: 'item_1', title: 'Inspect', status: 'pending', activeForm: 'Inspecting' }),
+    true
+  );
+  assert.equal(isPlanProgressItem({ id: 'item_1', title: 'Inspect', status: 'pending', activeForm: '' }), false);
+  assert.equal(isPlanProgressItem({ id: 'item_1', title: 'Inspect', status: 'pending', activeForm: '   ' }), false);
+  assert.equal(isPlanProgressItem({ id: 'item_1', title: 'Inspect', status: 'pending' }), false);
 });
 
 test('normalizeStoredPlanProgressItems returns null for invalid stored progress', () => {

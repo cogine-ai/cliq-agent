@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseModelAction } from './actions.js';
+import { parseModelAction, parseTodoItemAction } from './actions.js';
 
 test('parses bash action', () => {
   assert.deepEqual(parseModelAction('{"bash":"npm test"}'), { bash: 'npm test' });
@@ -153,6 +153,34 @@ test('rejects invalid plan payloads', () => {
     /unsupported action/i
   );
   assert.throws(() => parseModelAction('{"plan":{"op":"approve","planId":"plan_1"}}'), /unsupported action/i);
+});
+
+test('parseTodoItemAction accepts omitted activeForm and drops blank strings', () => {
+  assert.deepEqual(parseTodoItemAction({ title: 'Inspect code', status: 'completed' }), {
+    title: 'Inspect code',
+    status: 'completed'
+  });
+  assert.deepEqual(
+    parseTodoItemAction({
+      id: 'item_1',
+      title: 'Implement tracker',
+      status: 'in_progress',
+      activeForm: 'Implementing tracker',
+      notes: 'working'
+    }),
+    {
+      id: 'item_1',
+      title: 'Implement tracker',
+      status: 'in_progress',
+      activeForm: 'Implementing tracker',
+      notes: 'working'
+    }
+  );
+  assert.deepEqual(parseTodoItemAction({ title: 'Inspect', status: 'pending', activeForm: '   ' }), {
+    title: 'Inspect',
+    status: 'pending'
+  });
+  assert.equal(parseTodoItemAction({ title: 'Inspect', status: 'pending', activeForm: 1 }), null);
 });
 
 test('rejects invalid todo payloads', () => {

@@ -11,7 +11,8 @@ import {
   openAIToolCallsFromDeltaParts,
   parseOllamaToolCalls,
   parseOpenAIToolCalls,
-  selectTypedRequestMode
+  selectTypedRequestMode,
+  typedRequestShouldStream
 } from './prompt-mapping.js';
 
 const modelCapabilities: ModelCapabilities = {
@@ -77,6 +78,23 @@ test('selectTypedRequestMode falls back to structured output when native tools a
 test('selectTypedRequestMode uses text-action when neither native tools nor structured output apply', () => {
   const request = promptRequest('anthropic', false);
   assert.equal(selectTypedRequestMode(request), 'text-action');
+});
+
+test('typedRequestShouldStream requires both non-off streaming mode and provider capability', () => {
+  const request = promptRequest('openai-compatible');
+  assert.equal(typedRequestShouldStream(request), true);
+
+  const streamingDisabled = {
+    ...request,
+    streaming: { mode: 'off' as const }
+  };
+  assert.equal(typedRequestShouldStream(streamingDisabled), false);
+
+  const providerNoStreaming = {
+    ...request,
+    providerCapabilities: { ...request.providerCapabilities, streaming: false }
+  };
+  assert.equal(typedRequestShouldStream(providerNoStreaming), false);
 });
 
 test('effectiveTypedRequest summarizes the resolved provider request shape', () => {

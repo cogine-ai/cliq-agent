@@ -116,6 +116,8 @@ test('buildApprovedPlanInstructionMessages includes execution tracker state and 
   assert.match(content, /\[in_progress\] Implement tracker - Implementing tracker/);
   assert.match(content, /Use the todo action to keep this tracker current/);
   assert.match(content, /Todo action shape:/);
+  assert.match(content, /activeForm field is optional/);
+  assert.match(content, /keeps the previous phrase for the same item id or derives one from the title/);
   assert.match(content, /replaces the full tracker list/);
   assert.match(content, /at most one item in_progress/);
   assert.match(content, /Do not mark an item completed/);

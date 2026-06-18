@@ -8,6 +8,7 @@ import {
   buildProviderStatusReport,
   formatProviderStatusReport,
   formatProviderStatusRow,
+  sanitizeBaseUrlForDisplay,
   validateProviderStatus
 } from './provider-status.js';
 import type { OllamaModelSummary } from './providers/ollama-discovery.js';
@@ -357,6 +358,18 @@ test('provider status represents local Ollama as local service availability, not
     assert.equal(ollama.model, 'qwen3:4b');
     assert.match(formatProviderStatusRow(ollama), /Ollama\s+Current · Configured · Local service · 2 models · using qwen3:4b/);
   });
+});
+
+test('sanitizeBaseUrlForDisplay strips embedded credentials and query fragments', () => {
+  assert.equal(
+    sanitizeBaseUrlForDisplay('https://user:secret@api.example.com/v1?token=abc#frag'),
+    'https://api.example.com/v1'
+  );
+  assert.equal(sanitizeBaseUrlForDisplay('http://localhost:11434/'), 'http://localhost:11434/');
+  assert.equal(
+    sanitizeBaseUrlForDisplay('not-a-url://user:secret@host/path?x=1'),
+    'not-a-url://host/path'
+  );
 });
 
 test('provider status distinguishes unavailable local Ollama from missing remote credentials', async () => {
