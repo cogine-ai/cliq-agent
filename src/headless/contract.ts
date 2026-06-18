@@ -27,6 +27,7 @@ export type HeadlessRunRequest = {
   metadata?: Record<string, string | number | boolean | null>;
   txMode?: 'off' | 'edit';
   txApply?: 'interactive' | 'auto-on-pass' | 'manual-only';
+  maxTurns?: number;
   /**
    * CLI-layer permission rules from `--allow`/`--deny`/`--ask` (already
    * parsed and tagged `source: 'cli'`). Composed with the workspace config

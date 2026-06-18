@@ -5,18 +5,26 @@ import { render } from 'ink-testing-library';
 
 import { TranscriptRow } from './transcript-row.js';
 
-test('renders a user entry with a > prefix', () => {
+test('renders a user entry as a spaced block without speaker labels', () => {
   const { lastFrame } = render(<TranscriptRow entry={{ kind: 'user', id: 'u1', text: 'hello' }} />);
-  assert.match(lastFrame() ?? '', />/);
-  assert.match(lastFrame() ?? '', /hello/);
+  const frame = lastFrame() ?? '';
+  assert.ok(frame.startsWith('\n'), `expected top spacing before user block, got ${JSON.stringify(frame)}`);
+  assert.match(frame, /\n hello/);
+  assert.match(frame, /hello/);
+  assert.doesNotMatch(frame, /You/);
+  assert.doesNotMatch(frame, /Cliq/);
+  assert.doesNotMatch(frame, />/);
 });
 
 test('renders an assistant entry plain', () => {
   const { lastFrame } = render(
     <TranscriptRow entry={{ kind: 'assistant', id: 'a1', text: 'response' }} />
   );
-  assert.match(lastFrame() ?? '', /response/);
-  assert.doesNotMatch(lastFrame() ?? '', />/);
+  const frame = lastFrame() ?? '';
+  assert.equal(frame, 'response');
+  assert.doesNotMatch(frame, /Cliq/);
+  assert.doesNotMatch(frame, /You/);
+  assert.doesNotMatch(frame, />/);
 });
 
 test('renders an assistant output token estimate when present', () => {

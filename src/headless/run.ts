@@ -137,6 +137,9 @@ async function validateRequest(request: HeadlessRunRequest) {
   if (request.skills?.some((skill) => typeof skill !== 'string')) {
     throw errorFrom('invalid-input', 'input', 'skills must be an array of strings');
   }
+  if (request.maxTurns !== undefined && (!Number.isInteger(request.maxTurns) || request.maxTurns < 1)) {
+    throw errorFrom('invalid-input', 'input', 'maxTurns must be a positive integer');
+  }
 
   const cwdStat = await stat(request.cwd).catch(() => null);
   if (!cwdStat?.isDirectory()) {
@@ -486,6 +489,7 @@ export async function runHeadless(
       confirm: options.confirm,
       instructions: assembly.instructions,
       signal: options.signal,
+      maxTurns: request.maxTurns,
       autoCompact: {
         config: workspaceConfig.autoCompact,
         modelConfig

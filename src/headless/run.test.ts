@@ -57,6 +57,14 @@ function finalModel(message = 'done'): ModelClient {
   };
 }
 
+function bashLoopModel(): ModelClient {
+  return {
+    async complete() {
+      return { provider: 'ollama', model: 'test-model', content: JSON.stringify({ bash: 'pwd' }) };
+    }
+  };
+}
+
 test('runHeadless refuses non-interactive runs without persisted workspace trust', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-no-trust-home-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'cliq-headless-no-trust-ws-'));
@@ -159,6 +167,33 @@ test('runHeadless emits run-start through run-end for a completed run', async ()
   assert.equal(typeof output.sessionId, 'string');
   assert.equal(typeof output.turn, 'number');
   assert.deepEqual(events, ['run-start', 'checkpoint-created', 'model-start', 'model-end', 'final', 'run-end']);
+});
+
+test('runHeadless passes request maxTurns into the runner', async () => {
+  const { cwd } = await setupWorkspace();
+  const events: RuntimeEventEnvelope[] = [];
+
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'loop',
+      policy: 'yolo',
+      model: { provider: 'ollama', model: 'test-model' },
+      autoCompact: { enabled: 'off' },
+      maxTurns: 2
+    },
+    {
+      modelClient: bashLoopModel(),
+      onEvent(event) {
+        events.push(event);
+      }
+    }
+  );
+
+  assert.equal(output.status, 'failed');
+  assert.equal(output.error?.stage, 'model');
+  assert.match(output.error?.message ?? '', /Exceeded max turns \(2\)/);
+  assert.equal(events.at(-1)?.type, 'run-end');
 });
 
 test('runHeadless creates a fresh session by default even when the workspace has an active session', async () => {
