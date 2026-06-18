@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-06-18
+
+This patch release adds configurable turn budgets for longer automation runs
+and improves user-message contrast in the TUI transcript.
+
+### Added
+
+- `cliq run`, interactive chat, TUI, and headless runs can now configure the
+  model/tool iteration budget with `--max-turns`, `CLIQ_MAX_TURNS`, or the
+  headless `maxTurns` option. The default budget is now 100 turns (#343).
+- The runtime now stops repeated identical tool/action/result loops and emits
+  a recoverable error before returning the loop-detection failure (#343).
+
+### Changed
+
+- User transcript entries in the TUI now render as compact terminal-palette
+  blocks, improving contrast across themes and multiline prompts (#350).
+- The test command now runs Node test files with single-process concurrency to
+  keep shared runtime state deterministic in CI and local release gates (#343).
+
 ## [0.14.1] - 2026-06-14
 
 This patch release improves Plan Mode execution tracking tolerance and adds
@@ -424,7 +444,8 @@ payload-aware approvals, and a steady stream of TUI polish.
   [GitHub Releases](https://github.com/cogine-ai/cliq-agent/releases); this
   file starts with v0.9.0.
 
-[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/cogine-ai/cliq-agent/compare/v0.14.2...HEAD
+[0.14.2]: https://github.com/cogine-ai/cliq-agent/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/cogine-ai/cliq-agent/compare/v0.13.0...v0.13.1
