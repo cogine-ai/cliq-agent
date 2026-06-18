@@ -1,20 +1,12 @@
 # Cliq
 
 [![npm version](https://img.shields.io/npm/v/@cogineai/cliq.svg)](https://www.npmjs.com/package/@cogineai/cliq)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 Every team has their own agent. This is ours.
 
-Cliq is a tiny local coding agent harness built around a minimal, provider-agnostic action protocol.
+Cliq is a local coding-agent CLI built around a small, provider-agnostic JSON action protocol. It runs in your current workspace, keeps sessions on your machine, and works with local or hosted model providers.
 
-## What it is
-
-- **Local-first**: runs in the directory where you invoke it
-- **Provider-agnostic protocol**: the model responds with plain JSON actions
-- **Minimal by design**: small surface area, easy to inspect, easy to extend
-- **Persistent sessions**: each workspace keeps its own local session state
-
-## Quick start
+## Install
 
 Requirements: Node.js 22 or newer.
 
@@ -22,98 +14,57 @@ Requirements: Node.js 22 or newer.
 npm install -g @cogineai/cliq
 ```
 
-## Usage
+Check the installed version:
 
-Start in any project directory:
+```bash
+cliq --version
+```
+
+Update to the latest published version:
+
+```bash
+npm install -g @cogineai/cliq@latest
+```
+
+## Quick Start
+
+Start an interactive session in any project directory:
 
 ```bash
 cd path/to/your-project
 cliq
 ```
 
-Running `cliq` with no arguments starts interactive chat. `cliq chat` is the explicit equivalent.
-
-Run a non-interactive prompt:
+Run a one-shot prompt:
 
 ```bash
 cliq run "inspect this repo and summarize the architecture"
 ```
 
-### Interactive UI
-
-When you launch `cliq` (or `cliq chat`) on a TTY, you enter the Ink-based TUI by default. It renders an inline three-zone layout — scrolling transcript, input bar, and status line — and stays compatible with shell scrollback (no alt-screen).
-
-Inside the TUI:
-
-- Slash commands (`/exit`, `/quit`, `/reset`, `/help`, `/policy <mode>`,
-  `/model`, `/models`, `/providers`) open a palette popover and support Tab
-  completion. `/help` lists commands, shortcuts, and mode behavior.
-- ↑ / ↓ recall previously submitted prompts while preserving any in-progress
-  draft; ← / → move the cursor inside the input buffer.
-- The status line shows the current mode in user-facing language, such as
-  `Plan`, `Default`, `+ Accept Edits`, or `! YOLO`.
-- Shift+Tab rotates through modes; Ctrl+C cancels an active turn or clears
-  input; Ctrl+D exits on empty input; Ctrl+O folds or unfolds the most recent
-  tool output.
-- The input area shows short state-aware hints: idle hints point to `/help` and
-  mode switching, slash input shows completion help, and active turns show the
-  cancellation shortcut.
-- An approval modal handles `--policy default`, `--policy accept-edits`, and interactive `--tx-apply` decisions.
-
-The TUI runs by default on a TTY, but you can opt in explicitly with `--tui` (useful when scripting around the default). Opt out with `--classic` or `CLIQ_TUI=0` to fall back to the legacy readline REPL:
+Run with structured JSONL events for automation:
 
 ```bash
-cliq --classic
-CLIQ_TUI=0 cliq chat
+cliq run --jsonl "inspect this repo"
 ```
 
-By default, mode changes update the status line without adding transcript noise.
-To show mode-change notices in the transcript while debugging TUI state, use
-`--tui-debug` or `CLIQ_TUI_DEBUG=1`.
+`cliq "prompt"` still works as a shorthand, but scripts should prefer `cliq run`.
 
-Non-interactive runs (`cliq run "prompt"` and `cliq run --jsonl "prompt"`) are unaffected.
+## Model Setup
 
-#### Known limitation: terminal resize during an active turn
-
-The TUI uses Ink's *inline* render mode (no alt-screen) so prior turns stay in the shell scrollback and you can search/copy them like any normal output. The cost is that **resizing the terminal while a turn is actively rendering** (the model is still streaming) can leave duplicated rows in scrollback — Ink can't reach back past the current frame to clean them up. Resizing between turns is fine. If this bites you often, drop into `--classic` for that session, or wait for the turn to finish before resizing.
-
-## Current scope
-
-Cliq is intentionally small right now. It supports:
-
-- Interactive chat and non-interactive runs
-- Machine-readable JSONL headless runs
-- Structured file inspection with read, list, find, and grep
-- Shell command execution
-- Exact text replacement edits
-- Local session persistence, checkpoints, forks, compactions, and handoffs
-- Final assistant responses after tool work completes
-
-## Why this shape
-
-- No dependency on provider-native tool calling
-- Keeps the runtime protocol inspectable
-- Makes local execution and replay straightforward
-- Provides a simple base for a local coding agent
-
-## Develop from source
-
-```bash
-npm install
-npm run build
-npm link
-```
-
-## Model Providers
-
-Cliq is local-first. If you do not configure a provider or model, Cliq tries local Ollama first:
+Cliq is local-first. If you do not configure a model, Cliq tries local Ollama first.
 
 ```bash
 ollama pull qwen3.5:4b
 cliq "inspect this repo"
 ```
 
-On startup, Cliq calls `http://localhost:11434/api/tags`. If local models exist, it chooses the first model whose name contains `qwen`; otherwise it uses the first model returned by Ollama. If Ollama has no models, TTY startup opens a provider-first setup state with local and remote configuration options. Non-interactive commands return the same guidance as a deterministic configuration error instead of silently falling back to a remote provider.
+Supported providers:
+
+- `ollama`: uses local `http://localhost:11434` by default and does not require an API key
+- `openrouter`: requires `OPENROUTER_API_KEY`
+- `anthropic`: requires `ANTHROPIC_API_KEY`
+- `openai`: requires `OPENAI_API_KEY`
+- `openai-compatible`: requires `--base-url` or `CLIQ_MODEL_BASE_URL`; uses `CLIQ_MODEL_API_KEY` when set
 
 Select a provider from the CLI:
 
@@ -121,6 +72,21 @@ Select a provider from the CLI:
 cliq --provider anthropic --model claude-sonnet-4-20250514 "inspect this repo"
 cliq --provider openai --model gpt-5.2 "inspect this repo"
 cliq --provider ollama --model qwen3.5:4b "inspect this repo"
+```
+
+Save provider credentials locally:
+
+```bash
+cliq providers auth set openai --api-key
+cliq providers auth set anthropic --api-key
+cliq providers auth set openrouter --api-key
+```
+
+Check provider status:
+
+```bash
+cliq providers status
+cliq providers validate
 ```
 
 Use `.cliq/config.json` for workspace defaults:
@@ -136,200 +102,112 @@ Use `.cliq/config.json` for workspace defaults:
 }
 ```
 
-Supported providers:
-
-- `openrouter`: requires `OPENROUTER_API_KEY`
-- `anthropic`: requires `ANTHROPIC_API_KEY`
-- `openai`: requires `OPENAI_API_KEY`
-- `openai-compatible`: requires `--base-url` or `CLIQ_MODEL_BASE_URL`; uses `CLIQ_MODEL_API_KEY` when set
-- `ollama`: uses local `http://localhost:11434` by default, can auto-discover an installed model, and does not require an API key
-
-Provider/model display metadata, known context windows, and catalog update
-instructions live in [`docs/model-catalog.md`](docs/model-catalog.md).
-
-Provider management:
-
-- In the TUI, run `/model` or `/models` to open provider-first setup and model
-  selection. The provider step always opens first and defaults to the current
-  runtime provider. In the model step, `Enter` applies the highlighted
-  provider/model to the current TUI session only; `Space` saves the provider and
-  model as the startup default in the local auth file and also applies it to
-  the current session.
-- In the TUI, run `/providers` to open the provider management list. The active
-  provider is shown first and marked `Current`; rows use `Configured`,
-  `Not configured`, or `Unavailable`, and configured rows show sources such as
-  `ENV`, `Workspace`, `CLI`, or `Local service`. Provider details expose a
-  configure action that reuses the `/model` setup flow.
-- The model picker combines static catalog rows, local Ollama models from
-  `/api/tags`, model ids from workspace/env/auth defaults, and direct custom
-  model entry. Rows label `Current`, `Startup default`, `Provider default`,
-  `Catalog`, `Local`, `Configured`, or `Custom`.
-- For scripts and headless use, run `cliq providers status` or
-  `cliq providers status --json`. `cliq providers list` is an alias.
-- Run `cliq providers validate [provider]` to validate the current or named
-  provider configuration. `--json` returns structured issues such as
-  `missing-api-key`, `missing-base-url`, `missing-model`, or
-  `local-service-unavailable`.
-- TUI and CLI credential setup can save API keys to the local auth file at
-  `${CLIQ_HOME:-~/.cliq}/auth.json` through the existing auth-store path. TUI
-  secret input is masked and only persists after an explicit save action; direct
-  session use does not write the auth file.
-- OpenAI-compatible setup supports a base URL, `/models` discovery when the
-  endpoint exposes it, direct custom model entry, and an optional API key.
-  Workspace config persistence, global-default layers, broader remote dynamic
-  provider model lists, and Ollama model pulling are outside this slice.
-
-More design boundaries live in [`docs/provider-management.md`](docs/provider-management.md).
-
 OpenAI-compatible streaming modes:
 
-- `auto` (default): first sends `stream: true`; if the endpoint rejects streaming before response-body consumption with a compatibility-style HTTP status (`400`, `404`, `405`, `415`, or `422`), Cliq retries once with `stream: false`
-- `on`: sends `stream: true` and does not fall back
-- `off`: sends `stream: false`
+- `auto`: try streaming first, then retry non-streaming for compatibility-style HTTP failures
+- `on`: require streaming
+- `off`: use non-streaming responses
 
-## Commands
+## Interactive UI
 
-Run a non-interactive prompt in the current directory:
+`cliq` and `cliq chat` start the terminal UI on a TTY. The UI keeps normal shell scrollback and shows a transcript, input bar, and status line.
+
+Useful controls:
+
+| Action | Keys or command |
+|---|---|
+| Show help | `/help` |
+| Change model | `/model` or `/models` |
+| Manage providers | `/providers` |
+| Rotate policy mode | `Shift+Tab` |
+| Cancel active turn | `Ctrl+C` |
+| Exit on empty input | `Ctrl+D` |
+| Fold or unfold latest tool output | `Ctrl+O` |
+| Recall prompt history | Up / Down |
+
+Use the classic readline interface when you want a simpler terminal mode:
 
 ```bash
-cliq run "inspect this repo and add a tiny README improvement"
+cliq --classic
+CLIQ_TUI=0 cliq chat
 ```
 
-The older `cliq "prompt"` shorthand still works as a compatibility shortcut, but docs and automation should prefer `cliq run`.
+## Common Commands
 
-Start interactive chat:
+Start chat:
 
 ```bash
 cliq
 cliq chat
 ```
 
-Reset persisted conversation for the current directory:
+Run headlessly:
 
 ```bash
-cliq reset
+cliq run "inspect this repo"
+cliq run --jsonl "inspect this repo"
 ```
 
-Print raw persisted session:
-
-```bash
-cliq history
-```
-
-Run with a stricter policy mode:
+Use a stricter planning mode:
 
 ```bash
 cliq --policy plan run "inspect the runner and explain how tool dispatch works"
 ```
 
-Activate one or more skills for a run:
+Activate skills for a run:
 
 ```bash
 cliq --skill reviewer --skill safe-edit run "inspect the runtime and suggest a minimal refactor"
 ```
 
-Run with structured JSONL events:
+Manage local session history:
 
 ```bash
-cliq run --jsonl "inspect this repo"
-```
-
-`--jsonl` writes one JSON object per line to stdout and keeps human terminal text out of the event stream. The event stream is versioned and includes run lifecycle, model lifecycle, tool lifecycle, checkpoint, compaction, final, and error events. Exit codes are stable: `0` for completed runs, `1` for failed runs, and `130` for cancelled runs.
-
-Long automation can raise or lower the per-turn model/tool iteration cap with
-`--max-turns N` or an environment default:
-
-```bash
-CLIQ_MAX_TURNS=120 cliq run --jsonl "complete the benchmark sweep"
-cliq run --max-turns 40 "inspect this repo"
-```
-
-The built-in default is 100 turns.
-
-### Stdio JSON-RPC
-
-`cliq rpc` starts a newline-delimited JSON-RPC 2.0 server over stdio. It is intended for local GUI, gateway, automation, and future subagent orchestrators that need to start runs, subscribe to events, cancel work, and query stable artifacts without scraping terminal output.
-
-Initial methods:
-
-```text
-run.start(params: HeadlessRunRequest) -> { runId }
-run.cancel(params: { runId: string }) -> { status: 'cancelled' | 'not-found' | 'already-finished' }
-session.get(params: { cwd: string; sessionId?: string }) -> SessionView
-artifact.get(params: { cwd: string; artifactId: string; sessionId?: string }) -> ArtifactView
-skills.list(params: { cwd: string }) -> { cwd, skills, activeSkills }
-```
-
-Runtime events are emitted as notifications:
-
-```json
-{"jsonrpc":"2.0","method":"run.event","params":{"schemaVersion":2,"eventId":"evt_001","runId":"run_abc","sessionId":"ses_123","turn":4,"timestamp":"2026-05-03T00:00:00.000Z","type":"run-start","payload":{"cwd":"/repo","policy":"default","model":{"provider":"openai","model":"example-model"}}}}
-```
-
-`run.cancel` returning `cancelled` means the abort signal was delivered. Clients should wait for the terminal `run.event` with `type: "run-end"` before treating the run as finished. Clients that send notification-style `run.start` requests without an `id` must read the `runId` from subsequent `run.event` notifications.
-
-The first version allows one active run per `cliq rpc` process. The public protocol still carries `runId` on events so future orchestrators can run multiple Cliq workers or migrate to a multi-run process without changing event consumers.
-
-Batch requests are not supported in v1.
-
-Create and inspect workflow artifacts:
-
-```bash
+cliq reset
+cliq history
 cliq checkpoint create "before refactor"
 cliq checkpoint list
-cliq checkpoint fork CHECKPOINT_ID "alternate approach"
 cliq checkpoint restore CHECKPOINT_ID --scope session
-cliq checkpoint restore CHECKPOINT_ID --scope files --yes
 cliq compact create --summary "Stable context summary"
 cliq compact list
 cliq handoff create
 ```
 
-## Safety model
+Use stdio JSON-RPC for local integrations:
+
+```bash
+cliq rpc
+```
+
+## Safety And Permissions
 
 Cliq runs tools on your local machine in the current workspace. It is not a sandbox.
 
-Workspace trust decides whether Cliq enters the workspace runtime layer that reads `./.cliq/config.json`: hooks (including lifecycle command hooks), extension modules, validators, instructions, skills, etc. Trusted access is **orthogonal** to tool policy (`--policy` / `CLIQ_POLICY_MODE`): confirming trust does **not** auto-approve edits or shell commands—that remains policy’s job.
+Workspace trust controls whether Cliq may load workspace-local configuration such as `.cliq/config.json`, hooks, validators, instructions, skills, and extensions. Trusting a workspace does not approve edits or shell commands.
 
-- **Interactive terminals** (`cliq` / `cliq chat` when stdin+stdout are TTY): the first encounter with a canonical workspace prompts once; approvals persist under `CLIQ_HOME` (`workspaces/<workspaceId>/trust.json`), keyed by symlink-resolving real path.
-- **Non-interactive & automation** (`cliq run "prompt"`, `cliq run --jsonl "prompt"`, `cliq rpc`, `cliq tx validate|apply`; legacy shortcut: `cliq "prompt"`): fail-closed unless the workspace already has a persisted `trusted` record or `CLIQ_TRUST_WORKSPACE=trust` is set deliberately (use `trust`/`trusted` synonyms; prefer `deny`/`untrusted` to forbid).
-- Ordering matters: Cliq resolves trust **before** reading repo-controlled `.cliq` config layers (supply-chain tooling should not get a loading-order shortcut).
+Tool actions are controlled by policy modes:
 
-The default policy mode is `default`, which asks before edits, shell commands, transaction apply, and permission requests. For unfamiliar repositories or exploratory review, prefer:
+| Mode | Behavior |
+|---|---|
+| `default` | Ask before edits, shell commands, transaction apply, and permission requests |
+| `accept-edits` | Allow edits and successful transaction apply; ask before shell commands |
+| `plan` | Inspect and produce a plan; block edits, shell commands, transaction apply, and permission requests |
+| `yolo` | Auto-approve normal tool calls and permission requests, subject to built-in and explicit deny rules |
+
+Set a mode per run:
 
 ```bash
 cliq --policy plan "inspect this repo"
+cliq --policy accept-edits "fix the failing test"
 ```
 
-For day-to-day coding, `default` provides approval checkpoints; `accept-edits` lets file edits proceed while still asking before shell commands.
-
-## Policy modes
-
-- `Default` (`default`): ask before edits, shell commands, transaction apply, and permission requests
-- `+ Accept Edits` (`accept-edits`): allow edits and successful transaction apply; ask before shell commands
-- `Plan` (`plan`): inspect and produce a plan; block edits, shell commands, transaction apply, and permission requests
-- `! YOLO` (`yolo`): auto-approve normal tool calls and permission requests, subject to built-in and explicit deny rules
-
-Set the default with:
+Set a default:
 
 ```bash
 export CLIQ_POLICY_MODE=plan
-# or per-invocation:
-cliq --policy plan "inspect this repo"
-# --preset is an alias for --policy (mutually exclusive):
-cliq --preset accept-edits "fix the failing test"
 ```
 
-## Tool permissions
-
-On top of the `PolicyMode` preset above, you can layer per-action **allow / deny / ask** rules. Rules are matched before the preset; **deny always wins**, and a small set of built-in denies (e.g. `bash: rm`, `fs-write: .git/*`) cannot be overridden.
-
-Rule grammar: `"<channel>: <pattern>"`.
-
-Channels: `fs-read`, `fs-write`, `bash`, `mcp`, `network`.
-Patterns: literal string, `*` wildcard, `prefix *` for command/path prefixes (e.g. `npm *`, `docs/*`).
-
-### CLI flags (repeatable)
+Layer explicit tool rules when needed:
 
 ```bash
 cliq \
@@ -340,121 +218,38 @@ cliq \
   "ship a fix"
 ```
 
-`--allow/--deny/--ask` produce `'cli'`-tagged rules and are stacked on top of any workspace and persisted rules.
+## Transactions Preview
 
-### Workspace config
+Cliq can stage edits in a transaction overlay before applying them to the real workspace.
 
-Add a `permissions` section to `./.cliq/config.json`:
-
-```json
-{
-  "permissions": {
-    "preset": "default",
-    "allow": ["bash: git *", "fs-read: docs/*"],
-    "deny":  ["fs-write: .env"],
-    "ask":   ["fs-write: src/*"]
-  }
-}
-```
-
-### Approval modal scopes (TUI)
-
-When the TUI asks for approval, you can pick:
-
-| Key | Scope | Persistence |
-|---|---|---|
-| `y` | Allow this action only | none |
-| `a` | Allow this and any further asks in the **same turn** | none (tool subjects only) |
-| `s` | Allow matching actions for the rest of this **session** | in-process |
-| `Shift+W` | **Always allow** matching actions in this **workspace** | `~/.cliq/workspaces/<id>/permissions.json` |
-| `n` / `Esc` | Deny this action | none |
-
-Capital `W` for the workspace scope is intentional — it's the most sticky decision, so it requires a deliberate shift keystroke.
-
-Headless / `--json` / `rpc` / non-TTY runs are restricted to single-action allows: hooks that emit `scope: 'session'` or `scope: 'workspace'` are coerced down to `'once'` and `permissions.json` is never written from a non-interactive run.
-
-### Layer ordering
-
-When deciding a tool call, Cliq walks layers in this fixed order; the first matching rule wins, otherwise the `PolicyMode` preset decides:
-
-1. **Built-in deny** (small, non-overridable shadow list)
-2. **Workspace config** `permissions.{allow,deny,ask}`
-3. **Persisted** `~/.cliq/workspaces/<id>/permissions.json`
-4. **CLI flags** `--allow / --deny / --ask`
-5. **Session memory** (TUI "Allow this session" picks)
-6. **PolicyMode preset** (fallthrough)
-
-Within each layer, `deny` always wins over `allow`. All of layers 2–5 only load after the workspace trust gate has approved this workspace.
-
-## Workspace config
-
-Cliq reads optional runtime config from `./.cliq/config.json` in the current workspace.
-
-```json
-{
-  "instructionFiles": [".cliq/instructions.md"],
-  "extensions": ["builtin:policy-instructions", "./.cliq/extensions/log-turns.js"],
-  "defaultSkills": ["reviewer"],
-  "model": {
-    "provider": "ollama",
-    "model": "qwen3.5:4b",
-    "baseUrl": "http://localhost:11434",
-    "streaming": "auto"
-  }
-}
-```
-
-All fields are optional. If the file is missing, Cliq uses no repo-local prompt, skill, or extension overrides and resolves the model with its local-first Ollama default.
-
-## Transactions (preview)
-
-Cliq's transactional workspace runtime is available as an opt-in preview. When tx mode is enabled, `edit` actions are staged into a transaction overlay, validators run against the staged view, and the staged diff is applied to the real workspace only after the tx passes the apply policy.
-
-Enable per run:
+Enable transaction edit mode for a run:
 
 ```bash
 cliq --tx edit --tx-apply auto-on-pass "fix the failing parser test"
 ```
 
-Useful tx commands:
+Useful transaction commands:
 
 ```bash
-# Open an explicit tx. The positional argument is an optional human-readable
-# label; the persistent identifier (txId, e.g. `tx_01HX...`) is generated by
-# cliq and printed to stdout.
 cliq tx open refactor-auth
-
-# List tx in the current workspace
 cliq tx list
-
-# Inspect a specific tx (use the auto-generated tx_… id from `tx open`/`tx list`)
 cliq tx status <txId>
-
-# Run validators against the staged view
+cliq tx diff <txId>
+cliq tx show <txId>
 cliq tx validate <txId>
-
-# Approve a validated tx, optionally overriding a blocking validator
 cliq tx approve <txId> --override tsc --reason "known flaky check"
-
-# Apply a tx; this walks through missing finalize -> validate -> approve stages
 cliq tx apply <txId>
-
-# Abort a tx in any non-terminal state
 cliq tx abort <txId>
 ```
 
 Current preview limits:
 
-- `edit-tx` stages text replacements in existing files. File creation, deletion, rename, mode changes, and shell-driven mutations are still outside the staged diff.
-- `bash` runs against the real workspace. Its side effects are recorded as `BashEffect`s for review, but they are not rolled back if the tx is aborted.
-- Validator override names must match the validator result name exactly. Shell validators use the configured `name` as-is, for example `tsc`; Cliq does not add a `shell:` prefix.
-- `transactions.bashPolicy=confirm` defers to the upstream tool-permission path in interactive mode (no second tx overlay prompt). In `--headless` it promotes to deny so unattended runs cannot execute bash.
+- `edit-tx` stages text replacements in existing files.
+- File creation, deletion, rename, and mode changes are outside the staged diff.
+- `bash` runs against the real workspace. Its side effects are recorded for review but are not rolled back if the transaction is aborted.
+- Validator override names must match the validator result name exactly.
 
-When a transaction's apply leaves files partially written (e.g., a disk error mid-write), aborting requires an explicit `--restore-confirmed` (rolls back via the pre-apply ghost snapshot) or `--keep-partial` (leaves the partial state in place).
-
-See `docs/superpowers/specs/2026-05-02-cliq-transactional-workspace-runtime-design.md` for the full design.
-
-## Skills
+## Skills And Extensions
 
 Cliq ships a small built-in system skill set:
 
@@ -462,105 +257,66 @@ Cliq ships a small built-in system skill set:
 - `skill-installer`
 - `skill-doctor`
 
-Built-in skills are shipped inside the `@cogineai/cliq` package and synced on
-first use into `${CLIQ_HOME:-~/.cliq}/skills/.system`. Cliq creates a missing or
-empty built-in skill directory there, but it does not overwrite a non-empty
-same-name skill directory in this release. Upgrading built-in skills means
-upgrading the Cliq package, for example `npm install -g @cogineai/cliq@latest`,
-then letting Cliq merge in missing built-in skills on the next run.
+Built-in skills are included in the `@cogineai/cliq` package and synced on first use into `${CLIQ_HOME:-~/.cliq}/skills/.system`.
 
-Local project skills are discovered from project roots after workspace trust has been decided:
+Cliq discovers local skills from:
 
 - Project: `./.cliq/skills/<name>/SKILL.md` and `./.agents/skills/<name>/SKILL.md`
 - User: `~/.cliq/skills/<name>/SKILL.md` and `~/.agents/skills/<name>/SKILL.md`
-- Built-in: `${CLIQ_HOME:-~/.cliq}/skills/.system/<name>/SKILL.md`, synced from
-  the installed Cliq package
+- Built-in: `${CLIQ_HOME:-~/.cliq}/skills/.system/<name>/SKILL.md`
 
-Project skills win over user skills, and user skills win over built-in skills when names collide. Workspace `defaultSkills` can activate only project-owned skills; `--skill <name>`, headless `skills`, TUI `/skill <name>`, and the model `{"skill":{"name":"..."}}` action can explicitly activate discovered project, user, or built-in skills. Activation injects instructions only; it does not grant bash, edit, network, or MCP permissions.
+Activate skills with `--skill <name>` or from the TUI. Skill activation injects instructions only; it does not grant bash, edit, network, or MCP permissions.
 
-```md
----
-name: reviewer
-description: inspection-first review mode
----
-
-Prefer plan-mode inspection first. Summarize structure before proposing mutations.
-```
-
-Optional frontmatter fields include `license`, `compatibility`, `metadata`, and `allowed-tools`. `allowed-tools` is descriptive metadata only; tool authorization still goes through Cliq's normal policy engine.
-
-Activated skills can expose bundled resources. The model can read or list them through `skillResource`, and the resolver keeps paths relative to the activated skill directory with traversal, symlink-escape, binary, and size checks.
-
-## Extensions
-
-Phase 2 extensions add instruction overlays and runtime hooks.
-
-Enable the built-in policy overlay:
+Workspace extensions can add instruction overlays and runtime hooks:
 
 ```json
 {
-  "extensions": ["builtin:policy-instructions"]
+  "extensions": ["builtin:policy-instructions", "./.cliq/extensions/log-turns.js"]
 }
 ```
 
-Enable a local workspace extension module:
+Extensions do not register new model-callable top-level actions.
 
-```json
-{
-  "extensions": ["./.cliq/extensions/log-turns.js"]
-}
-```
+## Local Data
 
-Extensions are intentionally limited to hooks and instruction contributions. They do not register new model-callable top-level actions.
-
-## Session model
-
-By default, session state is stored outside the project:
+By default, Cliq stores session state outside your project:
 
 ```txt
 ~/.cliq/
 ```
 
-Cliq stores sessions and workflow artifacts under `CLIQ_HOME`, which defaults to `~/.cliq`. Workspaces are tracked by real path, so multiple projects can keep separate active sessions without writing conversation history into the repository. The workspace-local `./.cliq/config.json`, instruction files, skills, and extensions remain opt-in project configuration.
+`CLIQ_HOME` changes that location:
 
-Cliq replays prior records back into the model in order, including normalized tool results. Runtime-composed instructions are rebuilt on each turn from the current workspace config, loaded skills, and extensions; they are not persisted as session records.
+```bash
+export CLIQ_HOME=/path/to/cliq-home
+```
 
-## Internal architecture
+Workspace-local `.cliq/config.json`, instruction files, skills, and extensions remain opt-in project configuration.
 
-The Phase 0 runtime split organizes the code into focused modules:
+## Troubleshooting
 
-- `src/session` for persistence, lifecycle state, and migration
-- `src/protocol` for action parsing and protocol types
-- `src/model` for provider registry, config resolution, adapters, and streaming transport
-- `src/tools` for executable tool definitions and registry lookup
-- `src/runtime` for turn execution and lifecycle hooks
-- `src/cli.ts` for CLI and REPL behavior
+If startup asks for provider setup, either configure a remote provider API key or install and pull a local Ollama model.
 
-## Non-goals for the current version
+If a workspace is denied by trust state, reset or review the trust record under:
 
-The current version is an early open source starting point. It does **not** yet aim to provide:
+```txt
+${CLIQ_HOME:-~/.cliq}/workspaces/<workspaceId>/trust.json
+```
 
-- sandboxing
-- rich approval UX
-- token-by-token final answer rendering
-- broad tool surface area
-- multi-agent orchestration
-- remote execution
+If a command needs more model/tool iterations, raise the turn budget:
 
-## Roadmap themes
+```bash
+CLIQ_MAX_TURNS=120 cliq run --jsonl "complete the benchmark sweep"
+cliq run --max-turns 40 "inspect this repo"
+```
 
-Near-term priorities are:
+## Support
 
-1. TX review polish: `tx diff/show/validators` and clearer apply review
-2. payload-aware approvals and reusable hook control-plane
-3. cost and token governance
-4. observability, audit export, and debug/replay
-5. richer local UX, worktree isolation, and automation on top of the same runtime interfaces
+For support requests, include:
 
-## Contributing
-
-Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md).
-
-## License
-
-MIT
+- `cliq --version`
+- `node --version`
+- operating system and shell
+- provider and model
+- the command you ran
+- the full error message or relevant JSONL event

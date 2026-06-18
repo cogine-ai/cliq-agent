@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-06-19
+
+This patch release updates the public npm package presentation after the
+project repository moved private.
+
+### Changed
+
+- Reworked the npm README around install, usage, model setup, safety, local
+  data, and support guidance.
+- Removed the repository license file and stale README license badge/link from
+  the published package contents.
+
 ## [0.14.2] - 2026-06-18
 
 This patch release adds configurable turn budgets for longer automation runs
