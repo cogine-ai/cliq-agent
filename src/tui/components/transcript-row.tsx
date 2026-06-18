@@ -6,7 +6,7 @@ import { formatApproxOutputTokens } from '../token-estimate.js';
 const TOOL_GLYPH = { running: '▸', ok: '✓', error: '✗' } as const;
 const TOOL_BODY_FOLD_BUCKET = 8;
 const MAX_FOLDED_BODY_LINES = 4;
-const USER_MESSAGE_BACKGROUND = '#1d2430';
+const USER_MESSAGE_BACKGROUND = 'blackBright';
 
 export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
   switch (entry.kind) {
