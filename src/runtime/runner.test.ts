@@ -19,7 +19,16 @@ function completion(content: string) {
   return {
     content,
     provider: 'openrouter' as const,
-    model: 'test-model'
+    model: 'test-model',
+    effectiveRequest: {
+      provider: 'openrouter' as const,
+      model: 'test-model',
+      mode: 'text-action' as const,
+      streaming: false,
+      baseInstructionChars: 0,
+      inputItemCount: 0,
+      toolNames: [] as string[]
+    }
   };
 }
 
@@ -1549,12 +1558,9 @@ test('runner lets PermissionRequest command hooks allow policy asks without user
 });
 
 test('PermissionRequest hook allow with explicit scope is accepted (forward compat)', async () => {
-  // v0 only acts on 'once'; 'session' and 'workspace' are accepted from the
-  // hook so authors can start emitting them, but treated as 'once' by the
-  // runner until #62-B lands. The hook must still complete the turn cleanly.
-  // Non-string scope values are also exercised here (regression pin for
-  // PR #71 nitpick) to lock in coerceHookPermissionScope's "unknown/non-string
-  // → 'once'" guarantee.
+  // v0 only acts on 'once'; richer scopes are accepted from the hook so
+  // authors can start emitting them, but the runner ignores scope until
+  // #62-B lands. The hook must still complete the turn cleanly.
   const session = await createTempSession();
   let calls = 0;
   let executed = false;

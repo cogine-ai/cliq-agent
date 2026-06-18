@@ -47,12 +47,37 @@ async function writeWorkspaceHook(cwd: string, name: string, source: string) {
   return commandFor(scriptPath);
 }
 
+function mockEffectiveRequest(provider: 'ollama' = 'ollama', model = 'test-model') {
+  return {
+    provider,
+    model,
+    mode: 'text-action' as const,
+    streaming: false,
+    baseInstructionChars: 0,
+    inputItemCount: 0,
+    toolNames: [] as string[]
+  };
+}
+
+function mockCompletion(
+  content: string,
+  provider: 'ollama' = 'ollama',
+  model = 'test-model'
+) {
+  return {
+    provider,
+    model,
+    content,
+    effectiveRequest: mockEffectiveRequest(provider, model)
+  };
+}
+
 function finalModel(message = 'done'): ModelClient {
   return {
     async complete(_messages, options) {
       await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
       await options?.onEvent?.({ type: 'end' });
-      return { provider: 'ollama', model: 'test-model', content: JSON.stringify({ message }) };
+      return mockCompletion(JSON.stringify({ message }));
     }
   };
 }
@@ -60,7 +85,7 @@ function finalModel(message = 'done'): ModelClient {
 function bashLoopModel(): ModelClient {
   return {
     async complete() {
-      return { provider: 'ollama', model: 'test-model', content: JSON.stringify({ bash: 'pwd' }) };
+      return mockCompletion(JSON.stringify({ bash: 'pwd' }));
     }
   };
 }
@@ -323,7 +348,7 @@ process.stdin.on('end', () => {
           modelSawSessionStart = JSON.parse(await readFile(markerPath, 'utf8')).hookEventName === 'SessionStart';
           await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
           await options?.onEvent?.({ type: 'end' });
-          return { provider: 'ollama', model: 'test-model', content: JSON.stringify({ message: 'done' }) };
+          return mockCompletion(JSON.stringify({ message: 'done' }));
         }
       }
     }
@@ -366,7 +391,7 @@ test('runHeadless fails closed for required SessionStart infrastructure errors b
       modelClient: {
         async complete() {
           modelCalls += 1;
-          return { provider: 'ollama', model: 'test-model', content: JSON.stringify({ message: 'done' }) };
+          return mockCompletion(JSON.stringify({ message: 'done' }));
         }
       }
     }
@@ -417,11 +442,9 @@ process.stdin.on('end', () => {
           calls += 1;
           await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
           await options?.onEvent?.({ type: 'end' });
-          return {
-            provider: 'ollama',
-            model: 'test-model',
-            content: calls === 1 ? JSON.stringify({ bash: 'pwd' }) : JSON.stringify({ message: 'done' })
-          };
+          return mockCompletion(
+            calls === 1 ? JSON.stringify({ bash: 'pwd' }) : JSON.stringify({ message: 'done' })
+          );
         }
       }
     }
@@ -468,14 +491,11 @@ test('runHeadless falls back to workspace permissions.preset when request.policy
           calls += 1;
           await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
           await options?.onEvent?.({ type: 'end' });
-          return {
-            provider: 'ollama',
-            model: 'test-model',
-            content:
-              calls === 1
-                ? JSON.stringify({ edit: { path: 'README.md', old_text: 'a', new_text: 'b' } })
-                : JSON.stringify({ message: 'gave up' })
-          };
+          return mockCompletion(
+            calls === 1
+              ? JSON.stringify({ edit: { path: 'README.md', old_text: 'a', new_text: 'b' } })
+              : JSON.stringify({ message: 'gave up' })
+          );
         }
       },
       onEvent(event) {
@@ -573,17 +593,9 @@ process.stdin.on('end', () => {
           // let a "session was silently upgraded to workspace" regression
           // slip through.
           if (calls === 1 || calls === 2) {
-            return {
-              provider: 'ollama',
-              model: 'test-model',
-              content: JSON.stringify({ bash: 'pwd' })
-            };
+            return mockCompletion(JSON.stringify({ bash: 'pwd' }));
           }
-          return {
-            provider: 'ollama',
-            model: 'test-model',
-            content: JSON.stringify({ message: 'done' })
-          };
+          return mockCompletion(JSON.stringify({ message: 'done' }));
         }
       }
     }
