@@ -19,7 +19,16 @@ function completion(content: string) {
   return {
     content,
     provider: 'openrouter' as const,
-    model: 'test-model'
+    model: 'test-model',
+    effectiveRequest: {
+      provider: 'openrouter' as const,
+      model: 'test-model',
+      mode: 'text-action' as const,
+      streaming: false,
+      baseInstructionChars: 0,
+      inputItemCount: 0,
+      toolNames: []
+    }
   };
 }
 
@@ -473,7 +482,16 @@ test('runner prioritizes structured tool calls and replays typed tool results be
                 name: 'bash',
                 arguments: { command: 'pwd' }
               }
-            ]
+            ],
+            effectiveRequest: {
+              provider: 'openrouter' as const,
+              model: 'test-model',
+              mode: 'native-tools' as const,
+              streaming: false,
+              baseInstructionChars: 0,
+              inputItemCount: 0,
+              toolNames: ['bash']
+            }
           };
         }
 
@@ -1549,12 +1567,8 @@ test('runner lets PermissionRequest command hooks allow policy asks without user
 });
 
 test('PermissionRequest hook allow with explicit scope is accepted (forward compat)', async () => {
-  // v0 only acts on 'once'; 'session' and 'workspace' are accepted from the
-  // hook so authors can start emitting them, but treated as 'once' by the
-  // runner until #62-B lands. The hook must still complete the turn cleanly.
-  // Non-string scope values are also exercised here (regression pin for
-  // PR #71 nitpick) to lock in coerceHookPermissionScope's "unknown/non-string
-  // → 'once'" guarantee.
+  // Hook scope values are accepted on the wire but always treated as one-shot.
+  // Session/workspace persistence is owned by the TUI, not hook output.
   const session = await createTempSession();
   let calls = 0;
   let executed = false;
