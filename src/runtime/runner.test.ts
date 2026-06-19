@@ -96,6 +96,58 @@ function bashOkRegistry() {
   };
 }
 
+function readOkRegistry(content = 'same file contents') {
+  return {
+    definitions: [],
+    resolve() {
+      return {
+        definition: {
+          name: 'read',
+          access: 'read' as const,
+          supports(action: unknown): action is { read: { path: string } } {
+            return typeof (action as { read?: { path?: unknown } }).read?.path === 'string';
+          },
+          async execute(action: { read: { path: string } }) {
+            return {
+              tool: 'read',
+              status: 'ok' as const,
+              content: `contents of ${action.read.path}\n${content}`,
+              meta: {}
+            };
+          }
+        }
+      };
+    }
+  };
+}
+
+function readVaryingRegistry() {
+  let calls = 0;
+  return {
+    definitions: [],
+    resolve() {
+      return {
+        definition: {
+          name: 'read',
+          access: 'read' as const,
+          supports(action: unknown): action is { read: { path: string } } {
+            return typeof (action as { read?: { path?: unknown } }).read?.path === 'string';
+          },
+          async execute(action: { read: { path: string } }) {
+            calls += 1;
+            return {
+              tool: 'read',
+              status: 'ok' as const,
+              content: `contents of ${action.read.path} call ${calls}`,
+              meta: {}
+            };
+          }
+        }
+      };
+    }
+  };
+}
+
 async function writeHookScript(cwd: string, name: string, source: string) {
   const hooksDir = path.join(cwd, '.cliq', 'hooks');
   await mkdir(hooksDir, { recursive: true });
@@ -259,6 +311,53 @@ test('runner detects repeated identical tool action/result doom loops', async ()
   assert.equal(calls, 3);
   assert.match(errors.at(-1)?.message ?? '', /repeated identical bash action/i);
   assert.equal(errors.at(-1)?.stage, 'model');
+});
+
+test('runner detects repeated identical read action/result doom loops', async () => {
+  const session = await createTempSession();
+  const errors: Extract<RuntimeEvent, { type: 'error' }>[] = [];
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(JSON.stringify({ read: { path: 'a.txt' } }));
+      }
+    },
+    maxTurns: 100,
+    policy: createPolicyEngine({ mode: 'yolo' }),
+    registry: readOkRegistry(),
+    onEvent(event) {
+      if (event.type === 'error') {
+        errors.push(event);
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'repeat a read'), /Doom loop detected/i);
+  assert.equal(calls, 3);
+  assert.match(errors.at(-1)?.message ?? '', /repeated identical read action/i);
+});
+
+test('runner resets doom-loop counter when the same read action returns different results', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(JSON.stringify({ read: { path: 'a.txt' } }));
+      }
+    },
+    maxTurns: 5,
+    policy: createPolicyEngine({ mode: 'yolo' }),
+    registry: readVaryingRegistry()
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'vary read output'), /Exceeded max turns \(5\)/);
+  assert.equal(calls, 5);
 });
 
 test('per-turn signal in runTurn opts cancels the turn without poisoning the runner', async () => {

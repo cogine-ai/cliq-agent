@@ -19,9 +19,18 @@ const bashSubject: ApprovalSubject = buildToolApprovalSubject({
   action: { bash: 'git status' }
 });
 
+const unparseableBashSubject: ApprovalSubject = buildToolApprovalSubject({
+  definition: { name: 'bash', access: 'exec' },
+  action: { bash: '&& ls' }
+});
+
 test('approvalSubjectToPermissionRule derives bash rule from command head', () => {
   const rule = approvalSubjectToPermissionRule(bashSubject, 'session');
   assert.deepEqual(rule, { channel: 'bash', pattern: 'git', source: 'session' });
+});
+
+test('approvalSubjectToPermissionRule returns null for unparseable bash command heads', () => {
+  assert.equal(approvalSubjectToPermissionRule(unparseableBashSubject, 'session'), null);
 });
 
 test('approvalSubjectToPermissionRule returns null for non-tool subjects', () => {
@@ -74,6 +83,26 @@ test('extendApprovalScope workspace persists before mutating in-memory table (PR
     });
     assert.deepEqual(result, { ok: false, reason: 'EROFS: read-only file system' });
     assert.deepEqual(table.allow, [], 'failed workspace persist must not leave in-memory allow');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('extendApprovalScope rejects workspace persist for unparseable bash without mutating table', async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'cliq-extend-unparseable-'));
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-extend-unparseable-home-'));
+  try {
+    const ctx = await createWorkspaceTrustContext(cwd, home);
+    const table: PermissionTable = { deny: [], allow: [], ask: [] };
+    const result = await extendApprovalScope(ctx, table, unparseableBashSubject, 'workspace');
+    assert.deepEqual(result, {
+      ok: false,
+      reason: 'cannot derive a permission rule from tool subject'
+    });
+    assert.deepEqual(table.allow, []);
+    const record = await readPersistedWorkspacePermissions(ctx);
+    assert.equal(record, undefined);
   } finally {
     await rm(cwd, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

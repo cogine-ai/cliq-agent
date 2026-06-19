@@ -169,6 +169,30 @@ test('runHeadless emits run-start through run-end for a completed run', async ()
   assert.deepEqual(events, ['run-start', 'checkpoint-created', 'model-start', 'model-end', 'final', 'run-end']);
 });
 
+test('runHeadless rejects invalid maxTurns before starting a session', async () => {
+  const { cwd } = await setupWorkspace();
+
+  for (const maxTurns of [0, -1, 1.5] as const) {
+    const output = await runHeadless(
+      {
+        cwd,
+        prompt: 'loop',
+        model: { provider: 'ollama', model: 'test-model' },
+        autoCompact: { enabled: 'off' },
+        maxTurns
+      },
+      { modelClient: finalModel('ignored') }
+    );
+
+    assert.equal(output.status, 'failed');
+    assert.equal(output.error?.code, 'invalid-input');
+    assert.equal(output.error?.stage, 'input');
+    assert.match(output.error?.message ?? '', /maxTurns must be a positive integer/);
+    assert.equal(output.sessionId, undefined);
+    assert.equal(output.turn, undefined);
+  }
+});
+
 test('runHeadless passes request maxTurns into the runner', async () => {
   const { cwd } = await setupWorkspace();
   const events: RuntimeEventEnvelope[] = [];
