@@ -495,7 +495,20 @@ test('runner prioritizes structured tool calls and replays typed tool results be
           };
         }
 
-        return completion('done');
+        return {
+          content: 'done',
+          provider: 'openrouter' as const,
+          model: 'test-model',
+          effectiveRequest: {
+            provider: 'openrouter' as const,
+            model: 'test-model',
+            mode: 'native-tools' as const,
+            streaming: false,
+            baseInstructionChars: 0,
+            inputItemCount: 0,
+            toolNames: ['bash']
+          }
+        };
       }
     },
     policy: createPolicyEngine({ mode: 'yolo' })
@@ -541,7 +554,7 @@ test('runner carries session streaming mode into typed prompt requests', async (
   assert.equal((firstRequest as { streaming?: { mode?: string } }).streaming?.mode, 'off');
 });
 
-test('runner uses inferred typed request streaming for fallback model-start events', async () => {
+test('runner uses effectiveRequest.streaming for model-start events', async () => {
   const session = await createTempSession();
   session.model = {
     provider: 'openai-compatible',
@@ -554,7 +567,18 @@ test('runner uses inferred typed request streaming for fallback model-start even
   const runner = createRunner({
     model: {
       async complete() {
-        return completion('{"message":"done"}');
+        return {
+          ...completion('{"message":"done"}'),
+          effectiveRequest: {
+            provider: 'openrouter' as const,
+            model: 'test-model',
+            mode: 'text-action' as const,
+            streaming: true,
+            baseInstructionChars: 0,
+            inputItemCount: 0,
+            toolNames: []
+          }
+        };
       }
     },
     onEvent(event) {
