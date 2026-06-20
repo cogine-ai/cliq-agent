@@ -261,6 +261,43 @@ test('runner detects repeated identical tool action/result doom loops', async ()
   assert.equal(errors.at(-1)?.stage, 'model');
 });
 
+test('runner detects doom loops from repeated native toolCalls', async () => {
+  const session = await createTempSession();
+  const errors: Extract<RuntimeEvent, { type: 'error' }>[] = [];
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return {
+          content: '',
+          provider: 'openrouter' as const,
+          model: 'test-model',
+          toolCalls: [
+            {
+              id: `call_${calls}`,
+              name: 'bash',
+              arguments: { command: 'echo doom-loop' }
+            }
+          ]
+        };
+      }
+    },
+    policy: createPolicyEngine({ mode: 'yolo' }),
+    onEvent(event) {
+      if (event.type === 'error') {
+        errors.push(event);
+      }
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'repeat native tool calls'), /Doom loop detected/i);
+  assert.equal(calls, 3);
+  assert.match(errors.at(-1)?.message ?? '', /repeated identical bash action/i);
+  assert.equal(errors.at(-1)?.stage, 'model');
+});
+
 test('per-turn signal in runTurn opts cancels the turn without poisoning the runner', async () => {
   const session = await createTempSession();
   const runner = createRunner({
@@ -2018,6 +2055,49 @@ test('runner treats auto compact off as a hard disable without compact events', 
   assert.equal(session.compactions.length, 0);
   assert.equal(events.includes('compact-start'), false);
   assert.equal(events.includes('compact-skip'), false);
+});
+
+test('runner rethrows context overflow when auto-compaction cannot find a safe range', async () => {
+  const session = await createTempSession();
+  const events: RuntimeEvent[] = [];
+  let normalCalls = 0;
+  const overflowError = new Error('context length exceeded, maximum context window is 700 tokens');
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        normalCalls += 1;
+        throw overflowError;
+      }
+    },
+    autoCompact: {
+      config: {
+        enabled: 'on',
+        contextWindowTokens: 700,
+        thresholdRatio: 0.99,
+        reserveTokens: 100,
+        keepRecentTokens: 20,
+        minNewTokens: 1
+      },
+      modelConfig: {
+        provider: 'openrouter',
+        model: 'anthropic/claude-sonnet-4.6',
+        baseUrl: 'https://example.test',
+        streaming: 'off'
+      }
+    },
+    onEvent(event) {
+      events.push(event);
+    }
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'new request'), /context length exceeded/);
+  assert.equal(normalCalls, 1);
+  assert.equal(session.compactions.length, 0);
+  assert.equal(
+    events.some((event) => event.type === 'compact-skip' && event.reason === 'no-safe-range'),
+    true
+  );
 });
 
 test('runner retries once after recognized context overflow and successful compaction', async () => {
