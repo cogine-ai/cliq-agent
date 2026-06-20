@@ -196,7 +196,7 @@ Reuse `formatToolResultLine` from `cli.ts:1158` for the one-line summary. Phase 
 - For `edit`: show `+N -M` summary and the file path; full diff in the approval modal only.
 - For `read` / `ls` / `find` / `grep`: show path/pattern + result count; details on demand deferred to Phase A2.
 
-Color/iconography: a single status glyph per row (`▸` running, `✓` ok, `✗` error). No emoji unless the user opts in via env (`CLIQ_TUI_EMOJI=1`).
+Color/iconography: a single status glyph per row (`▸` running, `✓` ok, `✗` error).
 
 ### A.11 — Status bar contents
 
