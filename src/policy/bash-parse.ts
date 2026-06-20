@@ -8,6 +8,29 @@ const SHELL_INTERPRETER_HEADS = new Set([
   'zsh'
 ]);
 
+/**
+ * Shell metacommands that can run a different program than the parsed head.
+ * A `bash: git *` (or `bash: *`) allow rule must never auto-approve these,
+ * otherwise `exec bash -c '…'` bypasses nested-script inspection.
+ */
+const BASH_DELEGATION_HEADS = new Set(['command', 'eval', 'exec', 'source', '.', 'xargs']);
+
+/**
+ * Non-shell interpreters that accept inline scripts via `-c` / `--command`.
+ * Allow rules keyed on command heads cannot constrain their payloads.
+ */
+const SCRIPT_INTERPRETER_HEADS = new Set([
+  'node',
+  'nodejs',
+  'perl',
+  'php',
+  'python',
+  'python3',
+  'ruby',
+  'lua',
+  'luajit'
+]);
+
 const BUSYBOX_HEAD = 'busybox';
 const MAX_SHELL_INLINE_DEPTH = 8;
 
@@ -38,6 +61,13 @@ export function bashCommandHasUnsafeAllowSyntax(commandLine: string): boolean {
 
 function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number): boolean {
   if (unsafeAllowSyntaxInFragment(commandLine)) return true;
+
+  const head = parseBashCommandHead(commandLine);
+  if (head && (head.startsWith('-') || BASH_DELEGATION_HEADS.has(head))) return true;
+
+  const interpreterScript = extractScriptInterpreterInline(commandLine);
+  if (interpreterScript !== null) return true;
+
   const nested = extractShellInlineScript(commandLine);
   if (nested === null) return false;
   if (depth >= MAX_SHELL_INLINE_DEPTH) return true;
@@ -106,6 +136,61 @@ export function extractShellInlineScript(commandLine: string): string | null {
   return null;
 }
 
+/**
+ * Extract inline script text from `python -c`, `node -e`, etc. Returns null when
+ * the invocation is not a known script interpreter or has no script argument.
+ */
+function extractScriptInterpreterInline(commandLine: string): string | null {
+  if (typeof commandLine !== 'string') return null;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return null;
+
+  const tokens = tokenizeWords(trimmed);
+  if (tokens.length === 0) return null;
+
+  let i = 0;
+  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
+    i += 1;
+  }
+  while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
+    const expanded = expandEnvSplitString(tokens, i);
+    if (expanded) {
+      tokens.splice(i, expanded.consumed, ...expanded.tokens);
+      continue;
+    }
+    i = skipWrapperFlags(tokens, i);
+    if (i >= tokens.length) return null;
+  }
+  if (i >= tokens.length) return null;
+
+  const head = tokenBasename(tokens[i]!);
+  if (!SCRIPT_INTERPRETER_HEADS.has(head)) return null;
+  i += 1;
+
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '-c' || token === '--command' || token === '-e' || token === '--eval') {
+      return tokens[i + 1] ?? null;
+    }
+    if (
+      token.startsWith('--command=') ||
+      token.startsWith('--eval=') ||
+      /^-[A-Za-z]*[ce][A-Za-z]*$/.test(token)
+    ) {
+      if (token.includes('=')) {
+        return token.slice(token.indexOf('=') + 1);
+      }
+      return tokens[i + 1] ?? null;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return null;
+}
+
 function tokenBasename(token: string): string {
   return token.includes('/') ? token.split('/').filter(Boolean).pop()! : token;
 }
@@ -116,6 +201,10 @@ function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consume
   let i = wrapperIndex + 1;
   while (i < tokens.length) {
     const token = tokens[i]!;
+    if (token === '-' || token === '--') {
+      i += 1;
+      continue;
+    }
     if (token === '-S' || token === '--split-string') {
       splitFlagIndex = i;
       break;
@@ -295,6 +384,8 @@ export function parseBashCommandHead(commandLine: string): string | null {
   // Strip directory prefix and trailing args; we only want the basename so
   // `/usr/local/bin/python` and `python` collapse to the same matcher key.
   const basename = head.includes('/') ? head.split('/').filter(Boolean).pop()! : head;
+  // Option-looking heads (e.g. env - -- -S … mis-parse) must not match allow rules.
+  if (basename.startsWith('-')) return null;
   return basename || null;
 }
 
@@ -368,9 +459,11 @@ function skipEnvWrapperFlags(tokens: string[], start: number): number {
   let i = start;
   while (i < tokens.length) {
     const token = tokens[i]!;
+    // POSIX/GNU env treat a lone `-` or `--` as end-of-options; keep scanning
+    // so a following `-S` / `--split-string` is still visible to the parser.
     if (token === '-' || token === '--') {
       i += 1;
-      break;
+      continue;
     }
 
     const skipped = skipEnvOption(tokens, i);
