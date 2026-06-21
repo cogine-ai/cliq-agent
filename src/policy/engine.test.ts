@@ -306,6 +306,8 @@ test('decision table: bash allow rules do not auto-approve delegation or interpr
     'exec bash -c "git status && rm -rf /"',
     'eval "rm -rf /"',
     "python -c 'import os; os.system(\"rm -rf /\")'",
+    "python3.12 -c 'import os; os.system(\"rm -rf /\")'",
+    "php -r 'system(\"rm -rf /\");'",
     "env - -S bash -c 'git status && rm -rf /'"
   ]) {
     const subject = buildToolApprovalSubject({

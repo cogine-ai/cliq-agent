@@ -184,11 +184,18 @@ test('bashCommandHasUnsafeAllowSyntax treats shell delegation metacommands as un
 test('bashCommandHasUnsafeAllowSyntax treats script interpreters with inline code as unsafe for allow rules', () => {
   for (const command of [
     "python -c 'import os; os.system(\"rm -rf /\")'",
+    "python3.12 -c 'import os; os.system(\"rm -rf /\")'",
+    "pypy3 -c 'import os; os.system(\"rm -rf /\")'",
     "node -e 'require(\"child_process\").execSync(\"rm -rf /\")'",
+    "node --require tsx -e 'require(\"child_process\").execSync(\"rm -rf /\")'",
     "perl -e 'system(\"rm -rf /\")'",
-    "ruby -e 'system(\"rm -rf /\")'"
+    "ruby3.3 -e 'system(\"rm -rf /\")'",
+    "php -r 'system(\"rm -rf /\");'",
+    "php8.3 -d detect_unicode=0 -r 'system(\"rm -rf /\");'",
+    "lua5.4 -e 'os.execute(\"rm -rf /\")'"
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }
   assert.equal(bashCommandHasUnsafeAllowSyntax('python --version'), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax('node --version'), false);
 });

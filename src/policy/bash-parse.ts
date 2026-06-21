@@ -31,6 +31,17 @@ const SCRIPT_INTERPRETER_HEADS = new Set([
   'luajit'
 ]);
 
+const VERSIONED_SCRIPT_INTERPRETER_PATTERNS: readonly RegExp[] = [
+  /^node(?:js)?\d*(?:\.\d+)*$/,
+  /^perl\d*(?:\.\d+)*$/,
+  /^php\d*(?:\.\d+)*$/,
+  /^pypy\d*(?:\.\d+)*$/,
+  /^python\d*(?:\.\d+)*$/,
+  /^ruby\d*(?:\.\d+)*$/,
+  /^lua\d*(?:\.\d+)*$/,
+  /^luajit(?:-\d+(?:\.\d+)*)?$/
+];
+
 const BUSYBOX_HEAD = 'busybox';
 const MAX_SHELL_INLINE_DEPTH = 8;
 
@@ -164,29 +175,47 @@ function extractScriptInterpreterInline(commandLine: string): string | null {
   if (i >= tokens.length) return null;
 
   const head = tokenBasename(tokens[i]!);
-  if (!SCRIPT_INTERPRETER_HEADS.has(head)) return null;
+  if (!isScriptInterpreterHead(head)) return null;
   i += 1;
 
   while (i < tokens.length) {
     const token = tokens[i]!;
-    if (token === '-c' || token === '--command' || token === '-e' || token === '--eval') {
+    if (isScriptInlineFlag(head, token)) {
       return tokens[i + 1] ?? null;
     }
-    if (
-      token.startsWith('--command=') ||
-      token.startsWith('--eval=') ||
-      /^-[A-Za-z]*[ce][A-Za-z]*$/.test(token)
-    ) {
-      if (token.includes('=')) {
-        return token.slice(token.indexOf('=') + 1);
-      }
-      return tokens[i + 1] ?? null;
+    const attached = extractAttachedScriptInline(head, token);
+    if (attached !== null) {
+      return attached;
     }
-    if (token.startsWith('-')) {
-      i += 1;
-      continue;
-    }
-    break;
+    i += 1;
+  }
+  return null;
+}
+
+function isScriptInterpreterHead(head: string): boolean {
+  return (
+    SCRIPT_INTERPRETER_HEADS.has(head) ||
+    VERSIONED_SCRIPT_INTERPRETER_PATTERNS.some((pattern) => pattern.test(head))
+  );
+}
+
+function isPhpInterpreterHead(head: string): boolean {
+  return /^php\d*(?:\.\d+)*$/.test(head);
+}
+
+function isScriptInlineFlag(head: string, token: string): boolean {
+  if (token === '--command' || token === '--eval') return true;
+  if (token === '-c' || token === '-e') return true;
+  if (isPhpInterpreterHead(head) && token === '-r') return true;
+  return /^-[A-Za-z]*[ce][A-Za-z]*$/.test(token);
+}
+
+function extractAttachedScriptInline(head: string, token: string): string | null {
+  if (token.startsWith('--command=') || token.startsWith('--eval=')) {
+    return token.slice(token.indexOf('=') + 1);
+  }
+  if (isPhpInterpreterHead(head) && token.startsWith('-r') && token.length > 2) {
+    return token.slice(2);
   }
   return null;
 }
