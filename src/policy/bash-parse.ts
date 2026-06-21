@@ -180,12 +180,12 @@ function extractScriptInterpreterInline(commandLine: string): string | null {
 
   while (i < tokens.length) {
     const token = tokens[i]!;
-    if (isScriptInlineFlag(head, token)) {
-      return tokens[i + 1] ?? null;
-    }
     const attached = extractAttachedScriptInline(head, token);
     if (attached !== null) {
       return attached;
+    }
+    if (isScriptInlineFlag(head, token)) {
+      return tokens[i + 1] ?? null;
     }
     i += 1;
   }
@@ -203,19 +203,64 @@ function isPhpInterpreterHead(head: string): boolean {
   return /^php\d*(?:\.\d+)*$/.test(head);
 }
 
+function isNodeInterpreterHead(head: string): boolean {
+  return /^node(?:js)?\d*(?:\.\d+)*$/.test(head);
+}
+
+function isPythonInterpreterHead(head: string): boolean {
+  return /^(?:python|pypy)\d*(?:\.\d+)*$/.test(head);
+}
+
+function isPerlInterpreterHead(head: string): boolean {
+  return /^perl\d*(?:\.\d+)*$/.test(head);
+}
+
+function isRubyInterpreterHead(head: string): boolean {
+  return /^ruby\d*(?:\.\d+)*$/.test(head);
+}
+
+function isLuaInterpreterHead(head: string): boolean {
+  return /^lua\d*(?:\.\d+)*$/.test(head) || /^luajit(?:-\d+(?:\.\d+)*)?$/.test(head);
+}
+
+function scriptInlineShortFlags(head: string): ReadonlySet<string> {
+  if (isNodeInterpreterHead(head)) return new Set(['e', 'p']);
+  if (isPythonInterpreterHead(head)) return new Set(['c']);
+  if (isPerlInterpreterHead(head)) return new Set(['e', 'E']);
+  if (isRubyInterpreterHead(head)) return new Set(['e']);
+  if (isPhpInterpreterHead(head)) return new Set(['r']);
+  if (isLuaInterpreterHead(head)) return new Set(['e']);
+  return new Set();
+}
+
 function isScriptInlineFlag(head: string, token: string): boolean {
   if (token === '--command' || token === '--eval') return true;
-  if (token === '-c' || token === '-e') return true;
-  if (isPhpInterpreterHead(head) && token === '-r') return true;
-  return /^-[A-Za-z]*[ce][A-Za-z]*$/.test(token);
+  if (isNodeInterpreterHead(head) && token === '--print') return true;
+  if (!token.startsWith('-') || token.startsWith('--')) return false;
+
+  const flags = scriptInlineShortFlags(head);
+  if (flags.size === 0) return false;
+  return token
+    .slice(1)
+    .split('')
+    .some((flag) => flags.has(flag));
 }
 
 function extractAttachedScriptInline(head: string, token: string): string | null {
   if (token.startsWith('--command=') || token.startsWith('--eval=')) {
     return token.slice(token.indexOf('=') + 1);
   }
-  if (isPhpInterpreterHead(head) && token.startsWith('-r') && token.length > 2) {
-    return token.slice(2);
+  if (isNodeInterpreterHead(head) && token.startsWith('--print=')) {
+    return token.slice('--print='.length);
+  }
+  if (!token.startsWith('-') || token.startsWith('--')) return null;
+
+  const flags = scriptInlineShortFlags(head);
+  for (let i = 1; i < token.length; i += 1) {
+    if (flags.has(token[i]!)) {
+      const script = token.slice(i + 1);
+      return script === '' ? null : script;
+    }
   }
   return null;
 }
