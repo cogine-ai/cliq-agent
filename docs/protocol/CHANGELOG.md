@@ -21,6 +21,12 @@ For each entry, include date, author, what changed, and migration guidance if br
 
 ---
 
+## [Unreleased] — 2026-06-21 — macopc
+
+### Additive
+- `src/protocol/model/actions.ts` adds exported `McpAction` and the `{ mcp: McpAction }` `ModelAction` variant for model-specified MCP server/tool calls. Consumers that exhaustively switch over `ModelAction` should add an `mcp` branch.
+- `src/policy/types.ts` allows tool approval displays to include optional `server` and `tool` fields so consumers can show MCP targets without parsing `display.detail`.
+
 ## [0.9.0] — 2026-05-12 — Baseline
 
 Establishes the protocol surface for the v0.9 release line.

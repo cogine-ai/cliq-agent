@@ -14,7 +14,7 @@ const toolSubject: Extract<ApprovalSubject, { kind: 'tool' }> = {
   toolName: 'bash',
   access: 'exec',
   channel: { kind: 'bash', commandHead: 'rm', unsafeForAllow: false },
-  action: { bash: 'rm -rf /' } as never,
+  action: { bash: 'rm -rf /' },
   display: { title: 'Allow bash command?', command: 'rm -rf /' }
 };
 
@@ -42,7 +42,7 @@ const mcpSubject: Extract<ApprovalSubject, { kind: 'tool' }> = {
   toolName: 'mcp',
   access: 'exec',
   channel: { kind: 'mcp', server: 'context7', tool: 'search' },
-  action: { mcp: { server: 'context7', tool: 'search', arguments: { query: 'typescript' } } } as never,
+  action: { mcp: { server: 'context7', tool: 'search', arguments: { query: 'typescript' } } },
   display: {
     title: 'Allow MCP tool?',
     server: 'context7',
