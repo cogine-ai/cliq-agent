@@ -675,6 +675,24 @@ test('runHeadless uses the intended turn for post-session setup failures', async
   ]);
 });
 
+test('runHeadless rejects invalid maxTurns before starting a session', async () => {
+  const { cwd } = await setupWorkspace();
+
+  const output = await runHeadless(
+    {
+      cwd,
+      prompt: 'say done',
+      maxTurns: 0
+    },
+    { modelClient: finalModel('done') }
+  );
+
+  assert.equal(output.status, 'failed');
+  assert.equal(output.error?.code, 'invalid-input');
+  assert.match(output.error?.message ?? '', /maxTurns must be a positive integer/i);
+  assert.equal(output.sessionId, undefined);
+});
+
 test('runHeadless rejects unknown session request fields', async () => {
   const { cwd } = await setupWorkspace();
 

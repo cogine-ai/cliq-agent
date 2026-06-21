@@ -11,7 +11,10 @@ import {
   openAIToolCallsFromDeltaParts,
   parseOllamaToolCalls,
   parseOpenAIToolCalls,
-  selectTypedRequestMode
+  selectTypedRequestMode,
+  typedPromptToAnthropicInput,
+  typedPromptToOpenAIMessages,
+  typedRequestShouldStream
 } from './prompt-mapping.js';
 
 const modelCapabilities: ModelCapabilities = {
@@ -22,7 +25,27 @@ const modelCapabilities: ModelCapabilities = {
   toolCalling: true
 };
 
-function promptRequest(provider: ResolvedModelConfig['provider'], toolCalling = true) {
+function promptRequest(
+  provider: ResolvedModelConfig['provider'],
+  toolCalling = true,
+  streaming: ResolvedModelConfig['streaming'] = 'auto'
+) {
+  const modelConfig: ResolvedModelConfig = {
+    provider,
+    model: 'test-model',
+    baseUrl: 'http://localhost:4000/v1',
+    streaming
+  };
+  return buildModelPromptRequest({
+    modelConfig,
+    modelCapabilities: { ...modelCapabilities, toolCalling },
+    instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+    input: [{ kind: 'message', role: 'user', content: 'hello' }],
+    registry: createToolRegistry()
+  });
+}
+
+function promptRequestWithToolHistory(provider: ResolvedModelConfig['provider']) {
   const modelConfig: ResolvedModelConfig = {
     provider,
     model: 'test-model',
@@ -31,9 +54,24 @@ function promptRequest(provider: ResolvedModelConfig['provider'], toolCalling = 
   };
   return buildModelPromptRequest({
     modelConfig,
-    modelCapabilities: { ...modelCapabilities, toolCalling },
+    modelCapabilities,
     instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
-    input: [{ kind: 'message', role: 'user', content: 'hello' }],
+    input: [
+      { kind: 'message', role: 'user', content: 'run pwd' },
+      {
+        kind: 'message',
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'call_1', name: 'bash', arguments: { command: 'pwd' } }]
+      },
+      {
+        kind: 'tool_result',
+        toolName: 'bash',
+        status: 'ok',
+        content: '/workspace',
+        callId: 'call_1'
+      }
+    ],
     registry: createToolRegistry()
   });
 }
@@ -143,4 +181,141 @@ test('captureOpenAIToolCallDeltas assembles streaming tool call fragments', () =
   assert.deepEqual(openAIToolCallsFromDeltaParts(accumulator), [
     { id: 'call_1', name: 'bash', arguments: { command: 'pwd' } }
   ]);
+});
+
+test('typedRequestShouldStream requires provider streaming and a non-off streaming mode', () => {
+  const streamingRequest = promptRequest('openai-compatible');
+  assert.equal(typedRequestShouldStream(streamingRequest), true);
+
+  const offRequest = promptRequest('openai-compatible', true, 'off');
+  assert.equal(typedRequestShouldStream(offRequest), false);
+
+  const noProviderStreaming = buildModelPromptRequest({
+    modelConfig: {
+      provider: 'openai-compatible',
+      model: 'test-model',
+      baseUrl: 'http://localhost:4000/v1',
+      streaming: 'auto'
+    },
+    modelCapabilities: { ...modelCapabilities, streaming: false },
+    instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+    input: [{ kind: 'message', role: 'user', content: 'hello' }],
+    registry: createToolRegistry()
+  });
+  assert.equal(typedRequestShouldStream(noProviderStreaming), false);
+});
+
+test('typedPromptToOpenAIMessages maps native tool history into OpenAI chat roles', () => {
+  const request = promptRequestWithToolHistory('openai-compatible');
+  const messages = typedPromptToOpenAIMessages(request, 'native-tools');
+
+  assert.deepEqual(messages[0], { role: 'system', content: 'BASE' });
+  assert.deepEqual(messages[1], { role: 'user', content: 'run pwd' });
+  assert.deepEqual(messages[2], {
+    role: 'assistant',
+    content: '',
+    tool_calls: [
+      {
+        id: 'call_1',
+        type: 'function',
+        function: { name: 'bash', arguments: '{"command":"pwd"}' }
+      }
+    ]
+  });
+  assert.deepEqual(messages[3], {
+    role: 'tool',
+    tool_call_id: 'call_1',
+    content: '/workspace'
+  });
+});
+
+test('typedPromptToOpenAIMessages injects mode-specific fallback instructions', () => {
+  const structuredRequest = promptRequest('openai-compatible', false);
+  const structuredMessages = typedPromptToOpenAIMessages(structuredRequest, 'structured-output');
+  assert.equal(structuredMessages[0]?.role, 'system');
+  assert.match(structuredMessages[1]?.content ?? '', /STRUCTURED TOOL SCHEMA MODE/);
+
+  const textActionRequest = promptRequest('anthropic', false);
+  const textActionMessages = typedPromptToOpenAIMessages(textActionRequest, 'text-action');
+  assert.equal(textActionMessages[0]?.role, 'system');
+  assert.match(textActionMessages[1]?.content ?? '', /TEXT ACTION FALLBACK MODE/);
+});
+
+test('typedPromptToOpenAIMessages falls back to user content for tool results outside native-tools mode', () => {
+  const request = promptRequestWithToolHistory('openai-compatible');
+  const messages = typedPromptToOpenAIMessages(request, 'structured-output');
+
+  const toolResult = messages.find((message) => message.content === '/workspace');
+  assert.ok(toolResult);
+  assert.equal(toolResult.role, 'user');
+  assert.equal(toolResult.tool_call_id, undefined);
+});
+
+test('typedPromptToAnthropicInput serializes native tool history and mode instructions', () => {
+  const request = promptRequestWithToolHistory('anthropic');
+  const { system, messages } = typedPromptToAnthropicInput(request, 'native-tools');
+
+  assert.equal(system, 'BASE');
+  assert.deepEqual(messages[0], { role: 'user', content: 'run pwd' });
+  assert.deepEqual(messages[1], {
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool_use',
+        id: 'call_1',
+        name: 'bash',
+        input: { command: 'pwd' }
+      }
+    ]
+  });
+  assert.deepEqual(messages[2], {
+    role: 'user',
+    content: [
+      {
+        type: 'tool_result',
+        tool_use_id: 'call_1',
+        content: '/workspace'
+      }
+    ]
+  });
+});
+
+test('typedPromptToAnthropicInput marks error tool results and appends text-action guidance', () => {
+  const request = buildModelPromptRequest({
+    modelConfig: {
+      provider: 'anthropic',
+      model: 'test-model',
+      baseUrl: 'http://localhost:4000/v1',
+      streaming: 'auto'
+    },
+    modelCapabilities: { ...modelCapabilities, toolCalling: false },
+    instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+    input: [
+      {
+        kind: 'tool_result',
+        toolName: 'bash',
+        status: 'error',
+        content: 'command failed',
+        callId: 'call_9'
+      }
+    ],
+    registry: createToolRegistry()
+  });
+
+  const native = typedPromptToAnthropicInput(request, 'native-tools');
+  assert.deepEqual(native.messages[0], {
+    role: 'user',
+    content: [
+      {
+        type: 'tool_result',
+        tool_use_id: 'call_9',
+        content: 'command failed',
+        is_error: true
+      }
+    ]
+  });
+
+  const textAction = typedPromptToAnthropicInput(request, 'text-action');
+  assert.match(textAction.system, /BASE/);
+  assert.match(textAction.system, /TEXT ACTION FALLBACK MODE/);
 });
