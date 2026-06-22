@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   BUILTIN_DENY,
+  accessChannelPrimaryKey,
   composePermissionTable,
   EMPTY_PERMISSION_TABLE,
   matchAgainstTable,
@@ -194,13 +195,17 @@ test('matchAgainstTable: explicit ask wins over allow for unsafe bash syntax', (
   }
 });
 
-test('matchAgainstTable: mcp + network channels (type-only today)', () => {
+test('matchAgainstTable: mcp primary keys match server/tool rules', () => {
   const table = tableWith({
     allow: [
       wsRule('mcp', 'context7/*'),
       wsRule('network', 'api.example.com')
     ]
   });
+  assert.equal(
+    accessChannelPrimaryKey({ kind: 'mcp', server: 'context7', tool: 'search' }),
+    'context7/search'
+  );
   assert.equal(
     matchAgainstTable(table, { kind: 'mcp', server: 'context7', tool: 'search' }).kind,
     'allow'

@@ -34,6 +34,12 @@ export type SkillResourceAction = {
   mode?: 'read' | 'list';
 };
 
+export type McpAction = {
+  server: string;
+  tool: string;
+  arguments?: Record<string, unknown>;
+};
+
 export type PlanItemAction = {
   id?: string;
   title: string;
@@ -84,11 +90,12 @@ export type ModelAction =
   | { grep: GrepAction }
   | { skill: SkillAction }
   | { skillResource: SkillResourceAction }
+  | { mcp: McpAction }
   | { plan: PlanAction }
   | { todo: TodoAction }
   | { message: string };
 
-const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'skill', 'skillResource', 'plan', 'todo', 'message'] as const;
+const TOP_LEVEL_ACTIONS = ['bash', 'edit', 'read', 'ls', 'find', 'grep', 'skill', 'skillResource', 'mcp', 'plan', 'todo', 'message'] as const;
 
 export function parseModelAction(content: string): ModelAction {
   let parsed: unknown;
@@ -215,6 +222,23 @@ export function parseModelAction(content: string): ModelAction {
     }
   }
 
+  if (record.mcp && typeof record.mcp === 'object' && !Array.isArray(record.mcp)) {
+    const mcp = record.mcp as Record<string, unknown>;
+    if (
+      typeof mcp.server === 'string' &&
+      typeof mcp.tool === 'string' &&
+      (mcp.arguments === undefined || isPlainRecord(mcp.arguments))
+    ) {
+      return {
+        mcp: {
+          server: mcp.server,
+          tool: mcp.tool,
+          ...(mcp.arguments !== undefined ? { arguments: mcp.arguments as Record<string, unknown> } : {})
+        }
+      };
+    }
+  }
+
   if (record.plan && typeof record.plan === 'object' && !Array.isArray(record.plan)) {
     const plan = record.plan as Record<string, unknown>;
     const items = parsePlanItems(plan.items);
@@ -312,6 +336,10 @@ function parsePlanItems(value: unknown): PlanItemAction[] | undefined | null {
     items.push(item);
   }
   return items;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 export function parseTodoItemAction(value: unknown): TodoItemAction | null {

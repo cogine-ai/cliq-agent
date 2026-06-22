@@ -100,6 +100,8 @@ function ToolBody({
       <Text>{subject.display.title}</Text>
       <Field label="tool" value={subject.toolName} />
       <Field label="access" value={subject.access} />
+      {subject.display.server ? <Field label="server" value={subject.display.server} /> : null}
+      {subject.display.tool ? <Field label="mcp tool" value={subject.display.tool} /> : null}
       {subject.display.path ? <Field label="path" value={subject.display.path} /> : null}
       {subject.display.command ? (
         <Field label="command" value={subject.display.command} />

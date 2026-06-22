@@ -50,6 +50,15 @@ test('parses skill resource read and list actions', () => {
   });
 });
 
+test('parses mcp action with optional opaque arguments', () => {
+  assert.deepEqual(parseModelAction('{"mcp":{"server":"context7","tool":"search"}}'), {
+    mcp: { server: 'context7', tool: 'search' }
+  });
+  assert.deepEqual(parseModelAction('{"mcp":{"server":"context7","tool":"search","arguments":{"query":"policy","limit":3}}}'), {
+    mcp: { server: 'context7', tool: 'search', arguments: { query: 'policy', limit: 3 } }
+  });
+});
+
 test('parses plan draft, update, and finalize actions', () => {
   assert.deepEqual(parseModelAction('{"plan":{"op":"draft","title":"T","content":"## Plan"}}'), {
     plan: { op: 'draft', title: 'T', content: '## Plan' }
@@ -171,6 +180,12 @@ test('rejects invalid skill resource payloads', () => {
   assert.throws(() => parseModelAction('{"skillResource":{"skill":123,"path":"x"}}'), /unsupported action/i);
   assert.throws(() => parseModelAction('{"skillResource":{"path":"x"}}'), /unsupported action/i);
   assert.throws(() => parseModelAction('{"skillResource":{"skill":"reviewer","path":123}}'), /unsupported action/i);
+});
+
+test('rejects invalid mcp payloads', () => {
+  assert.throws(() => parseModelAction('{"mcp":{"server":123,"tool":"search"}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"mcp":{"server":"context7","tool":123}}'), /unsupported action/i);
+  assert.throws(() => parseModelAction('{"mcp":{"server":"context7","tool":"search","arguments":["query"]}}'), /unsupported action/i);
 });
 
 test('parses final message action', () => {
