@@ -8,6 +8,40 @@ const SHELL_INTERPRETER_HEADS = new Set([
   'zsh'
 ]);
 
+/**
+ * Shell metacommands that can run a different program than the parsed head.
+ * A `bash: git *` (or `bash: *`) allow rule must never auto-approve these,
+ * otherwise `exec bash -c '…'` bypasses nested-script inspection.
+ */
+const BASH_DELEGATION_HEADS = new Set(['command', 'eval', 'exec', 'source', '.', 'xargs']);
+
+/**
+ * Non-shell interpreters that accept inline scripts via `-c` / `--command`.
+ * Allow rules keyed on command heads cannot constrain their payloads.
+ */
+const SCRIPT_INTERPRETER_HEADS = new Set([
+  'node',
+  'nodejs',
+  'perl',
+  'php',
+  'python',
+  'python3',
+  'ruby',
+  'lua',
+  'luajit'
+]);
+
+const VERSIONED_SCRIPT_INTERPRETER_PATTERNS: readonly RegExp[] = [
+  /^node(?:js)?\d*(?:\.\d+)*$/,
+  /^perl\d*(?:\.\d+)*$/,
+  /^php\d*(?:\.\d+)*$/,
+  /^pypy\d*(?:\.\d+)*$/,
+  /^python\d*(?:\.\d+)*$/,
+  /^ruby\d*(?:\.\d+)*$/,
+  /^lua\d*(?:\.\d+)*$/,
+  /^luajit(?:-\d+(?:\.\d+)*)?$/
+];
+
 const BUSYBOX_HEAD = 'busybox';
 const MAX_SHELL_INLINE_DEPTH = 8;
 
@@ -38,6 +72,13 @@ export function bashCommandHasUnsafeAllowSyntax(commandLine: string): boolean {
 
 function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number): boolean {
   if (unsafeAllowSyntaxInFragment(commandLine)) return true;
+
+  const head = parseBashCommandHead(commandLine);
+  if (head && (head.startsWith('-') || BASH_DELEGATION_HEADS.has(head))) return true;
+
+  const interpreterScript = extractScriptInterpreterInline(commandLine);
+  if (interpreterScript !== null) return true;
+
   const nested = extractShellInlineScript(commandLine);
   if (nested === null) return false;
   if (depth >= MAX_SHELL_INLINE_DEPTH) return true;
@@ -106,6 +147,124 @@ export function extractShellInlineScript(commandLine: string): string | null {
   return null;
 }
 
+/**
+ * Extract inline script text from `python -c`, `node -e`, etc. Returns null when
+ * the invocation is not a known script interpreter or has no script argument.
+ */
+function extractScriptInterpreterInline(commandLine: string): string | null {
+  if (typeof commandLine !== 'string') return null;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return null;
+
+  const tokens = tokenizeWords(trimmed);
+  if (tokens.length === 0) return null;
+
+  let i = 0;
+  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
+    i += 1;
+  }
+  while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
+    const expanded = expandEnvSplitString(tokens, i);
+    if (expanded) {
+      tokens.splice(i, expanded.consumed, ...expanded.tokens);
+      continue;
+    }
+    i = skipWrapperFlags(tokens, i);
+    if (i >= tokens.length) return null;
+  }
+  if (i >= tokens.length) return null;
+
+  const head = tokenBasename(tokens[i]!);
+  if (!isScriptInterpreterHead(head)) return null;
+  i += 1;
+
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    const attached = extractAttachedScriptInline(head, token);
+    if (attached !== null) {
+      return attached;
+    }
+    if (isScriptInlineFlag(head, token)) {
+      return tokens[i + 1] ?? null;
+    }
+    i += 1;
+  }
+  return null;
+}
+
+function isScriptInterpreterHead(head: string): boolean {
+  return (
+    SCRIPT_INTERPRETER_HEADS.has(head) ||
+    VERSIONED_SCRIPT_INTERPRETER_PATTERNS.some((pattern) => pattern.test(head))
+  );
+}
+
+function isPhpInterpreterHead(head: string): boolean {
+  return /^php\d*(?:\.\d+)*$/.test(head);
+}
+
+function isNodeInterpreterHead(head: string): boolean {
+  return /^node(?:js)?\d*(?:\.\d+)*$/.test(head);
+}
+
+function isPythonInterpreterHead(head: string): boolean {
+  return /^(?:python|pypy)\d*(?:\.\d+)*$/.test(head);
+}
+
+function isPerlInterpreterHead(head: string): boolean {
+  return /^perl\d*(?:\.\d+)*$/.test(head);
+}
+
+function isRubyInterpreterHead(head: string): boolean {
+  return /^ruby\d*(?:\.\d+)*$/.test(head);
+}
+
+function isLuaInterpreterHead(head: string): boolean {
+  return /^lua\d*(?:\.\d+)*$/.test(head) || /^luajit(?:-\d+(?:\.\d+)*)?$/.test(head);
+}
+
+function scriptInlineShortFlags(head: string): ReadonlySet<string> {
+  if (isNodeInterpreterHead(head)) return new Set(['e', 'p']);
+  if (isPythonInterpreterHead(head)) return new Set(['c']);
+  if (isPerlInterpreterHead(head)) return new Set(['e', 'E']);
+  if (isRubyInterpreterHead(head)) return new Set(['e']);
+  if (isPhpInterpreterHead(head)) return new Set(['r']);
+  if (isLuaInterpreterHead(head)) return new Set(['e']);
+  return new Set();
+}
+
+function isScriptInlineFlag(head: string, token: string): boolean {
+  if (token === '--command' || token === '--eval') return true;
+  if (isNodeInterpreterHead(head) && token === '--print') return true;
+  if (!token.startsWith('-') || token.startsWith('--')) return false;
+
+  const flags = scriptInlineShortFlags(head);
+  if (flags.size === 0) return false;
+  return token
+    .slice(1)
+    .split('')
+    .some((flag) => flags.has(flag));
+}
+
+function extractAttachedScriptInline(head: string, token: string): string | null {
+  if (token.startsWith('--command=') || token.startsWith('--eval=')) {
+    return token.slice(token.indexOf('=') + 1);
+  }
+  if (isNodeInterpreterHead(head) && token.startsWith('--print=')) {
+    return token.slice('--print='.length);
+  }
+  if (!token.startsWith('-') || token.startsWith('--')) return null;
+
+  const flags = scriptInlineShortFlags(head);
+  for (let i = 1; i < token.length; i += 1) {
+    if (flags.has(token[i]!)) {
+      const script = token.slice(i + 1);
+      return script === '' ? null : script;
+    }
+  }
+  return null;
+}
+
 function tokenBasename(token: string): string {
   return token.includes('/') ? token.split('/').filter(Boolean).pop()! : token;
 }
@@ -116,6 +275,10 @@ function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consume
   let i = wrapperIndex + 1;
   while (i < tokens.length) {
     const token = tokens[i]!;
+    if (token === '-' || token === '--') {
+      i += 1;
+      continue;
+    }
     if (token === '-S' || token === '--split-string') {
       splitFlagIndex = i;
       break;
@@ -295,6 +458,8 @@ export function parseBashCommandHead(commandLine: string): string | null {
   // Strip directory prefix and trailing args; we only want the basename so
   // `/usr/local/bin/python` and `python` collapse to the same matcher key.
   const basename = head.includes('/') ? head.split('/').filter(Boolean).pop()! : head;
+  // Option-looking heads (e.g. env - -- -S … mis-parse) must not match allow rules.
+  if (basename.startsWith('-')) return null;
   return basename || null;
 }
 
@@ -368,9 +533,11 @@ function skipEnvWrapperFlags(tokens: string[], start: number): number {
   let i = start;
   while (i < tokens.length) {
     const token = tokens[i]!;
+    // POSIX/GNU env treat a lone `-` or `--` as end-of-options; keep scanning
+    // so a following `-S` / `--split-string` is still visible to the parser.
     if (token === '-' || token === '--') {
       i += 1;
-      break;
+      continue;
     }
 
     const skipped = skipEnvOption(tokens, i);
