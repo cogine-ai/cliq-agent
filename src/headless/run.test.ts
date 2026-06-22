@@ -196,6 +196,28 @@ test('runHeadless passes request maxTurns into the runner', async () => {
   assert.equal(events.at(-1)?.type, 'run-end');
 });
 
+test('runHeadless rejects invalid maxTurns before starting a session', async () => {
+  const { cwd } = await setupWorkspace();
+
+  for (const maxTurns of [0, -1, 1.5] as const) {
+    const output = await runHeadless(
+      {
+        cwd,
+        prompt: 'never runs',
+        model: { provider: 'ollama', model: 'test-model' },
+        maxTurns
+      },
+      { modelClient: finalModel('done') }
+    );
+
+    assert.equal(output.status, 'failed');
+    assert.equal(output.error?.code, 'invalid-input');
+    assert.match(output.error?.message ?? '', /maxTurns must be a positive integer/i);
+    assert.equal(output.sessionId, undefined);
+    assert.equal(output.turn, undefined);
+  }
+});
+
 test('runHeadless creates a fresh session by default even when the workspace has an active session', async () => {
   const { cwd } = await setupWorkspace();
 

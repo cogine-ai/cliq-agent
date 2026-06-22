@@ -261,6 +261,38 @@ test('runner detects repeated identical tool action/result doom loops', async ()
   assert.equal(errors.at(-1)?.stage, 'model');
 });
 
+test('createRunner rejects invalid maxTurns and doomLoop limits at construction', () => {
+  const model = { async complete() { return completion('{"message":"done"}'); } };
+
+  assert.throws(() => createRunner({ model, maxTurns: 0 }), /maxTurns must be a positive integer/i);
+  assert.throws(() => createRunner({ model, maxTurns: -2 }), /maxTurns must be a positive integer/i);
+  assert.throws(
+    () => createRunner({ model, doomLoop: { repeatedActionLimit: 0 } }),
+    /doomLoop\.repeatedActionLimit must be a positive integer/i
+  );
+});
+
+test('runner honors a custom doomLoop repeatedActionLimit', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(JSON.stringify({ bash: 'pwd' }));
+      }
+    },
+    maxTurns: 100,
+    doomLoop: { repeatedActionLimit: 2 },
+    policy: createPolicyEngine({ mode: 'yolo' }),
+    registry: bashOkRegistry()
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'repeat a command'), /Doom loop detected/i);
+  assert.equal(calls, 2);
+});
+
 test('per-turn signal in runTurn opts cancels the turn without poisoning the runner', async () => {
   const session = await createTempSession();
   const runner = createRunner({
