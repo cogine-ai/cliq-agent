@@ -305,6 +305,13 @@ test('decision table: bash allow rules do not auto-approve delegation or interpr
   for (const bash of [
     'exec bash -c "git status && rm -rf /"',
     'eval "rm -rf /"',
+    'timeout 5 bash -c "git status && rm -rf /"',
+    'nohup bash -c "git status && rm -rf /"',
+    '/usr/bin/time bash -c "git status && rm -rf /"',
+    "timeout 5 env -S 'bash -c \"git status && rm -rf /\"'",
+    "nohup /usr/bin/env -S 'bash -c \"git status && rm -rf /\"'",
+    "/usr/bin/time -p env --split-string='bash -c \"git status && rm -rf /\"'",
+    "timeout 5 /usr/bin/env -S 'python -c \"import os; os.system(\\\"rm -rf /\\\")\"'",
     "python -c 'import os; os.system(\"rm -rf /\")'",
     "python3 -c'import os; os.system(\"rm -rf /\")'",
     "python3.12 -c 'import os; os.system(\"rm -rf /\")'",

@@ -76,13 +76,54 @@ function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number
   const head = parseBashCommandHead(commandLine);
   if (head && (head.startsWith('-') || BASH_DELEGATION_HEADS.has(head))) return true;
 
-  const interpreterScript = extractScriptInterpreterInline(commandLine);
-  if (interpreterScript !== null) return true;
+  const embedded = analyzeEmbeddedInlineScripts(commandLine);
+  if (embedded.hasScriptInterpreter) return true;
 
-  const nested = extractShellInlineScript(commandLine);
-  if (nested === null) return false;
-  if (depth >= MAX_SHELL_INLINE_DEPTH) return true;
-  return bashCommandHasUnsafeAllowSyntaxInner(nested, depth + 1);
+  const shellScripts = new Set<string>();
+  const leadingShell = extractShellInlineScript(commandLine);
+  if (leadingShell !== null) shellScripts.add(leadingShell);
+  for (const script of embedded.shellScripts) shellScripts.add(script);
+
+  for (const nested of shellScripts) {
+    if (depth >= MAX_SHELL_INLINE_DEPTH) return true;
+    if (bashCommandHasUnsafeAllowSyntaxInner(nested, depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
+ * Scan every argv position for inline shell / script-interpreter payloads.
+ * Prefix wrappers such as `timeout` or `nohup` hide `bash -c` from head-based
+ * parsing; embedded detection keeps `allow: bash: *` from auto-approving them.
+ */
+function analyzeEmbeddedInlineScripts(commandLine: string): {
+  shellScripts: string[];
+  hasScriptInterpreter: boolean;
+} {
+  if (typeof commandLine !== 'string') {
+    return { shellScripts: [], hasScriptInterpreter: false };
+  }
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return { shellScripts: [], hasScriptInterpreter: false };
+
+  const tokens = tokenizeWords(trimmed);
+  const shellScripts: string[] = [];
+  let hasScriptInterpreter = false;
+  let i = 0;
+  while (i < tokens.length) {
+    const expanded = expandEnvSplitString(tokens, i);
+    if (expanded) {
+      tokens.splice(i, expanded.consumed, ...expanded.tokens);
+      continue;
+    }
+    if (extractScriptInterpreterInlineFromTokens(tokens, i) !== null) {
+      hasScriptInterpreter = true;
+    }
+    const shellScript = extractShellInlineScriptFromTokens(tokens, i);
+    if (shellScript !== null) shellScripts.push(shellScript);
+    i += 1;
+  }
+  return { shellScripts, hasScriptInterpreter };
 }
 
 /**
@@ -112,6 +153,13 @@ export function extractShellInlineScript(commandLine: string): string | null {
   }
   if (i >= tokens.length) return null;
 
+  return extractShellInlineScriptFromTokens(tokens, i);
+}
+
+function extractShellInlineScriptFromTokens(tokens: string[], startIndex: number): string | null {
+  if (startIndex >= tokens.length) return null;
+
+  let i = startIndex;
   let head = tokenBasename(tokens[i]!);
   i += 1;
 
@@ -151,34 +199,13 @@ export function extractShellInlineScript(commandLine: string): string | null {
  * Extract inline script text from `python -c`, `node -e`, etc. Returns null when
  * the invocation is not a known script interpreter or has no script argument.
  */
-function extractScriptInterpreterInline(commandLine: string): string | null {
-  if (typeof commandLine !== 'string') return null;
-  const trimmed = commandLine.trim();
-  if (trimmed === '') return null;
+function extractScriptInterpreterInlineFromTokens(tokens: string[], startIndex: number): string | null {
+  if (startIndex >= tokens.length) return null;
 
-  const tokens = tokenizeWords(trimmed);
-  if (tokens.length === 0) return null;
-
-  let i = 0;
-  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
-    i += 1;
-  }
-  while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
-    const expanded = expandEnvSplitString(tokens, i);
-    if (expanded) {
-      tokens.splice(i, expanded.consumed, ...expanded.tokens);
-      continue;
-    }
-    i = skipWrapperFlags(tokens, i);
-    if (i >= tokens.length) return null;
-  }
-  if (i >= tokens.length) return null;
-
-  const head = tokenBasename(tokens[i]!);
+  const head = tokenBasename(tokens[startIndex]!);
   if (!isScriptInterpreterHead(head)) return null;
-  i += 1;
 
-  while (i < tokens.length) {
+  for (let i = startIndex + 1; i < tokens.length; i += 1) {
     const token = tokens[i]!;
     const attached = extractAttachedScriptInline(head, token);
     if (attached !== null) {
@@ -187,7 +214,6 @@ function extractScriptInterpreterInline(commandLine: string): string | null {
     if (isScriptInlineFlag(head, token)) {
       return tokens[i + 1] ?? null;
     }
-    i += 1;
   }
   return null;
 }

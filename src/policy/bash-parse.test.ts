@@ -215,3 +215,20 @@ test('bashCommandHasUnsafeAllowSyntax treats script interpreters with inline cod
   assert.equal(bashCommandHasUnsafeAllowSyntax('python --version'), false);
   assert.equal(bashCommandHasUnsafeAllowSyntax('node --version'), false);
 });
+
+test('bashCommandHasUnsafeAllowSyntax inspects shell -c scripts hidden behind prefix wrappers', () => {
+  for (const command of [
+    'timeout 5 bash -c "git status && rm -rf /"',
+    'nohup bash -c "git status && rm -rf /"',
+    '/usr/bin/time bash -c "git status && rm -rf /"',
+    'stdbuf -oL bash -c "git status && rm -rf /"',
+    'timeout 5 python -c "import os; os.system(\"rm -rf /\")"',
+    "timeout 5 env -S 'bash -c \"git status && rm -rf /\"'",
+    "nohup /usr/bin/env -S 'bash -c \"git status && rm -rf /\"'",
+    "/usr/bin/time -p env --split-string='bash -c \"git status && rm -rf /\"'",
+    "timeout 5 /usr/bin/env -S 'python -c \"import os; os.system(\\\"rm -rf /\\\")\"'"
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
+  }
+  assert.equal(bashCommandHasUnsafeAllowSyntax('timeout 5 bash -c "git status"'), false);
+});
