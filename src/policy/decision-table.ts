@@ -76,6 +76,19 @@ export const BUILTIN_DENY: readonly PermissionRule[] = freezeRules([
   rule('fs-write', '.git', 'builtin')
 ]);
 
+/**
+ * Literal bash command heads from {@link BUILTIN_DENY}. Used by bash-parse to
+ * reject nested inline scripts (e.g. `bash -c "rm -rf /"`) that would bypass
+ * head-only deny matching.
+ */
+export const BUILTIN_BASH_DENY_HEADS: ReadonlySet<string> = Object.freeze(
+  new Set(
+    BUILTIN_DENY.filter((denyRule) => denyRule.channel === 'bash' && !denyRule.pattern.includes('*')).map(
+      (denyRule) => denyRule.pattern
+    )
+  )
+) as ReadonlySet<string>;
+
 const UNSAFE_BASH_ALLOW_RULE: PermissionRule = Object.freeze({
   channel: 'bash',
   pattern: '(unsafe-shell-syntax)',
@@ -135,6 +148,17 @@ export function matchAgainstTable(table: PermissionTable, channel: AccessChannel
   for (const denyRule of table.deny) {
     if (matchesRule(denyRule, channel)) {
       return { kind: 'deny', rule: denyRule };
+    }
+  }
+
+  if (channel.kind === 'bash' && channel.nestedBuiltinDenyHead) {
+    for (const denyRule of table.deny) {
+      if (
+        denyRule.channel === 'bash' &&
+        matchesRule(denyRule, { ...channel, commandHead: channel.nestedBuiltinDenyHead })
+      ) {
+        return { kind: 'deny', rule: denyRule };
+      }
     }
   }
 
