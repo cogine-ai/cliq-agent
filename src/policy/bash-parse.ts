@@ -109,12 +109,19 @@ function analyzeEmbeddedInlineScripts(commandLine: string): {
   const tokens = tokenizeWords(trimmed);
   const shellScripts: string[] = [];
   let hasScriptInterpreter = false;
-  for (let i = 0; i < tokens.length; i += 1) {
+  let i = 0;
+  while (i < tokens.length) {
+    const expanded = expandEnvSplitString(tokens, i);
+    if (expanded) {
+      tokens.splice(i, expanded.consumed, ...expanded.tokens);
+      continue;
+    }
     if (extractScriptInterpreterInlineFromTokens(tokens, i) !== null) {
       hasScriptInterpreter = true;
     }
     const shellScript = extractShellInlineScriptFromTokens(tokens, i);
     if (shellScript !== null) shellScripts.push(shellScript);
+    i += 1;
   }
   return { shellScripts, hasScriptInterpreter };
 }
