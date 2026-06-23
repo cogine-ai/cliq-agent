@@ -261,6 +261,87 @@ test('runner detects repeated identical tool action/result doom loops', async ()
   assert.equal(errors.at(-1)?.stage, 'model');
 });
 
+test('createRunner rejects non-positive maxTurns and doomLoop.repeatedActionLimit', () => {
+  const model = { async complete() { return completion('{"message":"done"}'); } };
+
+  assert.throws(() => createRunner({ model, maxTurns: 0 }), /maxTurns must be a positive integer/);
+  assert.throws(() => createRunner({ model, maxTurns: -2 }), /maxTurns must be a positive integer/);
+  assert.throws(() => createRunner({ model, maxTurns: 1.5 }), /maxTurns must be a positive integer/);
+  assert.throws(
+    () => createRunner({ model, doomLoop: { repeatedActionLimit: 0 } }),
+    /doomLoop\.repeatedActionLimit must be a positive integer/
+  );
+});
+
+test('runner honors custom doomLoop.repeatedActionLimit before the default limit', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        return completion(JSON.stringify({ bash: 'pwd' }));
+      }
+    },
+    maxTurns: 100,
+    doomLoop: { repeatedActionLimit: 2 },
+    policy: createPolicyEngine({ mode: 'yolo' }),
+    registry: bashOkRegistry()
+  });
+
+  await assert.rejects(() => runner.runTurn(session, 'repeat a command'), /Doom loop detected/i);
+  assert.equal(calls, 2);
+});
+
+test('runner doom loop counter resets when the tool result changes', async () => {
+  const session = await createTempSession();
+  let calls = 0;
+
+  const runner = createRunner({
+    model: {
+      async complete() {
+        calls += 1;
+        if (calls <= 2) {
+          return completion(JSON.stringify({ bash: 'pwd' }));
+        }
+        if (calls === 3) {
+          return completion(JSON.stringify({ bash: 'pwd' }));
+        }
+        return completion(JSON.stringify({ message: 'done' }));
+      }
+    },
+    maxTurns: 100,
+    policy: createPolicyEngine({ mode: 'yolo' }),
+    registry: {
+      definitions: [],
+      resolve() {
+        return {
+          definition: {
+            name: 'bash',
+            access: 'exec' as const,
+            supports(action: unknown): action is { bash: string } {
+              return typeof (action as { bash?: unknown }).bash === 'string';
+            },
+            async execute(action: { bash: string }) {
+              return {
+                tool: 'bash',
+                status: 'ok' as const,
+                content: calls === 3 ? '/tmp/other' : '/tmp/ws',
+                meta: { exit: 0, signal: 'none', timed_out: false }
+              };
+            }
+          }
+        };
+      }
+    }
+  });
+
+  const finalMessage = await runner.runTurn(session, 'repeat with changing output');
+  assert.equal(finalMessage, 'done');
+  assert.equal(calls, 4);
+});
+
 test('per-turn signal in runTurn opts cancels the turn without poisoning the runner', async () => {
   const session = await createTempSession();
   const runner = createRunner({
