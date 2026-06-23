@@ -38,6 +38,12 @@ export type AccessChannel =
        * therefore must not be auto-approved by a bash allow rule.
        */
       unsafeForAllow: boolean;
+      /**
+       * When a nested shell inline script (`bash -c`, etc.) resolves to a
+       * builtin-deny head such as `rm`, surface it here so deny rules apply
+       * even though the outer command head differs (e.g. `bash -c "rm …"`).
+       */
+      nestedBuiltinDenyHead?: string;
     }
   | { kind: 'mcp'; server: string; tool: string }
   | { kind: 'network'; host?: string }

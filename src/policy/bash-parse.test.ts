@@ -173,12 +173,27 @@ test('bashCommandHasUnsafeAllowSyntax treats shell delegation metacommands as un
     'exec bash -c "git status && rm -rf /"',
     'eval "rm -rf /"',
     'command bash -c "git status && rm -rf /"',
+    'builtin exec bash -c "rm -rf /"',
+    'builtin eval "rm -rf /"',
     '. ./script.sh',
     'source ./script.sh',
     'xargs rm -rf /'
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }
+});
+
+test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find -exec as unsafe for allow rules', () => {
+  for (const command of [
+    'bash -c "rm -rf /"',
+    'timeout 5 bash -c "rm -rf /"',
+    'nohup bash -c "rm -rf /"',
+    'find . -name foo -exec rm {} \\;',
+    'find . -name foo -execdir rm {} \\;'
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
+  }
+  assert.equal(bashCommandHasUnsafeAllowSyntax('timeout 5 bash -c "git status"'), false);
 });
 
 test('bashCommandHasUnsafeAllowSyntax treats script interpreters with inline code as unsafe for allow rules', () => {

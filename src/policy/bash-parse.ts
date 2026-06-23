@@ -1,3 +1,5 @@
+import { BUILTIN_BASH_DENY_HEADS } from './decision-table.js';
+
 const SHELL_INTERPRETER_HEADS = new Set([
   'ash',
   'bash',
@@ -13,7 +15,7 @@ const SHELL_INTERPRETER_HEADS = new Set([
  * A `bash: git *` (or `bash: *`) allow rule must never auto-approve these,
  * otherwise `exec bash -c '…'` bypasses nested-script inspection.
  */
-const BASH_DELEGATION_HEADS = new Set(['command', 'eval', 'exec', 'source', '.', 'xargs']);
+const BASH_DELEGATION_HEADS = new Set(['builtin', 'command', 'eval', 'exec', 'source', '.', 'xargs']);
 
 /**
  * Non-shell interpreters that accept inline scripts via `-c` / `--command`.
@@ -70,6 +72,31 @@ export function bashCommandHasUnsafeAllowSyntax(commandLine: string): boolean {
   return bashCommandHasUnsafeAllowSyntaxInner(commandLine, 0);
 }
 
+/**
+ * Returns the first builtin-deny bash head found in nested shell inline scripts,
+ * or null when no such head is present.
+ */
+export function bashNestedBuiltinDenyHead(commandLine: string): string | null {
+  return bashNestedBuiltinDenyHeadInner(commandLine, 0);
+}
+
+function bashNestedBuiltinDenyHeadInner(commandLine: string, depth: number): string | null {
+  const embedded = analyzeEmbeddedInlineScripts(commandLine);
+  const shellScripts = new Set<string>();
+  const leadingShell = extractShellInlineScript(commandLine);
+  if (leadingShell !== null) shellScripts.add(leadingShell);
+  for (const script of embedded.shellScripts) shellScripts.add(script);
+
+  for (const nested of shellScripts) {
+    const head = parseBashCommandHead(nested);
+    if (head && BUILTIN_BASH_DENY_HEADS.has(head)) return head;
+    if (depth >= MAX_SHELL_INLINE_DEPTH) continue;
+    const deeper = bashNestedBuiltinDenyHeadInner(nested, depth + 1);
+    if (deeper) return deeper;
+  }
+  return null;
+}
+
 function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number): boolean {
   if (unsafeAllowSyntaxInFragment(commandLine)) return true;
 
@@ -77,7 +104,8 @@ function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number
   if (head && (head.startsWith('-') || BASH_DELEGATION_HEADS.has(head))) return true;
 
   const embedded = analyzeEmbeddedInlineScripts(commandLine);
-  if (embedded.hasScriptInterpreter) return true;
+  if (embedded.hasScriptInterpreter || embedded.hasFindExec) return true;
+  if (bashNestedBuiltinDenyHead(commandLine) !== null) return true;
 
   const shellScripts = new Set<string>();
   const leadingShell = extractShellInlineScript(commandLine);
@@ -99,22 +127,28 @@ function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number
 function analyzeEmbeddedInlineScripts(commandLine: string): {
   shellScripts: string[];
   hasScriptInterpreter: boolean;
+  hasFindExec: boolean;
 } {
   if (typeof commandLine !== 'string') {
-    return { shellScripts: [], hasScriptInterpreter: false };
+    return { shellScripts: [], hasScriptInterpreter: false, hasFindExec: false };
   }
   const trimmed = commandLine.trim();
-  if (trimmed === '') return { shellScripts: [], hasScriptInterpreter: false };
+  if (trimmed === '') return { shellScripts: [], hasScriptInterpreter: false, hasFindExec: false };
 
   const tokens = tokenizeWords(trimmed);
   const shellScripts: string[] = [];
   let hasScriptInterpreter = false;
+  let hasFindExec = false;
   let i = 0;
   while (i < tokens.length) {
     const expanded = expandEnvSplitString(tokens, i);
     if (expanded) {
       tokens.splice(i, expanded.consumed, ...expanded.tokens);
       continue;
+    }
+    const token = tokens[i]!;
+    if (token === '-exec' || token === '-execdir' || token.startsWith('-exec=') || token.startsWith('-execdir=')) {
+      hasFindExec = true;
     }
     if (extractScriptInterpreterInlineFromTokens(tokens, i) !== null) {
       hasScriptInterpreter = true;
@@ -123,7 +157,7 @@ function analyzeEmbeddedInlineScripts(commandLine: string): {
     if (shellScript !== null) shellScripts.push(shellScript);
     i += 1;
   }
-  return { shellScripts, hasScriptInterpreter };
+  return { shellScripts, hasScriptInterpreter, hasFindExec };
 }
 
 /**

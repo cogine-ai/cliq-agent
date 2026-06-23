@@ -170,6 +170,23 @@ test('matchAgainstTable: channel kind mismatch is never a match', () => {
   assert.equal(decision.kind, 'fallthrough');
 });
 
+test('matchAgainstTable: nested builtin-deny heads deny even when outer head matches allow', () => {
+  const table = composePermissionTable({
+    allow: [wsRule('bash', '*')]
+  });
+  const decision = matchAgainstTable(table, {
+    kind: 'bash',
+    commandHead: 'bash',
+    unsafeForAllow: true,
+    nestedBuiltinDenyHead: 'rm'
+  });
+  assert.equal(decision.kind, 'deny');
+  if (decision.kind === 'deny') {
+    assert.equal(decision.rule.source, 'builtin');
+    assert.equal(decision.rule.pattern, 'rm');
+  }
+});
+
 test('matchAgainstTable: unsafe bash syntax cannot be approved by allow rules', () => {
   const table = tableWith({
     allow: [wsRule('bash', 'git *')]

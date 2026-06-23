@@ -361,6 +361,42 @@ test('decision table: builtin deny blocks plain `rm` even when user adds a broad
   }
 });
 
+test('decision table: builtin deny blocks nested rm inside bash -c even with broad bash allow', async () => {
+  const policy = createPolicyEngine({
+    mode: 'yolo',
+    table: composePermissionTable({ allow: [wsRule('bash', '*')] })
+  });
+
+  for (const bash of [
+    'bash -c "rm -rf /"',
+    'timeout 5 bash -c "rm -rf /"',
+    'builtin exec bash -c "rm -rf /"'
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+    const decision = await policy.decide(subject);
+    assert.equal(decision.behavior, 'deny', bash);
+    if (decision.behavior === 'deny') {
+      assert.match(decision.reason, /builtin/);
+    }
+  }
+});
+
+test('decision table: find -exec cannot be auto-approved by bash allow rules', async () => {
+  const policy = createPolicyEngine({
+    mode: 'default',
+    table: composePermissionTable({ allow: [wsRule('bash', '*')] })
+  });
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: 'find . -name foo -exec rm {} \\;' }
+  });
+  const decision = await policy.decide(subject);
+  assert.equal(decision.behavior, 'ask');
+});
+
 test('decision table: plan channel keys include op and plan id', async () => {
   const policy = createPolicyEngine({
     mode: 'yolo',
