@@ -232,3 +232,14 @@ test('bashCommandHasUnsafeAllowSyntax inspects shell -c scripts hidden behind pr
   }
   assert.equal(bashCommandHasUnsafeAllowSyntax('timeout 5 bash -c "git status"'), false);
 });
+
+function nestedBashCommand(depth: number, inner: string): string {
+  if (depth === 0) return inner;
+  return `bash -c ${JSON.stringify(nestedBashCommand(depth - 1, inner))}`;
+}
+
+test('bashCommandHasUnsafeAllowSyntax treats deeply nested shell -c scripts as unsafe at the depth limit', () => {
+  const safeInner = 'git status';
+  assert.equal(bashCommandHasUnsafeAllowSyntax(nestedBashCommand(8, safeInner)), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax(nestedBashCommand(9, safeInner)), true);
+});
