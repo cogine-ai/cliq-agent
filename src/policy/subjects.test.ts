@@ -79,6 +79,22 @@ test('buildToolApprovalSubject marks executable shell syntax unsafe for bash all
   }
 });
 
+test('buildToolApprovalSubject surfaces nested builtin-deny heads for bash -c wrappers', () => {
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: 'timeout 5 bash -c "rm -rf /"' }
+  });
+
+  if (subject.kind === 'tool') {
+    assert.deepEqual(subject.channel, {
+      kind: 'bash',
+      commandHead: 'timeout',
+      unsafeForAllow: true,
+      nestedBuiltinDenyHead: 'rm'
+    });
+  }
+});
+
 test('buildToolApprovalSubject marks TX edits as staged and includes the path', () => {
   const subject = buildToolApprovalSubject({
     definition: { name: 'edit', access: 'write' },
