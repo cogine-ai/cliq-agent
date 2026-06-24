@@ -36,6 +36,7 @@ import { buildContextMessages, buildPromptInput } from './context.js';
 import type { RuntimeEventSink } from '../protocol/runtime/events.js';
 import { runHooks, type RuntimeHook } from './hooks.js';
 import {
+  abortStaleImplicitTurnTx,
   assertHeadlessCompatible,
   finishTurnTx,
   openTurnTx,
@@ -290,6 +291,10 @@ export function createRunner({
         lastAssistantOutputAt: session.lifecycle.lastAssistantOutputAt
       };
       let checkpointCreated = false;
+      let activeTxFromTxRunner: Awaited<ReturnType<typeof openTurnTx>>['tx'] = null;
+      let txOpenedThisTurn = false;
+      let coordinatorCtx: CoordinatorCtx | null = null;
+      let turnTxLifecycleCompleted = false;
 
       try {
         if (signal?.aborted) {
@@ -334,9 +339,6 @@ export function createRunner({
         await throwIfCancelled();
 
         // Tx open at turn start (if tx mode is on).
-        let activeTxFromTxRunner: Awaited<ReturnType<typeof openTurnTx>>['tx'] = null;
-        let txOpenedThisTurn = false;
-        let coordinatorCtx: CoordinatorCtx | null = null;
         if (transactions) {
           coordinatorCtx = {
             cwd,
@@ -365,6 +367,7 @@ export function createRunner({
             await finishTurnTx(coordinatorCtx, transactions, activeTxFromTxRunner, async (e) => {
               await onEvent(e);
             });
+            turnTxLifecycleCompleted = true;
           }
           await runNonBlockingCommandHookEvent({
             schemaVersion: 1,
@@ -915,6 +918,17 @@ export function createRunner({
         await onEvent({ type: 'error', stage: 'model', message, recoverable: true });
         throw new Error(message);
       } finally {
+        if (
+          transactions &&
+          activeTxFromTxRunner &&
+          txOpenedThisTurn &&
+          coordinatorCtx &&
+          !turnTxLifecycleCompleted
+        ) {
+          await abortStaleImplicitTurnTx(coordinatorCtx, activeTxFromTxRunner, async (e) => {
+            await onEvent(e);
+          });
+        }
         if (!checkpointCreated) {
           session.lifecycle.status = previousLifecycle.status;
           session.lifecycle.turn = previousLifecycle.turn;
