@@ -41,19 +41,14 @@ import type { TxValidatorsConfig, TxStagedViewConfig } from '../config.js';
 import type { ValidatorResult } from '../../validators/types.js';
 
 /**
- * Coordinator scope (v0.8 Phase 12 Task 48):
+ * Coordinator scope (v0.8+):
  *
- * This module exposes manual operations only -- openTx, getTxStatus, listTx,
- * applyTx, abortTx -- intended to be driven from the CLI. Auto-open at turn
- * start, auto-finalize/auto-validate at turn end, and auto-apply per
- * applyPolicy require runner integration (OverlayWriter injection,
- * turn-boundary hooks) and are deferred to a follow-up task.
- *
- * Likewise the validate/approve/finalize stages of the tx lifecycle are
- * deferred. v0.8's `applyTx` requires the underlying tx to already be in
- * 'approved' state (Stage A guard). For now the coordinator surfaces this
- * as a 'rejected' result and the operator/test must construct an approved
- * tx with diff manually. TODO(post-v0.8): wire auto-validate/auto-approve.
+ * Exposes manual tx lifecycle stages — openTx, finalizeTx, validateTx,
+ * approveTx, applyTx, abortTx — for CLI and tests. The runner wires
+ * auto-open / auto-finalize / auto-validate / auto-apply for per-turn
+ * implicit transactions via `src/runtime/tx-runner.ts` (`openTurnTx`,
+ * `finishTurnTx`). Explicit txs opened via `cliq tx open` accumulate
+ * edits across turns; the user drives validate/approve/apply manually.
  */
 
 export type CoordinatorContext = {
@@ -180,10 +175,10 @@ export async function applyTx(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _opts: { overrides?: string[]; reason?: string } = {}
 ): Promise<CoordinatorApplyResult> {
-  // For v0.8: tx must already be 'approved'. The auto-validate/auto-approve
-  // pipeline is deferred to runner integration. CLI users can run this
-  // against a manually-prepared tx for testing or wait for the full pipeline.
-  // TODO(post-v0.8): plumb overrides/reason into the validate/approve stage.
+  // applyTx requires the tx to already be in 'approved' state. The runner's
+  // finishTurnTx pipeline drives validate → approve before calling apply for
+  // auto-opened per-turn txs; CLI users with explicit txs run those stages
+  // manually. TODO: plumb overrides/reason into the validate/approve stage.
   try {
     const result = await runApplyTx({
       root: txRootFor(ctx),
