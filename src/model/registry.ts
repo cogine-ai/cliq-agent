@@ -72,6 +72,15 @@ const PROVIDERS: Record<ProviderName, ModelProviderDefinition> = {
     getDefaultModel: () => null,
     getKnownModels: () => []
   },
+  zhipu: {
+    name: 'zhipu',
+    displayName: getProviderCatalogEntry('zhipu')?.displayName ?? 'Zhipu AI',
+    defaultBaseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    apiKeyEnv: 'ZHIPU_API_KEY',
+    requiresApiKey: true,
+    getDefaultModel: () => 'glm-5.2',
+    getKnownModels: () => listModelDescriptors('zhipu')
+  },
   ollama: {
     name: 'ollama',
     displayName: getProviderCatalogEntry('ollama')?.displayName ?? 'Ollama',

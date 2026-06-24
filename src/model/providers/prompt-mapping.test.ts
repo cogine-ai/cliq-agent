@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildModelPromptRequest } from '../prompt.js';
+import { resolveProviderPromptCapabilities } from '../prompt.js';
 import type { ModelCapabilities, ResolvedModelConfig } from '../types.js';
 import { createToolRegistry } from '../../tools/registry.js';
 import {
@@ -72,6 +73,40 @@ test('selectTypedRequestMode prefers native tools when the provider supports the
 test('selectTypedRequestMode falls back to structured output when native tools are unavailable', () => {
   const request = promptRequest('openai-compatible', false);
   assert.equal(selectTypedRequestMode(request), 'structured-output');
+});
+
+test('Zhipu prompt capabilities use text-action fallback instead of native or schema tools', () => {
+  const modelConfig: ResolvedModelConfig = {
+    provider: 'zhipu',
+    model: 'glm-5.2',
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    streaming: 'auto'
+  };
+  const capabilities = resolveProviderPromptCapabilities({
+    modelConfig,
+    modelCapabilities
+  });
+
+  assert.deepEqual(capabilities, {
+    nativeToolCalling: false,
+    structuredOutput: false,
+    streaming: true
+  });
+
+  const request = buildModelPromptRequest({
+    modelConfig,
+    modelCapabilities,
+    instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+    input: [{ kind: 'message', role: 'user', content: 'hello' }],
+    registry: createToolRegistry()
+  });
+
+  assert.equal(selectTypedRequestMode(request), 'text-action');
+  assert.deepEqual(request.textActionFallback, {
+    mode: 'bounded',
+    maxAttempts: 1,
+    reason: 'provider has no native tool-calling or structured-output capability'
+  });
 });
 
 test('selectTypedRequestMode uses text-action when neither native tools nor structured output apply', () => {

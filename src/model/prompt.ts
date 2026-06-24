@@ -79,6 +79,12 @@ export function resolveProviderPromptCapabilities({
         structuredOutput: true,
         streaming: modelCapabilities.streaming
       };
+    case 'zhipu':
+      return {
+        nativeToolCalling: false,
+        structuredOutput: false,
+        streaming: modelCapabilities.streaming
+      };
     case 'anthropic':
       return {
         nativeToolCalling: canUseNativeTools,

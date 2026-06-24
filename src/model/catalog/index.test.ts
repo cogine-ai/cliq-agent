@@ -12,7 +12,7 @@ test('provider catalog covers every built-in provider with setup metadata', () =
   const providers = listProviderCatalog();
   const byId = new Map(providers.map((provider) => [provider.id, provider]));
 
-  for (const id of ['openrouter', 'anthropic', 'openai', 'openai-compatible', 'ollama'] as const) {
+  for (const id of ['openrouter', 'anthropic', 'openai', 'openai-compatible', 'zhipu', 'ollama'] as const) {
     const provider = byId.get(id);
     assert.ok(provider, `missing provider catalog entry for ${id}`);
     assert.equal(typeof provider.displayName, 'string');
@@ -26,6 +26,12 @@ test('provider catalog covers every built-in provider with setup metadata', () =
     envVar: 'OPENROUTER_API_KEY',
     required: true
   });
+  assert.deepEqual(byId.get('zhipu')?.auth, {
+    kind: 'api-key',
+    envVar: 'ZHIPU_API_KEY',
+    required: true
+  });
+  assert.equal(byId.get('zhipu')?.defaultModelId, 'glm-5.2');
   assert.equal(byId.get('ollama')?.auth.kind, 'none');
 });
 
@@ -33,12 +39,16 @@ test('model metadata resolves known hosted models without crossing provider boun
   const openrouter = resolveModelMetadata('openrouter', 'anthropic/claude-sonnet-4.6');
   const anthropic = resolveModelMetadata('anthropic', 'claude-sonnet-4-20250514');
   const openai = resolveModelMetadata('openai', 'gpt-5.2');
+  const zhipu = resolveModelMetadata('zhipu', 'glm-5.2');
 
   assert.equal(openrouter?.capabilities.contextWindow, 200_000);
   assert.equal(openrouter?.capabilities.reasoning, true);
   assert.equal(anthropic?.capabilities.contextWindow, 200_000);
   assert.equal(openai?.capabilities.contextWindow, 128_000);
+  assert.equal(zhipu?.capabilities.contextWindow, 1_000_000);
+  assert.equal(zhipu?.routing?.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
   assert.equal(resolveModelMetadata('anthropic', 'anthropic/claude-sonnet-4.6'), null);
+  assert.equal(resolveModelMetadata('openrouter', 'glm-5.2'), null);
 });
 
 test('Pi model rows map to CLIQ model metadata entries with explicit provider ids', () => {
@@ -112,6 +122,28 @@ test('Pi model rows omit pricing when upstream cost metadata is incomplete', () 
 
   assert.ok(mapped);
   assert.equal(mapped.pricing, undefined);
+});
+
+test('Pi Z.AI Coding CN model rows map to the native Zhipu provider', () => {
+  const mapped = mapPiModelToCatalogEntry({
+    provider: 'zai-coding-cn',
+    id: 'glm-5.2',
+    name: 'GLM-5.2',
+    api: 'openai-completions',
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1_000_000,
+    maxTokens: 131_072,
+    compat: { thinkingFormat: 'zai' }
+  });
+
+  assert.equal(mapped?.provider, 'zhipu');
+  assert.equal(mapped?.model, 'glm-5.2');
+  assert.equal(mapped?.routing?.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
+  assert.equal(mapped?.capabilities.toolCalling, false);
+  assert.equal(mapped?.source.upstreamProvider, 'zai-coding-cn');
 });
 
 test('OpenClaw provider rows map to CLIQ provider catalog entries', () => {

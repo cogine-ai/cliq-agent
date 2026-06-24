@@ -50,25 +50,29 @@ export type OpenClawProviderRecord = {
   }>;
 };
 
-const PROVIDER_IDS = new Set<ProviderName>(['openrouter', 'anthropic', 'openai', 'openai-compatible', 'ollama']);
+const PROVIDER_IDS = new Set<ProviderName>(['openrouter', 'anthropic', 'openai', 'openai-compatible', 'zhipu', 'ollama']);
 
 const PI_PROVIDER_MAP: Record<string, ProviderName | undefined> = {
   openrouter: 'openrouter',
   anthropic: 'anthropic',
-  openai: 'openai'
+  openai: 'openai',
+  zai: 'zhipu',
+  'zai-coding-cn': 'zhipu'
 };
 
 const PROVIDER_ENV_VARS: Partial<Record<ProviderName, string>> = {
   openrouter: 'OPENROUTER_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
+  zhipu: 'ZHIPU_API_KEY',
   'openai-compatible': 'CLIQ_MODEL_API_KEY'
 };
 
 const PROVIDER_DEFAULT_MODELS: Partial<Record<ProviderName, string>> = {
   openrouter: 'anthropic/claude-sonnet-4.6',
   anthropic: 'claude-sonnet-4-20250514',
-  openai: 'gpt-5.2'
+  openai: 'gpt-5.2',
+  zhipu: 'glm-5.2'
 };
 
 function isProviderName(value: string): value is ProviderName {
@@ -115,7 +119,7 @@ export function mapPiModelToCatalogEntry(record: PiModelCatalogRecord): ModelCat
         output: ['text'],
         streaming: true,
         reasoning: record.reasoning === true,
-        toolCalling: true
+        toolCalling: provider === 'zhipu' ? false : true
       },
       'contextWindow',
       record.contextWindow

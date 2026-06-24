@@ -8,6 +8,7 @@ test('registry recognizes built-in providers', () => {
   assert.equal(isProviderName('anthropic'), true);
   assert.equal(isProviderName('openai'), true);
   assert.equal(isProviderName('openai-compatible'), true);
+  assert.equal(isProviderName('zhipu'), true);
   assert.equal(isProviderName('ollama'), true);
   assert.equal(isProviderName('unknown'), false);
   assert.equal(isProviderName('toString'), false);
@@ -28,7 +29,7 @@ test('registry requires explicit model for ollama and openai-compatible', () => 
 });
 
 test('known model descriptors are text-to-text compatible', () => {
-  for (const provider of ['openrouter', 'anthropic', 'openai'] as const) {
+  for (const provider of ['openrouter', 'anthropic', 'openai', 'zhipu'] as const) {
     const descriptors = getModelProvider(provider).getKnownModels();
     assert.equal(descriptors.length > 0, true);
     assert.equal(descriptors.every((descriptor) => descriptor.capabilities.input.includes('text')), true);
@@ -40,10 +41,12 @@ test('known default model descriptors expose context windows', () => {
   const openrouter = findKnownModelDescriptor('openrouter', 'anthropic/claude-sonnet-4.6');
   const anthropic = findKnownModelDescriptor('anthropic', 'claude-sonnet-4-20250514');
   const openai = findKnownModelDescriptor('openai', 'gpt-5.2');
+  const zhipu = findKnownModelDescriptor('zhipu', 'glm-5.2');
 
   assert.equal(openrouter?.capabilities.contextWindow, 200_000);
   assert.equal(anthropic?.capabilities.contextWindow, 200_000);
   assert.equal(openai?.capabilities.contextWindow, 128_000);
+  assert.equal(zhipu?.capabilities.contextWindow, 1_000_000);
 });
 
 test('findKnownModelDescriptor returns null for unknown models', () => {

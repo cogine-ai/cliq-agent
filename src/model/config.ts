@@ -100,6 +100,10 @@ export function formatModelSetupMessage(details: ModelSetupDetails): string {
     `    cliq providers auth set openrouter --api-key --model ${DEFAULT_MODEL_CONFIG.model}`,
     '    export OPENROUTER_API_KEY=...',
     `    cliq --provider openrouter --model ${DEFAULT_MODEL_CONFIG.model}`,
+    '  Zhipu AI:',
+    '    cliq providers auth set zhipu --api-key --model glm-5.2',
+    '    export ZHIPU_API_KEY=...',
+    '    cliq --provider zhipu --model glm-5.2',
     '  OpenAI-compatible:',
     '    cliq providers auth set openai-compatible --base-url http://localhost:4000/v1 --model <model> [--api-key]',
     '    cliq --provider openai-compatible --base-url http://localhost:4000/v1 --model <model>',
@@ -137,6 +141,9 @@ function getProviderApiKey(provider: ProviderName, auth: ProviderAuthStore) {
   if (provider === 'openrouter') return firstDefined(process.env.OPENROUTER_API_KEY, getProviderAuthEntry(auth, provider)?.apiKey);
   if (provider === 'anthropic') return firstDefined(process.env.ANTHROPIC_API_KEY, getProviderAuthEntry(auth, provider)?.apiKey);
   if (provider === 'openai') return firstDefined(process.env.OPENAI_API_KEY, getProviderAuthEntry(auth, provider)?.apiKey);
+  if (provider === 'zhipu') {
+    return firstDefined(process.env.ZHIPU_API_KEY, process.env.ZHIPUAI_API_KEY, getProviderAuthEntry(auth, provider)?.apiKey);
+  }
   if (provider === 'openai-compatible') {
     return firstDefined(
       process.env.CLIQ_MODEL_API_KEY,

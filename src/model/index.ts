@@ -17,6 +17,7 @@ export function registerBuiltInModelProviders() {
   registerModelClientFactory('anthropic', createAnthropicClient);
   registerModelClientFactory('openai', createOpenAIClient);
   registerModelClientFactory('openai-compatible', createOpenAICompatibleClient);
+  registerModelClientFactory('zhipu', createOpenAICompatibleClient);
   registerModelClientFactory('ollama', createOllamaClient);
   registered = true;
 }

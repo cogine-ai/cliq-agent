@@ -1675,7 +1675,7 @@ Options:
                            (e.g. "bash: npm *", "fs-write: .env", "fs-read: docs/*").
                            See README "## Tool permissions" for the full layer order.
   --skill NAME             Activate a skill; repeat to load multiple skills
-  --provider NAME          openrouter | anthropic | openai | openai-compatible | ollama
+  --provider NAME          openrouter | anthropic | openai | openai-compatible | zhipu | ollama
   --model ID               Provider model id; required for openai-compatible; auto-discovered for ollama
   --base-url URL           Required for openai-compatible; optional provider override
   --streaming MODE         auto | on | off
@@ -1704,12 +1704,15 @@ RPC:
 Examples:
   cliq --policy plan "inspect this repo"
   cliq --provider ollama --model qwen3.5:4b "inspect this repo"
+  cliq --provider zhipu --model glm-5.2 "inspect this repo"
   cliq providers status
 
 Env:
   OPENROUTER_API_KEY        Required for OpenRouter
   ANTHROPIC_API_KEY         Required for Anthropic
   OPENAI_API_KEY            Required for OpenAI
+  ZHIPU_API_KEY             Required for Zhipu AI
+  ZHIPUAI_API_KEY           Optional alias for Zhipu AI
   CLIQ_MODEL_API_KEY        Optional for openai-compatible
   OPENAI_COMPATIBLE_API_KEY Optional for openai-compatible
   CLIQ_MODEL_*              Optional provider/model/base URL/streaming defaults
