@@ -72,6 +72,7 @@ export function bashCommandHasUnsafeAllowSyntax(commandLine: string): boolean {
 
 function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number): boolean {
   if (unsafeAllowSyntaxInFragment(commandLine)) return true;
+  if (envSplitExpansionsHaveUnsafeSyntax(commandLine)) return true;
 
   const head = parseBashCommandHead(commandLine);
   if (head && (head.startsWith('-') || BASH_DELEGATION_HEADS.has(head))) return true;
@@ -293,6 +294,32 @@ function extractAttachedScriptInline(head: string, token: string): string | null
 
 function tokenBasename(token: string): string {
   return token.includes('/') ? token.split('/').filter(Boolean).pop()! : token;
+}
+
+/**
+ * `env -S` / `env --split-string=` execute the split payload as a real argv
+ * vector, so compound operators inside the quoted split string are live syntax,
+ * not literals. Outer-line quote scanning hides them from
+ * {@link unsafeAllowSyntaxInFragment}; expand and re-check the payload here.
+ */
+function envSplitExpansionsHaveUnsafeSyntax(commandLine: string): boolean {
+  if (typeof commandLine !== 'string') return false;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return false;
+
+  const tokens = tokenizeWords(trimmed);
+  let i = 0;
+  while (i < tokens.length) {
+    const expanded = expandEnvSplitString(tokens, i);
+    if (!expanded) {
+      i += 1;
+      continue;
+    }
+    const splitCommand = expanded.tokens.join(' ');
+    if (unsafeAllowSyntaxInFragment(splitCommand)) return true;
+    tokens.splice(i, expanded.consumed, ...expanded.tokens);
+  }
+  return false;
 }
 
 function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consumed: number; tokens: string[] } | null {

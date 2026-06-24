@@ -284,6 +284,8 @@ test('decision table: bash allow rules do not auto-approve compound syntax insid
     "bash -c 'bash -c \"git status && rm -rf /\"'",
     'bash -c "git status; rm -rf /"',
     'sh -c "git status | sh"',
+    "env -S 'git status && rm -rf /'",
+    "env --split-string='git status && rm -rf /'",
     "/usr/bin/env -S bash -c 'git status && rm -rf /'",
     "/usr/bin/env -i -S bash -c 'git status && rm -rf /'"
   ]) {

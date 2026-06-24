@@ -144,6 +144,19 @@ test('extractShellInlineScript returns the -c script for shell interpreters', ()
   assert.equal(extractShellInlineScript('npm test'), null);
 });
 
+test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside env -S split payloads', () => {
+  for (const command of [
+    "env -S 'git status && rm -rf /'",
+    "env --split-string='git status && rm -rf /'",
+    "env -i -S 'git status && rm -rf /'",
+    "env FOO=bar -S 'git status | sh'",
+    "/usr/bin/env -S 'git status; rm -rf /'"
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
+  }
+  assert.equal(bashCommandHasUnsafeAllowSyntax("env -S 'git status'"), false);
+});
+
 test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c scripts', () => {
   for (const command of [
     "bash -c 'git status && rm -rf /'",
