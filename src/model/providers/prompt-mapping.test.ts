@@ -109,6 +109,40 @@ test('Zhipu prompt capabilities use text-action fallback instead of native or sc
   });
 });
 
+test('Zhipu prompt capabilities preserve disabled streaming capability', () => {
+  const modelConfig: ResolvedModelConfig = {
+    provider: 'zhipu',
+    model: 'glm-5.2',
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    streaming: 'auto'
+  };
+  const capabilities = resolveProviderPromptCapabilities({
+    modelConfig,
+    modelCapabilities: { ...modelCapabilities, streaming: false }
+  });
+
+  assert.deepEqual(capabilities, {
+    nativeToolCalling: false,
+    structuredOutput: false,
+    streaming: false
+  });
+
+  const request = buildModelPromptRequest({
+    modelConfig,
+    modelCapabilities: { ...modelCapabilities, streaming: false },
+    instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+    input: [{ kind: 'message', role: 'user', content: 'hello' }],
+    registry: createToolRegistry()
+  });
+
+  assert.equal(selectTypedRequestMode(request), 'text-action');
+  assert.deepEqual(request.textActionFallback, {
+    mode: 'bounded',
+    maxAttempts: 1,
+    reason: 'provider has no native tool-calling or structured-output capability'
+  });
+});
+
 test('selectTypedRequestMode uses text-action when neither native tools nor structured output apply', () => {
   const request = promptRequest('anthropic', false);
   assert.equal(selectTypedRequestMode(request), 'text-action');

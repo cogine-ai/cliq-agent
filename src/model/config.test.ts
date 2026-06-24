@@ -216,6 +216,31 @@ test('resolveModelConfig accepts the ZHIPUAI_API_KEY alias for Zhipu', async () 
   });
 });
 
+test('formatModelSetupMessage documents both Zhipu API key env aliases', () => {
+  const message = formatModelSetupMessage(
+    new ModelSetupRequiredError({
+      reason: 'missing-provider-api-key',
+      provider: 'zhipu',
+      missingEnvVar: 'ZHIPU_API_KEY'
+    })
+  );
+
+  assert.match(message, /ZHIPU_API_KEY/);
+  assert.match(message, /ZHIPUAI_API_KEY/);
+});
+
+test('resolveModelConfig prefers ZHIPU_API_KEY over the ZHIPUAI_API_KEY alias for Zhipu', async () => {
+  await withEnv({ ZHIPU_API_KEY: 'zhipu-key', ZHIPUAI_API_KEY: 'zhipuai-key' }, async () => {
+    assert.deepEqual(await resolveModelConfig({ workspace: {}, cli: { provider: 'zhipu', model: 'glm-5.2' } }), {
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      apiKey: 'zhipu-key',
+      streaming: 'auto'
+    });
+  });
+});
+
 test('resolveModelConfig can use the active provider credential from local auth', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-config-'));
   try {

@@ -218,12 +218,6 @@ export const CATALOG_SNAPSHOT = {
         api: 'openai-completions',
         baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
       },
-      pricing: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0
-      },
       compat: {
         supportsStore: false,
         supportsDeveloperRole: false,
@@ -253,12 +247,6 @@ export const CATALOG_SNAPSHOT = {
       routing: {
         api: 'openai-completions',
         baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
-      },
-      pricing: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0
       },
       compat: {
         supportsStore: false,
@@ -291,12 +279,6 @@ export const CATALOG_SNAPSHOT = {
         api: 'openai-completions',
         baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
       },
-      pricing: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0
-      },
       compat: {
         supportsStore: false,
         supportsDeveloperRole: false,
@@ -327,12 +309,6 @@ export const CATALOG_SNAPSHOT = {
       routing: {
         api: 'openai-completions',
         baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
-      },
-      pricing: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0
       },
       compat: {
         supportsStore: false,
@@ -365,12 +341,6 @@ export const CATALOG_SNAPSHOT = {
         api: 'openai-completions',
         baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
       },
-      pricing: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0
-      },
       compat: {
         supportsStore: false,
         supportsDeveloperRole: false,
@@ -401,12 +371,6 @@ export const CATALOG_SNAPSHOT = {
       routing: {
         api: 'openai-completions',
         baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
-      },
-      pricing: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0
       },
       compat: {
         supportsStore: false,

@@ -47,6 +47,7 @@ test('model metadata resolves known hosted models without crossing provider boun
   assert.equal(openai?.capabilities.contextWindow, 128_000);
   assert.equal(zhipu?.capabilities.contextWindow, 1_000_000);
   assert.equal(zhipu?.routing?.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
+  assert.equal(zhipu?.pricing, undefined);
   assert.equal(resolveModelMetadata('anthropic', 'anthropic/claude-sonnet-4.6'), null);
   assert.equal(resolveModelMetadata('openrouter', 'glm-5.2'), null);
 });
@@ -144,6 +145,28 @@ test('Pi Z.AI Coding CN model rows map to the native Zhipu provider', () => {
   assert.equal(mapped?.routing?.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
   assert.equal(mapped?.capabilities.toolCalling, false);
   assert.equal(mapped?.source.upstreamProvider, 'zai-coding-cn');
+});
+
+test('Pi Z.AI model rows map to the native Zhipu provider', () => {
+  const mapped = mapPiModelToCatalogEntry({
+    provider: 'zai',
+    id: 'glm-5.2',
+    name: 'GLM-5.2',
+    api: 'openai-completions',
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1_000_000,
+    maxTokens: 131_072,
+    compat: { thinkingFormat: 'zai' }
+  });
+
+  assert.equal(mapped?.provider, 'zhipu');
+  assert.equal(mapped?.model, 'glm-5.2');
+  assert.equal(mapped?.routing?.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
+  assert.equal(mapped?.capabilities.toolCalling, false);
+  assert.equal(mapped?.source.upstreamProvider, 'zai');
 });
 
 test('OpenClaw provider rows map to CLIQ provider catalog entries', () => {
