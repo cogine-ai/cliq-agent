@@ -361,6 +361,32 @@ test('decision table: builtin deny blocks plain `rm` even when user adds a broad
   }
 });
 
+test('decision table: mcp allow rules auto-approve matching server/tool calls', async () => {
+  const policy = createPolicyEngine({
+    mode: 'default',
+    table: composePermissionTable({ allow: [wsRule('mcp', 'context7/search')] })
+  });
+  const allowed = buildToolApprovalSubject({
+    definition: { name: 'mcp', access: 'exec' },
+    action: { mcp: { server: 'context7', tool: 'search', arguments: { query: 'policy' } } }
+  });
+  assert.deepEqual(await policy.decide(allowed), {
+    behavior: 'allow',
+    reason: 'allow by workspace rule "mcp: context7/search" (subject: mcp)',
+    decidedBy: 'policy'
+  });
+
+  const blocked = buildToolApprovalSubject({
+    definition: { name: 'mcp', access: 'exec' },
+    action: { mcp: { server: 'other', tool: 'search' } }
+  });
+  const blockedDecision = await policy.decide(blocked);
+  assert.equal(blockedDecision.behavior, 'ask');
+  if (blockedDecision.behavior === 'ask') {
+    assert.match(blockedDecision.prompt, /Allow MCP tool\?/);
+  }
+});
+
 test('decision table: plan channel keys include op and plan id', async () => {
   const policy = createPolicyEngine({
     mode: 'yolo',

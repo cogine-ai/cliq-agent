@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { indexClean } from './index-clean.js';
+import { checkIndexUnchanged, IndexChangedSinceValidation, indexClean } from './index-clean.js';
+import { validatorsDir } from '../../workspace/transactions/store.js';
 
 const execFileAsync = promisify(execFile);
 const ctx = (cwd: string) => ({ txId: 'tx_test', workspaceView: cwd, realCwd: cwd, signal: new AbortController().signal });
@@ -147,6 +148,92 @@ test('index-clean reports unmerged conflict files (porcelain v2 "u " records)', 
     );
     assert.ok(result.findings?.some((f) => f.path === 'a.txt'));
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function writeIndexCleanBaseline(
+  root: string,
+  txId: string,
+  baseline: Awaited<ReturnType<typeof indexClean.run>>
+): Promise<void> {
+  const dir = validatorsDir(root, txId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'builtin_index-clean.json'), JSON.stringify(baseline), 'utf8');
+}
+
+test('checkIndexUnchanged is a no-op when no validation baseline exists', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-no-baseline-'));
+  try {
+    await checkIndexUnchanged({ root, txId: 'tx_missing', realCwd: root });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('checkIndexUnchanged passes when the Git index fingerprint still matches validation', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-unchanged-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-root-'));
+  try {
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: dir });
+    await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+    await execFileAsync('git', ['config', 'user.name', 't'], { cwd: dir });
+    await writeFile(path.join(dir, 'a.txt'), 'a', 'utf8');
+    await execFileAsync('git', ['add', 'a.txt'], { cwd: dir });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: dir });
+
+    const baseline = await indexClean.run(ctx(dir));
+    await writeIndexCleanBaseline(root, 'tx_clean', baseline);
+    await checkIndexUnchanged({ root, txId: 'tx_clean', realCwd: dir });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('checkIndexUnchanged rejects when the Git index changed after validation', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-changed-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-root-changed-'));
+  try {
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: dir });
+    await execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: dir });
+    await execFileAsync('git', ['config', 'user.name', 't'], { cwd: dir });
+    await writeFile(path.join(dir, 'a.txt'), 'a', 'utf8');
+    await execFileAsync('git', ['add', 'a.txt'], { cwd: dir });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: dir });
+
+    const baseline = await indexClean.run(ctx(dir));
+    await writeIndexCleanBaseline(root, 'tx_dirty', baseline);
+
+    await writeFile(path.join(dir, 'b.txt'), 'staged after validation', 'utf8');
+    await execFileAsync('git', ['add', 'b.txt'], { cwd: dir });
+
+    await assert.rejects(
+      () => checkIndexUnchanged({ root, txId: 'tx_dirty', realCwd: dir }),
+      (err: unknown) =>
+        err instanceof IndexChangedSinceValidation &&
+        /Git index changed since builtin:index-clean validation/.test((err as Error).message)
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('checkIndexUnchanged skips fingerprint enforcement for not-a-git-repo validation baselines', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-nogit-baseline-'));
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-ic-nogit-cwd-'));
+  try {
+    await writeIndexCleanBaseline(root, 'tx_nogit', {
+      name: 'builtin:index-clean',
+      severity: 'blocking',
+      status: 'pass',
+      durationMs: 1,
+      message: 'not a git repository; skipping index-clean check'
+    });
+    await checkIndexUnchanged({ root, txId: 'tx_nogit', realCwd: dir });
+  } finally {
+    await rm(root, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
   }
 });

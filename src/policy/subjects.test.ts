@@ -79,6 +79,28 @@ test('buildToolApprovalSubject marks executable shell syntax unsafe for bash all
   }
 });
 
+test('buildToolApprovalSubject marks prefix-wrapped bypass attempts unsafe for bash allow rules', () => {
+  for (const bash of [
+    'timeout 5 bash -c "git status && rm -rf /"',
+    'nohup bash -c "git status && rm -rf /"',
+    'exec bash -c "git status && rm -rf /"',
+    'eval "rm -rf /"',
+    "timeout 5 env -S 'bash -c \"git status && rm -rf /\"'",
+    "timeout 5 /usr/bin/env -S 'python -c \"import os; os.system(\\\"rm -rf /\\\")\"'",
+    "python -c 'import os; os.system(\"rm -rf /\")'"
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+
+    if (subject.kind === 'tool') {
+      assert.equal(subject.channel.kind, 'bash');
+      assert.equal(subject.channel.unsafeForAllow, true, bash);
+    }
+  }
+});
+
 test('buildToolApprovalSubject marks TX edits as staged and includes the path', () => {
   const subject = buildToolApprovalSubject({
     definition: { name: 'edit', access: 'write' },
