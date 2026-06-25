@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { assertHeadlessCompatible, openTurnTx, finishTurnTx, abortStaleImplicitTurnTx, type TxRunnerOptions } from './tx-runner.js';
+import { finalizeTx } from '../workspace/transactions/coordinator.js';
 import { createSession, mutateSession } from '../session/store.js';
 import { openRecordId } from '../workspace/transactions/types.js';
 import { overlayDir, resolveTxRoot, readTxState } from '../workspace/transactions/store.js';
@@ -314,7 +315,24 @@ test('abortStaleImplicitTurnTx aborts a staging implicit tx and emits tx-aborted
   });
 });
 
-test('abortStaleImplicitTurnTx is a no-op when the tx is not staging', async () => {
+test('abortStaleImplicitTurnTx aborts finalized implicit txs left mid-pipeline', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'one');
+    const opts: TxRunnerOptions = baseOpts({ applyPolicy: 'auto-on-pass' });
+    const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
+    const writer = createOverlayWriter(ws, overlayDir(resolveTxRoot(home), open.tx!.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+    await finalizeTx(ctx, open.tx!.id);
+    events.length = 0;
+    await abortStaleImplicitTurnTx(ctx, open.tx!, async (e) => { events.push(e); });
+    assert.ok(events.some((e) => e.type === 'tx-aborted'));
+    const tx = await readTxState(resolveTxRoot(home), open.tx!.id);
+    assert.equal(tx?.state, 'aborted');
+    assert.equal(ctx.session.activeTxId, undefined);
+  });
+});
+
+test('abortStaleImplicitTurnTx is a no-op when the tx already applied', async () => {
   await withTrEnv(async ({ ctx, ws, home, events }) => {
     await commitInitialFile(ws, 'a.txt', 'one');
     const opts: TxRunnerOptions = baseOpts({ applyPolicy: 'auto-on-pass' });

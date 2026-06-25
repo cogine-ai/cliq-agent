@@ -55,6 +55,13 @@ export type CoordinatorCtx = {
 
 export type EventEmitter = (event: RuntimeEvent) => Promise<void> | void;
 
+/** Implicit per-turn txs left in these states never completed {@link finishTurnTx}. */
+const STALE_IMPLICIT_TURN_TX_STATES = new Set<Transaction['state']>([
+  'staging',
+  'finalized',
+  'validated'
+]);
+
 export function assertHeadlessCompatible(opts: TxRunnerOptions): void {
   if (opts.headless && opts.applyPolicy === 'interactive') {
     throw new Error('--tx-apply interactive requires a TTY; use --tx-apply manual-only or auto-on-pass for headless runs');
@@ -107,7 +114,7 @@ export async function abortStaleImplicitTurnTx(
   emit: EventEmitter
 ): Promise<void> {
   const current = await getActiveTx(ctx);
-  if (!current || current.id !== tx.id || current.state !== 'staging') {
+  if (!current || current.id !== tx.id || !STALE_IMPLICIT_TURN_TX_STATES.has(current.state)) {
     return;
   }
   await abortTx(ctx, tx.id, { reason: 'user-abort' });
