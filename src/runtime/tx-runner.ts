@@ -1,13 +1,13 @@
 import type { TxBashPolicy, TxValidatorsConfig, TxStagedViewConfig } from '../workspace/config.js';
 import { formatTxApplyReview, readTxReviewSnapshot } from '../workspace/transactions/inspect.js';
 import {
+  abortTx,
   openTx,
   getActiveTx,
   finalizeTx,
   validateTx,
   approveTx,
-  applyTx,
-  abortTx
+  applyTx
 } from '../workspace/transactions/coordinator.js';
 import type {
   BashEffect,
@@ -94,6 +94,30 @@ export async function openTurnTx(
   const tx = await openTx(ctx, { explicit: false });
   await emit({ type: 'tx-staging-start', txId: tx.id, trigger: 'auto-turn' });
   return { tx, opened: true };
+}
+
+/**
+ * Abort an implicit per-turn tx left in `staging` when a turn exits without
+ * {@link finishTurnTx}. Prevents the next turn from reusing the orphan with
+ * `opened: false`, which would skip end-of-turn finalize/apply forever.
+ */
+export async function abortStaleImplicitTurnTx(
+  ctx: CoordinatorCtx,
+  tx: Transaction,
+  emit: EventEmitter
+): Promise<void> {
+  const current = await getActiveTx(ctx);
+  if (!current || current.id !== tx.id || current.state !== 'staging') {
+    return;
+  }
+  await abortTx(ctx, tx.id, { reason: 'user-abort' });
+  await emit({
+    type: 'tx-aborted',
+    txId: tx.id,
+    reason: 'user-abort',
+    artifactRef: `tx/${tx.id}/`,
+    failedValidators: undefined
+  });
 }
 
 /**

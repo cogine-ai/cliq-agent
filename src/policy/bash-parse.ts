@@ -72,6 +72,7 @@ export function bashCommandHasUnsafeAllowSyntax(commandLine: string): boolean {
 
 function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number): boolean {
   if (unsafeAllowSyntaxInFragment(commandLine)) return true;
+  if (envSplitExpansionsHaveUnsafeSyntax(commandLine)) return true;
 
   const head = parseBashCommandHead(commandLine);
   if (head && (head.startsWith('-') || BASH_DELEGATION_HEADS.has(head))) return true;
@@ -295,6 +296,32 @@ function tokenBasename(token: string): string {
   return token.includes('/') ? token.split('/').filter(Boolean).pop()! : token;
 }
 
+/**
+ * `env -S` / `env --split-string=` execute the split payload as a real argv
+ * vector, so compound operators inside the quoted split string are live syntax,
+ * not literals. Outer-line quote scanning hides them from
+ * {@link unsafeAllowSyntaxInFragment}; expand and re-check the payload here.
+ */
+function envSplitExpansionsHaveUnsafeSyntax(commandLine: string): boolean {
+  if (typeof commandLine !== 'string') return false;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return false;
+
+  const tokens = tokenizeWords(trimmed);
+  let i = 0;
+  while (i < tokens.length) {
+    const expanded = expandEnvSplitString(tokens, i);
+    if (!expanded) {
+      i += 1;
+      continue;
+    }
+    const splitCommand = expanded.tokens.join(' ');
+    if (unsafeAllowSyntaxInFragment(splitCommand)) return true;
+    tokens.splice(i, expanded.consumed, ...expanded.tokens);
+  }
+  return false;
+}
+
 function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consumed: number; tokens: string[] } | null {
   if (tokenBasename(tokens[wrapperIndex]!) !== 'env') return null;
   let splitFlagIndex: number | null = null;
@@ -317,6 +344,19 @@ function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consume
         tokens: splitTokens
       };
     }
+    const shortSplit = extractEnvShortSplitString(token);
+    if (shortSplit) {
+      if (shortSplit.attached !== null) {
+        const splitTokens = tokenizeWords(shortSplit.attached);
+        if (splitTokens.length === 0) return null;
+        return {
+          consumed: i - wrapperIndex + 1,
+          tokens: splitTokens
+        };
+      }
+      splitFlagIndex = i;
+      break;
+    }
     const skipped = skipEnvOption(tokens, i);
     if (skipped === i) break;
     i = skipped;
@@ -330,6 +370,16 @@ function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consume
     consumed: splitFlagIndex - wrapperIndex + 2,
     tokens: splitTokens
   };
+}
+
+function extractEnvShortSplitString(token: string): { attached: string | null } | null {
+  if (!token.startsWith('-') || token.startsWith('--') || token === '-') return null;
+  const splitFlagOffset = token.indexOf('S', 1);
+  if (splitFlagOffset === -1) return null;
+  const precedingShortFlags = token.slice(1, splitFlagOffset);
+  if (!/^[iv]*$/.test(precedingShortFlags)) return null;
+  const attached = token.slice(splitFlagOffset + 1);
+  return { attached: attached === '' ? null : attached };
 }
 
 function skipEnvOption(tokens: string[], index: number): number {
