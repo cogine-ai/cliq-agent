@@ -28,6 +28,17 @@ test('registry requires explicit model for ollama and openai-compatible', () => 
   assert.equal(getModelProvider('openai-compatible').getDefaultModel(), null);
 });
 
+test('registry exposes zhipu defaults and catalog-backed metadata', () => {
+  const zhipu = getModelProvider('zhipu');
+
+  assert.equal(zhipu.name, 'zhipu');
+  assert.equal(zhipu.displayName, 'Zhipu AI');
+  assert.equal(zhipu.defaultBaseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
+  assert.equal(zhipu.apiKeyEnv, 'ZHIPU_API_KEY');
+  assert.equal(zhipu.requiresApiKey, true);
+  assert.equal(zhipu.getDefaultModel(), 'glm-5.2');
+});
+
 test('known model descriptors are text-to-text compatible', () => {
   for (const provider of ['openrouter', 'anthropic', 'openai', 'zhipu'] as const) {
     const descriptors = getModelProvider(provider).getKnownModels();

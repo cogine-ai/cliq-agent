@@ -226,7 +226,9 @@ test('bashCommandHasUnsafeAllowSyntax inspects shell -c scripts hidden behind pr
     "timeout 5 env -S 'bash -c \"git status && rm -rf /\"'",
     "nohup /usr/bin/env -S 'bash -c \"git status && rm -rf /\"'",
     "/usr/bin/time -p env --split-string='bash -c \"git status && rm -rf /\"'",
-    "timeout 5 /usr/bin/env -S 'python -c \"import os; os.system(\\\"rm -rf /\\\")\"'"
+    "timeout 5 /usr/bin/env -S 'python -c \"import os; os.system(\\\"rm -rf /\\\")\"'",
+    "timeout 5 env --split-string 'bash -c \"git status && rm -rf /\"'",
+    "nice -n 10 env --split-string 'bash -c \"git status && rm -rf /\"'"
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }

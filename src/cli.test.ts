@@ -1036,6 +1036,30 @@ test('parseArgs accepts model provider flags', () => {
   );
 });
 
+test('parseArgs accepts the native zhipu provider flag', () => {
+  assert.deepEqual(
+    parseArgs([
+      'node',
+      'src/index.ts',
+      '--provider',
+      'zhipu',
+      '--model',
+      'glm-5.2',
+      'chat'
+    ]),
+    {
+      cmd: 'chat',
+      prompt: '',
+      policy: 'default',
+      skills: [],
+      model: {
+        provider: 'zhipu',
+        model: 'glm-5.2'
+      }
+    }
+  );
+});
+
 test('parseArgs rejects missing model flag values', () => {
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--provider']), /Missing value for --provider/i);
   assert.throws(() => parseArgs(['node', 'src/index.ts', '--model']), /Missing value for --model/i);
@@ -1115,6 +1139,9 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   );
   assert.match(output, /auto \| on \| off/);
   assert.match(output, /openai-compatible/);
+  assert.match(output, /zhipu/);
+  assert.match(output, /ZHIPU_API_KEY/);
+  assert.match(output, /ZHIPUAI_API_KEY/);
   assert.match(output, /--base-url URL/);
 });
 
