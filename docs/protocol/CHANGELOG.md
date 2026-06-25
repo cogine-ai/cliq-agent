@@ -21,7 +21,9 @@ For each entry, include date, author, what changed, and migration guidance if br
 
 ---
 
-## [Unreleased] — 2026-06-21 — macopc
+## [Unreleased]
+
+## [0.15.0] — 2026-06-25 — macopc
 
 ### Additive
 - `src/protocol/model/actions.ts` adds exported `McpAction` and the `{ mcp: McpAction }` `ModelAction` variant for model-specified MCP server/tool calls. Consumers that exhaustively switch over `ModelAction` should add an `mcp` branch.
