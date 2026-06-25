@@ -75,6 +75,24 @@ export const CATALOG_SNAPSHOT = {
       source: { kind: 'cliq-overlay', confidence: 'high' }
     },
     {
+      id: 'zhipu',
+      displayName: 'Zhipu AI',
+      kind: 'hosted-api',
+      auth: { kind: 'api-key', envVar: 'ZHIPU_API_KEY', required: true },
+      configSources: ['ENV', 'Workspace', 'Global', 'CLI'],
+      setup: {
+        primary: ['Set ZHIPU_API_KEY, then choose a GLM model.'],
+        docsUrl: 'https://docs.bigmodel.cn/cn/coding-plan/overview'
+      },
+      modelListSource: {
+        kind: 'snapshot',
+        description: 'Static CLIQ catalog generated from upstream metadata.'
+      },
+      defaultModelId: 'glm-5.2',
+      visibleModelLimit: 8,
+      source: { kind: 'cliq-overlay', confidence: 'high' }
+    },
+    {
       id: 'ollama',
       displayName: 'Ollama',
       kind: 'local-runtime',
@@ -181,6 +199,191 @@ export const CATALOG_SNAPSHOT = {
         confidence: 'medium',
         upstreamProvider: 'openai',
         upstreamModelId: 'gpt-5.2'
+      }
+    },
+    {
+      provider: 'zhipu',
+      model: 'glm-4.5-air',
+      displayName: 'GLM-4.5-Air',
+      capabilities: {
+        input: ['text'],
+        output: ['text'],
+        streaming: true,
+        reasoning: true,
+        toolCalling: false,
+        contextWindow: 131_072,
+        maxOutputTokens: 98_304
+      },
+      routing: {
+        api: 'openai-completions',
+        baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
+      },
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        thinkingFormat: 'zai'
+      },
+      source: {
+        kind: 'pi',
+        confidence: 'medium',
+        upstreamProvider: 'zai-coding-cn',
+        upstreamModelId: 'glm-4.5-air'
+      }
+    },
+    {
+      provider: 'zhipu',
+      model: 'glm-4.7',
+      displayName: 'GLM-4.7',
+      capabilities: {
+        input: ['text'],
+        output: ['text'],
+        streaming: true,
+        reasoning: true,
+        toolCalling: false,
+        contextWindow: 204_800,
+        maxOutputTokens: 131_072
+      },
+      routing: {
+        api: 'openai-completions',
+        baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
+      },
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        thinkingFormat: 'zai',
+        zaiToolStream: true
+      },
+      source: {
+        kind: 'pi',
+        confidence: 'medium',
+        upstreamProvider: 'zai-coding-cn',
+        upstreamModelId: 'glm-4.7'
+      }
+    },
+    {
+      provider: 'zhipu',
+      model: 'glm-5-turbo',
+      displayName: 'GLM-5-Turbo',
+      capabilities: {
+        input: ['text'],
+        output: ['text'],
+        streaming: true,
+        reasoning: true,
+        toolCalling: false,
+        contextWindow: 200_000,
+        maxOutputTokens: 131_072
+      },
+      routing: {
+        api: 'openai-completions',
+        baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
+      },
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        thinkingFormat: 'zai',
+        zaiToolStream: true
+      },
+      source: {
+        kind: 'pi',
+        confidence: 'medium',
+        upstreamProvider: 'zai-coding-cn',
+        upstreamModelId: 'glm-5-turbo'
+      }
+    },
+    {
+      provider: 'zhipu',
+      model: 'glm-5.1',
+      displayName: 'GLM-5.1',
+      capabilities: {
+        input: ['text'],
+        output: ['text'],
+        streaming: true,
+        reasoning: true,
+        toolCalling: false,
+        contextWindow: 200_000,
+        maxOutputTokens: 131_072
+      },
+      routing: {
+        api: 'openai-completions',
+        baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
+      },
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        thinkingFormat: 'zai',
+        zaiToolStream: true
+      },
+      source: {
+        kind: 'pi',
+        confidence: 'medium',
+        upstreamProvider: 'zai-coding-cn',
+        upstreamModelId: 'glm-5.1'
+      }
+    },
+    {
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      displayName: 'GLM-5.2',
+      capabilities: {
+        input: ['text'],
+        output: ['text'],
+        streaming: true,
+        reasoning: true,
+        toolCalling: false,
+        contextWindow: 1_000_000,
+        maxOutputTokens: 131_072
+      },
+      routing: {
+        api: 'openai-completions',
+        baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
+      },
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: true,
+        thinkingFormat: 'zai',
+        zaiToolStream: true
+      },
+      source: {
+        kind: 'pi',
+        confidence: 'medium',
+        upstreamProvider: 'zai-coding-cn',
+        upstreamModelId: 'glm-5.2'
+      }
+    },
+    {
+      provider: 'zhipu',
+      model: 'glm-5v-turbo',
+      displayName: 'GLM-5V-Turbo',
+      capabilities: {
+        input: ['text', 'image'],
+        output: ['text'],
+        streaming: true,
+        reasoning: true,
+        toolCalling: false,
+        contextWindow: 200_000,
+        maxOutputTokens: 131_072
+      },
+      routing: {
+        api: 'openai-completions',
+        baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4'
+      },
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        thinkingFormat: 'zai',
+        zaiToolStream: true
+      },
+      source: {
+        kind: 'pi',
+        confidence: 'medium',
+        upstreamProvider: 'zai-coding-cn',
+        upstreamModelId: 'glm-5v-turbo'
       }
     }
   ]

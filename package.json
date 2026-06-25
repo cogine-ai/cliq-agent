@@ -21,7 +21,9 @@
     "ollama",
     "openrouter",
     "openai",
-    "anthropic"
+    "anthropic",
+    "zhipu",
+    "glm"
   ],
   "bin": {
     "cliq": "dist/index.js"

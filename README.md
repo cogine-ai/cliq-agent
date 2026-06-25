@@ -64,6 +64,7 @@ Supported providers:
 - `openrouter`: requires `OPENROUTER_API_KEY`
 - `anthropic`: requires `ANTHROPIC_API_KEY`
 - `openai`: requires `OPENAI_API_KEY`
+- `zhipu`: requires `ZHIPU_API_KEY` and uses the Zhipu AI Coding Plan endpoint by default
 - `openai-compatible`: requires `--base-url` or `CLIQ_MODEL_BASE_URL`; uses `CLIQ_MODEL_API_KEY` when set
 
 Select a provider from the CLI:
@@ -71,6 +72,7 @@ Select a provider from the CLI:
 ```bash
 cliq --provider anthropic --model claude-sonnet-4-20250514 "inspect this repo"
 cliq --provider openai --model gpt-5.2 "inspect this repo"
+cliq --provider zhipu --model glm-5.2 "inspect this repo"
 cliq --provider ollama --model qwen3.5:4b "inspect this repo"
 ```
 
@@ -80,6 +82,7 @@ Save provider credentials locally:
 cliq providers auth set openai --api-key
 cliq providers auth set anthropic --api-key
 cliq providers auth set openrouter --api-key
+cliq providers auth set zhipu --api-key
 ```
 
 Check provider status:

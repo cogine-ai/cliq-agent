@@ -182,6 +182,9 @@ function envApiKeyNames(provider: ProviderName): string[] {
   if (provider === 'openai-compatible') {
     return ['CLIQ_MODEL_API_KEY', 'OPENAI_COMPATIBLE_API_KEY'];
   }
+  if (provider === 'zhipu') {
+    return ['ZHIPU_API_KEY', 'ZHIPUAI_API_KEY'];
+  }
   const apiKeyEnv = getModelProvider(provider).apiKeyEnv;
   return apiKeyEnv ? [apiKeyEnv] : [];
 }

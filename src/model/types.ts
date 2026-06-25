@@ -3,6 +3,7 @@ export type ProviderName =
   | 'anthropic'
   | 'openai'
   | 'openai-compatible'
+  | 'zhipu'
   | 'ollama';
 
 export type ModelModality = 'text' | 'image' | 'audio' | 'video';

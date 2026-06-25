@@ -66,9 +66,10 @@ with mode `0600` and command output never prints the saved secret value.
 value; `--api-key-stdin` reads one key line from stdin for scripts.
 
 Environment variables such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`OPENROUTER_API_KEY`, `CLIQ_MODEL_API_KEY`, or `OPENAI_COMPATIBLE_API_KEY` still
-work and take precedence over the auth file. Workspace config may hold
-non-secret defaults such as provider, model, base URL, and streaming mode.
+`OPENROUTER_API_KEY`, `ZHIPU_API_KEY`, `ZHIPUAI_API_KEY`, `CLIQ_MODEL_API_KEY`,
+or `OPENAI_COMPATIBLE_API_KEY` still work and take precedence over the auth
+file. Workspace config may hold non-secret defaults such as provider, model,
+base URL, and streaming mode.
 
 The TUI can also collect API keys with masked input. Persisting a secret still
 requires an explicit save action. For non-secret provider/model defaults, the

@@ -21,7 +21,9 @@ const MODEL_ENV_KEYS = [
   'OPENROUTER_API_KEY',
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
-  'OPENAI_COMPATIBLE_API_KEY'
+  'OPENAI_COMPATIBLE_API_KEY',
+  'ZHIPU_API_KEY',
+  'ZHIPUAI_API_KEY'
 ] as const;
 
 async function withEnv<T>(env: Record<string, string | undefined>, fn: () => T | Promise<T>) {
@@ -376,5 +378,27 @@ test('provider status distinguishes unavailable local Ollama from missing remote
     const openai = report.providers.find((provider) => provider.provider === 'openai');
     assert.equal(openai?.state, 'not-configured');
     assert.deepEqual(openai?.issues.map((issue) => issue.code), ['missing-api-key']);
+  });
+});
+
+test('provider status reports Zhipu env credentials and default model without leaking secrets', async () => {
+  await withEnv({ ZHIPU_API_KEY: 'zhipu-secret' }, async () => {
+    const report = await buildProviderStatusReport({
+      workspace: {},
+      cli: { provider: 'zhipu' },
+      discoverOllamaModels: unavailableOllama
+    });
+
+    const zhipu = report.providers[0]!;
+    assert.equal(report.activeProvider, 'zhipu');
+    assert.equal(report.activeModel, 'glm-5.2');
+    assert.equal(zhipu.provider, 'zhipu');
+    assert.equal(zhipu.current, true);
+    assert.equal(zhipu.state, 'configured');
+    assert.deepEqual(zhipu.sources, ['ENV', 'CLI']);
+    assert.equal(zhipu.model, 'glm-5.2');
+    assert.equal(zhipu.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
+    assert.match(formatProviderStatusRow(zhipu), /Zhipu AI\s+Current · Configured · ENV, CLI · using glm-5\.2/);
+    assert.doesNotMatch(JSON.stringify(report), /zhipu-secret/);
   });
 });

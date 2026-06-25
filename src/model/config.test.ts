@@ -22,7 +22,9 @@ const MODEL_ENV_KEYS = [
   'OPENROUTER_API_KEY',
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
-  'OPENAI_COMPATIBLE_API_KEY'
+  'OPENAI_COMPATIBLE_API_KEY',
+  'ZHIPU_API_KEY',
+  'ZHIPUAI_API_KEY'
 ] as const;
 
 async function withEnv<T>(env: Record<string, string | undefined>, fn: () => T | Promise<T>) {
@@ -185,6 +187,55 @@ test('resolveModelConfig preserves explicit OpenRouter configuration', async () 
       model: 'anthropic/claude-sonnet-4.6',
       baseUrl: 'https://openrouter.ai/api/v1',
       apiKey: 'or-key',
+      streaming: 'auto'
+    });
+  });
+});
+
+test('resolveModelConfig preserves explicit Zhipu configuration', async () => {
+  await withEnv({ ZHIPU_API_KEY: 'zhipu-key' }, async () => {
+    assert.deepEqual(await resolveModelConfig({ workspace: {}, cli: { provider: 'zhipu' } }), {
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      apiKey: 'zhipu-key',
+      streaming: 'auto'
+    });
+  });
+});
+
+test('resolveModelConfig accepts the ZHIPUAI_API_KEY alias for Zhipu', async () => {
+  await withEnv({ ZHIPUAI_API_KEY: 'zhipuai-key' }, async () => {
+    assert.deepEqual(await resolveModelConfig({ workspace: {}, cli: { provider: 'zhipu', model: 'glm-5.2' } }), {
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      apiKey: 'zhipuai-key',
+      streaming: 'auto'
+    });
+  });
+});
+
+test('formatModelSetupMessage documents both Zhipu API key env aliases', () => {
+  const message = formatModelSetupMessage(
+    new ModelSetupRequiredError({
+      reason: 'missing-provider-api-key',
+      provider: 'zhipu',
+      missingEnvVar: 'ZHIPU_API_KEY'
+    })
+  );
+
+  assert.match(message, /ZHIPU_API_KEY/);
+  assert.match(message, /ZHIPUAI_API_KEY/);
+});
+
+test('resolveModelConfig prefers ZHIPU_API_KEY over the ZHIPUAI_API_KEY alias for Zhipu', async () => {
+  await withEnv({ ZHIPU_API_KEY: 'zhipu-key', ZHIPUAI_API_KEY: 'zhipuai-key' }, async () => {
+    assert.deepEqual(await resolveModelConfig({ workspace: {}, cli: { provider: 'zhipu', model: 'glm-5.2' } }), {
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      apiKey: 'zhipu-key',
       streaming: 'auto'
     });
   });
