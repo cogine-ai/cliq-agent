@@ -161,7 +161,6 @@ type ParsedArgsBase = {
   txMode?: TxMode;
   txApply?: TxApplyPolicy;
   maxTurns?: number;
-  tui?: boolean;
   classic?: boolean;
   tuiDebug?: boolean;
   /**
@@ -1101,7 +1100,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let txMode: TxMode | undefined;
   let txApply: TxApplyPolicy | undefined;
   let maxTurns: number | undefined;
-  let tui = false;
   let classic = false;
   let tuiDebug = false;
   let policyExplicit = false;
@@ -1165,13 +1163,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
 
-    if (token === '--tui') {
-      tui = true;
-      continue;
-    }
-
-    if (token.startsWith('--tui=')) {
-      throw new Error('--tui does not accept a value');
+    if (token === '--tui' || token.startsWith('--tui=')) {
+      throw new Error(
+        '--tui has been removed; the Ink TUI is already the default on a TTY. ' +
+          'Use --classic or CLIQ_TUI=0 to force the legacy readline REPL.'
+      );
     }
 
     if (token === '--classic') {
@@ -1416,7 +1412,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
-    ...(tui ? { tui } : {}),
     ...(classic ? { classic } : {}),
     ...(tuiDebug ? { tuiDebug } : {}),
     ...(cliPermissions ? { cliPermissions } : {})
@@ -1426,7 +1421,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ...(txMode !== undefined ? { txMode } : {}),
     ...(txApply !== undefined ? { txApply } : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
-    ...(tui ? { tui } : {}),
     ...(classic ? { classic } : {}),
     ...(tuiDebug ? { tuiDebug } : {}),
     ...(cliPermissions ? { cliPermissions } : {})
@@ -1485,7 +1479,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     return { cmd: 'version', policy, skills, model };
   }
   // Fallback: any unrecognized first token is a compatibility shortcut for
-  // `cliq run`. baseExtras carry --tui/--classic/--policy explicit flags so the
+  // `cliq run`. baseExtras carry --classic/--policy explicit flags so the
   // dispatch layer sees the same surface here as in the explicit command path.
   return { cmd: 'run', prompt: args.join(' '), policy, skills, model, ...baseExtras };
 }
@@ -1683,7 +1677,6 @@ Options:
   --max-turns N            Maximum model/tool iterations per turn (default 100)
   --tx <off|edit>          Override workspace config transactions.mode for this run
   --tx-apply <policy>      Override transactions.applyPolicy (interactive | auto-on-pass | manual-only)
-  --tui                    Force the Ink TUI (already the default on a TTY; overrides CLIQ_TUI=0)
   --tui-debug              Show TUI mode-change notices in the transcript
   --classic                Force the legacy readline REPL instead of the TUI
 
@@ -2954,20 +2947,9 @@ export async function runCli(argv: string[]) {
   const isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const wantsTui = resolveTuiPreference({
     classic: parsed.classic === true,
-    tui: parsed.tui === true,
     envOptOut: process.env.CLIQ_TUI === '0',
     isTTY
   });
-  if (parsed.tui && !parsed.classic && !isTTY) {
-    // --classic is allowed to coexist with --tui and silently win, so the
-    // refusal only fires when the user actually asked the TUI to launch
-    // without a TTY.
-    process.stderr.write(
-      `--tui requires a TTY on both stdin and stdout. ` +
-        `Drop --tui for the readline REPL or use \`cliq run --jsonl\` for non-TTY workflows.\n`
-    );
-    throw new ReportedCliError('--tui requires a TTY', { exitCode: 1 });
-  }
 
   await ensureInteractiveWorkspaceTrustedForRuntime({
     cwd,
@@ -3216,16 +3198,12 @@ export async function runCli(argv: string[]) {
 }
 
 // Precedence: explicit CLI flags win over env, which wins over the default.
-// --classic is the conservative override (wins over --tui) so a hand-edited
-// shell function with both flags falls back to readline.
 export function resolveTuiPreference(opts: {
   classic: boolean;
-  tui: boolean;
   envOptOut: boolean;
   isTTY: boolean;
 }): boolean {
   if (opts.classic) return false;
-  if (opts.tui) return true;
   if (opts.envOptOut) return false;
   return opts.isTTY;
 }
