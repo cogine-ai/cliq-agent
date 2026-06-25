@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-06-25
+
+This release adds the native Zhipu AI provider, hardens bash allowlist parsing,
+and exposes MCP model actions through the consumer protocol surface.
+
+### Added
+
+- Added the `zhipu` provider with GLM model catalog entries, Zhipu Coding Plan
+  routing defaults, local credential setup, and `ZHIPU_API_KEY` /
+  `ZHIPUAI_API_KEY` environment support (#377).
+- Added model-specified MCP action protocol support so approval surfaces can
+  display MCP server and tool targets without parsing display text.
+
+### Changed
+
+- Provider documentation, package keywords, setup help, and prompt capability
+  mapping now cover Zhipu / GLM usage (#377).
+
+### Fixed
+
+- Hardened bash allowlist checks for nested shell invocations, prefix wrappers,
+  versioned interpreters, attached inline flags, `exec` / `eval`, and `env -S`
+  split strings (#371, #372).
+- Zhipu catalog entries with unknown public pricing no longer advertise zero
+  pricing as complete pricing metadata (#377).
+
 ## [0.14.3] - 2026-06-19
 
 This patch release updates the public npm package presentation after the
