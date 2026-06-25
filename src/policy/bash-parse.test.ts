@@ -29,6 +29,9 @@ test('parseBashCommandHead unwraps sudo and env style wrappers', () => {
   assert.equal(parseBashCommandHead("env FOO=bar -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead("env -u VAR -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead("env --split-string='bash -c \"git status\"'"), 'bash');
+  assert.equal(parseBashCommandHead("env -S'bash -c \"git status\"'"), 'bash');
+  assert.equal(parseBashCommandHead("env -iS 'bash -c \"git status\"'"), 'bash');
+  assert.equal(parseBashCommandHead("env -iS'bash -c \"git status\"'"), 'bash');
   assert.equal(parseBashCommandHead("env - -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead("env -- -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead('doas pacman -Syu'), 'pacman');
@@ -138,6 +141,9 @@ test('extractShellInlineScript returns the -c script for shell interpreters', ()
   assert.equal(extractShellInlineScript("env FOO=bar -S bash -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript("env -u VAR -S bash -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript('env --split-string=\'bash -c "git status"\''), 'git status');
+  assert.equal(extractShellInlineScript('env -S\'bash -c "git status"\''), 'git status');
+  assert.equal(extractShellInlineScript('env -iS \'bash -c "git status"\''), 'git status');
+  assert.equal(extractShellInlineScript('env -iS\'bash -c "git status"\''), 'git status');
   assert.equal(extractShellInlineScript('env -S bash -c'), null);
   assert.equal(extractShellInlineScript("env - -S bash -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript("env -- -S bash -c 'git status'"), 'git status');
@@ -149,12 +155,17 @@ test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside env -S spl
     "env -S 'git status && rm -rf /'",
     "env --split-string='git status && rm -rf /'",
     "env -i -S 'git status && rm -rf /'",
+    "env -S'git status && rm -rf /'",
+    "env -iS 'git status && rm -rf /'",
+    "env -iS'git status && rm -rf /'",
     "env FOO=bar -S 'git status | sh'",
     "/usr/bin/env -S 'git status; rm -rf /'"
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }
   assert.equal(bashCommandHasUnsafeAllowSyntax("env -S 'git status'"), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax("env -S'git status'"), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax("env -iS 'git status'"), false);
 });
 
 test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c scripts', () => {
@@ -172,7 +183,10 @@ test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c s
     "/usr/bin/env -i -S bash -c 'git status && rm -rf /'",
     "env FOO=bar -S bash -c 'git status && rm -rf /'",
     "env -u VAR -S bash -c 'git status && rm -rf /'",
-    'env --split-string=\'bash -c "git status && rm -rf /"\''
+    'env --split-string=\'bash -c "git status && rm -rf /"\'',
+    'env -S\'bash -c "git status && rm -rf /"\'',
+    'env -iS \'bash -c "git status && rm -rf /"\'',
+    'env -iS\'bash -c "git status && rm -rf /"\''
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }

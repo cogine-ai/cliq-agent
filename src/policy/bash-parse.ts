@@ -344,6 +344,19 @@ function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consume
         tokens: splitTokens
       };
     }
+    const shortSplit = extractEnvShortSplitString(token);
+    if (shortSplit) {
+      if (shortSplit.attached !== null) {
+        const splitTokens = tokenizeWords(shortSplit.attached);
+        if (splitTokens.length === 0) return null;
+        return {
+          consumed: i - wrapperIndex + 1,
+          tokens: splitTokens
+        };
+      }
+      splitFlagIndex = i;
+      break;
+    }
     const skipped = skipEnvOption(tokens, i);
     if (skipped === i) break;
     i = skipped;
@@ -357,6 +370,16 @@ function expandEnvSplitString(tokens: string[], wrapperIndex: number): { consume
     consumed: splitFlagIndex - wrapperIndex + 2,
     tokens: splitTokens
   };
+}
+
+function extractEnvShortSplitString(token: string): { attached: string | null } | null {
+  if (!token.startsWith('-') || token.startsWith('--') || token === '-') return null;
+  const splitFlagOffset = token.indexOf('S', 1);
+  if (splitFlagOffset === -1) return null;
+  const precedingShortFlags = token.slice(1, splitFlagOffset);
+  if (!/^[iv]*$/.test(precedingShortFlags)) return null;
+  const attached = token.slice(splitFlagOffset + 1);
+  return { attached: attached === '' ? null : attached };
 }
 
 function skipEnvOption(tokens: string[], index: number): number {
