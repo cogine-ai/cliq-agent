@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed the `--tui` rollout flag now that the Ink TUI has been the default
+  interactive surface on a TTY since v0.9.0. Use `--classic` or `CLIQ_TUI=0` to
+  opt out; passing `--tui` now returns a migration error.
+
 ## [0.15.0] - 2026-06-25
 
 This release adds the native Zhipu AI provider, hardens bash allowlist parsing,
