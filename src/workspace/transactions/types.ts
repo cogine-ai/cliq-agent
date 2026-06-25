@@ -1,4 +1,4 @@
-export type TxKind = 'edit'; // 'worktree' deferred to v0.9
+export type TxKind = 'edit'; // 'worktree' deferred — not yet implemented
 
 export type TxState =
   | 'staging'
