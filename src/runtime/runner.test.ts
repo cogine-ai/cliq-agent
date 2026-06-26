@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { resolveModelMetadata } from '../model/catalog/index.js';
-import type { ModelClient } from '../model/types.js';
+import type { ModelClient, ModelRequestMode } from '../model/types.js';
 import { approvePlan, createDraftPlan, finalizePlan, readPlanArtifact, readPlanProgress } from '../plans/store.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { createSession } from '../session/store.js';
@@ -15,11 +15,29 @@ import type { RuntimeEvent } from '../protocol/runtime/events.js';
 import { createRunner } from './runner.js';
 import type { TxRunnerOptions } from './tx-runner.js';
 
-function completion(content: string) {
+function completion(
+  content: string,
+  overrides?: {
+    mode?: ModelRequestMode;
+    streaming?: boolean;
+    toolNames?: string[];
+  }
+) {
+  const mode = overrides?.mode ?? 'text-action';
+  const streaming = overrides?.streaming ?? false;
   return {
     content,
     provider: 'openrouter' as const,
-    model: 'test-model'
+    model: 'test-model',
+    effectiveRequest: {
+      provider: 'openrouter' as const,
+      model: 'test-model',
+      mode,
+      streaming,
+      baseInstructionChars: 0,
+      inputItemCount: 0,
+      toolNames: overrides?.toolNames ?? []
+    }
   };
 }
 
@@ -554,7 +572,16 @@ test('runner prioritizes structured tool calls and replays typed tool results be
                 name: 'bash',
                 arguments: { command: 'pwd' }
               }
-            ]
+            ],
+            effectiveRequest: {
+              provider: 'openrouter' as const,
+              model: 'test-model',
+              mode: 'native-tools' as const,
+              streaming: false,
+              baseInstructionChars: 0,
+              inputItemCount: 0,
+              toolNames: ['bash']
+            }
           };
         }
 
