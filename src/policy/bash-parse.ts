@@ -45,6 +45,8 @@ const VERSIONED_SCRIPT_INTERPRETER_PATTERNS: readonly RegExp[] = [
 ];
 
 const BUSYBOX_HEAD = 'busybox';
+const DIRECT_WRAPPED_DENY_HEADS = new Set([BUSYBOX_HEAD, 'builtin']);
+const PRIVILEGE_WRAPPER_HEADS = new Set(['runuser', 'su', 'sudo']);
 const MAX_SHELL_INLINE_DEPTH = 8;
 
 const SHELL_OPTION_VALUE_FLAGS: ReadonlySet<string> = new Set([
@@ -77,7 +79,95 @@ export function bashCommandHasUnsafeAllowSyntax(commandLine: string): boolean {
  * or null when no such head is present.
  */
 export function bashNestedBuiltinDenyHead(commandLine: string): string | null {
+  const direct = bashDirectWrappedBuiltinDenyHead(commandLine);
+  if (direct) return direct;
+
+  const privilegeScript = extractPrivilegeWrapperInlineScript(commandLine);
+  if (privilegeScript !== null) {
+    const head = parseBashCommandHead(privilegeScript);
+    if (head && BUILTIN_BASH_DENY_HEADS.has(head)) return head;
+    const nested = bashNestedBuiltinDenyHeadInner(privilegeScript, 0);
+    if (nested) return nested;
+  }
+
   return bashNestedBuiltinDenyHeadInner(commandLine, 0);
+}
+
+function bashDirectWrappedBuiltinDenyHead(commandLine: string): string | null {
+  if (typeof commandLine !== 'string') return null;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return null;
+
+  const tokens = tokenizeWords(trimmed);
+  let i = 0;
+  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
+    i += 1;
+  }
+  while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
+    const expanded = expandEnvSplitString(tokens, i);
+    if (expanded) {
+      tokens.splice(i, expanded.consumed, ...expanded.tokens);
+      continue;
+    }
+    i = skipWrapperFlags(tokens, i);
+    if (i >= tokens.length) return null;
+  }
+  if (i >= tokens.length) return null;
+
+  const head = tokenBasename(tokens[i]!);
+  if (!DIRECT_WRAPPED_DENY_HEADS.has(head)) return null;
+
+  let j = i + 1;
+  while (j < tokens.length && tokens[j]!.startsWith('-')) {
+    j += 1;
+  }
+  if (j >= tokens.length) return null;
+
+  const sub = tokenBasename(tokens[j]!);
+  return BUILTIN_BASH_DENY_HEADS.has(sub) ? sub : null;
+}
+
+function extractPrivilegeWrapperInlineScript(commandLine: string): string | null {
+  if (typeof commandLine !== 'string') return null;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return null;
+
+  const tokens = tokenizeWords(trimmed);
+  let i = 0;
+  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
+    i += 1;
+  }
+  while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
+    const expanded = expandEnvSplitString(tokens, i);
+    if (expanded) {
+      tokens.splice(i, expanded.consumed, ...expanded.tokens);
+      continue;
+    }
+    i = skipWrapperFlags(tokens, i);
+    if (i >= tokens.length) return null;
+  }
+  if (i >= tokens.length) return null;
+
+  return extractPrivilegeWrapperInlineScriptFromTokens(tokens, i);
+}
+
+function extractPrivilegeWrapperInlineScriptFromTokens(tokens: string[], startIndex: number): string | null {
+  const head = tokenBasename(tokens[startIndex]!);
+  if (!PRIVILEGE_WRAPPER_HEADS.has(head)) return null;
+
+  for (let i = startIndex + 1; i < tokens.length; i += 1) {
+    const token = tokens[i]!;
+    if (token === '-c' || token === '--command') {
+      return tokens[i + 1] ?? null;
+    }
+    if (token.startsWith('--command=')) {
+      return token.slice('--command='.length);
+    }
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(token)) {
+      return tokens[i + 1] ?? null;
+    }
+  }
+  return null;
 }
 
 function bashNestedBuiltinDenyHeadInner(commandLine: string, depth: number): string | null {
