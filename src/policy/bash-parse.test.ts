@@ -32,6 +32,8 @@ test('parseBashCommandHead unwraps sudo and env style wrappers', () => {
   assert.equal(parseBashCommandHead("env -S'bash -c \"git status\"'"), 'bash');
   assert.equal(parseBashCommandHead("env -iS 'bash -c \"git status\"'"), 'bash');
   assert.equal(parseBashCommandHead("env -iS'bash -c \"git status\"'"), 'bash');
+  assert.equal(parseBashCommandHead("env -ivS'git status'"), 'git');
+  assert.equal(parseBashCommandHead("env -uS'git status'"), null);
   assert.equal(parseBashCommandHead("env - -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead("env -- -S bash -c 'git status'"), 'bash');
   assert.equal(parseBashCommandHead('doas pacman -Syu'), 'pacman');
