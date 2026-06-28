@@ -335,6 +335,29 @@ test('decision table: bash allow rules do not auto-approve delegation or interpr
   }
 });
 
+test('decision table: git shell aliases cannot be auto-approved by bash git allow rules', async () => {
+  const policy = createPolicyEngine({
+    mode: 'default',
+    table: composePermissionTable({ allow: [wsRule('bash', 'git *')] })
+  });
+
+  for (const bash of [
+    "git -c alias.x='!rm -rf /' x",
+    "git -c alias.x='!bash -c \"rm -rf /\"' x",
+    'git -c alias.status="!rm -rf /" status'
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+    const decision = await policy.decide(subject);
+    assert.equal(decision.behavior, 'deny', bash);
+    if (decision.behavior === 'deny') {
+      assert.match(decision.reason, /builtin/);
+    }
+  }
+});
+
 test('decision table: bash without identifiable head never matches allow (no silent approve)', async () => {
   const policy = createPolicyEngine({
     mode: 'default',
@@ -395,7 +418,13 @@ test('decision table: builtin deny blocks nested rm inside bash -c even with bro
     'builtin exec bash -c "rm -rf /"',
     'builtin rm -rf /',
     'busybox rm -rf /',
-    'su -c "rm -rf /"'
+    'su -c "rm -rf /"',
+    'ionice -c 3 rm -rf /',
+    'taskset -c 0 rm -rf /',
+    'setsid rm -rf /',
+    'script -c "rm -rf /" /dev/null',
+    'runuser -u root -- rm -rf /',
+    'su -- rm -rf /'
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },
