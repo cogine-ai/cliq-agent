@@ -366,6 +366,62 @@ test('decision table: builtin deny blocks plain `rm` even when user adds a broad
   }
 });
 
+test('decision table: builtin deny blocks nested rm inside bash -c even with broad bash allow', async () => {
+  const policy = createPolicyEngine({
+    mode: 'yolo',
+    table: composePermissionTable({ allow: [wsRule('bash', '*')] })
+  });
+
+  for (const bash of [
+    'bash -c "rm -rf /"',
+    'timeout 5 bash -c "rm -rf /"',
+    'timeout 5 rm -rf /',
+    'timeout -k 1s --preserve-status 5s rm -rf /',
+    'timeout -sTERM -k1s 5s rm -rf /',
+    'nohup rm -rf /',
+    'stdbuf -oL rm -rf /',
+    'stdbuf -o L -e0 rm -rf /',
+    '/usr/bin/time rm -rf /',
+    '/usr/bin/time -p rm -rf /',
+    '/usr/bin/time -l rm -rf /',
+    '/usr/bin/time -lp rm -rf /',
+    '/usr/bin/time -f %E -o out rm -rf /',
+    '/usr/bin/time -f%E -oout rm -rf /',
+    "timeout 5 env -S 'rm -rf /'",
+    "timeout 5 env --split-string='rm -rf /'",
+    "timeout 5 env -iS'rm -rf /'",
+    "nohup env -S 'rm -rf /'",
+    "/usr/bin/time env -S 'rm -rf /'",
+    'builtin exec bash -c "rm -rf /"',
+    'builtin rm -rf /',
+    'busybox rm -rf /',
+    'su -c "rm -rf /"'
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+    const decision = await policy.decide(subject);
+    assert.equal(decision.behavior, 'deny', bash);
+    if (decision.behavior === 'deny') {
+      assert.match(decision.reason, /builtin/);
+    }
+  }
+});
+
+test('decision table: find -exec cannot be auto-approved by bash allow rules', async () => {
+  const policy = createPolicyEngine({
+    mode: 'default',
+    table: composePermissionTable({ allow: [wsRule('bash', '*')] })
+  });
+  const subject = buildToolApprovalSubject({
+    definition: { name: 'bash', access: 'exec' },
+    action: { bash: 'find . -name foo -exec rm {} \\;' }
+  });
+  const decision = await policy.decide(subject);
+  assert.equal(decision.behavior, 'ask');
+});
+
 test('decision table: plan channel keys include op and plan id', async () => {
   const policy = createPolicyEngine({
     mode: 'yolo',

@@ -1,6 +1,10 @@
 import type { ModelAction } from '../protocol/model/actions.js';
 import type { TxReviewSnapshot } from '../workspace/transactions/inspect.js';
-import { bashCommandHasUnsafeAllowSyntax, parseBashCommandHead } from './bash-parse.js';
+import {
+  bashCommandHasUnsafeAllowSyntax,
+  bashNestedBuiltinDenyHead,
+  parseBashCommandHead
+} from './bash-parse.js';
 import type { AccessChannel, ApprovalSubject, ToolAccess } from './types.js';
 
 type ToolApprovalDisplay = Extract<ApprovalSubject, { kind: 'tool' }>['display'];
@@ -46,10 +50,12 @@ function deriveChannel(
     // string so the decision-table matcher treats it as "no head" and
     // falls through to ask/preset rather than guessing.
     const commandHead = parseBashCommandHead(action.bash) ?? '';
+    const nestedBuiltinDenyHead = bashNestedBuiltinDenyHead(action.bash) ?? undefined;
     return {
       kind: 'bash',
       commandHead,
-      unsafeForAllow: bashCommandHasUnsafeAllowSyntax(action.bash)
+      unsafeForAllow: bashCommandHasUnsafeAllowSyntax(action.bash),
+      ...(nestedBuiltinDenyHead ? { nestedBuiltinDenyHead } : {})
     };
   }
 
