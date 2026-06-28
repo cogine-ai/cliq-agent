@@ -215,6 +215,16 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     'bash -c "rm -rf /"',
     'timeout 5 bash -c "rm -rf /"',
     'nohup bash -c "rm -rf /"',
+    'timeout 5 rm -rf /',
+    'timeout -k 1s --preserve-status 5s rm -rf /',
+    'timeout -sTERM -k1s 5s rm -rf /',
+    'nohup rm -rf /',
+    '/usr/bin/time rm -rf /',
+    '/usr/bin/time -p rm -rf /',
+    '/usr/bin/time -l rm -rf /',
+    '/usr/bin/time -lp rm -rf /',
+    '/usr/bin/time -f %E -o out rm -rf /',
+    '/usr/bin/time -f%E -oout rm -rf /',
     "timeout 5 env -S 'rm -rf /'",
     "timeout 5 env --split-string='rm -rf /'",
     "timeout 5 env -iS'rm -rf /'",
@@ -229,6 +239,9 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }
   assert.equal(bashCommandHasUnsafeAllowSyntax('timeout 5 bash -c "git status"'), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax('timeout 5 git status'), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax('/usr/bin/time -p git status'), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax('/usr/bin/time -f %E git status'), false);
 });
 
 test('bashCommandHasUnsafeAllowSyntax treats script interpreters with inline code as unsafe for allow rules', () => {
