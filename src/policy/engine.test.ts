@@ -379,6 +379,8 @@ test('decision table: builtin deny blocks nested rm inside bash -c even with bro
     'timeout -k 1s --preserve-status 5s rm -rf /',
     'timeout -sTERM -k1s 5s rm -rf /',
     'nohup rm -rf /',
+    'stdbuf -oL rm -rf /',
+    'stdbuf -o L -e0 rm -rf /',
     '/usr/bin/time rm -rf /',
     '/usr/bin/time -p rm -rf /',
     '/usr/bin/time -l rm -rf /',

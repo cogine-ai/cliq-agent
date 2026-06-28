@@ -219,6 +219,8 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     'timeout -k 1s --preserve-status 5s rm -rf /',
     'timeout -sTERM -k1s 5s rm -rf /',
     'nohup rm -rf /',
+    'stdbuf -oL rm -rf /',
+    'stdbuf -o L -e0 rm -rf /',
     '/usr/bin/time rm -rf /',
     '/usr/bin/time -p rm -rf /',
     '/usr/bin/time -l rm -rf /',
@@ -240,6 +242,7 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
   }
   assert.equal(bashCommandHasUnsafeAllowSyntax('timeout 5 bash -c "git status"'), false);
   assert.equal(bashCommandHasUnsafeAllowSyntax('timeout 5 git status'), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax('stdbuf -oL git status'), false);
   assert.equal(bashCommandHasUnsafeAllowSyntax('/usr/bin/time -p git status'), false);
   assert.equal(bashCommandHasUnsafeAllowSyntax('/usr/bin/time -f %E git status'), false);
 });

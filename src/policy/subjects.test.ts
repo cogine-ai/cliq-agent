@@ -125,6 +125,8 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads inside direct 
     ['timeout -k 1s --preserve-status 5s rm -rf /', 'timeout'],
     ['timeout -sTERM -k1s 5s rm -rf /', 'timeout'],
     ['nohup rm -rf /', 'nohup'],
+    ['stdbuf -oL rm -rf /', 'stdbuf'],
+    ['stdbuf -o L -e0 rm -rf /', 'stdbuf'],
     ['/usr/bin/time rm -rf /', 'time'],
     ['/usr/bin/time -p rm -rf /', 'time'],
     ['/usr/bin/time -l rm -rf /', 'time'],

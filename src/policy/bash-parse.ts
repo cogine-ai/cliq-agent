@@ -46,7 +46,7 @@ const VERSIONED_SCRIPT_INTERPRETER_PATTERNS: readonly RegExp[] = [
 
 const BUSYBOX_HEAD = 'busybox';
 const DIRECT_WRAPPED_DENY_HEADS = new Set([BUSYBOX_HEAD, 'builtin']);
-const PREFIX_COMMAND_WRAPPER_HEADS = new Set(['nohup', 'time', 'timeout']);
+const PREFIX_COMMAND_WRAPPER_HEADS = new Set(['nohup', 'stdbuf', 'time', 'timeout']);
 const PRIVILEGE_WRAPPER_HEADS = new Set(['runuser', 'su', 'sudo']);
 const TIME_NO_VALUE_SHORT_FLAGS = new Set(['a', 'h', 'l', 'p', 'q', 'v']);
 const MAX_SHELL_INLINE_DEPTH = 8;
@@ -725,6 +725,7 @@ function skipPrefixCommandWrapper(tokens: string[], wrapperIndex: number): numbe
   if (head === 'timeout') return skipTimeoutWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'time') return skipTimeWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'nohup') return skipNohupWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'stdbuf') return skipStdbufWrapperArgs(tokens, wrapperIndex + 1);
   return wrapperIndex + 1;
 }
 
@@ -765,6 +766,36 @@ function skipTimeoutWrapperArgs(tokens: string[], start: number): number {
   }
   // `timeout` requires a duration before the command.
   return i < tokens.length ? i + 1 : i;
+}
+
+function skipStdbufWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') return i + 1;
+    if (
+      token === '-i' ||
+      token === '--input' ||
+      token === '-o' ||
+      token === '--output' ||
+      token === '-e' ||
+      token === '--error'
+    ) {
+      i += 2;
+      continue;
+    }
+    if (
+      /^-[ioe].+/.test(token) ||
+      token.startsWith('--input=') ||
+      token.startsWith('--output=') ||
+      token.startsWith('--error=')
+    ) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return i;
 }
 
 function skipTimeWrapperArgs(tokens: string[], start: number): number {
