@@ -95,6 +95,30 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads for bash -c wr
   }
 });
 
+test('buildToolApprovalSubject surfaces nested builtin-deny heads inside env -S prefix wrappers', () => {
+  for (const [bash, commandHead] of [
+    ["timeout 5 env -S 'rm -rf /'", 'timeout'],
+    ["timeout 5 env --split-string='rm -rf /'", 'timeout'],
+    ["timeout 5 env -iS'rm -rf /'", 'timeout'],
+    ["nohup env -S 'rm -rf /'", 'nohup'],
+    ["/usr/bin/time env -S 'rm -rf /'", 'time']
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+
+    if (subject.kind === 'tool') {
+      assert.deepEqual(subject.channel, {
+        kind: 'bash',
+        commandHead,
+        unsafeForAllow: true,
+        nestedBuiltinDenyHead: 'rm'
+      });
+    }
+  }
+});
+
 test('buildToolApprovalSubject marks TX edits as staged and includes the path', () => {
   const subject = buildToolApprovalSubject({
     definition: { name: 'edit', access: 'write' },

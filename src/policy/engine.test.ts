@@ -375,6 +375,11 @@ test('decision table: builtin deny blocks nested rm inside bash -c even with bro
   for (const bash of [
     'bash -c "rm -rf /"',
     'timeout 5 bash -c "rm -rf /"',
+    "timeout 5 env -S 'rm -rf /'",
+    "timeout 5 env --split-string='rm -rf /'",
+    "timeout 5 env -iS'rm -rf /'",
+    "nohup env -S 'rm -rf /'",
+    "/usr/bin/time env -S 'rm -rf /'",
     'builtin exec bash -c "rm -rf /"',
     'builtin rm -rf /',
     'busybox rm -rf /',

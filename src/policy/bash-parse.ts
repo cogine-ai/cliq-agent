@@ -171,6 +171,9 @@ function extractPrivilegeWrapperInlineScriptFromTokens(tokens: string[], startIn
 }
 
 function bashNestedBuiltinDenyHeadInner(commandLine: string, depth: number): string | null {
+  const splitDeny = envSplitExpansionsNestedBuiltinDenyHead(commandLine);
+  if (splitDeny) return splitDeny;
+
   const embedded = analyzeEmbeddedInlineScripts(commandLine);
   const shellScripts = new Set<string>();
   const leadingShell = extractShellInlineScript(commandLine);
@@ -185,6 +188,38 @@ function bashNestedBuiltinDenyHeadInner(commandLine: string, depth: number): str
     if (deeper) return deeper;
   }
   return null;
+}
+
+function envSplitExpansionsNestedBuiltinDenyHead(commandLine: string): string | null {
+  if (typeof commandLine !== 'string') return null;
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return null;
+
+  const tokens = tokenizeWords(trimmed);
+  let i = 0;
+  while (i < tokens.length) {
+    const expanded = expandEnvSplitString(tokens, i);
+    if (!expanded) {
+      i += 1;
+      continue;
+    }
+
+    const denyHead = builtinDenyHeadFromCommandTokens(expanded.tokens);
+    if (denyHead) return denyHead;
+
+    tokens.splice(i, expanded.consumed, ...expanded.tokens);
+  }
+  return null;
+}
+
+function builtinDenyHeadFromCommandTokens(tokens: string[]): string | null {
+  if (tokens.length === 0) return null;
+
+  const commandLine = tokens.join(' ');
+  const head = parseBashCommandHead(commandLine);
+  if (head && BUILTIN_BASH_DENY_HEADS.has(head)) return head;
+
+  return bashDirectWrappedBuiltinDenyHead(commandLine);
 }
 
 function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number): boolean {
