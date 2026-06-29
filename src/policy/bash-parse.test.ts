@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   bashCommandHasUnsafeAllowSyntax,
+  bashNestedBuiltinDenyHead,
   extractShellInlineScript,
   parseBashCommandHead
 } from './bash-parse.js';
@@ -11,6 +12,17 @@ test('parseBashCommandHead returns the plain command for a simple invocation', (
   assert.equal(parseBashCommandHead('npm test'), 'npm');
   assert.equal(parseBashCommandHead('ls'), 'ls');
   assert.equal(parseBashCommandHead('git pull --rebase'), 'git');
+});
+
+test('parseBashCommandHead keeps privilege wrappers that carry inline commands', () => {
+  assert.equal(parseBashCommandHead('sudo -c "rm -rf /"'), 'sudo');
+  assert.equal(parseBashCommandHead("sudo -c 'rm -rf /'"), 'sudo');
+  assert.equal(parseBashCommandHead('sudo --command="rm -rf /"'), 'sudo');
+  assert.equal(parseBashCommandHead('runuser -u root -c "rm -rf /"'), 'runuser');
+  assert.equal(parseBashCommandHead('su -c "rm -rf /"'), 'su');
+  // Plain wrapped commands still unwrap to the inner head.
+  assert.equal(parseBashCommandHead('sudo ls /tmp'), 'ls');
+  assert.equal(parseBashCommandHead('sudo -u deploy git status'), 'git');
 });
 
 test('parseBashCommandHead skips leading KEY=VALUE env assignments', () => {
@@ -210,6 +222,20 @@ test('bashCommandHasUnsafeAllowSyntax treats shell delegation metacommands as un
   }
 });
 
+test('bashNestedBuiltinDenyHead surfaces rm inside privilege wrapper inline scripts', () => {
+  for (const command of [
+    'sudo -c "rm -rf /"',
+    "sudo -c 'rm -rf /'",
+    'sudo --command="rm -rf /"',
+    'runuser -u root -c "rm -rf /"',
+    'su -c "rm -rf /"'
+  ]) {
+    assert.equal(bashNestedBuiltinDenyHead(command), 'rm', command);
+  }
+  assert.equal(bashNestedBuiltinDenyHead('sudo -c "git status"'), null);
+  assert.equal(bashNestedBuiltinDenyHead('sudo ls /tmp'), null);
+});
+
 test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find -exec as unsafe for allow rules', () => {
   for (const command of [
     'bash -c "rm -rf /"',
@@ -235,6 +261,10 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     'builtin rm -rf /',
     'busybox rm -rf /',
     'su -c "rm -rf /"',
+    'sudo -c "rm -rf /"',
+    "sudo -c 'rm -rf /'",
+    'sudo --command="rm -rf /"',
+    'runuser -u root -c "rm -rf /"',
     'find . -name foo -exec rm {} \\;',
     'find . -name foo -execdir rm {} \\;'
   ]) {
