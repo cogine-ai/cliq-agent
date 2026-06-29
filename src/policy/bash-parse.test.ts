@@ -235,6 +235,11 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     'builtin rm -rf /',
     'busybox rm -rf /',
     'su -c "rm -rf /"',
+    'su root rm -rf /',
+    'su - root rm -rf /',
+    'runuser -u alice rm -rf /',
+    'runuser -u root -- rm -rf /',
+    'sudo su root rm -rf /',
     'find . -name foo -exec rm {} \\;',
     'find . -name foo -execdir rm {} \\;'
   ]) {

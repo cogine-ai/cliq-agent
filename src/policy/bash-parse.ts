@@ -108,11 +108,63 @@ function bashDirectWrappedBuiltinDenyHead(commandLine: string): string | null {
   i = skipExecutionWrappers(tokens, i);
   if (i >= tokens.length) return null;
 
-  const head = tokenBasename(tokens[i]!);
-  if (BUILTIN_BASH_DENY_HEADS.has(head)) return head;
-  if (!DIRECT_WRAPPED_DENY_HEADS.has(head)) return null;
+  while (i < tokens.length && PRIVILEGE_WRAPPER_HEADS.has(tokenBasename(tokens[i]!))) {
+    if (extractPrivilegeWrapperInlineScriptFromTokens(tokens, i) !== null) {
+      return null;
+    }
+    i = skipWrapperFlags(tokens, i);
+    if (i >= tokens.length) return null;
+  }
 
-  let j = i + 1;
+  return scanArgvForBuiltinDenyHead(tokens, i);
+}
+
+function scanArgvForBuiltinDenyHead(tokens: string[], startIndex: number): string | null {
+  for (let i = startIndex; i < tokens.length; i += 1) {
+    const token = tokens[i]!;
+    if (isShellControlOperatorToken(token)) break;
+
+    if (
+      token === '-exec' ||
+      token === '-execdir' ||
+      token.startsWith('-exec=') ||
+      token.startsWith('-execdir=')
+    ) {
+      i = skipFindExecPayload(tokens, i);
+      continue;
+    }
+
+    const { head, stopAfter } = argvTokenBuiltinDenyHead(token);
+    if (head && BUILTIN_BASH_DENY_HEADS.has(head)) return head;
+    if (head && DIRECT_WRAPPED_DENY_HEADS.has(head)) {
+      const wrapped = wrappedBuiltinDenyHeadAfterDirectWrapper(tokens, i, head);
+      if (wrapped) return wrapped;
+    }
+    if (stopAfter) break;
+  }
+  return null;
+}
+
+function argvTokenBuiltinDenyHead(token: string): { head: string | null; stopAfter: boolean } {
+  const operatorIndex = findShellControlOperatorIndex(token);
+  if (operatorIndex >= 0) {
+    const before = token.slice(0, operatorIndex).trim();
+    return {
+      head: before === '' ? null : tokenBasename(before),
+      stopAfter: true
+    };
+  }
+  return { head: tokenBasename(token), stopAfter: false };
+}
+
+function wrappedBuiltinDenyHeadAfterDirectWrapper(
+  tokens: string[],
+  wrapperIndex: number,
+  wrapperHead: string
+): string | null {
+  if (!DIRECT_WRAPPED_DENY_HEADS.has(wrapperHead)) return null;
+
+  let j = wrapperIndex + 1;
   while (j < tokens.length && tokens[j]!.startsWith('-')) {
     j += 1;
   }
@@ -120,6 +172,33 @@ function bashDirectWrappedBuiltinDenyHead(commandLine: string): string | null {
 
   const sub = tokenBasename(tokens[j]!);
   return BUILTIN_BASH_DENY_HEADS.has(sub) ? sub : null;
+}
+
+function findShellControlOperatorIndex(token: string): number {
+  for (let i = 0; i < token.length; i += 1) {
+    const ch = token[i]!;
+    const next = token[i + 1];
+    if (ch === ';' || ch === '|') return i;
+    if (ch === '&' && next === '&') return i;
+    if (ch === '&' && next !== '>' && (i === 0 || token[i - 1] !== '>')) return i;
+  }
+  return -1;
+}
+
+function isShellControlOperatorToken(token: string): boolean {
+  return token === '|' || token === ';' || token === '&' || token === '&&' || token === '||';
+}
+
+function skipFindExecPayload(tokens: string[], execIndex: number): number {
+  let i = execIndex + 1;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === ';' || token === '\\;' || token.endsWith(';')) {
+      return i;
+    }
+    i += 1;
+  }
+  return tokens.length - 1;
 }
 
 function extractPrivilegeWrapperInlineScript(commandLine: string): string | null {
