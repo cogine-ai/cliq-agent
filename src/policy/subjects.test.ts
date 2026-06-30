@@ -132,7 +132,17 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads inside direct 
     ['/usr/bin/time -l rm -rf /', 'time'],
     ['/usr/bin/time -lp rm -rf /', 'time'],
     ['/usr/bin/time -f %E -o out rm -rf /', 'time'],
-    ['/usr/bin/time -f%E -oout rm -rf /', 'time']
+    ['/usr/bin/time -f%E -oout rm -rf /', 'time'],
+    ['ionice -c 3 rm -rf /', 'ionice'],
+    ['taskset -c 0 rm -rf /', 'taskset'],
+    ['setsid rm -rf /', 'setsid'],
+    ['script -c "rm -rf /" /dev/null', 'script'],
+    ['runuser -u root -- rm -rf /', 'runuser'],
+    ['runuser -u alice rm -rf /', 'runuser'],
+    ['su -- rm -rf /', 'su'],
+    ['su root rm -rf /', 'su'],
+    ['su - root rm -rf /', 'su'],
+    ['sudo su root rm -rf /', 'su']
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },
@@ -143,6 +153,27 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads inside direct 
       assert.deepEqual(subject.channel, {
         kind: 'bash',
         commandHead,
+        unsafeForAllow: true,
+        nestedBuiltinDenyHead: 'rm'
+      });
+    }
+  }
+});
+
+test('buildToolApprovalSubject surfaces git shell alias payloads as unsafe with nested deny heads', () => {
+  for (const bash of [
+    "git -c alias.x='!rm -rf /' x",
+    "git -c alias.x='!bash -c \"rm -rf /\"' x"
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+
+    if (subject.kind === 'tool') {
+      assert.deepEqual(subject.channel, {
+        kind: 'bash',
+        commandHead: 'git',
         unsafeForAllow: true,
         nestedBuiltinDenyHead: 'rm'
       });
