@@ -235,6 +235,21 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     'builtin rm -rf /',
     'busybox rm -rf /',
     'su -c "rm -rf /"',
+    'su root rm -rf /',
+    'su - root rm -rf /',
+    'runuser -u alice rm -rf /',
+    'sudo su root rm -rf /',
+    'ionice -c 3 rm -rf /',
+    'taskset -c 0 rm -rf /',
+    'setsid rm -rf /',
+    'watch -n1 rm -rf /',
+    'unshare -r rm -rf /',
+    'flock -n /tmp/l rm -rf /',
+    'chronic rm -rf /',
+    'catchsegv rm -rf /',
+    'runuser -u root -- rm -rf /',
+    'su -- rm -rf /',
+    'script -c "rm -rf /" /dev/null',
     'find . -name foo -exec rm {} \\;',
     'find . -name foo -execdir rm {} \\;'
   ]) {
@@ -245,6 +260,22 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
   assert.equal(bashCommandHasUnsafeAllowSyntax('stdbuf -oL git status'), false);
   assert.equal(bashCommandHasUnsafeAllowSyntax('/usr/bin/time -p git status'), false);
   assert.equal(bashCommandHasUnsafeAllowSyntax('/usr/bin/time -f %E git status'), false);
+  assert.equal(bashCommandHasUnsafeAllowSyntax('ionice -c 3 git status'), false);
+});
+
+test('bashCommandHasUnsafeAllowSyntax treats git shell aliases as unsafe for allow rules', () => {
+  for (const command of [
+    "git -c alias.x='!rm -rf /' x",
+    "git -c alias.x='!bash -c \"rm -rf /\"' x",
+    'git -c alias.status="!rm -rf /" status',
+    'git -c alias.x=!rm -rf / x',
+    "git -calias.x='!rm -rf /' x",
+    "git --config alias.x='!rm -rf /' x"
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
+  }
+  assert.equal(bashCommandHasUnsafeAllowSyntax("git -c alias.x='!echo hi' x"), true);
+  assert.equal(bashCommandHasUnsafeAllowSyntax('git -c advice.statusHints=false status'), false);
 });
 
 test('bashCommandHasUnsafeAllowSyntax treats script interpreters with inline code as unsafe for allow rules', () => {
