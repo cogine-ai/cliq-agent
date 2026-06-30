@@ -132,6 +132,11 @@ function extractPrivilegeWrapperInlineScript(commandLine: string): string | null
   while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
     i += 1;
   }
+  // Inspect privilege wrappers before generic execution wrappers (`sudo`, `env`)
+  // strip the outer head — otherwise `sudo -c "rm -rf /"` unwraps to `rm`.
+  const leadingPrivilegeScript = extractPrivilegeWrapperInlineScriptFromTokens(tokens, i);
+  if (leadingPrivilegeScript !== null) return leadingPrivilegeScript;
+
   i = skipExecutionWrappers(tokens, i);
   if (i >= tokens.length) return null;
 
@@ -157,6 +162,12 @@ function skipExecutionWrappers(tokens: string[], startIndex: number): number {
     return i;
   }
   return i;
+}
+
+function privilegeWrapperHeadWithInlineScript(tokens: string[], startIndex: number): string | null {
+  const head = tokenBasename(tokens[startIndex]!);
+  if (!PRIVILEGE_WRAPPER_HEADS.has(head)) return null;
+  return extractPrivilegeWrapperInlineScriptFromTokens(tokens, startIndex) !== null ? head : null;
 }
 
 function extractPrivilegeWrapperInlineScriptFromTokens(tokens: string[], startIndex: number): string | null {
@@ -686,6 +697,9 @@ export function parseBashCommandHead(commandLine: string): string | null {
 
   // Unwrap `sudo`/`env` style wrappers, skipping their option flags.
   while (i < tokens.length && isCommandWrapper(tokens[i]!)) {
+    const privilegeHead = privilegeWrapperHeadWithInlineScript(tokens, i);
+    if (privilegeHead !== null) return privilegeHead;
+
     const expanded = expandEnvSplitString(tokens, i);
     if (expanded) {
       tokens.splice(i, expanded.consumed, ...expanded.tokens);
