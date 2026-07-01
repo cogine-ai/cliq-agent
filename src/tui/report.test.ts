@@ -96,6 +96,7 @@ test('redactReportText covers common secret patterns', () => {
   const redacted = redactReportText(
     [
       'Authorization: Bearer sk-secretabcdefghijklmnopqrstuvwxyz123456',
+      'Authorization: Token abcdef1234567890abcdef1234567890',
       'ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456',
       'github_pat_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890',
       'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturepart',
@@ -104,9 +105,11 @@ test('redactReportText covers common secret patterns', () => {
   );
 
   assert.doesNotMatch(redacted, /sk-secret/);
+  assert.doesNotMatch(redacted, /abcdef1234567890/);
   assert.doesNotMatch(redacted, /sk-ant-api03/);
   assert.doesNotMatch(redacted, /github_pat_/);
   assert.doesNotMatch(redacted, /eyJhbGci/);
   assert.doesNotMatch(redacted, /YWJjZGVm/);
-  assert.equal((redacted.match(/\[REDACTED\]/g) ?? []).length, 5);
+  assert.match(redacted, /Authorization: \[REDACTED\]/);
+  assert.equal((redacted.match(/\[REDACTED\]/g) ?? []).length, 6);
 });

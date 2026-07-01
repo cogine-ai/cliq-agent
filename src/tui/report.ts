@@ -76,7 +76,7 @@ export async function buildLocalReportMarkdown(
 export function redactReportText(input: string): string {
   return input
     .replace(
-      /\b(Authorization\s*[:=]\s*)(?:Bearer|Basic)?\s*[^\s,;]+/gi,
+      /\b(Authorization\s*[:=]\s*)[^\r\n,;]+/gi,
       '$1[REDACTED]'
     )
     .replace(
