@@ -289,6 +289,7 @@ test('decision table: bash allow rules do not auto-approve compound syntax insid
     "env -S'bash -c \"git status && rm -rf /\"'",
     "env -iS 'bash -c \"git status && rm -rf /\"'",
     "env -iS'bash -c \"git status && rm -rf /\"'",
+    "env -ivS'bash -c \"git status && rm -rf /\"'",
     "/usr/bin/env -S bash -c 'git status && rm -rf /'",
     "/usr/bin/env -i -S bash -c 'git status && rm -rf /'"
   ]) {
@@ -395,7 +396,11 @@ test('decision table: builtin deny blocks nested rm inside bash -c even with bro
     'builtin exec bash -c "rm -rf /"',
     'builtin rm -rf /',
     'busybox rm -rf /',
-    'su -c "rm -rf /"'
+    'su -c "rm -rf /"',
+    'sudo -c "rm -rf /"',
+    "sudo -c 'rm -rf /'",
+    'sudo --command="rm -rf /"',
+    'runuser -u root -c "rm -rf /"'
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },
