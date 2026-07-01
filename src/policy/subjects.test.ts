@@ -119,6 +119,30 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads inside env -S 
   }
 });
 
+test('buildToolApprovalSubject surfaces nested builtin-deny heads inside privilege wrapper inline scripts', () => {
+  for (const [bash, commandHead] of [
+    ['su -c "rm -rf /"', 'su'],
+    ['sudo -c "rm -rf /"', 'sudo'],
+    ["sudo -c 'rm -rf /'", 'sudo'],
+    ['sudo --command="rm -rf /"', 'sudo'],
+    ['runuser -u root -c "rm -rf /"', 'runuser']
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+
+    if (subject.kind === 'tool') {
+      assert.deepEqual(subject.channel, {
+        kind: 'bash',
+        commandHead,
+        unsafeForAllow: true,
+        nestedBuiltinDenyHead: 'rm'
+      });
+    }
+  }
+});
+
 test('buildToolApprovalSubject surfaces nested builtin-deny heads inside direct prefix wrappers', () => {
   for (const [bash, commandHead] of [
     ['timeout 5 rm -rf /', 'timeout'],
