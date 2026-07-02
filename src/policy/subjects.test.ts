@@ -125,7 +125,9 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads inside privile
     ['sudo -c "rm -rf /"', 'sudo'],
     ["sudo -c 'rm -rf /'", 'sudo'],
     ['sudo --command="rm -rf /"', 'sudo'],
-    ['runuser -u root -c "rm -rf /"', 'runuser']
+    ['runuser -u root -c "rm -rf /"', 'runuser'],
+    ['timeout 5 sudo -c "rm -rf /"', 'timeout'],
+    ['nohup sudo -c "rm -rf /"', 'nohup']
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },
