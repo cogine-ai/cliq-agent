@@ -151,6 +151,9 @@ function skipExecutionWrappers(tokens: string[], startIndex: number): number {
       tokens.splice(i, expanded.consumed, ...expanded.tokens);
       continue;
     }
+    if (privilegeWrapperHeadWithInlineScript(tokens, i) !== null) {
+      return i;
+    }
     if (isCommandWrapper(tokens[i]!)) {
       i = skipWrapperFlags(tokens, i);
       continue;

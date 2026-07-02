@@ -232,7 +232,10 @@ test('bashNestedBuiltinDenyHead surfaces rm inside privilege wrapper inline scri
     "sudo -c 'rm -rf /'",
     'sudo --command="rm -rf /"',
     'runuser -u root -c "rm -rf /"',
-    'su -c "rm -rf /"'
+    'su -c "rm -rf /"',
+    'timeout 5 sudo -c "rm -rf /"',
+    'nohup sudo -c "rm -rf /"',
+    'stdbuf -oL sudo -c "rm -rf /"'
   ]) {
     assert.equal(bashNestedBuiltinDenyHead(command), 'rm', command);
   }
@@ -269,6 +272,8 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     "sudo -c 'rm -rf /'",
     'sudo --command="rm -rf /"',
     'runuser -u root -c "rm -rf /"',
+    'timeout 5 sudo -c "rm -rf /"',
+    'nohup sudo -c "rm -rf /"',
     'find . -name foo -exec rm {} \\;',
     'find . -name foo -execdir rm {} \\;'
   ]) {

@@ -400,7 +400,9 @@ test('decision table: builtin deny blocks nested rm inside bash -c even with bro
     'sudo -c "rm -rf /"',
     "sudo -c 'rm -rf /'",
     'sudo --command="rm -rf /"',
-    'runuser -u root -c "rm -rf /"'
+    'runuser -u root -c "rm -rf /"',
+    'timeout 5 sudo -c "rm -rf /"',
+    'nohup sudo -c "rm -rf /"'
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },
