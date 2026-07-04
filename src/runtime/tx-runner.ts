@@ -16,8 +16,9 @@ import type {
   ValidatorResultSummary
 } from '../workspace/transactions/types.js';
 import { resolveTxRoot } from '../workspace/transactions/store.js';
-import { resolveCliqHome } from '../session/store.js';
+import { mutateSession, resolveCliqHome } from '../session/store.js';
 import type { Session } from '../session/types.js';
+import { openRecordId } from '../workspace/transactions/types.js';
 import type { RuntimeEvent } from '../protocol/runtime/events.js';
 
 export type TxApplyReview = {
@@ -55,6 +56,17 @@ export type CoordinatorCtx = {
 
 export type EventEmitter = (event: RuntimeEvent) => Promise<void> | void;
 
+function isExplicitActiveTx(session: Session, txId: string): boolean {
+  const record = session.records.find((r) => r.id === openRecordId(txId));
+  return record?.kind === 'tx-opened' && record.meta.explicit === true;
+}
+
+async function detachImplicitActiveTx(ctx: CoordinatorCtx): Promise<void> {
+  await mutateSession(ctx.cwd, ctx.session, (session) => {
+    session.activeTxId = undefined;
+  });
+}
+
 export function assertHeadlessCompatible(opts: TxRunnerOptions): void {
   if (opts.headless && opts.applyPolicy === 'interactive') {
     throw new Error('--tx-apply interactive requires a TTY; use --tx-apply manual-only or auto-on-pass for headless runs');
@@ -81,11 +93,44 @@ export async function openTurnTx(
 ): Promise<{ tx: Transaction | null; opened: boolean }> {
   const existing = await getActiveTx(ctx);
   if (existing) {
-    // Reuse existing tx (explicit tx open precedes the runner). Do NOT re-emit
-    // tx-staging-start. opened=false signals the runner to skip finishTurnTx so
-    // the explicit tx accumulates edits across turns and the user drives apply
-    // manually.
-    return { tx: existing, opened: false };
+    if (isExplicitActiveTx(ctx.session, existing.id)) {
+      // Reuse existing tx (explicit tx open precedes the runner). Do NOT re-emit
+      // tx-staging-start. opened=false signals the runner to skip finishTurnTx so
+      // the explicit tx accumulates edits across turns and the user drives apply
+      // manually.
+      return { tx: existing, opened: false };
+    }
+    if (opts.auto === 'per-turn') {
+      // A prior implicit per-turn tx left active (apply conflict/partial, or a
+      // failed lifecycle). Detach or abort it so this turn can auto-open fresh.
+      if (existing.state === 'staging') {
+        await abortTx(ctx, existing.id, { reason: 'user-abort' });
+        await emit({
+          type: 'tx-aborted',
+          txId: existing.id,
+          reason: 'user-abort',
+          artifactRef: `tx/${existing.id}/`,
+          failedValidators: undefined
+        });
+      } else {
+        await detachImplicitActiveTx(ctx);
+      }
+    } else {
+      // Manual mode must not reuse implicit txs; clear leftovers so edits are not
+      // silently staged without a user-driven lifecycle.
+      if (existing.state === 'staging') {
+        await abortTx(ctx, existing.id, { reason: 'user-abort' });
+        await emit({
+          type: 'tx-aborted',
+          txId: existing.id,
+          reason: 'user-abort',
+          artifactRef: `tx/${existing.id}/`,
+          failedValidators: undefined
+        });
+      } else {
+        await detachImplicitActiveTx(ctx);
+      }
+    }
   }
   if (opts.auto !== 'per-turn') {
     // Manual mode without an active tx → skip turn lifecycle entirely.
@@ -107,7 +152,14 @@ export async function abortStaleImplicitTurnTx(
   emit: EventEmitter
 ): Promise<void> {
   const current = await getActiveTx(ctx);
-  if (!current || current.id !== tx.id || current.state !== 'staging') {
+  if (!current || current.id !== tx.id || isExplicitActiveTx(ctx.session, tx.id)) {
+    return;
+  }
+  if (current.state === 'approved' || current.state === 'applied-partial') {
+    await detachImplicitActiveTx(ctx);
+    return;
+  }
+  if (current.state !== 'staging' && current.state !== 'finalized' && current.state !== 'validated') {
     return;
   }
   await abortTx(ctx, tx.id, { reason: 'user-abort' });
@@ -251,6 +303,9 @@ export async function finishTurnTx(
     // NOTE: tx stays in 'approved' state — user can retry `cliq tx apply <id>` after
     // resolving the external change. We intentionally do NOT emit tx-aborted here:
     // emitting it would imply the tx is now in aborted state, which is incorrect.
+    if (!isExplicitActiveTx(ctx.session, tx.id)) {
+      await detachImplicitActiveTx(ctx);
+    }
   } else if (applyResult.error === 'partial') {
     await emit({
       type: 'error',
@@ -260,6 +315,9 @@ export async function finishTurnTx(
       recoverable: false
     });
     // No tx-aborted event: tx remains in applied-partial; user must abort manually.
+    if (!isExplicitActiveTx(ctx.session, tx.id)) {
+      await detachImplicitActiveTx(ctx);
+    }
   } else {
     await emit({
       type: 'error',

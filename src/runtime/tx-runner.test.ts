@@ -326,6 +326,80 @@ test('abortStaleImplicitTurnTx is a no-op when the tx is not staging', async () 
   });
 });
 
+test('openTurnTx detaches implicit approved tx stuck after apply conflict', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'one');
+    const opts: TxRunnerOptions = baseOpts({
+      applyPolicy: 'auto-on-pass',
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] }
+    });
+    const { openTx, applyTx } = await import('../workspace/transactions/coordinator.js');
+    const { writeDiff, writeTxState } = await import('../workspace/transactions/store.js');
+    const tx = await openTx(ctx, { explicit: false });
+    const root = resolveTxRoot(home);
+    await writeTxState(root, {
+      ...tx,
+      state: 'approved',
+      diffSummary: {
+        filesChanged: 1,
+        additions: 0,
+        deletions: 0,
+        creates: [],
+        modifies: ['a.txt'],
+        deletes: []
+      }
+    });
+    await writeDiff(root, tx.id, {
+      files: [{ path: 'a.txt', op: 'modify', oldContent: 'one', newContent: 'ONE' }],
+      outOfBand: []
+    });
+    await writeFile(path.join(ws, 'a.txt'), 'EXTERNAL', 'utf8');
+
+    const applyResult = await applyTx(ctx, tx.id);
+    assert.equal(applyResult.ok, false);
+    if (!applyResult.ok) assert.equal(applyResult.error, 'conflict');
+    assert.equal(ctx.session.activeTxId, tx.id);
+
+    const next = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
+    assert.equal(next.opened, true);
+    assert.notEqual(next.tx!.id, tx.id);
+    assert.ok(events.some((e) => e.type === 'tx-staging-start'));
+  });
+});
+
+test('openTurnTx detaches leftover implicit tx in manual mode instead of reusing it', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'one');
+    const perTurnOpts: TxRunnerOptions = baseOpts({ applyPolicy: 'auto-on-pass' });
+    const open = await openTurnTx(ctx, perTurnOpts, async (e) => { events.push(e); });
+    const manualOpts: TxRunnerOptions = baseOpts({ auto: 'manual', applyPolicy: 'manual-only' });
+    const next = await openTurnTx(ctx, manualOpts, async (e) => { events.push(e); });
+    assert.equal(next.tx, null);
+    assert.equal(next.opened, false);
+    assert.equal(ctx.session.activeTxId, undefined);
+    const tx = await readTxState(resolveTxRoot(home), open.tx!.id);
+    assert.equal(tx?.state, 'aborted');
+  });
+});
+
+test('abortStaleImplicitTurnTx aborts implicit tx left in finalized after failed validate', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'one');
+    const opts: TxRunnerOptions = baseOpts({ applyPolicy: 'auto-on-pass' });
+    const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
+    const writer = createOverlayWriter(ws, overlayDir(resolveTxRoot(home), open.tx!.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+    const { finalizeTx } = await import('../workspace/transactions/coordinator.js');
+    await finalizeTx(ctx, open.tx!.id);
+    events.length = 0;
+    await abortStaleImplicitTurnTx(ctx, open.tx!, async (e) => { events.push(e); });
+    assert.ok(events.some((e) => e.type === 'tx-aborted'));
+    assert.equal(ctx.session.activeTxId, undefined);
+    const tx = await readTxState(resolveTxRoot(home), open.tx!.id);
+    assert.equal(tx?.state, 'aborted');
+  });
+});
+
 test('explicit tx + auto=per-turn: openTurnTx returns opened=false; runner-integration test confirms finishTurnTx is NOT called for opened=false', async () => {
   // Unit-level proof: openTurnTx behavior is asserted in Task 11 ("reuses existing
   // explicit tx even when auto=per-turn"). The full runner-skips-finalize behavior is
