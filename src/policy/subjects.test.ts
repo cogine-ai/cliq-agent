@@ -132,7 +132,55 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads inside direct 
     ['/usr/bin/time -l rm -rf /', 'time'],
     ['/usr/bin/time -lp rm -rf /', 'time'],
     ['/usr/bin/time -f %E -o out rm -rf /', 'time'],
-    ['/usr/bin/time -f%E -oout rm -rf /', 'time']
+    ['/usr/bin/time -f%E -oout rm -rf /', 'time'],
+    ['flock -w 5 /tmp/lock rm -rf /', 'flock'],
+    ['flock /tmp/lock -c "rm -rf /"', 'flock']
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+
+    if (subject.kind === 'tool') {
+      assert.deepEqual(subject.channel, {
+        kind: 'bash',
+        commandHead,
+        unsafeForAllow: true,
+        nestedBuiltinDenyHead: 'rm'
+      });
+    }
+  }
+});
+
+test('buildToolApprovalSubject surfaces nested builtin-deny heads inside privilege wrappers', () => {
+  for (const [bash, commandHead] of [
+    ['sudo -c "rm -rf /"', 'sudo'],
+    ['env sudo -c "rm -rf /"', 'sudo'],
+    ['su -c "rm -rf /"', 'su'],
+    ['runuser -u root -c "rm -rf /"', 'runuser']
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+
+    if (subject.kind === 'tool') {
+      assert.deepEqual(subject.channel, {
+        kind: 'bash',
+        commandHead,
+        unsafeForAllow: true,
+        nestedBuiltinDenyHead: 'rm'
+      });
+    }
+  }
+});
+
+test('buildToolApprovalSubject surfaces nested builtin-deny heads inside git shell aliases', () => {
+  for (const [bash, commandHead] of [
+    ["git -c alias.x='!rm -rf /' x", 'git'],
+    ["sudo git -c alias.x='!rm -rf /' x", 'git'],
+    ["timeout 5 git -c alias.x='!rm -rf /' x", 'timeout'],
+    ["env -S 'git -c alias.x=\"!rm -rf /\" x'", 'git']
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },

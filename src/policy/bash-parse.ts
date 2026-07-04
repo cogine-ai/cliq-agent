@@ -46,9 +46,26 @@ const VERSIONED_SCRIPT_INTERPRETER_PATTERNS: readonly RegExp[] = [
 
 const BUSYBOX_HEAD = 'busybox';
 const DIRECT_WRAPPED_DENY_HEADS = new Set([BUSYBOX_HEAD, 'builtin']);
-const PREFIX_COMMAND_WRAPPER_HEADS = new Set(['nohup', 'stdbuf', 'time', 'timeout']);
+const GIT_HEAD = 'git';
+const PREFIX_COMMAND_WRAPPER_HEADS = new Set([
+  'catchsegv',
+  'chronic',
+  'flock',
+  'ionice',
+  'nohup',
+  'setsid',
+  'stdbuf',
+  'taskset',
+  'time',
+  'timeout',
+  'unshare',
+  'watch'
+]);
 const PRIVILEGE_WRAPPER_HEADS = new Set(['runuser', 'su', 'sudo']);
+const SCRIPT_WRAPPER_HEADS = new Set(['script']);
+const IONICE_NO_VALUE_SHORT_FLAGS = new Set(['p', 't']);
 const TIME_NO_VALUE_SHORT_FLAGS = new Set(['a', 'h', 'l', 'p', 'q', 'v']);
+const UNSHARE_NO_VALUE_SHORT_FLAGS = new Set(['f', 'i', 'm', 'n', 'p', 'r', 'U']);
 const MAX_SHELL_INLINE_DEPTH = 8;
 
 const SHELL_OPTION_VALUE_FLAGS: ReadonlySet<string> = new Set([
@@ -110,9 +127,24 @@ function bashDirectWrappedBuiltinDenyHead(commandLine: string): string | null {
 
   const head = tokenBasename(tokens[i]!);
   if (BUILTIN_BASH_DENY_HEADS.has(head)) return head;
-  if (!DIRECT_WRAPPED_DENY_HEADS.has(head)) return null;
+  if (DIRECT_WRAPPED_DENY_HEADS.has(head)) {
+    return wrappedBuiltinDenyHeadAfterDirectWrapper(tokens, i);
+  }
 
-  let j = i + 1;
+  const privilegeDeny = privilegeWrapperBuiltinDenyHead(tokens, i);
+  if (privilegeDeny) return privilegeDeny;
+
+  while (i < tokens.length && PRIVILEGE_WRAPPER_HEADS.has(tokenBasename(tokens[i]!))) {
+    if (extractPrivilegeWrapperInlineScriptFromTokens(tokens, i) !== null) return null;
+    i = skipPrivilegeWrapperForWrappedCommand(tokens, i);
+    if (i >= tokens.length) return null;
+  }
+
+  return null;
+}
+
+function wrappedBuiltinDenyHeadAfterDirectWrapper(tokens: string[], wrapperIndex: number): string | null {
+  let j = wrapperIndex + 1;
   while (j < tokens.length && tokens[j]!.startsWith('-')) {
     j += 1;
   }
@@ -120,6 +152,81 @@ function bashDirectWrappedBuiltinDenyHead(commandLine: string): string | null {
 
   const sub = tokenBasename(tokens[j]!);
   return BUILTIN_BASH_DENY_HEADS.has(sub) ? sub : null;
+}
+
+function privilegeWrapperBuiltinDenyHead(tokens: string[], startIndex: number): string | null {
+  const inlineScript = extractPrivilegeWrapperInlineScriptFromTokens(tokens, startIndex);
+  if (inlineScript !== null) {
+    return builtinDenyHeadFromCommandTokens(tokenizeWords(inlineScript));
+  }
+
+  if (!PRIVILEGE_WRAPPER_HEADS.has(tokenBasename(tokens[startIndex]!))) return null;
+
+  const nextCommand = skipPrivilegeWrapperForWrappedCommand(tokens, startIndex);
+  if (nextCommand >= tokens.length) return null;
+  return scanArgvForBuiltinDenyHead(tokens, nextCommand);
+}
+
+function skipPrivilegeWrapperForWrappedCommand(tokens: string[], startIndex: number): number {
+  let i = startIndex + 1;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') return i + 1;
+    if (token === '-' && tokenBasename(tokens[startIndex]!) !== 'sudo') {
+      i += 1;
+      continue;
+    }
+    if (!token.startsWith('-')) return i;
+    if (token === '-u' || token === '--user' || token === '-g' || token === '--group') {
+      i += 2;
+      continue;
+    }
+    if (token.startsWith('--user=') || token.startsWith('--group=')) {
+      i += 1;
+      continue;
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function scanArgvForBuiltinDenyHead(tokens: string[], startIndex: number): string | null {
+  const commandTokens = tokens.slice(startIndex);
+  const terminatorIndex = commandTokens.findIndex(
+    (token) => token === '&&' || token === '||' || isCommandTerminatorToken(token)
+  );
+  const scopedTokens = terminatorIndex === -1 ? commandTokens : commandTokens.slice(0, terminatorIndex);
+  if (scopedTokens.length === 0) return null;
+
+  const direct = argvTokenBuiltinDenyHead(scopedTokens, 0);
+  if (direct) return direct;
+
+  return bashDirectWrappedBuiltinDenyHead(scopedTokens.join(' '));
+}
+
+function argvTokenBuiltinDenyHead(tokens: string[], index: number): string | null {
+  const token = tokens[index]!;
+  if (isCommandTerminatorToken(token) || token === '&&' || token === '||') return null;
+
+  const inlineScript =
+    extractShellInlineScriptFromTokens(tokens, index) ??
+    extractPrivilegeWrapperInlineScriptFromTokens(tokens, index) ??
+    extractScriptWrapperInlineFromTokens(tokens, index) ??
+    extractFlockWrapperInlineFromTokens(tokens, index);
+  if (inlineScript !== null) {
+    return builtinDenyHeadFromCommandTokens(tokenizeWords(inlineScript));
+  }
+
+  const head = tokenBasename(token);
+  if (BUILTIN_BASH_DENY_HEADS.has(head)) return head;
+  if (DIRECT_WRAPPED_DENY_HEADS.has(head)) {
+    return wrappedBuiltinDenyHeadAfterDirectWrapper(tokens, index);
+  }
+  return null;
+}
+
+function isCommandTerminatorToken(token: string): boolean {
+  return token === ';' || token === '&' || token === '|' || token === '\n';
 }
 
 function extractPrivilegeWrapperInlineScript(commandLine: string): string | null {
@@ -132,6 +239,11 @@ function extractPrivilegeWrapperInlineScript(commandLine: string): string | null
   while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
     i += 1;
   }
+
+  if (privilegeWrapperHeadWithInlineScript(tokens, i)) {
+    return extractPrivilegeWrapperInlineScriptFromTokens(tokens, i);
+  }
+
   i = skipExecutionWrappers(tokens, i);
   if (i >= tokens.length) return null;
 
@@ -145,6 +257,9 @@ function skipExecutionWrappers(tokens: string[], startIndex: number): number {
     if (expanded) {
       tokens.splice(i, expanded.consumed, ...expanded.tokens);
       continue;
+    }
+    if (privilegeWrapperHeadWithInlineScript(tokens, i)) {
+      return i;
     }
     if (isCommandWrapper(tokens[i]!)) {
       i = skipWrapperFlags(tokens, i);
@@ -163,8 +278,31 @@ function extractPrivilegeWrapperInlineScriptFromTokens(tokens: string[], startIn
   const head = tokenBasename(tokens[startIndex]!);
   if (!PRIVILEGE_WRAPPER_HEADS.has(head)) return null;
 
+  let consumedUserOption = false;
   for (let i = startIndex + 1; i < tokens.length; i += 1) {
     const token = tokens[i]!;
+    if (token === '--') return null;
+    if (token === '-u' || token === '--user' || token === '-g' || token === '--group') {
+      consumedUserOption = true;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('--user=') || token.startsWith('--group=')) {
+      consumedUserOption = true;
+      continue;
+    }
+    if (!token.startsWith('-')) {
+      const next = tokens[i + 1];
+      if (
+        (head === 'su' || head === 'runuser') &&
+        !consumedUserOption &&
+        next !== undefined &&
+        isPrivilegeCommandStringFlag(next)
+      ) {
+        continue;
+      }
+      return null;
+    }
     if (token === '-c' || token === '--command') {
       return tokens[i + 1] ?? null;
     }
@@ -178,9 +316,28 @@ function extractPrivilegeWrapperInlineScriptFromTokens(tokens: string[], startIn
   return null;
 }
 
+function isPrivilegeCommandStringFlag(token: string): boolean {
+  return (
+    token === '-c' ||
+    token === '--command' ||
+    token.startsWith('--command=') ||
+    /^-[A-Za-z]*c[A-Za-z]*$/.test(token)
+  );
+}
+
+function privilegeWrapperHeadWithInlineScript(tokens: string[], index: number): string | null {
+  if (index >= tokens.length) return null;
+  const head = tokenBasename(tokens[index]!);
+  if (!PRIVILEGE_WRAPPER_HEADS.has(head)) return null;
+  return extractPrivilegeWrapperInlineScriptFromTokens(tokens, index) !== null ? head : null;
+}
+
 function bashNestedBuiltinDenyHeadInner(commandLine: string, depth: number): string | null {
   const splitDeny = envSplitExpansionsNestedBuiltinDenyHead(commandLine);
   if (splitDeny) return splitDeny;
+
+  const gitAliasDeny = gitShellAliasBuiltinDenyHead(commandLine, depth);
+  if (gitAliasDeny) return gitAliasDeny;
 
   const embedded = analyzeEmbeddedInlineScripts(commandLine);
   const shellScripts = new Set<string>();
@@ -230,9 +387,68 @@ function builtinDenyHeadFromCommandTokens(tokens: string[]): string | null {
   return bashDirectWrappedBuiltinDenyHead(commandLine);
 }
 
+function gitShellAliasHasUnsafeAllowSyntax(commandLine: string): boolean {
+  return extractGitShellAliasPayloads(commandLine).length > 0;
+}
+
+function gitShellAliasBuiltinDenyHead(commandLine: string, depth: number): string | null {
+  for (const payload of extractGitShellAliasPayloads(commandLine)) {
+    const direct = builtinDenyHeadFromCommandTokens(tokenizeWords(payload));
+    if (direct) return direct;
+    if (depth >= MAX_SHELL_INLINE_DEPTH) continue;
+    const nested = bashNestedBuiltinDenyHeadInner(payload, depth + 1);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function extractGitShellAliasPayloads(commandLine: string): string[] {
+  if (typeof commandLine !== 'string') return [];
+  const trimmed = commandLine.trim();
+  if (trimmed === '') return [];
+
+  const tokens = tokenizeWords(trimmed);
+  let i = 0;
+  while (i < tokens.length && isEnvAssignment(tokens[i]!)) {
+    i += 1;
+  }
+
+  i = skipExecutionWrappers(tokens, i);
+  if (i >= tokens.length || tokenBasename(tokens[i]!) !== GIT_HEAD) return [];
+
+  const payloads: string[] = [];
+  for (let j = i + 1; j < tokens.length; j += 1) {
+    const token = tokens[j]!;
+    let config: string | null = null;
+    if (token === '-c' || token === '--config') {
+      config = tokens[j + 1] ?? null;
+      j += 1;
+    } else if (token.startsWith('-c') && token.length > 2) {
+      config = token.slice(2);
+    } else if (token.startsWith('--config=')) {
+      config = token.slice('--config='.length);
+    }
+
+    const payload = extractGitShellAliasPayload(config);
+    if (payload !== null) payloads.push(payload);
+  }
+  return payloads;
+}
+
+function extractGitShellAliasPayload(config: string | null): string | null {
+  if (config === null) return null;
+  const separator = config.indexOf('=');
+  if (separator <= 0) return null;
+  const key = config.slice(0, separator);
+  const value = config.slice(separator + 1);
+  if (!/^alias\.[^.=\s]+$/.test(key)) return null;
+  return value.startsWith('!') ? value.slice(1) : null;
+}
+
 function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number): boolean {
   if (unsafeAllowSyntaxInFragment(commandLine)) return true;
   if (envSplitExpansionsHaveUnsafeSyntax(commandLine)) return true;
+  if (gitShellAliasHasUnsafeAllowSyntax(commandLine)) return true;
 
   const head = parseBashCommandHead(commandLine);
   if (head && (head.startsWith('-') || BASH_DELEGATION_HEADS.has(head))) return true;
@@ -289,6 +505,10 @@ function analyzeEmbeddedInlineScripts(commandLine: string): {
     }
     const shellScript = extractShellInlineScriptFromTokens(tokens, i);
     if (shellScript !== null) shellScripts.push(shellScript);
+    const scriptWrapperScript = extractScriptWrapperInlineFromTokens(tokens, i);
+    if (scriptWrapperScript !== null) shellScripts.push(scriptWrapperScript);
+    const flockWrapperScript = extractFlockWrapperInlineFromTokens(tokens, i);
+    if (flockWrapperScript !== null) shellScripts.push(flockWrapperScript);
     i += 1;
   }
   return { shellScripts, hasScriptInterpreter, hasFindExec };
@@ -382,6 +602,39 @@ function extractScriptInterpreterInlineFromTokens(tokens: string[], startIndex: 
     if (isScriptInlineFlag(head, token)) {
       return tokens[i + 1] ?? null;
     }
+  }
+  return null;
+}
+
+function extractScriptWrapperInlineFromTokens(tokens: string[], startIndex: number): string | null {
+  if (startIndex >= tokens.length) return null;
+  const head = tokenBasename(tokens[startIndex]!);
+  if (!SCRIPT_WRAPPER_HEADS.has(head)) return null;
+
+  for (let i = startIndex + 1; i < tokens.length; i += 1) {
+    const token = tokens[i]!;
+    if (token === '-c' || token === '--command') {
+      return tokens[i + 1] ?? null;
+    }
+    if (token.startsWith('--command=')) {
+      return token.slice('--command='.length);
+    }
+  }
+  return null;
+}
+
+function extractFlockWrapperInlineFromTokens(tokens: string[], startIndex: number): string | null {
+  if (startIndex >= tokens.length || tokenBasename(tokens[startIndex]!) !== 'flock') return null;
+
+  const commandIndex = skipFlockWrapperArgs(tokens, startIndex + 1);
+  if (commandIndex >= tokens.length) return null;
+
+  const token = tokens[commandIndex]!;
+  if (token === '-c' || token === '--command') {
+    return tokens[commandIndex + 1] ?? null;
+  }
+  if (token.startsWith('--command=')) {
+    return token.slice('--command='.length);
   }
   return null;
 }
@@ -691,6 +944,8 @@ export function parseBashCommandHead(commandLine: string): string | null {
       tokens.splice(i, expanded.consumed, ...expanded.tokens);
       continue;
     }
+    const privilegeHead = privilegeWrapperHeadWithInlineScript(tokens, i);
+    if (privilegeHead) return privilegeHead;
     i = skipWrapperFlags(tokens, i);
     if (i >= tokens.length) return null;
   }
@@ -722,15 +977,101 @@ function isPrefixCommandWrapper(token: string): boolean {
 
 function skipPrefixCommandWrapper(tokens: string[], wrapperIndex: number): number {
   const head = tokenBasename(tokens[wrapperIndex]!);
+  if (head === 'catchsegv' || head === 'chronic' || head === 'setsid') {
+    return skipSimplePrefixWrapperArgs(tokens, wrapperIndex + 1);
+  }
+  if (head === 'flock') return skipFlockWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'ionice') return skipIoniceWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'timeout') return skipTimeoutWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'time') return skipTimeWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'nohup') return skipNohupWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'taskset') return skipTasksetWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'stdbuf') return skipStdbufWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'unshare') return skipUnshareWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'watch') return skipWatchWrapperArgs(tokens, wrapperIndex + 1);
   return wrapperIndex + 1;
+}
+
+function skipSimplePrefixWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') return i + 1;
+    if (!token.startsWith('-')) return i;
+    i += 1;
+  }
+  return i;
 }
 
 function skipNohupWrapperArgs(tokens: string[], start: number): number {
   return tokens[start] === '--' ? start + 1 : start;
+}
+
+function skipFlockWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  let consumedLockTarget = false;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') {
+      i += 1;
+      continue;
+    }
+    if (consumedLockTarget) return i;
+    if (
+      token === '-E' ||
+      token === '--conflict-exit-code' ||
+      token === '-w' ||
+      token === '--wait' ||
+      token === '--timeout'
+    ) {
+      i += 2;
+      continue;
+    }
+    if (
+      token.startsWith('-E') ||
+      token.startsWith('-w') ||
+      token.startsWith('--conflict-exit-code=') ||
+      token.startsWith('--wait=') ||
+      token.startsWith('--timeout=')
+    ) {
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    consumedLockTarget = true;
+    i += 1;
+  }
+  return i;
+}
+
+function skipIoniceWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') return i + 1;
+    if (token === '-c' || token === '--class' || token === '-n' || token === '--classdata') {
+      i += 2;
+      continue;
+    }
+    if (token.startsWith('--class=') || token.startsWith('--classdata=')) {
+      i += 1;
+      continue;
+    }
+    const shortSkip = skipShortOptionToken(token, IONICE_NO_VALUE_SHORT_FLAGS, new Set(['c', 'n']));
+    if (shortSkip !== null) {
+      i += shortSkip;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return i;
 }
 
 function skipTimeoutWrapperArgs(tokens: string[], start: number): number {
@@ -798,6 +1139,129 @@ function skipStdbufWrapperArgs(tokens: string[], start: number): number {
   return i;
 }
 
+function skipTasksetWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  let consumedMaskOrCpuList = false;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') return i + 1;
+    if (token === '-c' || token === '--cpu-list') {
+      i += 2;
+      consumedMaskOrCpuList = true;
+      continue;
+    }
+    if (token.startsWith('--cpu-list=')) {
+      i += 1;
+      consumedMaskOrCpuList = true;
+      continue;
+    }
+    if (token === '-a' || token === '--all-tasks') {
+      i += 1;
+      continue;
+    }
+    if (token === '-p' || token === '--pid') {
+      return i + 2;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    if (!consumedMaskOrCpuList) {
+      i += 1;
+      consumedMaskOrCpuList = true;
+      continue;
+    }
+    return i;
+  }
+  return i;
+}
+
+function skipUnshareWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') return i + 1;
+    if (
+      token === '--map-user' ||
+      token === '--map-group' ||
+      token === '--map-users' ||
+      token === '--map-groups' ||
+      token === '--map-auto' ||
+      token === '--root' ||
+      token === '--wd' ||
+      token === '--setuid' ||
+      token === '--setgid' ||
+      token === '--kill-child' ||
+      token === '--mount-proc' ||
+      token === '--propagation'
+    ) {
+      i += 2;
+      continue;
+    }
+    if (
+      token.startsWith('--map-user=') ||
+      token.startsWith('--map-group=') ||
+      token.startsWith('--map-users=') ||
+      token.startsWith('--map-groups=') ||
+      token.startsWith('--map-auto=') ||
+      token.startsWith('--root=') ||
+      token.startsWith('--wd=') ||
+      token.startsWith('--setuid=') ||
+      token.startsWith('--setgid=') ||
+      token.startsWith('--kill-child=') ||
+      token.startsWith('--mount-proc=') ||
+      token.startsWith('--propagation=')
+    ) {
+      i += 1;
+      continue;
+    }
+    const shortSkip = skipShortOptionToken(token, UNSHARE_NO_VALUE_SHORT_FLAGS, new Set([]));
+    if (shortSkip !== null) {
+      i += shortSkip;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+function skipWatchWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') return i + 1;
+    if (
+      token === '-n' ||
+      token === '--interval' ||
+      token === '-d' ||
+      token === '--differences' ||
+      token === '-p' ||
+      token === '--precise'
+    ) {
+      i += 2;
+      continue;
+    }
+    if (
+      token.startsWith('--interval=') ||
+      token.startsWith('--differences=') ||
+      token.startsWith('--precise=')
+    ) {
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
 function skipTimeWrapperArgs(tokens: string[], start: number): number {
   let i = start;
   while (i < tokens.length) {
@@ -839,6 +1303,23 @@ function skipTimeShortOptionToken(token: string): number | null {
       return i === token.length - 1 ? 2 : 1;
     }
     if (!TIME_NO_VALUE_SHORT_FLAGS.has(flag)) return null;
+  }
+  return 1;
+}
+
+function skipShortOptionToken(
+  token: string,
+  noValueFlags: ReadonlySet<string>,
+  separatedValueFlags: ReadonlySet<string>
+): number | null {
+  if (!token.startsWith('-') || token.startsWith('--') || token === '-') return null;
+
+  for (let i = 1; i < token.length; i += 1) {
+    const flag = token[i]!;
+    if (separatedValueFlags.has(flag)) {
+      return i === token.length - 1 ? 2 : 1;
+    }
+    if (!noValueFlags.has(flag)) return null;
   }
   return 1;
 }
