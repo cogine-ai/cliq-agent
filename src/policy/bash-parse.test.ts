@@ -257,6 +257,10 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     'watch rm -rf /',
     'unshare -r rm -rf /',
     'flock -n /tmp/lock rm -rf /',
+    'flock -w 5 /tmp/lock rm -rf /',
+    'flock --timeout=5 /tmp/lock rm -rf /',
+    'flock /tmp/lock -c "rm -rf /"',
+    'flock --wait 5 /tmp/lock --command "rm -rf /"',
     'chronic rm -rf /',
     'catchsegv rm -rf /',
     'script -q -c "rm -rf /" /dev/null',
@@ -298,6 +302,8 @@ test('bashNestedBuiltinDenyHead surfaces builtins inside privilege wrappers and 
     'runuser -u root -c "rm -rf /"',
     'sudo su -c "rm -rf /"',
     'script -q -c "rm -rf /" /dev/null',
+    'flock -w 5 /tmp/lock rm -rf /',
+    'flock /tmp/lock -c "rm -rf /"',
     "git -c alias.x='!rm -rf /' x",
     'git -c alias.x="!bash -c \\"rm -rf /\\"" x',
     "sudo git -c alias.x='!rm -rf /' x",
@@ -305,6 +311,15 @@ test('bashNestedBuiltinDenyHead surfaces builtins inside privilege wrappers and 
     "env -S 'git -c alias.x=\"!rm -rf /\" x'"
   ]) {
     assert.equal(bashNestedBuiltinDenyHead(command), 'rm', command);
+  }
+
+  for (const command of [
+    'sudo -u root echo hi',
+    "git -c alias.x='!echo hi' x",
+    'flock -w 5 /tmp/lock echo hi',
+    'flock /tmp/lock -c "echo hi"'
+  ]) {
+    assert.equal(bashNestedBuiltinDenyHead(command), null, command);
   }
 });
 

@@ -406,6 +406,8 @@ test('decision table: builtin deny blocks nested rm inside bash -c even with bro
     'watch rm -rf /',
     'unshare -r rm -rf /',
     'flock -n /tmp/lock rm -rf /',
+    'flock -w 5 /tmp/lock rm -rf /',
+    'flock /tmp/lock -c "rm -rf /"',
     'script -q -c "rm -rf /" /dev/null',
     "git -c alias.x='!rm -rf /' x",
     "sudo git -c alias.x='!rm -rf /' x",
@@ -442,10 +444,41 @@ test('decision table: bash allow rules do not auto-approve git shell aliases', a
     assert.equal(decision.behavior, 'ask', bash);
   }
 
+  for (const bash of [
+    "git -c alias.x='!rm -rf /' x",
+    "sudo git -c alias.x='!rm -rf /' x"
+  ]) {
+    const decision = await askPolicy.decide(
+      buildToolApprovalSubject({
+        definition: { name: 'bash', access: 'exec' },
+        action: { bash }
+      })
+    );
+    assert.equal(decision.behavior, 'deny', bash);
+    if (decision.behavior === 'deny') {
+      assert.match(decision.reason, /builtin/);
+    }
+  }
+
   const denyPolicy = createPolicyEngine({
     mode: 'yolo',
     table: composePermissionTable({ allow: [wsRule('bash', 'git *')] })
   });
+
+  // Shell aliases stay unsafe for command-head allow rules even when the
+  // alias body is not itself denied.
+  for (const bash of [
+    "git -c alias.x='!echo hi' x",
+    "sudo git -c alias.x='!echo hi' x"
+  ]) {
+    const decision = await denyPolicy.decide(
+      buildToolApprovalSubject({
+        definition: { name: 'bash', access: 'exec' },
+        action: { bash }
+      })
+    );
+    assert.equal(decision.behavior, 'ask', bash);
+  }
 
   for (const bash of [
     "git -c alias.x='!rm -rf /' x",

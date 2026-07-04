@@ -211,7 +211,8 @@ function argvTokenBuiltinDenyHead(tokens: string[], index: number): string | nul
   const inlineScript =
     extractShellInlineScriptFromTokens(tokens, index) ??
     extractPrivilegeWrapperInlineScriptFromTokens(tokens, index) ??
-    extractScriptWrapperInlineFromTokens(tokens, index);
+    extractScriptWrapperInlineFromTokens(tokens, index) ??
+    extractFlockWrapperInlineFromTokens(tokens, index);
   if (inlineScript !== null) {
     return builtinDenyHeadFromCommandTokens(tokenizeWords(inlineScript));
   }
@@ -506,6 +507,8 @@ function analyzeEmbeddedInlineScripts(commandLine: string): {
     if (shellScript !== null) shellScripts.push(shellScript);
     const scriptWrapperScript = extractScriptWrapperInlineFromTokens(tokens, i);
     if (scriptWrapperScript !== null) shellScripts.push(scriptWrapperScript);
+    const flockWrapperScript = extractFlockWrapperInlineFromTokens(tokens, i);
+    if (flockWrapperScript !== null) shellScripts.push(flockWrapperScript);
     i += 1;
   }
   return { shellScripts, hasScriptInterpreter, hasFindExec };
@@ -616,6 +619,22 @@ function extractScriptWrapperInlineFromTokens(tokens: string[], startIndex: numb
     if (token.startsWith('--command=')) {
       return token.slice('--command='.length);
     }
+  }
+  return null;
+}
+
+function extractFlockWrapperInlineFromTokens(tokens: string[], startIndex: number): string | null {
+  if (startIndex >= tokens.length || tokenBasename(tokens[startIndex]!) !== 'flock') return null;
+
+  const commandIndex = skipFlockWrapperArgs(tokens, startIndex + 1);
+  if (commandIndex >= tokens.length) return null;
+
+  const token = tokens[commandIndex]!;
+  if (token === '-c' || token === '--command') {
+    return tokens[commandIndex + 1] ?? null;
+  }
+  if (token.startsWith('--command=')) {
+    return token.slice('--command='.length);
   }
   return null;
 }
@@ -990,20 +1009,31 @@ function skipNohupWrapperArgs(tokens: string[], start: number): number {
 
 function skipFlockWrapperArgs(tokens: string[], start: number): number {
   let i = start;
+  let consumedLockTarget = false;
   while (i < tokens.length) {
     const token = tokens[i]!;
-    if (token === '--') return i + 1;
-    if (token === '-c' || token === '--command') {
-      return i + 1;
-    }
-    if (token.startsWith('--command=')) {
-      return i + 1;
-    }
-    if (token === '-E' || token === '--conflict-exit-code' || token === '-F' || token === '--fcntl') {
-      i += token === '-E' || token === '--conflict-exit-code' ? 2 : 1;
+    if (token === '--') {
+      i += 1;
       continue;
     }
-    if (token.startsWith('--conflict-exit-code=')) {
+    if (consumedLockTarget) return i;
+    if (
+      token === '-E' ||
+      token === '--conflict-exit-code' ||
+      token === '-w' ||
+      token === '--wait' ||
+      token === '--timeout'
+    ) {
+      i += 2;
+      continue;
+    }
+    if (
+      token.startsWith('-E') ||
+      token.startsWith('-w') ||
+      token.startsWith('--conflict-exit-code=') ||
+      token.startsWith('--wait=') ||
+      token.startsWith('--timeout=')
+    ) {
       i += 1;
       continue;
     }
@@ -1011,7 +1041,8 @@ function skipFlockWrapperArgs(tokens: string[], start: number): number {
       i += 1;
       continue;
     }
-    return i + 1;
+    consumedLockTarget = true;
+    i += 1;
   }
   return i;
 }
