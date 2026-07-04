@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   bashCommandHasUnsafeAllowSyntax,
+  bashNestedBuiltinDenyHead,
   extractShellInlineScript,
   parseBashCommandHead
 } from './bash-parse.js';
@@ -52,6 +53,15 @@ test('parseBashCommandHead handles sudo long-form --user= attached value', () =>
   // Parallel coverage so the attached-value branch in skipWrapperFlags isn't
   // exercised only by nice.
   assert.equal(parseBashCommandHead('sudo --user=deploy ls'), 'ls');
+});
+
+test('parseBashCommandHead keeps privilege wrappers that carry inline commands', () => {
+  assert.equal(parseBashCommandHead('sudo -c "rm -rf /"'), 'sudo');
+  assert.equal(parseBashCommandHead('sudo --command="rm -rf /"'), 'sudo');
+  assert.equal(parseBashCommandHead('su -c "rm -rf /"'), 'su');
+  assert.equal(parseBashCommandHead('runuser -u root -c "rm -rf /"'), 'runuser');
+  assert.equal(parseBashCommandHead('env sudo -c "rm -rf /"'), 'sudo');
+  assert.equal(parseBashCommandHead('timeout 5 sudo -c "rm -rf /"'), 'timeout');
 });
 
 test('parseBashCommandHead returns the basename for absolute paths', () => {
@@ -234,7 +244,22 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     "/usr/bin/time env -S 'rm -rf /'",
     'builtin rm -rf /',
     'busybox rm -rf /',
+    'sudo -c "rm -rf /"',
     'su -c "rm -rf /"',
+    'runuser -u root -c "rm -rf /"',
+    'sudo su -c "rm -rf /"',
+    'sudo runuser -u root rm -rf /',
+    'runuser -- rm -rf /',
+    'su -- rm -rf /',
+    'ionice -c2 -n7 rm -rf /',
+    'taskset 0x1 rm -rf /',
+    'setsid rm -rf /',
+    'watch rm -rf /',
+    'unshare -r rm -rf /',
+    'flock -n /tmp/lock rm -rf /',
+    'chronic rm -rf /',
+    'catchsegv rm -rf /',
+    'script -q -c "rm -rf /" /dev/null',
     'find . -name foo -exec rm {} \\;',
     'find . -name foo -execdir rm {} \\;'
   ]) {
@@ -245,6 +270,42 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
   assert.equal(bashCommandHasUnsafeAllowSyntax('stdbuf -oL git status'), false);
   assert.equal(bashCommandHasUnsafeAllowSyntax('/usr/bin/time -p git status'), false);
   assert.equal(bashCommandHasUnsafeAllowSyntax('/usr/bin/time -f %E git status'), false);
+});
+
+test('bashCommandHasUnsafeAllowSyntax treats git shell aliases as unsafe through wrappers', () => {
+  for (const command of [
+    "git -c alias.x='!rm -rf /' x",
+    'git -c alias.x="!bash -c \\"rm -rf /\\"" x',
+    "git -c alias.status='!rm -rf /' status",
+    "git -c alias.x='!echo hi' x",
+    "git -calias.x='!rm -rf /' x",
+    "git --config alias.x='!rm -rf /' x",
+    "sudo git -c alias.x='!rm -rf /' x",
+    "timeout 5 git -c alias.x='!rm -rf /' x",
+    "env -S 'git -c alias.x=\"!rm -rf /\" x'"
+  ]) {
+    assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
+  }
+
+  assert.equal(bashCommandHasUnsafeAllowSyntax('git -c core.editor=vim status'), false);
+});
+
+test('bashNestedBuiltinDenyHead surfaces builtins inside privilege wrappers and git aliases', () => {
+  for (const command of [
+    'sudo -c "rm -rf /"',
+    'env sudo -c "rm -rf /"',
+    'su -c "rm -rf /"',
+    'runuser -u root -c "rm -rf /"',
+    'sudo su -c "rm -rf /"',
+    'script -q -c "rm -rf /" /dev/null',
+    "git -c alias.x='!rm -rf /' x",
+    'git -c alias.x="!bash -c \\"rm -rf /\\"" x',
+    "sudo git -c alias.x='!rm -rf /' x",
+    "timeout 5 git -c alias.x='!rm -rf /' x",
+    "env -S 'git -c alias.x=\"!rm -rf /\" x'"
+  ]) {
+    assert.equal(bashNestedBuiltinDenyHead(command), 'rm', command);
+  }
 });
 
 test('bashCommandHasUnsafeAllowSyntax treats script interpreters with inline code as unsafe for allow rules', () => {

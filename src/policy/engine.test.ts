@@ -395,13 +395,68 @@ test('decision table: builtin deny blocks nested rm inside bash -c even with bro
     'builtin exec bash -c "rm -rf /"',
     'builtin rm -rf /',
     'busybox rm -rf /',
-    'su -c "rm -rf /"'
+    'sudo -c "rm -rf /"',
+    'su -c "rm -rf /"',
+    'runuser -u root -c "rm -rf /"',
+    'sudo su -c "rm -rf /"',
+    'sudo runuser -u root rm -rf /',
+    'ionice -c2 -n7 rm -rf /',
+    'taskset 0x1 rm -rf /',
+    'setsid rm -rf /',
+    'watch rm -rf /',
+    'unshare -r rm -rf /',
+    'flock -n /tmp/lock rm -rf /',
+    'script -q -c "rm -rf /" /dev/null',
+    "git -c alias.x='!rm -rf /' x",
+    "sudo git -c alias.x='!rm -rf /' x",
+    "timeout 5 git -c alias.x='!rm -rf /' x"
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },
       action: { bash }
     });
     const decision = await policy.decide(subject);
+    assert.equal(decision.behavior, 'deny', bash);
+    if (decision.behavior === 'deny') {
+      assert.match(decision.reason, /builtin/);
+    }
+  }
+});
+
+test('decision table: bash allow rules do not auto-approve git shell aliases', async () => {
+  const askPolicy = createPolicyEngine({
+    mode: 'default',
+    table: composePermissionTable({ allow: [wsRule('bash', 'git *')] })
+  });
+
+  for (const bash of [
+    "git -c alias.x='!echo hi' x",
+    "sudo git -c alias.x='!echo hi' x"
+  ]) {
+    const decision = await askPolicy.decide(
+      buildToolApprovalSubject({
+        definition: { name: 'bash', access: 'exec' },
+        action: { bash }
+      })
+    );
+    assert.equal(decision.behavior, 'ask', bash);
+  }
+
+  const denyPolicy = createPolicyEngine({
+    mode: 'yolo',
+    table: composePermissionTable({ allow: [wsRule('bash', 'git *')] })
+  });
+
+  for (const bash of [
+    "git -c alias.x='!rm -rf /' x",
+    "sudo git -c alias.x='!rm -rf /' x"
+  ]) {
+    const decision = await denyPolicy.decide(
+      buildToolApprovalSubject({
+        definition: { name: 'bash', access: 'exec' },
+        action: { bash }
+      })
+    );
     assert.equal(decision.behavior, 'deny', bash);
     if (decision.behavior === 'deny') {
       assert.match(decision.reason, /builtin/);

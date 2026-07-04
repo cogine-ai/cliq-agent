@@ -150,6 +150,52 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads inside direct 
   }
 });
 
+test('buildToolApprovalSubject surfaces nested builtin-deny heads inside privilege wrappers', () => {
+  for (const [bash, commandHead] of [
+    ['sudo -c "rm -rf /"', 'sudo'],
+    ['env sudo -c "rm -rf /"', 'sudo'],
+    ['su -c "rm -rf /"', 'su'],
+    ['runuser -u root -c "rm -rf /"', 'runuser']
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+
+    if (subject.kind === 'tool') {
+      assert.deepEqual(subject.channel, {
+        kind: 'bash',
+        commandHead,
+        unsafeForAllow: true,
+        nestedBuiltinDenyHead: 'rm'
+      });
+    }
+  }
+});
+
+test('buildToolApprovalSubject surfaces nested builtin-deny heads inside git shell aliases', () => {
+  for (const [bash, commandHead] of [
+    ["git -c alias.x='!rm -rf /' x", 'git'],
+    ["sudo git -c alias.x='!rm -rf /' x", 'git'],
+    ["timeout 5 git -c alias.x='!rm -rf /' x", 'timeout'],
+    ["env -S 'git -c alias.x=\"!rm -rf /\" x'", 'git']
+  ]) {
+    const subject = buildToolApprovalSubject({
+      definition: { name: 'bash', access: 'exec' },
+      action: { bash }
+    });
+
+    if (subject.kind === 'tool') {
+      assert.deepEqual(subject.channel, {
+        kind: 'bash',
+        commandHead,
+        unsafeForAllow: true,
+        nestedBuiltinDenyHead: 'rm'
+      });
+    }
+  }
+});
+
 test('buildToolApprovalSubject marks TX edits as staged and includes the path', () => {
   const subject = buildToolApprovalSubject({
     definition: { name: 'edit', access: 'write' },
