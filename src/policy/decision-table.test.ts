@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  BUILTIN_BASH_DENY_HEADS,
   BUILTIN_DENY,
   accessChannelPrimaryKey,
   composePermissionTable,
@@ -25,6 +26,15 @@ const wsRule = (channel: PermissionRule['channel'], pattern: string): Permission
 
 const bashChannel = (commandHead: string, unsafeForAllow = false) =>
   ({ kind: 'bash', commandHead, unsafeForAllow }) as const;
+
+test('BUILTIN_BASH_DENY_HEADS mirrors literal bash patterns from BUILTIN_DENY', () => {
+  const literalBashDeny = BUILTIN_DENY.filter(
+    (rule) => rule.channel === 'bash' && !rule.pattern.includes('*')
+  ).map((rule) => rule.pattern);
+
+  assert.deepEqual([...BUILTIN_BASH_DENY_HEADS].sort(), literalBashDeny.sort());
+  assert.ok(BUILTIN_BASH_DENY_HEADS.has('rm'));
+});
 
 test('EMPTY_PERMISSION_TABLE and BUILTIN_DENY are deeply frozen (no shared-singleton mutation)', () => {
   // Regression for PR #71 CodeRabbit finding: the default table singleton is
