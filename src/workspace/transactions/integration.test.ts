@@ -474,3 +474,64 @@ test('e2e: failed turn aborts implicit per-turn tx so the next turn can auto-app
     assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'APPLIED');
   });
 });
+
+test('e2e: doom loop aborts implicit per-turn tx so staged edits never land', async () => {
+  await withEnv(async ({ home, ws, session }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+    const transactions: TxRunnerOptions = {
+      mode: 'edit',
+      auto: 'per-turn',
+      applyPolicy: 'auto-on-pass',
+      bashPolicy: 'passthrough',
+      headless: true,
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] },
+      stagedViewConfig: { copyMode: 'copy', bindPaths: [] },
+      workspaceId: 'ws_int',
+      workspaceRealPath: ws,
+      cliqHome: home
+    };
+
+    const failEvents: RuntimeEvent[] = [];
+    const failRunner = createRunner({
+      model: scriptedModel([
+        '{"edit":{"path":"a.txt","old_text":"one","new_text":"ORPHAN"}}',
+        '{"bash":"pwd"}',
+        '{"bash":"pwd"}'
+      ]),
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
+      transactions,
+      doomLoop: { repeatedActionLimit: 2 },
+      maxTurns: 100,
+      onEvent: (e) => {
+        failEvents.push(e);
+      }
+    });
+
+    await assert.rejects(() => failRunner.runTurn(session, 'stage then doom loop'), /Doom loop detected/);
+    assert.ok(failEvents.some((e) => e.type === 'tx-aborted'), 'doom loop should abort implicit tx');
+    assert.equal(failEvents.some((e) => e.type === 'tx-applied'), false);
+    assert.equal(session.activeTxId, undefined);
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'one');
+
+    const recoveryEvents: RuntimeEvent[] = [];
+    const recoveryRunner = createRunner({
+      model: scriptedModel([
+        '{"edit":{"path":"a.txt","old_text":"one","new_text":"APPLIED"}}',
+        '{"message":"done"}'
+      ]),
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
+      transactions,
+      onEvent: (e) => {
+        recoveryEvents.push(e);
+      }
+    });
+
+    const finalMessage = await recoveryRunner.runTurn(session, 'recover after doom loop');
+    assert.equal(finalMessage, 'done');
+    assert.ok(recoveryEvents.some((e) => e.type === 'tx-applied'), 'next turn should auto-apply');
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'APPLIED');
+  });
+});
