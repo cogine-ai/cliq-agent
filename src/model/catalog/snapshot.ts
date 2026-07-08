@@ -93,6 +93,24 @@ export const CATALOG_SNAPSHOT = {
       source: { kind: 'cliq-overlay', confidence: 'high' }
     },
     {
+      id: 'cliq-models',
+      displayName: 'Cliq Models',
+      kind: 'local-runtime',
+      auth: { kind: 'none' },
+      configSources: ['Cliq managed runtime', 'Existing Ollama runtime', 'Workspace', 'Global', 'CLI'],
+      setup: {
+        primary: [
+          'Set up the Cliq Models runtime, then choose a local model. Existing Ollama-compatible runtimes can be used when present.'
+        ]
+      },
+      modelListSource: {
+        kind: 'cliq-models-runtime',
+        description: 'Cliq Models local runtime discovery.'
+      },
+      visibleModelLimit: 8,
+      source: { kind: 'cliq-overlay', confidence: 'high' }
+    },
+    {
       id: 'ollama',
       displayName: 'Ollama',
       kind: 'local-runtime',

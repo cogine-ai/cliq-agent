@@ -81,6 +81,14 @@ const PROVIDERS: Record<ProviderName, ModelProviderDefinition> = {
     getDefaultModel: () => 'glm-5.2',
     getKnownModels: () => listModelDescriptors('zhipu')
   },
+  'cliq-models': {
+    name: 'cliq-models',
+    displayName: getProviderCatalogEntry('cliq-models')?.displayName ?? 'Cliq Models',
+    defaultBaseUrl: OLLAMA_DEFAULT_BASE_URL,
+    requiresApiKey: false,
+    getDefaultModel: () => null,
+    getKnownModels: () => []
+  },
   ollama: {
     name: 'ollama',
     displayName: getProviderCatalogEntry('ollama')?.displayName ?? 'Ollama',

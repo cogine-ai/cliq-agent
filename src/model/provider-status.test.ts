@@ -381,6 +381,51 @@ test('provider status distinguishes unavailable local Ollama from missing remote
   });
 });
 
+test('provider status exposes Cliq Models as a managed local provider distinct from raw Ollama', async () => {
+  await withEnv({ CLIQ_MODEL_PROVIDER: 'cliq-models' }, async () => {
+    const report = await buildProviderStatusReport({
+      workspace: {},
+      cli: {},
+      discoverOllamaModels: unavailableOllama
+    });
+
+    assert.equal(report.activeProvider, 'cliq-models');
+    const cliqModels = report.providers[0]!;
+    assert.equal(cliqModels.provider, 'cliq-models');
+    assert.equal(cliqModels.displayName, 'Cliq Models');
+    assert.equal(cliqModels.current, true);
+    assert.equal(cliqModels.state, 'runtime-missing');
+    assert.deepEqual(cliqModels.issues.map((issue) => issue.code), ['local-runtime-missing']);
+    assert.match(formatProviderStatusRow(cliqModels), /Cliq Models\s+Current · Runtime missing · needs Cliq Models runtime/);
+    assert.ok(cliqModels.setup.some((line) => /Cliq Models runtime/i.test(line)));
+
+    const ollama = report.providers.find((provider) => provider.provider === 'ollama');
+    assert.equal(ollama?.displayName, 'Ollama');
+    assert.equal(ollama?.state, 'unavailable');
+  });
+});
+
+test('provider status renders Cliq Models ready state when a local runtime has models', async () => {
+  await withEnv({ CLIQ_MODEL_PROVIDER: 'cliq-models' }, async () => {
+    const report = await buildProviderStatusReport({
+      workspace: {},
+      cli: {},
+      discoverOllamaModels: async () => [{ name: 'llama3.2:latest' }, { name: 'qwen3:4b' }]
+    });
+
+    const cliqModels = report.providers[0]!;
+    assert.equal(cliqModels.provider, 'cliq-models');
+    assert.equal(cliqModels.state, 'ready');
+    assert.deepEqual(cliqModels.sources, ['Existing Ollama runtime']);
+    assert.equal(cliqModels.modelCount, 2);
+    assert.equal(cliqModels.model, 'qwen3:4b');
+    assert.match(formatProviderStatusRow(cliqModels), /Cliq Models\s+Current · Ready · Existing Ollama runtime · 2 models · using qwen3:4b/);
+
+    const validation = validateProviderStatus(report, 'cliq-models');
+    assert.equal(validation.ok, true);
+  });
+});
+
 test('provider status reports Zhipu env credentials and default model without leaking secrets', async () => {
   await withEnv({ ZHIPU_API_KEY: 'zhipu-secret' }, async () => {
     const report = await buildProviderStatusReport({

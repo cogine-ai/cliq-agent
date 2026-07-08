@@ -392,3 +392,63 @@ test('model setup flow discovers selectable models after OpenAI-compatible base 
     }
   ]);
 });
+
+test('model setup flow routes Cliq Models runtime setup to model selection', async () => {
+  const snapshot = makeSnapshot({
+    selectedProvider: 'cliq-models',
+    providers: [
+      {
+        provider: 'cliq-models',
+        displayName: 'Cliq Models',
+        state: 'runtime-missing',
+        stateLabel: 'Runtime missing',
+        current: true,
+        issues: ['Cliq Models runtime']
+      },
+      {
+        provider: 'ollama',
+        displayName: 'Ollama',
+        state: 'configured',
+        stateLabel: 'Configured',
+        current: false,
+        issues: []
+      }
+    ],
+    modelsByProvider: {
+      'cliq-models': [
+        {
+          kind: 'model',
+          provider: 'cliq-models',
+          model: 'qwen3.5:4b',
+          displayName: 'qwen3.5:4b',
+          labels: ['Local']
+        }
+      ],
+      ollama: [
+        {
+          kind: 'model',
+          provider: 'ollama',
+          model: 'qwen3.5:4b',
+          displayName: 'qwen3.5:4b',
+          labels: ['Local']
+        }
+      ]
+    }
+  });
+  const { stdin, lastFrame } = render(
+    <ModelSetupFlow snapshot={snapshot} onApply={() => {}} onClose={() => {}} />
+  );
+
+  await flush();
+  stdin.write('\r');
+  await flush();
+
+  assert.match(lastFrame() ?? '', /Cliq Models runtime/);
+  assert.doesNotMatch(lastFrame() ?? '', /API key/i);
+
+  stdin.write('\r');
+  await flush();
+
+  assert.match(lastFrame() ?? '', /qwen3\.5:4b/);
+  assert.match(lastFrame() ?? '', /Model step:/);
+});

@@ -10,12 +10,18 @@ creates a shared provider status layer plus user-facing management entry points:
 
 ## In scope
 
-- Report providers as `Configured`, `Not configured`, or `Unavailable`.
+- Report hosted providers as `Configured` or `Not configured`, raw `Ollama` as
+  `Configured`, `Not configured`, or `Unavailable`, and `Cliq Models` with
+  local-runtime setup states such as `Runtime missing`, `Model missing`, and
+  `Ready`.
 - Put the active provider first and mark it `Current`.
 - Show safe configuration source labels such as `ENV`, `Workspace`,
   `Managed credential`, `CLI`, and `Local service`.
 - Treat Ollama as a local service with model availability, not as a credentialed
   remote provider.
+- Treat `Cliq Models` as a first-party local-runtime provider, distinct from
+  raw self-managed `Ollama`, with setup guidance focused on Cliq Models rather
+  than direct Ollama configuration.
 - Return structured validation issues for missing API keys, base URLs, model
   ids, local models, or local service availability.
 - Save directly entered provider API keys to the local user auth file.
@@ -47,9 +53,10 @@ view exposes a configure action that reuses the same setup flow. It does not
 become the primary model-selection entry point.
 
 The picker source list is intentionally conservative: static catalog rows,
-local Ollama `/api/tags` rows, configured model ids from workspace/env/auth, and
-direct custom model-id entry. Remote dynamic model-list APIs and Ollama pull
-actions remain separate future work.
+local runtime rows for `Cliq Models` and `Ollama`, configured model ids from
+workspace/env/auth, and direct custom model-id entry. Remote dynamic model-list
+APIs, Cliq Models installer/repair actions, model download/create actions, and
+Ollama pull actions remain separate future work.
 
 ## Secret Persistence Decision
 

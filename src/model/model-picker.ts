@@ -110,7 +110,7 @@ function buildModelRowsForProvider(opts: {
     add(entry.model, entry.displayName, 'Catalog');
   }
 
-  if (opts.provider === 'ollama') {
+  if (usesDiscoveredLocalModels(opts.provider)) {
     for (const model of opts.ollamaModels) {
       add(model.name, model.name, 'Local');
     }
@@ -153,6 +153,10 @@ function buildModelRowsForProvider(opts: {
       labels: ['Custom']
     }
   ];
+}
+
+function usesDiscoveredLocalModels(provider: ProviderName) {
+  return provider === 'ollama' || provider === 'cliq-models';
 }
 
 function configuredModelIds(opts: {

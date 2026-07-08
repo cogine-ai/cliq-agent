@@ -31,6 +31,18 @@ const report: ProviderStatusReport = {
       setup: []
     },
     {
+      provider: 'cliq-models',
+      displayName: 'Cliq Models',
+      current: false,
+      state: 'ready',
+      sources: ['Existing Ollama runtime'],
+      issues: [],
+      setup: [],
+      modelCount: 2,
+      model: 'qwen3.5:4b',
+      baseUrl: 'http://localhost:11434'
+    },
+    {
       provider: 'ollama',
       displayName: 'Ollama',
       current: false,
@@ -63,6 +75,7 @@ test('model picker defaults provider selection to current runtime provider', () 
 
   assert.equal(snapshot.selectedProvider, 'ollama');
   assert.equal(snapshot.providers.find((provider) => provider.provider === 'ollama')?.stateLabel, 'Configured');
+  assert.equal(snapshot.providers.find((provider) => provider.provider === 'cliq-models')?.stateLabel, 'Ready');
 });
 
 test('model picker labels current, startup default, provider default, catalog, local, configured, and custom rows', () => {
@@ -103,6 +116,9 @@ test('model picker labels current, startup default, provider default, catalog, l
 
   const ollama = snapshot.modelsByProvider.ollama ?? [];
   assert.deepEqual(ollama.find((row) => row.model === 'qwen3.5:4b')?.labels, ['Local']);
+
+  const cliqModels = snapshot.modelsByProvider['cliq-models'] ?? [];
+  assert.deepEqual(cliqModels.find((row) => row.model === 'qwen3.5:4b')?.labels, ['Local']);
 });
 
 test('model picker does not label session-only auth as a saved default', () => {

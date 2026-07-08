@@ -2,7 +2,15 @@ import type { ModelCapabilities, ProviderName } from '../types.js';
 
 export type ProviderKind = 'hosted-api' | 'local-runtime' | 'openai-compatible' | 'aggregator';
 
-export type ConfigSourceLabel = 'ENV' | 'Workspace' | 'Global' | 'Managed credential' | 'CLI' | 'Local service';
+export type ConfigSourceLabel =
+  | 'ENV'
+  | 'Workspace'
+  | 'Global'
+  | 'Managed credential'
+  | 'CLI'
+  | 'Local service'
+  | 'Cliq managed runtime'
+  | 'Existing Ollama runtime';
 
 export type ProviderAuth =
   | {
@@ -14,7 +22,7 @@ export type ProviderAuth =
       kind: 'none';
     };
 
-export type ModelListSourceKind = 'snapshot' | 'ollama-tags' | 'provider-api' | 'user-config';
+export type ModelListSourceKind = 'snapshot' | 'ollama-tags' | 'cliq-models-runtime' | 'provider-api' | 'user-config';
 
 export type ModelListSource = {
   kind: ModelListSourceKind;

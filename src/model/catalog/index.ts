@@ -50,7 +50,15 @@ export type OpenClawProviderRecord = {
   }>;
 };
 
-const PROVIDER_IDS = new Set<ProviderName>(['openrouter', 'anthropic', 'openai', 'openai-compatible', 'zhipu', 'ollama']);
+const PROVIDER_IDS = new Set<ProviderName>([
+  'openrouter',
+  'anthropic',
+  'openai',
+  'openai-compatible',
+  'zhipu',
+  'cliq-models',
+  'ollama'
+]);
 
 const PI_PROVIDER_MAP: Record<string, ProviderName | undefined> = {
   openrouter: 'openrouter',
@@ -161,7 +169,7 @@ export function mapPiModelToCatalogEntry(record: PiModelCatalogRecord): ModelCat
 
 function inferProviderKind(provider: ProviderName, categories: string[] | undefined): ProviderKind {
   if (provider === 'openrouter') return 'aggregator';
-  if (provider === 'ollama') return 'local-runtime';
+  if (provider === 'cliq-models' || provider === 'ollama') return 'local-runtime';
   if (provider === 'openai-compatible') return 'openai-compatible';
   if (categories?.includes('local')) return 'local-runtime';
   return 'hosted-api';

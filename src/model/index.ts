@@ -18,6 +18,7 @@ export function registerBuiltInModelProviders() {
   registerModelClientFactory('openai', createOpenAIClient);
   registerModelClientFactory('openai-compatible', createOpenAICompatibleClient);
   registerModelClientFactory('zhipu', createOpenAICompatibleClient);
+  registerModelClientFactory('cliq-models', createOllamaClient);
   registerModelClientFactory('ollama', createOllamaClient);
   registered = true;
 }

@@ -31,6 +31,7 @@ export type ModelSetupFlowProps = {
 
 type Step =
   | { kind: 'providers'; selectedIndex: number }
+  | { kind: 'local-runtime-setup'; provider: ProviderName }
   | { kind: 'models'; provider: ProviderName; selectedIndex: number; draft?: SetupDraft; discoveredRows?: ModelPickerModelRow[] }
   | { kind: 'custom-model'; provider: ProviderName; value: string; draft?: SetupDraft }
   | { kind: 'secret-confirm'; provider: ProviderName; model: string; draft: SetupDraft }
@@ -104,6 +105,11 @@ export function ModelSetupFlow({
       return;
     }
 
+    if (step.kind === 'local-runtime-setup') {
+      handleLocalRuntimeSetupInput(input, key, step, snapshot, setStep);
+      return;
+    }
+
     if (step.kind === 'secret-confirm') {
       void handleSecretConfirmInput(input, key, step, onApply);
       return;
@@ -135,6 +141,8 @@ export function ModelSetupFlow({
       </Text>
       {step.kind === 'providers' ? (
         <ProviderStep snapshot={snapshot} selectedIndex={step.selectedIndex} />
+      ) : step.kind === 'local-runtime-setup' ? (
+        <LocalRuntimeSetupStep provider={step.provider} />
       ) : step.kind === 'models' ? (
         <ModelStep
           snapshot={snapshot}
@@ -180,6 +188,14 @@ function handleProviderInput(
   if (key.return || key.rightArrow) {
     const provider = snapshot.providers[step.selectedIndex];
     if (!provider) return;
+    if (provider.provider === 'cliq-models') {
+      if (requiresCliqModelsRuntimeSetup(provider.state)) {
+        setStep({ kind: 'local-runtime-setup', provider: provider.provider });
+        return;
+      }
+      setStep({ kind: 'models', provider: provider.provider, selectedIndex: 0 });
+      return;
+    }
     if (provider.state !== 'configured' && provider.issues.length > 0) {
       setStep({
         kind: 'setup-input',
@@ -191,6 +207,22 @@ function handleProviderInput(
       return;
     }
     setStep({ kind: 'models', provider: provider.provider, selectedIndex: 0 });
+  }
+}
+
+function handleLocalRuntimeSetupInput(
+  input: string,
+  key: Key,
+  step: Extract<Step, { kind: 'local-runtime-setup' }>,
+  snapshot: ModelPickerSnapshot,
+  setStep: (step: Step) => void
+) {
+  if (key.leftArrow || key.backspace || key.delete) {
+    setStep({ kind: 'providers', selectedIndex: providerIndex(snapshot, step.provider) });
+    return;
+  }
+  if (key.return || key.rightArrow || input === ' ') {
+    setStep({ kind: 'models', provider: step.provider, selectedIndex: 0 });
   }
 }
 
@@ -464,6 +496,17 @@ function ProviderStep({ snapshot, selectedIndex }: { snapshot: ModelPickerSnapsh
   );
 }
 
+function LocalRuntimeSetupStep({ provider }: { provider: ProviderName }) {
+  const displayName = provider === 'cliq-models' ? 'Cliq Models' : provider;
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text bold>{`${displayName} runtime`}</Text>
+      <Text>Runtime setup is required before local models can run.</Text>
+      <Text>Continue to model selection when the runtime is ready.</Text>
+    </Box>
+  );
+}
+
 function ModelStep({
   snapshot,
   provider,
@@ -553,6 +596,10 @@ function isEditingStep(step: Step) {
   return step.kind === 'custom-model' || step.kind === 'setup-input';
 }
 
+function requiresCliqModelsRuntimeSetup(state: string) {
+  return state === 'runtime-missing' || state === 'runtime-installing' || state === 'repair-required';
+}
+
 function shouldCollectDirectModel(snapshot: ModelPickerSnapshot, provider: ProviderName) {
   return modelRows(snapshot, provider).filter((row) => row.kind === 'model').length === 0;
 }
@@ -626,6 +673,9 @@ function formatModelRow(row: ModelPickerModelRow, selected: boolean) {
 function footerForStep(step: Step) {
   if (step.kind === 'providers') {
     return 'Provider step: Enter/Right models · Up/Down select · Esc/q close';
+  }
+  if (step.kind === 'local-runtime-setup') {
+    return 'Runtime setup: Enter continue to model selection · Left back · Esc/q close';
   }
   if (step.kind === 'models') {
     if (step.draft?.apiKey) {

@@ -4,6 +4,7 @@ export type ProviderName =
   | 'openai'
   | 'openai-compatible'
   | 'zhipu'
+  | 'cliq-models'
   | 'ollama';
 
 export type ModelModality = 'text' | 'image' | 'audio' | 'video';

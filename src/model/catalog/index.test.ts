@@ -12,7 +12,7 @@ test('provider catalog covers every built-in provider with setup metadata', () =
   const providers = listProviderCatalog();
   const byId = new Map(providers.map((provider) => [provider.id, provider]));
 
-  for (const id of ['openrouter', 'anthropic', 'openai', 'openai-compatible', 'zhipu', 'ollama'] as const) {
+  for (const id of ['openrouter', 'anthropic', 'openai', 'openai-compatible', 'zhipu', 'cliq-models', 'ollama'] as const) {
     const provider = byId.get(id);
     assert.ok(provider, `missing provider catalog entry for ${id}`);
     assert.equal(typeof provider.displayName, 'string');
@@ -32,6 +32,9 @@ test('provider catalog covers every built-in provider with setup metadata', () =
     required: true
   });
   assert.equal(byId.get('zhipu')?.defaultModelId, 'glm-5.2');
+  assert.equal(byId.get('cliq-models')?.displayName, 'Cliq Models');
+  assert.equal(byId.get('cliq-models')?.auth.kind, 'none');
+  assert.equal(byId.get('cliq-models')?.kind, 'local-runtime');
   assert.equal(byId.get('ollama')?.auth.kind, 'none');
 });
 

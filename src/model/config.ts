@@ -77,14 +77,17 @@ export function isModelSetupRequiredError(error: unknown): error is ModelSetupRe
 
 export function formatModelSetupMessage(details: ModelSetupDetails): string {
   const status = formatSetupStatus(details);
+  const displayName = getModelProvider(details.provider).displayName;
   return [
     'Cliq needs a model provider before chat can start.',
     '',
     'Current status:',
     `  ${status}`,
-    ...(details.causeMessage ? [`  Ollama discovery error: ${details.causeMessage}`] : []),
+    ...(details.causeMessage ? [`  ${displayName} discovery error: ${details.causeMessage}`] : []),
     '',
     'Provider configuration:',
+    '  Cliq Models:',
+    '    Choose Cliq Models from /model, set up the local runtime, then choose a local model.',
     '  Local Ollama:',
     `    ollama pull ${OLLAMA_DEFAULT_MODEL_HINT}`,
     `    cliq --provider ollama --model ${OLLAMA_DEFAULT_MODEL_HINT}`,
@@ -160,6 +163,9 @@ function formatSetupStatus(details: ModelSetupDetails) {
   const displayName = getModelProvider(details.provider).displayName;
   switch (details.reason) {
     case 'no-local-model':
+      if (details.provider === 'cliq-models') {
+        return `Cliq Models is selected, but no local runtime model could be selected at ${details.baseUrl ?? 'http://localhost:11434'}.`;
+      }
       return [
         'No provider/model is configured.',
         `Cliq checked local Ollama at ${details.baseUrl ?? 'http://localhost:11434'}, but no local model could be selected.`
@@ -188,12 +194,16 @@ function requireApiKey(provider: ProviderName, apiKey: string | undefined) {
   }
 }
 
-function buildNoLocalModelConfiguredError(baseUrl: string, cause?: unknown) {
+function isLocalRuntimeProvider(provider: ProviderName) {
+  return provider === 'ollama' || provider === 'cliq-models';
+}
+
+function buildNoLocalModelConfiguredError(provider: ProviderName, baseUrl: string, cause?: unknown) {
   const causeMessage = cause instanceof Error ? cause.message : cause ? String(cause) : '';
   return new ModelSetupRequiredError(
     {
       reason: 'no-local-model',
-      provider: 'ollama',
+      provider,
       baseUrl,
       ...(causeMessage ? { causeMessage } : {})
     },
@@ -201,17 +211,17 @@ function buildNoLocalModelConfiguredError(baseUrl: string, cause?: unknown) {
   );
 }
 
-async function discoverDefaultOllamaModel(baseUrl: string) {
+async function discoverDefaultLocalRuntimeModel(provider: ProviderName, baseUrl: string) {
   let models: Awaited<ReturnType<typeof discoverOllamaModels>>;
   try {
     models = await discoverOllamaModels(baseUrl);
   } catch (error) {
-    throw buildNoLocalModelConfiguredError(baseUrl, error);
+    throw buildNoLocalModelConfiguredError(provider, baseUrl, error);
   }
 
   const selected = selectDefaultOllamaModel(models);
   if (!selected) {
-    throw buildNoLocalModelConfiguredError(baseUrl);
+    throw buildNoLocalModelConfiguredError(provider, baseUrl);
   }
 
   return selected;
@@ -257,8 +267,8 @@ export async function resolveModelConfig({ workspace, cli, auth = EMPTY_PROVIDER
     });
   }
 
-  if (!model && provider === 'ollama') {
-    model = await discoverDefaultOllamaModel(baseUrl);
+  if (!model && isLocalRuntimeProvider(provider)) {
+    model = await discoverDefaultLocalRuntimeModel(provider, baseUrl);
   }
 
   if (!model) {
