@@ -11,6 +11,10 @@ import {
   upsertProviderAuth
 } from './auth-store.js';
 
+async function writeAuthJson(home: string, value: unknown) {
+  await writeFile(authFilePath(home), `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+}
+
 test('upsertProviderAuth writes a local auth file without exposing secrets in summaries', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-'));
   try {
@@ -57,6 +61,90 @@ test('loadProviderAuthStore returns an empty store when auth.json is missing', a
       version: 1,
       providers: {}
     });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('loadProviderAuthStore rejects unknown provider keys in auth.json', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-unknown-provider-'));
+  try {
+    await writeAuthJson(home, {
+      version: 1,
+      providers: {
+        unknown: {
+          apiKey: 'sk-secret'
+        }
+      }
+    });
+
+    await assert.rejects(
+      loadProviderAuthStore({ cliqHome: home }),
+      /Unknown model provider in auth\.json: unknown/
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('loadProviderAuthStore rejects non-object provider entries in auth.json', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-provider-entry-'));
+  try {
+    await writeAuthJson(home, {
+      version: 1,
+      providers: {
+        openai: 'sk-secret'
+      }
+    });
+
+    await assert.rejects(
+      loadProviderAuthStore({ cliqHome: home }),
+      /auth\.providers\.openai must be an object/
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('loadProviderAuthStore rejects unsupported streaming values in auth.json', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-streaming-'));
+  try {
+    await writeAuthJson(home, {
+      version: 1,
+      providers: {
+        openai: {
+          apiKey: 'sk-secret',
+          streaming: 'sometimes'
+        }
+      }
+    });
+
+    await assert.rejects(
+      loadProviderAuthStore({ cliqHome: home }),
+      /auth\.streaming must be one of: auto, on, off/
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('loadProviderAuthStore rejects invalid activeProvider values in auth.json', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'cliq-auth-active-provider-'));
+  try {
+    await writeAuthJson(home, {
+      version: 1,
+      activeProvider: 'unknown',
+      providers: {
+        openai: {
+          apiKey: 'sk-secret'
+        }
+      }
+    });
+
+    await assert.rejects(
+      loadProviderAuthStore({ cliqHome: home }),
+      /Unknown active model provider in auth\.json: unknown/
+    );
   } finally {
     await rm(home, { recursive: true, force: true });
   }
