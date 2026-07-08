@@ -402,3 +402,76 @@ test('provider status reports Zhipu env credentials and default model without le
     assert.doesNotMatch(JSON.stringify(report), /zhipu-secret/);
   });
 });
+
+test('provider status validates cliq-models through the managed runtime, not raw Ollama', async () => {
+  let rawOllamaCalls = 0;
+  let cliqRuntimeCalls = 0;
+
+  await withEnv(
+    {
+      CLIQ_MODEL_PROVIDER: 'cliq-models',
+      CLIQ_MODEL: 'cliq-models/qwen3.5:4b'
+    },
+    async () => {
+      const report = await buildProviderStatusReport({
+        workspace: {},
+        cli: {},
+        discoverOllamaModels: async () => {
+          rawOllamaCalls += 1;
+          throw new Error('raw Ollama unavailable');
+        },
+        discoverCliqModelsRuntimeModels: async (baseUrl) => {
+          cliqRuntimeCalls += 1;
+          assert.equal(baseUrl, 'http://127.0.0.1:11435');
+          return [{ name: 'qwen3.5:4b' }];
+        }
+      });
+
+      const cliqModels = report.providers[0]!;
+      assert.equal(report.activeProvider, 'cliq-models');
+      assert.equal(report.activeModel, 'cliq-models/qwen3.5:4b');
+      assert.equal(cliqModels.provider, 'cliq-models');
+      assert.equal(cliqModels.current, true);
+      assert.equal(cliqModels.state, 'configured');
+      assert.deepEqual(cliqModels.sources, ['ENV', 'Local service']);
+      assert.equal(cliqModels.modelCount, 1);
+      assert.equal(cliqModels.model, 'cliq-models/qwen3.5:4b');
+      assert.match(formatProviderStatusRow(cliqModels), /Cliq Models\s+Current · Configured · ENV, Local service · 1 model/);
+    }
+  );
+
+  assert.equal(rawOllamaCalls, 1);
+  assert.equal(cliqRuntimeCalls, 1);
+});
+
+test('provider status reports cliq-models managed runtime and missing model issues distinctly', async () => {
+  await withEnv(
+    {
+      CLIQ_MODEL_PROVIDER: 'cliq-models',
+      CLIQ_MODEL: 'cliq-models/qwen3.5:4b'
+    },
+    async () => {
+      const report = await buildProviderStatusReport({
+        workspace: {},
+        cli: {},
+        discoverOllamaModels: unavailableOllama,
+        discoverCliqModelsRuntimeModels: async () => [{ name: 'llama3.2:latest' }]
+      });
+
+      const cliqModels = report.providers[0]!;
+      assert.equal(cliqModels.provider, 'cliq-models');
+      assert.equal(cliqModels.state, 'not-configured');
+      assert.deepEqual(cliqModels.issues.map((issue) => issue.code), ['managed-model-missing']);
+      assert.match(cliqModels.issues[0]!.message, /Cliq Models managed runtime/i);
+      assert.match(cliqModels.issues[0]!.message, /qwen3\.5:4b/);
+
+      const validation = validateProviderStatus(report, 'cliq-models');
+      assert.equal(validation.ok, false);
+      if (!validation.ok) {
+        assert.equal(validation.provider, 'cliq-models');
+        assert.equal(validation.state, 'not-configured');
+        assert.deepEqual(validation.issues.map((issue) => issue.code), ['managed-model-missing']);
+      }
+    }
+  );
+});

@@ -1,4 +1,10 @@
-import { DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_PROVIDER, MODEL, OLLAMA_DEFAULT_BASE_URL } from '../config.js';
+import {
+  CLIQ_MODELS_DEFAULT_BASE_URL,
+  DEFAULT_MODEL_BASE_URL,
+  DEFAULT_MODEL_PROVIDER,
+  MODEL,
+  OLLAMA_DEFAULT_BASE_URL
+} from '../config.js';
 import { getProviderCatalogEntry, listModelDescriptors, resolveModelMetadata, toModelDescriptor } from './catalog/index.js';
 import type {
   ModelClient,
@@ -85,6 +91,14 @@ const PROVIDERS: Record<ProviderName, ModelProviderDefinition> = {
     name: 'ollama',
     displayName: getProviderCatalogEntry('ollama')?.displayName ?? 'Ollama',
     defaultBaseUrl: OLLAMA_DEFAULT_BASE_URL,
+    requiresApiKey: false,
+    getDefaultModel: () => null,
+    getKnownModels: () => []
+  },
+  'cliq-models': {
+    name: 'cliq-models',
+    displayName: getProviderCatalogEntry('cliq-models')?.displayName ?? 'Cliq Models',
+    defaultBaseUrl: CLIQ_MODELS_DEFAULT_BASE_URL,
     requiresApiKey: false,
     getDefaultModel: () => null,
     getKnownModels: () => []

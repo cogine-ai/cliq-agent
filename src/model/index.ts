@@ -1,6 +1,7 @@
 import { getModelProvider, registerModelClientFactory } from './registry.js';
 import type { ModelClient, ResolvedModelConfig } from './types.js';
 import { createAnthropicClient } from './providers/anthropic.js';
+import { createCliqModelsClient } from './providers/cliq-models.js';
 import { createOllamaClient } from './providers/ollama.js';
 import { createOpenAIClient } from './providers/openai.js';
 import { createOpenAICompatibleClient } from './providers/openai-compatible.js';
@@ -19,6 +20,7 @@ export function registerBuiltInModelProviders() {
   registerModelClientFactory('openai-compatible', createOpenAICompatibleClient);
   registerModelClientFactory('zhipu', createOpenAICompatibleClient);
   registerModelClientFactory('ollama', createOllamaClient);
+  registerModelClientFactory('cliq-models', createCliqModelsClient);
   registered = true;
 }
 

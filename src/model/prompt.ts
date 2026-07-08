@@ -92,6 +92,7 @@ export function resolveProviderPromptCapabilities({
         streaming: modelCapabilities.streaming
       };
     case 'ollama':
+    case 'cliq-models':
       return {
         nativeToolCalling: canUseNativeTools,
         structuredOutput: true,
@@ -111,7 +112,7 @@ function textActionFallbackFor({
   modelConfig: ResolvedModelConfig;
   providerCapabilities: ModelProviderCapabilities;
 }): TextActionFallback {
-  const maxAttempts = modelConfig.provider === 'ollama' ? 2 : 1;
+  const maxAttempts = modelConfig.provider === 'ollama' || modelConfig.provider === 'cliq-models' ? 2 : 1;
   if (providerCapabilities.nativeToolCalling || providerCapabilities.structuredOutput) {
     return {
       mode: 'disabled',

@@ -5,6 +5,7 @@ import {
   type ProviderAuthStore
 } from './auth-store.js';
 import { getProviderCatalogEntry, type ConfigSourceLabel } from './catalog/index.js';
+import { cliqModelIdToRuntimeTag, discoverCliqModelsRuntimeModels as defaultDiscoverCliqModelsRuntimeModels } from './providers/cliq-models.js';
 import { discoverOllamaModels as defaultDiscoverOllamaModels, selectDefaultOllamaModel, type OllamaModelSummary } from './providers/ollama-discovery.js';
 import { getModelProvider, isProviderName, listModelProviders } from './registry.js';
 import type { ProviderName } from './types.js';
@@ -16,7 +17,9 @@ export type ProviderStatusIssueCode =
   | 'missing-base-url'
   | 'missing-model'
   | 'local-models-missing'
-  | 'local-service-unavailable';
+  | 'local-service-unavailable'
+  | 'managed-model-missing'
+  | 'managed-runtime-unavailable';
 
 export type ProviderStatusIssue = {
   code: ProviderStatusIssueCode;
@@ -66,6 +69,7 @@ export type BuildProviderStatusReportOptions = {
   env?: Record<string, string | undefined>;
   currentModel?: CurrentProviderStatusModel;
   discoverOllamaModels?: (baseUrl: string) => Promise<OllamaModelSummary[]>;
+  discoverCliqModelsRuntimeModels?: (baseUrl: string) => Promise<OllamaModelSummary[]>;
 };
 
 export type ProviderValidationResult =
@@ -217,6 +221,10 @@ function addSource(sources: Set<ConfigSourceLabel>, source: ConfigSourceLabel) {
 
 function orderedSources(sources: Set<ConfigSourceLabel>): ConfigSourceLabel[] {
   return SOURCE_ORDER.filter((source) => sources.has(source));
+}
+
+function withLocalServiceSource(sources: ConfigSourceLabel[]): ConfigSourceLabel[] {
+  return orderedSources(new Set([...sources, 'Local service']));
 }
 
 function configuredSourcesForProvider(opts: {
@@ -409,6 +417,120 @@ async function buildOllamaProviderStatus(opts: {
   };
 }
 
+async function buildCliqModelsProviderStatus(opts: {
+  activeProvider: ProviderName;
+  currentModel?: CurrentProviderStatusModel;
+  cli: PartialModelConfig;
+  workspace: PartialModelConfig | undefined;
+  envConfig: PartialModelConfig;
+  env: Record<string, string | undefined>;
+  auth: ProviderAuthStore;
+  discoverCliqModelsRuntimeModels: (baseUrl: string) => Promise<OllamaModelSummary[]>;
+}): Promise<ProviderStatus> {
+  const providerDef = getModelProvider('cliq-models');
+  const baseUrl = resolveProviderBaseUrl({ ...opts, provider: 'cliq-models' });
+  const setup = providerSetup('cliq-models');
+  let models: OllamaModelSummary[];
+  try {
+    models = await opts.discoverCliqModelsRuntimeModels(baseUrl ?? providerDef.defaultBaseUrl);
+  } catch (error) {
+    return {
+      provider: 'cliq-models',
+      displayName: providerDef.displayName,
+      current: opts.activeProvider === 'cliq-models',
+      state: 'unavailable',
+      sources: [],
+      issues: [
+        issue(
+          'managed-runtime-unavailable',
+          'managed runtime',
+          `Cliq Models managed runtime is unavailable: ${error instanceof Error ? error.message : String(error)}`
+        )
+      ],
+      setup,
+      ...(baseUrl ? { baseUrl: sanitizeBaseUrlForDisplay(baseUrl) } : {})
+    };
+  }
+
+  const model = resolveProviderModel({ ...opts, provider: 'cliq-models' });
+  if (!model) {
+    return {
+      provider: 'cliq-models',
+      displayName: providerDef.displayName,
+      current: opts.activeProvider === 'cliq-models',
+      state: 'not-configured',
+      sources: ['Local service'],
+      issues: [issue('missing-model', 'model', 'Cliq Models requires a model id for the managed runtime.')],
+      setup,
+      modelCount: models.length,
+      ...(baseUrl ? { baseUrl: sanitizeBaseUrlForDisplay(baseUrl) } : {})
+    };
+  }
+
+  let runtimeModel: string;
+  try {
+    runtimeModel = cliqModelIdToRuntimeTag(model);
+  } catch (error) {
+    return {
+      provider: 'cliq-models',
+      displayName: providerDef.displayName,
+      current: opts.activeProvider === 'cliq-models',
+      state: 'not-configured',
+      sources: ['Local service'],
+      issues: [
+        issue(
+          'managed-model-missing',
+          'managed model',
+          `Cliq Models model id cannot be routed safely: ${error instanceof Error ? error.message : String(error)}`
+        )
+      ],
+      setup,
+      model,
+      modelCount: models.length,
+      ...(baseUrl ? { baseUrl: sanitizeBaseUrlForDisplay(baseUrl) } : {})
+    };
+  }
+
+  if (!models.some((candidate) => candidate.name === runtimeModel)) {
+    return {
+      provider: 'cliq-models',
+      displayName: providerDef.displayName,
+      current: opts.activeProvider === 'cliq-models',
+      state: 'not-configured',
+      sources: ['Local service'],
+      issues: [
+        issue(
+          'managed-model-missing',
+          'managed model',
+          `Cliq Models managed runtime is reachable, but runtime model ${runtimeModel} is not installed for selected model ${model}.`
+        )
+      ],
+      setup,
+      model,
+      modelCount: models.length,
+      ...(baseUrl ? { baseUrl: sanitizeBaseUrlForDisplay(baseUrl) } : {})
+    };
+  }
+
+  return {
+    provider: 'cliq-models',
+    displayName: providerDef.displayName,
+    current: opts.activeProvider === 'cliq-models',
+    state: 'configured',
+    sources: withLocalServiceSource(
+      configuredSourcesForProvider({
+        ...opts,
+        provider: 'cliq-models'
+      })
+    ),
+    issues: [],
+    setup,
+    modelCount: models.length,
+    model,
+    ...(baseUrl ? { baseUrl: sanitizeBaseUrlForDisplay(baseUrl) } : {})
+  };
+}
+
 function sortProviders(activeProvider: ProviderName, providers: ProviderStatus[]) {
   const stateRank: Record<ProviderConfigState, number> = {
     configured: 0,
@@ -430,7 +552,8 @@ export async function buildProviderStatusReport({
   auth = EMPTY_PROVIDER_AUTH_STORE,
   env = process.env,
   currentModel,
-  discoverOllamaModels = defaultDiscoverOllamaModels
+  discoverOllamaModels = defaultDiscoverOllamaModels,
+  discoverCliqModelsRuntimeModels = defaultDiscoverCliqModelsRuntimeModels
 }: BuildProviderStatusReportOptions): Promise<ProviderStatusReport> {
   const envConfig = envModelConfig(env);
   const activeProvider = currentModel?.provider ?? resolveActiveProvider(cli, workspace.model, auth, env);
@@ -446,6 +569,17 @@ export async function buildProviderStatusReport({
             auth,
             discoverOllamaModels
           })
+        : provider.name === 'cliq-models'
+          ? buildCliqModelsProviderStatus({
+              activeProvider,
+              currentModel,
+              cli,
+              workspace: workspace.model,
+              envConfig,
+              env,
+              auth,
+              discoverCliqModelsRuntimeModels
+            })
         : buildRemoteProviderStatus({
             provider: provider.name,
             activeProvider,
@@ -494,7 +628,7 @@ export function formatProviderStatusRow(status: ProviderStatus): string {
   }
 
   if (status.state === 'unavailable') {
-    parts.push('local service unavailable');
+    parts.push(status.provider === 'cliq-models' ? 'managed runtime unavailable' : 'local service unavailable');
   } else if (status.state === 'not-configured' && status.issues.length > 0) {
     parts.push(`needs ${status.issues.map((current) => current.requirement).join(', ')}`);
   }

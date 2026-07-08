@@ -10,6 +10,7 @@ test('registry recognizes built-in providers', () => {
   assert.equal(isProviderName('openai-compatible'), true);
   assert.equal(isProviderName('zhipu'), true);
   assert.equal(isProviderName('ollama'), true);
+  assert.equal(isProviderName('cliq-models'), true);
   assert.equal(isProviderName('unknown'), false);
   assert.equal(isProviderName('toString'), false);
 });
@@ -23,9 +24,18 @@ test('registry exposes safe defaults for the default provider', () => {
   });
 });
 
-test('registry requires explicit model for ollama and openai-compatible', () => {
+test('registry requires explicit model for local/custom runtime providers', () => {
   assert.equal(getModelProvider('ollama').getDefaultModel(), null);
+  assert.equal(getModelProvider('cliq-models').getDefaultModel(), null);
   assert.equal(getModelProvider('openai-compatible').getDefaultModel(), null);
+});
+
+test('cliq-models uses a Cliq-managed local runtime distinct from raw Ollama', () => {
+  const provider = getModelProvider('cliq-models');
+
+  assert.equal(provider.displayName, 'Cliq Models');
+  assert.equal(provider.defaultBaseUrl, 'http://127.0.0.1:11435');
+  assert.equal(provider.requiresApiKey, false);
 });
 
 test('known model descriptors are text-to-text compatible', () => {

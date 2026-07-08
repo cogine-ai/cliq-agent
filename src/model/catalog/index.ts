@@ -50,7 +50,15 @@ export type OpenClawProviderRecord = {
   }>;
 };
 
-const PROVIDER_IDS = new Set<ProviderName>(['openrouter', 'anthropic', 'openai', 'openai-compatible', 'zhipu', 'ollama']);
+const PROVIDER_IDS = new Set<ProviderName>([
+  'openrouter',
+  'anthropic',
+  'openai',
+  'openai-compatible',
+  'zhipu',
+  'ollama',
+  'cliq-models'
+]);
 
 const PI_PROVIDER_MAP: Record<string, ProviderName | undefined> = {
   openrouter: 'openrouter',
@@ -161,7 +169,7 @@ export function mapPiModelToCatalogEntry(record: PiModelCatalogRecord): ModelCat
 
 function inferProviderKind(provider: ProviderName, categories: string[] | undefined): ProviderKind {
   if (provider === 'openrouter') return 'aggregator';
-  if (provider === 'ollama') return 'local-runtime';
+  if (provider === 'ollama' || provider === 'cliq-models') return 'local-runtime';
   if (provider === 'openai-compatible') return 'openai-compatible';
   if (categories?.includes('local')) return 'local-runtime';
   return 'hosted-api';
@@ -174,7 +182,7 @@ export function mapOpenClawProviderToCatalogEntry(record: OpenClawProviderRecord
 
   const envVar = PROVIDER_ENV_VARS[record.id];
   const auth =
-    record.id === 'ollama'
+    record.id === 'ollama' || record.id === 'cliq-models'
       ? ({ kind: 'none' } as const)
       : ({
           kind: 'api-key',
@@ -185,8 +193,10 @@ export function mapOpenClawProviderToCatalogEntry(record: OpenClawProviderRecord
   const setupPrimary =
     record.id === 'openai-compatible'
       ? ['Set a base URL, then choose a discovered or custom model for the OpenAI-compatible endpoint.']
+      : record.id === 'cliq-models'
+        ? ['Start the Cliq-managed model runtime and select an installed Cliq Models model.']
       : auth.kind === 'none'
-      ? ['Run the local provider service before selecting a model.']
+        ? ['Run the local provider service before selecting a model.']
       : [`Set ${auth.envVar} or configure an ${record.name ?? record.id} credential.`];
 
   const modelListSource =
@@ -195,6 +205,11 @@ export function mapOpenClawProviderToCatalogEntry(record: OpenClawProviderRecord
           kind: 'ollama-tags' as const,
           description: 'Local Ollama /api/tags discovery.'
         }
+      : record.id === 'cliq-models'
+        ? {
+            kind: 'ollama-tags' as const,
+            description: 'Cliq-managed Ollama-derived /api/tags discovery.'
+          }
       : record.id === 'openai-compatible'
         ? {
             kind: 'provider-api' as const,
@@ -211,7 +226,9 @@ export function mapOpenClawProviderToCatalogEntry(record: OpenClawProviderRecord
     kind: inferProviderKind(record.id, record.categories),
     auth,
     configSources:
-      record.id === 'ollama' ? ['Local service', 'Workspace', 'Global', 'CLI'] : ['ENV', 'Workspace', 'Global', 'CLI'],
+      record.id === 'ollama' || record.id === 'cliq-models'
+        ? ['Local service', 'Workspace', 'Global', 'CLI']
+        : ['ENV', 'Workspace', 'Global', 'CLI'],
     setup: {
       primary: setupPrimary,
       ...(record.docs ? { docsUrl: record.docs } : {})

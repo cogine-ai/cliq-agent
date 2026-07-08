@@ -357,6 +357,50 @@ test('resolveModelConfig requires model and baseUrl for openai-compatible', asyn
   });
 });
 
+test('resolveModelConfig resolves cliq-models without probing raw Ollama', async () => {
+  let fetchCalls = 0;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    fetchCalls += 1;
+    throw new Error('raw Ollama must not be probed');
+  });
+
+  try {
+    await withEnv({}, async () => {
+      assert.deepEqual(
+        await resolveModelConfig({
+          workspace: {},
+          cli: { provider: 'cliq-models', model: 'cliq-models/qwen3.5:4b', streaming: 'off' }
+        }),
+        {
+          provider: 'cliq-models',
+          model: 'cliq-models/qwen3.5:4b',
+          baseUrl: 'http://127.0.0.1:11435',
+          streaming: 'off'
+        }
+      );
+    });
+    assert.equal(fetchCalls, 0);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('resolveModelConfig gives cliq-models a provider-specific missing model setup error', async () => {
+  await withEnv({}, async () => {
+    await assert.rejects(
+      () => resolveModelConfig({ workspace: {}, cli: { provider: 'cliq-models' } }),
+      (error) => {
+        assert.ok(error instanceof ModelSetupRequiredError);
+        assert.equal(error.reason, 'missing-model');
+        assert.equal(error.provider, 'cliq-models');
+        assert.match(formatModelSetupMessage(error), /Cliq Models provider is selected/i);
+        assert.match(formatModelSetupMessage(error), /cliq --provider cliq-models --model <model>/);
+        return true;
+      }
+    );
+  });
+});
+
 test('resolveModelConfig validates streaming mode', async () => {
   await withEnv({ OPENROUTER_API_KEY: 'or-key' }, async () => {
     await assert.rejects(

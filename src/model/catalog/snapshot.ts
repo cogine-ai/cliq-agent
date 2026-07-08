@@ -108,6 +108,22 @@ export const CATALOG_SNAPSHOT = {
       },
       visibleModelLimit: 8,
       source: { kind: 'cliq-overlay', confidence: 'high' }
+    },
+    {
+      id: 'cliq-models',
+      displayName: 'Cliq Models',
+      kind: 'local-runtime',
+      auth: { kind: 'none' },
+      configSources: ['Local service', 'Workspace', 'Global', 'CLI'],
+      setup: {
+        primary: ['Start the Cliq-managed model runtime and select an installed Cliq Models model.']
+      },
+      modelListSource: {
+        kind: 'ollama-tags',
+        description: 'Cliq-managed Ollama-derived /api/tags discovery.'
+      },
+      visibleModelLimit: 8,
+      source: { kind: 'cliq-overlay', confidence: 'high' }
     }
   ],
   models: [
