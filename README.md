@@ -186,7 +186,7 @@ cliq rpc
 
 Cliq runs tools on your local machine in the current workspace. It is not a sandbox.
 
-Workspace trust controls whether Cliq may load workspace-local configuration such as `.cliq/config.json`, hooks, validators, instructions, skills, and extensions. Trusting a workspace does not approve edits or shell commands.
+Workspace trust controls whether Cliq may load workspace-local configuration such as `.cliq/config.json`, hooks, validators, instructions, skills, and extensions. Trusting a workspace does not approve edits, shell commands, MCP calls, or network access; those remain controlled by policy modes and explicit tool rules.
 
 Tool actions are controlled by policy modes:
 

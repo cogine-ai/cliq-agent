@@ -11,6 +11,7 @@ import { promisify } from 'node:util';
 import { HEADLESS_SCHEMA_VERSION } from './headless/contract.js';
 import {
   cliExitCode,
+  formatClassicWorkspaceTrustPrompt,
   formatTxRuntimeEventLine,
   formatToolResultLine,
   isReportedCliError,
@@ -1109,6 +1110,7 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /--jsonl/);
   assert.match(output, /--tui-debug/);
   assert.match(output, /CLIQ_TUI_DEBUG/);
+  assert.match(output, /CLIQ_TRUST_WORKSPACE[\s\S]*does not grant tool approvals/i);
   assert.match(
     output,
     /cliq rpc\s+Reads newline-delimited JSON-RPC 2\.0 requests from stdin and writes protocol messages to stdout/
@@ -1116,6 +1118,18 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /auto \| on \| off/);
   assert.match(output, /openai-compatible/);
   assert.match(output, /--base-url URL/);
+});
+
+test('classic workspace trust prompt separates trust from tool permissions', () => {
+  const output = formatClassicWorkspaceTrustPrompt('/via/symlink', '/canonical/project');
+
+  assert.match(output, /\.cliq\/config/);
+  assert.match(output, /repo-configured hooks/);
+  assert.match(output, /does not approve file edits, shell commands, MCP, or network access/i);
+  assert.match(output, /`--policy` and tool approvals still decide runtime actions/i);
+  assert.doesNotMatch(output, /may read or edit files/i);
+  assert.match(output, /\/via\/symlink/);
+  assert.match(output, /\/canonical\/project/);
 });
 
 test('runCli prints topic help for workflow asset command groups', async () => {

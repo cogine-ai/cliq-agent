@@ -16,6 +16,10 @@ test('workspace trust ink prompt renders path and honours y/n/escape decisions',
 
   assert.match(trusted.lastFrame() ?? '', /canonical: \/canonical\/project/);
   assert.match(trusted.lastFrame() ?? '', /\.cliq\/config/);
+  const frame = (trusted.lastFrame() ?? '').replace(/\s+/g, ' ');
+  assert.doesNotMatch(frame, /may read or edit files/i);
+  assert.match(frame, /does not approve file edits, shell commands, MCP, or network access/i);
+  assert.match(frame, /`--policy`[\s\S]*tool[\s\S]*approvals[\s\S]*decide/i);
 
   trusted.stdin.write('y');
   await flush();

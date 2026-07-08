@@ -1718,8 +1718,9 @@ Env:
   CLIQ_MODEL_*              Optional provider/model/base URL/streaming defaults
   CLIQ_POLICY_MODE          Optional default policy mode
   CLIQ_MAX_TURNS            Optional max-turns default; useful for CI/headless automation
-  CLIQ_TRUST_WORKSPACE       trust | deny — non-interactive/CI shortcut to trust or forbid workspace runtime gates
-                             (trusted | untrusted synonyms). Interactive chat still prompts unless set.
+  CLIQ_TRUST_WORKSPACE      trust | deny - non-interactive/CI shortcut for workspace-local config only;
+                            does not grant tool approvals. Interactive chat still prompts unless set.
+                            (trusted | untrusted synonyms).
   CLIQ_TUI                  Set to "0" to fall back to the legacy readline REPL
   CLIQ_TUI_DEBUG            Set to "1" to show TUI mode-change notices
 `);
@@ -2112,18 +2113,20 @@ async function denyIfWorkspaceUntrustedNonInteractiveRuntime(
   }
 }
 
+export function formatClassicWorkspaceTrustPrompt(cwdRaw: string, workspaceRealPath: string): string {
+  const pathLine = cwdRaw === workspaceRealPath ? workspaceRealPath : `${cwdRaw} → ${workspaceRealPath}`;
+  return (
+    '\nTrusted workspace gate - if you approve, Cliq loads `.cliq/config`, repo-configured hooks, ' +
+    'extension scripts, validators, instructions, and skills for this workspace.\n' +
+    'It does not approve file edits, shell commands, MCP, or network access. Paths:\n' +
+    `  ${pathLine}\n` +
+    'Approve only intentional directories - `--policy` and tool approvals still decide runtime actions.\n'
+  );
+}
+
 async function promptClassicWorkspaceTrust(cwdRaw: string, workspaceRealPath: string): Promise<boolean> {
   const readlinePromises = await import('node:readline/promises');
-  process.stdout.write(
-    '\nTrusted workspace gate — if you approve, Cliq loads `.cliq/config` and may read or edit files under the workspace, ' +
-      'and run repo-configured hooks, extension scripts, and validators. Paths:\n'
-  );
-  process.stdout.write(
-    `  ${cwdRaw === workspaceRealPath ? workspaceRealPath : `${cwdRaw} → ${workspaceRealPath}`}\n`
-  );
-  process.stdout.write(
-    'Approve only intentional directories — this gate is separate from `--policy` tool approvals.\n'
-  );
+  process.stdout.write(formatClassicWorkspaceTrustPrompt(cwdRaw, workspaceRealPath));
   const rl = readlinePromises.createInterface({
     input: process.stdin as NodeJS.ReadableStream,
     output: process.stdout as NodeJS.WritableStream
