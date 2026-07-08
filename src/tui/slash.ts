@@ -79,8 +79,14 @@ export function parseSlash(input: string): ParsedSlashCommand {
       }
       return { kind: 'model' };
     case '/providers':
+      if (rest.length > 0) {
+        return { kind: 'invalid', head, reason: `${head} does not accept arguments yet` };
+      }
       return { kind: 'providers' };
     case '/skills':
+      if (rest.length > 0) {
+        return { kind: 'invalid', head, reason: `${head} does not accept arguments yet` };
+      }
       return { kind: 'skills' };
     case '/skill': {
       const name = rest.join(' ').trim();

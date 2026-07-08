@@ -16,6 +16,11 @@ test('parseSlash maps /reset and /help', () => {
 
 test('parseSlash maps skill commands', () => {
   assert.deepEqual(parseSlash('/skills'), { kind: 'skills' });
+  assert.deepEqual(parseSlash('/skills extra'), {
+    kind: 'invalid',
+    head: '/skills',
+    reason: '/skills does not accept arguments yet'
+  });
   assert.deepEqual(parseSlash('/skill reviewer'), { kind: 'skill', name: 'reviewer' });
   const noArg = parseSlash('/skill');
   assert.equal(noArg.kind, 'invalid');
@@ -24,6 +29,11 @@ test('parseSlash maps skill commands', () => {
 
 test('parseSlash maps provider management command', () => {
   assert.deepEqual(parseSlash('/providers'), { kind: 'providers' });
+  assert.deepEqual(parseSlash('/providers extra'), {
+    kind: 'invalid',
+    head: '/providers',
+    reason: '/providers does not accept arguments yet'
+  });
 });
 
 test('parseSlash maps model picker commands', () => {
