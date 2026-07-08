@@ -2375,6 +2375,65 @@ test('runCli providers auth set writes local auth without echoing the API key', 
   });
 });
 
+test('runCli providers auth set --api-key-stdin requires piped stdin before writing auth', async () => {
+  await withCliTestEnv('providers-auth-stdin-tty', async (env) => {
+    const authPath = authFilePath(env.home);
+    const expectedError =
+      /cliq providers auth set --api-key-stdin requires piped stdin; use --api-key for a secure prompt/;
+    const runWithoutPipedStdin = async () => {
+      await withMockStdin('', async () => {
+        Object.defineProperty(process.stdin, 'isTTY', {
+          configurable: true,
+          value: true
+        });
+        await assert.rejects(
+          () =>
+            runCli([
+              'node',
+              'src/index.ts',
+              'providers',
+              'auth',
+              'set',
+              'openai',
+              '--api-key-stdin',
+              '--model',
+              'gpt-5.2'
+            ]),
+          expectedError
+        );
+      });
+    };
+
+    await runWithoutPipedStdin();
+    await assert.rejects(() => readFile(authPath, 'utf8'), /ENOENT/);
+
+    const existingAuth = {
+      version: 1,
+      activeProvider: 'anthropic',
+      providers: {
+        anthropic: {
+          model: 'claude-sonnet-4-20250514'
+        }
+      }
+    };
+    const existingRaw = `${JSON.stringify(existingAuth, null, 2)}\n`;
+    await writeFile(authPath, existingRaw, 'utf8');
+
+    await runWithoutPipedStdin();
+    const raw = await readFile(authPath, 'utf8');
+    const payload = JSON.parse(raw) as {
+      providers?: {
+        openai?: unknown;
+      };
+    };
+
+    assert.equal(raw, existingRaw);
+    assert.equal(payload.providers?.openai, undefined);
+    assert.equal(env.outputText(), '');
+    assert.equal(env.stderrText(), '');
+  });
+});
+
 test('runCli providers validate --json returns structured configuration failures', async () => {
   await withCliTestEnv('providers-validate-json', async (env) => {
     const previousTrust = process.env.CLIQ_TRUST_WORKSPACE;
