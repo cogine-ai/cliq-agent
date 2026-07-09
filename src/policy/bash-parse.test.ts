@@ -157,6 +157,9 @@ test('extractShellInlineScript returns the -c script for shell interpreters', ()
   assert.equal(extractShellInlineScript('env -S bash -c'), null);
   assert.equal(extractShellInlineScript("env - -S bash -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript("env -- -S bash -c 'git status'"), 'git status');
+  assert.equal(extractShellInlineScript('flock /tmp/lock -c "rm -rf /"'), 'rm -rf /');
+  assert.equal(extractShellInlineScript('flock --wait 5 /tmp/lock --command "rm -rf /"'), 'rm -rf /');
+  assert.equal(extractShellInlineScript('flock /tmp/lock --command="rm -rf /"'), 'rm -rf /');
   assert.equal(extractShellInlineScript('npm test'), null);
 });
 

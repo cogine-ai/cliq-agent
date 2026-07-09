@@ -138,6 +138,30 @@ test('parses todo action for approved-plan execution tracking', () => {
       }
     }
   );
+  assert.deepEqual(
+    parseModelAction(
+      '{"todo":{"planId":"plan_1","items":[{"id":"item_1","title":"Inspect code","status":"in_progress","activeForm":"   "}]}}'
+    ),
+    {
+      todo: {
+        planId: 'plan_1',
+        items: [{ id: 'item_1', title: 'Inspect code', status: 'in_progress' }]
+      }
+    }
+  );
+  assert.deepEqual(
+    parseModelAction(
+      '{"todo":{"planId":"plan_1","items":[{"id":"item_1","title":"Inspect code","status":"in_progress","activeForm":"  Inspecting code  "}]}}'
+    ),
+    {
+      todo: {
+        planId: 'plan_1',
+        items: [
+          { id: 'item_1', title: 'Inspect code', status: 'in_progress', activeForm: 'Inspecting code' }
+        ]
+      }
+    }
+  );
 });
 
 test('rejects invalid plan payloads', () => {
