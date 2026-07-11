@@ -417,6 +417,137 @@ test('e2e: multi-turn explicit tx accumulates edits then applies via state-aware
 });
 
 
+test('e2e: cancelled turn aborts implicit per-turn tx so the next turn can auto-apply', async () => {
+  await withEnv(async ({ home, ws, session }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+    const transactions: TxRunnerOptions = {
+      mode: 'edit',
+      auto: 'per-turn',
+      applyPolicy: 'auto-on-pass',
+      bashPolicy: 'passthrough',
+      headless: true,
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] },
+      stagedViewConfig: { copyMode: 'copy', bindPaths: [] },
+      workspaceId: 'ws_int',
+      workspaceRealPath: ws,
+      cliqHome: home
+    };
+
+    const controller = new AbortController();
+    let modelCalls = 0;
+    const cancelEvents: RuntimeEvent[] = [];
+    const cancelRunner = createRunner({
+      model: {
+        async complete(): Promise<ModelCompletion> {
+          modelCalls += 1;
+          if (modelCalls === 2) {
+            controller.abort();
+          }
+          const text =
+            modelCalls === 1
+              ? '{"edit":{"path":"a.txt","old_text":"one","new_text":"ORPHAN"}}'
+              : '{"bash":"pwd"}';
+          return { content: text, provider: 'openrouter', model: 'test-model' };
+        }
+      },
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
+      transactions,
+      onEvent: (e) => {
+        cancelEvents.push(e);
+      }
+    });
+
+    await assert.rejects(
+      () => cancelRunner.runTurn(session, 'stage then cancel', { signal: controller.signal }),
+      /cancelled/i
+    );
+    assert.ok(cancelEvents.some((e) => e.type === 'tx-aborted'), 'cancelled turn should abort implicit tx');
+    assert.equal(session.activeTxId, undefined);
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'one');
+
+    const successEvents: RuntimeEvent[] = [];
+    const successRunner = createRunner({
+      model: scriptedModel([
+        '{"edit":{"path":"a.txt","old_text":"one","new_text":"APPLIED"}}',
+        '{"message":"done"}'
+      ]),
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
+      transactions,
+      onEvent: (e) => {
+        successEvents.push(e);
+      }
+    });
+
+    const finalMessage = await successRunner.runTurn(session, 'apply on next turn');
+    assert.equal(finalMessage, 'done');
+    assert.ok(successEvents.some((e) => e.type === 'tx-applied'), 'next turn should auto-apply');
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'APPLIED');
+  });
+});
+
+test('e2e: doom-loop turn aborts implicit per-turn tx so the next turn can auto-apply', async () => {
+  await withEnv(async ({ home, ws, session }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+    const transactions: TxRunnerOptions = {
+      mode: 'edit',
+      auto: 'per-turn',
+      applyPolicy: 'auto-on-pass',
+      bashPolicy: 'passthrough',
+      headless: true,
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] },
+      stagedViewConfig: { copyMode: 'copy', bindPaths: [] },
+      workspaceId: 'ws_int',
+      workspaceRealPath: ws,
+      cliqHome: home
+    };
+
+    const doomEvents: RuntimeEvent[] = [];
+    const doomRunner = createRunner({
+      model: scriptedModel([
+        '{"edit":{"path":"a.txt","old_text":"one","new_text":"ORPHAN"}}',
+        '{"bash":"pwd"}',
+        '{"bash":"pwd"}'
+      ]),
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
+      transactions,
+      doomLoop: { repeatedActionLimit: 2 },
+      maxTurns: 100,
+      onEvent: (e) => {
+        doomEvents.push(e);
+      }
+    });
+
+    await assert.rejects(() => doomRunner.runTurn(session, 'stage then doom loop'), /Doom loop detected/i);
+    assert.ok(doomEvents.some((e) => e.type === 'tx-aborted'), 'doom-loop turn should abort implicit tx');
+    assert.equal(session.activeTxId, undefined);
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'one');
+
+    const successEvents: RuntimeEvent[] = [];
+    const successRunner = createRunner({
+      model: scriptedModel([
+        '{"edit":{"path":"a.txt","old_text":"one","new_text":"APPLIED"}}',
+        '{"message":"done"}'
+      ]),
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
+      transactions,
+      onEvent: (e) => {
+        successEvents.push(e);
+      }
+    });
+
+    const finalMessage = await successRunner.runTurn(session, 'apply on next turn');
+    assert.equal(finalMessage, 'done');
+    assert.ok(successEvents.some((e) => e.type === 'tx-applied'), 'next turn should auto-apply');
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'APPLIED');
+  });
+});
+
 test('e2e: failed turn aborts implicit per-turn tx so the next turn can auto-apply', async () => {
   await withEnv(async ({ home, ws, session }) => {
     await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');

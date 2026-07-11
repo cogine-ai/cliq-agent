@@ -134,7 +134,11 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads inside direct 
     ['/usr/bin/time -f %E -o out rm -rf /', 'time'],
     ['/usr/bin/time -f%E -oout rm -rf /', 'time'],
     ['flock -w 5 /tmp/lock rm -rf /', 'flock'],
-    ['flock /tmp/lock -c "rm -rf /"', 'flock']
+    ['flock --timeout=5 /tmp/lock rm -rf /', 'flock'],
+    ['flock /tmp/lock -c "rm -rf /"', 'flock'],
+    ['flock --wait 5 /tmp/lock --command "rm -rf /"', 'flock'],
+    ['chronic rm -rf /', 'chronic'],
+    ['catchsegv rm -rf /', 'catchsegv']
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },

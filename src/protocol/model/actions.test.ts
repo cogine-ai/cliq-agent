@@ -164,6 +164,27 @@ test('rejects invalid plan payloads', () => {
   assert.throws(() => parseModelAction('{"plan":{"op":"approve","planId":"plan_1"}}'), /unsupported action/i);
 });
 
+test('todo action trims activeForm and omits whitespace-only values', () => {
+  assert.deepEqual(
+    parseModelAction(
+      '{"todo":{"items":[{"title":"Inspect","status":"pending","activeForm":"  Inspecting  "}]}}'
+    ),
+    {
+      todo: {
+        items: [{ title: 'Inspect', status: 'pending', activeForm: 'Inspecting' }]
+      }
+    }
+  );
+  assert.deepEqual(
+    parseModelAction('{"todo":{"items":[{"title":"Inspect","status":"pending","activeForm":"   "}]}}'),
+    {
+      todo: {
+        items: [{ title: 'Inspect', status: 'pending' }]
+      }
+    }
+  );
+});
+
 test('rejects invalid todo payloads', () => {
   assert.throws(() => parseModelAction('{"todo":{"items":"nope"}}'), /unsupported action/i);
   assert.throws(() => parseModelAction('{"todo":{"items":[{"title":"Inspect","status":"unknown","activeForm":"Inspecting"}]}}'), /unsupported action/i);
