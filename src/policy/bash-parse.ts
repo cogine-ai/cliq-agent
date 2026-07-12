@@ -198,8 +198,10 @@ function scanArgvForBuiltinDenyHead(tokens: string[], startIndex: number): strin
   const scopedTokens = terminatorIndex === -1 ? commandTokens : commandTokens.slice(0, terminatorIndex);
   if (scopedTokens.length === 0) return null;
 
-  const direct = argvTokenBuiltinDenyHead(scopedTokens, 0);
-  if (direct) return direct;
+  for (let i = 0; i < scopedTokens.length; i += 1) {
+    const direct = argvTokenBuiltinDenyHead(scopedTokens, i);
+    if (direct) return direct;
+  }
 
   return bashDirectWrappedBuiltinDenyHead(scopedTokens.join(' '));
 }
