@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createSession } from '../session/store.js';
-import { approvePlan, createDraftPlan, finalizePlan, readPlanProgress } from '../plans/store.js';
+import { approvePlan, createDraftPlan, finalizePlan, readPlanProgress, updatePlanProgress } from '../plans/store.js';
 import { todoTool } from './todo.js';
 
 const originalCliqHome = process.env.CLIQ_HOME;
@@ -91,5 +91,42 @@ test('todoTool.execute updates approved-plan execution progress', async () => {
   assert.deepEqual(progress.items.map((item) => [item.title, item.status]), [
     ['Inspect', 'completed'],
     ['Implement', 'in_progress']
+  ]);
+});
+
+test('todoTool.execute preserves existing activeForm when updates omit it', async () => {
+  const { cwd, session } = await tempScope();
+  const draft = await createDraftPlan(cwd, session, {
+    title: 'Tracker',
+    contentMarkdown: '## Steps\n- Inspect code\n- 汇总生成项目清单'
+  });
+  await finalizePlan(cwd, session);
+  const approved = await approvePlan(cwd, session, { planId: draft.id, targetMode: 'default' });
+  await updatePlanProgress(cwd, session, {
+    planId: approved.id,
+    items: [
+      { id: 'item_1', title: 'Inspect code', status: 'pending', activeForm: 'Checking code' },
+      { id: 'item_2', title: '汇总生成项目清单', status: 'pending', activeForm: 'Working on 汇总生成项目清单' }
+    ]
+  });
+
+  const result = await todoTool.execute(
+    {
+      todo: {
+        planId: approved.id,
+        items: [
+          { id: 'item_1', title: 'Inspect code', status: 'completed' },
+          { id: 'report', title: '汇总生成项目清单', status: 'in_progress' }
+        ]
+      }
+    },
+    { cwd, session }
+  );
+
+  assert.equal(result.status, 'ok');
+  const progress = await readPlanProgress(cwd, session, approved.id);
+  assert.deepEqual(progress.items, [
+    { id: 'item_1', title: 'Inspect code', status: 'completed', activeForm: 'Checking code' },
+    { id: 'report', title: '汇总生成项目清单', status: 'in_progress', activeForm: 'Working on 汇总生成项目清单' }
   ]);
 });

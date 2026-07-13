@@ -474,3 +474,44 @@ test('e2e: failed turn aborts implicit per-turn tx so the next turn can auto-app
     assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'APPLIED');
   });
 });
+
+test('e2e: doom loop aborts implicit per-turn tx so staged edits never land', async () => {
+  await withEnv(async ({ home, ws, session }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+    const transactions: TxRunnerOptions = {
+      mode: 'edit',
+      auto: 'per-turn',
+      applyPolicy: 'auto-on-pass',
+      bashPolicy: 'passthrough',
+      headless: true,
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] },
+      stagedViewConfig: { copyMode: 'copy', bindPaths: [] },
+      workspaceId: 'ws_int',
+      workspaceRealPath: ws,
+      cliqHome: home
+    };
+
+    const events: RuntimeEvent[] = [];
+    const runner = createRunner({
+      model: scriptedModel([
+        '{"edit":{"path":"a.txt","old_text":"one","new_text":"ORPHAN"}}',
+        '{"bash":"pwd"}',
+        '{"bash":"pwd"}',
+        '{"bash":"pwd"}'
+      ]),
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
+      transactions,
+      onEvent: (e) => {
+        events.push(e);
+      }
+    });
+
+    await assert.rejects(() => runner.runTurn(session, 'stage then doom loop'), /Doom loop detected/i);
+    assert.ok(events.some((e) => e.type === 'tx-aborted'), 'doom loop should abort implicit tx');
+    assert.equal(session.activeTxId, undefined);
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'one');
+  });
+});

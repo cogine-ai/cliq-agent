@@ -297,8 +297,10 @@ test('bashCommandHasUnsafeAllowSyntax treats git shell aliases as unsafe through
 test('bashNestedBuiltinDenyHead surfaces builtins inside privilege wrappers and git aliases', () => {
   for (const command of [
     'sudo -c "rm -rf /"',
+    'sudo -u root rm -rf /',
     'env sudo -c "rm -rf /"',
     'su -c "rm -rf /"',
+    'su deploy -c "rm -rf /"',
     'runuser -u root -c "rm -rf /"',
     'sudo su -c "rm -rf /"',
     'script -q -c "rm -rf /" /dev/null',
