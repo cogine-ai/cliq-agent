@@ -99,8 +99,9 @@ test('createInteractivePolicyEngine one-shot allow does not satisfy later asks',
     assert.equal(table.allow.length, 0);
 
     const second = await live.engine.decide(bashSubject);
-    assert.equal(second.behavior, 'ask');
+    assert.deepEqual(second, { behavior: 'allow', decidedBy: 'user' });
     assert.equal(approvalCalls, 2, 'one-shot allow must reopen the modal on the next ask');
+    assert.equal(table.allow.length, 0, 'one-shot allow must not persist session or workspace rules');
   } finally {
     await rm(cwd, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
@@ -154,13 +155,12 @@ test('createInteractivePolicyEngine allow-turn satisfies asks until resetTurn', 
     assert.equal(approvalCalls, 1);
 
     const second = await live.engine.decide(bashSubject);
-    assert.equal(second.behavior, 'allow');
-    assert.notEqual(second.decidedBy, 'user');
+    assert.deepEqual(second, { behavior: 'allow', decidedBy: 'user' });
     assert.equal(approvalCalls, 1, 'allow-turn must satisfy later asks without reopening the modal');
 
     live.resetTurn();
     const third = await live.engine.decide(bashSubject);
-    assert.equal(third.behavior, 'ask');
+    assert.deepEqual(third, { behavior: 'allow', decidedBy: 'user' });
     assert.equal(approvalCalls, 2, 'resetTurn must require approval again');
   } finally {
     await rm(cwd, { recursive: true, force: true });
