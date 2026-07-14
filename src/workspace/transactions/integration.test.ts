@@ -515,3 +515,71 @@ test('e2e: doom loop aborts implicit per-turn tx so staged edits never land', as
     assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'one');
   });
 });
+
+test('e2e: cancellation aborts implicit per-turn tx so staged edits never land', async () => {
+  await withEnv(async ({ home, ws, session }) => {
+    await writeFile(path.join(ws, 'a.txt'), 'one', 'utf8');
+    await execFileAsync('git', ['add', '.'], { cwd: ws });
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: ws });
+
+    const transactions: TxRunnerOptions = {
+      mode: 'edit',
+      auto: 'per-turn',
+      applyPolicy: 'auto-on-pass',
+      bashPolicy: 'passthrough',
+      headless: true,
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] },
+      stagedViewConfig: { copyMode: 'copy', bindPaths: [] },
+      workspaceId: 'ws_int',
+      workspaceRealPath: ws,
+      cliqHome: home
+    };
+
+    const controller = new AbortController();
+    const events: RuntimeEvent[] = [];
+    const runner = createRunner({
+      model: scriptedModel([
+        '{"edit":{"path":"a.txt","old_text":"one","new_text":"ORPHAN"}}',
+        '{"message":"should not reach"}'
+      ]),
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
+      transactions,
+      onEvent: (e) => {
+        events.push(e);
+      },
+      hooks: [
+        {
+          async afterTool() {
+            controller.abort();
+          }
+        }
+      ]
+    });
+
+    await assert.rejects(
+      () => runner.runTurn(session, 'stage then cancel', { signal: controller.signal }),
+      /cancelled/i
+    );
+    assert.ok(events.some((e) => e.type === 'tx-aborted'), 'cancellation should abort implicit tx');
+    assert.equal(session.activeTxId, undefined);
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'one');
+
+    const recoveryEvents: RuntimeEvent[] = [];
+    const recoveryRunner = createRunner({
+      model: scriptedModel([
+        '{"edit":{"path":"a.txt","old_text":"one","new_text":"APPLIED"}}',
+        '{"message":"done"}'
+      ]),
+      policy: createPolicyEngine({ mode: 'accept-edits' }),
+      transactions,
+      onEvent: (e) => {
+        recoveryEvents.push(e);
+      }
+    });
+
+    const finalMessage = await recoveryRunner.runTurn(session, 'apply on next turn');
+    assert.equal(finalMessage, 'done');
+    assert.ok(recoveryEvents.some((e) => e.type === 'tx-applied'), 'next turn should auto-apply after cancel cleanup');
+    assert.equal(await readFile(path.join(ws, 'a.txt'), 'utf8'), 'APPLIED');
+  });
+});
