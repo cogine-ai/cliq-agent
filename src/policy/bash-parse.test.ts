@@ -267,6 +267,10 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     'chronic rm -rf /',
     'catchsegv rm -rf /',
     'script -q -c "rm -rf /" /dev/null',
+    'script -q /dev/null rm -rf /',
+    'pkexec rm -rf /',
+    '\\rm -rf /',
+    'busybox \\rm -rf /',
     'find . -name foo -exec rm {} \\;',
     'find . -name foo -execdir rm {} \\;'
   ]) {
@@ -305,6 +309,10 @@ test('bashNestedBuiltinDenyHead surfaces builtins inside privilege wrappers and 
     'runuser -u root -c "rm -rf /"',
     'sudo su -c "rm -rf /"',
     'script -q -c "rm -rf /" /dev/null',
+    'script -q /dev/null rm -rf /',
+    'pkexec rm -rf /',
+    '\\rm -rf /',
+    'busybox \\rm -rf /',
     'flock -w 5 /tmp/lock rm -rf /',
     'flock /tmp/lock -c "rm -rf /"',
     "git -c alias.x='!rm -rf /' x",

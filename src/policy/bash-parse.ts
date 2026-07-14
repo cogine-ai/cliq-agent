@@ -53,6 +53,8 @@ const PREFIX_COMMAND_WRAPPER_HEADS = new Set([
   'flock',
   'ionice',
   'nohup',
+  'pkexec',
+  'script',
   'setsid',
   'stdbuf',
   'taskset',
@@ -104,7 +106,10 @@ export function bashNestedBuiltinDenyHead(commandLine: string): string | null {
   const privilegeScript = extractPrivilegeWrapperInlineScript(commandLine);
   if (privilegeScript !== null) {
     const head = parseBashCommandHead(privilegeScript);
-    if (head && BUILTIN_BASH_DENY_HEADS.has(head)) return head;
+    if (head) {
+      const denyHead = builtinDenyHeadFromName(head);
+      if (denyHead) return denyHead;
+    }
     const nested = bashNestedBuiltinDenyHeadInner(privilegeScript, 0);
     if (nested) return nested;
   }
@@ -125,8 +130,9 @@ function bashDirectWrappedBuiltinDenyHead(commandLine: string): string | null {
   i = skipExecutionWrappers(tokens, i);
   if (i >= tokens.length) return null;
 
+  const denyHead = builtinDenyHeadFromName(tokens[i]!);
+  if (denyHead) return denyHead;
   const head = tokenBasename(tokens[i]!);
-  if (BUILTIN_BASH_DENY_HEADS.has(head)) return head;
   if (DIRECT_WRAPPED_DENY_HEADS.has(head)) {
     return wrappedBuiltinDenyHeadAfterDirectWrapper(tokens, i);
   }
@@ -150,8 +156,7 @@ function wrappedBuiltinDenyHeadAfterDirectWrapper(tokens: string[], wrapperIndex
   }
   if (j >= tokens.length) return null;
 
-  const sub = tokenBasename(tokens[j]!);
-  return BUILTIN_BASH_DENY_HEADS.has(sub) ? sub : null;
+  return builtinDenyHeadFromName(tokens[j]!);
 }
 
 function privilegeWrapperBuiltinDenyHead(tokens: string[], startIndex: number): string | null {
@@ -219,8 +224,9 @@ function argvTokenBuiltinDenyHead(tokens: string[], index: number): string | nul
     return builtinDenyHeadFromCommandTokens(tokenizeWords(inlineScript));
   }
 
+  const denyHead = builtinDenyHeadFromName(token);
+  if (denyHead) return denyHead;
   const head = tokenBasename(token);
-  if (BUILTIN_BASH_DENY_HEADS.has(head)) return head;
   if (DIRECT_WRAPPED_DENY_HEADS.has(head)) {
     return wrappedBuiltinDenyHeadAfterDirectWrapper(tokens, index);
   }
@@ -349,7 +355,10 @@ function bashNestedBuiltinDenyHeadInner(commandLine: string, depth: number): str
 
   for (const nested of shellScripts) {
     const head = parseBashCommandHead(nested);
-    if (head && BUILTIN_BASH_DENY_HEADS.has(head)) return head;
+    if (head) {
+      const denyHead = builtinDenyHeadFromName(head);
+      if (denyHead) return denyHead;
+    }
     if (depth >= MAX_SHELL_INLINE_DEPTH) continue;
     const deeper = bashNestedBuiltinDenyHeadInner(nested, depth + 1);
     if (deeper) return deeper;
@@ -384,7 +393,10 @@ function builtinDenyHeadFromCommandTokens(tokens: string[]): string | null {
 
   const commandLine = tokens.join(' ');
   const head = parseBashCommandHead(commandLine);
-  if (head && BUILTIN_BASH_DENY_HEADS.has(head)) return head;
+  if (head) {
+    const denyHead = builtinDenyHeadFromName(head);
+    if (denyHead) return denyHead;
+  }
 
   return bashDirectWrappedBuiltinDenyHead(commandLine);
 }
@@ -718,6 +730,20 @@ function tokenBasename(token: string): string {
   return token.includes('/') ? token.split('/').filter(Boolean).pop()! : token;
 }
 
+/** Bash treats a leading backslash as escaping the command name (e.g. `\rm` → `rm`). */
+function normalizeBuiltinDenyHead(head: string): string {
+  let normalized = head;
+  while (normalized.startsWith('\\')) {
+    normalized = normalized.slice(1);
+  }
+  return normalized;
+}
+
+function builtinDenyHeadFromName(tokenOrHead: string): string | null {
+  const normalized = normalizeBuiltinDenyHead(tokenBasename(tokenOrHead));
+  return BUILTIN_BASH_DENY_HEADS.has(normalized) ? normalized : null;
+}
+
 /**
  * `env -S` / `env --split-string=` execute the split payload as a real argv
  * vector, so compound operators inside the quoted split string are live syntax,
@@ -991,7 +1017,24 @@ function skipPrefixCommandWrapper(tokens: string[], wrapperIndex: number): numbe
   if (head === 'stdbuf') return skipStdbufWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'unshare') return skipUnshareWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'watch') return skipWatchWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'script') return skipScriptWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'pkexec') return skipSimplePrefixWrapperArgs(tokens, wrapperIndex + 1);
   return wrapperIndex + 1;
+}
+
+function skipScriptWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '-c' || token === '--command' || token.startsWith('--command=')) return i;
+    if (token === '--') return i + 1;
+    if (!token.startsWith('-')) break;
+    i += 1;
+  }
+  if (i < tokens.length && !tokens[i]!.startsWith('-')) {
+    i += 1;
+  }
+  return i;
 }
 
 function skipSimplePrefixWrapperArgs(tokens: string[], start: number): number {

@@ -412,6 +412,10 @@ test('decision table: builtin deny blocks nested rm inside bash -c even with bro
     'flock -w 5 /tmp/lock rm -rf /',
     'flock /tmp/lock -c "rm -rf /"',
     'script -q -c "rm -rf /" /dev/null',
+    'script -q /dev/null rm -rf /',
+    'pkexec rm -rf /',
+    '\\rm -rf /',
+    'busybox \\rm -rf /',
     "git -c alias.x='!rm -rf /' x",
     "sudo git -c alias.x='!rm -rf /' x",
     "timeout 5 git -c alias.x='!rm -rf /' x"
