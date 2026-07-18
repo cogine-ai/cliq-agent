@@ -265,7 +265,15 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     'catchsegv rm -rf /',
     'script -q -c "rm -rf /" /dev/null',
     'find . -name foo -exec rm {} \\;',
-    'find . -name foo -execdir rm {} \\;'
+    'find . -name foo -execdir rm {} \\;',
+    'find /workspace -name "*.ts" -delete',
+    'nsenter -t 1 rm -rf /',
+    'chroot /tmp rm -rf /',
+    'systemd-run -- rm -rf /',
+    'firejail rm -rf /',
+    'unshare -r chroot /tmp rm -rf /workspace',
+    'lxc exec c rm -rf /',
+    'machinectl shell box rm -rf /'
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }
@@ -304,6 +312,13 @@ test('bashNestedBuiltinDenyHead surfaces builtins inside privilege wrappers and 
     'script -q -c "rm -rf /" /dev/null',
     'flock -w 5 /tmp/lock rm -rf /',
     'flock /tmp/lock -c "rm -rf /"',
+    'nsenter -t 1 rm -rf /',
+    'chroot /tmp rm -rf /',
+    'systemd-run -- rm -rf /',
+    'firejail rm -rf /',
+    'unshare -r chroot /tmp rm -rf /workspace',
+    'lxc exec c rm -rf /',
+    'machinectl shell box rm -rf /',
     "git -c alias.x='!rm -rf /' x",
     'git -c alias.x="!bash -c \\"rm -rf /\\"" x',
     "sudo git -c alias.x='!rm -rf /' x",

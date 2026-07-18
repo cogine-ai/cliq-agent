@@ -50,11 +50,17 @@ const GIT_HEAD = 'git';
 const PREFIX_COMMAND_WRAPPER_HEADS = new Set([
   'catchsegv',
   'chronic',
+  'chroot',
+  'firejail',
   'flock',
   'ionice',
+  'lxc',
+  'machinectl',
   'nohup',
+  'nsenter',
   'setsid',
   'stdbuf',
+  'systemd-run',
   'taskset',
   'time',
   'timeout',
@@ -454,7 +460,7 @@ function bashCommandHasUnsafeAllowSyntaxInner(commandLine: string, depth: number
   if (head && (head.startsWith('-') || BASH_DELEGATION_HEADS.has(head))) return true;
 
   const embedded = analyzeEmbeddedInlineScripts(commandLine);
-  if (embedded.hasScriptInterpreter || embedded.hasFindExec) return true;
+  if (embedded.hasScriptInterpreter || embedded.hasFindExec || embedded.hasFindDelete) return true;
   if (bashNestedBuiltinDenyHead(commandLine) !== null) return true;
 
   const shellScripts = new Set<string>();
@@ -478,17 +484,21 @@ function analyzeEmbeddedInlineScripts(commandLine: string): {
   shellScripts: string[];
   hasScriptInterpreter: boolean;
   hasFindExec: boolean;
+  hasFindDelete: boolean;
 } {
   if (typeof commandLine !== 'string') {
-    return { shellScripts: [], hasScriptInterpreter: false, hasFindExec: false };
+    return { shellScripts: [], hasScriptInterpreter: false, hasFindExec: false, hasFindDelete: false };
   }
   const trimmed = commandLine.trim();
-  if (trimmed === '') return { shellScripts: [], hasScriptInterpreter: false, hasFindExec: false };
+  if (trimmed === '') {
+    return { shellScripts: [], hasScriptInterpreter: false, hasFindExec: false, hasFindDelete: false };
+  }
 
   const tokens = tokenizeWords(trimmed);
   const shellScripts: string[] = [];
   let hasScriptInterpreter = false;
   let hasFindExec = false;
+  let hasFindDelete = false;
   let i = 0;
   while (i < tokens.length) {
     const expanded = expandEnvSplitString(tokens, i);
@@ -499,6 +509,9 @@ function analyzeEmbeddedInlineScripts(commandLine: string): {
     const token = tokens[i]!;
     if (token === '-exec' || token === '-execdir' || token.startsWith('-exec=') || token.startsWith('-execdir=')) {
       hasFindExec = true;
+    }
+    if (token === '-delete' || token.startsWith('-delete=')) {
+      hasFindDelete = true;
     }
     if (extractScriptInterpreterInlineFromTokens(tokens, i) !== null) {
       hasScriptInterpreter = true;
@@ -511,7 +524,7 @@ function analyzeEmbeddedInlineScripts(commandLine: string): {
     if (flockWrapperScript !== null) shellScripts.push(flockWrapperScript);
     i += 1;
   }
-  return { shellScripts, hasScriptInterpreter, hasFindExec };
+  return { shellScripts, hasScriptInterpreter, hasFindExec, hasFindDelete };
 }
 
 /**
@@ -980,8 +993,14 @@ function skipPrefixCommandWrapper(tokens: string[], wrapperIndex: number): numbe
   if (head === 'catchsegv' || head === 'chronic' || head === 'setsid') {
     return skipSimplePrefixWrapperArgs(tokens, wrapperIndex + 1);
   }
+  if (head === 'chroot') return skipChrootWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'flock') return skipFlockWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'firejail') return skipSimplePrefixWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'ionice') return skipIoniceWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'lxc') return skipLxcWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'machinectl') return skipMachinectlWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'nsenter') return skipNsenterWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'systemd-run') return skipSystemdRunWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'timeout') return skipTimeoutWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'time') return skipTimeWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'nohup') return skipNohupWrapperArgs(tokens, wrapperIndex + 1);
@@ -1005,6 +1024,133 @@ function skipSimplePrefixWrapperArgs(tokens: string[], start: number): number {
 
 function skipNohupWrapperArgs(tokens: string[], start: number): number {
   return tokens[start] === '--' ? start + 1 : start;
+}
+
+function skipChrootWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') return i + 1;
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    return i + 1;
+  }
+  return i;
+}
+
+function skipNsenterWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') return i + 1;
+    if (
+      token === '-t' ||
+      token === '--target' ||
+      token === '--wd' ||
+      token === '--root' ||
+      token === '--user' ||
+      token === '--preserve-credentials'
+    ) {
+      i += 2;
+      continue;
+    }
+    if (
+      token.startsWith('--target=') ||
+      token.startsWith('--wd=') ||
+      token.startsWith('--root=') ||
+      token.startsWith('--user=')
+    ) {
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+function skipSystemdRunWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  while (i < tokens.length) {
+    const token = tokens[i]!;
+    if (token === '--') return i + 1;
+    if (
+      token === '-p' ||
+      token === '--property' ||
+      token === '-E' ||
+      token === '--setenv' ||
+      token === '--slice' ||
+      token === '--unit' ||
+      token === '--description' ||
+      token === '--working-directory' ||
+      token === '--uid' ||
+      token === '--gid' ||
+      token === '--machine' ||
+      token === '--on-calendar' ||
+      token === '--timer-property'
+    ) {
+      i += 2;
+      continue;
+    }
+    if (
+      token.startsWith('--property=') ||
+      token.startsWith('--setenv=') ||
+      token.startsWith('--slice=') ||
+      token.startsWith('--unit=') ||
+      token.startsWith('--description=') ||
+      token.startsWith('--working-directory=') ||
+      token.startsWith('--uid=') ||
+      token.startsWith('--gid=') ||
+      token.startsWith('--machine=') ||
+      token.startsWith('--timer-property=')
+    ) {
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+function skipLxcWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  if (i >= tokens.length) return i;
+  const sub = tokenBasename(tokens[i]!);
+  if (sub === 'exec' || sub === 'attach') {
+    i += 1;
+    if (i < tokens.length && !tokens[i]!.startsWith('-')) {
+      i += 1;
+    }
+    if (i < tokens.length && tokens[i] === '--') {
+      i += 1;
+    }
+  }
+  return i;
+}
+
+function skipMachinectlWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  if (i >= tokens.length) return i;
+  const sub = tokenBasename(tokens[i]!);
+  if (sub === 'shell' || sub === 'login' || sub === 'bind') {
+    i += 1;
+    if (i < tokens.length && !tokens[i]!.startsWith('-')) {
+      i += 1;
+    }
+  }
+  while (i < tokens.length && tokens[i]!.startsWith('-')) {
+    i += 1;
+  }
+  return i;
 }
 
 function skipFlockWrapperArgs(tokens: string[], start: number): number {
