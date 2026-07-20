@@ -22,12 +22,20 @@ export type TranscriptEntry =
       kind: 'tool';
       id: string;
       tool: string;
-      status: 'running' | 'ok' | 'error';
+      status: ToolTranscriptStatus;
       summary: string;
       body?: string;
       expanded?: boolean;
     }
   | { kind: 'system'; id: string; text: string };
+
+export type ToolTranscriptStatus =
+  | 'running'
+  | 'waiting'
+  | 'ok'
+  | 'error'
+  | 'denied'
+  | 'blocked';
 
 export type ErrorEntry = {
   id: string;
@@ -203,12 +211,16 @@ export function reduce(state: UiState, action: UiAction): UiState {
       }
       return state;
     }
-    case 'approval-request':
+    case 'approval-request': {
       // The bridge guarantees one in-flight pending at a time by force-denying
       // the previous one before dispatching this; if a caller bypassed the
       // bridge, this replace would still keep the UI consistent (older
       // Promise stays unresolved and surfaces as a stuck modal).
-      return { ...state, pendingApproval: action.pending };
+      const next = { ...state, pendingApproval: action.pending };
+      if (action.pending.subject.kind !== 'tool') return next;
+      const idx = findLastActiveToolIndex(next.transcript, action.pending.subject.toolName);
+      return idx === -1 ? next : updateToolEntry(next, idx, { status: 'waiting' });
+    }
     case 'approval-resolve':
       // The bridge that owns the Promise resolves it before dispatching this;
       // the reducer only clears UI state to keep reduce() pure. Mismatched
@@ -241,10 +253,14 @@ export function reduce(state: UiState, action: UiAction): UiState {
   }
 }
 
-function findLastRunningToolIndex(transcript: TranscriptEntry[], tool: string): number {
+function findLastActiveToolIndex(transcript: TranscriptEntry[], tool: string): number {
   for (let i = transcript.length - 1; i >= 0; i -= 1) {
     const entry = transcript[i]!;
-    if (entry.kind === 'tool' && entry.tool === tool && entry.status === 'running') {
+    if (
+      entry.kind === 'tool' &&
+      entry.tool === tool &&
+      (entry.status === 'running' || entry.status === 'waiting')
+    ) {
       return i;
     }
   }
@@ -266,9 +282,9 @@ function updateToolEntry(
 function reduceToolHookStart(state: UiState, action: ModelAction): UiState {
   const tool = toolNameFromAction(action);
   const summary = previewFromAction(action);
-  const idx = findLastRunningToolIndex(state.transcript, tool);
+  const idx = findLastActiveToolIndex(state.transcript, tool);
   if (idx !== -1) {
-    return updateToolEntry(state, idx, { summary });
+    return updateToolEntry(state, idx, { status: 'running', summary });
   }
   // Fallback: tool-start RuntimeEvent didn't fire (e.g. test driving hooks
   // alone). Create the running entry now.
@@ -283,9 +299,9 @@ function reduceToolHookStart(state: UiState, action: ModelAction): UiState {
 function reduceToolHookEnd(state: UiState, result: ToolResult): UiState {
   const summary = formatToolResultSummary(result);
   const body = extractToolBody(result);
-  const idx = findLastRunningToolIndex(state.transcript, result.tool);
+  const idx = findLastActiveToolIndex(state.transcript, result.tool);
   const patch: Partial<Extract<TranscriptEntry, { kind: 'tool' }>> = {
-    status: result.status,
+    status: toolTranscriptStatus(result),
     summary,
     ...(body !== undefined ? { body } : {}),
   };
@@ -303,12 +319,24 @@ function reduceToolHookEnd(state: UiState, result: ToolResult): UiState {
         kind: 'tool',
         id,
         tool: result.tool,
-        status: result.status,
+        status: toolTranscriptStatus(result),
         summary,
         ...(body !== undefined ? { body } : {}),
       },
     ],
   };
+}
+
+function toolTranscriptStatus(result: ToolResult): ToolTranscriptStatus {
+  if (result.status === 'ok') return 'ok';
+  const reason = typeof result.meta.reason === 'string' ? result.meta.reason.toLowerCase() : '';
+  if (/\b(user denied|user declined|denied by hook|confirmation required)\b/.test(reason)) {
+    return 'denied';
+  }
+  if (/\b(block|blocked|blocks)\b/.test(reason) || /^deny by .* rule\b/.test(reason)) {
+    return 'blocked';
+  }
+  return 'error';
 }
 
 function pushSystem(state: UiState, text: string): UiState {
@@ -393,7 +421,7 @@ function reduceRuntimeEvent(state: UiState, event: RuntimeEvent): UiState {
       // Backstop finalization for setups that drive RuntimeEvent without the
       // hook bridge (e.g. tests). When the bridge is wired, the entry is
       // already non-running by the time this fires and the lookup misses.
-      const idx = findLastRunningToolIndex(state.transcript, event.tool);
+      const idx = findLastActiveToolIndex(state.transcript, event.tool);
       if (idx === -1) return state;
       return updateToolEntry(state, idx, { status: event.status });
     }

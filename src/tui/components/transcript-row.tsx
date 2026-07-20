@@ -1,9 +1,22 @@
 import { Box, Text } from 'ink';
 
 import type { TranscriptEntry } from '../store.js';
+import { semanticTextProps, type SemanticTone } from '../semantic-styles.js';
 import { formatApproxOutputTokens } from '../token-estimate.js';
 
-const TOOL_GLYPH = { running: '▸', ok: '✓', error: '✗' } as const;
+const TOOL_PRESENTATION: Readonly<
+  Record<
+    Extract<TranscriptEntry, { kind: 'tool' }>['status'],
+    { tone: SemanticTone; marker: string; label: string }
+  >
+> = Object.freeze({
+  running: Object.freeze({ tone: 'active', marker: '▸', label: 'running' }),
+  waiting: Object.freeze({ tone: 'warning', marker: '…', label: 'waiting approval' }),
+  ok: Object.freeze({ tone: 'success', marker: '✓', label: 'succeeded' }),
+  error: Object.freeze({ tone: 'error', marker: '✗', label: 'failed' }),
+  denied: Object.freeze({ tone: 'danger', marker: '⊘', label: 'denied' }),
+  blocked: Object.freeze({ tone: 'warning', marker: '■', label: 'blocked' })
+});
 const TOOL_BODY_FOLD_BUCKET = 8;
 const MAX_FOLDED_BODY_LINES = 4;
 const USER_MESSAGE_BACKGROUND = 'blackBright';
@@ -17,23 +30,24 @@ export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
       return (
         <Box flexDirection="column">
           <Text>{entry.text}</Text>
-          {outputTokens ? <Text dimColor>{outputTokens}</Text> : null}
+          {outputTokens ? <Text {...semanticTextProps('muted')}>{outputTokens}</Text> : null}
         </Box>
       );
     }
     case 'tool': {
-      const glyph = TOOL_GLYPH[entry.status];
-      const color = entry.status === 'error' ? 'red' : entry.status === 'ok' ? 'green' : 'yellow';
+      const presentation = TOOL_PRESENTATION[entry.status];
       return (
         <Box flexDirection="column">
           <Box width="100%" overflow="hidden">
-            <Text color={color}>{glyph} </Text>
-            <Text dimColor>tool: </Text>
+            <Text {...semanticTextProps(presentation.tone)}>
+              {`${presentation.marker} ${presentation.label} `}
+            </Text>
+            <Text {...semanticTextProps('muted')}>tool: </Text>
             <Text>{entry.tool}</Text>
             {entry.summary ? (
               <>
-                <Text dimColor>{' — '}</Text>
-                <Text dimColor wrap="truncate">
+                <Text {...semanticTextProps('muted')}>{' — '}</Text>
+                <Text {...semanticTextProps('muted')} wrap="truncate">
                   {entry.summary}
                 </Text>
               </>
@@ -46,7 +60,7 @@ export function TranscriptRow({ entry }: { entry: TranscriptEntry }) {
     case 'system':
       return (
         <Box>
-          <Text dimColor italic>
+          <Text {...semanticTextProps('muted')} italic>
             {entry.text}
           </Text>
         </Box>
@@ -84,12 +98,12 @@ function ToolBody({ body, expanded }: { body: string; expanded: boolean }) {
       {visible.map((line, idx) => (
         // Body lines are indexed by position (no entry.id needed beyond row).
         // eslint-disable-next-line react/no-array-index-key
-        <Text key={idx} dimColor wrap="truncate">
+        <Text key={idx} {...semanticTextProps('muted')} wrap="truncate">
           {line}
         </Text>
       ))}
       {remaining > 0 ? (
-        <Text dimColor italic>
+        <Text {...semanticTextProps('muted')} italic>
           {`… ${remaining} more line${remaining === 1 ? '' : 's'} (Ctrl+O to expand)`}
         </Text>
       ) : null}

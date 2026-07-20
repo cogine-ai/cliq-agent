@@ -51,8 +51,7 @@ test('shows a red error indicator when errors are present', () => {
   });
   const { lastFrame } = render(<BottomStatusBar state={state} />);
   const frame = lastFrame() ?? '';
-  // ANSI red for ● — assert presence of the glyph at minimum
-  assert.match(frame, /●/);
+  assert.match(frame, /✗ error/);
 });
 
 test('does not render policy mode label because the composer owns mode context', () => {
@@ -67,6 +66,20 @@ test('renders the active tx state when state.tx is set', () => {
   const frame = lastFrame() ?? '';
   assert.match(frame, /tx tx_abc123 validated/);
   assert.doesNotMatch(frame, /tx idle/);
+});
+
+test('transaction lifecycle uses active, info, and success markers', () => {
+  const cases = [
+    ['staging', '▸'],
+    ['finalized', 'i'],
+    ['validated', '✓']
+  ] as const;
+  for (const [state, marker] of cases) {
+    const { lastFrame } = render(
+      <BottomStatusBar state={init({ tx: { txId: 'tx_123', state } })} />
+    );
+    assert.match(lastFrame() ?? '', new RegExp(`${marker} tx tx_123 ${state}`));
+  }
 });
 
 test('renders the session token estimate when sessionTokens is non-null', () => {
@@ -103,9 +116,9 @@ test('renders update notice when a newer version is available', () => {
 });
 
 test('renders supplied running-state hints in the footer', () => {
-  const { lastFrame } = render(<TopStatusBar hint="Running · Ctrl+C cancel" />);
+  const { lastFrame } = render(<TopStatusBar hint="Running · Ctrl+C cancel" tone="active" />);
   const frame = lastFrame() ?? '';
-  assert.match(frame, /Running/);
+  assert.match(frame, /▸ Running/);
   assert.match(frame, /Ctrl\+C cancel/);
 });
 

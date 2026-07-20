@@ -6,6 +6,8 @@ import {
   describePolicyMode,
   formatModeForHelp,
   formatModeForStatus,
+  getModeColor,
+  getModeTone,
   listPolicyModeDescriptions
 } from './mode-language.js';
 
@@ -28,10 +30,13 @@ test('policy mode language maps every internal mode to a user-facing label', () 
 });
 
 test('status label marks yolo mode distinctly', () => {
-  assert.equal(formatModeForStatus('default'), 'Default');
+  assert.equal(formatModeForStatus('default'), '! Default');
   assert.match(formatModeForStatus('yolo'), /^! YOLO$/);
   assert.equal(describePolicyMode('yolo').risk, 'danger');
   assert.equal(describePolicyMode('plan').risk, 'safe');
+  assert.equal(getModeTone('plan'), 'safe');
+  assert.equal(getModeColor('plan'), 'green');
+  assert.equal(getModeTone('accept-edits'), 'info');
 });
 
 test('help formatter uses the same labels as the mode descriptions', () => {
