@@ -265,7 +265,17 @@ test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find 
     'catchsegv rm -rf /',
     'script -q -c "rm -rf /" /dev/null',
     'find . -name foo -exec rm {} \\;',
-    'find . -name foo -execdir rm {} \\;'
+    'find . -name foo -execdir rm {} \\;',
+    'strace rm -rf /',
+    'ltrace rm -rf /',
+    'valgrind rm -rf /',
+    'pkexec rm -rf /',
+    'run0 rm -rf /',
+    'sg wheel rm -rf /',
+    'docker exec container rm -rf /',
+    'incus exec c rm -rf /',
+    'unbuffer rm -rf /',
+    'rlwrap rm -rf /'
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }
@@ -304,6 +314,12 @@ test('bashNestedBuiltinDenyHead surfaces builtins inside privilege wrappers and 
     'script -q -c "rm -rf /" /dev/null',
     'flock -w 5 /tmp/lock rm -rf /',
     'flock /tmp/lock -c "rm -rf /"',
+    'pkexec rm -rf /',
+    'run0 rm -rf /',
+    'sg wheel rm -rf /',
+    'strace rm -rf /',
+    'docker exec container rm -rf /',
+    'incus exec c rm -rf /',
     "git -c alias.x='!rm -rf /' x",
     'git -c alias.x="!bash -c \\"rm -rf /\\"" x',
     "sudo git -c alias.x='!rm -rf /' x",

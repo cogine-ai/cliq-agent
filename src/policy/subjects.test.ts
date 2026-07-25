@@ -134,7 +134,14 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads inside direct 
     ['/usr/bin/time -f %E -o out rm -rf /', 'time'],
     ['/usr/bin/time -f%E -oout rm -rf /', 'time'],
     ['flock -w 5 /tmp/lock rm -rf /', 'flock'],
-    ['flock /tmp/lock -c "rm -rf /"', 'flock']
+    ['flock /tmp/lock -c "rm -rf /"', 'flock'],
+    ['strace rm -rf /', 'strace'],
+    ['ltrace rm -rf /', 'ltrace'],
+    ['valgrind rm -rf /', 'valgrind'],
+    ['docker exec container rm -rf /', 'docker'],
+    ['incus exec c rm -rf /', 'incus'],
+    ['unbuffer rm -rf /', 'unbuffer'],
+    ['rlwrap rm -rf /', 'rlwrap']
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },
@@ -157,7 +164,10 @@ test('buildToolApprovalSubject surfaces nested builtin-deny heads inside privile
     ['sudo -c "rm -rf /"', 'sudo'],
     ['env sudo -c "rm -rf /"', 'sudo'],
     ['su -c "rm -rf /"', 'su'],
-    ['runuser -u root -c "rm -rf /"', 'runuser']
+    ['runuser -u root -c "rm -rf /"', 'runuser'],
+    ['pkexec rm -rf /', 'pkexec'],
+    ['run0 rm -rf /', 'run0'],
+    ['sg wheel rm -rf /', 'sg']
   ]) {
     const subject = buildToolApprovalSubject({
       definition: { name: 'bash', access: 'exec' },

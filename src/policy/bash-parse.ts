@@ -50,18 +50,25 @@ const GIT_HEAD = 'git';
 const PREFIX_COMMAND_WRAPPER_HEADS = new Set([
   'catchsegv',
   'chronic',
+  'docker',
   'flock',
+  'incus',
   'ionice',
+  'ltrace',
   'nohup',
+  'rlwrap',
   'setsid',
   'stdbuf',
+  'strace',
   'taskset',
   'time',
   'timeout',
+  'unbuffer',
   'unshare',
+  'valgrind',
   'watch'
 ]);
-const PRIVILEGE_WRAPPER_HEADS = new Set(['runuser', 'su', 'sudo']);
+const PRIVILEGE_WRAPPER_HEADS = new Set(['pkexec', 'run0', 'runuser', 'sg', 'su', 'sudo']);
 const SCRIPT_WRAPPER_HEADS = new Set(['script']);
 const IONICE_NO_VALUE_SHORT_FLAGS = new Set(['p', 't']);
 const TIME_NO_VALUE_SHORT_FLAGS = new Set(['a', 'h', 'l', 'p', 'q', 'v']);
@@ -168,11 +175,26 @@ function privilegeWrapperBuiltinDenyHead(tokens: string[], startIndex: number): 
 }
 
 function skipPrivilegeWrapperForWrappedCommand(tokens: string[], startIndex: number): number {
+  const head = tokenBasename(tokens[startIndex]!);
+  if (head === 'sg') {
+    let i = startIndex + 1;
+    while (i < tokens.length) {
+      const token = tokens[i]!;
+      if (token === '--') return i + 1;
+      if (token === '-c' || token === '--command') return i;
+      if (!token.startsWith('-')) {
+        return i + 1;
+      }
+      i += 1;
+    }
+    return i;
+  }
+
   let i = startIndex + 1;
   while (i < tokens.length) {
     const token = tokens[i]!;
     if (token === '--') return i + 1;
-    if (token === '-' && tokenBasename(tokens[startIndex]!) !== 'sudo') {
+    if (token === '-' && head !== 'sudo') {
       i += 1;
       continue;
     }
@@ -977,10 +999,21 @@ function isPrefixCommandWrapper(token: string): boolean {
 
 function skipPrefixCommandWrapper(tokens: string[], wrapperIndex: number): number {
   const head = tokenBasename(tokens[wrapperIndex]!);
-  if (head === 'catchsegv' || head === 'chronic' || head === 'setsid') {
+  if (
+    head === 'catchsegv' ||
+    head === 'chronic' ||
+    head === 'ltrace' ||
+    head === 'rlwrap' ||
+    head === 'setsid' ||
+    head === 'strace' ||
+    head === 'unbuffer' ||
+    head === 'valgrind'
+  ) {
     return skipSimplePrefixWrapperArgs(tokens, wrapperIndex + 1);
   }
+  if (head === 'docker') return skipDockerWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'flock') return skipFlockWrapperArgs(tokens, wrapperIndex + 1);
+  if (head === 'incus') return skipIncusWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'ionice') return skipIoniceWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'timeout') return skipTimeoutWrapperArgs(tokens, wrapperIndex + 1);
   if (head === 'time') return skipTimeWrapperArgs(tokens, wrapperIndex + 1);
@@ -1001,6 +1034,30 @@ function skipSimplePrefixWrapperArgs(tokens: string[], start: number): number {
     i += 1;
   }
   return i;
+}
+
+function skipContainerExecWrapperArgs(tokens: string[], start: number): number {
+  let i = start;
+  if (i >= tokens.length) return i;
+  const sub = tokenBasename(tokens[i]!);
+  if (sub === 'exec' || sub === 'attach') {
+    i += 1;
+    if (i < tokens.length && !tokens[i]!.startsWith('-')) {
+      i += 1;
+    }
+    if (i < tokens.length && tokens[i] === '--') {
+      i += 1;
+    }
+  }
+  return i;
+}
+
+function skipDockerWrapperArgs(tokens: string[], start: number): number {
+  return skipContainerExecWrapperArgs(tokens, start);
+}
+
+function skipIncusWrapperArgs(tokens: string[], start: number): number {
+  return skipContainerExecWrapperArgs(tokens, start);
 }
 
 function skipNohupWrapperArgs(tokens: string[], start: number): number {
