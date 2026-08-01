@@ -326,6 +326,33 @@ test('abortStaleImplicitTurnTx is a no-op when the tx is not staging', async () 
   });
 });
 
+test('finishTurnTx manual-only stops after validation without applying', async () => {
+  await withTrEnv(async ({ ctx, ws, home, events }) => {
+    await commitInitialFile(ws, 'a.txt', 'one');
+    const opts: TxRunnerOptions = baseOpts({
+      applyPolicy: 'manual-only',
+      validatorsConfig: { disabled: ['builtin:index-clean', 'builtin:size-limit'] }
+    });
+    const open = await openTurnTx(ctx, opts, async (e) => { events.push(e); });
+    const writer = createOverlayWriter(ws, overlayDir(resolveTxRoot(home), open.tx!.id));
+    await writer.replaceText('a.txt', 'one', 'ONE');
+
+    await finishTurnTx(ctx, opts, open.tx!, async (e) => { events.push(e); });
+
+    const types = events.map((e) => e.type);
+    assert.deepEqual(
+      types.filter((t) => t.startsWith('tx-')),
+      ['tx-staging-start', 'tx-finalized', 'tx-validated']
+    );
+    assert.equal(events.some((e) => e.type === 'tx-applied'), false);
+    assert.equal(events.some((e) => e.type === 'tx-aborted'), false);
+    const tx = await readTxState(resolveTxRoot(home), open.tx!.id);
+    assert.equal(tx?.state, 'validated');
+    const { readFile: rf } = await import('node:fs/promises');
+    assert.equal(await rf(path.join(ws, 'a.txt'), 'utf8'), 'one');
+  });
+});
+
 test('explicit tx + auto=per-turn: openTurnTx returns opened=false; runner-integration test confirms finishTurnTx is NOT called for opened=false', async () => {
   // Unit-level proof: openTurnTx behavior is asserted in Task 11 ("reuses existing
   // explicit tx even when auto=per-turn"). The full runner-skips-finalize behavior is

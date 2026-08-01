@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, symlink, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -81,6 +81,37 @@ test('diffMtimes finds deletions', async () => {
   const before: Map<string, number> = new Map([['a.txt', 1000], ['b.txt', 1000]]);
   const after: Map<string, number> = new Map([['a.txt', 1000]]);
   assert.deepEqual(diffMtimes(before, after), ['b.txt']);
+});
+
+test('snapshotMtimes tracks symlink add, retarget, and removal via lstat', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-bash-symlink-'));
+  try {
+    const targetA = path.join(dir, 'target-a.txt');
+    const targetB = path.join(dir, 'target-b.txt');
+    await writeFile(targetA, 'a', 'utf8');
+    await writeFile(targetB, 'b', 'utf8');
+
+    const before = await snapshotMtimes(dir);
+    assert.equal(before.size, 2);
+
+    const linkPath = path.join(dir, 'alias');
+    await symlink(targetA, linkPath);
+    const afterAdd = await snapshotMtimes(dir);
+    assert.deepEqual(diffMtimes(before, afterAdd), ['alias']);
+
+    await new Promise((r) => setTimeout(r, 20));
+    await unlink(linkPath);
+    await symlink(targetB, linkPath);
+    const afterRetarget = await snapshotMtimes(dir);
+    assert.deepEqual(diffMtimes(afterAdd, afterRetarget), ['alias']);
+
+    await unlink(linkPath);
+    const afterRemove = await snapshotMtimes(dir);
+    assert.deepEqual(diffMtimes(afterRetarget, afterRemove), ['alias']);
+    assert.equal(afterRemove.has('alias'), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('recordBashEffect builds BashEffect with outOfBand=true', () => {

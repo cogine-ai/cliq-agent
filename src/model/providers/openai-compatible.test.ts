@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test, { mock } from 'node:test';
 
 import type { ModelCapabilities, ResolvedModelConfig } from '../types.js';
-import { buildModelPromptRequest } from '../prompt.js';
+import { buildModelPromptRequest, resolveProviderPromptCapabilities } from '../prompt.js';
 import { createToolRegistry } from '../../tools/registry.js';
 import { createOpenAICompatibleClient } from './openai-compatible.js';
 
@@ -277,6 +277,53 @@ test('openai-compatible auto streaming falls back when streaming is rejected bef
     );
     assert.deepEqual(seenStreamFlags, [true, false]);
     assert.deepEqual(starts, [false]);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('openai-compatible typed prompt uses text-action fallback for Zhipu without native tools or schema', async () => {
+  const seen: { body?: Record<string, unknown> } = {};
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    seen.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({
+      choices: [{ message: { content: '{"type":"tool","tool":"bash","arguments":{"command":"pwd"}}' } }]
+    });
+  });
+
+  try {
+    const zhipuConfig: ResolvedModelConfig = {
+      provider: 'zhipu',
+      model: 'glm-5.2',
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      apiKey: 'zhipu-key',
+      streaming: 'off'
+    };
+    const request = buildModelPromptRequest({
+      modelConfig: zhipuConfig,
+      modelCapabilities: textModelCapabilities,
+      providerCapabilities: resolveProviderPromptCapabilities({
+        modelConfig: zhipuConfig,
+        modelCapabilities: textModelCapabilities
+      }),
+      instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+      input: [{ kind: 'message', role: 'user', content: 'hello' }],
+      registry: createToolRegistry()
+    });
+    const client = createOpenAICompatibleClient(zhipuConfig);
+    const result = await client.complete(request);
+
+    const messages = seen.body?.messages as Array<{ role: string; content: string }>;
+    assert.equal(seen.body?.tools, undefined);
+    assert.equal(seen.body?.response_format, undefined);
+    assert.equal(messages.some((message) => message.content.includes('TEXT ACTION FALLBACK MODE')), true);
+    assert.deepEqual(result.structuredOutput, {
+      type: 'tool',
+      tool: 'bash',
+      arguments: { command: 'pwd' }
+    });
+    assert.equal(result.effectiveRequest?.mode, 'text-action');
+    assert.equal(result.effectiveRequest?.streaming, false);
   } finally {
     fetchMock.mock.restore();
   }
