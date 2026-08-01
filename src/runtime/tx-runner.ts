@@ -96,10 +96,21 @@ export async function openTurnTx(
   return { tx, opened: true };
 }
 
+/** Terminal states where an implicit per-turn tx should not be auto-aborted. */
+const STALE_IMPLICIT_TX_TERMINAL_STATES = new Set<Transaction['state']>([
+  'applied',
+  'aborted',
+  'applied-partial'
+]);
+
 /**
- * Abort an implicit per-turn tx left in `staging` when a turn exits without
- * {@link finishTurnTx}. Prevents the next turn from reusing the orphan with
- * `opened: false`, which would skip end-of-turn finalize/apply forever.
+ * Abort an implicit per-turn tx left in a non-terminal state when a turn exits
+ * without {@link finishTurnTx}. Prevents the next turn from reusing the orphan
+ * with `opened: false`, which would skip end-of-turn finalize/apply forever.
+ *
+ * Mid-turn failures leave the tx in `staging` (handled since 79a7a4b). This
+ * also covers post-{@link finalizeTx} failures (e.g. validateTx I/O or race
+ * errors) that leave the tx in `finalized` / `validated` / `approved`.
  */
 export async function abortStaleImplicitTurnTx(
   ctx: CoordinatorCtx,
@@ -107,7 +118,11 @@ export async function abortStaleImplicitTurnTx(
   emit: EventEmitter
 ): Promise<void> {
   const current = await getActiveTx(ctx);
-  if (!current || current.id !== tx.id || current.state !== 'staging') {
+  if (
+    !current ||
+    current.id !== tx.id ||
+    STALE_IMPLICIT_TX_TERMINAL_STATES.has(current.state)
+  ) {
     return;
   }
   await abortTx(ctx, tx.id, { reason: 'user-abort' });
