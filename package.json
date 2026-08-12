@@ -50,6 +50,7 @@
     "test": "node --test --test-concurrency=1 --import tsx \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
     "test:state": "node --test --test-concurrency=1 --import tsx \"src/kernel/**/*.test.ts\" \"src/state/**/*.test.ts\"",
     "test:state-probe": "node --test --test-concurrency=1 --import tsx src/state/probe.test.ts",
+    "test:sandbox-probe": "node --test --test-concurrency=1 --import tsx src/sandbox/probe.test.ts",
     "catalog:update": "tsx scripts/catalog/update.ts"
   },
   "dependencies": {
