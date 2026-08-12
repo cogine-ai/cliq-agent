@@ -6,6 +6,8 @@
 **Decision Type:** Architecture  
 **Audience:** Core maintainers and contributors
 
+> **Superseded for future architecture:** This proposal is retained as historical context. The final runtime architecture is [Durable Verified Run Kernel](./2026-08-11-durable-verified-run-kernel.md). In particular, the final RFC supersedes JSON-over-text actions as the core control protocol and Session ownership of execution continuity.
+
 ---
 
 ## 1. Summary
