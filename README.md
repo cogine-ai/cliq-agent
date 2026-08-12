@@ -8,7 +8,7 @@ Cliq is a local coding-agent CLI built around a small, provider-agnostic JSON ac
 
 ## Install
 
-Requirements: Node.js 22 or newer.
+Requirements: Node.js 22.13 or newer.
 
 ```bash
 npm install -g @cogineai/cliq
