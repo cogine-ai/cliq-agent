@@ -68,7 +68,14 @@ function serializeCanonical(value: unknown, ancestors: Set<object>): string {
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      return `[${value.map((entry) => serializeCanonical(entry, ancestors)).join(',')}]`;
+      const entries: string[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.hasOwn(value, index)) {
+          throw new TypeError('canonical JSON does not permit sparse arrays');
+        }
+        entries.push(serializeCanonical(value[index], ancestors));
+      }
+      return `[${entries.join(',')}]`;
     }
 
     const prototype = Object.getPrototypeOf(value);

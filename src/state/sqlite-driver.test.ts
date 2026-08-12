@@ -1,10 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { lstatSync } from 'node:fs';
+import { chmod, link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { openSqliteDriver } from './sqlite-driver.js';
+import {
+  openSqliteDriver,
+  type SqliteConnection,
+  type SqliteDriver,
+  type SqliteStatement
+} from './sqlite-driver.js';
 
 test('executes caller-owned schema and prepared statements against a file database', async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-driver-'));
@@ -58,6 +64,96 @@ test('BEGIN IMMEDIATE transaction rolls back every write when the callback fails
   }
 });
 
+test('transaction rejects an async callback, rolls back immediately, and consumes its late rejection', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-async-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+  const unhandledRejections: unknown[] = [];
+  const captureUnhandledRejection = (reason: unknown) => unhandledRejections.push(reason);
+  process.on('unhandledRejection', captureUnhandledRejection);
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+    driver.exec('CREATE TABLE records (id INTEGER PRIMARY KEY, value TEXT NOT NULL) STRICT');
+    let lateContinuationRan = false;
+
+    assert.throws(
+      () =>
+        // Async transaction callbacks are a compile-time error as well as a runtime error.
+        // @ts-expect-error SQLite transactions must complete synchronously.
+        driver.transaction(async (connection) => {
+          connection.prepare('INSERT INTO records (id, value) VALUES (?, ?)').run(1n, 'rolled-back');
+          await Promise.resolve();
+          lateContinuationRan = true;
+          connection.prepare('INSERT INTO records (id, value) VALUES (?, ?)').run(2n, 'too-late');
+        }),
+      /transaction callback must be synchronous/
+    );
+
+    const immediateCount = driver.prepare('SELECT count(*) AS count FROM records').get<{ count: bigint }>();
+    assert.equal(immediateCount?.count, 0n, 'the synchronous prefix is rolled back before returning');
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(lateContinuationRan, true);
+    assert.deepEqual(unhandledRejections, [], 'the rejected async continuation is observed internally');
+    const finalCount = driver.prepare('SELECT count(*) AS count FROM records').get<{ count: bigint }>();
+    assert.equal(finalCount?.count, 0n, 'an escaped scoped connection cannot write after rollback');
+    driver.close();
+  } finally {
+    process.off('unhandledRejection', captureUnhandledRejection);
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('transaction rejects non-Promise thenables and rolls back their synchronous writes', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-thenable-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+    driver.exec('CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT');
+
+    assert.throws(
+      () =>
+        driver.transaction((connection) => {
+          connection.prepare('INSERT INTO records (id) VALUES (?)').run(1n);
+          return { then() {} } as unknown as number;
+        }),
+      /transaction callback must be synchronous/
+    );
+
+    assert.equal(driver.prepare('SELECT count(*) AS count FROM records').get<{ count: bigint }>()?.count, 0n);
+    driver.close();
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('transaction-scoped connections and statements expire when the callback returns', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-scope-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+    driver.exec('CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT');
+    let escapedConnection: SqliteConnection | undefined;
+    let escapedStatement: SqliteStatement | undefined;
+
+    driver.transaction((connection) => {
+      escapedConnection = connection;
+      escapedStatement = connection.prepare('INSERT INTO records (id) VALUES (?)');
+      escapedStatement.run(1n);
+    });
+
+    assert.throws(() => escapedConnection?.exec('INSERT INTO records (id) VALUES (2)'), /scope is no longer active/);
+    assert.throws(() => escapedConnection?.prepare('SELECT 1'), /scope is no longer active/);
+    assert.throws(() => escapedStatement?.run(3n), /scope is no longer active/);
+    assert.equal(driver.prepare('SELECT count(*) AS count FROM records').get<{ count: bigint }>()?.count, 1n);
+    driver.close();
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test('transaction reserves the write lock before its first write', async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-immediate-'));
   const databasePath = path.join(stateRoot, 'kernel.sqlite3');
@@ -92,6 +188,145 @@ test('rejects in-memory, relative, and non-normalized database paths', () => {
     () => openSqliteDriver(`${os.tmpdir()}/cliq/../kernel.sqlite3`),
     /normalized absolute file-backed/
   );
+});
+
+test('pre-creates a new database as a private single-link regular file owned by the effective uid', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-private-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+    const info = await lstat(databasePath);
+    const effectiveUid = process.geteuid?.();
+
+    assert.equal(info.isFile(), true);
+    assert.equal(info.isSymbolicLink(), false);
+    assert.equal(info.mode & 0o7777, 0o600);
+    assert.equal(info.nlink, 1);
+    assert.equal(info.uid, effectiveUid);
+    driver.close();
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('rejects unsafe existing database file types, links, permissions, and ownership before SQLite opens', async (t) => {
+  await t.test('symbolic link', async () => {
+    const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-unsafe-'));
+    const target = path.join(stateRoot, 'target.sqlite3');
+    const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+    try {
+      await writeFile(target, '', { mode: 0o600 });
+      await symlink(target, databasePath);
+      assertOpenRejects(databasePath, /must not be a symbolic link/);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  await t.test('directory', async () => {
+    const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-unsafe-'));
+    const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+    try {
+      await mkdir(databasePath, { mode: 0o700 });
+      assertOpenRejects(databasePath, /must be a regular file/);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  await t.test('multiple hard links', async () => {
+    const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-unsafe-'));
+    const target = path.join(stateRoot, 'target.sqlite3');
+    const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+    try {
+      await writeFile(target, '', { mode: 0o600 });
+      await link(target, databasePath);
+      assertOpenRejects(databasePath, /link count must be exactly 1/);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  await t.test('non-private mode', async () => {
+    const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-unsafe-'));
+    const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+    try {
+      await writeFile(databasePath, '', { mode: 0o600 });
+      await chmod(databasePath, 0o640);
+      assertOpenRejects(databasePath, /mode must be exactly 0600/);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  await t.test('effective uid mismatch', async () => {
+    const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-unsafe-'));
+    const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+    const getEffectiveUid = process.geteuid;
+    if (typeof getEffectiveUid !== 'function') assert.fail('POSIX test requires process.geteuid');
+    try {
+      await writeFile(databasePath, '', { mode: 0o600 });
+      process.geteuid = () => getEffectiveUid() + 1;
+      assertOpenRejects(databasePath, /must be owned by the effective uid/);
+    } finally {
+      process.geteuid = getEffectiveUid;
+      await rm(stateRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+test('rejects unsafe pre-existing journal, WAL, and shared-memory files before SQLite opens', async (t) => {
+  for (const suffix of ['-journal', '-wal', '-shm'] as const) {
+    await t.test(`${suffix} permissions`, async () => {
+      const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-sidecar-'));
+      const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+      try {
+        await writeFile(databasePath, '', { mode: 0o600 });
+        await writeFile(`${databasePath}${suffix}`, 'unsafe', { mode: 0o600 });
+        await chmod(`${databasePath}${suffix}`, 0o640);
+        assertOpenRejects(databasePath, /mode must be exactly 0600/);
+      } finally {
+        await rm(stateRoot, { recursive: true, force: true });
+      }
+    });
+
+    await t.test(`${suffix} type`, async () => {
+      const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-sidecar-'));
+      const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+      const target = path.join(stateRoot, 'sidecar-target');
+      try {
+        await writeFile(databasePath, '', { mode: 0o600 });
+        await writeFile(target, 'target', { mode: 0o600 });
+        await symlink(target, `${databasePath}${suffix}`);
+        assertOpenRejects(databasePath, /must not be a symbolic link/);
+      } finally {
+        await rm(stateRoot, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test('an active rollback journal inherits exact 0600 ownership and link invariants', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-journal-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+    driver.exec('CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT');
+    driver.transaction((connection) => {
+      connection.prepare('INSERT INTO records (id) VALUES (?)').run(1n);
+      const journalInfo = lstatSync(`${databasePath}-journal`);
+      assert.equal(journalInfo.isFile(), true);
+      assert.equal(journalInfo.isSymbolicLink(), false);
+      assert.equal(journalInfo.mode & 0o7777, 0o600);
+      assert.equal(journalInfo.nlink, 1);
+      assert.equal(journalInfo.uid, process.geteuid?.());
+    });
+    driver.close();
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
 });
 
 test('committed rows survive close and reopen of the file database', async () => {
@@ -178,3 +413,14 @@ test('close makes the driver and its prepared statements unusable', async () => 
     await rm(stateRoot, { recursive: true, force: true });
   }
 });
+
+function assertOpenRejects(databasePath: string, expected: RegExp): void {
+  let unexpectedlyOpened: SqliteDriver | undefined;
+  try {
+    assert.throws(() => {
+      unexpectedlyOpened = openSqliteDriver(databasePath);
+    }, expected);
+  } finally {
+    unexpectedlyOpened?.close();
+  }
+}
