@@ -30,6 +30,10 @@ Create one architecture epic that links the final RFC and all six local backlog-
 
 The six work packages are parallel ownership boundaries, not product phases. None may switch the default runtime independently.
 
+### Overlapping open pull request
+
+[PR #469 — `docs: design agent tool execution boundary (#63)`](https://github.com/cogine-ai/cliq-agent/pull/469) is currently open, non-draft, and still declares `Closes #63`. Its optional/opt-in execution boundary is superseded by this RFC's mandatory strong Run isolation and conflicts with the planned rewrite of #63 as work package 03. Close #469 without merge after linking it to PR #479/the final RFC, and remove its issue-closing effect; no commit from #469 is a second architecture authority.
+
 ## Existing Issue Decisions
 
 | Issue | Current intent | Relationship to the final design | Recommended update | Kernel blocker |
@@ -77,7 +81,7 @@ The manager publishes only an immutable signed model/service selection consumed 
 ## Recommended Remote Edits (Not Performed)
 
 1. Create the architecture epic and five new child issues listed above.
-2. Rewrite #63 as work package 03 and link it to the epic instead of creating a duplicate sandbox issue.
+2. Close PR #469 without merge as superseded by PR #479/the final RFC, remove its `Closes #63` effect, then rewrite #63 as work package 03 and link it to the epic instead of creating a duplicate sandbox issue.
 3. Update #62 and #76 dependencies/scopes.
 4. Close #46 as superseded only after the epic and work package 05 links exist.
 5. Split #102 and #105 checklists explicitly: mark the absorbed minimal signed
