@@ -4,8 +4,17 @@ import { chmodSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { qualifyStateBackend, type StateProbeSqliteDatabase } from './probe.js';
+import {
+  isLocalFilesystem,
+  qualifyStateBackend,
+  type StateProbeSqliteDatabase
+} from './probe.js';
 import { openSqliteDriver } from './sqlite-driver.js';
+
+test('Darwin filesystem qualification accepts local HFS and rejects NFS', () => {
+  assert.equal(isLocalFilesystem('darwin', 25n), true);
+  assert.equal(isLocalFilesystem('darwin', 2n), false);
+});
 
 test('qualifyStateBackend proves a local durable SQLite probe without granting authority', async () => {
   const stateRoot = await makeStateRoot();

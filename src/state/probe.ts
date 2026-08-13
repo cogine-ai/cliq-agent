@@ -121,12 +121,19 @@ function sqliteIntegerEquals(value: unknown, expected: number): boolean {
   return value === expected || value === BigInt(expected);
 }
 
-function isLocalFilesystem(platform: 'darwin' | 'linux', type: bigint): boolean {
+export function isLocalFilesystem(platform: 'darwin' | 'linux', type: bigint): boolean {
   const normalized = BigInt.asUintN(32, type);
   if (platform === 'darwin') {
     // Darwin f_type values. Only filesystems with local durability semantics
     // accepted by this qualification probe are listed here.
-    return new Set([1n, 4n, 17n, 21n, 26n]).has(normalized);
+    return new Set([
+      1n,
+      4n,
+      17n,
+      21n,
+      25n, // HFS
+      26n // APFS
+    ]).has(normalized);
   }
 
   // Linux statfs magic values for persistent local disk or local union
