@@ -517,10 +517,6 @@ static int run_host(int argc, char **argv) {
     namespace_token("net", netns, sizeof(netns));
     namespace_token("pid", pidns, sizeof(pidns));
     namespace_token("cgroup", cgroupns, sizeof(cgroupns));
-    char helper_source[64];
-    if (snprintf(helper_source, sizeof(helper_source), "/proc/%ld/exe", (long)getpid()) >=
-        (int)sizeof(helper_source)) fail_message("helper source path overflow");
-
     int barrier[2], output[2];
     if (pipe2(barrier, O_CLOEXEC) != 0 || pipe2(output, O_CLOEXEC) != 0) fail("pipe failed");
     pid_t child = fork();
@@ -533,13 +529,21 @@ static int run_host(int argc, char **argv) {
         char release = 0;
         if (read(barrier[0], &release, 1) != 1) _exit(126);
         close(barrier[0]);
+        /* Give bubblewrap the already-verified inode, not a path it would reopen. */
+        int helper_fd_flags = fcntl(self_fd, F_GETFD);
+        if (helper_fd_flags < 0 || fcntl(self_fd, F_SETFD, helper_fd_flags & ~FD_CLOEXEC) != 0 ||
+            lseek(self_fd, 0, SEEK_SET) < 0) _exit(126);
+        char helper_fd_text[32];
+        if (snprintf(helper_fd_text, sizeof(helper_fd_text), "%d", self_fd) >=
+            (int)sizeof(helper_fd_text)) _exit(126);
         char *const bwrap_argv[] = {
             (char *)bwrap, "--unshare-user", "--uid", "0", "--gid", "0", "--unshare-pid",
             "--unshare-net", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup", "--hostname",
             "cliq-probe", "--new-session", "--die-with-parent", "--clearenv", "--setenv", "PATH", "/",
             "--cap-drop", "ALL", "--tmpfs", "/", "--proc", "/proc", "--dev", "/dev", "--dir",
-            "/generation", "--bind", (char *)generation, "/generation", "--ro-bind", helper_source,
-            "/cliq-probe", "--chdir", "/generation", "--", "/cliq-probe", "--guest", "--challenge",
+            "/generation", "--bind", (char *)generation, "/generation", "--perms", "0555",
+            "--ro-bind-data", helper_fd_text, "/cliq-probe", "--chdir", "/generation", "--",
+            "/cliq-probe", "--guest", "--challenge",
             (char *)challenge, "--helper-sha256", (char *)helper_digest, "--workspace-path", (char *)workspace,
             "--state-root-path", (char *)state_root, "--home-path", (char *)home, "--host-userns", userns,
             "--host-mntns", mntns, "--host-netns", netns, "--host-pidns", pidns, "--host-cgroupns",
