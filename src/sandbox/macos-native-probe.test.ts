@@ -11,15 +11,20 @@ const buildScriptUrl = new URL('../../scripts/kernel/build-macos-execution-probe
 test('macOS helper hashes its actual bundle executable rather than caller-controlled argv[0]', async () => {
   const source = await readFile(helperSourceUrl, 'utf8');
 
-  assert.match(source, /Bundle\.main\.executableURL/);
+  assert.match(
+    source,
+    /guard let executableURL = Bundle\.main\.executableURL[\s\S]*?let helperDigest = try sha256\(executableURL\)/
+  );
   assert.doesNotMatch(source, /sha256\(URL\(fileURLWithPath: CommandLine\.arguments\[0\]\)\)/);
 });
 
 test('macOS receipt binds guest denials and the no-share/no-network VM configuration', async () => {
   const source = await readFile(helperSourceUrl, 'utf8');
+  const receipt = source.slice(source.indexOf('return HostReceipt('));
 
   assert.match(source, /configuration\.directorySharingDevices\.isEmpty/);
   assert.match(source, /configuration\.networkDevices\.isEmpty/);
+  assert.match(receipt, /noWritableHostShare: noWritableHostShare/);
   for (const observation of [
     'workspaceReadDenied',
     'workspaceWriteDenied',
@@ -28,8 +33,8 @@ test('macOS receipt binds guest denials and the no-share/no-network VM configura
     'homeReadDenied',
     'directNetworkDenied'
   ]) {
-    assert.match(source, new RegExp(`${observation}: observedReceipt\\.${observation}`));
-    assert.doesNotMatch(source, new RegExp(`${observation}: true`));
+    assert.match(receipt, new RegExp(`${observation}: observedReceipt\\.${observation}`));
+    assert.doesNotMatch(receipt, new RegExp(`${observation}: true`));
   }
 });
 
@@ -37,8 +42,10 @@ test('macOS forced-termination evidence comes from destructive VM stop completio
   const source = await readFile(helperSourceUrl, 'utf8');
 
   assert.match(source, /try await virtualMachine\.stop\(\)/);
-  assert.match(source, /let forcedTerminationEmpty = virtualMachine\.state == \.stopped/);
-  assert.match(source, /forcedTerminationEmpty: forcedTerminationEmpty/);
+  assert.match(
+    source,
+    /try await virtualMachine\.stop\(\)[\s\S]*?let forcedTerminationEmpty = virtualMachine\.state == \.stopped[\s\S]*?guard forcedTerminationEmpty[\s\S]*?forcedTerminationEmpty: forcedTerminationEmpty/
+  );
   assert.doesNotMatch(source, /forcedTerminationEmpty: true/);
 });
 
@@ -47,4 +54,5 @@ test('macOS release signing uses a secure timestamp unless explicitly disabled',
 
   assert.match(source, /timestamp_flag=--timestamp\n/);
   assert.match(source, /if \[ "\$\{CLIQ_CODESIGN_TIMESTAMP:-1\}" = "0" \]; then\n\s+timestamp_flag=--timestamp=none/);
+  assert.match(source, /codesign --force --options runtime "\$timestamp_flag"[\s\S]*?--sign "\$CLIQ_CODESIGN_IDENTITY" "\$app"/);
 });

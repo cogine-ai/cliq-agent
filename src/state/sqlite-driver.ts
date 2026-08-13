@@ -119,13 +119,14 @@ function assertNoTransactionControl(sql: string): void {
     }
     if (character === "'" || character === '"' || character === '`' || character === '[') {
       const close = character === '[' ? ']' : character;
+      const supportsDoubledCloseEscape = character !== '[';
       index += 1;
       while (index < sql.length) {
         if (sql[index] !== close) {
           index += 1;
           continue;
         }
-        if (sql[index + 1] === close) {
+        if (supportsDoubledCloseEscape && sql[index + 1] === close) {
           index += 2;
           continue;
         }
@@ -196,6 +197,7 @@ function observeRejectedThenable(value: PromiseLike<unknown>): void {
 class NodeSqliteDriver implements SqliteDriver {
   private readonly database: DatabaseSync;
   private transactionActive = false;
+  private poisoned = false;
 
   constructor(databasePath: string) {
     this.database = new DatabaseSync(databasePath, {
@@ -236,6 +238,13 @@ class NodeSqliteDriver implements SqliteDriver {
       try {
         this.database.exec('ROLLBACK');
       } catch (rollbackError) {
+        this.poisoned = true;
+        try {
+          this.database.close();
+        } catch {
+          // The transaction outcome is already uncertain. Closing is best
+          // effort; the public connection remains permanently unusable.
+        }
         throw new AggregateError([error, rollbackError], 'SQLite transaction and rollback both failed');
       }
       throw error;
@@ -251,6 +260,9 @@ class NodeSqliteDriver implements SqliteDriver {
   }
 
   private readonly requireNoActiveTransaction = (): void => {
+    if (this.poisoned) {
+      throw new Error('The SQLite connection was abandoned after a failed rollback');
+    }
     if (this.transactionActive) {
       throw new Error('The outer SQLite connection is unavailable during an active transaction');
     }

@@ -102,8 +102,8 @@ The launcher hashes `/proc/self/exe` and opens/hashes bubblewrap before using
 the executable that runs. The sandbox receives the already-running launcher's
 `/proc/<pid>/exe` as a read-only file.
 
-The `Kernel foundation` GitHub workflow builds this helper on the fixed
-`ubuntu-22.04` hosted image, delegates exactly one disposable cgroup subtree,
+The `Kernel foundation` GitHub workflow builds this helper on the
+`ubuntu-22.04` moving hosted-runner baseline, delegates exactly one disposable cgroup subtree,
 and runs the real probe as the unprivileged runner user. Missing user
 namespaces, cgroup controllers, or bubblewrap behavior fails the job; it is
 never converted to a skip. `ubuntu-24.04` remains in the ordinary build/test
@@ -111,6 +111,12 @@ matrix, but its default AppArmor user-namespace policy blocks bubblewrap's
 network-namespace setup. It must not be called qualified unless a separately
 frozen AppArmor policy or a suitable self-hosted runner passes the same real
 probe; the workflow does not disable that host security policy globally.
+
+The runner label does not pin an image release, kernel, bubblewrap, or compiler
+package. Every qualification result therefore applies only to that exact job,
+whose image, kernel, bubblewrap, and musl toolchain identity are recorded in
+the log. A change to any of those observations requires a fresh successful
+qualification; no earlier receipt is carried forward as host authority.
 
 For M0, the repository-supported reproducible Linux qualification entry is the
 `linux-strong-probe` job in `.github/workflows/kernel-foundation.yml`, triggered

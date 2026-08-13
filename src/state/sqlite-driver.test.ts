@@ -89,6 +89,42 @@ test('transaction callbacks cannot commit through the outer driver and leave par
   }
 });
 
+test('a failed rollback permanently poisons the uncertain SQLite connection', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-rollback-poison-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+    const internals = driver as unknown as {
+      database: { exec(sql: string): void; close(): void };
+    };
+    const originalExec = internals.database.exec.bind(internals.database);
+    const primaryError = new Error('injected transaction failure');
+    const rollbackError = new Error('injected rollback failure');
+
+    assert.throws(
+      () =>
+        driver.transaction(() => {
+          internals.database.exec = (sql) => {
+            if (sql === 'ROLLBACK') throw rollbackError;
+            originalExec(sql);
+          };
+          throw primaryError;
+        }),
+      (error) =>
+        error instanceof AggregateError &&
+        error.errors[0] === primaryError &&
+        error.errors[1] === rollbackError
+    );
+
+    assert.throws(() => driver.exec('SELECT 1'), /abandoned after a failed rollback/);
+    assert.throws(() => driver.prepare('SELECT 1'), /abandoned after a failed rollback/);
+    assert.throws(() => driver.transaction(() => undefined), /abandoned after a failed rollback/);
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test('statements prepared on the outer driver cannot escape into an active transaction', async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-statement-owner-'));
   const databasePath = path.join(stateRoot, 'kernel.sqlite3');
@@ -159,6 +195,10 @@ test('transaction-scoped SQL reserves every control verb without rejecting quote
 
       const row = connection.prepare("SELECT 'COMMIT; ROLLBACK' AS value").get<{ value: string }>();
       assert.equal(row?.value, 'COMMIT; ROLLBACK');
+      assert.throws(
+        () => connection.exec('SELECT [a]]; COMMIT'),
+        /transaction control SQL is reserved for the driver/
+      );
     });
 
     driver.close();

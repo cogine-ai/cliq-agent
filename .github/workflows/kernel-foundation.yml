@@ -53,6 +53,15 @@ jobs:
       - name: Install probe toolchain
         run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools
 
+      - name: Record qualification baseline
+        shell: bash
+        run: |
+          printf 'runner-image-os=%s\n' "${ImageOS:-unknown}"
+          printf 'runner-image-version=%s\n' "${ImageVersion:-unknown}"
+          uname -a
+          bwrap --version
+          musl-gcc --version
+
       - name: Build pinned Linux probe
         id: build
         shell: bash
