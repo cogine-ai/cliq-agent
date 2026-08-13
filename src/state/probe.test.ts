@@ -2,14 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 
 import { qualifyStateBackend, type StateProbeSqliteDatabase } from './probe.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 
 test('qualifyStateBackend proves a local durable SQLite probe without granting authority', async () => {
-  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-root-'));
+  const stateRoot = await makeStateRoot();
   await chmod(stateRoot, 0o700);
 
   try {
@@ -40,7 +39,7 @@ test('qualifyStateBackend proves a local durable SQLite probe without granting a
 });
 
 test('qualifyStateBackend returns a SQLite failure when the probe database cannot close cleanly', async () => {
-  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-root-'));
+  const stateRoot = await makeStateRoot();
   await chmod(stateRoot, 0o700);
 
   try {
@@ -78,7 +77,7 @@ test('qualifyStateBackend returns a SQLite failure when the probe database canno
 });
 
 test('qualifyStateBackend returns a failure instead of throwing when probe cleanup is blocked', async () => {
-  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-root-'));
+  const stateRoot = await makeStateRoot();
   await chmod(stateRoot, 0o700);
 
   try {
@@ -121,7 +120,7 @@ test('qualifyStateBackend rejects a relative state root without throwing', async
 });
 
 test('qualifyStateBackend rejects a symlink as the current state root', async () => {
-  const parent = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-parent-'));
+  const parent = await makeStateParent();
   const target = path.join(parent, 'target');
   const stateRoot = path.join(parent, 'current');
   await mkdirPrivate(target);
@@ -139,7 +138,7 @@ test('qualifyStateBackend rejects a symlink as the current state root', async ()
 });
 
 test('qualifyStateBackend requires exact 0700 state-root permissions', async () => {
-  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-root-'));
+  const stateRoot = await makeStateRoot();
   await chmod(stateRoot, 0o750);
 
   try {
@@ -156,7 +155,7 @@ test('qualifyStateBackend requires exact 0700 state-root permissions', async () 
 });
 
 test('qualifyStateBackend requires the state root to match the effective uid', async () => {
-  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-root-'));
+  const stateRoot = await makeStateRoot();
   await chmod(stateRoot, 0o700);
   const getEffectiveUid = process.geteuid;
   if (typeof getEffectiveUid !== 'function') assert.fail('POSIX test requires process.geteuid');
@@ -176,7 +175,7 @@ test('qualifyStateBackend requires the state root to match the effective uid', a
 });
 
 test('qualifyStateBackend returns an unavailable failure for a missing root', async () => {
-  const parent = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-parent-'));
+  const parent = await makeStateParent();
   const stateRoot = path.join(parent, 'missing');
 
   try {
@@ -192,7 +191,7 @@ test('qualifyStateBackend returns an unavailable failure for a missing root', as
 });
 
 test('qualifyStateBackend rejects a non-directory root', async () => {
-  const parent = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-parent-'));
+  const parent = await makeStateParent();
   const stateRoot = path.join(parent, 'state-file');
   await writeFile(stateRoot, 'not a directory', { mode: 0o700 });
 
@@ -208,7 +207,7 @@ test('qualifyStateBackend rejects a non-directory root', async () => {
 });
 
 test('qualifyStateBackend contains SQLite factory failures and removes the probe', async () => {
-  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-state-root-'));
+  const stateRoot = await makeStateRoot();
   await chmod(stateRoot, 0o700);
 
   try {
@@ -233,4 +232,16 @@ test('qualifyStateBackend contains SQLite factory failures and removes the probe
 
 async function mkdirPrivate(dirname: string): Promise<void> {
   await mkdir(dirname, { mode: 0o700 });
+}
+
+async function makeStateRoot(): Promise<string> {
+  const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-state-root-'));
+  await chmod(stateRoot, 0o700);
+  return stateRoot;
+}
+
+async function makeStateParent(): Promise<string> {
+  const parent = await mkdtemp(path.join(process.cwd(), '.cliq-state-parent-'));
+  await chmod(parent, 0o700);
+  return parent;
 }

@@ -60,8 +60,8 @@ jobs:
         id: cgroup
         shell: bash
         run: |
-          own_cgroup=$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)
-          parent="/sys/fs/cgroup${own_cgroup}/cliq-m0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cgroup_root=/sys/fs/cgroup
+          parent="$cgroup_root/cliq-m0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           sudo mkdir "$parent"
           for controller in cpu memory pids; do
             grep -qw "$controller" "$parent/cgroup.controllers" || {
