@@ -119,6 +119,31 @@ test('qualifyStateBackend returns a failure instead of throwing when probe clean
   }
 });
 
+test('qualifyStateBackend preserves the primary failure when cleanup also fails', async () => {
+  const stateRoot = await makeStateRoot();
+  await chmod(stateRoot, 0o700);
+
+  try {
+    const result = await qualifyStateBackend({
+      stateRoot,
+      sqliteFactory() {
+        chmodSync(stateRoot, 0o500);
+        const error = new Error('injected primary SQLite failure') as Error & { code: string };
+        error.code = 'EPRIMARY';
+        throw error;
+      }
+    });
+
+    assert.equal(result.ok, false);
+    if (result.ok) assert.fail('qualification must fail closed');
+    assert.equal(result.error.code, 'sqlite_probe_failed');
+    assert.equal(result.error.causeCode, 'EPRIMARY');
+  } finally {
+    await chmod(stateRoot, 0o700);
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test('qualifyStateBackend rejects a relative state root without throwing', async () => {
   const result = await qualifyStateBackend({ stateRoot: 'relative/state' });
 

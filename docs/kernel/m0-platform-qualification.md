@@ -36,27 +36,34 @@ The VM has:
 - no network device; and
 - a serial challenge/receipt channel bound to that VM instance.
 
-The guest performs real deny/allow checks and verifies one exact detached PID,
-its PPID 1 adoption, and its BusyBox executable digest immediately before the
-receipt. The host then stops the VM and verifies both the stopped boundary and
-the bytes written to the disposable disk. The TypeScript qualifier independently
-verifies the helper's Developer ID Team/identifier, virtualization entitlement,
-Gatekeeper notarization, signed resource seal, caller-frozen post-signing helper
-digest, manifest digest, asset digests, challenge, receipt, and disk marker.
+The helper rejects any VM configuration containing a directory share or network
+device. The guest independently attempts the forbidden host-path and direct
+network operations, publishes those observed results, and verifies one exact
+detached PID, its PPID 1 adoption, and its BusyBox executable digest immediately
+before the receipt. The host then destructively stops the VM and verifies both
+the stopped boundary and the bytes written to the disposable disk. The
+TypeScript qualifier independently verifies the helper's Developer ID
+Team/identifier, virtualization entitlement, Gatekeeper notarization, signed
+resource seal, caller-frozen post-signing helper digest, manifest digest, asset
+digests, challenge, receipt, and disk marker.
 
-Build on an Apple silicon Mac with the signing identity in Keychain:
+Build on an Apple Silicon Mac. Replace the examples with a Developer ID
+Application identity and `notarytool` Keychain profile installed on that
+controlled runner:
 
 ```bash
-export CLIQ_CODESIGN_IDENTITY='Developer ID Application: Chuan Liu (LMWH2NK82S)'
-export CLIQ_CODESIGN_TIMESTAMP=1
+export CLIQ_CODESIGN_IDENTITY='Developer ID Application: YOUR NAME (TEAMID)'
 scripts/kernel/build-macos-execution-probe.sh /absolute/output/directory
 ```
+
+Secure timestamping is enabled by default. `CLIQ_CODESIGN_TIMESTAMP=0` is only
+for local diagnostics; such a bundle is not eligible for the notarization gate.
 
 Notarization is a distinct external publication to Apple and must be explicitly
 authorized:
 
 ```bash
-export CLIQ_NOTARY_KEYCHAIN_PROFILE='coginework-local'
+export CLIQ_NOTARY_KEYCHAIN_PROFILE='YOUR-NOTARYTOOL-PROFILE'
 scripts/kernel/notarize-macos-execution-probe.sh \
   /absolute/output/directory/CliqKernelProbe.app
 ```
@@ -104,6 +111,17 @@ matrix, but its default AppArmor user-namespace policy blocks bubblewrap's
 network-namespace setup. It must not be called qualified unless a separately
 frozen AppArmor policy or a suitable self-hosted runner passes the same real
 probe; the workflow does not disable that host security policy globally.
+
+For M0, the repository-supported reproducible Linux qualification entry is the
+`linux-strong-probe` job in `.github/workflows/kernel-foundation.yml`, triggered
+by a push to `cliq/**` or a pull request targeting `main`. Directly running
+`npm run test:sandbox-probe:linux` is intentionally not presented as a local
+gate: it requires a root-created cgroup v2 parent with `cpu`, `memory`, and
+`pids` delegated to the invoking uid, a sibling Supervisor cgroup containing
+the qualifier process, a pinned installation and manifest digest, and private
+scratch/StateRoot paths. The workflow is the canonical executable setup for
+all required `CLIQ_LINUX_PROBE_*` variables and performs depth-first cleanup of
+the complete disposable cgroup subtree.
 
 ## M0 gates
 

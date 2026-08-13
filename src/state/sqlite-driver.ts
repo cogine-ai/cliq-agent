@@ -38,19 +38,25 @@ export interface SqliteDriver extends SqliteConnection {
 }
 
 class NodeSqliteStatement implements SqliteStatement {
-  constructor(private readonly statement: StatementSync) {
+  constructor(
+    private readonly statement: StatementSync,
+    private readonly requireUsable: () => void = () => undefined
+  ) {
     statement.setReadBigInts(true);
   }
 
   run(...parameters: SqliteInputValue[]): SqliteRunResult {
+    this.requireUsable();
     return this.statement.run(...parameters) as SqliteRunResult;
   }
 
   get<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row | undefined {
+    this.requireUsable();
     return this.statement.get(...parameters) as Row | undefined;
   }
 
   all<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row[] {
+    this.requireUsable();
     return this.statement.all(...parameters) as Row[];
   }
 }
@@ -77,10 +83,78 @@ class TransactionScopedStatement implements SqliteStatement {
   }
 }
 
+const TRANSACTION_CONTROL_KEYWORDS = new Set([
+  'BEGIN',
+  'COMMIT',
+  'END',
+  'RELEASE',
+  'ROLLBACK',
+  'SAVEPOINT'
+]);
+
+function assertNoTransactionControl(sql: string): void {
+  let index = 0;
+  let statementStart = true;
+  while (index < sql.length) {
+    const character = sql[index];
+    if (/\s/u.test(character)) {
+      index += 1;
+      continue;
+    }
+    if (character === '-' && sql[index + 1] === '-') {
+      index = sql.indexOf('\n', index + 2);
+      if (index === -1) return;
+      continue;
+    }
+    if (character === '/' && sql[index + 1] === '*') {
+      const end = sql.indexOf('*/', index + 2);
+      if (end === -1) return;
+      index = end + 2;
+      continue;
+    }
+    if (character === ';') {
+      statementStart = true;
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === '`' || character === '[') {
+      const close = character === '[' ? ']' : character;
+      index += 1;
+      while (index < sql.length) {
+        if (sql[index] !== close) {
+          index += 1;
+          continue;
+        }
+        if (sql[index + 1] === close) {
+          index += 2;
+          continue;
+        }
+        index += 1;
+        break;
+      }
+      statementStart = false;
+      continue;
+    }
+    if (/[A-Za-z_]/u.test(character)) {
+      const start = index;
+      index += 1;
+      while (index < sql.length && /[A-Za-z0-9_]/u.test(sql[index])) index += 1;
+      const keyword = sql.slice(start, index).toUpperCase();
+      if (statementStart && TRANSACTION_CONTROL_KEYWORDS.has(keyword)) {
+        throw new TypeError('SQLite transaction control SQL is reserved for the driver');
+      }
+      statementStart = false;
+      continue;
+    }
+    statementStart = false;
+    index += 1;
+  }
+}
+
 class TransactionScopedConnection implements SqliteConnection {
   private active = true;
 
-  constructor(private readonly connection: SqliteConnection) {}
+  constructor(private readonly database: DatabaseSync) {}
 
   deactivate(): void {
     this.active = false;
@@ -88,12 +162,17 @@ class TransactionScopedConnection implements SqliteConnection {
 
   exec(sql: string): void {
     this.requireActive();
-    this.connection.exec(sql);
+    assertNoTransactionControl(sql);
+    this.database.exec(sql);
   }
 
   prepare(sql: string): SqliteStatement {
     this.requireActive();
-    return new TransactionScopedStatement(this.connection.prepare(sql), this.requireActive);
+    assertNoTransactionControl(sql);
+    return new TransactionScopedStatement(
+      new NodeSqliteStatement(this.database.prepare(sql)),
+      this.requireActive
+    );
   }
 
   private readonly requireActive = (): void => {
@@ -116,6 +195,7 @@ function observeRejectedThenable(value: PromiseLike<unknown>): void {
 
 class NodeSqliteDriver implements SqliteDriver {
   private readonly database: DatabaseSync;
+  private transactionActive = false;
 
   constructor(databasePath: string) {
     this.database = new DatabaseSync(databasePath, {
@@ -126,18 +206,22 @@ class NodeSqliteDriver implements SqliteDriver {
   }
 
   exec(sql: string): void {
+    this.requireNoActiveTransaction();
     this.database.exec(sql);
   }
 
   prepare(sql: string): SqliteStatement {
-    return new NodeSqliteStatement(this.database.prepare(sql));
+    this.requireNoActiveTransaction();
+    return new NodeSqliteStatement(this.database.prepare(sql), this.requireNoActiveTransaction);
   }
 
   transaction<Operation extends SqliteTransactionOperation>(
     operation: SynchronousOperation<Operation>
   ): ReturnType<Operation> {
+    this.requireNoActiveTransaction();
     this.database.exec('BEGIN IMMEDIATE');
-    const scopedConnection = new TransactionScopedConnection(this);
+    this.transactionActive = true;
+    const scopedConnection = new TransactionScopedConnection(this.database);
     try {
       const result = operation(scopedConnection) as ReturnType<Operation>;
       scopedConnection.deactivate();
@@ -155,12 +239,22 @@ class NodeSqliteDriver implements SqliteDriver {
         throw new AggregateError([error, rollbackError], 'SQLite transaction and rollback both failed');
       }
       throw error;
+    } finally {
+      scopedConnection.deactivate();
+      this.transactionActive = false;
     }
   }
 
   close(): void {
+    this.requireNoActiveTransaction();
     this.database.close();
   }
+
+  private readonly requireNoActiveTransaction = (): void => {
+    if (this.transactionActive) {
+      throw new Error('The outer SQLite connection is unavailable during an active transaction');
+    }
+  };
 }
 
 const SQLITE_SIDECAR_SUFFIXES = ['-journal', '-wal', '-shm'] as const;

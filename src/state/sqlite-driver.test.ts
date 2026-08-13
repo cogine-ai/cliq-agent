@@ -64,6 +64,109 @@ test('BEGIN IMMEDIATE transaction rolls back every write when the callback fails
   }
 });
 
+test('transaction callbacks cannot commit through the outer driver and leave partial writes', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-transaction-owner-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+    driver.exec('CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT');
+
+    assert.throws(
+      () =>
+        driver.transaction((connection) => {
+          connection.prepare('INSERT INTO records (id) VALUES (?)').run(1n);
+          driver.exec('COMMIT');
+          throw new Error('callback failed after an illicit commit');
+        }),
+      /outer SQLite connection is unavailable during an active transaction/
+    );
+
+    assert.equal(driver.prepare('SELECT count(*) AS count FROM records').get<{ count: bigint }>()?.count, 0n);
+    driver.close();
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('statements prepared on the outer driver cannot escape into an active transaction', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-statement-owner-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+    driver.exec('CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT');
+    const escapedStatement = driver.prepare('INSERT INTO records (id) VALUES (?)');
+
+    assert.throws(
+      () =>
+        driver.transaction((connection) => {
+          connection.prepare('INSERT INTO records (id) VALUES (?)').run(1n);
+          escapedStatement.run(2n);
+        }),
+      /outer SQLite connection is unavailable during an active transaction/
+    );
+
+    assert.equal(driver.prepare('SELECT count(*) AS count FROM records').get<{ count: bigint }>()?.count, 0n);
+    driver.close();
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('transaction-scoped exec rejects transaction control before any statement runs', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-scoped-control-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+    driver.exec('CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT');
+
+    assert.throws(
+      () =>
+        driver.transaction((connection) => {
+          connection.exec('INSERT INTO records (id) VALUES (1); COMMIT');
+        }),
+      /transaction control SQL is reserved for the driver/
+    );
+
+    assert.equal(driver.prepare('SELECT count(*) AS count FROM records').get<{ count: bigint }>()?.count, 0n);
+    driver.close();
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('transaction-scoped SQL reserves every control verb without rejecting quoted text', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-control-verbs-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+
+    driver.transaction((connection) => {
+      for (const sql of [
+        'BEGIN',
+        'COMMIT',
+        'END',
+        'RELEASE savepoint_name',
+        'ROLLBACK',
+        'SAVEPOINT savepoint_name',
+        '/* leading comment */ SAVEPOINT savepoint_name'
+      ]) {
+        assert.throws(() => connection.prepare(sql), /transaction control SQL is reserved for the driver/);
+      }
+
+      const row = connection.prepare("SELECT 'COMMIT; ROLLBACK' AS value").get<{ value: string }>();
+      assert.equal(row?.value, 'COMMIT; ROLLBACK');
+    });
+
+    driver.close();
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test('transaction rejects an async callback, rolls back immediately, and consumes its late rejection', async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-async-'));
   const databasePath = path.join(stateRoot, 'kernel.sqlite3');

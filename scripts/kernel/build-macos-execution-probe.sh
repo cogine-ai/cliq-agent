@@ -103,9 +103,9 @@ manifest_digest=$(node "$repo_root/scripts/kernel/write-execution-probe-manifest
   "$app/Contents/Resources/execution-probe-manifest.json" \
   "$kernel_sha256" "$initramfs_sha256" "$worker_sha256")
 
-timestamp_flag=--timestamp=none
-if [ "${CLIQ_CODESIGN_TIMESTAMP:-0}" = "1" ]; then
-  timestamp_flag=--timestamp
+timestamp_flag=--timestamp
+if [ "${CLIQ_CODESIGN_TIMESTAMP:-1}" = "0" ]; then
+  timestamp_flag=--timestamp=none
 fi
 codesign --force --options runtime "$timestamp_flag" \
   --entitlements "$repo_root/native/macos/CliqKernelProbe/CliqKernelProbe.entitlements" \

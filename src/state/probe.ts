@@ -234,26 +234,29 @@ export async function qualifyStateBackend(
 
   const durabilityFilename = path.join(probeDirectory, 'durability-probe');
   const sqliteFilename = path.join(probeDirectory, 'state-probe.sqlite');
+  let primaryResult: StateBackendQualification | undefined;
+  let primaryException: unknown;
   try {
-    try {
-      await fsyncDirectory(stateRoot);
-      const durabilityHandle = await open(durabilityFilename, 'wx', 0o600);
+    primaryResult = await (async (): Promise<StateBackendQualification> => {
       try {
-        await durabilityHandle.writeFile('cliq-state-probe-v1\n', 'utf8');
-        await durabilityHandle.sync();
-      } finally {
-        await durabilityHandle.close();
+        await fsyncDirectory(stateRoot);
+        const durabilityHandle = await open(durabilityFilename, 'wx', 0o600);
+        try {
+          await durabilityHandle.writeFile('cliq-state-probe-v1\n', 'utf8');
+          await durabilityHandle.sync();
+        } finally {
+          await durabilityHandle.close();
+        }
+        await fsyncDirectory(probeDirectory);
+      } catch (cause) {
+        return failure('durability_probe_failed', 'File or directory fsync failed.', cause);
       }
-      await fsyncDirectory(probeDirectory);
-    } catch (cause) {
-      return failure('durability_probe_failed', 'File or directory fsync failed.', cause);
-    }
 
-    let database: StateProbeSqliteDatabase | undefined;
-    let sqliteFailure: unknown;
-    try {
-      database = (options.sqliteFactory ?? defaultSqliteFactory)(sqliteFilename);
-      database.exec(`
+      let database: StateProbeSqliteDatabase | undefined;
+      let sqliteFailure: unknown;
+      try {
+        database = (options.sqliteFactory ?? defaultSqliteFactory)(sqliteFilename);
+        database.exec(`
         PRAGMA journal_mode=DELETE;
         PRAGMA foreign_keys=ON;
         PRAGMA synchronous=FULL;
@@ -271,75 +274,95 @@ export async function qualifyStateBackend(
         COMMIT;
       `);
 
-      const foreignKeys = pragmaScalar(database, 'foreign_keys');
-      const synchronous = sqliteSynchronousName(pragmaScalar(database, 'synchronous'));
-      const busyTimeout = pragmaScalar(database, 'busy_timeout');
-      const applicationId = pragmaScalar(database, 'application_id');
-      const userVersion = pragmaScalar(database, 'user_version');
-      const journalMode = sqliteJournalMode(pragmaScalar(database, 'journal_mode'));
-      const foreignKeyViolations = database.prepare('PRAGMA foreign_key_check').all();
-      const integrityCheck = pragmaScalar(database, 'integrity_check');
+        const foreignKeys = pragmaScalar(database, 'foreign_keys');
+        const synchronous = sqliteSynchronousName(pragmaScalar(database, 'synchronous'));
+        const busyTimeout = pragmaScalar(database, 'busy_timeout');
+        const applicationId = pragmaScalar(database, 'application_id');
+        const userVersion = pragmaScalar(database, 'user_version');
+        const journalMode = sqliteJournalMode(pragmaScalar(database, 'journal_mode'));
+        const foreignKeyViolations = database.prepare('PRAGMA foreign_key_check').all();
+        const integrityCheck = pragmaScalar(database, 'integrity_check');
 
-      if (
-        !sqliteIntegerEquals(foreignKeys, 1) ||
-        synchronous !== 'FULL' ||
-        !sqliteIntegerEquals(busyTimeout, SQLITE_BUSY_TIMEOUT_MS) ||
-        !sqliteIntegerEquals(applicationId, SQLITE_APPLICATION_ID) ||
-        !sqliteIntegerEquals(userVersion, SQLITE_USER_VERSION) ||
-        journalMode !== 'delete' ||
-        foreignKeyViolations.length !== 0 ||
-        integrityCheck !== 'ok'
-      ) {
-        throw new Error('SQLite did not retain the required state profile.');
+        if (
+          !sqliteIntegerEquals(foreignKeys, 1) ||
+          synchronous !== 'FULL' ||
+          !sqliteIntegerEquals(busyTimeout, SQLITE_BUSY_TIMEOUT_MS) ||
+          !sqliteIntegerEquals(applicationId, SQLITE_APPLICATION_ID) ||
+          !sqliteIntegerEquals(userVersion, SQLITE_USER_VERSION) ||
+          journalMode !== 'delete' ||
+          foreignKeyViolations.length !== 0 ||
+          integrityCheck !== 'ok'
+        ) {
+          throw new Error('SQLite did not retain the required state profile.');
+        }
+      } catch (cause) {
+        sqliteFailure = cause;
       }
-    } catch (cause) {
-      sqliteFailure = cause;
-    }
-    try {
-      database?.close();
-    } catch (cause) {
-      sqliteFailure ??= cause;
-    }
-    if (sqliteFailure !== undefined) {
-      return failure('sqlite_probe_failed', 'SQLite durability/profile qualification failed.', sqliteFailure);
-    }
-
-    try {
-      await chmod(sqliteFilename, 0o600);
-      await fsyncFile(sqliteFilename);
-      await fsyncDirectory(probeDirectory);
-    } catch (cause) {
-      return failure('durability_probe_failed', 'SQLite file or parent directory fsync failed.', cause);
-    }
-
-    return {
-      ok: true,
-      stateRoot,
-      authorityReady: false,
-      limitations: LIMITATIONS,
-      filesystem: {
-        platform,
-        type: `0x${BigInt.asUintN(32, filesystemType).toString(16)}`,
-        local: true
-      },
-      durability: { fileFsync: true, directoryFsync: true },
-      sqlite: {
-        foreignKeys: true,
-        synchronous: 'FULL',
-        busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
-        applicationId: SQLITE_APPLICATION_ID,
-        userVersion: SQLITE_USER_VERSION,
-        journalMode: 'delete',
-        foreignKeyCheck: 'ok',
-        integrityCheck: 'ok'
+      try {
+        database?.close();
+      } catch (cause) {
+        sqliteFailure ??= cause;
       }
-    };
-  } finally {
-    try {
-      await rm(probeDirectory, { recursive: true, force: true });
-      await fsyncDirectory(stateRoot);
-    } catch (cause) {
-      return failure('durability_probe_failed', 'State probe cleanup or parent directory fsync failed.', cause);
-    }
+      if (sqliteFailure !== undefined) {
+        return failure('sqlite_probe_failed', 'SQLite durability/profile qualification failed.', sqliteFailure);
+      }
+
+      try {
+        await chmod(sqliteFilename, 0o600);
+        await fsyncFile(sqliteFilename);
+        await fsyncDirectory(probeDirectory);
+      } catch (cause) {
+        return failure('durability_probe_failed', 'SQLite file or parent directory fsync failed.', cause);
+      }
+
+      return {
+        ok: true,
+        stateRoot,
+        authorityReady: false,
+        limitations: LIMITATIONS,
+        filesystem: {
+          platform,
+          type: `0x${BigInt.asUintN(32, filesystemType).toString(16)}`,
+          local: true
+        },
+        durability: { fileFsync: true, directoryFsync: true },
+        sqlite: {
+          foreignKeys: true,
+          synchronous: 'FULL',
+          busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
+          applicationId: SQLITE_APPLICATION_ID,
+          userVersion: SQLITE_USER_VERSION,
+          journalMode: 'delete',
+          foreignKeyCheck: 'ok',
+          integrityCheck: 'ok'
+        }
+      };
+    })();
+  } catch (cause) {
+    primaryException = cause;
   }
+
+  let cleanupException: unknown;
+  try {
+    await rm(probeDirectory, { recursive: true, force: true });
+    await fsyncDirectory(stateRoot);
+  } catch (cause) {
+    cleanupException = cause;
+  }
+
+  if (primaryResult !== undefined && !primaryResult.ok) return primaryResult;
+  if (primaryException !== undefined) {
+    return failure('durability_probe_failed', 'State qualification failed unexpectedly.', primaryException);
+  }
+  if (cleanupException !== undefined) {
+    return failure(
+      'durability_probe_failed',
+      'State probe cleanup or parent directory fsync failed.',
+      cleanupException
+    );
+  }
+  if (primaryResult === undefined) {
+    return failure('durability_probe_failed', 'State qualification produced no result.');
+  }
+  return primaryResult;
 }

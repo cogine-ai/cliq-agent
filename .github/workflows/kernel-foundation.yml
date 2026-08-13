@@ -24,6 +24,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
@@ -40,6 +42,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
@@ -127,9 +131,13 @@ jobs:
           CLIQ_CGROUP_PARENT: ${{ steps.cgroup.outputs.parent }}
         shell: bash
         run: |
-          for child in "$CLIQ_CGROUP_PARENT"/*; do
-            [ -d "$child" ] || continue
-            printf '1\n' | sudo tee "$child/cgroup.kill" >/dev/null 2>&1 || true
-            sudo rmdir "$child" || true
+          printf '1\n' | sudo tee "$CLIQ_CGROUP_PARENT/cgroup.kill" >/dev/null 2>&1 || true
+          for attempt in {1..100}; do
+            grep -q '^populated 0$' "$CLIQ_CGROUP_PARENT/cgroup.events" && break
+            sleep 0.05
           done
+          grep -q '^populated 0$' "$CLIQ_CGROUP_PARENT/cgroup.events"
+          while IFS= read -r -d '' child; do
+            sudo rmdir "$child"
+          done < <(find "$CLIQ_CGROUP_PARENT" -mindepth 1 -depth -type d -print0)
           sudo rmdir "$CLIQ_CGROUP_PARENT"

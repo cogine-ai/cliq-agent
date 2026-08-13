@@ -421,18 +421,36 @@ static int run_guest(int argc, char **argv) {
     for (;;) pause();
 }
 
+static int monotonic_remaining_milliseconds(const struct timespec *deadline) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    int64_t nanoseconds = ((int64_t)deadline->tv_sec - (int64_t)now.tv_sec) * 1000000000LL +
+                          ((int64_t)deadline->tv_nsec - (int64_t)now.tv_nsec);
+    if (nanoseconds <= 0) return 0;
+    return (int)((nanoseconds + 999999LL) / 1000000LL);
+}
+
 static bool wait_for_guest_ready(int fd, const char *challenge, const char *helper_digest, int timeout_ms) {
     char expected[160];
     if (snprintf(expected, sizeof(expected), "CLIQ_LINUX_GUEST_READY %s %s", challenge, helper_digest) >=
         (int)sizeof(expected)) return false;
     char output[MAX_OUTPUT_BYTES];
     size_t used = 0;
-    int remaining = timeout_ms;
-    while (remaining > 0 && used + 1 < sizeof(output)) {
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) return false;
+    deadline.tv_sec += timeout_ms / 1000;
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000 * 1000;
+    if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000 * 1000 * 1000;
+    }
+
+    while (used + 1 < sizeof(output)) {
+        int remaining = monotonic_remaining_milliseconds(&deadline);
+        if (remaining <= 0) break;
         struct pollfd descriptor = { .fd = fd, .events = POLLIN | POLLHUP };
         int interval = remaining > 100 ? 100 : remaining;
         int poll_result = poll(&descriptor, 1, interval);
-        remaining -= interval;
         if (poll_result < 0) {
             if (errno == EINTR) continue;
             return false;

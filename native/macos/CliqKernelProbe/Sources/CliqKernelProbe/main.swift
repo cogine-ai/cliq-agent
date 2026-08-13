@@ -178,7 +178,10 @@ private func runProbe(_ arguments: Arguments) async throws -> HostReceipt {
         throw ProbeError.invalidAsset("initramfs digest mismatch")
     }
 
-    let helperDigest = try sha256(URL(fileURLWithPath: CommandLine.arguments[0]))
+    guard let executableURL = Bundle.main.executableURL else {
+        throw ProbeError.invalidAsset("helper executable URL is unavailable")
+    }
+    let helperDigest = try sha256(executableURL)
     let bootLoader = VZLinuxBootLoader(kernelURL: arguments.kernel)
     bootLoader.initialRamdiskURL = arguments.initramfs
     bootLoader.commandLine = "console=hvc0 quiet cliq.challenge=\(arguments.challenge) cliq.worker_sha256=\(arguments.expectedWorkerDigest)"
@@ -206,6 +209,12 @@ private func runProbe(_ arguments: Arguments) async throws -> HostReceipt {
     configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
     configuration.serialPorts = [serialPort]
     configuration.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)]
+
+    let noWritableHostShare = configuration.directorySharingDevices.isEmpty
+    let noNetworkDevice = configuration.networkDevices.isEmpty
+    guard noWritableHostShare, noNetworkDevice else {
+        throw ProbeError.invalidConfiguration("probe VM must not expose host directories or network devices")
+    }
 
     do {
         try configuration.validate()
@@ -252,7 +261,10 @@ private func runProbe(_ arguments: Arguments) async throws -> HostReceipt {
     } catch {
         throw ProbeError.stopFailed("failed to stop probe VM: \(error)")
     }
-    guard virtualMachine.state == .stopped else {
+    // VZVirtualMachine.stop() is destructive rather than a guest-requested
+    // shutdown. Reaching .stopped is the observed end of the whole VM boundary.
+    let forcedTerminationEmpty = virtualMachine.state == .stopped
+    guard forcedTerminationEmpty else {
         throw ProbeError.stopFailed("probe VM did not reach the stopped state")
     }
 
@@ -271,21 +283,21 @@ private func runProbe(_ arguments: Arguments) async throws -> HostReceipt {
         initramfsDigest: initramfsDigest,
         workerDigest: observedReceipt.workerDigest,
         observations: .init(
-            generationWrite: true,
-            workspaceReadDenied: true,
-            workspaceWriteDenied: true,
-            stateReadDenied: true,
-            stateWriteDenied: true,
-            homeReadDenied: true,
-            directNetworkDenied: true,
-            daemonContained: true,
-            descendantsEnumerated: true,
-            forcedTerminationEmpty: true,
+            generationWrite: observedReceipt.generationWrite,
+            workspaceReadDenied: observedReceipt.workspaceReadDenied,
+            workspaceWriteDenied: observedReceipt.workspaceWriteDenied,
+            stateReadDenied: observedReceipt.stateReadDenied,
+            stateWriteDenied: observedReceipt.stateWriteDenied,
+            homeReadDenied: observedReceipt.homeReadDenied,
+            directNetworkDenied: observedReceipt.directNetworkDenied,
+            daemonContained: observedReceipt.daemonContained,
+            descendantsEnumerated: observedReceipt.descendantsEnumerated,
+            forcedTerminationEmpty: forcedTerminationEmpty,
             helperIdentityObserved: true,
             guestImageDigestVerified: true,
             authenticatedGuestBoot: true,
-            noWritableHostShare: configuration.directorySharingDevices.isEmpty,
-            vmStopped: true,
+            noWritableHostShare: noWritableHostShare,
+            vmStopped: forcedTerminationEmpty,
             workerIdentityVerified: true
         )
     )
