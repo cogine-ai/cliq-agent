@@ -53,7 +53,7 @@ Notarization is a distinct external publication to Apple and must be explicitly
 authorized:
 
 ```bash
-export CLIQ_NOTARY_KEYCHAIN_PROFILE='coginework local'
+export CLIQ_NOTARY_KEYCHAIN_PROFILE='coginework-local'
 scripts/kernel/notarize-macos-execution-probe.sh \
   /absolute/output/directory/CliqKernelProbe.app
 ```

@@ -6,7 +6,7 @@ if [ "$#" -ne 1 ]; then
   exit 64
 fi
 bundle=$1
-profile=${CLIQ_NOTARY_KEYCHAIN_PROFILE:-coginework local}
+profile=${CLIQ_NOTARY_KEYCHAIN_PROFILE:-coginework-local}
 case "$bundle" in
   /*) ;;
   *) echo "bundle path must be absolute" >&2; exit 64 ;;
