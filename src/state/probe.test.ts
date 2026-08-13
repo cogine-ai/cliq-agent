@@ -5,15 +5,29 @@ import { chmod, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/
 import path from 'node:path';
 
 import {
-  isLocalFilesystem,
+  isLocalLinuxFilesystem,
+  parseDarwinFilesystemObservation,
   qualifyStateBackend,
   type StateProbeSqliteDatabase
 } from './probe.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 
-test('Darwin filesystem qualification accepts local HFS and rejects NFS', () => {
-  assert.equal(isLocalFilesystem('darwin', 25n), true);
-  assert.equal(isLocalFilesystem('darwin', 2n), false);
+test('Darwin filesystem qualification uses the stable mount name and local flag', () => {
+  assert.deepEqual(
+    parseDarwinFilesystemObservation(
+      'Filesystem 512-blocks Used Available Capacity Mounted on\n/dev/disk9s1 100 1 99 1% /System/Volumes/Data\n',
+      '/dev/disk9s1 on /System/Volumes/Data (apfs, local, journaled)\n'
+    ),
+    { type: 'apfs', local: true }
+  );
+  assert.deepEqual(
+    parseDarwinFilesystemObservation(
+      'Filesystem 512-blocks Used Available Capacity Mounted on\nserver:/volume 100 1 99 1% /Volumes/remote\n',
+      'server:/volume on /Volumes/remote (nfs, nodev, nosuid)\n'
+    ),
+    { type: 'nfs', local: false }
+  );
+  assert.equal(isLocalLinuxFilesystem(0xef53n), true);
 });
 
 test('qualifyStateBackend proves a local durable SQLite probe without granting authority', async () => {

@@ -1,5 +1,7 @@
+import { execFile } from 'node:child_process';
 import { chmod, lstat, mkdtemp, open, rm, statfs } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import { openSqliteDriver } from './sqlite-driver.js';
 
@@ -7,6 +9,7 @@ const SQLITE_APPLICATION_ID = 0x434c4951;
 const SQLITE_USER_VERSION = 1;
 const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 const LIMITATIONS = Object.freeze(['native_descriptor_helper_required'] as const);
+const execFileAsync = promisify(execFile);
 
 interface SqliteStatement {
   get(...parameters: unknown[]): unknown;
@@ -121,20 +124,48 @@ function sqliteIntegerEquals(value: unknown, expected: number): boolean {
   return value === expected || value === BigInt(expected);
 }
 
-export function isLocalFilesystem(platform: 'darwin' | 'linux', type: bigint): boolean {
-  const normalized = BigInt.asUintN(32, type);
-  if (platform === 'darwin') {
-    // Darwin f_type values. Only filesystems with local durability semantics
-    // accepted by this qualification probe are listed here.
-    return new Set([
-      1n,
-      4n,
-      17n,
-      21n,
-      25n, // HFS
-      26n // APFS
-    ]).has(normalized);
+export interface DarwinFilesystemObservation {
+  type: string;
+  local: boolean;
+}
+
+export function parseDarwinFilesystemObservation(
+  dfOutput: string,
+  mountOutput: string
+): DarwinFilesystemObservation {
+  const dfLines = dfOutput.trimEnd().split('\n');
+  if (dfLines.length !== 2) throw new Error('Darwin df returned an unexpected number of lines');
+  const row = /^(\S+)\s+\d+\s+\d+\s+\d+\s+\d+%\s+(.+)$/u.exec(dfLines[1]);
+  if (row === null) throw new Error('Darwin df returned an unexpected filesystem row');
+  const [, source, mountPoint] = row;
+  const mountSuffix = ` on ${mountPoint} (`;
+  const matches = mountOutput
+    .trimEnd()
+    .split('\n')
+    .filter((line) => line.startsWith(`${source} on `) && line.includes(mountSuffix));
+  if (matches.length !== 1) throw new Error('Darwin mount table did not identify one exact filesystem');
+  const line = matches[0];
+  const optionsStart = line.lastIndexOf(mountSuffix);
+  if (optionsStart !== source.length || !line.endsWith(')')) {
+    throw new Error('Darwin mount returned an unexpected filesystem row');
   }
+  const options = line.slice(optionsStart + mountSuffix.length, -1).split(', ');
+  const type = options[0];
+  if (!/^[a-z0-9_]+$/u.test(type)) throw new Error('Darwin mount returned an invalid filesystem type');
+  return { type, local: options.includes('local') };
+}
+
+async function inspectDarwinFilesystem(stateRoot: string): Promise<DarwinFilesystemObservation> {
+  const commandOptions = { encoding: 'utf8' as const, env: { LC_ALL: 'C' } };
+  const [{ stdout: dfOutput }, { stdout: mountOutput }] = await Promise.all([
+    execFileAsync('/bin/df', ['-P', stateRoot], commandOptions),
+    execFileAsync('/sbin/mount', [], commandOptions)
+  ]);
+  return parseDarwinFilesystemObservation(dfOutput, mountOutput);
+}
+
+export function isLocalLinuxFilesystem(type: bigint): boolean {
+  const normalized = BigInt.asUintN(32, type);
 
   // Linux statfs magic values for persistent local disk or local union
   // filesystems used by supported hosts and CI. Network/FUSE/9p and
@@ -211,17 +242,35 @@ export async function qualifyStateBackend(
     return failure('state_root_mode_mismatch', 'State root mode must be exactly 0700.');
   }
 
-  let filesystemType: bigint;
-  try {
-    filesystemType = (await statfs(stateRoot, { bigint: true })).type;
-  } catch (cause) {
-    return failure('filesystem_probe_failed', 'Filesystem type cannot be inspected.', cause);
-  }
-  if (!isLocalFilesystem(platform, filesystemType)) {
-    return failure(
-      'filesystem_not_local',
-      `State root filesystem type 0x${BigInt.asUintN(32, filesystemType).toString(16)} is not an approved local filesystem.`
-    );
+  let filesystemType: string;
+  if (platform === 'darwin') {
+    let observation: DarwinFilesystemObservation;
+    try {
+      observation = await inspectDarwinFilesystem(stateRoot);
+    } catch (cause) {
+      return failure('filesystem_probe_failed', 'Darwin filesystem identity cannot be inspected.', cause);
+    }
+    filesystemType = observation.type;
+    if (!observation.local || (observation.type !== 'apfs' && observation.type !== 'hfs')) {
+      return failure(
+        'filesystem_not_local',
+        `State root filesystem ${observation.type} is not an approved local filesystem.`
+      );
+    }
+  } else {
+    let linuxFilesystemType: bigint;
+    try {
+      linuxFilesystemType = (await statfs(stateRoot, { bigint: true })).type;
+    } catch (cause) {
+      return failure('filesystem_probe_failed', 'Filesystem type cannot be inspected.', cause);
+    }
+    filesystemType = `0x${BigInt.asUintN(32, linuxFilesystemType).toString(16)}`;
+    if (!isLocalLinuxFilesystem(linuxFilesystemType)) {
+      return failure(
+        'filesystem_not_local',
+        `State root filesystem type ${filesystemType} is not an approved local filesystem.`
+      );
+    }
   }
 
   let probeDirectory: string | undefined;
@@ -322,7 +371,7 @@ export async function qualifyStateBackend(
         limitations: LIMITATIONS,
         filesystem: {
           platform,
-          type: `0x${BigInt.asUintN(32, filesystemType).toString(16)}`,
+          type: filesystemType,
           local: true
         },
         durability: { fileFsync: true, directoryFsync: true },
