@@ -203,8 +203,24 @@ static void write_all(int fd, const void *buffer, size_t length) {
 static void write_text_file(const char *path, const char *value) {
     int fd = open(path, O_WRONLY | O_CLOEXEC);
     if (fd < 0) fail(path);
-    write_all(fd, value, strlen(value));
-    if (close(fd) != 0) fail("close failed");
+    const uint8_t *cursor = (const uint8_t *)value;
+    size_t remaining = strlen(value);
+    while (remaining > 0) {
+        ssize_t written = write(fd, cursor, remaining);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            int saved_errno = errno;
+            close(fd);
+            fprintf(stderr, "cliq-linux-probe: write %s failed: %s\n", path, strerror(saved_errno));
+            exit(1);
+        }
+        cursor += written;
+        remaining -= (size_t)written;
+    }
+    if (close(fd) != 0) {
+        fprintf(stderr, "cliq-linux-probe: close %s failed: %s\n", path, strerror(errno));
+        exit(1);
+    }
 }
 
 static void join_path(char *output, size_t capacity, const char *base, const char *suffix) {

@@ -63,6 +63,7 @@ jobs:
           cgroup_root=/sys/fs/cgroup
           parent="$cgroup_root/cliq-m0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           sudo mkdir "$parent"
+          printf 'parent=%s\n' "$parent" >> "$GITHUB_OUTPUT"
           for controller in cpu memory pids; do
             grep -qw "$controller" "$parent/cgroup.controllers" || {
               echo "required cgroup controller is unavailable: $controller" >&2
@@ -70,13 +71,21 @@ jobs:
             }
           done
           printf '+cpu +memory +pids\n' | sudo tee "$parent/cgroup.subtree_control" >/dev/null
-          sudo chown "$(id -u):$(id -g)" "$parent"
+          supervisor="$parent/supervisor"
+          sudo mkdir "$supervisor"
+
+          runner_owner="$(id -u):$(id -g)"
+          sudo chown "$runner_owner" "$parent"
+          while IFS= read -r delegated_file; do
+            [ -e "$parent/$delegated_file" ] || continue
+            sudo chown "$runner_owner" "$parent/$delegated_file"
+          done < /sys/kernel/cgroup/delegate
           sudo chmod 0700 "$parent"
 
           scratch="$RUNNER_TEMP/cliq-m0-scratch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           state_root="$RUNNER_TEMP/cliq-m0-state-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -m 0700 "$scratch" "$state_root"
-          printf 'parent=%s\n' "$parent" >> "$GITHUB_OUTPUT"
+          printf 'supervisor=%s\n' "$supervisor" >> "$GITHUB_OUTPUT"
           printf 'scratch=%s\n' "$(realpath "$scratch")" >> "$GITHUB_OUTPUT"
           printf 'state_root=%s\n' "$(realpath "$state_root")" >> "$GITHUB_OUTPUT"
           printf 'workspace=%s\n' "$(realpath "$GITHUB_WORKSPACE")" >> "$GITHUB_OUTPUT"
@@ -87,11 +96,27 @@ jobs:
           CLIQ_LINUX_PROBE_INSTALLATION: ${{ steps.build.outputs.installation }}
           CLIQ_LINUX_PROBE_MANIFEST_DIGEST: ${{ steps.build.outputs.manifest_digest }}
           CLIQ_LINUX_PROBE_CGROUP_PARENT: ${{ steps.cgroup.outputs.parent }}
+          CLIQ_LINUX_PROBE_SUPERVISOR_CGROUP: ${{ steps.cgroup.outputs.supervisor }}
           CLIQ_LINUX_PROBE_SCRATCH_ROOT: ${{ steps.cgroup.outputs.scratch }}
           CLIQ_LINUX_PROBE_WORKSPACE: ${{ steps.cgroup.outputs.workspace }}
           CLIQ_LINUX_PROBE_STATE_ROOT: ${{ steps.cgroup.outputs.state_root }}
           CLIQ_LINUX_PROBE_HOME: ${{ steps.cgroup.outputs.home }}
-        run: npm run test:sandbox-probe:linux
+        shell: bash
+        run: |
+          runner_uid=$(id -u)
+          runner_gid=$(id -g)
+          runner_home=$HOME
+          runner_path=$PATH
+          npm_path=$(command -v npm)
+          sudo --preserve-env=CLIQ_LINUX_PROBE_INSTALLATION,CLIQ_LINUX_PROBE_MANIFEST_DIGEST,CLIQ_LINUX_PROBE_CGROUP_PARENT,CLIQ_LINUX_PROBE_SUPERVISOR_CGROUP,CLIQ_LINUX_PROBE_SCRATCH_ROOT,CLIQ_LINUX_PROBE_WORKSPACE,CLIQ_LINUX_PROBE_STATE_ROOT,CLIQ_LINUX_PROBE_HOME \
+            env CLIQ_RUNNER_UID="$runner_uid" CLIQ_RUNNER_GID="$runner_gid" \
+              CLIQ_RUNNER_HOME="$runner_home" CLIQ_RUNNER_PATH="$runner_path" CLIQ_NPM_PATH="$npm_path" \
+            /bin/bash -c '
+              printf "%s\n" "$$" > "$CLIQ_LINUX_PROBE_SUPERVISOR_CGROUP/cgroup.procs"
+              exec /usr/bin/setpriv --reuid="$CLIQ_RUNNER_UID" --regid="$CLIQ_RUNNER_GID" --clear-groups \
+                /usr/bin/env HOME="$CLIQ_RUNNER_HOME" PATH="$CLIQ_RUNNER_PATH" \
+                "$CLIQ_NPM_PATH" run test:sandbox-probe:linux
+            '
 
       - name: Remove delegated cgroup subtree
         if: always() && steps.cgroup.outputs.parent != ''
