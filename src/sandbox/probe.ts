@@ -14,7 +14,10 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { parseExecutionProbeReceipt } from './probe-protocol.js';
-import { parseExecutionProbeManifest } from './runtime-bundle.js';
+import {
+  assertMacOSExecutionInstallationIdentity,
+  parseExecutionProbeManifest
+} from './runtime-bundle.js';
 
 const execFileAsync = promisify(execFile);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -109,6 +112,8 @@ export type MacOSExecutionBackendProbeOptions = {
   bundlePath: string;
   /** Frozen by the installed Supervisor/Run assembly, never discovered from the bundle. */
   expectedManifestDigest: string;
+  /** Final post-signing helper digest, frozen alongside expectedManifestDigest. */
+  expectedHelperDigest: string;
   /** Existing owner-only local directory used only for the disposable probe disk. */
   scratchRoot: string;
 };
@@ -317,6 +322,12 @@ async function qualifyMacOSBackend(
       'The expected execution manifest digest is invalid.'
     );
   }
+  if (!SHA256_PATTERN.test(options.expectedHelperDigest)) {
+    return failure(
+      'UNSUPPORTED_EXECUTION_IDENTITY',
+      'The expected macOS helper digest is invalid.'
+    );
+  }
 
   let scratch: { directory: string; filename: string } | undefined;
   try {
@@ -356,6 +367,16 @@ async function qualifyMacOSBackend(
       sha256File(kernelPath),
       sha256File(initramfsPath)
     ]);
+    assertMacOSExecutionInstallationIdentity(
+      {
+        manifestDigest: options.expectedManifestDigest,
+        helperDigest: options.expectedHelperDigest
+      },
+      {
+        manifestDigest: manifest.manifestDigest,
+        helperDigest
+      }
+    );
     if (kernelDigest !== manifest.guest.kernelSha256) {
       throw new Error('guest kernel digest does not match the signed manifest');
     }

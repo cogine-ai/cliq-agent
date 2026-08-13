@@ -46,6 +46,11 @@ export type ExecutionProbeManifestWithoutDigest =
   | MacOSExecutionProbeManifestCore
   | LinuxExecutionProbeManifestCore;
 
+export type MacOSExecutionInstallationIdentity = Readonly<{
+  manifestDigest: string;
+  helperDigest: string;
+}>;
+
 function assertPlainObject(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new TypeError(`${label} must be an object`);
@@ -202,6 +207,44 @@ export function computeExecutionProbeManifestDigest(
     Record<string, unknown>;
   const core = parseManifestCore(candidate);
   return canonicalSha256(core);
+}
+
+function parseMacOSExecutionInstallationIdentity(
+  input: unknown,
+  label: string
+): MacOSExecutionInstallationIdentity {
+  assertPlainObject(input, label);
+  assertClosedKeys(input, ['manifestDigest', 'helperDigest'], label);
+  assertSha256(input.manifestDigest, `${label}.manifestDigest`);
+  assertSha256(input.helperDigest, `${label}.helperDigest`);
+  return Object.freeze({
+    manifestDigest: input.manifestDigest,
+    helperDigest: input.helperDigest
+  });
+}
+
+/**
+ * Verifies the post-signing helper bytes and signed manifest against identity
+ * values frozen outside the app bundle by the installer/Supervisor.
+ */
+export function assertMacOSExecutionInstallationIdentity(
+  expectedInput: unknown,
+  observedInput: unknown
+): void {
+  const expected = parseMacOSExecutionInstallationIdentity(
+    expectedInput,
+    'expected macOS execution installation identity'
+  );
+  const observed = parseMacOSExecutionInstallationIdentity(
+    observedInput,
+    'observed macOS execution installation identity'
+  );
+  if (observed.manifestDigest !== expected.manifestDigest) {
+    throw new TypeError('macOS execution installation manifest digest mismatch');
+  }
+  if (observed.helperDigest !== expected.helperDigest) {
+    throw new TypeError('macOS execution installation helper digest mismatch');
+  }
 }
 
 export function parseExecutionProbeManifest(input: unknown): ExecutionProbeManifest {

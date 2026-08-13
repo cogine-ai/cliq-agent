@@ -70,7 +70,9 @@ mkdir -p -- "$build_root/initramfs-root"
   cd "$build_root/initramfs-root"
   gzip -dc "$upstream_initramfs" | cpio -idm --quiet
   cp -- "$repo_root/native/macos/CliqKernelProbe/guest/init" init
-  chmod 0755 init
+  cp -- "$repo_root/native/macos/CliqKernelProbe/guest/verify-detached-daemon.sh" \
+    cliq-verify-detached-daemon
+  chmod 0755 init cliq-verify-detached-daemon
   find . -print | LC_ALL=C sort | cpio -o -H newc --quiet | gzip -9n > "$build_root/cliq-initramfs-virt"
 )
 
@@ -109,6 +111,8 @@ codesign --force --options runtime "$timestamp_flag" \
   --entitlements "$repo_root/native/macos/CliqKernelProbe/CliqKernelProbe.entitlements" \
   --sign "$CLIQ_CODESIGN_IDENTITY" "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
+helper_sha256=$(shasum -a 256 "$app/Contents/MacOS/cliq-kernel-probe" | awk '{print $1}')
 
 echo "BUNDLE_PATH=$app"
 echo "MANIFEST_DIGEST=$manifest_digest"
+echo "HELPER_DIGEST=$helper_sha256"

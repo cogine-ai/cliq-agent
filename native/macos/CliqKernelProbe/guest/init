@@ -17,7 +17,6 @@ for field in $(/bin/busybox cat /proc/cmdline); do
   esac
 done
 
-bool=true
 generation_write=false
 if [ -b /dev/vda ]; then
   marker="cliq-m0-generation-$challenge"
@@ -45,20 +44,34 @@ fi
 
 worker_digest=$(/bin/busybox sha256sum /bin/busybox | /bin/busybox cut -d' ' -f1)
 
-# A detached grandchild must remain visible to PID 1. It intentionally remains
+# A detached grandchild publishes its exact PID inside the guest. It remains
 # live when the host receives the receipt so the host must stop the complete VM
 # boundary, not just the foreground shell.
+daemon_pid_file=/cliq-detached-daemon.pid
+/bin/busybox rm -f "$daemon_pid_file"
 (
-  (
+  /bin/busybox sh -c '
+    pid_file=$1
+    /bin/busybox printf "%s\n" "$$" > "$pid_file"
     while :; do /bin/busybox sleep 60; done
-  ) &
+  ' cliq-detached-daemon "$daemon_pid_file" &
 ) &
-/bin/busybox sleep 1
+detacher_pid=$!
+wait "$detacher_pid"
 
-descendant_count=$(/bin/busybox find /proc -maxdepth 1 -type d -name '[0-9]*' | /bin/busybox wc -l)
+attempt=0
+while [ "$attempt" -lt 20 ] && [ ! -s "$daemon_pid_file" ]; do
+  /bin/busybox sleep 0.1
+  attempt=$((attempt + 1))
+done
+daemon_pid=''
+if [ -s "$daemon_pid_file" ]; then
+  daemon_pid=$(/bin/busybox cat "$daemon_pid_file")
+fi
+
 descendants_enumerated=false
 daemon_contained=false
-if [ "$descendant_count" -ge 2 ]; then
+if CLIQ_BUSYBOX=/bin/busybox /cliq-verify-detached-daemon "$daemon_pid" "$worker_digest"; then
   descendants_enumerated=true
   daemon_contained=true
 fi

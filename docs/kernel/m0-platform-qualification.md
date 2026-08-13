@@ -13,15 +13,17 @@ cannot create Run authority.
 
 ## What “fixed digest” means
 
-Each built backend contains a closed manifest with raw lowercase SHA-256
-digests for every executable or guest asset used by the probe. The manifest
-has its own canonical digest. A Supervisor must already know that manifest
-digest; it may not accept the value merely because the installation says so.
+Each built backend has a frozen installation identity. Linux uses a closed
+manifest containing raw lowercase SHA-256 digests for every executable used by
+the probe. macOS uses the canonical manifest digest plus the final,
+post-signing helper digest because Mach-O signing changes the executable bytes.
+A Supervisor must already know those identity values; it may not accept them
+merely because the installation says so.
 
-The digest is version-specific, not permanent. An intentional helper, kernel,
-initramfs, BusyBox, or bubblewrap change produces a new manifest digest and
-therefore requires a new qualification. No large guest image or private key is
-committed to this repository.
+The identity is version-specific, not permanent. An intentional helper,
+kernel, initramfs, BusyBox, or bubblewrap change produces a new frozen digest
+and therefore requires a new qualification. No large guest image or private
+key is committed to this repository.
 
 ## macOS
 
@@ -34,12 +36,13 @@ The VM has:
 - no network device; and
 - a serial challenge/receipt channel bound to that VM instance.
 
-The guest performs real deny/allow and double-fork checks. The host then stops
-the VM and verifies both the stopped boundary and the bytes written to the
-disposable disk. The TypeScript qualifier independently verifies the helper's
-Developer ID Team/identifier, virtualization entitlement, Gatekeeper
-notarization, signed resource seal, manifest digest, asset digests, challenge,
-receipt, and disk marker.
+The guest performs real deny/allow checks and verifies one exact detached PID,
+its PPID 1 adoption, and its BusyBox executable digest immediately before the
+receipt. The host then stops the VM and verifies both the stopped boundary and
+the bytes written to the disposable disk. The TypeScript qualifier independently
+verifies the helper's Developer ID Team/identifier, virtualization entitlement,
+Gatekeeper notarization, signed resource seal, caller-frozen post-signing helper
+digest, manifest digest, asset digests, challenge, receipt, and disk marker.
 
 Build on an Apple silicon Mac with the signing identity in Keychain:
 
@@ -58,12 +61,13 @@ scripts/kernel/notarize-macos-execution-probe.sh \
   /absolute/output/directory/CliqKernelProbe.app
 ```
 
-After stapling, run the production qualification seam with the build-reported
-manifest digest and an existing owner-only scratch directory:
+After stapling, run the production qualification seam with both build-reported
+identity digests and an existing owner-only scratch directory:
 
 ```bash
 CLIQ_MACOS_PROBE_BUNDLE=/absolute/output/directory/CliqKernelProbe.app \
 CLIQ_MACOS_PROBE_MANIFEST_DIGEST=<64-lowercase-hex> \
+CLIQ_MACOS_PROBE_HELPER_DIGEST=<64-lowercase-hex> \
 CLIQ_MACOS_PROBE_SCRATCH_ROOT=/absolute/0700/scratch \
 npm run test:sandbox-probe:macos
 ```

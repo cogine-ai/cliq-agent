@@ -35,6 +35,7 @@ if (backend === 'macos') {
       backend: 'macos_vm',
       bundlePath: requiredEnvironment('CLIQ_MACOS_PROBE_BUNDLE'),
       expectedManifestDigest: requiredEnvironment('CLIQ_MACOS_PROBE_MANIFEST_DIGEST'),
+      expectedHelperDigest: requiredEnvironment('CLIQ_MACOS_PROBE_HELPER_DIGEST'),
       scratchRoot: requiredEnvironment('CLIQ_MACOS_PROBE_SCRATCH_ROOT')
     })
   );

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  assertMacOSExecutionInstallationIdentity,
   computeExecutionProbeManifestDigest,
   parseExecutionProbeManifest
 } from './runtime-bundle.js';
@@ -28,6 +29,23 @@ test('execution probe manifest has one canonical self-digest', () => {
   assert.equal(parsed.backend, 'macos_vm');
   assert.equal(Object.isFrozen(parsed), true);
   assert.equal(Object.isFrozen(parsed.guest), true);
+});
+
+test('macOS frozen installation identity rejects different helper bytes', () => {
+  const expected = {
+    manifestDigest: 'a'.repeat(64),
+    helperDigest: 'b'.repeat(64)
+  } as const;
+
+  assert.doesNotThrow(() => assertMacOSExecutionInstallationIdentity(expected, expected));
+  assert.throws(
+    () =>
+      assertMacOSExecutionInstallationIdentity(expected, {
+        ...expected,
+        helperDigest: 'c'.repeat(64)
+      }),
+    /helper digest/i
+  );
 });
 
 test('execution probe manifest rejects traversal, unknown fields, and digest drift', () => {

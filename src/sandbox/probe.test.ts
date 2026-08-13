@@ -30,6 +30,7 @@ test('execution qualification rejects an unsigned caller-created macOS bundle', 
       backend: 'macos_vm',
       bundlePath: '/tmp/unsigned/CliqKernelProbe.app',
       expectedManifestDigest: '1'.repeat(64),
+      expectedHelperDigest: '2'.repeat(64),
       scratchRoot: '/tmp'
     });
     assert.equal(result.ok, false);
@@ -48,6 +49,7 @@ test('execution qualification rejects an unsigned caller-created macOS bundle', 
     backend: 'macos_vm',
     bundlePath,
     expectedManifestDigest: '1'.repeat(64),
+    expectedHelperDigest: '2'.repeat(64),
     scratchRoot
   });
 
