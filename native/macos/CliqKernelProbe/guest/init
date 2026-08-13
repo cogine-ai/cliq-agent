@@ -1,0 +1,86 @@
+#!/bin/busybox sh
+
+export PATH=/bin
+
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox mdev -s
+/bin/busybox modprobe virtio_blk 2>/dev/null || true
+
+challenge=''
+expected_worker=''
+for field in $(/bin/busybox cat /proc/cmdline); do
+  case "$field" in
+    cliq.challenge=*) challenge=${field#cliq.challenge=} ;;
+    cliq.worker_sha256=*) expected_worker=${field#cliq.worker_sha256=} ;;
+  esac
+done
+
+generation_write=false
+if [ -b /dev/vda ]; then
+  marker="cliq-m0-generation-$challenge"
+  if /bin/busybox printf '%s' "$marker" | /bin/busybox dd of=/dev/vda bs=1 conv=fsync 2>/dev/null; then
+    generation_write=true
+  fi
+fi
+
+workspace_read_denied=true
+workspace_write_denied=true
+state_read_denied=true
+state_write_denied=true
+home_read_denied=true
+
+[ ! -r /cliq-host/workspace/secret ] || workspace_read_denied=false
+[ ! -w /cliq-host/workspace ] || workspace_write_denied=false
+[ ! -r /cliq-host/state/secret ] || state_read_denied=false
+[ ! -w /cliq-host/state ] || state_write_denied=false
+[ ! -r /cliq-host/home/secret ] || home_read_denied=false
+
+direct_network_denied=false
+if ! /bin/busybox nc -w 1 1.1.1.1 53 </dev/null >/dev/null 2>&1; then
+  direct_network_denied=true
+fi
+
+worker_digest=$(/bin/busybox sha256sum /bin/busybox | /bin/busybox cut -d' ' -f1)
+
+# A detached grandchild publishes its exact PID inside the guest. It remains
+# live when the host receives the receipt so the host must stop the complete VM
+# boundary, not just the foreground shell.
+daemon_pid_file=/cliq-detached-daemon.pid
+/bin/busybox rm -f "$daemon_pid_file"
+(
+  /bin/busybox sh -c '
+    pid_file=$1
+    /bin/busybox printf "%s\n" "$$" > "$pid_file"
+    while :; do /bin/busybox sleep 60; done
+  ' cliq-detached-daemon "$daemon_pid_file" &
+) &
+detacher_pid=$!
+wait "$detacher_pid"
+
+attempt=0
+while [ "$attempt" -lt 20 ] && [ ! -s "$daemon_pid_file" ]; do
+  /bin/busybox sleep 0.1
+  attempt=$((attempt + 1))
+done
+daemon_pid=''
+if [ -s "$daemon_pid_file" ]; then
+  daemon_pid=$(/bin/busybox cat "$daemon_pid_file")
+fi
+
+descendants_enumerated=false
+daemon_contained=false
+if CLIQ_BUSYBOX=/bin/busybox /cliq-verify-detached-daemon "$daemon_pid" "$worker_digest"; then
+  descendants_enumerated=true
+  daemon_contained=true
+fi
+
+/bin/busybox printf 'CLIQ_GUEST_PROBE_V1 {"protocolVersion":"cliq-guest-probe-v1","challenge":"%s","generationWrite":%s,"workspaceReadDenied":%s,"workspaceWriteDenied":%s,"stateReadDenied":%s,"stateWriteDenied":%s,"homeReadDenied":%s,"directNetworkDenied":%s,"daemonContained":%s,"descendantsEnumerated":%s,"workerDigest":"%s"}\n' \
+  "$challenge" "$generation_write" "$workspace_read_denied" "$workspace_write_denied" \
+  "$state_read_denied" "$state_write_denied" "$home_read_denied" "$direct_network_denied" \
+  "$daemon_contained" "$descendants_enumerated" "$worker_digest"
+
+while :; do
+  /bin/busybox sleep 60
+done

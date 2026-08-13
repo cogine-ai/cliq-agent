@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the hidden M0 durable-state and strong execution-backend qualification
+  foundation for future Kernel work. It remains disconnected from the current
+  CLI/TUI runtime.
+
+### Changed
+
+- Raised the minimum supported Node.js version from 22.0 to 22.13 so the M0
+  state backend can use the unflagged built-in `node:sqlite` API.
+
 ## [0.15.0] - 2026-06-25
 
 This release adds the native Zhipu AI provider, hardens bash allowlist parsing,
