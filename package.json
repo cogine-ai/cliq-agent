@@ -50,7 +50,9 @@
     "test": "node --test --test-concurrency=1 --import tsx \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
     "test:state": "node --test --test-concurrency=1 --import tsx \"src/kernel/**/*.test.ts\" \"src/state/**/*.test.ts\"",
     "test:state-probe": "node --test --test-concurrency=1 --import tsx src/state/probe.test.ts",
-    "test:sandbox-probe": "node --test --test-concurrency=1 --import tsx src/sandbox/probe.test.ts",
+    "test:sandbox-probe": "node --test --test-concurrency=1 --import tsx \"src/sandbox/**/*.test.ts\"",
+    "test:sandbox-probe:macos": "tsx scripts/kernel/qualify-execution-backend.ts macos",
+    "test:sandbox-probe:linux": "tsx scripts/kernel/qualify-execution-backend.ts linux",
     "catalog:update": "tsx scripts/catalog/update.ts"
   },
   "dependencies": {

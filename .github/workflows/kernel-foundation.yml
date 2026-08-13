@@ -1,0 +1,107 @@
+name: Kernel foundation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, 'cliq/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-foundation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typescript:
+    name: TypeScript (${{ matrix.os }}, Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        node: [22.13.0, 24.x]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  linux-strong-probe:
+    name: Linux namespace and cgroup qualification
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+
+      - name: Install probe toolchain
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools
+
+      - name: Build pinned Linux probe
+        id: build
+        shell: bash
+        run: |
+          installation="$RUNNER_TEMP/cliq-linux-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          output=$(scripts/kernel/build-linux-execution-probe.sh "$installation")
+          printf '%s\n' "$output"
+          printf 'installation=%s\n' "$installation" >> "$GITHUB_OUTPUT"
+          printf 'manifest_digest=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^MANIFEST_DIGEST=//p')" >> "$GITHUB_OUTPUT"
+
+      - name: Delegate one disposable cgroup subtree
+        id: cgroup
+        shell: bash
+        run: |
+          own_cgroup=$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)
+          parent="/sys/fs/cgroup${own_cgroup}/cliq-m0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo mkdir "$parent"
+          for controller in cpu memory pids; do
+            grep -qw "$controller" "$parent/cgroup.controllers" || {
+              echo "required cgroup controller is unavailable: $controller" >&2
+              exit 1
+            }
+          done
+          printf '+cpu +memory +pids\n' | sudo tee "$parent/cgroup.subtree_control" >/dev/null
+          sudo chown "$(id -u):$(id -g)" "$parent"
+          sudo chmod 0700 "$parent"
+
+          scratch="$RUNNER_TEMP/cliq-m0-scratch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          state_root="$RUNNER_TEMP/cliq-m0-state-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 0700 "$scratch" "$state_root"
+          printf 'parent=%s\n' "$parent" >> "$GITHUB_OUTPUT"
+          printf 'scratch=%s\n' "$(realpath "$scratch")" >> "$GITHUB_OUTPUT"
+          printf 'state_root=%s\n' "$(realpath "$state_root")" >> "$GITHUB_OUTPUT"
+          printf 'workspace=%s\n' "$(realpath "$GITHUB_WORKSPACE")" >> "$GITHUB_OUTPUT"
+          printf 'home=%s\n' "$(realpath "$HOME")" >> "$GITHUB_OUTPUT"
+
+      - name: Run real Linux qualification
+        env:
+          CLIQ_LINUX_PROBE_INSTALLATION: ${{ steps.build.outputs.installation }}
+          CLIQ_LINUX_PROBE_MANIFEST_DIGEST: ${{ steps.build.outputs.manifest_digest }}
+          CLIQ_LINUX_PROBE_CGROUP_PARENT: ${{ steps.cgroup.outputs.parent }}
+          CLIQ_LINUX_PROBE_SCRATCH_ROOT: ${{ steps.cgroup.outputs.scratch }}
+          CLIQ_LINUX_PROBE_WORKSPACE: ${{ steps.cgroup.outputs.workspace }}
+          CLIQ_LINUX_PROBE_STATE_ROOT: ${{ steps.cgroup.outputs.state_root }}
+          CLIQ_LINUX_PROBE_HOME: ${{ steps.cgroup.outputs.home }}
+        run: npm run test:sandbox-probe:linux
+
+      - name: Remove delegated cgroup subtree
+        if: always() && steps.cgroup.outputs.parent != ''
+        env:
+          CLIQ_CGROUP_PARENT: ${{ steps.cgroup.outputs.parent }}
+        shell: bash
+        run: |
+          for child in "$CLIQ_CGROUP_PARENT"/*; do
+            [ -d "$child" ] || continue
+            printf '1\n' | sudo tee "$child/cgroup.kill" >/dev/null 2>&1 || true
+            sudo rmdir "$child" || true
+          done
+          sudo rmdir "$CLIQ_CGROUP_PARENT"
