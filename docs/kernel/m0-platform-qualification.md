@@ -91,10 +91,15 @@ The launcher hashes `/proc/self/exe` and opens/hashes bubblewrap before using
 the executable that runs. The sandbox receives the already-running launcher's
 `/proc/<pid>/exe` as a read-only file.
 
-The `Kernel foundation` GitHub workflow builds this helper on `ubuntu-24.04`,
-delegates exactly one disposable cgroup subtree, and runs the real probe as the
-unprivileged runner user. Missing user namespaces, cgroup controllers, or
-bubblewrap behavior fails the job; it is never converted to a skip.
+The `Kernel foundation` GitHub workflow builds this helper on the fixed
+`ubuntu-22.04` hosted image, delegates exactly one disposable cgroup subtree,
+and runs the real probe as the unprivileged runner user. Missing user
+namespaces, cgroup controllers, or bubblewrap behavior fails the job; it is
+never converted to a skip. `ubuntu-24.04` remains in the ordinary build/test
+matrix, but its default AppArmor user-namespace policy blocks bubblewrap's
+network-namespace setup. It must not be called qualified unless a separately
+frozen AppArmor policy or a suitable self-hosted runner passes the same real
+probe; the workflow does not disable that host security policy globally.
 
 ## M0 gates
 

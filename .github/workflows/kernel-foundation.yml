@@ -34,7 +34,10 @@ jobs:
 
   linux-strong-probe:
     name: Linux namespace and cgroup qualification
-    runs-on: ubuntu-24.04
+    # Ubuntu 24.04's hosted image denies the network-namespace setup under
+    # its default AppArmor user-namespace policy. Keep 24.04 in the build/test
+    # matrix, but qualify authority only on the unmodified 22.04 policy.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
