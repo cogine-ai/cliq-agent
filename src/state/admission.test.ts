@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomFillSync } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 
@@ -366,8 +366,12 @@ test('replacing the workspace root after Session create is ARTIFACT_MISMATCH', a
       workspacePath: workspace,
       ...channel
     });
+    // Linux ext4 often reuses the same inode after rm+mkdir at this path.
+    // Swap in a precreated directory so the captured root identity must change.
+    const replacement = path.join(parent, 'workspace-new');
+    await mkdir(replacement, { mode: 0o700 });
     await rm(workspace, { recursive: true, force: true });
-    await mkdir(workspace, { mode: 0o700 });
+    await rename(replacement, workspace);
     const workspaceIdentity = (await store.artifacts.readCanonical(
       created.session.workspaceIdentityRef
     )) as WorkspaceIdentityV1;
