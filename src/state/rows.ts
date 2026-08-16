@@ -125,6 +125,14 @@ export function readSession(connection: SqliteConnection | SqliteDriver, session
   return sessionFromRow(row);
 }
 
+export function readSessionPrincipalId(connection: SqliteConnection | SqliteDriver, sessionId: string): string {
+  const row = connection.prepare('SELECT principal_id FROM sessions WHERE id = ?').get<{ principal_id: string }>(sessionId);
+  if (row === undefined) {
+    throw new KernelStorageError('NOT_FOUND', `session ${sessionId} does not exist`);
+  }
+  return String(row.principal_id);
+}
+
 export function readRun(connection: SqliteConnection | SqliteDriver, runId: string): Run {
   const row = connection.prepare('SELECT * FROM runs WHERE id = ?').get(runId);
   if (row === undefined) {
@@ -219,12 +227,24 @@ export function insertRunEvent(connection: SqliteConnection, event: Extract<RunE
     .run(event.runId, BigInt(event.eventSeq), JSON.stringify(event), event.occurredAt);
 }
 
+function requireBudgetField(value: number, label: string, min: number, max: number): number {
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new KernelStorageError('INVALID_REQUEST', `${label} is outside ${min}..${max}`);
+  }
+  return value;
+}
+
 export function mergeBudgets(
   overrides?: Partial<typeof DEFAULT_RUN_BUDGETS>
 ): typeof DEFAULT_RUN_BUDGETS {
   const budgets = { ...DEFAULT_RUN_BUDGETS, ...overrides };
-  if (budgets.wallTimeMs < 1_000 || budgets.wallTimeMs > 2_592_000_000) {
-    throw new KernelStorageError('INVALID_REQUEST', 'wallTimeMs is outside 1000..2592000000');
-  }
-  return budgets;
+  return {
+    wallTimeMs: requireBudgetField(budgets.wallTimeMs, 'wallTimeMs', 1_000, 2_592_000_000),
+    modelTokens: requireBudgetField(budgets.modelTokens, 'modelTokens', 1, 100_000_000),
+    costMicros: requireBudgetField(budgets.costMicros, 'costMicros', 1, 1_000_000_000_000),
+    toolCalls: requireBudgetField(budgets.toolCalls, 'toolCalls', 1, 1_000_000),
+    repairAttempts: requireBudgetField(budgets.repairAttempts, 'repairAttempts', 0, 64),
+    childDepth: requireBudgetField(budgets.childDepth, 'childDepth', 0, 8),
+    childConcurrency: requireBudgetField(budgets.childConcurrency, 'childConcurrency', 1, 64)
+  };
 }

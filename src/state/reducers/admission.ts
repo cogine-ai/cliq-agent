@@ -52,6 +52,7 @@ import {
   readControlRequest,
   readRun,
   readSession,
+  readSessionPrincipalId,
   ZERO_BUDGET
 } from '../rows.js';
 import type { SqliteDriver } from '../sqlite-driver.js';
@@ -231,6 +232,9 @@ export async function admitRun(
   }
 
   const session = readSession(driver, input.sessionId);
+  if (readSessionPrincipalId(driver, input.sessionId) !== input.principalId) {
+    throw new KernelStorageError('INVALID_REQUEST', 'session does not belong to the calling principal');
+  }
   if (session.contextRevision !== input.expectedContextRevision) {
     throw new KernelStorageError('INVALID_REQUEST', 'session context revision does not match the admitted cursor');
   }
@@ -239,6 +243,9 @@ export async function admitRun(
   ) as Extract<WorkspaceIdentityV1, { kind: 'live' }>;
   if (workspaceIdentity.kind !== 'live') {
     throw new KernelStorageError('INVALID_REQUEST', 'only live Sessions may admit a Run');
+  }
+  if (workspaceIdentity.ownerPrincipalId !== input.principalId) {
+    throw new KernelStorageError('INVALID_REQUEST', 'workspace identity is not owned by the calling principal');
   }
   await recaptureLiveWorkspaceIdentity(workspaceIdentity, workspacePath);
 
@@ -495,11 +502,14 @@ export async function admitRun(
     }
 
     const lockedSession = readSession(connection, input.sessionId);
+    if (readSessionPrincipalId(connection, input.sessionId) !== input.principalId) {
+      throw new KernelStorageError('INVALID_REQUEST', 'session does not belong to the calling principal');
+    }
     if (lockedSession.contextRevision !== input.expectedContextRevision) {
       throw new KernelStorageError('INVALID_REQUEST', 'session context revision changed before admission committed');
     }
 
-    fenceOutcome = advanceTimeFence(connection, ownerEpoch, now);
+    fenceOutcome = advanceTimeFence(connection, ownerEpoch);
     if (fenceOutcome !== 'healthy') return;
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
 

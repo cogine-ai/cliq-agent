@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path';
 import { test } from 'node:test';
 
+import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1,
@@ -14,6 +15,7 @@ import type {
   WorkspaceIdentityV1
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
+import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
 
 function uuidv7(): string {
@@ -36,6 +38,15 @@ async function makePrivateDir(prefix: string): Promise<string> {
   const directory = await mkdtemp(path.join(process.cwd(), prefix));
   await chmod(directory, 0o700);
   return directory;
+}
+
+function inspectKernel<T>(stateRoot: string, read: (driver: ReturnType<typeof openSqliteDriver>) => T): T {
+  const driver = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    return read(driver);
+  } finally {
+    driver.close();
+  }
 }
 
 async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDigest: string) {
@@ -179,8 +190,20 @@ test('M1 store admits a queued Run with an initial Checkpoint and recovers it', 
     assert.equal(closure.latestCheckpoint.workspaceStateRef !== closure.runSpec.baseWorkspaceManifestRef, true);
     assert.deepEqual(closure.items, []);
     assert.deepEqual(closure.journal, []);
+    assert.deepEqual(closure.workerLaunches, []);
+    assert.deepEqual(closure.childAllocations, []);
     assert.equal(store.getRun(admitted.run.id).revision, 1);
     assert.equal(store.getSession(created.session.id).id, created.session.id);
+    inspectKernel(stateRoot, (driver) => {
+      const event = driver
+        .prepare('SELECT event_seq FROM run_events WHERE run_id = ?')
+        .get<{ event_seq: unknown }>(admitted.run.id);
+      assert.equal(Number(event?.event_seq), 1);
+      assert.equal(
+        Number(driver.prepare('SELECT count(*) AS count FROM run_events WHERE run_id = ?').get<{ count: unknown }>(admitted.run.id)?.count),
+        1
+      );
+    });
   } finally {
     store.close();
     await rm(stateRoot, { recursive: true, force: true });
@@ -245,6 +268,13 @@ test('admission-key replay returns the original Session and Run without a second
     assert.equal(replayed.replayed, true);
     assert.equal(replayed.run.id, admitted.run.id);
     assert.equal(replayed.run.latestCheckpointId, admitted.run.latestCheckpointId);
+    inspectKernel(stateRoot, (driver) => {
+      assert.equal(
+        Number(driver.prepare('SELECT count(*) AS count FROM sessions').get<{ count: unknown }>()?.count),
+        1
+      );
+      assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM runs').get<{ count: unknown }>()?.count), 1);
+    });
   } finally {
     store.close();
     await rm(stateRoot, { recursive: true, force: true });
@@ -504,6 +534,95 @@ test('concurrent same-key Session and Run admission returns the committed row', 
   }
 });
 
+test('concurrent different-key Sessions do not mark the time fence clock_regressed', async () => {
+  const stateRoot = await makePrivateDir('.cliq-m1-keys-');
+  const workspace = await makePrivateDir('.cliq-m1-ws-');
+  const store = await openStateStore(stateRoot);
+  try {
+    const principalId = 'cliq-test-principal';
+    const channel = await publishInProcessChannel(store, principalId);
+    const [left, right] = await Promise.all([
+      store.createSession({
+        principalId,
+        requestId: uuidv7(),
+        admissionKey: admissionKey('session-left'),
+        workspacePath: workspace,
+        ...channel
+      }),
+      store.createSession({
+        principalId,
+        requestId: uuidv7(),
+        admissionKey: admissionKey('session-right'),
+        workspacePath: workspace,
+        ...channel
+      })
+    ]);
+    assert.equal(left.replayed, false);
+    assert.equal(right.replayed, false);
+    assert.notEqual(left.session.id, right.session.id);
+    const third = await store.createSession({
+      principalId,
+      requestId: uuidv7(),
+      admissionKey: admissionKey('session-third'),
+      workspacePath: workspace,
+      ...channel
+    });
+    assert.equal(third.replayed, false);
+    inspectKernel(stateRoot, (driver) => {
+      const fence = driver
+        .prepare('SELECT state FROM canonical_time_fence WHERE id = 1')
+        .get<{ state: string }>();
+      assert.equal(fence?.state, 'healthy');
+      assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM sessions').get<{ count: unknown }>()?.count), 3);
+    });
+  } finally {
+    store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('admitRun rejects a Session owned by another principal', async () => {
+  const stateRoot = await makePrivateDir('.cliq-m1-owner-');
+  const workspace = await makePrivateDir('.cliq-m1-ws-');
+  const store = await openStateStore(stateRoot);
+  try {
+    const owner = await publishInProcessChannel(store, 'principal-owner');
+    const stranger = await publishInProcessChannel(store, 'principal-stranger');
+    const created = await store.createSession({
+      principalId: 'principal-owner',
+      requestId: uuidv7(),
+      admissionKey: admissionKey('session-owner'),
+      workspacePath: workspace,
+      ...owner
+    });
+    const workspaceIdentity = (await store.artifacts.readCanonical(
+      created.session.workspaceIdentityRef
+    )) as WorkspaceIdentityV1;
+    const source = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest);
+    await assert.rejects(
+      () =>
+        store.admitRun({
+          principalId: 'principal-stranger',
+          requestId: uuidv7(),
+          admissionKey: admissionKey('run-stranger'),
+          sessionId: created.session.id,
+          expectedContextRevision: 1,
+          workspacePath: workspace,
+          objective: 'should not attach',
+          allowUnverified: true,
+          ...stranger,
+          ...source
+        }),
+      (error: unknown) => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST'
+    );
+  } finally {
+    store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('reopening the store recovers the admitted Run from SQLite and CAS', async () => {
   const stateRoot = await makePrivateDir('.cliq-m1-reopen-');
   const workspace = await makePrivateDir('.cliq-m1-ws-');
@@ -552,6 +671,14 @@ test('reopening the store recovers the admitted Run from SQLite and CAS', async 
     assert.equal(closure.run.id, runId);
     assert.equal(closure.latestCheckpoint.reason, 'initial');
     assert.equal(closure.runSpec.operation, 'agent');
+    inspectKernel(stateRoot, (driver) => {
+      const owners = driver
+        .prepare(`SELECT owner_epoch, state FROM state_owners`)
+        .all<{ owner_epoch: unknown; state: string }>();
+      assert.equal(owners.length, 1);
+      assert.equal(Number(owners[0]?.owner_epoch), 1);
+      assert.equal(owners[0]?.state, 'active');
+    });
   } finally {
     second.close();
     await rm(stateRoot, { recursive: true, force: true });

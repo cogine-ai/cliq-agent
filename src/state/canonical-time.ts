@@ -76,16 +76,17 @@ export function sampleCanonicalNow(): string {
 
 export type TimeFenceAdvance = 'healthy' | 'clock_regressed' | 'still_regressed';
 
+// Admission must omit sampledNow so a stale pre-CAS timestamp cannot trip clock_regressed.
 export function advanceTimeFence(
   connection: SqliteConnection,
   stateOwnerEpoch: number,
-  sampledNow = sampleCanonicalNow()
+  sampledNow?: string
 ): TimeFenceAdvance {
   const current = readTimeFence(connection);
   if (current === undefined) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence is missing');
   }
-  const observed = sampledNow;
+  const observed = sampledNow ?? sampleCanonicalNow();
   const observedMs = parseCanonicalTime(observed);
   const lastAcceptedMs = parseCanonicalTime(current.lastAcceptedAt);
 

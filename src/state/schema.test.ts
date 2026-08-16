@@ -4,7 +4,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { KERNEL_STATE_SCHEMA_VERSION } from '../config.js';
-import { applyKernelSchema, readSchemaUserVersion } from './schema.js';
+import { applyKernelSchema, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 
 test('applyKernelSchema creates the twenty-table M1 authority layout', async () => {
@@ -42,6 +42,32 @@ test('applyKernelSchema creates the twenty-table M1 authority layout', async () 
     ]);
     applyKernelSchema(driver);
     assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
+    const activeOwnerIndex = driver
+      .prepare(`SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'state_owners_one_active'`)
+      .get<{ name: string }>();
+    assert.equal(activeOwnerIndex?.name, 'state_owners_one_active');
+  } finally {
+    driver.close();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('a failed schema transaction leaves user_version at 0 and no kernel tables', async () => {
+  const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-m1-schema-rollback-'));
+  await chmod(stateRoot, 0o700);
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  try {
+    assert.throws(() => {
+      driver.transaction((connection) => {
+        connection.exec(KERNEL_SCHEMA_SQL);
+        throw new Error('boom');
+      });
+    }, /boom/);
+    assert.equal(readSchemaUserVersion(driver), 0);
+    const tables = driver
+      .prepare(`SELECT count(*) AS count FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+      .get<{ count: unknown }>();
+    assert.equal(Number(tables?.count), 0);
   } finally {
     driver.close();
     await rm(stateRoot, { recursive: true, force: true });

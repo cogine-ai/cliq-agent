@@ -24,6 +24,9 @@ export async function readRecoveryClosure(
   }
 
   const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
+  if (runSpec.operation !== 'agent') {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'M1 recovery only accepts agent RunSpecs');
+  }
   assertArtifactRef(runSpec.objectiveRef);
   decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef));
   const workspaceState = decodeWorkspaceState(await artifacts.readCanonical(latestCheckpoint.workspaceStateRef));
@@ -32,13 +35,13 @@ export async function readRecoveryClosure(
   }
 
   const journalCount = driver
-    .prepare('SELECT count(*) AS count FROM run_journal WHERE run_id = ? AND seq > ?')
-    .get<{ count: unknown }>(run.id, BigInt(latestCheckpoint.journalSeq));
+    .prepare('SELECT count(*) AS count FROM run_journal WHERE run_id = ?')
+    .get<{ count: unknown }>(run.id);
   const itemCount = driver
-    .prepare('SELECT count(*) AS count FROM items WHERE run_id = ? AND item_seq > ?')
-    .get<{ count: unknown }>(run.id, BigInt(latestCheckpoint.runItemSeq));
+    .prepare('SELECT count(*) AS count FROM items WHERE run_id = ?')
+    .get<{ count: unknown }>(run.id);
   const launchCount = driver
-    .prepare('SELECT count(*) AS count FROM worker_launches WHERE run_id = ? AND retired_at IS NULL')
+    .prepare('SELECT count(*) AS count FROM worker_launches WHERE run_id = ?')
     .get<{ count: unknown }>(run.id);
   const childCount = driver
     .prepare('SELECT count(*) AS count FROM child_allocations WHERE parent_run_id = ? OR child_run_id = ?')

@@ -24,6 +24,7 @@ CREATE TABLE state_owners (
   state TEXT NOT NULL CHECK (state IN ('active', 'terminal')),
   row_digest TEXT NOT NULL
 ) STRICT;
+CREATE UNIQUE INDEX state_owners_one_active ON state_owners(state) WHERE state = 'active';
 
 CREATE TABLE artifacts (
   ref TEXT PRIMARY KEY,
@@ -55,7 +56,7 @@ CREATE TABLE items (
   item_id TEXT PRIMARY KEY,
   session_id TEXT,
   run_id TEXT,
-  item_seq INTEGER NOT NULL,
+  item_seq INTEGER NOT NULL CHECK (item_seq >= 1),
   kind TEXT NOT NULL,
   payload_ref TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -69,7 +70,7 @@ CREATE TABLE runs (
   session_id TEXT NOT NULL,
   parent_run_id TEXT,
   spec_ref TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting', 'succeeded', 'completed_unverified', 'failed', 'cancelled')),
   next_step TEXT,
   frontier_ref TEXT,
   waiting_reason TEXT,
@@ -109,13 +110,13 @@ CREATE TABLE checkpoints (
   journal_seq INTEGER NOT NULL,
   workspace_state_ref TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  reason TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK (reason IN ('initial', 'auto', 'manual', 'pre-effect', 'handoff')),
   FOREIGN KEY (run_id) REFERENCES runs(id) DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
 
 CREATE TABLE run_journal (
   run_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,
+  seq INTEGER NOT NULL CHECK (seq >= 1),
   op_id TEXT NOT NULL,
   op_kind TEXT NOT NULL,
   attempt INTEGER NOT NULL,
@@ -128,7 +129,7 @@ CREATE TABLE run_journal (
 
 CREATE TABLE run_events (
   run_id TEXT NOT NULL,
-  event_seq INTEGER NOT NULL,
+  event_seq INTEGER NOT NULL CHECK (event_seq >= 1),
   payload_json TEXT NOT NULL,
   occurred_at TEXT NOT NULL,
   PRIMARY KEY (run_id, event_seq),
@@ -287,8 +288,10 @@ export function applyKernelSchema(driver: SqliteDriver): void {
 
   const userVersion = requiredSafeInteger(pragmaScalar(driver, 'user_version'), 'user_version');
   if (userVersion === 0) {
-    driver.exec(KERNEL_SCHEMA_SQL);
-    driver.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`);
+    driver.transaction((connection) => {
+      connection.exec(KERNEL_SCHEMA_SQL);
+      connection.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`);
+    });
   } else if (userVersion !== KERNEL_STATE_SCHEMA_VERSION) {
     throw new Error(`unsupported kernel schema version ${userVersion}`);
   }

@@ -81,9 +81,21 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
   }
+  const existing = await lstat(directory);
+  if (existing.isSymbolicLink() || !existing.isDirectory()) {
+    throw new KernelStorageError('INVALID_REQUEST', `${directory} must be a 0700 directory`);
+  }
+  if (existing.uid !== requireEffectiveUid()) {
+    throw new KernelStorageError('INVALID_REQUEST', `${directory} must be owned by the effective uid`);
+  }
   await chmod(directory, 0o700);
   const info = await lstat(directory);
-  if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o7777) !== 0o700) {
+  if (
+    info.isSymbolicLink() ||
+    !info.isDirectory() ||
+    info.uid !== requireEffectiveUid() ||
+    (info.mode & 0o7777) !== 0o700
+  ) {
     throw new KernelStorageError('INVALID_REQUEST', `${directory} must be a 0700 directory`);
   }
 }
@@ -179,6 +191,22 @@ async function bootstrapFreshEmpty(
   }
   if (existingOwner !== undefined || fence !== undefined) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'state owner and time fence must be created together');
+  }
+
+  const leftover = driver
+    .prepare(
+      `SELECT
+         (SELECT count(*) FROM sessions) AS sessions,
+         (SELECT count(*) FROM runs) AS runs,
+         (SELECT count(*) FROM control_requests) AS control_requests`
+    )
+    .get<{ sessions: unknown; runs: unknown; control_requests: unknown }>();
+  if (
+    Number(leftover?.sessions ?? 0) !== 0 ||
+    Number(leftover?.runs ?? 0) !== 0 ||
+    Number(leftover?.control_requests ?? 0) !== 0
+  ) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'refusing fresh_empty genesis over a non-empty authority database');
   }
 
   const now = sampleCanonicalNow();

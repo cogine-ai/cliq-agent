@@ -256,7 +256,7 @@ export async function createSession(
       return;
     }
 
-    fenceOutcome = advanceTimeFence(connection, ownerEpoch, now);
+    fenceOutcome = advanceTimeFence(connection, ownerEpoch);
     if (fenceOutcome !== 'healthy') return;
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
     connection
