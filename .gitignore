@@ -2,7 +2,8 @@ node_modules/
 dist/
 .worktrees/
 .cliq/
-.cliq/
+.cliq-m1-*
+.cliq-state-*
 .DS_Store
 *.log
 .env

@@ -23,11 +23,13 @@ async function waitForText(file: string) {
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
-      return await readFile(file, 'utf8');
+      const text = await readFile(file, 'utf8');
+      if (text.trim().length > 0) return text;
+      lastError = new Error(`${file} is still empty`);
     } catch (error) {
       lastError = error;
-      await new Promise<void>((resolve) => setImmediate(resolve));
     }
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
   throw lastError instanceof Error ? lastError : new Error(`Timed out waiting for ${file}`);
 }
@@ -203,6 +205,7 @@ test('bash timeout terminates descendant process group', async () => {
       { cwd, session: createSession(cwd) }
     );
     childPid = Number((await waitForText(pidFile)).trim());
+    assert.ok(Number.isInteger(childPid) && childPid > 0, `invalid child pid: ${childPid}`);
 
     mock.timers.tick(BASH_TIMEOUT_MS);
     const result = await Promise.race([resultPromise, rejectAfterRealMs(1_000)]);
