@@ -37,7 +37,20 @@ function scriptedModel(actions: string[]): ModelClient {
   return {
     async complete(_messages: ChatMessage[], _options?: ModelCompleteOptions): Promise<ModelCompletion> {
       const text = actions[i++] ?? '{"message":"final"}';
-      return { content: text, provider: 'openrouter', model: 'test-model' };
+      return {
+        content: text,
+        provider: 'openrouter',
+        model: 'test-model',
+        effectiveRequest: {
+          provider: 'openrouter',
+          model: 'test-model',
+          mode: 'text-action',
+          streaming: false,
+          baseInstructionChars: 0,
+          inputItemCount: 0,
+          toolNames: []
+        }
+      };
     }
   };
 }
