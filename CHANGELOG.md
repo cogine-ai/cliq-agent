@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Removed the `--tui` rollout flag now that the Ink TUI has been the default
+  interactive surface on a TTY since v0.9.0. Use `--classic` or `CLIQ_TUI=0` to
+  opt out; passing `--tui` now returns a migration error.
+- Removed the runner fallback that synthesized `effectiveRequest` metadata when
+  providers omitted it. The typed `ModelPromptRequest` protocol has been fully
+  rolled out since v0.14.0; all provider clients now attach
+  `effectiveRequest` on typed completions.
 - Raised the minimum supported Node.js version from 22.0 to 22.13 so the M0
   state backend can use the unflagged built-in `node:sqlite` API.
 
