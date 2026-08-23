@@ -9,7 +9,7 @@ import type {
 } from '../kernel/types.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { insertArtifactMetadata } from './artifacts.js';
-import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
+import { advanceTimeFence, readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { decodeStateOwnerRecord } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
@@ -245,7 +245,7 @@ export async function gracefullyReleaseStateOwner(
   if (fence === undefined) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence is missing');
   }
-  const observedAt = maxCanonicalTime(sampleCanonicalNow(), fence.lastAcceptedAt);
+  const observedAt = sampleCanonicalNow();
   const evidence: StateOwnerTransitionEvidenceV1 = {
     schemaVersion: 1,
     format: 'cliq-state-owner-transition-evidence-v1',
@@ -266,11 +266,19 @@ export async function gracefullyReleaseStateOwner(
     evidence,
     'cliq-state-owner-transition-evidence-v1'
   );
-  const terminal = terminalRecord(active, evidence, published.ref, observedAt);
+  let terminal!: Extract<StateOwnerRecordV1, { state: 'terminal' }>;
 
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, expected);
-    insertArtifactMetadata(connection, published, observedAt);
+    const transactionObservedAt = sampleCanonicalNow();
+    const lockedFence = readTimeFence(connection);
+    if (lockedFence === undefined) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence is missing');
+    }
+    const recordedAt = maxCanonicalTime(transactionObservedAt, lockedFence.lastAcceptedAt);
+    advanceTimeFence(connection, active.ownerEpoch, transactionObservedAt);
+    terminal = terminalRecord(active, evidence, published.ref, recordedAt);
+    insertArtifactMetadata(connection, published, recordedAt);
     const result = connection
       .prepare(
         `UPDATE state_owners

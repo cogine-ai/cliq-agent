@@ -285,6 +285,10 @@ export function activateWorkerLease(
     }
     const run = readRun(connection, currentLaunch.runId);
     assertRunCanActivate(run, now, input.expectedRunRevision);
+    const leaseExpiresAt = addCanonicalDuration(now, input.leaseDurationMs);
+    if (parseCanonicalTime(leaseExpiresAt) > parseCanonicalTime(run.deadlineAt)) {
+      throw new KernelStorageError('INVALID_REQUEST', 'initial worker lease exceeds the Run deadline');
+    }
     if (currentLaunch.plannedRunRevision !== run.revision) {
       throw new KernelStorageError('REVISION_CONFLICT', 'worker launch was planned for another Run revision');
     }
@@ -303,7 +307,7 @@ export function activateWorkerLease(
       phase: 'activated',
       leaseEpoch,
       leaseVersion: 1,
-      leaseExpiresAt: addCanonicalDuration(now, input.leaseDurationMs),
+      leaseExpiresAt,
       generationWriteState: 'active',
       activatedAt: now
     };

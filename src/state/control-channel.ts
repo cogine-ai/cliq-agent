@@ -41,13 +41,22 @@ export async function validateControlChannelClosure(
     artifacts.describe(channel.principalIdentityRef, 'application/json', 'cliq-local-principal-identity-v1')
   ]);
   if (channel.transport.kind === 'in_process') {
-    const processIdentity = decodePlatformProcessIdentity(
-      await artifacts.readCanonical(channel.transport.processIdentityRef)
-    );
+    const [processIdentity, ownerProcessIdentity] = await Promise.all([
+      artifacts
+        .readCanonical(channel.transport.processIdentityRef)
+        .then(decodePlatformProcessIdentity),
+      artifacts.readCanonical(owner.processIdentityRef).then(decodePlatformProcessIdentity)
+    ]);
     if (
       processIdentity.identityDigest !== channel.transport.processIdentityDigest ||
+      ownerProcessIdentity.identityDigest !== owner.processIdentityDigest ||
+      processIdentity.platform !== ownerProcessIdentity.platform ||
+      processIdentity.pid !== ownerProcessIdentity.pid ||
       processIdentity.pid !== process.pid ||
+      processIdentity.processStartToken !== ownerProcessIdentity.processStartToken ||
+      processIdentity.ownerUid !== ownerProcessIdentity.ownerUid ||
       processIdentity.ownerUid !== owner.filesystem.ownerUid ||
+      processIdentity.executableImageDigest !== ownerProcessIdentity.executableImageDigest ||
       processIdentity.platform !== principal.platform ||
       processIdentity.observedAt !== channel.openedAt
     ) {
@@ -61,13 +70,9 @@ export async function validateControlChannelClosure(
       )
     );
   } else {
-    await artifacts.readBytes(channel.transport.peerObservationRef);
-    metadata.push(
-      await artifacts.describe(
-        channel.transport.peerObservationRef,
-        'application/json',
-        'cliq-local-socket-peer-observation-v1'
-      )
+    throw new KernelStorageError(
+      'ARTIFACT_MISMATCH',
+      'UDS control channels require a closed peer-observation decoder and native credential capture'
     );
   }
   return { channel, metadata };

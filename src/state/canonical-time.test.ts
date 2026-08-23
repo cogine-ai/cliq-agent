@@ -86,3 +86,27 @@ test('only explicit current-owner recovery clears clock_regressed at the retaine
     await rm(stateRoot, { recursive: true, force: true });
   }
 });
+
+test('owner transfer records a new regression under the successor epoch', async () => {
+  const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-m2-time-transfer-regression-'));
+  await chmod(stateRoot, 0o700);
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  try {
+    applyKernelSchema(driver);
+    driver.transaction((connection) => {
+      insertGenesisTimeFence(connection, 1, '2026-08-16T12:00:00.000Z');
+      assert.equal(
+        transferTimeFenceOwner(connection, 1, 2, '2026-08-16T11:00:00.000Z'),
+        'clock_regressed'
+      );
+    });
+    const fence = readTimeFence(driver);
+    assert.equal(fence?.stateOwnerEpoch, 2);
+    assert.equal(fence?.state, 'clock_regressed');
+    assert.equal(fence?.lastAcceptedAt, '2026-08-16T12:00:00.000Z');
+    assert.equal(fence?.observedWallClockAt, '2026-08-16T11:00:00.000Z');
+  } finally {
+    driver.close();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});

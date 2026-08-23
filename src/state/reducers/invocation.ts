@@ -396,7 +396,7 @@ async function settleInitialAttempt(
     const consumed = terminal.phase === 'unknown'
       ? prepared.budgetDelta
       : decodeBudgetUsage(terminal.consumed, 'invocation consumed budget');
-    const released = subtractBudget(prepared.budgetDelta, consumed, 'invocation budget release');
+    const released = prepared.budgetDelta;
     const reservedAfter = subtractBudget(snapshotRun.budgetReserved, prepared.budgetDelta, 'Run reserved settlement');
     const consumedAfter = addBudget(snapshotRun.budgetConsumed, consumed, 'Run consumed settlement');
     const fence = readTimeFence(driver);

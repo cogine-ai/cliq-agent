@@ -189,11 +189,8 @@ export function transferTimeFenceOwner(
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence does not match the prior owner');
   }
   const observed = sampledNow ?? sampleCanonicalNow();
-  if (parseCanonicalTime(observed) < parseCanonicalTime(current.lastAcceptedAt)) {
-    persistRegressedFence(connection, current, observed);
-    return 'clock_regressed';
-  }
-  const state = current.state;
+  const clockRegressed = parseCanonicalTime(observed) < parseCanonicalTime(current.lastAcceptedAt);
+  const state = clockRegressed ? 'clock_regressed' : current.state;
 
   const next: CanonicalTimeFenceV1 = {
     schemaVersion: 1,
@@ -226,7 +223,7 @@ export function transferTimeFenceOwner(
   if (result.changes !== 1n) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence changed during owner transfer');
   }
-  return next.state === 'healthy' ? 'healthy' : 'still_regressed';
+  return clockRegressed ? 'clock_regressed' : next.state === 'healthy' ? 'healthy' : 'still_regressed';
 }
 
 export function recoverRegressedTimeFence(

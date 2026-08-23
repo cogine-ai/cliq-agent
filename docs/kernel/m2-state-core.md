@@ -12,8 +12,9 @@ fully complete.
 - StateOwner bootstrap, graceful release, contiguous clean reacquisition, exact
   identity/evidence decoding, root/runtime/lock revalidation on every write,
   and explicit clock-regression recovery.
-- Exact local-principal and control-channel closure checks bound to the current
-  StateRoot.
+- Exact local-principal and in-process control-channel closure checks bound to
+  the current StateRoot; UDS peers fail closed until native credential capture
+  and the closed peer-observation decoder are available.
 - Typed workspace-generation and worker-launch reducers covering
   materialization registration, read-only preactivation, atomic Run/lease/write
   activation, narrow heartbeat CAS, revocation, checkpointing, sealing, and
@@ -30,9 +31,10 @@ fully complete.
 
 ## Deliberately still open
 
-- The descriptor-held cross-process OS lock, positive prior-process death proof,
-  and atomic death takeover require the signed native Supervisor/platform
-  helper. The TypeScript path fails closed instead of simulating that authority.
+- The descriptor-held cross-process OS lock, UDS peer-credential capture,
+  positive prior-process death proof, and atomic death takeover require the
+  signed native Supervisor/platform helper. The TypeScript path fails closed
+  instead of simulating that authority.
 - Legacy import, generation cutover, rollback-to-legacy, and native-Windows
   export-only handling remain the migration/rollback tail of WP01 and depend on
   the WP06 authority surfaces.

@@ -949,6 +949,14 @@ function budgetEquation(
   );
 }
 
+function budgetLessThanOrEqual(left: BudgetUsage, right: BudgetUsage): boolean {
+  return SETTLEMENT_BUDGET_FIELDS.every((field) => left[field] <= right[field]);
+}
+
+function budgetEqual(left: BudgetUsage, right: BudgetUsage): boolean {
+  return SETTLEMENT_BUDGET_FIELDS.every((field) => left[field] === right[field]);
+}
+
 export function decodeBudgetSettlement(value: unknown): BudgetSettlementV1 {
   if (
     !isRecord(value) ||
@@ -995,9 +1003,10 @@ export function decodeBudgetSettlement(value: unknown): BudgetSettlementV1 {
     'BudgetSettlement.budgetReservedAfter'
   );
   if (
-    !budgetEquation(consumed, released, reserved, 'add') ||
+    !budgetLessThanOrEqual(consumed, reserved) ||
+    !budgetEqual(released, reserved) ||
     !budgetEquation(consumedBefore, consumed, consumedAfter, 'add') ||
-    !budgetEquation(reservedBefore, reserved, reservedAfter, 'subtract')
+    !budgetEquation(reservedBefore, released, reservedAfter, 'subtract')
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'budget settlement equations do not balance');
   }

@@ -1,17 +1,28 @@
 import { assertArtifactRef, parseCanonicalTime } from '../kernel/identity.js';
 import type {
   BudgetUsage,
+  ChildAllocationV1,
+  ContextManifest,
   InvocationJournalEntry,
   RecoveryClosureV1,
   RunItemReferenceV1,
+  RunSpec,
   WorkerLaunch,
-  WorkspaceGenerationStateV1
+  WorkspaceEntryManifest,
+  WorkspaceGenerationStateV1,
+  WorkspaceStateManifest
 } from '../kernel/types.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import {
+  decodeAdmittedContext,
   decodeBudgetSettlement,
   decodeContextManifest,
+  decodeFrozenIgnoreRules,
+  decodeRunObjective,
   decodeRunSpec,
+  decodeSourceManifest,
+  decodeSourceProjection,
+  decodeVerifierSpec,
   decodeWorkerIdentity,
   decodeWorkspaceEntries,
   decodeWorkspaceGenerationIdentity,
@@ -52,6 +63,191 @@ function requireRecoveryTime(value: string, label: string): number {
   } catch {
     recoveryFailure(`${label} is not a canonical UTC millisecond`);
   }
+}
+
+async function requireRecoveryArtifacts(
+  artifacts: ArtifactCatalog,
+  refs: ReadonlyArray<readonly [label: string, ref: string | undefined]>
+): Promise<void> {
+  const unique = new Map<string, string>();
+  for (const [label, ref] of refs) {
+    if (ref === undefined) continue;
+    requireRecoveryArtifactRef(ref, label);
+    if (!unique.has(ref)) unique.set(ref, label);
+  }
+  await Promise.all(
+    [...unique].map(async ([ref, label]) => {
+      try {
+        await artifacts.readBytes(ref);
+      } catch (error) {
+        recoveryFailure(`${label} is not readable from CAS: ${(error as Error).message}`);
+      }
+    })
+  );
+}
+
+async function validateWorkspaceStateArtifacts(
+  artifacts: ArtifactCatalog,
+  workspaceStateRef: string,
+  label: string
+): Promise<{ state: WorkspaceStateManifest; entries: WorkspaceEntryManifest }> {
+  await requireRecoveryArtifacts(artifacts, [[label, workspaceStateRef]]);
+  const state = decodeWorkspaceState(await artifacts.readCanonical(workspaceStateRef));
+  await requireRecoveryArtifacts(artifacts, [
+    [`${label}.baseWorkspaceManifestRef`, state.baseWorkspaceManifestRef],
+    [`${label}.entriesRef`, state.entriesRef],
+    [`${label}.privateGitStateRef`, state.privateGitStateRef]
+  ]);
+  const entries = decodeWorkspaceEntries(await artifacts.readCanonical(state.entriesRef));
+  await requireRecoveryArtifacts(
+    artifacts,
+    entries.entries
+      .filter((entry) => entry.kind === 'file')
+      .map((entry, index) => [`${label}.entries[${index}].blobRef`, entry.blobRef] as const)
+  );
+  return { state, entries };
+}
+
+async function validateRunSpecArtifacts(
+  artifacts: ArtifactCatalog,
+  runSpec: RunSpec
+): Promise<void> {
+  await requireRecoveryArtifacts(artifacts, [
+    ['RunSpec.objectiveRef', runSpec.objectiveRef],
+    ['RunSpec.admittedContextRef', runSpec.admittedContextRef],
+    ['RunSpec.baseWorkspaceManifestRef', runSpec.baseWorkspaceManifestRef],
+    ['RunSpec.sourceProjectionRef', runSpec.sourceProjectionRef],
+    ['RunSpec.assemblyRef', runSpec.assemblyRef],
+    ['RunSpec.policyRef', runSpec.policyRef],
+    ['RunSpec.sandboxProfileRef', runSpec.sandboxProfileRef],
+    ['RunSpec.verifierSpecRef', runSpec.verifierSpecRef],
+    ['RunSpec.dependencyPolicyRef', runSpec.dependencyPolicyRef],
+    ['RunSpec.unverifiedConsentRef', runSpec.unverifiedConsentRef],
+    ...runSpec.credentialGrantRefs.map((ref, index) =>
+      [`RunSpec.credentialGrantRefs[${index}]`, ref] as const
+    )
+  ]);
+
+  decodeRunObjective(await artifacts.readCanonical(runSpec.objectiveRef));
+  decodeVerifierSpec(await artifacts.readCanonical(runSpec.verifierSpecRef));
+  const admitted = decodeAdmittedContext(
+    await artifacts.readCanonical(runSpec.admittedContextRef)
+  );
+  await requireRecoveryArtifacts(artifacts, [
+    ['AdmittedContext.sessionProjectionRef', admitted.sessionProjectionRef],
+    ...admitted.parentContextRefs.map((ref, index) =>
+      [`AdmittedContext.parentContextRefs[${index}]`, ref] as const
+    ),
+    ...admitted.additionalArtifactRefs.map((ref, index) =>
+      [`AdmittedContext.additionalArtifactRefs[${index}]`, ref] as const
+    )
+  ]);
+
+  const source = decodeSourceManifest(
+    await artifacts.readCanonical(runSpec.baseWorkspaceManifestRef)
+  );
+  const projection = decodeSourceProjection(
+    await artifacts.readCanonical(runSpec.sourceProjectionRef)
+  );
+  await requireRecoveryArtifacts(artifacts, [
+    ['SourceManifest.entriesRef', source.entriesRef],
+    ['SourceManifest.sourceProjectionRef', source.sourceProjectionRef],
+    ['SourceManifest.frozenIgnoreRulesRef', source.frozenIgnoreRulesRef],
+    ['SourceManifest.git.indexRef', source.git?.indexRef],
+    ...projection.explicitIncludes.map((include, index) =>
+      [`SourceProjection.explicitIncludes[${index}].authorizationRef`, include.authorizationRef] as const
+    )
+  ]);
+  const rules = decodeFrozenIgnoreRules(
+    await artifacts.readCanonical(source.frozenIgnoreRulesRef)
+  );
+  await requireRecoveryArtifacts(
+    artifacts,
+    rules.sources.map((ruleSource, index) =>
+      [`FrozenIgnoreRules.sources[${index}].contentRef`, ruleSource.contentRef] as const
+    )
+  );
+  if (
+    source.sourceProjectionRef !== runSpec.sourceProjectionRef ||
+    source.frozenIgnoreRulesRef !== projection.frozenIgnoreRulesRef ||
+    source.frozenIgnoreRulesDigest !== projection.frozenIgnoreRulesDigest ||
+    source.frozenIgnoreRulesDigest !== rules.rulesDigest
+  ) recoveryFailure('RunSpec source manifest, projection, and frozen ignore rules disagree');
+  const sourceEntries = decodeWorkspaceEntries(await artifacts.readCanonical(source.entriesRef));
+  if (sourceEntries.treeDigest !== source.treeDigest) {
+    recoveryFailure('SourceManifest entries do not match its tree digest');
+  }
+  await requireRecoveryArtifacts(
+    artifacts,
+    sourceEntries.entries
+      .filter((entry) => entry.kind === 'file')
+      .map((entry, index) => [`SourceManifest.entries[${index}].blobRef`, entry.blobRef] as const)
+  );
+}
+
+async function validateContextArtifacts(
+  artifacts: ArtifactCatalog,
+  context: ContextManifest,
+  runSpec: RunSpec
+): Promise<void> {
+  if (
+    context.admittedContextRef !== runSpec.admittedContextRef ||
+    context.assemblyRef !== runSpec.assemblyRef
+  ) recoveryFailure('Checkpoint ContextManifest does not match its admitted RunSpec');
+  const refs: Array<readonly [string, string | undefined]> = [
+    ['ContextManifest.admittedContextRef', context.admittedContextRef],
+    ['ContextManifest.assemblyRef', context.assemblyRef]
+  ];
+  for (const [segmentIndex, segment] of context.segments.entries()) {
+    if (segment.kind === 'raw') {
+      for (const [itemIndex, item] of segment.items.entries()) {
+        refs.push([
+          `ContextManifest.segments[${segmentIndex}].items[${itemIndex}].itemRef`,
+          item.itemRef
+        ]);
+      }
+    } else if (segment.kind === 'summary') {
+      refs.push([`ContextManifest.segments[${segmentIndex}].summaryRef`, segment.summaryRef]);
+      for (const [itemIndex, ref] of segment.preservedItemRefs.entries()) {
+        refs.push([
+          `ContextManifest.segments[${segmentIndex}].preservedItemRefs[${itemIndex}]`,
+          ref
+        ]);
+      }
+    }
+  }
+  await requireRecoveryArtifacts(artifacts, refs);
+}
+
+async function validateChildAllocationArtifacts(
+  artifacts: ArtifactCatalog,
+  allocations: ChildAllocationV1[]
+): Promise<void> {
+  const refs: Array<readonly [string, string | undefined]> = [];
+  for (const [index, allocation] of allocations.entries()) {
+    refs.push(
+      [`ChildAllocation[${index}].delegateOperationGrantRef`, allocation.delegateOperationGrantRef],
+      [`ChildAllocation[${index}].capabilityGrantRef`, allocation.capabilityGrantRef]
+    );
+    if (allocation.state !== 'reserved') {
+      refs.push([
+        `ChildAllocation[${index}].terminal.modelContentRef`,
+        allocation.terminal.modelContentRef
+      ]);
+      if ('resultRef' in allocation.terminal) {
+        refs.push(
+          [`ChildAllocation[${index}].terminal.resultRef`, allocation.terminal.resultRef],
+          [`ChildAllocation[${index}].terminal.patchManifestRef`, allocation.terminal.patchManifestRef]
+        );
+      } else {
+        refs.push([
+          `ChildAllocation[${index}].terminal.terminalDetailRef`,
+          allocation.terminal.terminalDetailRef
+        ]);
+      }
+    }
+  }
+  await requireRecoveryArtifacts(artifacts, refs);
 }
 
 function readRunItems(
@@ -171,7 +367,20 @@ async function validateJournalArtifactsAndBudgets(
   let reserved = { ...ZERO_BUDGET };
   let consumed = { ...ZERO_BUDGET };
   for (const group of groups.values()) {
-    await artifacts.readBytes(group.prepared.requestRef);
+    await requireRecoveryArtifacts(
+      artifacts,
+      group.entries.flatMap((entry, index) => [
+        [`Journal[${entry.seq}:${index}].requestRef`, entry.requestRef] as const,
+        [`Journal[${entry.seq}:${index}].grantRef`, entry.grantRef] as const,
+        [`Journal[${entry.seq}:${index}].sandboxLaunchSpecRef`, entry.sandboxLaunchSpecRef] as const,
+        [`Journal[${entry.seq}:${index}].resultRef`, entry.resultRef] as const,
+        [`Journal[${entry.seq}:${index}].receiptRef`, entry.receiptRef] as const,
+        [`Journal[${entry.seq}:${index}].errorRef`, entry.errorRef] as const,
+        [`Journal[${entry.seq}:${index}].evidenceRef`, entry.evidenceRef] as const,
+        [`Journal[${entry.seq}:${index}].attestationRef`, entry.attestationRef] as const,
+        [`Journal[${entry.seq}:${index}].budgetSettlementRef`, entry.budgetSettlementRef] as const
+      ])
+    );
     const firstTerminal = group.entries.find((entry) =>
       entry.phase === 'completed' || entry.phase === 'failed' || entry.phase === 'unknown'
     );
@@ -226,8 +435,24 @@ async function validateGenerationArtifacts(
   generations: WorkspaceGenerationStateV1[]
 ): Promise<void> {
   for (const generation of generations) {
+    await requireRecoveryArtifacts(artifacts, [
+      ['WorkspaceGeneration.generationRef', generation.generationRef],
+      ['WorkspaceGeneration.sourceWorkspaceStateRef', generation.sourceWorkspaceStateRef],
+      ['WorkspaceGeneration.snapshotEvidenceRef', generation.snapshotEvidenceRef],
+      ['WorkspaceGeneration.waitingSubjectRef', generation.waitingSubjectRef],
+      ['WorkspaceGeneration.quarantineEvidenceRef', generation.quarantineEvidenceRef],
+      ['WorkspaceGeneration.retirementEvidenceRef', generation.retirementEvidenceRef]
+    ]);
     const identity = decodeWorkspaceGenerationIdentity(
       await artifacts.readCanonical(generation.generationRef)
+    );
+    await requireRecoveryArtifacts(artifacts, [
+      ['WorkspaceGenerationIdentity.locator.stateRootIdentityRef', identity.locator.stateRootIdentityRef]
+    ]);
+    const sourceWorkspace = await validateWorkspaceStateArtifacts(
+      artifacts,
+      identity.sourceWorkspaceStateRef,
+      'WorkspaceGenerationIdentity.sourceWorkspaceStateRef'
     );
     if (
       identity.generationId !== generation.generationId ||
@@ -235,27 +460,28 @@ async function validateGenerationArtifacts(
       identity.identityDigest !== generation.generationIdentityDigest ||
       identity.sourceCheckpointId !== generation.sourceCheckpointId ||
       identity.sourceWorkspaceStateRef !== generation.sourceWorkspaceStateRef ||
-      identity.sourceWorkspaceStateDigest !== generation.sourceWorkspaceStateDigest
+      identity.sourceWorkspaceStateDigest !== generation.sourceWorkspaceStateDigest ||
+      sourceWorkspace.state.stateDigest !== identity.sourceWorkspaceStateDigest ||
+      sourceWorkspace.entries.treeDigest !== identity.sourceTreeDigest
     ) recoveryFailure('workspace generation state does not match its immutable identity');
     if (generation.snapshotEvidenceRef !== undefined) {
       const evidence = decodeWorkspaceGenerationSnapshotEvidence(
         await artifacts.readCanonical(generation.snapshotEvidenceRef)
       );
-      const evidenceWorkspaceState = decodeWorkspaceState(
-        await artifacts.readCanonical(evidence.workspaceStateRef)
-      );
-      const evidenceEntries = decodeWorkspaceEntries(
-        await artifacts.readCanonical(evidenceWorkspaceState.entriesRef)
+      const evidenceWorkspace = await validateWorkspaceStateArtifacts(
+        artifacts,
+        evidence.workspaceStateRef,
+        'WorkspaceGenerationSnapshotEvidence.workspaceStateRef'
       );
       if (
         evidence.evidenceDigest !== generation.snapshotEvidenceDigest ||
         evidence.generationRef !== generation.generationRef ||
         evidence.generationIdentityDigest !== generation.generationIdentityDigest ||
         evidence.runId !== generation.runId ||
-        evidenceWorkspaceState.stateDigest !== evidence.workspaceStateDigest ||
-        evidenceWorkspaceState.entriesRef !== evidence.entriesRef ||
-        evidenceWorkspaceState.privateGitStateRef !== evidence.privateGitStateRef ||
-        evidenceEntries.treeDigest !== evidence.treeDigest ||
+        evidenceWorkspace.state.stateDigest !== evidence.workspaceStateDigest ||
+        evidenceWorkspace.state.entriesRef !== evidence.entriesRef ||
+        evidenceWorkspace.state.privateGitStateRef !== evidence.privateGitStateRef ||
+        evidenceWorkspace.entries.treeDigest !== evidence.treeDigest ||
         evidence.treeDigest !== generation.lastVerifiedTreeDigest ||
         (generation.phase === 'sealed'
           ? evidence.purpose !== 'sealed_to_checkpoint'
@@ -276,6 +502,14 @@ async function validateLaunchGraph(
 ): Promise<void> {
   const byRef = new Map(generations.map((generation) => [generation.generationRef, generation]));
   for (const launch of launches) {
+    await requireRecoveryArtifacts(artifacts, [
+      ['WorkerLaunch.workspaceGenerationRef', launch.workspaceGenerationRef],
+      ['WorkerLaunch.containmentPlanRef', launch.containmentPlanRef],
+      ['WorkerLaunch.sandboxLaunchSpecRef', launch.sandboxLaunchSpecRef],
+      ['WorkerLaunch.workerIdentityDigest', launch.workerIdentityDigest],
+      ['WorkerLaunch.processContainmentRef', launch.processContainmentRef],
+      ['WorkerLaunch.retirementEvidenceRef', launch.retirementEvidenceRef]
+    ]);
     const generation = byRef.get(launch.workspaceGenerationRef);
     if (generation === undefined || generation.runId !== launch.runId) {
       recoveryFailure('unretired WorkerLaunch has no matching unretired workspace generation');
@@ -355,6 +589,14 @@ export async function readRecoveryClosure(
   ] as const) {
     if (ref !== undefined) requireRecoveryArtifactRef(ref, label);
   }
+  await requireRecoveryArtifacts(artifacts, [
+    ['Run.specRef', run.specRef],
+    ['Run.frontierRef', run.frontierRef],
+    ['Run.waitingOnRef', run.waitingOnRef],
+    ['Run.resultRef', run.resultRef],
+    ['Run.terminalDetailRef', run.terminalDetailRef],
+    ['Run.stopIntentRef', run.stopIntentRef]
+  ]);
   try {
     decodeBudgetUsage(run.budgetReserved, 'Run.budgetReserved');
     decodeBudgetUsage(run.budgetConsumed, 'Run.budgetConsumed');
@@ -376,6 +618,10 @@ export async function readRecoveryClosure(
   }
   requireRecoveryArtifactRef(latestCheckpoint.contextManifestRef, 'Checkpoint.contextManifestRef');
   requireRecoveryArtifactRef(latestCheckpoint.workspaceStateRef, 'Checkpoint.workspaceStateRef');
+  await requireRecoveryArtifacts(artifacts, [
+    ['Checkpoint.contextManifestRef', latestCheckpoint.contextManifestRef],
+    ['Checkpoint.workspaceStateRef', latestCheckpoint.workspaceStateRef]
+  ]);
   requireRecoveryTime(latestCheckpoint.createdAt, 'Checkpoint.createdAt');
   if (latestCheckpoint.runId !== run.id || latestCheckpoint.basedOnRunRevision >= run.revision) {
     recoveryFailure('latest Checkpoint is not a prior cut of the Run');
@@ -385,22 +631,28 @@ export async function readRecoveryClosure(
   }
 
   const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
-  assertArtifactRef(runSpec.objectiveRef);
+  await validateRunSpecArtifacts(artifacts, runSpec);
   const context = decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef));
   if (context.runId !== run.id || context.throughItemSeq !== latestCheckpoint.runItemSeq) {
     recoveryFailure('Checkpoint ContextManifest does not match its Run cut');
   }
-  const workspaceState = decodeWorkspaceState(
-    await artifacts.readCanonical(latestCheckpoint.workspaceStateRef)
+  await validateContextArtifacts(artifacts, context, runSpec);
+  const latestWorkspace = await validateWorkspaceStateArtifacts(
+    artifacts,
+    latestCheckpoint.workspaceStateRef,
+    'Checkpoint.workspaceStateRef'
   );
   if (
-    workspaceState.runId !== run.id ||
-    workspaceState.baseWorkspaceManifestRef !== runSpec.baseWorkspaceManifestRef
+    latestWorkspace.state.runId !== run.id ||
+    latestWorkspace.state.baseWorkspaceManifestRef !== runSpec.baseWorkspaceManifestRef
   ) recoveryFailure('workspace state is not bound to the admitted RunSpec');
 
   if (latestCheckpoint.runItemSeq > items.length) recoveryFailure('Checkpoint item cursor exceeds recovery items');
   if (latestCheckpoint.journalSeq > journal.length) recoveryFailure('Checkpoint Journal cursor exceeds recovery Journal');
-  await Promise.all(items.map((item) => artifacts.readBytes(item.payloadRef)));
+  await requireRecoveryArtifacts(
+    artifacts,
+    items.map((item, index) => [`Run.items[${index}].payloadRef`, item.payloadRef] as const)
+  );
   const groups = validateJournalGraph(journal);
   const journalBudgets = await validateJournalArtifactsAndBudgets(artifacts, groups);
   if (
@@ -418,6 +670,7 @@ export async function readRecoveryClosure(
   }
   await validateGenerationArtifacts(artifacts, workspaceGenerations);
   await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
+  await validateChildAllocationArtifacts(artifacts, childAllocations);
 
   return {
     runSpec,

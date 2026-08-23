@@ -1,5 +1,5 @@
 import { constants, type Stats } from 'node:fs';
-import { lstat, mkdir, open, readFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
@@ -88,7 +88,7 @@ import {
 import { readRecoveryClosure } from './recovery-closure.js';
 import { readRun, readSession } from './rows.js';
 import { applyKernelSchema, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
-import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
+import { openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import {
   assertActiveStateOwner,
   assertContiguousStateOwnerHistory,
@@ -119,6 +119,43 @@ export type {
   SealWorkerGenerationInput,
   SettleInvocationInput
 };
+
+const AUTHORITY_TABLES = [
+  'canonical_time_fence',
+  'state_owners',
+  'artifacts',
+  'sessions',
+  'items',
+  'runs',
+  'checkpoints',
+  'run_journal',
+  'run_events',
+  'worker_launches',
+  'workspace_generations',
+  'local_inference_activation_cycles',
+  'local_inference_launches',
+  'control_requests',
+  'list_read_cuts',
+  'list_read_cut_entries',
+  'child_allocations',
+  'authorization_grants',
+  'mcp_registrations',
+  'admin_operations'
+] as const;
+
+function assertFreshAuthorityDatabaseEmpty(connection: SqliteConnection | SqliteDriver): void {
+  for (const table of AUTHORITY_TABLES) {
+    const row = connection
+      .prepare(`SELECT count(*) AS count FROM ${table}`)
+      .get<{ count: unknown }>();
+    if (Number(row?.count ?? 0) !== 0) {
+      throw new KernelStorageError(
+        'RECOVERY_REQUIRED',
+        `refusing fresh_empty genesis over non-empty authority table ${table}`
+      );
+    }
+  }
+}
 
 function requireEffectiveUid(): number {
   if (typeof process.geteuid !== 'function') {
@@ -620,28 +657,22 @@ async function acquireOrBootstrapStateOwner(
   if (fence !== undefined) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence exists without state owner history');
   }
+  assertFreshAuthorityDatabaseEmpty(driver);
 
-  const leftover = driver
-    .prepare(
-      `SELECT
-         (SELECT count(*) FROM sessions) AS sessions,
-         (SELECT count(*) FROM runs) AS runs,
-         (SELECT count(*) FROM control_requests) AS control_requests`
-    )
-    .get<{ sessions: unknown; runs: unknown; control_requests: unknown }>();
-  if (
-    Number(leftover?.sessions ?? 0) !== 0 ||
-    Number(leftover?.runs ?? 0) !== 0 ||
-    Number(leftover?.control_requests ?? 0) !== 0
-  ) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'refusing fresh_empty genesis over a non-empty authority database');
+  const casRoot = path.join(stateRoot, KERNEL_CAS_DIRECTORY);
+  const existingCasEntries = await readdir(casRoot);
+  if (existingCasEntries.length !== 0) {
+    throw new KernelStorageError(
+      'RECOVERY_REQUIRED',
+      'refusing fresh_empty genesis over a non-empty CAS namespace'
+    );
   }
 
   const now = sampleCanonicalNow();
   const platform = hostPlatform();
   const uid = requireEffectiveUid();
   const rootInfo = await lstat(stateRoot);
-  const casInfo = await lstat(path.join(stateRoot, KERNEL_CAS_DIRECTORY));
+  const casInfo = await lstat(casRoot);
   const lockInfo = await ensureLockFile(path.join(stateRoot, 'runtime', 'state-owner.lock'));
 
   const stateRootIdentity: StateRootIdentityV1 = {
@@ -699,7 +730,7 @@ async function acquireOrBootstrapStateOwner(
     contentDigest: canonicalSha256({
       applicationId: KERNEL_SQLITE_APPLICATION_ID,
       userVersion: KERNEL_STATE_SCHEMA_VERSION,
-      tables: 20
+      tables: AUTHORITY_TABLES.length
     })
   };
   const databaseArtifact = await artifacts.publishCanonical(emptyDatabase, 'cliq-kernel-empty-database-v1');
@@ -800,6 +831,7 @@ async function acquireOrBootstrapStateOwner(
   owner.rowDigest = digestOmitting(owner, 'rowDigest');
 
   driver.transaction((connection) => {
+    assertFreshAuthorityDatabaseEmpty(connection);
     insertStateOwnerArtifacts(
       connection,
       [
@@ -852,9 +884,9 @@ async function acquireAfterGracefulRelease(
   if (currentFence === undefined || currentFence.stateOwnerEpoch !== prior.ownerEpoch) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence does not match graceful owner history');
   }
-  const sampledAcquiredAt = sampleCanonicalNow();
-  const acquiredAt = sampledAcquiredAt >= currentFence.lastAcceptedAt
-    ? sampledAcquiredAt
+  const acquiredAt = sampleCanonicalNow();
+  const artifactCreatedAt = acquiredAt >= currentFence.lastAcceptedAt
+    ? acquiredAt
     : currentFence.lastAcceptedAt;
   const processIdentity = await currentProcessIdentity(acquiredAt);
   const processArtifact = await artifacts.publishCanonical(
@@ -935,8 +967,7 @@ async function acquireAfterGracefulRelease(
       throw new KernelStorageError('RECOVERY_REQUIRED', 'prior state owner changed during acquisition');
     }
     fenceOutcome = transferTimeFenceOwner(connection, prior.ownerEpoch, ownerEpoch, acquiredAt);
-    if (fenceOutcome === 'clock_regressed') return;
-    insertStateOwnerArtifacts(connection, [processArtifact, acquisitionArtifact], acquiredAt);
+    insertStateOwnerArtifacts(connection, [processArtifact, acquisitionArtifact], artifactCreatedAt);
     connection
       .prepare(
         `INSERT INTO state_owners (
@@ -945,8 +976,8 @@ async function acquireAfterGracefulRelease(
       )
       .run(BigInt(ownerEpoch), supervisorInstanceId, JSON.stringify(owner), owner.rowDigest);
   });
-  if (fenceOutcome === 'clock_regressed' || fenceOutcome === undefined) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'clock regression blocked state owner acquisition');
+  if (fenceOutcome === undefined) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'state owner acquisition did not transfer the time fence');
   }
   return owner;
 }

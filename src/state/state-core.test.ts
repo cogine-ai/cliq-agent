@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomFillSync } from 'node:crypto';
-import { chmod, lstat, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 
@@ -13,6 +13,8 @@ import {
 } from '../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1,
+  LocalControlChannelIdentityV1,
+  PlatformProcessIdentityV1,
   SourceManifest,
   SourceProjectionSpec,
   VerifierSpec,
@@ -25,6 +27,7 @@ import type {
 } from '../kernel/types.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { KernelStorageError } from './errors.js';
+import { applyKernelSchema } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
 
@@ -144,7 +147,15 @@ type ActiveFixture = {
   workerIdentityDigest: string;
 };
 
-async function createActiveFixture(label: string): Promise<ActiveFixture> {
+type ActiveFixtureOptions = {
+  runWallTimeMs?: number;
+  leaseDurationMs?: number;
+};
+
+async function createActiveFixture(
+  label: string,
+  options: ActiveFixtureOptions = {}
+): Promise<ActiveFixture> {
   const stateRoot = await makePrivateDir(`.cliq-m2-${label}-state-`);
   const workspace = await makePrivateDir(`.cliq-m2-${label}-ws-`);
   const store = await openStateStore(stateRoot);
@@ -170,6 +181,9 @@ async function createActiveFixture(label: string): Promise<ActiveFixture> {
     workspacePath: workspace,
     objective: `exercise ${label}`,
     allowUnverified: true,
+    budgets: options.runWallTimeMs === undefined
+      ? undefined
+      : { wallTimeMs: options.runWallTimeMs },
     ...channel,
     ...source
   });
@@ -289,12 +303,20 @@ async function createActiveFixture(label: string): Promise<ActiveFixture> {
     workerIdentityDigest: workerArtifact.ref,
     processContainmentRef: containment.ref
   });
-  const activated = store.activateWorkerLease({
-    launchId,
-    expectedRunRevision: admitted.run.revision,
-    expectedGenerationRowVersion: preactivatedGeneration.rowVersion,
-    leaseDurationMs: 60_000
-  });
+  let activated: ReturnType<StateStore['activateWorkerLease']>;
+  try {
+    activated = store.activateWorkerLease({
+      launchId,
+      expectedRunRevision: admitted.run.revision,
+      expectedGenerationRowVersion: preactivatedGeneration.rowVersion,
+      leaseDurationMs: options.leaseDurationMs ?? 60_000
+    });
+  } catch (error) {
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+    throw error;
+  }
   return {
     stateRoot,
     workspace,
@@ -366,6 +388,12 @@ test('WP01 state core persists activation, permanent dispatch claim, settlement,
     assert.equal(completed.entry.phase, 'completed');
     assert.equal(completed.run.budgetReserved.toolCalls, 0);
     assert.equal(completed.run.budgetConsumed.toolCalls, 1);
+    assert.deepEqual(completed.settlement.released, {
+      modelTokens: 0,
+      costMicros: 0,
+      toolCalls: 1,
+      repairAttempts: 0
+    });
 
     const metadataReader = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
     try {
@@ -475,6 +503,16 @@ test('WP01 state core persists activation, permanent dispatch claim, settlement,
   }
 });
 
+test('initial worker lease cannot extend past the Run deadline', async () => {
+  await assert.rejects(
+    createActiveFixture('initial-lease-deadline', {
+      runWallTimeMs: 59_000,
+      leaseDurationMs: 60_000
+    }),
+    (error) => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST'
+  );
+});
+
 test('dispatch claim is singleflight and cannot be appended twice', async () => {
   const fixture = await createActiveFixture('singleflight');
   try {
@@ -503,6 +541,57 @@ test('dispatch claim is singleflight and cannot be appended twice', async () => 
     await assert.rejects(
       fixture.store.claimInvocationDispatch({ ...claimInput, dispatchId: 'losing-dispatch' }),
       (error) => error instanceof KernelStorageError && error.code === 'STATE_TRANSITION_INVALID'
+    );
+  } finally {
+    await disposeFixture(fixture);
+  }
+});
+
+test('recovery requires every terminal Journal artifact to remain in CAS', async () => {
+  const fixture = await createActiveFixture('recovery-terminal-cas');
+  try {
+    const request = await fixture.store.artifacts.publishCanonical(
+      { schemaVersion: 1, format: 'cliq-tool-request-test-v1' },
+      'cliq-tool-request-v1'
+    );
+    const prepared = await fixture.store.prepareInvocation({
+      runId: fixture.runId,
+      expectedRunRevision: fixture.runRevision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: 'missing-result-op',
+      opKind: 'tool',
+      target: 'test.read',
+      requestRef: request.ref,
+      replayClass: 'retry',
+      idempotencyKey: 'missing-result-op-attempt-0',
+      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
+    });
+    await fixture.store.claimInvocationDispatch({
+      runId: fixture.runId,
+      expectedRunRevision: prepared.run.revision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: prepared.entry.opId,
+      attempt: 0,
+      dispatchId: 'missing-result-dispatch',
+      brokerFenceTokenDigest: digest('missing-result:fence')
+    });
+    const result = await fixture.store.artifacts.publishCanonical(
+      { schemaVersion: 1, format: 'cliq-tool-result-test-v1', ok: true },
+      'cliq-tool-result-v1'
+    );
+    await fixture.store.completeInvocation({
+      runId: fixture.runId,
+      opId: prepared.entry.opId,
+      attempt: 0,
+      expectedRunRevision: prepared.run.revision,
+      resultRef: result.ref,
+      consumed: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
+    });
+
+    await rm(path.join(fixture.stateRoot, 'cas', result.ref));
+    await assert.rejects(
+      fixture.store.readRecoveryClosure(fixture.runId),
+      (error) => error instanceof KernelStorageError && error.code === 'RECOVERY_REQUIRED'
     );
   } finally {
     await disposeFixture(fixture);
@@ -621,6 +710,96 @@ test('control channel decoding rejects extension fields even when its digest reh
   }
 });
 
+test('control channel rejects forged process identity and opaque UDS peer evidence', async () => {
+  const stateRoot = await makePrivateDir('.cliq-m2-channel-binding-state-');
+  const workspace = await makePrivateDir('.cliq-m2-channel-binding-ws-');
+  const store = await openStateStore(stateRoot);
+  try {
+    const principalId = 'cliq-m2-principal';
+    const published = await publishInProcessChannel(store, principalId);
+    const channel = await store.artifacts.readCanonical<LocalControlChannelIdentityV1>(
+      published.channelIdentityRef
+    );
+    assert.equal(channel.transport.kind, 'in_process');
+    if (channel.transport.kind !== 'in_process') throw new Error('expected in-process channel');
+    const processIdentity = await store.artifacts.readCanonical<PlatformProcessIdentityV1>(
+      channel.transport.processIdentityRef
+    );
+    const forgedProcess: PlatformProcessIdentityV1 = {
+      ...processIdentity,
+      processStartToken: `${processIdentity.processStartToken}:forged`,
+      executableImageDigest: digest('forged-executable'),
+      identityDigest: ''
+    };
+    forgedProcess.identityDigest = digestOmitting(forgedProcess, 'identityDigest');
+    const forgedProcessArtifact = await store.artifacts.publishCanonical(
+      forgedProcess,
+      forgedProcess.format
+    );
+    const forgedChannel: LocalControlChannelIdentityV1 = {
+      ...channel,
+      transport: {
+        kind: 'in_process',
+        processIdentityRef: forgedProcessArtifact.ref,
+        processIdentityDigest: forgedProcess.identityDigest
+      },
+      channelNonceDigest: digest('forged-process-channel'),
+      channelIdentityDigest: ''
+    };
+    forgedChannel.channelIdentityDigest = digestOmitting(forgedChannel, 'channelIdentityDigest');
+    const forgedChannelArtifact = await store.artifacts.publishCanonical(
+      forgedChannel,
+      forgedChannel.format
+    );
+    await assert.rejects(
+      store.createSession({
+        principalId,
+        requestId: uuidv7(),
+        admissionKey: admissionKey('forged-process-channel'),
+        workspacePath: workspace,
+        channelIdentityRef: forgedChannelArtifact.ref,
+        channelIdentityDigest: forgedChannel.channelIdentityDigest
+      }),
+      (error) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH'
+    );
+
+    const peerObservation = await store.artifacts.publishCanonical(
+      { schemaVersion: 1, format: 'cliq-local-socket-peer-observation-test-v1' },
+      'cliq-local-socket-peer-observation-v1'
+    );
+    const udsChannel: LocalControlChannelIdentityV1 = {
+      ...channel,
+      transport: {
+        kind: 'uds_peer',
+        peerObservationRef: peerObservation.ref,
+        peerObservationDigest: peerObservation.ref
+      },
+      channelNonceDigest: digest('opaque-uds-channel'),
+      channelIdentityDigest: ''
+    };
+    udsChannel.channelIdentityDigest = digestOmitting(udsChannel, 'channelIdentityDigest');
+    const udsChannelArtifact = await store.artifacts.publishCanonical(
+      udsChannel,
+      udsChannel.format
+    );
+    await assert.rejects(
+      store.createSession({
+        principalId,
+        requestId: uuidv7(),
+        admissionKey: admissionKey('opaque-uds-channel'),
+        workspacePath: workspace,
+        channelIdentityRef: udsChannelArtifact.ref,
+        channelIdentityDigest: udsChannel.channelIdentityDigest
+      }),
+      (error) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH'
+    );
+  } finally {
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('recovery closed-decodes row_json instead of trusting redundant columns', async () => {
   const fixture = await createActiveFixture('corruption');
   try {
@@ -638,6 +817,51 @@ test('recovery closed-decodes row_json instead of trusting redundant columns', a
     );
   } finally {
     await disposeFixture(fixture);
+  }
+});
+
+test('fresh genesis refuses residual rows in every authority table', async () => {
+  const stateRoot = await makePrivateDir('.cliq-m2-genesis-db-residue-');
+  const driver = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    applyKernelSchema(driver);
+    driver
+      .prepare(
+        `INSERT INTO authorization_grants (grant_id, owner_principal_id, state, row_json)
+         VALUES (?, ?, ?, ?)`
+      )
+      .run('residual-grant', 'residual-principal', 'active', '{}');
+  } finally {
+    driver.close();
+  }
+  try {
+    await assert.rejects(
+      openStateStore(stateRoot),
+      (error) =>
+        error instanceof KernelStorageError &&
+        error.code === 'RECOVERY_REQUIRED' &&
+        error.message.includes('authorization_grants')
+    );
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('fresh genesis refuses a pre-existing CAS namespace', async () => {
+  const stateRoot = await makePrivateDir('.cliq-m2-genesis-cas-residue-');
+  const casRoot = path.join(stateRoot, 'cas');
+  await mkdir(casRoot, { mode: 0o700 });
+  await writeFile(path.join(casRoot, digest('residual-cas-object')), 'residual', { mode: 0o400 });
+  try {
+    await assert.rejects(
+      openStateStore(stateRoot),
+      (error) =>
+        error instanceof KernelStorageError &&
+        error.code === 'RECOVERY_REQUIRED' &&
+        error.message.includes('CAS namespace')
+    );
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
   }
 });
 
@@ -664,6 +888,57 @@ test('concurrent close joins one graceful StateOwner release', async () => {
     assert.equal(reopened.ownerEpoch, 2);
     await reopened.close();
   } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('graceful reacquisition preserves clock regression under the successor owner', async () => {
+  const stateRoot = await makePrivateDir('.cliq-m2-owner-clock-regression-');
+  const originalNow = Date.now;
+  const first = await openStateStore(stateRoot);
+  let second: StateStore | undefined;
+  try {
+    const firstFence = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+    let highWater: string;
+    try {
+      highWater = firstFence
+        .prepare('SELECT last_accepted_at FROM canonical_time_fence WHERE id = 1')
+        .get<{ last_accepted_at: string }>()!.last_accepted_at;
+    } finally {
+      firstFence.close();
+    }
+    Date.now = () => Date.parse(highWater) - 1_000;
+    await first.close();
+    second = await openStateStore(stateRoot);
+    assert.equal(second.ownerEpoch, 2);
+
+    const secondFence = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+    try {
+      const row = secondFence
+        .prepare(
+          `SELECT state_owner_epoch, last_accepted_at, observed_wall_clock_at, state
+           FROM canonical_time_fence WHERE id = 1`
+        )
+        .get<{
+          state_owner_epoch: unknown;
+          last_accepted_at: string;
+          observed_wall_clock_at: string;
+          state: string;
+        }>();
+      assert.equal(Number(row?.state_owner_epoch), 2);
+      assert.equal(row?.state, 'clock_regressed');
+      assert.equal(row?.last_accepted_at, highWater);
+      assert.ok(Date.parse(row!.observed_wall_clock_at) < Date.parse(highWater));
+    } finally {
+      secondFence.close();
+    }
+
+    Date.now = originalNow;
+    assert.equal(second.recoverCanonicalTime(), 'healthy');
+  } finally {
+    Date.now = originalNow;
+    await first.close().catch(() => undefined);
+    await second?.close().catch(() => undefined);
     await rm(stateRoot, { recursive: true, force: true });
   }
 });
