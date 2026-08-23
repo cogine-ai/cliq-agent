@@ -3,7 +3,7 @@
 **Status:** Final
 **Date:** 2026-08-11
 **Decision Type:** Architecture
-**Implementation Status:** Hidden M0 qualification and M1 admission/state-store slices landed; Kernel Cut not implemented. Default CLI/TUI still uses the legacy runtime.
+**Implementation Status:** Hidden M0 qualification, M1 admission/state-store, and M2 WP01 state-core slices landed; Kernel Cut not implemented. Native ownership takeover and migration/rollback remain open, and the default CLI/TUI still uses the legacy runtime.
 **Audience:** Core maintainers, implementers, reviewers, and integration authors
 
 > **Product promise:** **Delegate. Detach. Return to verified work.**

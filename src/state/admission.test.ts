@@ -191,6 +191,7 @@ test('M1 store admits a queued Run with an initial Checkpoint and recovers it', 
     assert.deepEqual(closure.items, []);
     assert.deepEqual(closure.journal, []);
     assert.deepEqual(closure.workerLaunches, []);
+    assert.deepEqual(closure.workspaceGenerations, []);
     assert.deepEqual(closure.childAllocations, []);
     assert.equal(store.getRun(admitted.run.id).revision, 1);
     assert.equal(store.getSession(created.session.id).id, created.session.id);
@@ -205,7 +206,7 @@ test('M1 store admits a queued Run with an initial Checkpoint and recovers it', 
       );
     });
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -276,7 +277,7 @@ test('admission-key replay returns the original Session and Run without a second
       assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM runs').get<{ count: unknown }>()?.count), 1);
     });
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -311,7 +312,7 @@ test('same admission key with a different intent is ADMISSION_KEY_CONFLICT', asy
       (error: unknown) => error instanceof KernelStorageError && error.code === 'ADMISSION_KEY_CONFLICT'
     );
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -344,7 +345,7 @@ test('reused requestId with different bytes is REQUEST_ID_CONFLICT', async () =>
       (error: unknown) => error instanceof KernelStorageError && error.code === 'REQUEST_ID_CONFLICT'
     );
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -393,7 +394,7 @@ test('replacing the workspace root after Session create is ARTIFACT_MISMATCH', a
       (error: unknown) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH'
     );
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(parent, { recursive: true, force: true });
   }
@@ -423,7 +424,7 @@ test('session.create rejects a symlinked workspace root', async () => {
         (error.code === 'ARTIFACT_MISMATCH' || error.code === 'INVALID_REQUEST')
     );
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(realWorkspace, { recursive: true, force: true });
     await rm(parent, { recursive: true, force: true });
@@ -455,7 +456,7 @@ test('Git workspaces publish a repository identity', async () => {
     assert.equal(typeof workspaceIdentity.repositoryIdentityRef, 'string');
     assert.equal(typeof workspaceIdentity.repositoryIdentityDigest, 'string');
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -532,7 +533,7 @@ test('concurrent same-key Session and Run admission returns the committed row', 
     assert.equal(firstRun.run.latestCheckpointId, storedRun.latestCheckpointId);
     assert.equal(secondRun.run.latestCheckpointId, storedRun.latestCheckpointId);
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -580,7 +581,7 @@ test('concurrent different-key Sessions do not mark the time fence clock_regress
       assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM sessions').get<{ count: unknown }>()?.count), 3);
     });
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -621,7 +622,7 @@ test('admitRun rejects a Session owned by another principal', async () => {
       (error: unknown) => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST'
     );
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -662,7 +663,7 @@ test('reopening the store recovers the admitted Run from SQLite and CAS', async 
     runId = admitted.run.id;
     sessionId = created.session.id;
   } finally {
-    first.close();
+    await first.close();
   }
 
   const second = await openStateStore(stateRoot);
@@ -675,16 +676,19 @@ test('reopening the store recovers the admitted Run from SQLite and CAS', async 
     assert.equal(closure.run.id, runId);
     assert.equal(closure.latestCheckpoint.reason, 'initial');
     assert.equal(closure.runSpec.operation, 'agent');
+    assert.equal(second.ownerEpoch, 2);
     inspectKernel(stateRoot, (driver) => {
       const owners = driver
-        .prepare(`SELECT owner_epoch, state FROM state_owners`)
+        .prepare(`SELECT owner_epoch, state FROM state_owners ORDER BY owner_epoch`)
         .all<{ owner_epoch: unknown; state: string }>();
-      assert.equal(owners.length, 1);
+      assert.equal(owners.length, 2);
       assert.equal(Number(owners[0]?.owner_epoch), 1);
-      assert.equal(owners[0]?.state, 'active');
+      assert.equal(owners[0]?.state, 'terminal');
+      assert.equal(Number(owners[1]?.owner_epoch), 2);
+      assert.equal(owners[1]?.state, 'active');
     });
   } finally {
-    second.close();
+    await second.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -740,7 +744,7 @@ test('same admission key with different budgets is ADMISSION_KEY_CONFLICT', asyn
       (error: unknown) => error instanceof KernelStorageError && error.code === 'ADMISSION_KEY_CONFLICT'
     );
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -769,7 +773,7 @@ test('session.create rejects a symlinked .git/config', async () => {
       (error: unknown) => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST'
     );
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
@@ -811,7 +815,7 @@ test('an empty required verifier set without allowUnverified is INVALID_REQUEST'
       (error: unknown) => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST'
     );
   } finally {
-    store.close();
+    await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }

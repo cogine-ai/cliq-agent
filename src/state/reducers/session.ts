@@ -18,8 +18,10 @@ import type {
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
-import { decodeControlChannel, decodeSessionProjection, decodeWorkspaceIdentity } from '../decoders.js';
+import { validateControlChannelClosure } from '../control-channel.js';
+import { decodeSessionProjection, decodeWorkspaceIdentity } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
+import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import {
   insertControlRequest,
   readAdmissionReplay,
@@ -140,7 +142,7 @@ async function replayCreateSession(
 export async function createSession(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
-  ownerEpoch: number,
+  owner: StateOwnerContext,
   input: CreateSessionInput
 ): Promise<CreateSessionResult> {
   assertRequestId(input.requestId);
@@ -163,16 +165,14 @@ export async function createSession(
   const replayed = await replayCreateSession(driver, artifacts, input, admissionIntentDigest, requestDigest);
   if (replayed !== undefined) return replayed;
 
-  const channel = decodeControlChannel(await artifacts.readCanonical(input.channelIdentityRef));
-  if (channel.channelIdentityDigest !== input.channelIdentityDigest || channel.principalId !== input.principalId) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel identity does not match the caller');
-  }
+  const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
+  const channel = channelClosure.channel;
 
   const captured = await captureLiveWorkspaceIdentity({
     workspacePath,
     ownerPrincipalId: input.principalId
   });
-  const published: PublishedArtifact[] = [];
+  const published: PublishedArtifact[] = [...channelClosure.metadata];
   let workspaceIdentity: Extract<WorkspaceIdentityV1, { kind: 'live' }> = captured.identity;
   if (captured.repository !== undefined) {
     const repositoryArtifact = await artifacts.publishCanonical(
@@ -256,7 +256,8 @@ export async function createSession(
       return;
     }
 
-    fenceOutcome = advanceTimeFence(connection, ownerEpoch);
+    assertActiveStateOwner(connection, owner);
+    fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch);
     if (fenceOutcome !== 'healthy') return;
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
     connection

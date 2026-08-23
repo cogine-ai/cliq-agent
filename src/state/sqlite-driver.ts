@@ -95,6 +95,8 @@ const TRANSACTION_CONTROL_KEYWORDS = new Set([
 function assertNoTransactionControl(sql: string): void {
   let index = 0;
   let statementStart = true;
+  let triggerBody = false;
+  let statementKeywords: string[] = [];
   while (index < sql.length) {
     const character = sql[index];
     if (/\s/u.test(character)) {
@@ -114,6 +116,7 @@ function assertNoTransactionControl(sql: string): void {
     }
     if (character === ';') {
       statementStart = true;
+      if (!triggerBody) statementKeywords = [];
       index += 1;
       continue;
     }
@@ -141,8 +144,20 @@ function assertNoTransactionControl(sql: string): void {
       index += 1;
       while (index < sql.length && /[A-Za-z0-9_]/u.test(sql[index])) index += 1;
       const keyword = sql.slice(start, index).toUpperCase();
+      if (triggerBody && statementStart && keyword === 'END') {
+        triggerBody = false;
+        statementStart = false;
+        continue;
+      }
       if (statementStart && TRANSACTION_CONTROL_KEYWORDS.has(keyword)) {
         throw new TypeError('SQLite transaction control SQL is reserved for the driver');
+      }
+      if (!triggerBody) {
+        statementKeywords.push(keyword);
+        const prefix = statementKeywords.filter((entry) => entry !== 'TEMP' && entry !== 'TEMPORARY');
+        if (prefix.length === 2 && prefix[0] === 'CREATE' && prefix[1] === 'TRIGGER') {
+          triggerBody = true;
+        }
       }
       statementStart = false;
       continue;
