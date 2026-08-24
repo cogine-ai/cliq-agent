@@ -165,3 +165,41 @@ test('physical guards reject history rewrites and direct lifecycle skips', async
     await rm(stateRoot, { recursive: true, force: true });
   }
 });
+
+test('physical Journal guard closes attempts and preserves unknown settlements', async () => {
+  const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-m2-fault-journal-'));
+  await chmod(stateRoot, 0o700);
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  try {
+    applyKernelSchema(driver);
+    seedRun(driver);
+    const insert = driver.prepare(
+      `INSERT INTO run_journal (run_id, seq, op_id, op_kind, attempt, phase, entry_json)
+       VALUES ('run-1', ?, ?, 'tool', 0, ?, ?)`
+    );
+
+    insert.run(1, 'op-final', 'prepared', '{}');
+    insert.run(2, 'op-final', 'dispatch_claimed', '{}');
+    insert.run(3, 'op-final', 'completed', '{"budgetSettlementRef":"settlement-final"}');
+    assert.throws(
+      () => insert.run(4, 'op-final', 'failed', '{"budgetSettlementRef":"settlement-final"}'),
+      /already has a final phase/
+    );
+
+    insert.run(4, 'op-resolution', 'prepared', '{}');
+    insert.run(5, 'op-resolution', 'dispatch_claimed', '{}');
+    insert.run(6, 'op-resolution', 'unknown', '{"budgetSettlementRef":"settlement-unknown"}');
+    assert.throws(
+      () => insert.run(7, 'op-resolution', 'completed', '{"budgetSettlementRef":"settlement-other"}'),
+      /reuse the unknown settlement/
+    );
+    insert.run(7, 'op-resolution', 'completed', '{"budgetSettlementRef":"settlement-unknown"}');
+    assert.throws(
+      () => insert.run(8, 'op-resolution', 'abandoned', '{"budgetSettlementRef":"settlement-unknown"}'),
+      /already has a final phase/
+    );
+  } finally {
+    driver.close();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});

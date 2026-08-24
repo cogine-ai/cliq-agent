@@ -298,6 +298,25 @@ BEFORE INSERT ON run_journal BEGIN
       WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt
         AND phase IN ('dispatch_claimed', 'completed', 'failed', 'unknown', 'abandoned')
     ) THEN RAISE(ABORT, 'run journal attempt already has a claim or terminal phase')
+    WHEN NEW.phase IN ('completed', 'failed', 'unknown', 'abandoned') AND EXISTS (
+      SELECT 1 FROM run_journal
+      WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt
+        AND phase IN ('completed', 'failed', 'abandoned')
+    ) THEN RAISE(ABORT, 'run journal attempt already has a final phase')
+    WHEN NEW.phase IN ('completed', 'failed', 'abandoned') AND EXISTS (
+      SELECT 1 FROM run_journal
+      WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt AND phase = 'unknown'
+    ) AND (
+      json_type(NEW.entry_json, '$.budgetSettlementRef') IS NOT 'text'
+      OR (
+        SELECT json_type(entry_json, '$.budgetSettlementRef') FROM run_journal
+        WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt AND phase = 'unknown'
+      ) IS NOT 'text'
+      OR json_extract(NEW.entry_json, '$.budgetSettlementRef') IS NOT (
+        SELECT json_extract(entry_json, '$.budgetSettlementRef') FROM run_journal
+        WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt AND phase = 'unknown'
+      )
+    ) THEN RAISE(ABORT, 'run journal resolution must reuse the unknown settlement')
     WHEN NEW.phase IN ('completed', 'unknown') AND NOT EXISTS (
       SELECT 1 FROM run_journal
       WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt AND phase = 'dispatch_claimed'
