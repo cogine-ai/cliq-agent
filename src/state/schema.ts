@@ -6,7 +6,7 @@ import {
 import { requiredSafeInteger } from '../kernel/identity.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 
-export const KERNEL_SCHEMA_SQL = `
+export const KERNEL_SCHEMA_V1_SQL = `
 CREATE TABLE canonical_time_fence (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   state_owner_epoch INTEGER NOT NULL,
@@ -248,6 +248,177 @@ CREATE TABLE admin_operations (
 ) STRICT;
 `;
 
+export const KERNEL_SCHEMA_V2_SQL = `
+CREATE UNIQUE INDEX worker_launches_one_unretired_per_run
+  ON worker_launches(run_id) WHERE retired_at IS NULL;
+
+CREATE UNIQUE INDEX workspace_generations_unique_generation_ref
+  ON workspace_generations(json_extract(row_json, '$.generationRef'))
+  WHERE json_extract(row_json, '$.generationRef') IS NOT NULL;
+
+CREATE TRIGGER checkpoints_immutable_update
+BEFORE UPDATE ON checkpoints BEGIN
+  SELECT RAISE(ABORT, 'checkpoints are immutable');
+END;
+CREATE TRIGGER checkpoints_immutable_delete
+BEFORE DELETE ON checkpoints BEGIN
+  SELECT RAISE(ABORT, 'checkpoints are immutable');
+END;
+
+CREATE TRIGGER items_immutable_update
+BEFORE UPDATE ON items BEGIN
+  SELECT RAISE(ABORT, 'items are immutable');
+END;
+CREATE TRIGGER items_immutable_delete
+BEFORE DELETE ON items BEGIN
+  SELECT RAISE(ABORT, 'items are immutable');
+END;
+
+CREATE TRIGGER run_journal_validate_insert
+BEFORE INSERT ON run_journal BEGIN
+  SELECT CASE
+    WHEN NEW.seq != COALESCE((SELECT max(seq) + 1 FROM run_journal WHERE run_id = NEW.run_id), 1)
+      THEN RAISE(ABORT, 'run journal sequence must be contiguous')
+    WHEN NEW.attempt < 0
+      THEN RAISE(ABORT, 'run journal attempt must be nonnegative')
+    WHEN NEW.op_kind NOT IN ('model', 'tool', 'mcp-server', 'mcp', 'verifier', 'publish')
+      THEN RAISE(ABORT, 'run journal op_kind is invalid')
+    WHEN NEW.phase NOT IN ('prepared', 'dispatch_claimed', 'completed', 'failed', 'unknown', 'abandoned')
+      THEN RAISE(ABORT, 'run journal phase is invalid')
+    WHEN NEW.phase = 'prepared' AND NEW.attempt != COALESCE(
+      (SELECT max(attempt) + 1 FROM run_journal WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND phase = 'prepared'),
+      0
+    ) THEN RAISE(ABORT, 'run journal attempts must be contiguous from zero')
+    WHEN NEW.phase != 'prepared' AND NOT EXISTS (
+      SELECT 1 FROM run_journal
+      WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt AND phase = 'prepared'
+    ) THEN RAISE(ABORT, 'run journal phase requires a prepared attempt')
+    WHEN NEW.phase = 'dispatch_claimed' AND EXISTS (
+      SELECT 1 FROM run_journal
+      WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt
+        AND phase IN ('dispatch_claimed', 'completed', 'failed', 'unknown', 'abandoned')
+    ) THEN RAISE(ABORT, 'run journal attempt already has a claim or terminal phase')
+    WHEN NEW.phase IN ('completed', 'failed', 'unknown', 'abandoned') AND EXISTS (
+      SELECT 1 FROM run_journal
+      WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt
+        AND phase IN ('completed', 'failed', 'abandoned')
+    ) THEN RAISE(ABORT, 'run journal attempt already has a final phase')
+    WHEN NEW.phase IN ('completed', 'failed', 'abandoned') AND EXISTS (
+      SELECT 1 FROM run_journal
+      WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt AND phase = 'unknown'
+    ) AND (
+      json_type(NEW.entry_json, '$.budgetSettlementRef') IS NOT 'text'
+      OR (
+        SELECT json_type(entry_json, '$.budgetSettlementRef') FROM run_journal
+        WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt AND phase = 'unknown'
+      ) IS NOT 'text'
+      OR json_extract(NEW.entry_json, '$.budgetSettlementRef') IS NOT (
+        SELECT json_extract(entry_json, '$.budgetSettlementRef') FROM run_journal
+        WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt AND phase = 'unknown'
+      )
+    ) THEN RAISE(ABORT, 'run journal resolution must reuse the unknown settlement')
+    WHEN NEW.phase IN ('completed', 'unknown') AND NOT EXISTS (
+      SELECT 1 FROM run_journal
+      WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt AND phase = 'dispatch_claimed'
+    ) THEN RAISE(ABORT, 'run journal terminal phase requires a claim')
+    WHEN NEW.phase = 'abandoned' AND NOT EXISTS (
+      SELECT 1 FROM run_journal
+      WHERE run_id = NEW.run_id AND op_id = NEW.op_id AND attempt = NEW.attempt AND phase = 'unknown'
+    ) THEN RAISE(ABORT, 'run journal abandonment requires unknown')
+  END;
+END;
+CREATE TRIGGER run_journal_immutable_update
+BEFORE UPDATE ON run_journal BEGIN
+  SELECT RAISE(ABORT, 'run journal is append-only');
+END;
+CREATE TRIGGER run_journal_immutable_delete
+BEFORE DELETE ON run_journal BEGIN
+  SELECT RAISE(ABORT, 'run journal is append-only');
+END;
+
+CREATE TRIGGER worker_launches_validate_insert
+BEFORE INSERT ON worker_launches BEGIN
+  SELECT CASE
+    WHEN NEW.phase NOT IN ('reserved', 'preactivated', 'activated', 'reconciling', 'retired')
+      THEN RAISE(ABORT, 'worker launch phase is invalid')
+    WHEN (NEW.phase = 'retired') != (NEW.retired_at IS NOT NULL)
+      THEN RAISE(ABORT, 'worker launch retired_at does not match phase')
+  END;
+END;
+CREATE TRIGGER worker_launches_validate_update
+BEFORE UPDATE ON worker_launches BEGIN
+  SELECT CASE
+    WHEN NEW.launch_id != OLD.launch_id OR NEW.run_id != OLD.run_id
+      THEN RAISE(ABORT, 'worker launch identity is immutable')
+    WHEN NOT (
+      (OLD.phase = 'reserved' AND NEW.phase IN ('preactivated', 'retired')) OR
+      (OLD.phase = 'preactivated' AND NEW.phase IN ('activated', 'retired')) OR
+      (OLD.phase = 'activated' AND NEW.phase IN ('activated', 'reconciling', 'retired')) OR
+      (OLD.phase = 'reconciling' AND NEW.phase = 'retired')
+    ) THEN RAISE(ABORT, 'worker launch phase transition is invalid')
+    WHEN (NEW.phase = 'retired') != (NEW.retired_at IS NOT NULL)
+      THEN RAISE(ABORT, 'worker launch retired_at does not match phase')
+  END;
+END;
+CREATE TRIGGER worker_launches_immutable_delete
+BEFORE DELETE ON worker_launches BEGIN
+  SELECT RAISE(ABORT, 'worker launch history is retained');
+END;
+
+CREATE TRIGGER workspace_generations_validate_insert
+BEFORE INSERT ON workspace_generations BEGIN
+  SELECT CASE
+    WHEN NEW.phase != 'materializing'
+      THEN RAISE(ABORT, 'workspace generation must begin materializing')
+    WHEN NEW.row_version != 1
+      THEN RAISE(ABORT, 'workspace generation must begin at row version one')
+  END;
+END;
+CREATE TRIGGER workspace_generations_validate_update
+BEFORE UPDATE ON workspace_generations BEGIN
+  SELECT CASE
+    WHEN NEW.generation_id != OLD.generation_id OR NEW.run_id != OLD.run_id
+      THEN RAISE(ABORT, 'workspace generation identity is immutable')
+    WHEN NEW.row_version != OLD.row_version + 1
+      THEN RAISE(ABORT, 'workspace generation row version must increment by one')
+    WHEN NOT (
+      (OLD.phase = 'materializing' AND NEW.phase IN ('preactivated_readonly', 'quarantined')) OR
+      (OLD.phase = 'preactivated_readonly' AND NEW.phase IN ('active', 'quarantined')) OR
+      (OLD.phase = 'active' AND NEW.phase IN ('revoking', 'fenced_reconciling')) OR
+      (OLD.phase = 'revoking' AND NEW.phase IN ('checkpointing', 'fenced_reconciling', 'quarantined')) OR
+      (OLD.phase = 'checkpointing' AND NEW.phase IN ('sealed', 'fenced_reconciling', 'quarantined')) OR
+      (OLD.phase = 'fenced_reconciling' AND NEW.phase = 'quarantined') OR
+      (OLD.phase IN ('sealed', 'quarantined') AND NEW.phase = 'retired')
+    ) THEN RAISE(ABORT, 'workspace generation phase transition is invalid')
+  END;
+END;
+CREATE TRIGGER workspace_generations_immutable_delete
+BEFORE DELETE ON workspace_generations BEGIN
+  SELECT RAISE(ABORT, 'workspace generation history is retained');
+END;
+
+CREATE TRIGGER state_owners_validate_update
+BEFORE UPDATE ON state_owners BEGIN
+  SELECT CASE
+    WHEN NEW.owner_epoch != OLD.owner_epoch OR NEW.supervisor_instance_id != OLD.supervisor_instance_id
+      THEN RAISE(ABORT, 'state owner identity is immutable')
+    WHEN OLD.state != 'active' OR NEW.state != 'terminal'
+      THEN RAISE(ABORT, 'state owner transition must be active to terminal')
+  END;
+END;
+CREATE TRIGGER state_owners_immutable_delete
+BEFORE DELETE ON state_owners BEGIN
+  SELECT RAISE(ABORT, 'state owner history is retained');
+END;
+
+CREATE TRIGGER canonical_time_fence_immutable_delete
+BEFORE DELETE ON canonical_time_fence BEGIN
+  SELECT RAISE(ABORT, 'canonical time fence cannot be deleted');
+END;
+`;
+
+export const KERNEL_SCHEMA_SQL = `${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}`;
+
 const REQUIRED_TABLES = [
   'canonical_time_fence',
   'state_owners',
@@ -278,22 +449,36 @@ function pragmaScalar(driver: SqliteDriver, name: string): unknown {
 }
 
 export function applyKernelSchema(driver: SqliteDriver): void {
+  const userVersion = requiredSafeInteger(pragmaScalar(driver, 'user_version'), 'user_version');
+  const applicationId = requiredSafeInteger(pragmaScalar(driver, 'application_id'), 'application_id');
+  if (![0, 1, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
+    throw new Error(`unsupported kernel schema version ${userVersion}`);
+  }
+  if (applicationId !== 0 && applicationId !== KERNEL_SQLITE_APPLICATION_ID) {
+    throw new Error(`kernel database has foreign application_id ${applicationId}`);
+  }
+  if (userVersion !== 0 && applicationId !== KERNEL_SQLITE_APPLICATION_ID) {
+    throw new Error('versioned kernel database is missing the Cliq application_id');
+  }
+
   driver.exec(`
     PRAGMA foreign_keys=ON;
     PRAGMA synchronous=FULL;
     PRAGMA busy_timeout=${KERNEL_SQLITE_BUSY_TIMEOUT_MS};
-    PRAGMA application_id=${KERNEL_SQLITE_APPLICATION_ID};
     PRAGMA journal_mode=DELETE;
   `);
 
-  const userVersion = requiredSafeInteger(pragmaScalar(driver, 'user_version'), 'user_version');
   if (userVersion === 0) {
     driver.transaction((connection) => {
+      connection.exec(`PRAGMA application_id=${KERNEL_SQLITE_APPLICATION_ID}`);
       connection.exec(KERNEL_SCHEMA_SQL);
       connection.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`);
     });
-  } else if (userVersion !== KERNEL_STATE_SCHEMA_VERSION) {
-    throw new Error(`unsupported kernel schema version ${userVersion}`);
+  } else if (userVersion === 1 && KERNEL_STATE_SCHEMA_VERSION === 2) {
+    driver.transaction((connection) => {
+      connection.exec(KERNEL_SCHEMA_V2_SQL);
+      connection.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`);
+    });
   }
 
   const names = new Set(

@@ -26,10 +26,10 @@ import type {
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
+import { validateControlChannelClosure } from '../control-channel.js';
 import {
   decodeAdmittedContext,
   decodeContextManifest,
-  decodeControlChannel,
   decodeFrozenIgnoreRules,
   decodeRunObjective,
   decodeRunSpec,
@@ -43,6 +43,7 @@ import {
   decodeWorkspaceState
 } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
+import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import {
   DEFAULT_RUN_BUDGETS,
   insertControlRequest,
@@ -198,7 +199,7 @@ async function replayAdmitRun(
 export async function admitRun(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
-  ownerEpoch: number,
+  owner: StateOwnerContext,
   input: AdmitRunInput
 ): Promise<AdmitRunResult> {
   assertRequestId(input.requestId);
@@ -226,10 +227,8 @@ export async function admitRun(
   const replayed = await replayAdmitRun(driver, artifacts, input, admissionIntentDigest, requestDigest);
   if (replayed !== undefined) return replayed;
 
-  const channel = decodeControlChannel(await artifacts.readCanonical(input.channelIdentityRef));
-  if (channel.channelIdentityDigest !== input.channelIdentityDigest || channel.principalId !== input.principalId) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel identity does not match the caller');
-  }
+  const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
+  const channel = channelClosure.channel;
 
   const session = readSession(driver, input.sessionId);
   if (readSessionPrincipalId(driver, input.sessionId) !== input.principalId) {
@@ -301,6 +300,20 @@ export async function admitRun(
   await artifacts.readBytes(input.policyRef);
   await artifacts.readBytes(input.sandboxProfileRef);
 
+  const referencedMetadata = await Promise.all([
+    artifacts.describe(input.assemblyRef, 'application/json', 'cliq-run-assembly-v1'),
+    artifacts.describe(input.policyRef, 'application/json', 'cliq-run-policy-v1'),
+    artifacts.describe(input.sandboxProfileRef, 'application/json', 'cliq-sandbox-profile-v1'),
+    artifacts.describe(input.verifierSpecRef, 'application/json', 'cliq-verifier-spec-v1'),
+    artifacts.describe(input.sourceProjectionRef, 'application/json', 'cliq-source-projection-v1'),
+    artifacts.describe(input.frozenIgnoreRulesRef, 'application/json', 'cliq-frozen-ignore-rules-v1'),
+    artifacts.describe(input.baseWorkspaceManifestRef, 'application/json', 'cliq-source-manifest-v1'),
+    artifacts.describe(sourceManifest.entriesRef, 'application/json', 'cliq-workspace-entries-v1'),
+    ...(input.credentialGrantRefs ?? []).map((ref) =>
+      artifacts.describe(ref, 'application/json', 'cliq-endpoint-credential-grant-binding-v1')
+    )
+  ]);
+
   const now = sampleCanonicalNow();
   const runId = identityHash('cliq-run-id-v1', input.principalId, 'run.submit', input.admissionKey);
   const checkpointId = identityHash('cliq-checkpoint-id-v1', runId, 'initial', 0);
@@ -314,7 +327,7 @@ export async function admitRun(
     objectiveDigest: ''
   };
   objective.objectiveDigest = digestOmitting(objective, 'objectiveDigest');
-  const published: PublishedArtifact[] = [];
+  const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata];
   const objectiveArtifact = await artifacts.publishCanonical(objective, 'cliq-run-objective-v1');
   published.push(objectiveArtifact);
   decodeRunObjective(objective);
@@ -509,7 +522,8 @@ export async function admitRun(
       throw new KernelStorageError('INVALID_REQUEST', 'session context revision changed before admission committed');
     }
 
-    fenceOutcome = advanceTimeFence(connection, ownerEpoch);
+    assertActiveStateOwner(connection, owner);
+    fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch);
     if (fenceOutcome !== 'healthy') return;
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
 

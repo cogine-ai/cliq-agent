@@ -2,9 +2,13 @@ export type KernelStorageErrorCode =
   | 'ADMISSION_KEY_CONFLICT'
   | 'REQUEST_ID_CONFLICT'
   | 'ARTIFACT_MISMATCH'
+  | 'BUDGET_EXHAUSTED'
   | 'INVALID_REQUEST'
+  | 'LEASE_FENCED'
   | 'NOT_FOUND'
   | 'RECOVERY_REQUIRED'
+  | 'REVISION_CONFLICT'
+  | 'STATE_TRANSITION_INVALID'
   | 'UNSUPPORTED_PLATFORM';
 
 export class KernelStorageError extends Error {

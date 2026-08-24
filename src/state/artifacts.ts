@@ -44,6 +44,15 @@ export class ArtifactCatalog {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} is not JSON`);
     }
   }
+
+  async describe(
+    ref: ArtifactRef,
+    mediaType: string,
+    schemaKind: string
+  ): Promise<PublishedArtifact> {
+    const bytes = await this.readBytes(ref);
+    return { ref, mediaType, schemaKind, byteLength: bytes.byteLength };
+  }
 }
 
 export function insertArtifactMetadata(
@@ -57,4 +66,18 @@ export function insertArtifactMetadata(
        VALUES (?, ?, ?, ?, ?)`
     )
     .run(artifact.ref, artifact.mediaType, artifact.schemaKind, BigInt(artifact.byteLength), createdAt);
+  const stored = connection
+    .prepare('SELECT media_type, schema_kind, byte_length FROM artifacts WHERE ref = ?')
+    .get<{ media_type: string; schema_kind: string; byte_length: unknown }>(artifact.ref);
+  if (
+    stored === undefined ||
+    stored.media_type !== artifact.mediaType ||
+    stored.schema_kind !== artifact.schemaKind ||
+    Number(stored.byte_length) !== artifact.byteLength
+  ) {
+    throw new KernelStorageError(
+      'ARTIFACT_MISMATCH',
+      `artifact ${artifact.ref} metadata conflicts with its first authoritative declaration`
+    );
+  }
 }

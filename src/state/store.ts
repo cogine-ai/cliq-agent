@@ -1,5 +1,6 @@
 import { constants, type Stats } from 'node:fs';
-import { chmod, lstat, mkdir, open } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
 import {
@@ -11,7 +12,6 @@ import {
 import { canonicalSha256 } from '../kernel/canonical.js';
 import {
   digestOmitting,
-  encodeCanonicalTime,
   identityHash,
   normalizeAbsolutePath,
   sha256Bytes,
@@ -20,6 +20,7 @@ import {
 import type {
   KernelGenerationIdentityV1,
   LocalControlChannelIdentityV1,
+  LocalPrincipalIdentityV1,
   PlatformProcessIdentityV1,
   RecoveryClosureV1,
   Run,
@@ -27,27 +28,191 @@ import type {
   StateLockIdentityV1,
   StateOwnerAcquisitionEvidenceV1,
   StateOwnerRecordV1,
+  StateOwnerTransitionEvidenceV1,
   StateRootIdentityV1
 } from '../kernel/types.js';
 import { ArtifactCatalog } from './artifacts.js';
-import { insertGenesisTimeFence, readTimeFence, sampleCanonicalNow } from './canonical-time.js';
+import {
+  insertGenesisTimeFence,
+  readTimeFence,
+  recoverRegressedTimeFence,
+  sampleCanonicalNow,
+  transferTimeFenceOwner,
+  type TimeFenceAdvance
+} from './canonical-time.js';
 import { ContentAddressedStore } from './cas.js';
 import { KernelStorageError } from './errors.js';
+import {
+  decodePlatformProcessIdentity,
+  decodeStateLockIdentity,
+  decodeStateOwnerAcquisitionEvidence,
+  decodeStateOwnerTransitionEvidence,
+  decodeStateRootIdentity
+} from './decoders.js';
 import { admitRun, type AdmitRunInput, type AdmitRunResult } from './reducers/admission.js';
+import {
+  abandonUnknownInvocation,
+  claimInvocationDispatch,
+  completeInvocation,
+  failClaimedInvocationWithoutRelease,
+  failInvocationBeforeDispatch,
+  markInvocationUnknown,
+  prepareInvocation,
+  type ClaimInvocationDispatchInput,
+  type PrepareInvocationInput,
+  type SettleInvocationInput
+} from './reducers/invocation.js';
 import { createSession, type CreateSessionInput, type CreateSessionResult } from './reducers/session.js';
+import {
+  activateWorkerLease,
+  beginGenerationCheckpoint,
+  beginGenerationRevocation,
+  recordWorkerPreactivated,
+  renewWorkerLease,
+  reserveWorkerLaunch,
+  sealWorkerGeneration,
+  type ActivateWorkerLeaseInput,
+  type BeginGenerationCheckpointInput,
+  type BeginGenerationRevocationInput,
+  type RecordWorkerPreactivatedInput,
+  type RenewWorkerLeaseInput,
+  type ReserveWorkerLaunchInput,
+  type SealWorkerGenerationInput
+} from './reducers/worker-launch.js';
+import {
+  recordWorkspaceGenerationPreactivated,
+  registerWorkspaceGeneration,
+  type RecordWorkspaceGenerationPreactivatedInput,
+  type RegisterWorkspaceGenerationInput
+} from './reducers/workspace-transition.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { readRun, readSession } from './rows.js';
 import { applyKernelSchema, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
-import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
+import { openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
+import {
+  assertActiveStateOwner,
+  assertContiguousStateOwnerHistory,
+  contextFromStateOwner,
+  gracefullyReleaseStateOwner,
+  readActiveStateOwner,
+  readLatestStateOwner,
+  insertStateOwnerArtifacts,
+  type StateOwnerContext
+} from './state-owner.js';
 import { hostPlatform } from './workspace-identity.js';
 
-export type { AdmitRunInput, AdmitRunResult, CreateSessionInput, CreateSessionResult };
+export type {
+  ActivateWorkerLeaseInput,
+  AdmitRunInput,
+  AdmitRunResult,
+  BeginGenerationCheckpointInput,
+  BeginGenerationRevocationInput,
+  ClaimInvocationDispatchInput,
+  CreateSessionInput,
+  CreateSessionResult,
+  PrepareInvocationInput,
+  RecordWorkerPreactivatedInput,
+  RecordWorkspaceGenerationPreactivatedInput,
+  RegisterWorkspaceGenerationInput,
+  RenewWorkerLeaseInput,
+  ReserveWorkerLaunchInput,
+  SealWorkerGenerationInput,
+  SettleInvocationInput
+};
+
+const AUTHORITY_TABLES = [
+  'canonical_time_fence',
+  'state_owners',
+  'artifacts',
+  'sessions',
+  'items',
+  'runs',
+  'checkpoints',
+  'run_journal',
+  'run_events',
+  'worker_launches',
+  'workspace_generations',
+  'local_inference_activation_cycles',
+  'local_inference_launches',
+  'control_requests',
+  'list_read_cuts',
+  'list_read_cut_entries',
+  'child_allocations',
+  'authorization_grants',
+  'mcp_registrations',
+  'admin_operations'
+] as const;
+
+function assertFreshAuthorityDatabaseEmpty(connection: SqliteConnection | SqliteDriver): void {
+  for (const table of AUTHORITY_TABLES) {
+    const row = connection
+      .prepare(`SELECT count(*) AS count FROM ${table}`)
+      .get<{ count: unknown }>();
+    if (Number(row?.count ?? 0) !== 0) {
+      throw new KernelStorageError(
+        'RECOVERY_REQUIRED',
+        `refusing fresh_empty genesis over non-empty authority table ${table}`
+      );
+    }
+  }
+}
 
 function requireEffectiveUid(): number {
   if (typeof process.geteuid !== 'function') {
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'state store requires a POSIX effective uid');
   }
   return process.geteuid();
+}
+
+let currentProcessBasePromise:
+  | Promise<{ processStartToken: string; executableImageDigest: string }>
+  | undefined;
+
+async function currentProcessBase(): Promise<{
+  processStartToken: string;
+  executableImageDigest: string;
+}> {
+  currentProcessBasePromise ??= (async () => {
+    const executableImageDigest = sha256Bytes(await readFile(process.execPath));
+    if (process.platform === 'linux') {
+      let stat: string;
+      try {
+        stat = await readFile(`/proc/${process.pid}/stat`, 'utf8');
+      } catch {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'cannot read the current Linux process start token');
+      }
+      const close = stat.lastIndexOf(')');
+      const fields = close === -1 ? [] : stat.slice(close + 2).trim().split(/\s+/u);
+      const startTicks = fields[19];
+      if (startTicks === undefined || !/^\d+$/u.test(startTicks)) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'Linux process stat has no valid start token');
+      }
+      return { processStartToken: `linux-proc-start-ticks:${startTicks}`, executableImageDigest };
+    }
+    const startEpochMs = Math.max(0, Math.floor(Date.now() - process.uptime() * 1_000));
+    return {
+      processStartToken: `darwin-process-start-epoch-ms:${startEpochMs}`,
+      executableImageDigest
+    };
+  })();
+  return currentProcessBasePromise;
+}
+
+async function currentProcessIdentity(observedAt: string): Promise<PlatformProcessIdentityV1> {
+  const base = await currentProcessBase();
+  const identity: PlatformProcessIdentityV1 = {
+    schemaVersion: 1,
+    format: 'cliq-platform-process-identity-v1',
+    platform: hostPlatform(),
+    pid: process.pid,
+    processStartToken: base.processStartToken,
+    ownerUid: requireEffectiveUid(),
+    executableImageDigest: base.executableImageDigest,
+    observedAt,
+    identityDigest: ''
+  };
+  identity.identityDigest = digestOmitting(identity, 'identityDigest');
+  return identity;
 }
 
 async function assertPrivateStateRoot(stateRoot: string): Promise<void> {
@@ -75,20 +240,27 @@ async function assertPrivateStateRoot(stateRoot: string): Promise<void> {
   }
 }
 
-async function ensurePrivateDirectory(directory: string): Promise<void> {
+async function ensurePrivateDirectory(directory: string, allowCreate: boolean): Promise<void> {
+  let existing: Stats;
   try {
-    await mkdir(directory, { mode: 0o700 });
+    existing = await lstat(directory);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (!allowCreate) {
+      throw new KernelStorageError(
+        'RECOVERY_REQUIRED',
+        `${directory} is missing from an existing StateOwner generation`
+      );
+    }
+    await mkdir(directory, { mode: 0o700 });
+    existing = await lstat(directory);
   }
-  const existing = await lstat(directory);
   if (existing.isSymbolicLink() || !existing.isDirectory()) {
     throw new KernelStorageError('INVALID_REQUEST', `${directory} must be a 0700 directory`);
   }
   if (existing.uid !== requireEffectiveUid()) {
     throw new KernelStorageError('INVALID_REQUEST', `${directory} must be owned by the effective uid`);
   }
-  await chmod(directory, 0o700);
   const info = await lstat(directory);
   if (
     info.isSymbolicLink() ||
@@ -112,24 +284,171 @@ async function ensureLockFile(lockPath: string): Promise<Stats> {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
   }
   const existing = await lstat(lockPath);
-  if (existing.isSymbolicLink() || !existing.isFile() || existing.nlink !== 1) {
+  if (
+    existing.isSymbolicLink() ||
+    !existing.isFile() ||
+    existing.nlink !== 1 ||
+    existing.uid !== requireEffectiveUid()
+  ) {
     throw new KernelStorageError('INVALID_REQUEST', 'state-owner lock must be a 0600 regular file with link count 1');
   }
-  await chmod(lockPath, 0o600);
   const info = await lstat(lockPath);
-  if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1 || (info.mode & 0o7777) !== 0o600) {
+  if (
+    info.isSymbolicLink() ||
+    !info.isFile() ||
+    info.nlink !== 1 ||
+    info.uid !== requireEffectiveUid() ||
+    (info.mode & 0o7777) !== 0o600
+  ) {
     throw new KernelStorageError('INVALID_REQUEST', 'state-owner lock must be a 0600 regular file with link count 1');
   }
   return info;
 }
 
+async function stateOwnerFilesystemFromArtifacts(
+  stateRoot: string,
+  artifacts: ArtifactCatalog,
+  owner: StateOwnerRecordV1
+): Promise<{
+  lockIdentity: StateLockIdentityV1;
+  filesystem: StateOwnerContext['filesystem'];
+}> {
+  const lockIdentity = decodeStateLockIdentity(
+    await artifacts.readCanonical(owner.stateLockIdentityRef)
+  );
+  if (lockIdentity.identityDigest !== owner.stateLockIdentityDigest) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock identity does not rehash');
+  }
+  const rootIdentity = decodeStateRootIdentity(
+    await artifacts.readCanonical(lockIdentity.stateRootIdentityRef)
+  );
+  if (
+    rootIdentity.identityDigest !== lockIdentity.stateRootIdentityDigest ||
+    rootIdentity.canonicalAbsolutePath !== stateRoot ||
+    rootIdentity.ownerUid !== requireEffectiveUid() ||
+    rootIdentity.platform !== hostPlatform() ||
+    lockIdentity.ownerUid !== requireEffectiveUid()
+  ) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner root identity does not rehash');
+  }
+  const runtimePath = path.join(stateRoot, 'runtime');
+  const lockPath = path.join(stateRoot, lockIdentity.canonicalRootRelativePath);
+  let rootInfo: Stats;
+  let runtimeInfo: Stats;
+  let lockInfo: Stats;
+  try {
+    [rootInfo, runtimeInfo, lockInfo] = await Promise.all([
+      lstat(stateRoot),
+      lstat(runtimePath),
+      lstat(lockPath)
+    ]);
+  } catch {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner filesystem closure is incomplete');
+  }
+  if (
+    rootInfo.isSymbolicLink() ||
+    !rootInfo.isDirectory() ||
+    rootInfo.uid !== requireEffectiveUid() ||
+    (rootInfo.mode & 0o7777) !== 0o700 ||
+    runtimeInfo.isSymbolicLink() ||
+    !runtimeInfo.isDirectory() ||
+    runtimeInfo.uid !== requireEffectiveUid() ||
+    (runtimeInfo.mode & 0o7777) !== 0o700 ||
+    lockInfo.isSymbolicLink() ||
+    !lockInfo.isFile() ||
+    lockInfo.uid !== requireEffectiveUid() ||
+    (lockInfo.mode & 0o7777) !== 0o600 ||
+    lockInfo.nlink !== 1 ||
+    unsignedDecimalId(rootInfo.dev) !== rootIdentity.deviceId ||
+    unsignedDecimalId(rootInfo.ino) !== rootIdentity.directoryFileId ||
+    unsignedDecimalId(lockInfo.dev) !== lockIdentity.deviceId ||
+    unsignedDecimalId(lockInfo.ino) !== lockIdentity.fileId
+  ) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner filesystem identity changed during open');
+  }
+  return {
+    lockIdentity,
+    filesystem: {
+      stateRootPath: stateRoot,
+      stateRootDeviceId: unsignedDecimalId(rootInfo.dev),
+      stateRootFileId: unsignedDecimalId(rootInfo.ino),
+      ownerUid: requireEffectiveUid(),
+      runtimePath,
+      runtimeDeviceId: unsignedDecimalId(runtimeInfo.dev),
+      runtimeFileId: unsignedDecimalId(runtimeInfo.ino),
+      lockPath,
+      lockDeviceId: unsignedDecimalId(lockInfo.dev),
+      lockFileId: unsignedDecimalId(lockInfo.ino)
+    }
+  };
+}
+
+async function stateOwnerContextFromArtifacts(
+  stateRoot: string,
+  artifacts: ArtifactCatalog,
+  owner: Extract<StateOwnerRecordV1, { state: 'active' }>
+): Promise<StateOwnerContext> {
+  const { lockIdentity, filesystem } = await stateOwnerFilesystemFromArtifacts(
+    stateRoot,
+    artifacts,
+    owner
+  );
+  const processIdentity = decodePlatformProcessIdentity(
+    await artifacts.readCanonical(owner.processIdentityRef)
+  );
+  const acquisition = decodeStateOwnerAcquisitionEvidence(
+    await artifacts.readCanonical(owner.acquisitionEvidenceRef)
+  );
+  if (
+    processIdentity.identityDigest !== owner.processIdentityDigest ||
+    processIdentity.executableImageDigest !== owner.supervisorExecutableDigest ||
+    processIdentity.ownerUid !== requireEffectiveUid() ||
+    processIdentity.platform !== hostPlatform() ||
+    acquisition.evidenceDigest !== owner.acquisitionEvidenceDigest ||
+    acquisition.ownerEpoch !== owner.ownerEpoch ||
+    acquisition.supervisorInstanceId !== owner.supervisorInstanceId ||
+    acquisition.runtimeBundleRef !== owner.runtimeBundleRef ||
+    acquisition.runtimeBundleManifestDigest !== owner.runtimeBundleManifestDigest ||
+    acquisition.processIdentityRef !== owner.processIdentityRef ||
+    acquisition.processIdentityDigest !== owner.processIdentityDigest ||
+    acquisition.stateLockIdentityRef !== owner.stateLockIdentityRef ||
+    acquisition.stateLockIdentityDigest !== owner.stateLockIdentityDigest ||
+    acquisition.instanceNonceDigest !== owner.instanceNonceDigest ||
+    acquisition.acquiredAt !== owner.acquiredAt ||
+    (owner.ownerEpoch === 1
+      ? acquisition.kind !== 'genesis'
+      : acquisition.kind === 'genesis' || acquisition.priorOwnerEpoch !== owner.ownerEpoch - 1)
+  ) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'active StateOwner acquisition closure does not match');
+  }
+  return contextFromStateOwner(
+    owner,
+    filesystem,
+    { ref: lockIdentity.stateRootIdentityRef, digest: lockIdentity.stateRootIdentityDigest }
+  );
+}
+
 export class StateStore {
+  private closed = false;
+  private closing: Promise<void> | undefined;
+
   private constructor(
     readonly stateRoot: string,
     private readonly driver: SqliteDriver,
     readonly artifacts: ArtifactCatalog,
-    readonly ownerEpoch: number
+    private readonly owner: StateOwnerContext
   ) {}
+
+  get ownerEpoch(): number {
+    return this.owner.ownerEpoch;
+  }
+
+  get stateRootIdentity(): { ref: string; digest: string } {
+    return {
+      ref: this.owner.stateRootIdentityRef,
+      digest: this.owner.stateRootIdentityDigest
+    };
+  }
 
   static async open(stateRoot: string): Promise<StateStore> {
     if (process.platform !== 'darwin' && process.platform !== 'linux') {
@@ -138,22 +457,136 @@ export class StateStore {
     await assertPrivateStateRoot(stateRoot);
     const casRoot = path.join(stateRoot, KERNEL_CAS_DIRECTORY);
     const runtimeRoot = path.join(stateRoot, 'runtime');
-    await ensurePrivateDirectory(casRoot);
-    await ensurePrivateDirectory(runtimeRoot);
-
     const driver = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
-    applyKernelSchema(driver);
-    const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
-    const ownerEpoch = await bootstrapFreshEmpty(stateRoot, driver, artifacts);
-    return new StateStore(stateRoot, driver, artifacts, ownerEpoch);
+    try {
+      const preflightSchemaVersion = readSchemaUserVersion(driver);
+      if (preflightSchemaVersion === 1) {
+        const priorOwners = driver
+          .prepare('SELECT count(*) AS count FROM state_owners')
+          .get<{ count: unknown }>();
+        if (Number(priorOwners?.count ?? 0) !== 0) {
+          throw new KernelStorageError(
+            'RECOVERY_REQUIRED',
+            'schema-v1 authority requires the explicit WP01 generation migration path'
+          );
+        }
+      } else if (preflightSchemaVersion === KERNEL_STATE_SCHEMA_VERSION) {
+        const activeOwner = driver
+          .prepare(`SELECT owner_epoch FROM state_owners WHERE state = 'active' LIMIT 1`)
+          .get<{ owner_epoch: unknown }>();
+        if (activeOwner !== undefined) {
+          throw new KernelStorageError(
+            'RECOVERY_REQUIRED',
+            `state owner epoch ${String(activeOwner.owner_epoch)} is still active`
+          );
+        }
+      }
+      applyKernelSchema(driver);
+      const ownerHistory = driver
+        .prepare('SELECT count(*) AS count FROM state_owners')
+        .get<{ count: unknown }>();
+      const allowLayoutCreation = Number(ownerHistory?.count ?? 0) === 0;
+      await ensurePrivateDirectory(casRoot, allowLayoutCreation);
+      await ensurePrivateDirectory(runtimeRoot, allowLayoutCreation);
+      const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
+      const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts);
+      const ownerContext = await stateOwnerContextFromArtifacts(stateRoot, artifacts, owner);
+      return new StateStore(stateRoot, driver, artifacts, ownerContext);
+    } catch (error) {
+      try {
+        driver.close();
+      } catch {
+        // Preserve the open/acquisition failure as the primary diagnostic.
+      }
+      throw error;
+    }
   }
 
   createSession(input: CreateSessionInput): Promise<CreateSessionResult> {
-    return createSession(this.driver, this.artifacts, this.ownerEpoch, input);
+    return createSession(this.driver, this.artifacts, this.owner, input);
   }
 
   admitRun(input: AdmitRunInput): Promise<AdmitRunResult> {
-    return admitRun(this.driver, this.artifacts, this.ownerEpoch, input);
+    return admitRun(this.driver, this.artifacts, this.owner, input);
+  }
+
+  registerWorkspaceGeneration(input: RegisterWorkspaceGenerationInput) {
+    return registerWorkspaceGeneration(this.driver, this.artifacts, this.owner, input);
+  }
+
+  recordWorkspaceGenerationPreactivated(input: RecordWorkspaceGenerationPreactivatedInput) {
+    return recordWorkspaceGenerationPreactivated(this.driver, this.artifacts, this.owner, input);
+  }
+
+  reserveWorkerLaunch(input: ReserveWorkerLaunchInput) {
+    return reserveWorkerLaunch(this.driver, this.artifacts, this.owner, input);
+  }
+
+  recordWorkerPreactivated(input: RecordWorkerPreactivatedInput) {
+    return recordWorkerPreactivated(this.driver, this.artifacts, this.owner, input);
+  }
+
+  activateWorkerLease(input: ActivateWorkerLeaseInput) {
+    return activateWorkerLease(this.driver, this.owner, input);
+  }
+
+  renewWorkerLease(input: RenewWorkerLeaseInput) {
+    return renewWorkerLease(this.driver, this.owner, input);
+  }
+
+  beginGenerationRevocation(input: BeginGenerationRevocationInput) {
+    return beginGenerationRevocation(this.driver, this.owner, input);
+  }
+
+  beginGenerationCheckpoint(input: BeginGenerationCheckpointInput) {
+    return beginGenerationCheckpoint(this.driver, this.owner, input);
+  }
+
+  sealWorkerGeneration(input: SealWorkerGenerationInput) {
+    return sealWorkerGeneration(this.driver, this.artifacts, this.owner, input);
+  }
+
+  prepareInvocation(input: PrepareInvocationInput) {
+    return prepareInvocation(this.driver, this.artifacts, this.owner, input);
+  }
+
+  claimInvocationDispatch(input: ClaimInvocationDispatchInput) {
+    return claimInvocationDispatch(this.driver, this.artifacts, this.owner, input);
+  }
+
+  completeInvocation(
+    input: SettleInvocationInput & {
+      resultRef?: string;
+      receiptRef?: string;
+      consumed: import('../kernel/types.js').BudgetUsage;
+    }
+  ) {
+    return completeInvocation(this.driver, this.artifacts, this.owner, input);
+  }
+
+  failInvocationBeforeDispatch(input: SettleInvocationInput & { errorRef: string }) {
+    return failInvocationBeforeDispatch(this.driver, this.artifacts, this.owner, input);
+  }
+
+  failClaimedInvocationWithoutRelease(
+    input: SettleInvocationInput & { errorRef: string; evidenceRef: string; evidenceDigest: string }
+  ) {
+    return failClaimedInvocationWithoutRelease(this.driver, this.artifacts, this.owner, input);
+  }
+
+  markInvocationUnknown(
+    input: SettleInvocationInput & { evidenceRef: string; evidenceDigest: string }
+  ) {
+    return markInvocationUnknown(this.driver, this.artifacts, this.owner, input);
+  }
+
+  abandonUnknownInvocation(input: {
+    runId: string;
+    opId: string;
+    attempt: number;
+    attestationRef: string;
+  }) {
+    return abandonUnknownInvocation(this.driver, this.artifacts, this.owner, input);
   }
 
   getSession(sessionId: string): Session {
@@ -168,8 +601,28 @@ export class StateStore {
     return readRecoveryClosure(this.driver, this.artifacts, runId);
   }
 
-  close(): void {
-    this.driver.close();
+  recoverCanonicalTime(): TimeFenceAdvance {
+    let outcome!: TimeFenceAdvance;
+    this.driver.transaction((connection) => {
+      assertActiveStateOwner(connection, this.owner);
+      outcome = recoverRegressedTimeFence(connection, this.owner.ownerEpoch);
+    });
+    return outcome;
+  }
+
+  close(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    if (this.closing !== undefined) return this.closing;
+    const attempt = (async () => {
+      await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
+      this.driver.close();
+      this.closed = true;
+    })();
+    this.closing = attempt.catch((error: unknown) => {
+      this.closing = undefined;
+      throw error;
+    });
+    return this.closing;
   }
 }
 
@@ -177,42 +630,49 @@ export async function openStateStore(stateRoot: string): Promise<StateStore> {
   return StateStore.open(stateRoot);
 }
 
-async function bootstrapFreshEmpty(
+async function acquireOrBootstrapStateOwner(
   stateRoot: string,
   driver: SqliteDriver,
   artifacts: ArtifactCatalog
-): Promise<number> {
-  const existingOwner = driver
-    .prepare(`SELECT owner_epoch FROM state_owners WHERE state = 'active'`)
-    .get<{ owner_epoch: unknown }>();
+): Promise<Extract<StateOwnerRecordV1, { state: 'active' }>> {
+  assertContiguousStateOwnerHistory(driver);
+  const existingOwner = readActiveStateOwner(driver);
   const fence = readTimeFence(driver);
-  if (existingOwner !== undefined && fence !== undefined) {
-    return Number(existingOwner.owner_epoch);
+  if (existingOwner !== undefined) {
+    throw new KernelStorageError(
+      'RECOVERY_REQUIRED',
+      `state owner epoch ${existingOwner.ownerEpoch} is still active`
+    );
   }
-  if (existingOwner !== undefined || fence !== undefined) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'state owner and time fence must be created together');
+  const latestOwner = readLatestStateOwner(driver);
+  if (latestOwner !== undefined) {
+    if (fence === undefined || fence.stateOwnerEpoch !== latestOwner.ownerEpoch) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'state owner history and time fence do not match');
+    }
+    if (latestOwner.state !== 'terminal' || latestOwner.terminalReason !== 'graceful_release') {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'latest state owner is not cleanly acquirable');
+    }
+    return acquireAfterGracefulRelease(stateRoot, driver, artifacts, latestOwner);
   }
+  if (fence !== undefined) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence exists without state owner history');
+  }
+  assertFreshAuthorityDatabaseEmpty(driver);
 
-  const leftover = driver
-    .prepare(
-      `SELECT
-         (SELECT count(*) FROM sessions) AS sessions,
-         (SELECT count(*) FROM runs) AS runs,
-         (SELECT count(*) FROM control_requests) AS control_requests`
-    )
-    .get<{ sessions: unknown; runs: unknown; control_requests: unknown }>();
-  if (
-    Number(leftover?.sessions ?? 0) !== 0 ||
-    Number(leftover?.runs ?? 0) !== 0 ||
-    Number(leftover?.control_requests ?? 0) !== 0
-  ) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'refusing fresh_empty genesis over a non-empty authority database');
+  const casRoot = path.join(stateRoot, KERNEL_CAS_DIRECTORY);
+  const existingCasEntries = await readdir(casRoot);
+  if (existingCasEntries.length !== 0) {
+    throw new KernelStorageError(
+      'RECOVERY_REQUIRED',
+      'refusing fresh_empty genesis over a non-empty CAS namespace'
+    );
   }
 
   const now = sampleCanonicalNow();
   const platform = hostPlatform();
   const uid = requireEffectiveUid();
   const rootInfo = await lstat(stateRoot);
+  const casInfo = await lstat(casRoot);
   const lockInfo = await ensureLockFile(path.join(stateRoot, 'runtime', 'state-owner.lock'));
 
   const stateRootIdentity: StateRootIdentityV1 = {
@@ -231,18 +691,7 @@ async function bootstrapFreshEmpty(
   stateRootIdentity.identityDigest = digestOmitting(stateRootIdentity, 'identityDigest');
   const stateRootArtifact = await artifacts.publishCanonical(stateRootIdentity, 'cliq-state-root-identity-v1');
 
-  const processIdentity: PlatformProcessIdentityV1 = {
-    schemaVersion: 1,
-    format: 'cliq-platform-process-identity-v1',
-    platform,
-    pid: process.pid,
-    processStartToken: `${process.pid}:${process.ppid}:${encodeCanonicalTime(Date.now())}`,
-    ownerUid: uid,
-    executableImageDigest: sha256Bytes(Buffer.from(process.execPath, 'utf8')),
-    observedAt: now,
-    identityDigest: ''
-  };
-  processIdentity.identityDigest = digestOmitting(processIdentity, 'identityDigest');
+  const processIdentity = await currentProcessIdentity(now);
   const processArtifact = await artifacts.publishCanonical(processIdentity, 'cliq-platform-process-identity-v1');
 
   const lockIdentity: StateLockIdentityV1 = {
@@ -278,7 +727,11 @@ async function bootstrapFreshEmpty(
     format: 'cliq-kernel-empty-database-v1',
     applicationId: KERNEL_SQLITE_APPLICATION_ID,
     userVersion: readSchemaUserVersion(driver),
-    contentDigest: canonicalSha256({ applicationId: KERNEL_SQLITE_APPLICATION_ID, userVersion: 1, tables: 20 })
+    contentDigest: canonicalSha256({
+      applicationId: KERNEL_SQLITE_APPLICATION_ID,
+      userVersion: KERNEL_STATE_SCHEMA_VERSION,
+      tables: AUTHORITY_TABLES.length
+    })
   };
   const databaseArtifact = await artifacts.publishCanonical(emptyDatabase, 'cliq-kernel-empty-database-v1');
 
@@ -291,8 +744,8 @@ async function bootstrapFreshEmpty(
     stateRootIdentityDigest: stateRootIdentity.identityDigest,
     canonicalRootRelativePath: KERNEL_CAS_DIRECTORY,
     ownerUid: uid,
-    deviceId: unsignedDecimalId(rootInfo.dev),
-    directoryFileId: unsignedDecimalId(rootInfo.ino),
+    deviceId: unsignedDecimalId(casInfo.dev),
+    directoryFileId: unsignedDecimalId(casInfo.ino),
     mode: 448,
     entries: [] as Array<{ artifactRef: string; byteCount: number }>,
     objectCount: 0,
@@ -328,7 +781,7 @@ async function bootstrapFreshEmpty(
   const generationArtifact = await artifacts.publishCanonical(generation, 'cliq-kernel-generation-identity-v1');
 
   const supervisorInstanceId = identityHash('cliq-supervisor-instance-v1', processIdentity.identityDigest, now);
-  const instanceNonceDigest = sha256Bytes(Buffer.from(`${supervisorInstanceId}:${now}`, 'utf8'));
+  const instanceNonceDigest = sha256Bytes(randomBytes(32));
   const acquisition: StateOwnerAcquisitionEvidenceV1 = {
     schemaVersion: 1,
     format: 'cliq-state-owner-acquisition-evidence-v1',
@@ -354,14 +807,14 @@ async function bootstrapFreshEmpty(
     'cliq-state-owner-acquisition-evidence-v1'
   );
 
-  const owner: StateOwnerRecordV1 = {
+  const owner: Extract<StateOwnerRecordV1, { state: 'active' }> = {
     schemaVersion: 1,
     ownerEpoch: 1,
     supervisorInstanceId,
     runtimeBundleRef: schemaArtifact.ref,
     runtimeBundleManifestDigest: schemaManifest.manifestDigest,
     supervisorEntryId: 'state-store',
-    supervisorEntryVersion: 'm1',
+    supervisorEntryVersion: 'm2',
     supervisorExecutableDigest: processIdentity.executableImageDigest,
     processIdentityRef: processArtifact.ref,
     processIdentityDigest: processIdentity.identityDigest,
@@ -378,6 +831,21 @@ async function bootstrapFreshEmpty(
   owner.rowDigest = digestOmitting(owner, 'rowDigest');
 
   driver.transaction((connection) => {
+    assertFreshAuthorityDatabaseEmpty(connection);
+    insertStateOwnerArtifacts(
+      connection,
+      [
+        stateRootArtifact,
+        processArtifact,
+        lockArtifact,
+        schemaArtifact,
+        databaseArtifact,
+        casArtifact,
+        generationArtifact,
+        acquisitionArtifact
+      ],
+      now
+    );
     insertGenesisTimeFence(connection, 1, now);
     connection
       .prepare(
@@ -386,7 +854,132 @@ async function bootstrapFreshEmpty(
       )
       .run(supervisorInstanceId, JSON.stringify(owner), owner.rowDigest);
   });
-  return 1;
+  return owner;
+}
+
+async function acquireAfterGracefulRelease(
+  stateRoot: string,
+  driver: SqliteDriver,
+  artifacts: ArtifactCatalog,
+  prior: Extract<StateOwnerRecordV1, { state: 'terminal' }>
+): Promise<Extract<StateOwnerRecordV1, { state: 'active' }>> {
+  await stateOwnerFilesystemFromArtifacts(stateRoot, artifacts, prior);
+  const transition = decodeStateOwnerTransitionEvidence(
+    await artifacts.readCanonical(prior.transitionEvidenceRef)
+  );
+  if (
+    transition.kind !== 'graceful_release' ||
+    transition.evidenceDigest !== prior.transitionEvidenceDigest ||
+    transition.priorOwnerEpoch !== prior.ownerEpoch ||
+    transition.priorSupervisorInstanceId !== prior.supervisorInstanceId ||
+    transition.priorProcessIdentityRef !== prior.processIdentityRef ||
+    transition.priorProcessIdentityDigest !== prior.processIdentityDigest ||
+    transition.stateLockIdentityRef !== prior.stateLockIdentityRef ||
+    transition.stateLockIdentityDigest !== prior.stateLockIdentityDigest
+  ) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'graceful owner transition evidence does not match');
+  }
+
+  const currentFence = readTimeFence(driver);
+  if (currentFence === undefined || currentFence.stateOwnerEpoch !== prior.ownerEpoch) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence does not match graceful owner history');
+  }
+  const acquiredAt = sampleCanonicalNow();
+  const artifactCreatedAt = acquiredAt >= currentFence.lastAcceptedAt
+    ? acquiredAt
+    : currentFence.lastAcceptedAt;
+  const processIdentity = await currentProcessIdentity(acquiredAt);
+  const processArtifact = await artifacts.publishCanonical(
+    processIdentity,
+    'cliq-platform-process-identity-v1'
+  );
+  const ownerEpoch = prior.ownerEpoch + 1;
+  const supervisorInstanceId = identityHash(
+    'cliq-supervisor-instance-v1',
+    processIdentity.identityDigest,
+    acquiredAt,
+    String(ownerEpoch)
+  );
+  const instanceNonceDigest = sha256Bytes(randomBytes(32));
+  const acquisition: StateOwnerAcquisitionEvidenceV1 = {
+    schemaVersion: 1,
+    format: 'cliq-state-owner-acquisition-evidence-v1',
+    ownerEpoch,
+    supervisorInstanceId,
+    runtimeBundleRef: prior.runtimeBundleRef,
+    runtimeBundleManifestDigest: prior.runtimeBundleManifestDigest,
+    processIdentityRef: processArtifact.ref,
+    processIdentityDigest: processIdentity.identityDigest,
+    stateLockIdentityRef: prior.stateLockIdentityRef,
+    stateLockIdentityDigest: prior.stateLockIdentityDigest,
+    instanceNonceDigest,
+    acquiredAt,
+    evidenceDigest: '',
+    kind: 'acquire_after_graceful_release',
+    priorOwnerEpoch: prior.ownerEpoch,
+    priorTerminalRowDigest: prior.rowDigest,
+    priorTransitionEvidenceRef: prior.transitionEvidenceRef,
+    priorTransitionEvidenceDigest: prior.transitionEvidenceDigest,
+    priorTerminalReason: 'graceful_release'
+  };
+  acquisition.evidenceDigest = digestOmitting(acquisition, 'evidenceDigest');
+  const acquisitionArtifact = await artifacts.publishCanonical(
+    acquisition,
+    'cliq-state-owner-acquisition-evidence-v1'
+  );
+  const owner: Extract<StateOwnerRecordV1, { state: 'active' }> = {
+    schemaVersion: 1,
+    ownerEpoch,
+    supervisorInstanceId,
+    runtimeBundleRef: prior.runtimeBundleRef,
+    runtimeBundleManifestDigest: prior.runtimeBundleManifestDigest,
+    supervisorEntryId: prior.supervisorEntryId,
+    supervisorEntryVersion: prior.supervisorEntryVersion,
+    supervisorExecutableDigest: processIdentity.executableImageDigest,
+    processIdentityRef: processArtifact.ref,
+    processIdentityDigest: processIdentity.identityDigest,
+    stateLockIdentityRef: prior.stateLockIdentityRef,
+    stateLockIdentityDigest: prior.stateLockIdentityDigest,
+    acquisitionEvidenceRef: acquisitionArtifact.ref,
+    acquisitionEvidenceDigest: acquisition.evidenceDigest,
+    instanceNonceDigest,
+    acquiredAt,
+    rowDigest: '',
+    state: 'active',
+    rowVersion: 1
+  };
+  owner.rowDigest = digestOmitting(owner, 'rowDigest');
+
+  let fenceOutcome: TimeFenceAdvance | undefined;
+  driver.transaction((connection) => {
+    assertContiguousStateOwnerHistory(connection);
+    if (readActiveStateOwner(connection) !== undefined) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'another state owner acquired authority');
+    }
+    const lockedPrior = readLatestStateOwner(connection);
+    if (
+      lockedPrior === undefined ||
+      lockedPrior.state !== 'terminal' ||
+      lockedPrior.ownerEpoch !== prior.ownerEpoch ||
+      lockedPrior.rowDigest !== prior.rowDigest ||
+      lockedPrior.terminalReason !== 'graceful_release'
+    ) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'prior state owner changed during acquisition');
+    }
+    fenceOutcome = transferTimeFenceOwner(connection, prior.ownerEpoch, ownerEpoch, acquiredAt);
+    insertStateOwnerArtifacts(connection, [processArtifact, acquisitionArtifact], artifactCreatedAt);
+    connection
+      .prepare(
+        `INSERT INTO state_owners (
+           owner_epoch, supervisor_instance_id, record_json, state, row_digest
+         ) VALUES (?, ?, ?, 'active', ?)`
+      )
+      .run(BigInt(ownerEpoch), supervisorInstanceId, JSON.stringify(owner), owner.rowDigest);
+  });
+  if (fenceOutcome === undefined) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'state owner acquisition did not transfer the time fence');
+  }
+  return owner;
 }
 
 export async function publishInProcessChannel(
@@ -395,27 +988,31 @@ export async function publishInProcessChannel(
   client: LocalControlChannelIdentityV1['client'] = 'cli'
 ): Promise<{ channelIdentityRef: string; channelIdentityDigest: string }> {
   const now = sampleCanonicalNow();
-  const processIdentity: PlatformProcessIdentityV1 = {
-    schemaVersion: 1,
-    format: 'cliq-platform-process-identity-v1',
-    platform: hostPlatform(),
-    pid: process.pid,
-    processStartToken: `${process.pid}:${process.ppid}`,
-    ownerUid: requireEffectiveUid(),
-    executableImageDigest: sha256Bytes(Buffer.from(process.execPath, 'utf8')),
-    observedAt: now,
-    identityDigest: ''
-  };
-  processIdentity.identityDigest = digestOmitting(processIdentity, 'identityDigest');
+  const processIdentity = await currentProcessIdentity(now);
   const processArtifact = await store.artifacts.publishCanonical(
     processIdentity,
     'cliq-platform-process-identity-v1'
   );
+  const principal: LocalPrincipalIdentityV1 = {
+    schemaVersion: 1,
+    format: 'cliq-local-principal-identity-v1',
+    stateRootIdentityRef: store.stateRootIdentity.ref,
+    stateRootIdentityDigest: store.stateRootIdentity.digest,
+    platform: hostPlatform(),
+    effectiveUid: requireEffectiveUid(),
+    principalId,
+    identityDigest: ''
+  };
+  principal.identityDigest = digestOmitting(principal, 'identityDigest');
+  const principalArtifact = await store.artifacts.publishCanonical(
+    principal,
+    'cliq-local-principal-identity-v1'
+  );
   const channel: LocalControlChannelIdentityV1 = {
     schemaVersion: 1,
     format: 'cliq-local-control-channel-identity-v1',
-    principalIdentityRef: processArtifact.ref,
-    principalIdentityDigest: processIdentity.identityDigest,
+    principalIdentityRef: principalArtifact.ref,
+    principalIdentityDigest: principal.identityDigest,
     principalId,
     client,
     transport: {
@@ -424,7 +1021,7 @@ export async function publishInProcessChannel(
       processIdentityDigest: processIdentity.identityDigest
     },
     openedAt: now,
-    channelNonceDigest: sha256Bytes(Buffer.from(`${principalId}:${now}`, 'utf8')),
+    channelNonceDigest: sha256Bytes(randomBytes(32)),
     channelIdentityDigest: ''
   };
   channel.channelIdentityDigest = digestOmitting(channel, 'channelIdentityDigest');

@@ -207,6 +207,28 @@ test('transaction-scoped SQL reserves every control verb without rejecting quote
   }
 });
 
+test('transaction-scoped schema may create a trigger without exposing transaction control', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-trigger-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+
+  try {
+    const driver = openSqliteDriver(databasePath);
+    driver.transaction((connection) => {
+      connection.exec(`
+        CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT;
+        CREATE TRIGGER records_no_delete BEFORE DELETE ON records BEGIN
+          SELECT RAISE(ABORT, 'immutable');
+        END;
+      `);
+    });
+    driver.prepare('INSERT INTO records (id) VALUES (1)').run();
+    assert.throws(() => driver.prepare('DELETE FROM records').run(), /immutable/);
+    driver.close();
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test('transaction rejects an async callback, rolls back immediately, and consumes its late rejection', async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-async-'));
   const databasePath = path.join(stateRoot, 'kernel.sqlite3');

@@ -1,17 +1,34 @@
-import { digestOmitting } from '../kernel/identity.js';
+import {
+  assertArtifactRef,
+  digestOmitting,
+  parseCanonicalTime,
+  requiredSafeInteger
+} from '../kernel/identity.js';
 import type {
   AdmittedContextManifest,
+  BudgetSettlementV1,
+  BudgetUsage,
   ContextManifest,
   DirectUnverifiedConsentV1,
   FrozenIgnoreRulesV1,
   LocalControlChannelIdentityV1,
+  LocalPrincipalIdentityV1,
+  PlatformProcessIdentityV1,
   RunObjectiveV1,
   RunSpec,
   SessionContextProjection,
   SourceManifest,
   SourceProjectionSpec,
+  StateLockIdentityV1,
+  StateOwnerAcquisitionEvidenceV1,
+  StateOwnerRecordV1,
+  StateOwnerTransitionEvidenceV1,
+  StateRootIdentityV1,
   VerifierSpec,
+  WorkerIdentity,
   WorkspaceEntryManifest,
+  WorkspaceGenerationIdentityV1,
+  WorkspaceGenerationSnapshotEvidenceV1,
   WorkspaceIdentityV1,
   WorkspaceStateManifest
 } from '../kernel/types.js';
@@ -24,6 +41,71 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function requireString(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} must be a nonempty string`);
+  }
+  return value;
+}
+
+function rejectUnknownKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string
+): void {
+  const allowedKeys = new Set(allowed);
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.has(key)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `${label}.${key} is not part of the closed schema`);
+    }
+  }
+}
+
+function requireSafeInteger(value: unknown, label: string, minimum = 0): number {
+  let parsed: number;
+  try {
+    parsed = requiredSafeInteger(value, label);
+  } catch {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} must be a safe integer`);
+  }
+  if (parsed < minimum) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} must be at least ${minimum}`);
+  }
+  return parsed;
+}
+
+function requireArtifactRef(value: unknown, label: string): string {
+  const ref = requireString(value, label);
+  try {
+    assertArtifactRef(ref);
+  } catch {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} must be a canonical ArtifactRef`);
+  }
+  return ref;
+}
+
+function requireCanonicalTime(value: unknown, label: string): string {
+  const timestamp = requireString(value, label);
+  try {
+    parseCanonicalTime(timestamp);
+  } catch {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} must be a canonical UTC millisecond`);
+  }
+  return timestamp;
+}
+
+function requireUnsignedDecimal(value: unknown, label: string): string {
+  const decimal = requireString(value, label);
+  if (!/^(?:0|[1-9]\d*)$/u.test(decimal)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} must be an unsigned decimal string`);
+  }
+  return decimal;
+}
+
+function requireDigest(value: unknown, label: string): string {
+  return requireArtifactRef(value, label);
+}
+
+function requirePlatform(value: unknown, label: string): 'linux' | 'macos' {
+  if (value !== 'linux' && value !== 'macos') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} must be linux or macos`);
   }
   return value;
 }
@@ -57,11 +139,453 @@ export function decodeControlChannel(value: unknown): LocalControlChannelIdentit
   if (!isRecord(value) || value.format !== 'cliq-local-control-channel-identity-v1' || value.schemaVersion !== 1) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel identity has the wrong schema');
   }
+  rejectUnknownKeys(
+    value,
+    [
+      'schemaVersion',
+      'format',
+      'principalIdentityRef',
+      'principalIdentityDigest',
+      'principalId',
+      'client',
+      'transport',
+      'openedAt',
+      'channelNonceDigest',
+      'channelIdentityDigest'
+    ],
+    'LocalControlChannelIdentity'
+  );
+  requireArtifactRef(value.principalIdentityRef, 'LocalControlChannelIdentity.principalIdentityRef');
+  requireDigest(value.principalIdentityDigest, 'LocalControlChannelIdentity.principalIdentityDigest');
+  requireString(value.principalId, 'LocalControlChannelIdentity.principalId');
+  if (!['cli', 'tui', 'jsonl', 'rpc'].includes(String(value.client))) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel client is invalid');
+  }
+  if (!isRecord(value.transport)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel transport must be an object');
+  }
+  if (value.transport.kind === 'in_process') {
+    rejectUnknownKeys(
+      value.transport,
+      ['kind', 'processIdentityRef', 'processIdentityDigest'],
+      'LocalControlChannelIdentity.transport'
+    );
+    requireArtifactRef(value.transport.processIdentityRef, 'control channel processIdentityRef');
+    requireDigest(value.transport.processIdentityDigest, 'control channel processIdentityDigest');
+  } else if (value.transport.kind === 'uds_peer') {
+    rejectUnknownKeys(
+      value.transport,
+      ['kind', 'peerObservationRef', 'peerObservationDigest'],
+      'LocalControlChannelIdentity.transport'
+    );
+    requireArtifactRef(value.transport.peerObservationRef, 'control channel peerObservationRef');
+    requireDigest(value.transport.peerObservationDigest, 'control channel peerObservationDigest');
+  } else {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel transport is invalid');
+  }
+  requireCanonicalTime(value.openedAt, 'LocalControlChannelIdentity.openedAt');
+  requireDigest(value.channelNonceDigest, 'LocalControlChannelIdentity.channelNonceDigest');
+  requireDigest(value.channelIdentityDigest, 'LocalControlChannelIdentity.channelIdentityDigest');
   const channel = value as LocalControlChannelIdentityV1;
   if (digestOmitting(channel, 'channelIdentityDigest') !== channel.channelIdentityDigest) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel digest does not rehash');
   }
   return channel;
+}
+
+export function decodeLocalPrincipalIdentity(value: unknown): LocalPrincipalIdentityV1 {
+  if (
+    !isRecord(value) ||
+    value.format !== 'cliq-local-principal-identity-v1' ||
+    value.schemaVersion !== 1
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'local principal identity has the wrong schema');
+  }
+  rejectUnknownKeys(
+    value,
+    [
+      'schemaVersion',
+      'format',
+      'stateRootIdentityRef',
+      'stateRootIdentityDigest',
+      'platform',
+      'effectiveUid',
+      'principalId',
+      'identityDigest'
+    ],
+    'LocalPrincipalIdentity'
+  );
+  requireArtifactRef(value.stateRootIdentityRef, 'LocalPrincipalIdentity.stateRootIdentityRef');
+  requireDigest(value.stateRootIdentityDigest, 'LocalPrincipalIdentity.stateRootIdentityDigest');
+  requirePlatform(value.platform, 'LocalPrincipalIdentity.platform');
+  requireSafeInteger(value.effectiveUid, 'LocalPrincipalIdentity.effectiveUid');
+  requireString(value.principalId, 'LocalPrincipalIdentity.principalId');
+  requireDigest(value.identityDigest, 'LocalPrincipalIdentity.identityDigest');
+  const identity = value as LocalPrincipalIdentityV1;
+  if (digestOmitting(identity, 'identityDigest') !== identity.identityDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'local principal identity digest does not rehash');
+  }
+  return identity;
+}
+
+export function decodePlatformProcessIdentity(value: unknown): PlatformProcessIdentityV1 {
+  if (
+    !isRecord(value) ||
+    value.format !== 'cliq-platform-process-identity-v1' ||
+    value.schemaVersion !== 1
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'platform process identity has the wrong schema');
+  }
+  rejectUnknownKeys(
+    value,
+    [
+      'schemaVersion',
+      'format',
+      'platform',
+      'pid',
+      'processStartToken',
+      'ownerUid',
+      'executableImageDigest',
+      'observedAt',
+      'identityDigest'
+    ],
+    'PlatformProcessIdentity'
+  );
+  requirePlatform(value.platform, 'PlatformProcessIdentity.platform');
+  requireSafeInteger(value.pid, 'PlatformProcessIdentity.pid', 1);
+  requireString(value.processStartToken, 'PlatformProcessIdentity.processStartToken');
+  requireSafeInteger(value.ownerUid, 'PlatformProcessIdentity.ownerUid');
+  requireDigest(value.executableImageDigest, 'PlatformProcessIdentity.executableImageDigest');
+  requireCanonicalTime(value.observedAt, 'PlatformProcessIdentity.observedAt');
+  requireDigest(value.identityDigest, 'PlatformProcessIdentity.identityDigest');
+  const identity = value as PlatformProcessIdentityV1;
+  if (digestOmitting(identity, 'identityDigest') !== identity.identityDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'platform process identity digest does not rehash');
+  }
+  return identity;
+}
+
+export function decodeStateRootIdentity(value: unknown): StateRootIdentityV1 {
+  if (!isRecord(value) || value.format !== 'cliq-state-root-identity-v1' || value.schemaVersion !== 1) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state root identity has the wrong schema');
+  }
+  rejectUnknownKeys(
+    value,
+    [
+      'schemaVersion',
+      'format',
+      'platform',
+      'canonicalAbsolutePath',
+      'ownerUid',
+      'deviceId',
+      'directoryFileId',
+      'mode',
+      'openedNoFollow',
+      'layoutVersion',
+      'identityDigest'
+    ],
+    'StateRootIdentity'
+  );
+  requirePlatform(value.platform, 'StateRootIdentity.platform');
+  const absolutePath = requireString(value.canonicalAbsolutePath, 'StateRootIdentity.canonicalAbsolutePath');
+  if (!absolutePath.startsWith('/')) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state root identity path must be absolute');
+  }
+  requireSafeInteger(value.ownerUid, 'StateRootIdentity.ownerUid');
+  requireUnsignedDecimal(value.deviceId, 'StateRootIdentity.deviceId');
+  requireUnsignedDecimal(value.directoryFileId, 'StateRootIdentity.directoryFileId');
+  if (value.mode !== 448 || value.openedNoFollow !== true || value.layoutVersion !== 1) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state root identity protection fields are invalid');
+  }
+  requireDigest(value.identityDigest, 'StateRootIdentity.identityDigest');
+  const identity = value as StateRootIdentityV1;
+  if (digestOmitting(identity, 'identityDigest') !== identity.identityDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state root identity digest does not rehash');
+  }
+  return identity;
+}
+
+export function decodeStateLockIdentity(value: unknown): StateLockIdentityV1 {
+  if (!isRecord(value) || value.format !== 'cliq-state-lock-identity-v1' || value.schemaVersion !== 1) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state lock identity has the wrong schema');
+  }
+  rejectUnknownKeys(
+    value,
+    [
+      'schemaVersion',
+      'format',
+      'stateRootIdentityRef',
+      'stateRootIdentityDigest',
+      'canonicalRootRelativePath',
+      'deviceId',
+      'fileId',
+      'ownerUid',
+      'mode',
+      'linkCount',
+      'identityDigest'
+    ],
+    'StateLockIdentity'
+  );
+  requireArtifactRef(value.stateRootIdentityRef, 'StateLockIdentity.stateRootIdentityRef');
+  requireDigest(value.stateRootIdentityDigest, 'StateLockIdentity.stateRootIdentityDigest');
+  if (value.canonicalRootRelativePath !== 'runtime/state-owner.lock') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state lock identity has the wrong relative path');
+  }
+  requireUnsignedDecimal(value.deviceId, 'StateLockIdentity.deviceId');
+  requireUnsignedDecimal(value.fileId, 'StateLockIdentity.fileId');
+  requireSafeInteger(value.ownerUid, 'StateLockIdentity.ownerUid');
+  if (value.mode !== 384 || value.linkCount !== 1) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state lock identity protection fields are invalid');
+  }
+  requireDigest(value.identityDigest, 'StateLockIdentity.identityDigest');
+  const identity = value as StateLockIdentityV1;
+  if (digestOmitting(identity, 'identityDigest') !== identity.identityDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state lock identity digest does not rehash');
+  }
+  return identity;
+}
+
+const STATE_OWNER_COMMON_KEYS = [
+  'schemaVersion',
+  'ownerEpoch',
+  'supervisorInstanceId',
+  'runtimeBundleRef',
+  'runtimeBundleManifestDigest',
+  'supervisorEntryId',
+  'supervisorEntryVersion',
+  'supervisorExecutableDigest',
+  'processIdentityRef',
+  'processIdentityDigest',
+  'stateLockIdentityRef',
+  'stateLockIdentityDigest',
+  'acquisitionEvidenceRef',
+  'acquisitionEvidenceDigest',
+  'instanceNonceDigest',
+  'acquiredAt',
+  'rowDigest',
+  'state',
+  'rowVersion'
+] as const;
+
+export function decodeStateOwnerRecord(value: unknown): StateOwnerRecordV1 {
+  if (!isRecord(value) || value.schemaVersion !== 1) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner record has the wrong schema');
+  }
+  if (value.state === 'active') {
+    rejectUnknownKeys(value, STATE_OWNER_COMMON_KEYS, 'StateOwnerRecord(active)');
+    if (value.rowVersion !== 1) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'active state owner rowVersion must be one');
+    }
+  } else if (value.state === 'terminal') {
+    rejectUnknownKeys(
+      value,
+      [
+        ...STATE_OWNER_COMMON_KEYS,
+        'releasedAt',
+        'terminalReason',
+        'transitionEvidenceRef',
+        'transitionEvidenceDigest'
+      ],
+      'StateOwnerRecord(terminal)'
+    );
+    if (
+      value.rowVersion !== 2 ||
+      (value.terminalReason !== 'graceful_release' && value.terminalReason !== 'superseded_after_owner_death')
+    ) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'terminal state owner discriminator is invalid');
+    }
+    requireCanonicalTime(value.releasedAt, 'StateOwnerRecord.releasedAt');
+    requireArtifactRef(value.transitionEvidenceRef, 'StateOwnerRecord.transitionEvidenceRef');
+    requireDigest(value.transitionEvidenceDigest, 'StateOwnerRecord.transitionEvidenceDigest');
+  } else {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner state is invalid');
+  }
+  requireSafeInteger(value.ownerEpoch, 'StateOwnerRecord.ownerEpoch', 1);
+  requireString(value.supervisorInstanceId, 'StateOwnerRecord.supervisorInstanceId');
+  requireArtifactRef(value.runtimeBundleRef, 'StateOwnerRecord.runtimeBundleRef');
+  requireDigest(value.runtimeBundleManifestDigest, 'StateOwnerRecord.runtimeBundleManifestDigest');
+  requireString(value.supervisorEntryId, 'StateOwnerRecord.supervisorEntryId');
+  requireString(value.supervisorEntryVersion, 'StateOwnerRecord.supervisorEntryVersion');
+  requireDigest(value.supervisorExecutableDigest, 'StateOwnerRecord.supervisorExecutableDigest');
+  requireArtifactRef(value.processIdentityRef, 'StateOwnerRecord.processIdentityRef');
+  requireDigest(value.processIdentityDigest, 'StateOwnerRecord.processIdentityDigest');
+  requireArtifactRef(value.stateLockIdentityRef, 'StateOwnerRecord.stateLockIdentityRef');
+  requireDigest(value.stateLockIdentityDigest, 'StateOwnerRecord.stateLockIdentityDigest');
+  requireArtifactRef(value.acquisitionEvidenceRef, 'StateOwnerRecord.acquisitionEvidenceRef');
+  requireDigest(value.acquisitionEvidenceDigest, 'StateOwnerRecord.acquisitionEvidenceDigest');
+  requireDigest(value.instanceNonceDigest, 'StateOwnerRecord.instanceNonceDigest');
+  requireCanonicalTime(value.acquiredAt, 'StateOwnerRecord.acquiredAt');
+  requireDigest(value.rowDigest, 'StateOwnerRecord.rowDigest');
+  const record = value as StateOwnerRecordV1;
+  if (digestOmitting(record, 'rowDigest') !== record.rowDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner row digest does not rehash');
+  }
+  return record;
+}
+
+const STATE_OWNER_EVIDENCE_COMMON_KEYS = [
+  'schemaVersion',
+  'format',
+  'ownerEpoch',
+  'supervisorInstanceId',
+  'runtimeBundleRef',
+  'runtimeBundleManifestDigest',
+  'processIdentityRef',
+  'processIdentityDigest',
+  'stateLockIdentityRef',
+  'stateLockIdentityDigest',
+  'instanceNonceDigest',
+  'acquiredAt',
+  'evidenceDigest',
+  'kind'
+] as const;
+
+export function decodeStateOwnerAcquisitionEvidence(
+  value: unknown
+): StateOwnerAcquisitionEvidenceV1 {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== 1 ||
+    value.format !== 'cliq-state-owner-acquisition-evidence-v1'
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner acquisition evidence has the wrong schema');
+  }
+  if (value.kind === 'genesis') {
+    rejectUnknownKeys(
+      value,
+      [
+        ...STATE_OWNER_EVIDENCE_COMMON_KEYS,
+        'kernelGenerationIdentityRef',
+        'kernelGenerationIdentityDigest',
+        'ownerTableObservation'
+      ],
+      'StateOwnerAcquisitionEvidence(genesis)'
+    );
+    requireArtifactRef(value.kernelGenerationIdentityRef, 'StateOwnerAcquisitionEvidence.kernelGenerationIdentityRef');
+    requireDigest(value.kernelGenerationIdentityDigest, 'StateOwnerAcquisitionEvidence.kernelGenerationIdentityDigest');
+    if (value.ownerTableObservation !== 'empty') {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'genesis owner table observation is invalid');
+    }
+  } else if (value.kind === 'acquire_after_graceful_release' || value.kind === 'takeover_after_owner_death') {
+    rejectUnknownKeys(
+      value,
+      [
+        ...STATE_OWNER_EVIDENCE_COMMON_KEYS,
+        'priorOwnerEpoch',
+        'priorTerminalRowDigest',
+        'priorTransitionEvidenceRef',
+        'priorTransitionEvidenceDigest',
+        'priorTerminalReason'
+      ],
+      'StateOwnerAcquisitionEvidence(successor)'
+    );
+    requireSafeInteger(value.priorOwnerEpoch, 'StateOwnerAcquisitionEvidence.priorOwnerEpoch', 1);
+    requireDigest(value.priorTerminalRowDigest, 'StateOwnerAcquisitionEvidence.priorTerminalRowDigest');
+    requireArtifactRef(value.priorTransitionEvidenceRef, 'StateOwnerAcquisitionEvidence.priorTransitionEvidenceRef');
+    requireDigest(value.priorTransitionEvidenceDigest, 'StateOwnerAcquisitionEvidence.priorTransitionEvidenceDigest');
+    const expectedReason = value.kind === 'acquire_after_graceful_release'
+      ? 'graceful_release'
+      : 'superseded_after_owner_death';
+    if (value.priorTerminalReason !== expectedReason) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner acquisition terminal reason is invalid');
+    }
+  } else {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner acquisition kind is invalid');
+  }
+  requireSafeInteger(value.ownerEpoch, 'StateOwnerAcquisitionEvidence.ownerEpoch', 1);
+  requireString(value.supervisorInstanceId, 'StateOwnerAcquisitionEvidence.supervisorInstanceId');
+  requireArtifactRef(value.runtimeBundleRef, 'StateOwnerAcquisitionEvidence.runtimeBundleRef');
+  requireDigest(value.runtimeBundleManifestDigest, 'StateOwnerAcquisitionEvidence.runtimeBundleManifestDigest');
+  requireArtifactRef(value.processIdentityRef, 'StateOwnerAcquisitionEvidence.processIdentityRef');
+  requireDigest(value.processIdentityDigest, 'StateOwnerAcquisitionEvidence.processIdentityDigest');
+  requireArtifactRef(value.stateLockIdentityRef, 'StateOwnerAcquisitionEvidence.stateLockIdentityRef');
+  requireDigest(value.stateLockIdentityDigest, 'StateOwnerAcquisitionEvidence.stateLockIdentityDigest');
+  requireDigest(value.instanceNonceDigest, 'StateOwnerAcquisitionEvidence.instanceNonceDigest');
+  requireCanonicalTime(value.acquiredAt, 'StateOwnerAcquisitionEvidence.acquiredAt');
+  requireDigest(value.evidenceDigest, 'StateOwnerAcquisitionEvidence.evidenceDigest');
+  const evidence = value as StateOwnerAcquisitionEvidenceV1;
+  if (digestOmitting(evidence, 'evidenceDigest') !== evidence.evidenceDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner acquisition evidence does not rehash');
+  }
+  return evidence;
+}
+
+const STATE_OWNER_TRANSITION_COMMON_KEYS = [
+  'schemaVersion',
+  'format',
+  'priorOwnerEpoch',
+  'priorSupervisorInstanceId',
+  'priorProcessIdentityRef',
+  'priorProcessIdentityDigest',
+  'stateLockIdentityRef',
+  'stateLockIdentityDigest',
+  'observedAt',
+  'evidenceDigest',
+  'kind'
+] as const;
+
+export function decodeStateOwnerTransitionEvidence(value: unknown): StateOwnerTransitionEvidenceV1 {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== 1 ||
+    value.format !== 'cliq-state-owner-transition-evidence-v1'
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner transition evidence has the wrong schema');
+  }
+  if (value.kind === 'graceful_release') {
+    rejectUnknownKeys(
+      value,
+      [
+        ...STATE_OWNER_TRANSITION_COMMON_KEYS,
+        'releasingProcessIdentityRef',
+        'releasingProcessIdentityDigest'
+      ],
+      'StateOwnerTransitionEvidence(graceful_release)'
+    );
+    requireArtifactRef(value.releasingProcessIdentityRef, 'StateOwnerTransitionEvidence.releasingProcessIdentityRef');
+    requireDigest(value.releasingProcessIdentityDigest, 'StateOwnerTransitionEvidence.releasingProcessIdentityDigest');
+  } else if (value.kind === 'superseded_after_owner_death') {
+    rejectUnknownKeys(
+      value,
+      [
+        ...STATE_OWNER_TRANSITION_COMMON_KEYS,
+        'priorProcessObservation',
+        'successorOwnerEpoch',
+        'successorSupervisorInstanceId',
+        'successorRuntimeBundleRef',
+        'successorRuntimeBundleManifestDigest',
+        'successorProcessIdentityRef',
+        'successorProcessIdentityDigest',
+        'successorInstanceNonceDigest'
+      ],
+      'StateOwnerTransitionEvidence(takeover)'
+    );
+    if (value.priorProcessObservation !== 'absent_or_start_token_mismatch') {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner takeover process observation is invalid');
+    }
+    requireSafeInteger(value.successorOwnerEpoch, 'StateOwnerTransitionEvidence.successorOwnerEpoch', 2);
+    requireString(value.successorSupervisorInstanceId, 'StateOwnerTransitionEvidence.successorSupervisorInstanceId');
+    requireArtifactRef(value.successorRuntimeBundleRef, 'StateOwnerTransitionEvidence.successorRuntimeBundleRef');
+    requireDigest(value.successorRuntimeBundleManifestDigest, 'StateOwnerTransitionEvidence.successorRuntimeBundleManifestDigest');
+    requireArtifactRef(value.successorProcessIdentityRef, 'StateOwnerTransitionEvidence.successorProcessIdentityRef');
+    requireDigest(value.successorProcessIdentityDigest, 'StateOwnerTransitionEvidence.successorProcessIdentityDigest');
+    requireDigest(value.successorInstanceNonceDigest, 'StateOwnerTransitionEvidence.successorInstanceNonceDigest');
+  } else {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner transition kind is invalid');
+  }
+  requireSafeInteger(value.priorOwnerEpoch, 'StateOwnerTransitionEvidence.priorOwnerEpoch', 1);
+  requireString(value.priorSupervisorInstanceId, 'StateOwnerTransitionEvidence.priorSupervisorInstanceId');
+  requireArtifactRef(value.priorProcessIdentityRef, 'StateOwnerTransitionEvidence.priorProcessIdentityRef');
+  requireDigest(value.priorProcessIdentityDigest, 'StateOwnerTransitionEvidence.priorProcessIdentityDigest');
+  requireArtifactRef(value.stateLockIdentityRef, 'StateOwnerTransitionEvidence.stateLockIdentityRef');
+  requireDigest(value.stateLockIdentityDigest, 'StateOwnerTransitionEvidence.stateLockIdentityDigest');
+  requireCanonicalTime(value.observedAt, 'StateOwnerTransitionEvidence.observedAt');
+  requireDigest(value.evidenceDigest, 'StateOwnerTransitionEvidence.evidenceDigest');
+  const evidence = value as StateOwnerTransitionEvidenceV1;
+  if (digestOmitting(evidence, 'evidenceDigest') !== evidence.evidenceDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'state owner transition evidence does not rehash');
+  }
+  return evidence;
 }
 
 export function decodeRunObjective(value: unknown): RunObjectiveV1 {
@@ -123,6 +647,53 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
   if (!isRecord(value) || value.format !== 'cliq-workspace-entries-v1' || value.schemaVersion !== 1) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entries have the wrong schema');
   }
+  rejectUnknownKeys(
+    value,
+    ['schemaVersion', 'format', 'entries', 'entryCount', 'byteCount', 'treeDigest'],
+    'WorkspaceEntryManifest'
+  );
+  if (!Array.isArray(value.entries)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entries must be an array');
+  }
+  const entryCount = requireSafeInteger(value.entryCount, 'WorkspaceEntryManifest.entryCount');
+  requireSafeInteger(value.byteCount, 'WorkspaceEntryManifest.byteCount');
+  requireDigest(value.treeDigest, 'WorkspaceEntryManifest.treeDigest');
+  if (entryCount !== value.entries.length) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry count does not match the array');
+  }
+  let priorPath: string | undefined;
+  for (const [index, candidate] of value.entries.entries()) {
+    if (!isRecord(candidate)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} must be an object`);
+    }
+    const entryPath = requireString(candidate.path, `WorkspaceEntryManifest.entries[${index}].path`);
+    if (priorPath !== undefined && Buffer.compare(Buffer.from(priorPath), Buffer.from(entryPath)) >= 0) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry paths must be byte-sorted and unique');
+    }
+    priorPath = entryPath;
+    requireSafeInteger(candidate.mode, `WorkspaceEntryManifest.entries[${index}].mode`);
+    if (candidate.kind === 'directory') {
+      rejectUnknownKeys(candidate, ['path', 'kind', 'mode'], `WorkspaceEntryManifest.entries[${index}]`);
+    } else if (candidate.kind === 'file') {
+      rejectUnknownKeys(
+        candidate,
+        ['path', 'kind', 'mode', 'size', 'blobRef'],
+        `WorkspaceEntryManifest.entries[${index}]`
+      );
+      requireSafeInteger(candidate.size, `WorkspaceEntryManifest.entries[${index}].size`);
+      requireArtifactRef(candidate.blobRef, `WorkspaceEntryManifest.entries[${index}].blobRef`);
+    } else if (candidate.kind === 'symlink') {
+      rejectUnknownKeys(
+        candidate,
+        ['path', 'kind', 'mode', 'target', 'targetDigest'],
+        `WorkspaceEntryManifest.entries[${index}]`
+      );
+      requireString(candidate.target, `WorkspaceEntryManifest.entries[${index}].target`);
+      requireDigest(candidate.targetDigest, `WorkspaceEntryManifest.entries[${index}].targetDigest`);
+    } else {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} has an invalid kind`);
+    }
+  }
   const entries = value as WorkspaceEntryManifest;
   if (digestOmitting(entries, 'treeDigest') !== entries.treeDigest) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entries digest does not rehash');
@@ -145,11 +716,307 @@ export function decodeWorkspaceState(value: unknown): WorkspaceStateManifest {
   if (!isRecord(value) || value.format !== 'cliq-workspace-state-v1' || value.schemaVersion !== 1) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace state has the wrong schema');
   }
+  rejectUnknownKeys(
+    value,
+    [
+      'schemaVersion', 'format', 'runId', 'baseWorkspaceManifestRef', 'entriesRef',
+      'privateGitStateRef', 'invalidatedEphemeralPaths', 'sourceProjectionDigest', 'stateDigest'
+    ],
+    'WorkspaceStateManifest'
+  );
+  requireString(value.runId, 'WorkspaceStateManifest.runId');
+  requireArtifactRef(value.baseWorkspaceManifestRef, 'WorkspaceStateManifest.baseWorkspaceManifestRef');
+  requireArtifactRef(value.entriesRef, 'WorkspaceStateManifest.entriesRef');
+  if (value.privateGitStateRef !== undefined) {
+    requireArtifactRef(value.privateGitStateRef, 'WorkspaceStateManifest.privateGitStateRef');
+  }
+  if (
+    !Array.isArray(value.invalidatedEphemeralPaths) ||
+    value.invalidatedEphemeralPaths.some((entry) => typeof entry !== 'string' || entry.length === 0)
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace invalidated paths are invalid');
+  }
+  requireDigest(value.sourceProjectionDigest, 'WorkspaceStateManifest.sourceProjectionDigest');
+  requireDigest(value.stateDigest, 'WorkspaceStateManifest.stateDigest');
   const state = value as WorkspaceStateManifest;
   if (digestOmitting(state, 'stateDigest') !== state.stateDigest) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace state digest does not rehash');
   }
   return state;
+}
+
+export function decodeWorkspaceGenerationIdentity(value: unknown): WorkspaceGenerationIdentityV1 {
+  if (
+    !isRecord(value) ||
+    value.format !== 'cliq-workspace-generation-identity-v1' ||
+    value.schemaVersion !== 1
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation identity has the wrong schema');
+  }
+  rejectUnknownKeys(
+    value,
+    [
+      'schemaVersion', 'format', 'generationId', 'runId', 'workspaceIdentityDigest',
+      'sourceCheckpointId', 'sourceWorkspaceStateRef', 'sourceWorkspaceStateDigest',
+      'sourceTreeDigest', 'creationNonceDigest', 'locator', 'createdAt', 'identityDigest'
+    ],
+    'WorkspaceGenerationIdentity'
+  );
+  requireString(value.generationId, 'WorkspaceGenerationIdentity.generationId');
+  requireString(value.runId, 'WorkspaceGenerationIdentity.runId');
+  requireDigest(value.workspaceIdentityDigest, 'WorkspaceGenerationIdentity.workspaceIdentityDigest');
+  requireString(value.sourceCheckpointId, 'WorkspaceGenerationIdentity.sourceCheckpointId');
+  requireArtifactRef(value.sourceWorkspaceStateRef, 'WorkspaceGenerationIdentity.sourceWorkspaceStateRef');
+  requireDigest(value.sourceWorkspaceStateDigest, 'WorkspaceGenerationIdentity.sourceWorkspaceStateDigest');
+  requireDigest(value.sourceTreeDigest, 'WorkspaceGenerationIdentity.sourceTreeDigest');
+  requireDigest(value.creationNonceDigest, 'WorkspaceGenerationIdentity.creationNonceDigest');
+  if (!isRecord(value.locator)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation locator must be an object');
+  }
+  if (value.locator.kind === 'linux_directory') {
+    rejectUnknownKeys(
+      value.locator,
+      [
+        'kind', 'stateRootIdentityRef', 'stateRootIdentityDigest', 'canonicalRootRelativePath',
+        'deviceId', 'directoryFileId', 'ownerUid', 'mode', 'linkCount'
+      ],
+      'WorkspaceGenerationIdentity.locator'
+    );
+    requireArtifactRef(value.locator.stateRootIdentityRef, 'workspace generation stateRootIdentityRef');
+    requireDigest(value.locator.stateRootIdentityDigest, 'workspace generation stateRootIdentityDigest');
+    requireString(value.locator.canonicalRootRelativePath, 'workspace generation relative path');
+    requireUnsignedDecimal(value.locator.deviceId, 'workspace generation deviceId');
+    requireUnsignedDecimal(value.locator.directoryFileId, 'workspace generation directoryFileId');
+    requireSafeInteger(value.locator.ownerUid, 'workspace generation ownerUid');
+    if (value.locator.mode !== 448 || value.locator.linkCount !== 1) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation directory protection is invalid');
+    }
+  } else if (value.locator.kind === 'macos_vm_volume') {
+    rejectUnknownKeys(
+      value.locator,
+      [
+        'kind', 'stateRootIdentityRef', 'stateRootIdentityDigest',
+        'backingStoreCanonicalRootRelativePath', 'backingStoreDeviceId', 'backingStoreFileId',
+        'backingStoreOwnerUid', 'backingStoreMode', 'backingStoreLinkCount',
+        'vmVolumeReservationId', 'guestVolumeId'
+      ],
+      'WorkspaceGenerationIdentity.locator'
+    );
+    requireArtifactRef(value.locator.stateRootIdentityRef, 'workspace generation stateRootIdentityRef');
+    requireDigest(value.locator.stateRootIdentityDigest, 'workspace generation stateRootIdentityDigest');
+    requireString(value.locator.backingStoreCanonicalRootRelativePath, 'workspace generation backing path');
+    requireUnsignedDecimal(value.locator.backingStoreDeviceId, 'workspace generation backing deviceId');
+    requireUnsignedDecimal(value.locator.backingStoreFileId, 'workspace generation backing fileId');
+    requireSafeInteger(value.locator.backingStoreOwnerUid, 'workspace generation backing ownerUid');
+    if (value.locator.backingStoreMode !== 384 || value.locator.backingStoreLinkCount !== 1) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation backing protection is invalid');
+    }
+    requireString(value.locator.vmVolumeReservationId, 'workspace generation VM reservation');
+    requireString(value.locator.guestVolumeId, 'workspace generation guest volume');
+  } else {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation locator is invalid');
+  }
+  requireCanonicalTime(value.createdAt, 'WorkspaceGenerationIdentity.createdAt');
+  requireDigest(value.identityDigest, 'WorkspaceGenerationIdentity.identityDigest');
+  const identity = value as WorkspaceGenerationIdentityV1;
+  if (digestOmitting(identity, 'identityDigest') !== identity.identityDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation identity digest does not rehash');
+  }
+  return identity;
+}
+
+export function decodeWorkspaceGenerationSnapshotEvidence(
+  value: unknown
+): WorkspaceGenerationSnapshotEvidenceV1 {
+  if (
+    !isRecord(value) ||
+    value.format !== 'cliq-workspace-generation-snapshot-evidence-v1' ||
+    value.schemaVersion !== 1
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation snapshot evidence has the wrong schema');
+  }
+  rejectUnknownKeys(
+    value,
+    [
+      'schemaVersion', 'format', 'purpose', 'runId', 'generationRef',
+      'generationIdentityDigest', 'checkpointId', 'workspaceStateRef', 'workspaceStateDigest',
+      'entriesRef', 'treeDigest', 'privateGitStateRef', 'descriptorRewalkComplete',
+      'fileFsyncComplete', 'directoryFsyncComplete', 'observedAt', 'evidenceDigest'
+    ],
+    'WorkspaceGenerationSnapshotEvidence'
+  );
+  if (value.purpose !== 'materialized_from_checkpoint' && value.purpose !== 'sealed_to_checkpoint') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation snapshot purpose is invalid');
+  }
+  requireString(value.runId, 'WorkspaceGenerationSnapshotEvidence.runId');
+  requireArtifactRef(value.generationRef, 'WorkspaceGenerationSnapshotEvidence.generationRef');
+  requireDigest(value.generationIdentityDigest, 'WorkspaceGenerationSnapshotEvidence.generationIdentityDigest');
+  requireString(value.checkpointId, 'WorkspaceGenerationSnapshotEvidence.checkpointId');
+  requireArtifactRef(value.workspaceStateRef, 'WorkspaceGenerationSnapshotEvidence.workspaceStateRef');
+  requireDigest(value.workspaceStateDigest, 'WorkspaceGenerationSnapshotEvidence.workspaceStateDigest');
+  requireArtifactRef(value.entriesRef, 'WorkspaceGenerationSnapshotEvidence.entriesRef');
+  requireDigest(value.treeDigest, 'WorkspaceGenerationSnapshotEvidence.treeDigest');
+  if (value.privateGitStateRef !== undefined) {
+    requireArtifactRef(value.privateGitStateRef, 'WorkspaceGenerationSnapshotEvidence.privateGitStateRef');
+  }
+  requireCanonicalTime(value.observedAt, 'WorkspaceGenerationSnapshotEvidence.observedAt');
+  requireDigest(value.evidenceDigest, 'WorkspaceGenerationSnapshotEvidence.evidenceDigest');
+  const evidence = value as WorkspaceGenerationSnapshotEvidenceV1;
+  if (digestOmitting(evidence, 'evidenceDigest') !== evidence.evidenceDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation snapshot evidence does not rehash');
+  }
+  if (
+    evidence.descriptorRewalkComplete !== true ||
+    evidence.fileFsyncComplete !== true ||
+    evidence.directoryFsyncComplete !== true
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation snapshot is not durable');
+  }
+  return evidence;
+}
+
+export function decodeWorkerIdentity(value: unknown): WorkerIdentity {
+  if (!isRecord(value) || value.schemaVersion !== 1) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'WorkerIdentity has the wrong schema');
+  }
+  rejectUnknownKeys(
+    value,
+    [
+      'schemaVersion', 'executableRealpath', 'executableDigest', 'pid', 'processStartToken',
+      'spawnNonceDigest', 'activationNonceDigest', 'intendedLeaseEpoch', 'launchId',
+      'supervisorInstanceId', 'processContainmentRef'
+    ],
+    'WorkerIdentity'
+  );
+  const identity = value as WorkerIdentity;
+  for (const [label, member] of [
+    ['executableRealpath', identity.executableRealpath],
+    ['executableDigest', identity.executableDigest],
+    ['processStartToken', identity.processStartToken],
+    ['spawnNonceDigest', identity.spawnNonceDigest],
+    ['activationNonceDigest', identity.activationNonceDigest],
+    ['launchId', identity.launchId],
+    ['supervisorInstanceId', identity.supervisorInstanceId],
+    ['processContainmentRef', identity.processContainmentRef]
+  ] as const) {
+    requireString(member, `WorkerIdentity.${label}`);
+  }
+  requireDigest(identity.executableDigest, 'WorkerIdentity.executableDigest');
+  requireDigest(identity.spawnNonceDigest, 'WorkerIdentity.spawnNonceDigest');
+  requireDigest(identity.activationNonceDigest, 'WorkerIdentity.activationNonceDigest');
+  requireArtifactRef(identity.processContainmentRef, 'WorkerIdentity.processContainmentRef');
+  if (
+    !Number.isSafeInteger(identity.pid) ||
+    identity.pid < 1 ||
+    !Number.isSafeInteger(identity.intendedLeaseEpoch) ||
+    identity.intendedLeaseEpoch < 1
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'WorkerIdentity numeric identity is invalid');
+  }
+  return identity;
+}
+
+const SETTLEMENT_BUDGET_FIELDS = [
+  'modelTokens',
+  'costMicros',
+  'toolCalls',
+  'repairAttempts'
+] as const;
+
+function decodeSettlementBudget(value: unknown, label: string): BudgetUsage {
+  if (!isRecord(value)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} must be an object`);
+  }
+  rejectUnknownKeys(value, SETTLEMENT_BUDGET_FIELDS, label);
+  return {
+    modelTokens: requireSafeInteger(value.modelTokens, `${label}.modelTokens`),
+    costMicros: requireSafeInteger(value.costMicros, `${label}.costMicros`),
+    toolCalls: requireSafeInteger(value.toolCalls, `${label}.toolCalls`),
+    repairAttempts: requireSafeInteger(value.repairAttempts, `${label}.repairAttempts`)
+  };
+}
+
+function budgetEquation(
+  left: BudgetUsage,
+  delta: BudgetUsage,
+  right: BudgetUsage,
+  operation: 'add' | 'subtract'
+): boolean {
+  return SETTLEMENT_BUDGET_FIELDS.every((field) =>
+    operation === 'add'
+      ? left[field] + delta[field] === right[field]
+      : left[field] - delta[field] === right[field]
+  );
+}
+
+function budgetLessThanOrEqual(left: BudgetUsage, right: BudgetUsage): boolean {
+  return SETTLEMENT_BUDGET_FIELDS.every((field) => left[field] <= right[field]);
+}
+
+function budgetEqual(left: BudgetUsage, right: BudgetUsage): boolean {
+  return SETTLEMENT_BUDGET_FIELDS.every((field) => left[field] === right[field]);
+}
+
+export function decodeBudgetSettlement(value: unknown): BudgetSettlementV1 {
+  if (
+    !isRecord(value) ||
+    value.format !== 'cliq-budget-settlement-v1' ||
+    value.schemaVersion !== 1
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'budget settlement has the wrong schema');
+  }
+  rejectUnknownKeys(
+    value,
+    [
+      'schemaVersion', 'format', 'runId', 'opId', 'attempt', 'preparedJournalSeq',
+      'terminalJournalSeq', 'terminalPhase', 'reserved', 'consumed', 'released',
+      'budgetConsumedBefore', 'budgetConsumedAfter', 'budgetReservedBefore',
+      'budgetReservedAfter', 'settledAt', 'settlementDigest'
+    ],
+    'BudgetSettlement'
+  );
+  requireString(value.runId, 'BudgetSettlement.runId');
+  requireString(value.opId, 'BudgetSettlement.opId');
+  requireSafeInteger(value.attempt, 'BudgetSettlement.attempt');
+  requireSafeInteger(value.preparedJournalSeq, 'BudgetSettlement.preparedJournalSeq', 1);
+  requireSafeInteger(value.terminalJournalSeq, 'BudgetSettlement.terminalJournalSeq', 2);
+  if (!['completed', 'failed', 'unknown'].includes(String(value.terminalPhase))) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'budget settlement terminal phase is invalid');
+  }
+  const reserved = decodeSettlementBudget(value.reserved, 'BudgetSettlement.reserved');
+  const consumed = decodeSettlementBudget(value.consumed, 'BudgetSettlement.consumed');
+  const released = decodeSettlementBudget(value.released, 'BudgetSettlement.released');
+  const consumedBefore = decodeSettlementBudget(
+    value.budgetConsumedBefore,
+    'BudgetSettlement.budgetConsumedBefore'
+  );
+  const consumedAfter = decodeSettlementBudget(
+    value.budgetConsumedAfter,
+    'BudgetSettlement.budgetConsumedAfter'
+  );
+  const reservedBefore = decodeSettlementBudget(
+    value.budgetReservedBefore,
+    'BudgetSettlement.budgetReservedBefore'
+  );
+  const reservedAfter = decodeSettlementBudget(
+    value.budgetReservedAfter,
+    'BudgetSettlement.budgetReservedAfter'
+  );
+  if (
+    !budgetLessThanOrEqual(consumed, reserved) ||
+    !budgetEqual(released, reserved) ||
+    !budgetEquation(consumedBefore, consumed, consumedAfter, 'add') ||
+    !budgetEquation(reservedBefore, released, reservedAfter, 'subtract')
+  ) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'budget settlement equations do not balance');
+  }
+  requireCanonicalTime(value.settledAt, 'BudgetSettlement.settledAt');
+  requireDigest(value.settlementDigest, 'BudgetSettlement.settlementDigest');
+  const settlement = value as BudgetSettlementV1;
+  if (digestOmitting(settlement, 'settlementDigest') !== settlement.settlementDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'budget settlement digest does not rehash');
+  }
+  return settlement;
 }
 
 export function decodeVerifierSpec(value: unknown): VerifierSpec {

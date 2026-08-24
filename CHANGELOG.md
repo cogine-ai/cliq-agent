@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layout, Session create, atomic `run.submit` admission with an initial ready
   Checkpoint, and recovery-closure reads. The default CLI/TUI still does not
   call this path.
+- Added the hidden M2 WP01 state core: schema-level history and lifecycle
+  guards, exact StateOwner/control-channel closure checks, workspace-generation
+  and worker-launch fencing reducers, permanent invocation claims with atomic
+  budget settlement, stable recovery cuts, and dedicated fault tests. Native
+  descriptor-lock/takeover and migration/rollback integration remain gated.
 
 ### Changed
 
