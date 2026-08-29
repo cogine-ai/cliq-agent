@@ -462,6 +462,40 @@ test('Git workspaces publish a repository identity', async () => {
   }
 });
 
+test('Git objectFormat sha256 is captured in repository identity', async () => {
+  const stateRoot = await makePrivateDir('.cliq-m1-git-sha256-');
+  const workspace = await makePrivateDir('.cliq-m1-ws-');
+  await mkdir(path.join(workspace, '.git'), { mode: 0o700 });
+  await writeFile(
+    path.join(workspace, '.git', 'config'),
+    '[core]\n\trepositoryformatversion = 1\n\tobjectFormat = sha256\n',
+    { mode: 0o600 }
+  );
+  const store = await openStateStore(stateRoot);
+  try {
+    const principalId = 'cliq-test-principal';
+    const channel = await publishInProcessChannel(store, principalId);
+    const created = await store.createSession({
+      principalId,
+      requestId: uuidv7(),
+      admissionKey: admissionKey('session-git-sha256'),
+      workspacePath: workspace,
+      ...channel
+    });
+    const workspaceIdentity = (await store.artifacts.readCanonical(
+      created.session.workspaceIdentityRef
+    )) as Extract<WorkspaceIdentityV1, { kind: 'live' }>;
+    const repository = await store.artifacts.readCanonical<{ objectFormat: string }>(
+      workspaceIdentity.repositoryIdentityRef!
+    );
+    assert.equal(repository.objectFormat, 'sha256');
+  } finally {
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('concurrent same-key Session and Run admission returns the committed row', async () => {
   const stateRoot = await makePrivateDir('.cliq-m1-race-');
   const workspace = await makePrivateDir('.cliq-m1-ws-');
