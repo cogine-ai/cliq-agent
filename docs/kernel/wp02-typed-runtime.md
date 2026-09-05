@@ -16,14 +16,16 @@ protocols. Gate A does not switch production composition or claim that Gate B,
 broker integration, or provider qualification is complete.
 
 Gate A landed in PR #489 (`a153d47`); the model/context continuation landed in
-PR #490 (`c29179f`). Gate B also includes the minimum WP01
+PR #490 (`c29179f`), and direct tool-input contracts landed in PR #491
+(`eb93f46`). Gate B also includes the minimum WP01
 companion work needed to exercise the real SQLite/CAS continuation. The user
-approved that scope on 2026-09-05. This does not transfer storage ownership to
-WP02 or include the rest of WP01 migration, WP03 brokers, WP04 scheduling,
-WP05 verification, or WP06 production cutover.
+approved that scope on 2026-09-05 and the minimum WP03 canonical tool
+policy/profile/grant companion on 2026-09-06. This does not transfer storage or
+security ownership to WP02 or include the rest of WP01 migration, WP03 brokers,
+WP04 scheduling, WP05 verification, or WP06 production cutover.
 
-The existing M2 Journal reserves and settles budgets but has no model-turn,
-tool-batch/result, or compaction commit reducers. Its generic request/result
+The original M2 Journal reserved and settled budgets but had no model-turn,
+tool-batch/result, or compaction commit reducers. Generic request/result
 metadata is not validation of the retained typed model contract. Gate B must
 bind the exact model request and full reservation before claim, commit a
 completed observation together with its typed continuation, and recover that
@@ -41,13 +43,15 @@ only after the typed reducers have validated their complete input closure.
 
 ### Gate B implementation status
 
-The model-attempt/context lifecycle and direct tool-input projection now connect
-to StateStore. These are integration checkpoints inside Gate B, not new work
+The model-attempt/context lifecycle, direct tool-input projection and canonical
+ordinary-tool continuation now connect to StateStore. These are integration checkpoints inside Gate B, not new work
 packages or a declaration that Gate B has passed:
 
 - `StateStore.loadAgentRun` loads the retained assembly against the actual Run
   admission/deadline/budget, then derives normal prompts from retained context.
   Its handle retains static authority only, never a second mutable Run state.
+  Tool lifecycle results are detached, deeply frozen records; returned request,
+  target and budget objects cannot mutate shared authority or budget templates.
   Input schemas compile once from the verified manifest using a pinned standard
   JSON Schema validator (Ajv, draft-07); validation consumes typed values without
   coercion, defaults, stripping, JSON repair, external schema loading, async
@@ -93,14 +97,63 @@ packages or a declaration that Gate B has passed:
   without semantic retry. A valid but ineffective summary remains a usable
   observation in the Journal, not an accepted context summary.
 
-Gate B still requires trusted builtin execution and canonical policy/approval
-evidence, ordinary ordered tool-result commits (including denied/error and
-post-effect checkpoint validation), and user-input/repair/child projections.
-Those require the canonical grant, policy/approval, Journal and post-effect
-Checkpoint closure; accepting a caller's result or boolean would not establish
-it. The user authorized advancing to a reasonable new PR on 2026-09-05, so this
-model-state integration is reviewed before that separate authority-bearing
-execution work, without creating additional public milestones.
+### Canonical tool authority and continuation
+
+The 2026-09-06 approved integration implements the following as one coherent
+change, without adding public milestones:
+
+- Trusted Supervisor composition may supply release public keys to
+  `loadAgentRun`. Loading verifies a real Ed25519 RuntimeBundle signature, its
+  exact selected builtin/worker/provider entries, and the sole non-executable
+  policy profile with its empty structured-member closure. Complete-byte CAS
+  refs and self-omitting semantic digests remain separate. Keys never come from
+  Run/repository/worker input. This verifies selected authority, not bundle
+  installation, every other structured-root kind, or the running executable.
+- The fixed `tool-policy` evaluator uses the RFC mode table and rule precedence,
+  reproduces channel evidence from the normalized call and exact request/target,
+  and derives only direct-policy ordinary-tool grants. The entire winning
+  evidence is compared, including unsafe-allow downgrades and the real winning
+  rule id. Source refs, builtin denies, workspace/principal, frozen execution
+  contract, retry ceiling and Run lifetime cannot be substituted.
+- `prepareTool` reads the current SQLite frontier, publishes evidence, and
+  commits a direct allow's policy item, grant, one-call reservation and Journal
+  preparation together. A deny closes exactly its current call with a ref-free
+  `TOOL_CALL_DENIED` result and no Journal/charge. An ask returns
+  `approval_required` evidence without grant, claim, cursor advance or mutable
+  Run change. It is **not yet** a durable WaitingSubject/control-approval reducer.
+- `claimTool` independently reproduces the grant, then permanently claims only
+  the current exact request under the live lease, revision, time fence, expiry
+  and attempt ceiling. Generic StateStore claim/settlement methods cannot bypass
+  typed tool validation. No broker release gate or target I/O occurs here.
+- `completeTool` accepts a retained observation ref, not a caller result/charge
+  or success boolean. It binds request/target/grant/dispatch, validates bounded
+  output against the frozen schema, and atomically commits Journal settlement,
+  model-safe result, context, ordered frontier and Checkpoint. A received tool
+  error is a **completed, fully charged observation**, not proof of no release.
+  Invalid output becomes a retained protocol-error observation; diagnostics and
+  authorization records are not added to the model-content envelope.
+- Non-read tools must retain the post-effect workspace, snapshot and positive
+  retirement proof in that observation. The proof binds the checkpointing
+  generation, exact launch/containment and current inspector process/lock and
+  signed Supervisor identity. Completion seals the generation, retires the
+  worker and queues the Run in the same transaction. Read-only completions
+  preserve workspace state. Generic sealing cannot skip a claimed tool result.
+  Recovery checks each completion's historical Checkpoint, not just the latest
+  workspace, so a pre-effect snapshot cannot masquerade as its result.
+
+Tests use real SQLite/CAS, actual Ed25519 signatures with explicitly injected
+test roots, concurrent/stale/duplicate admission and claim cases, substituted
+authority and retirement evidence, restart, and transaction fault injection.
+The containment/snapshot fixtures are offline records, not actual OS inspection
+or proof that a tool, broker, sandbox or release bundle is qualified.
+
+Gate B still needs trusted builtin/broker execution, durable approval and
+user-input/repair/child projections. Existing attempts are not silently retried:
+retry/reconciliation and stop arbitration remain WP04-owned handoffs. Actual
+tool/MCP I/O, containment implementation, the second immediately-before-I/O
+gate, control UI/protocol, scheduling, bundle installation, paid-provider
+qualification and production cutover remain outside this change. Neither Gate B
+nor WP03 is declared complete.
 
 `candidate_required` and `stop_required` describe the retained
 observation's handoff to WP05/WP04; they are not permission to mark the Run
@@ -128,12 +181,16 @@ Line ranges must be positive safe integers in ascending order. Plan operations
 have distinct closed shapes; missing fields are not repaired or inferred.
 Actual symlink/descriptor containment and effect handling still belong to WP03.
 
-`PolicySubject` is action-free. The existing decision table, shell-head parser
-and mode engine consume it directly; the retiring runner alone retains its old
-action field for hooks. Modes and rule composition are unchanged: builtin
-denies enter through `composePermissionTable`, not a new implicit policy.
-These pure decisions do not manufacture the RFC's `PolicyChannelEvidenceV1`,
-approval records, target/request binding, or `OperationGrantV1`.
+`PolicySubject` is action-free and still carries no grant. The retiring runner
+keeps its existing mode/table/hook behavior. The canonical runtime does not
+serialize that engine's decisions into proofs: it uses the fixed RFC evaluator
+and `canonical-bash` parser instead. The new input preview and evidence use that
+same parser; persisted evidence retains every recognized nested deny occurrence
+in order, whereas the non-authoritative display subject needs only the first.
+Its bounded literal-shell grammar is not a general shell interpreter. Unknown,
+dynamic or ambiguous syntax loses the outer allow-rule key and remains unsafe;
+no host parser or legacy fallback is consulted. Actual executable/descriptor
+containment is independent of policy interpretation.
 
 The loop signature hashes the full frozen manifest entry and normalized input,
 excluding call ID/index. It is an observation key, not deduplication authority:

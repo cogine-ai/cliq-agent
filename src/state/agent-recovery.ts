@@ -11,11 +11,14 @@ import { validateUnusableModelResponse } from '../runtime/continuation.js';
 import { contextSourceDigest, validateContextItems } from '../runtime/context-compaction.js';
 import { readCanonicalArtifact, readModelTurnMaterial, readText } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
+import { validateToolRecovery } from './tool-recovery.js';
+import type { Checkpoint } from '../kernel/types.js';
 
 /** Recovery checks retained reachability/identity; loading the agent additionally reproduces native requests and validates schemas. */
 export async function validateAgentRecovery(input: {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: RunItemReferenceV1[];
   journal: InvocationJournalEntry[]; context: ContextManifest;
+  checkpoints: Checkpoint[];
 }): Promise<void> {
   const { artifacts, run, spec, journal } = input;
   const requests = new Map<string, ModelRequestV1>();
@@ -115,6 +118,7 @@ export async function validateAgentRecovery(input: {
       if (payload.outcome === 'error') await artifacts.readBytes(payload.diagnosticRef);
     }
   }
+  await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
   validateContextItems(input.context, input.items.map((row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: items.get(row.itemId)!
   })));

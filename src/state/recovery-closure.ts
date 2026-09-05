@@ -36,7 +36,7 @@ import { readChildAllocationsForRun } from './repositories/child-allocations.js'
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
-import { readCheckpoint, readRun } from './rows.js';
+import { checkpointFromRow, readCheckpoint, readRun } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 
 const ZERO_BUDGET: BudgetUsage = {
@@ -561,9 +561,12 @@ export async function readRecoveryClosure(
       recoveryFailure('Run is missing its initial ready Checkpoint');
     }
     const latestCheckpoint = readCheckpoint(connection, run.latestCheckpointId);
+    const checkpoints = connection.prepare('SELECT * FROM checkpoints WHERE run_id = ? ORDER BY rowid')
+      .all(run.id).map(checkpointFromRow);
     return {
       run,
       latestCheckpoint,
+      checkpoints,
       items: readRunItems(connection, run.id),
       journal: readInvocationJournal(connection, run.id),
       workerLaunches: readWorkerLaunchesForRun(connection, run.id, true),
@@ -659,6 +662,7 @@ export async function readRecoveryClosure(
   if (journal.some((entry) => entry.opKind === 'model')) {
     try {
       await validateAgentRecovery({ artifacts, run, spec: runSpec, items, journal,
+        checkpoints: databaseCut.checkpoints,
         context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) });
     } catch (error) {
       recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`);

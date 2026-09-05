@@ -2485,6 +2485,20 @@ Session label to reconstruct the objective.
 | `plan` | `read`, `plan`, `child_read_only` | none | `write`, `exec`, `mcp`, `verifier`, `dependency_install_scripts`, `delivery`, `child_mutating` |
 | `yolo` | every listed class | none | none |
 
+The v1 builtin floor is the ordered prefix `builtin:bash:rm` (`bash`, `rm`),
+`builtin:fs-write:git-tree` (`fs-write`, `.git/*`), and
+`builtin:fs-write:git-root` (`fs-write`, `.git`), all `deny`, with orders 0–2
+and no source ref. Frozen non-builtin rules follow that prefix; a snapshot
+cannot remove, replace or relabel it.
+
+RuntimeBundle signature encoding is standard padded base64 of a 64-byte
+Ed25519 signature. It covers UTF-8 `cliq-runtime-bundle-v1`, one NUL byte, and
+the lower-case 64-hex `manifestDigest` (not raw digest bytes or a `sha256:`
+prefix). The trusted release key set is Supervisor composition authority, never
+loaded from the Run, repository, worker or control request. Checking the selected
+signed entries/profile does not replace WP06's full bundle installation and
+structured-root walk or WP03's executing-process/broker identity checks.
+
 The action classifier is closed: built-in tools use their manifest `access`, except `delegate` becomes `child_read_only|child_mutating`; any MCP tool is `mcp`; verifier, install-script, delivery-plan, and child admission use their named classes. Kernel Cut exposes no generic network/integration tool or child endpoint capability: model, dependency registry, and streamable-HTTP MCP access remain their own typed broker contracts. `decisionRules` freezes `cliq-permission-grammar-v0`, not an opaque policy program: contiguous unique order/rule ids, at most 256 entries/1 MiB, one listed channel, and a nonempty pattern using only exact `*`, literal, suffix ` *`, or suffix `/*` semantics (`**` has no glob meaning). Channel primary keys are canonical root-relative paths for `fs-*`, the trusted parsed command head for `bash`, `registrationId/serverToolName` for MCP, and normalized plan identity for plan channels. Kernel Cut drops the unimplemented `network` channel.
 
 Every evaluation first publishes exact `PolicyChannelEvidenceV1`; there is no ephemeral parser result or adapter-owned matcher input. `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its policy ref/digest rehashes the current RunSpec snapshot; principal/Run/frontier/op/request/target equal the exact prospective subject and immutable artifacts; action class is the closed classifier result; and `evaluatedAt` uses canonical time before any approval, grant, denial item, Journal preparation, or target I/O. The fixed Supervisor evaluator plus retained `policy_engine` profile is the sole producer. Storage reruns that exact interpreter/profile over the immutable request/target and compares the full JCS output; a mutable installed parser, caller primary key, worker boolean, executable plugin, or semver-compatible engine is invalid.
@@ -5687,6 +5701,63 @@ Every row of this table is implemented by a narrow typed state-service method. T
 
 All named item/artifact objects use RFC 8785/JCS, reject unknown fields, carry `schemaVersion: 1`, use safe integers, and are content-addressed after their own digest field (when present) is omitted. Every `itemId` is unique within its owning Run, every referenced item is owned by that Run, and every ordered index is contiguous from zero.
 
+For ordinary tools, `ToolRequestV1` binds the exact resolved `ToolCallInputV1`,
+current tool frontier, assembly, batch/call/index and `ToolTargetV1`.
+`opId = H('cliq-tool-operation-v1', runId, batchItemId, callId)` is stable across
+attempts; attempts and physical generation/lease ownership belong to Journal
+claims, not a mutable request. The target pins the logical admitted workspace
+and **complete** frozen tool-manifest entry; its `toolContractDigest` hashes
+that entry, not the separate MCP `execution.toolContractDigest`.
+MCP alone requires
+`idempotencyKey = H('cliq-mcp-tool-idempotency-v1', runId, opId, registryRevisionRef, serverToolName)`;
+builtins forbid the field. The key is not evidence of server deduplication or
+retry safety. Plan channels use an explicit normalized input `planId`, otherwise
+`H('cliq-run-plan-v1', runId)`; they never consult a mutable Session plan pointer.
+Request, target and observation semantic digests omit only their own named
+digest field. Their ArtifactRefs always hash the **complete** retained JCS bytes.
+
+The fixed Bash v1 golden grammar recognizes ASCII space/tab separation,
+single/double quotes and escapes, simple command lists/pipelines/comments,
+literal environment assignments and unflagged `env|command|exec|builtin|nohup|sudo`
+wrappers (plus `--`), and shell `-c`/`--command` literal bodies through depth 8.
+Command, backtick and process substitutions retain recognized nested deny
+occurrences but never yield an outer allow-rule key. Repeated occurrences are
+ordered by lexical position tuples, not deduplicated by head text, with a maximum
+of 64 retained nested denies. Dynamic/unsupported wrapper options, delegation,
+script interpreters, redirection, malformed syntax and over-depth bodies are
+unsafe and have no trusted outer head. This is a bounded policy grammar, not a
+claim to interpret every shell construct; unsupported syntax never selects a
+host/legacy parser. Known literal deny occurrences survive loss of an outer head.
+
+`ToolObservationV1` is retained post-dispatch evidence, never permission to
+execute. It repeats the exact request, target, grant, attempt and permanent
+dispatch id, with `claim.timestamp <= observedAt <= completion.timestamp`.
+A successful `content` is a bounded JSON value of at most 1 MiB of JCS and must
+satisfy the frozen output schema when present. Invalid output becomes a
+`TOOL_PROTOCOL_ERROR` observation whose private diagnostic retains the original
+observation ref; the ordinary model content contains only that error code.
+An adapter error retains a canonical diagnostic whose `diagnosticDigest`
+hashes the complete diagnostic bytes. Both executed and error-valued observations
+close Journal as `completed` with `resultRef`, consume one reserved tool call,
+and publish one ordered ToolResult. An error payload's `journalErrorRef` names
+that completed error-valued observation, not a fabricated no-release/failed
+attempt; only positively proven no-release follows the separate refund protocol.
+
+For every non-read contract, `postEffect` is mandatory even on an error;
+read-only contracts forbid it and preserve the preceding workspace state.
+`checkpointId = H('cliq-tool-checkpoint-v1', runId, opId, String(attempt))` binds
+the positive sealed snapshot to this exact observation. Its workspace, tree,
+generation and retirement closure must agree with the quiesced owning launch;
+the inspector binds the trusted signed Supervisor entry and current StateOwner
+process/lock identities, not just an arbitrary matching instance-id string.
+Journal completion, full tool charge, ordered result, context/frontier,
+post-effect Checkpoint, generation seal and worker retirement commit together.
+Recovery retains this closure through the observation after generation retirement
+and checks the matching historical Checkpoint, so later checkpoints cannot hide
+a pre-effect workspace substitution. The State consumer does not itself perform
+tool I/O or OS inspection; the trusted WP03 producer and immediately-before-I/O
+gate remain independently required.
+
 ```ts
 type ModelTextV1 = {
   schemaVersion: 1
@@ -5783,6 +5854,66 @@ type ToolCallInputV1 = ToolCallInputBaseV1 & (
       inputSchemaRef: ArtifactRef
       inputSchemaDigest: string
       value?: never
+      diagnosticRef: ArtifactRef
+      diagnosticDigest: string
+    }
+)
+
+type ToolRequestV1 = {
+  schemaVersion: 1
+  format: 'cliq-tool-request-v1'
+  runId: string
+  opId: string
+  frontierRef: ArtifactRef
+  assemblyRef: ArtifactRef
+  batchItemId: string
+  callId: string
+  callIndex: number
+  toolName: string
+  inputRef: ArtifactRef
+  inputDigest: string
+  targetRef: ArtifactRef
+  targetDigest: string
+  idempotencyKey?: string
+  requestDigest: string
+}
+
+type ToolTargetV1 = {
+  schemaVersion: 1
+  format: 'cliq-tool-target-v1'
+  runId: string
+  workspaceIdentityRef: ArtifactRef
+  workspaceIdentityDigest: string
+  toolManifestRef: ArtifactRef
+  toolManifestDigest: string
+  toolName: string
+  toolContractDigest: string
+  execution: ToolContractManifestV1['entries'][number]['execution']
+  targetDigest: string
+}
+
+type ToolObservationV1 = {
+  schemaVersion: 1
+  format: 'cliq-tool-observation-v1'
+  runId: string
+  opId: string
+  attempt: number
+  requestRef: ArtifactRef
+  targetRef: ArtifactRef
+  grantRef: ArtifactRef
+  dispatchId: string
+  observedAt: string
+  observationDigest: string
+  postEffect?: {
+    workspaceStateRef: ArtifactRef
+    snapshotEvidenceRef: ArtifactRef
+    retirementEvidenceRef: ArtifactRef
+  }
+} & (
+  | { outcome: 'executed'; content: unknown }
+  | {
+      outcome: 'error'
+      code: 'TOOL_EXECUTION_FAILED' | 'TOOL_PROTOCOL_ERROR' | 'TOOL_RESOURCE_EXHAUSTED'
       diagnosticRef: ArtifactRef
       diagnosticDigest: string
     }
