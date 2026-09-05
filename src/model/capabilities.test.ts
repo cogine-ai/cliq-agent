@@ -20,7 +20,6 @@ const ADAPTER: ProviderAdapterIdentity = {
 };
 const CLAIMS: NormalizedModelCapabilityClaimsV1 = {
   nativeToolCalling: true,
-  constrainedOutput: true,
   streaming: true,
   trustedUsageEvidence: false,
   contextLimitTokens: 131_072,
@@ -86,12 +85,10 @@ function negotiate(
 test('provider transport capabilities are restrictions, not model evidence', () => {
   assert.deepEqual(providerTransportCapabilities('anthropic'), {
     nativeTools: true,
-    constrainedOutput: false,
     streaming: true
   });
   assert.deepEqual(providerTransportCapabilities('zhipu'), {
     nativeTools: true,
-    constrainedOutput: false,
     streaming: true
   });
 });
@@ -106,24 +103,17 @@ test('negotiateModelCapabilities selects native tools only from matching positiv
   }
 });
 
-test('negotiateModelCapabilities uses constrained IR only when both transport and evidence allow it', () => {
-  const claims = { ...CLAIMS, nativeToolCalling: false, constrainedOutput: true };
-  const openaiEvidence = evidenceValue('openai', claims);
-  const openai = negotiate('openai', openaiEvidence, claims);
-  assert.equal(openai.ok, true);
-  assert.equal(openai.ok ? openai.negotiation.mode : undefined, 'constrained-ir');
-
-  const anthropicEvidence = evidenceValue('anthropic', claims);
-  const anthropic = negotiate('anthropic', anthropicEvidence, claims);
-  assert.equal(anthropic.ok, true);
-  assert.equal(anthropic.ok ? anthropic.negotiation.mode : undefined, 'text-only');
+test('negotiation rejects the removed constrained-output capability instead of enabling autonomous execution', () => {
+  const evidence = evidenceValue('openai');
+  Object.assign(evidence, { constrainedOutput: true });
+  assert.equal(negotiate('openai', evidence).ok, false);
 });
 
 test('negotiateModelCapabilities maps absent or false autonomous evidence to text-only', () => {
   const missing = negotiate('openai', null);
   assert.deepEqual(missing, { ok: false, mode: 'text-only', reason: 'evidence_missing' });
 
-  const claims = { ...CLAIMS, nativeToolCalling: false, constrainedOutput: false };
+  const claims = { ...CLAIMS, nativeToolCalling: false };
   const evidence = evidenceValue('zhipu', claims);
   const result = negotiate('zhipu', evidence, claims);
   assert.equal(result.ok, true);

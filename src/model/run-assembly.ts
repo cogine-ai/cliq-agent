@@ -1,6 +1,7 @@
 import { canonicalJsonBytes, normalizeCanonicalText } from '../kernel/canonical.js';
 import { planCanonicalArtifact } from '../kernel/artifact-plan.js';
 import { assertArtifactRef, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
+import { assertBoundedJsonValue } from '../kernel/json.js';
 import type { ArtifactRef, ReplayClass, RunAssemblyV1 } from '../kernel/types.js';
 import {
   negotiateModelCapabilities,
@@ -10,15 +11,18 @@ import {
 import {
   validateModelPricing,
   type LocalZeroCostProvenanceV1,
+  createModelRequestReservation,
   type ModelPriceTableV1
 } from './pricing.js';
 import {
-  validateNormalModelAttemptAuthority,
-  type NormalModelAttemptAuthority,
-  type PromptSerializationProfileV1,
-  type ProviderNativeRequestProfileV1
+  compactionEnvelopeEstimate,
+  MISSING_TOOL_NAME,
+  type CompactionPromptEnvelopeMaterial,
+  type ModelAttemptAuthority,
+  type NormalPromptProjectionV1
 } from './request.js';
-import type { ByteBpeTokenizerAuthority } from './tokenizer.js';
+import { immutableSnapshot } from './immutable.js';
+import { createModelSession, type ModelSession } from './model-session.js';
 
 export type RunAssemblyReferenceKind =
   | 'mcp_registry_revision'
@@ -28,14 +32,10 @@ export type RunAssemblyReferenceKind =
   | 'skill_manifest'
   | 'runtime_bundle'
   | 'guest_toolchain_manifest'
-  | 'prompt_serialization_manifest'
-  | 'tokenizer_manifest'
   | 'compaction_prompt_envelope';
 
-export type RunAssemblyToolAuthority = {
-  ref: ArtifactRef;
-  digest: string;
-  entries: Array<{ name: string; replayClass: ReplayClass }>;
+export type RunAssemblyToolAuthority = Omit<NormalPromptProjectionV1['tools'][number], 'index'> & {
+  replayClass: ReplayClass;
 };
 
 export type RunAssemblyValidationMaterial = {
@@ -47,27 +47,11 @@ export type RunAssemblyValidationMaterial = {
   priceTable?: { ref: ArtifactRef; value: ModelPriceTableV1 };
   verifyLocalZeroCostAuthority: (provenance: LocalZeroCostProvenanceV1) => boolean;
   resolvePriceTableAuthority: (table: ModelPriceTableV1) => ArtifactRef | null;
-  nativeRequestProfile: { ref: ArtifactRef; value: ProviderNativeRequestProfileV1 };
-  promptSerialization: {
-    manifestRef: ArtifactRef;
-    manifestDigest: string;
-    profileRef: ArtifactRef;
-    profile: PromptSerializationProfileV1;
-  };
-  tokenizer: {
-    manifestRef: ArtifactRef;
-    manifestDigest: string;
-    entryVersion: string;
-    authority: ByteBpeTokenizerAuthority;
-  };
-  tools: RunAssemblyToolAuthority;
+  compactionEnvelope: CompactionPromptEnvelopeMaterial;
+  /** Resolve the exact signed manifest and schema closure, not independent entries beside a verified root. */
+  resolveVerifiedTools: (reference: RunAssemblyV1['tools']) => RunAssemblyToolAuthority[] | null;
   additionalCredentialGrantRefs: ArtifactRef[];
-  compactionEnvelopeTokenCount: number;
-  verifyReference: (reference: {
-    kind: RunAssemblyReferenceKind;
-    ref: ArtifactRef;
-    digest: string;
-  }) => boolean;
+  verifyReference: (reference: { kind: RunAssemblyReferenceKind; ref: ArtifactRef; digest: string }) => boolean;
   verifyProviderAdapter: (input: {
     adapter: RunAssemblyV1['provider']['adapter'];
     runtimeBundleRef: ArtifactRef;
@@ -106,7 +90,7 @@ export type RunAssemblyValidationFailure =
   | 'runtime_authority_invalid';
 
 export type ValidateRunAssemblyResult =
-  | { ok: true; authority: NormalModelAttemptAuthority }
+  | { ok: true; model: ModelSession }
   | {
       ok: false;
       code: 'RUN_ASSEMBLY_INVALID' | 'MODEL_CAPABILITY_UNKNOWN' | 'MODEL_COST_UNKNOWN';
@@ -132,8 +116,6 @@ const PROVIDER_KEYS = [
   'endpoint',
   'credentialGrantRefs',
   'adapter',
-  'nativeRequestProfileRef',
-  'nativeRequestProfileDigest',
   'negotiation',
   'pricing'
 ] as const;
@@ -151,7 +133,6 @@ const NEGOTIATION_KEYS = [
   'capabilityEvidenceRef',
   'capabilityDigest',
   'nativeToolCalling',
-  'constrainedOutput',
   'streaming',
   'trustedUsageEvidence',
   'contextLimitTokens',
@@ -183,13 +164,15 @@ const MODEL_RETRY_KEYS = [
   'postAttemptDelaysMs'
 ] as const;
 const TOOL_RETRY_KEYS = ['toolName', 'replayClass', 'maxDispatchedAttempts', 'postAttemptDelaysMs'] as const;
-const TOOL_AUTHORITY_ENTRY_KEYS = ['name', 'replayClass'] as const;
+const TOOL_AUTHORITY_ENTRY_KEYS = [
+  'name',
+  'replayClass',
+  'description',
+  'inputSchemaRef',
+  'inputSchemaDigest',
+  'inputSchema'
+] as const;
 const CONTEXT_KEYS = [
-  'promptTemplateRef',
-  'promptTemplateDigest',
-  'tokenizerRef',
-  'tokenizerDigest',
-  'tokenizerVersion',
   'compactionPromptEnvelopeRef',
   'compactionPromptEnvelopeDigest',
   'contextLimitTokens',
@@ -203,7 +186,7 @@ const CONTEXT_KEYS = [
   'maxSummaryBytes'
 ] as const;
 const PROVIDERS = new Set(['openai', 'anthropic', 'openrouter', 'openai-compatible', 'zhipu', 'ollama']);
-const MODES = new Set(['native-tools', 'constrained-ir', 'text-only']);
+const MODES = new Set(['native-tools', 'text-only']);
 const REPLAY_CLASSES = new Set<ReplayClass>(['retry', 'workspace-rollback-retry', 'reconcile', 'manual']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -212,7 +195,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function exactKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+function exactKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = []
+): boolean {
   const allowed = new Set([...required, ...optional]);
   return required.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => allowed.has(key));
 }
@@ -289,7 +276,8 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
       !exactKeys(provider.endpoint, LOCAL_ENDPOINT_KEYS) ||
       !isRef(provider.endpoint.identityDigest) ||
       !isRef(provider.endpoint.localProvenanceRef)
-    ) return false;
+    )
+      return false;
   } else if (
     provider.endpoint.kind !== 'registered' ||
     !exactKeys(provider.endpoint, REGISTERED_ENDPOINT_KEYS) ||
@@ -297,17 +285,17 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
     !isRef(provider.endpoint.endpointRegistrationRef) ||
     !isRef(provider.endpoint.endpointIdentityDigest) ||
     !isRef(provider.endpoint.tlsPolicyDigest)
-  ) return false;
+  )
+    return false;
   if (!strictlySortedUniqueRefs(provider.credentialGrantRefs)) return false;
   if (
     !isRecord(provider.adapter) ||
     !exactKeys(provider.adapter, ADAPTER_KEYS) ||
     !isNonempty(provider.adapter.adapterId) ||
     !isNonempty(provider.adapter.version) ||
-    !isRef(provider.adapter.codeDigest) ||
-    !isRef(provider.nativeRequestProfileRef) ||
-    !isRef(provider.nativeRequestProfileDigest)
-  ) return false;
+    !isRef(provider.adapter.codeDigest)
+  )
+    return false;
   if (!isRecord(provider.negotiation) || !exactKeys(provider.negotiation, NEGOTIATION_KEYS)) return false;
   const negotiation = provider.negotiation;
   if (
@@ -315,7 +303,6 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
     !isRef(negotiation.capabilityEvidenceRef) ||
     !isRef(negotiation.capabilityDigest) ||
     typeof negotiation.nativeToolCalling !== 'boolean' ||
-    typeof negotiation.constrainedOutput !== 'boolean' ||
     typeof negotiation.streaming !== 'boolean' ||
     typeof negotiation.trustedUsageEvidence !== 'boolean' ||
     !isSafeInteger(negotiation.contextLimitTokens, 1) ||
@@ -323,7 +310,8 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
     !Array.isArray(negotiation.exposedToolNames) ||
     negotiation.exposedToolNames.some((name) => !isNonempty(name)) ||
     new Set(negotiation.exposedToolNames).size !== negotiation.exposedToolNames.length
-  ) return false;
+  )
+    return false;
 
   if (!Array.isArray(assembly.mcpServers)) return false;
   const registrations = new Set<string>();
@@ -336,7 +324,8 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
       !isRef(server.registryRevisionRef) ||
       !isSafeInteger(server.registryRevision, 1) ||
       !isRef(server.manifestDigest)
-    ) return false;
+    )
+      return false;
     const previous = assembly.mcpServers[registrations.size - 1];
     if (previous !== undefined && byteCompare(previous.registrationId, server.registrationId) >= 0) return false;
     registrations.add(server.registrationId);
@@ -346,7 +335,8 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
     !exactKeys(assembly.tools, TOOLS_KEYS) ||
     !isRef(assembly.tools.manifestRef) ||
     !isRef(assembly.tools.manifestDigest)
-  ) return false;
+  )
+    return false;
   if (!isRecord(assembly.instructions) || !exactKeys(assembly.instructions, INSTRUCTION_KEYS)) return false;
   const instructions = assembly.instructions;
   if (
@@ -355,7 +345,8 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
     !isRef(instructions.workspaceInstructionsRef) ||
     !isRef(instructions.workspaceInstructionsDigest) ||
     !Array.isArray(instructions.skills)
-  ) return false;
+  )
+    return false;
   const skillIds = new Set<string>();
   for (const skill of instructions.skills) {
     if (
@@ -365,10 +356,12 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
       skillIds.has(skill.skillId) ||
       !isRef(skill.manifestRef) ||
       !isRef(skill.manifestDigest)
-    ) return false;
+    )
+      return false;
     skillIds.add(skill.skillId);
   }
-  if (!isRecord(assembly.runtime) || !exactKeys(assembly.runtime, RUNTIME_REQUIRED_KEYS, RUNTIME_GUEST_KEYS)) return false;
+  if (!isRecord(assembly.runtime) || !exactKeys(assembly.runtime, RUNTIME_REQUIRED_KEYS, RUNTIME_GUEST_KEYS))
+    return false;
   const runtime = assembly.runtime;
   if (
     !isRef(runtime.runtimeBundleRef) ||
@@ -376,11 +369,13 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
     !isNonempty(runtime.workerExecutableId) ||
     !isRef(runtime.workerExecutableDigest) ||
     !['macos_vm', 'linux_namespace'].includes(runtime.sandboxBackend)
-  ) return false;
+  )
+    return false;
   const hasGuestRef = runtime.guestToolchainManifestRef !== undefined;
   const hasGuestDigest = runtime.guestToolchainManifestDigest !== undefined;
   if (hasGuestRef !== hasGuestDigest) return false;
-  if (hasGuestRef && (!isRef(runtime.guestToolchainManifestRef) || !isRef(runtime.guestToolchainManifestDigest))) return false;
+  if (hasGuestRef && (!isRef(runtime.guestToolchainManifestRef) || !isRef(runtime.guestToolchainManifestDigest)))
+    return false;
   if (runtime.sandboxBackend === 'macos_vm' && !hasGuestRef) return false;
   if (
     !isRecord(assembly.retry) ||
@@ -388,15 +383,11 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
     !isRecord(assembly.retry.model) ||
     !exactKeys(assembly.retry.model, MODEL_RETRY_KEYS) ||
     !Array.isArray(assembly.retry.tools)
-  ) return false;
+  )
+    return false;
   if (!isRecord(assembly.context) || !exactKeys(assembly.context, CONTEXT_KEYS)) return false;
   const context = assembly.context;
   if (
-    !isRef(context.promptTemplateRef) ||
-    !isRef(context.promptTemplateDigest) ||
-    !isRef(context.tokenizerRef) ||
-    !isRef(context.tokenizerDigest) ||
-    !isNonempty(context.tokenizerVersion) ||
     !isRef(context.compactionPromptEnvelopeRef) ||
     !isRef(context.compactionPromptEnvelopeDigest) ||
     !isSafeInteger(context.contextLimitTokens, 1) ||
@@ -410,7 +401,8 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
     context.maxSummaryBytes !== 262_144 ||
     !isRef(assembly.assemblyDigest) ||
     !isNonempty(assembly.createdAt)
-  ) return false;
+  )
+    return false;
   return true;
 }
 
@@ -450,25 +442,15 @@ function validateReferences(assembly: RunAssemblyV1, material: RunAssemblyValida
     ) ||
     !verifyReference(
       material,
-      'prompt_serialization_manifest',
-      assembly.context.promptTemplateRef,
-      assembly.context.promptTemplateDigest
-    ) ||
-    !verifyReference(
-      material,
-      'tokenizer_manifest',
-      assembly.context.tokenizerRef,
-      assembly.context.tokenizerDigest
-    ) ||
-    !verifyReference(
-      material,
       'compaction_prompt_envelope',
       assembly.context.compactionPromptEnvelopeRef,
       assembly.context.compactionPromptEnvelopeDigest
     )
-  ) return false;
+  )
+    return false;
   for (const server of assembly.mcpServers) {
-    if (!verifyReference(material, 'mcp_registry_revision', server.registryRevisionRef, server.manifestDigest)) return false;
+    if (!verifyReference(material, 'mcp_registry_revision', server.registryRevisionRef, server.manifestDigest))
+      return false;
   }
   for (const skill of assembly.instructions.skills) {
     if (!verifyReference(material, 'skill_manifest', skill.manifestRef, skill.manifestDigest)) return false;
@@ -481,7 +463,8 @@ function validateReferences(assembly: RunAssemblyV1, material: RunAssemblyValida
       assembly.runtime.guestToolchainManifestRef,
       assembly.runtime.guestToolchainManifestDigest!
     )
-  ) return false;
+  )
+    return false;
   return true;
 }
 
@@ -510,35 +493,42 @@ function expectedToolRetry(entry: { name: string; replayClass: ReplayClass }): R
   };
 }
 
-function validateToolAuthority(assembly: RunAssemblyV1, material: RunAssemblyValidationMaterial): boolean {
-  if (material.tools.ref !== assembly.tools.manifestRef || material.tools.digest !== assembly.tools.manifestDigest) return false;
+function validateToolAuthority(assembly: RunAssemblyV1, tools: RunAssemblyToolAuthority[]): boolean {
   const names = new Set<string>();
-  for (const [index, entry] of material.tools.entries.entries()) {
+  for (const [index, entry] of tools.entries()) {
     if (
       !isRecord(entry) ||
       !exactKeys(entry, TOOL_AUTHORITY_ENTRY_KEYS) ||
       !isNonempty(entry.name) ||
+      entry.name === MISSING_TOOL_NAME ||
+      !isRef(entry.inputSchemaRef) ||
+      !isRef(entry.inputSchemaDigest) ||
+      typeof entry.description !== 'string' ||
       names.has(entry.name) ||
       !REPLAY_CLASSES.has(entry.replayClass) ||
-      (index > 0 && byteCompare(material.tools.entries[index - 1]!.name, entry.name) >= 0)
-    ) return false;
+      (index > 0 && byteCompare(tools[index - 1]!.name, entry.name) >= 0)
+    )
+      return false;
+    assertBoundedJsonValue(entry.inputSchema, 'tool input schema');
+    canonicalJsonBytes(entry.inputSchema);
     names.add(entry.name);
   }
   const exposed = assembly.provider.negotiation.exposedToolNames;
-  const expectedExposed = assembly.provider.negotiation.mode === 'text-only' ? [] : material.tools.entries.map((entry) => entry.name);
+  const expectedExposed = assembly.provider.negotiation.mode === 'text-only' ? [] : tools.map((entry) => entry.name);
   return sameStringSequence(exposed, expectedExposed);
 }
 
-function validateRetryPolicy(assembly: RunAssemblyV1, material: RunAssemblyValidationMaterial): boolean {
+function validateRetryPolicy(assembly: RunAssemblyV1, tools: RunAssemblyToolAuthority[]): boolean {
   if (
     assembly.retry.model.maxDispatchedAttempts !== 3 ||
     assembly.retry.model.maxZeroByteTransportRetriesPerAttempt !== 0 ||
     !sameJcs(assembly.retry.model.postAttemptDelaysMs, [500, 2000]) ||
-    assembly.retry.tools.length !== material.tools.entries.length
-  ) return false;
+    assembly.retry.tools.length !== tools.length
+  )
+    return false;
   return assembly.retry.tools.every((policy, index) => {
     if (!isRecord(policy) || !exactKeys(policy, TOOL_RETRY_KEYS)) return false;
-    return sameJcs(policy, expectedToolRetry(material.tools.entries[index]!));
+    return sameJcs(policy, expectedToolRetry(tools[index]!));
   });
 }
 
@@ -550,7 +540,7 @@ function validateContext(assembly: RunAssemblyV1, material: RunAssemblyValidatio
   const t = Math.min(Number((7n * BigInt(c)) / 10n), h - 8192);
   const r = Math.min(32_768, Math.floor(c / 4));
   const s = Math.min(8192, Math.floor(c / 8));
-  const k = material.compactionEnvelopeTokenCount;
+  const k = compactionEnvelopeEstimate(material.compactionEnvelope);
   const p = Math.min(Math.floor(c / 2), c - s - k);
   return (
     c >= 32_768 &&
@@ -566,16 +556,38 @@ function validateContext(assembly: RunAssemblyV1, material: RunAssemblyValidatio
     context.sourceInputTokenCap === p &&
     assembly.provider.negotiation.contextLimitTokens === c &&
     o <= assembly.provider.negotiation.maxOutputTokens &&
-    assembly.context.promptTemplateRef === material.promptSerialization.manifestRef &&
-    assembly.context.promptTemplateDigest === material.promptSerialization.manifestDigest &&
-    assembly.context.tokenizerRef === material.tokenizer.manifestRef &&
-    assembly.context.tokenizerDigest === material.tokenizer.manifestDigest &&
-    assembly.context.tokenizerVersion === material.tokenizer.entryVersion
+    s <= assembly.provider.negotiation.maxOutputTokens &&
+    assembly.context.compactionPromptEnvelopeRef === material.compactionEnvelope.ref &&
+    assembly.context.compactionPromptEnvelopeDigest === material.compactionEnvelope.value.envelopeDigest
   );
 }
 
-export function validateRunAssembly(input: ValidateRunAssemblyInput): ValidateRunAssemblyResult {
+export function validateRunAssembly(original: ValidateRunAssemblyInput): ValidateRunAssemblyResult {
   try {
+    const { material: originalMaterial, ...data } = original;
+    const {
+      resolveVerifiedCapabilityClaims,
+      verifyLocalZeroCostAuthority,
+      resolvePriceTableAuthority,
+      verifyReference,
+      verifyProviderAdapter,
+      verifyProviderEndpoint,
+      resolveVerifiedTools,
+      ...materialData
+    } = originalMaterial;
+    const input = {
+      ...immutableSnapshot(data),
+      material: {
+        ...immutableSnapshot(materialData),
+        resolveVerifiedCapabilityClaims,
+        verifyLocalZeroCostAuthority,
+        resolvePriceTableAuthority,
+        verifyReference,
+        verifyProviderAdapter,
+        verifyProviderEndpoint,
+        resolveVerifiedTools
+      }
+    };
     assertArtifactRef(input.assemblyRef);
     const admittedAt = parseCanonicalTime(input.admittedAt);
     const deadlineAt = parseCanonicalTime(input.deadlineAt);
@@ -585,19 +597,21 @@ export function validateRunAssembly(input: ValidateRunAssemblyInput): ValidateRu
     if (
       digestOmitting(input.assembly, 'assemblyDigest') !== input.assembly.assemblyDigest ||
       planCanonicalArtifact(input.assembly, input.assembly.format).ref !== input.assemblyRef
-    ) return fail('assembly_digest_mismatch');
+    )
+      return fail('assembly_digest_mismatch');
     if (!validateReferences(input.assembly, input.material)) return fail('assembly_reference_invalid');
 
     const assembly = input.assembly;
     const material = input.material;
     const provider = assembly.provider;
-    const endpointDigest = endpointIdentityDigest(assembly);
+    const capabilitySource = material.capabilityEvidence.value.source;
     if (
-      material.nativeRequestProfile.ref !== provider.nativeRequestProfileRef ||
-      material.nativeRequestProfile.value.profileDigest !== provider.nativeRequestProfileDigest ||
-      material.nativeRequestProfile.value.provider !== provider.name ||
-      material.nativeRequestProfile.value.model !== provider.model
-    ) return fail('provider_authority_mismatch');
+      capabilitySource.kind === 'signed_catalog' &&
+      capabilitySource.runtimeBundleRef !== assembly.runtime.runtimeBundleRef
+    ) {
+      return fail('capability_authority_invalid', 'MODEL_CAPABILITY_UNKNOWN');
+    }
+    const endpointDigest = endpointIdentityDigest(assembly);
     let adapterVerified = false;
     try {
       adapterVerified = material.verifyProviderAdapter({
@@ -643,11 +657,11 @@ export function validateRunAssembly(input: ValidateRunAssemblyInput): ValidateRu
       provider.negotiation.mode !== negotiated.mode ||
       provider.negotiation.streaming !== negotiated.streaming ||
       provider.negotiation.nativeToolCalling !== negotiated.nativeToolCalling ||
-      provider.negotiation.constrainedOutput !== negotiated.constrainedOutput ||
       provider.negotiation.trustedUsageEvidence !== negotiated.trustedUsageEvidence ||
       provider.negotiation.contextLimitTokens !== negotiated.contextLimitTokens ||
       provider.negotiation.maxOutputTokens !== negotiated.maxOutputTokens
-    ) return fail('capability_authority_invalid', 'MODEL_CAPABILITY_UNKNOWN');
+    )
+      return fail('capability_authority_invalid', 'MODEL_CAPABILITY_UNKNOWN');
 
     const pricing = validateModelPricing({
       provider: provider.name,
@@ -671,13 +685,19 @@ export function validateRunAssembly(input: ValidateRunAssemblyInput): ValidateRu
           provider.endpoint.localProvenanceRef !== provider.pricing.provenanceRef ||
           material.capabilityEvidence.value.source.kind !== 'managed_local' ||
           material.localProvenance?.value.capabilityEvidenceRef !== provider.negotiation.capabilityEvidenceRef ||
-          material.localProvenance.value.capabilityDigest !== provider.negotiation.capabilityDigest)) ||
+          material.localProvenance.value.capabilityDigest !== provider.negotiation.capabilityDigest ||
+          material.localProvenance.value.serviceSpecRef !==
+            material.capabilityEvidence.value.source.localInferenceServiceSpecRef ||
+          material.localProvenance.value.serviceSpecDigest !==
+            material.capabilityEvidence.value.source.localInferenceServiceSpecDigest)) ||
       (provider.endpoint.kind === 'registered' &&
         (provider.name === 'ollama' ||
           provider.credentialGrantRefs.length === 0 ||
           (material.capabilityEvidence.value.source.kind === 'registered_endpoint_negotiation' &&
-            material.capabilityEvidence.value.source.endpointRegistrationRef !== provider.endpoint.endpointRegistrationRef)))
-    ) return fail('provider_authority_mismatch');
+            material.capabilityEvidence.value.source.endpointRegistrationRef !==
+              provider.endpoint.endpointRegistrationRef)))
+    )
+      return fail('provider_authority_mismatch');
 
     if (!strictlySortedUniqueRefs(input.runSpecCredentialGrantRefs)) {
       return fail('credential_union_mismatch');
@@ -692,35 +712,40 @@ export function validateRunAssembly(input: ValidateRunAssemblyInput): ValidateRu
       return fail('credential_union_mismatch');
     }
 
-    if (!validateToolAuthority(assembly, material)) return fail('tool_authority_mismatch');
-    if (!validateRetryPolicy(assembly, material)) return fail('retry_policy_invalid');
+    const resolvedTools = material.resolveVerifiedTools(assembly.tools);
+    if (resolvedTools === null) return fail('tool_authority_mismatch');
+    const tools = immutableSnapshot(resolvedTools);
+    if (!validateToolAuthority(assembly, tools)) return fail('tool_authority_mismatch');
+    if (!validateRetryPolicy(assembly, tools)) return fail('retry_policy_invalid');
     if (!validateContext(assembly, material)) return fail('context_equations_invalid');
 
-    const authority: NormalModelAttemptAuthority = {
+    const authority: ModelAttemptAuthority = {
+      assemblyRef: input.assemblyRef,
+      assemblyDigest: assembly.assemblyDigest,
       provider: provider.name,
       model: provider.model,
       negotiatedMode: provider.negotiation.mode,
+      streaming: provider.negotiation.streaming,
       contextLimitTokens: provider.negotiation.contextLimitTokens,
       maximumOutputTokens: assembly.context.reservedOutputTokens,
       maximumCompactionOutputTokens: assembly.context.summaryTokenCap,
-      exposedToolNames: [...provider.negotiation.exposedToolNames],
+      exposedTools:
+        provider.negotiation.mode === 'text-only'
+          ? []
+          : tools.map(({ replayClass: _, ...tool }, index) => ({ index, ...tool })),
       pricing: pricing.pricing,
-      promptSerializationRef: assembly.context.promptTemplateRef,
-      promptSerializationDigest: assembly.context.promptTemplateDigest,
-      promptSerializationProfileRef: material.promptSerialization.profileRef,
-      promptSerializationProfile: material.promptSerialization.profile,
-      nativeRequestProfileRef: provider.nativeRequestProfileRef,
-      nativeRequestProfile: material.nativeRequestProfile.value,
-      tokenizerRef: assembly.context.tokenizerRef,
-      tokenizerDigest: assembly.context.tokenizerDigest,
-      tokenizer: material.tokenizer.authority
+      compactionEnvelope: material.compactionEnvelope
     };
     try {
-      validateNormalModelAttemptAuthority(authority);
+      createModelRequestReservation(
+        authority.contextLimitTokens,
+        Math.max(authority.maximumOutputTokens, authority.maximumCompactionOutputTokens),
+        authority.pricing
+      );
     } catch {
-      return fail('provider_authority_mismatch');
+      return fail('pricing_authority_invalid', 'MODEL_COST_UNKNOWN');
     }
-    return { ok: true, authority };
+    return { ok: true, model: createModelSession(authority) };
   } catch {
     return fail('assembly_schema_invalid');
   }

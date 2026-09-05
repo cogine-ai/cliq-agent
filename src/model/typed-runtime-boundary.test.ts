@@ -15,7 +15,8 @@ const TYPED_RUNTIME_SOURCES = [
   'model/provider-observation.ts',
   'model/request.ts',
   'model/run-assembly.ts',
-  'model/tokenizer.ts'
+  'model/model-session.ts',
+  'model/immutable.ts'
 ] as const;
 
 const LEGACY_DEPENDENCIES = [
@@ -50,5 +51,8 @@ test('typed model modules use the strict wire decoder instead of direct JSON.par
   for (const relativePath of TYPED_RUNTIME_SOURCES.filter((path) => path.startsWith('model/'))) {
     const source = await readFile(resolve(SOURCE_ROOT, relativePath), 'utf8');
     assert.doesNotMatch(source, /\bJSON\.parse\s*\(/u, `${relativePath} bypasses the strict JSON boundary`);
+    if (relativePath === 'model/request.ts') {
+      assert.doesNotMatch(source, /\bparseJsonStrict\b/u, 'request preparation must not re-decode typed tool arguments');
+    }
   }
 });

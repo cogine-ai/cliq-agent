@@ -831,7 +831,7 @@ The remaining derivation is exact:
 childPricing = P_A.provider.pricing
 childToolEntries = byteSort(filter(P_M.entries, requested-and-granted by G and legal for G.mode))
 childMcpServers = byteSort(P_A.mcpServers referenced by childToolEntries)
-childExposedToolNames = childToolEntries.names for native-tools/constrained-ir, otherwise []
+childExposedToolNames = childToolEntries.names for native-tools, otherwise []
 childToolRetries = P_A.retry.tools restricted to childExposedToolNames in that order
 childPolicyDecision[a] = P_P.decisions[a] when a is granted and legal for G.mode, otherwise deny
 childDeadlineAt = min(parent.deadlineAt, admissionCreatedAt + normalize(R.requestedBudgets.wallTimeMs))
@@ -842,7 +842,7 @@ allocation.grantedChildConcurrency = G.grantedBudgets.childConcurrency
 allocation.childDeadlineAt = G.childDeadlineAt
 ```
 
-The child assembly copies the parent's exact provider/model/endpoint, provider capability evidence, adapter, model credential bindings, runtime/guest, prompt/tokenizer/context/compaction, instructions, skills, model-retry, and algorithm identities. Pricing copies the exact `zero_cost` provenance or already-frozen trusted table with `calculationAlgorithm='cliq-price-ceil-v1'`; the latter remains valid because `childDeadlineAt <= parent.deadlineAt`. Only the deterministically filtered tool manifest, MCP set, exposed tool names, tool retry entries, digest, and creation time differ. The child policy copies the parent's principal, workspace identity, mode, engine, and applicable decision rules in original order, points at the child tool manifest, never widens any disposition, and sets every ungranted action class to `deny`. No refreshed registry, credential binding, mutable instruction/skill, or broader parent contract may enter either artifact.
+The child assembly copies the parent's exact provider/model/endpoint, provider capability evidence, adapter, model credential bindings, runtime/guest, context/compaction, instructions, skills, model-retry, and algorithm identities. Pricing copies the exact `zero_cost` provenance or already-frozen trusted table with `calculationAlgorithm='cliq-price-ceil-v1'`; the latter remains valid because `childDeadlineAt <= parent.deadlineAt`. Only the deterministically filtered tool manifest, MCP set, exposed tool names, tool retry entries, digest, and creation time differ. The child policy copies the parent's principal, workspace identity, mode, engine, and applicable decision rules in original order, points at the child tool manifest, never widens any disposition, and sets every ungranted action class to `deny`. No refreshed registry, credential binding, mutable instruction/skill, or broader parent contract may enter either artifact.
 
 Verifier/dependency derivation is equally closed. `inherit_parent` sets `childVerifierSpecRef` to the exact parent verifier spec and `childDependencyPolicyRef` to the exact parent policy when present. `none` uses the canonical empty `VerifierSpec`, requires `childDependencyPolicyRef` absent, and requires `derivedUnverifiedConsentRef`. `childCredentialGrantRefs` is the byte-sorted unique union recomputed from the child provider, filtered MCP revisions, and inherited dependency policy, contains no extra ref, and is a subset of the parent's frozen credential union.
 

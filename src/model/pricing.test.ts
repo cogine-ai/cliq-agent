@@ -33,6 +33,7 @@ function priceTable(): ModelPriceTableV1 {
     currency: 'USD' as const,
     unit: 'micros_per_million_tokens' as const,
     prices: { input: 2_000_000, output: 8_000_000, cacheRead: 500_000, cacheWrite: 2_500_000 },
+    requestTokenCeiling: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 100, cacheWriteTokens: 100 },
     validFrom: '2026-09-01T00:00:00.000Z',
     validThrough: '2026-09-10T00:00:00.000Z'
   };
@@ -41,7 +42,10 @@ function priceTable(): ModelPriceTableV1 {
   return value;
 }
 
-function trustedBound(table: ModelPriceTableV1, ref: string): Extract<ModelPricingBound, { kind: 'trusted_price_table' }> {
+function trustedBound(
+  table: ModelPriceTableV1,
+  ref: string
+): Extract<ModelPricingBound, { kind: 'trusted_price_table' }> {
   return {
     kind: 'trusted_price_table',
     priceTableRef: ref,
@@ -53,7 +57,10 @@ function trustedBound(table: ModelPriceTableV1, ref: string): Extract<ModelPrici
   };
 }
 
-function validateTrusted(table = priceTable(), boundOverride?: Partial<Extract<ModelPricingBound, { kind: 'trusted_price_table' }>>) {
+function validateTrusted(
+  table = priceTable(),
+  boundOverride?: Partial<Extract<ModelPricingBound, { kind: 'trusted_price_table' }>>
+) {
   const artifact = planCanonicalArtifact(table, table.format);
   return validateModelPricing({
     provider: 'openai',
@@ -130,15 +137,16 @@ test('cliq-price-ceil-v1 rejects unsafe inputs and exact-result overflow', () =>
   assert.throws(() => ceilTokenPriceMicros(-1, 1), /nonnegative safe integer/);
   assert.throws(() => ceilTokenPriceMicros(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER), /safe-integer range/);
   assert.throws(
-    () => calculateModelCostMicros(
-      {
-        inputTokens: Number.MAX_SAFE_INTEGER,
-        outputTokens: Number.MAX_SAFE_INTEGER,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0
-      },
-      { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 }
-    ),
+    () =>
+      calculateModelCostMicros(
+        {
+          inputTokens: Number.MAX_SAFE_INTEGER,
+          outputTokens: Number.MAX_SAFE_INTEGER,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0
+        },
+        { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 }
+      ),
     /safe-integer range/
   );
 });
@@ -153,10 +161,7 @@ test('priceTableDigest excludes signature bytes reference but the artifact ident
   const first = priceTable();
   const second = { ...first, signatureRef: 'c'.repeat(64) };
   assert.equal(priceTableDigest(first), priceTableDigest(second));
-  assert.notEqual(
-    planCanonicalArtifact(first, first.format).ref,
-    planCanonicalArtifact(second, second.format).ref
-  );
+  assert.notEqual(planCanonicalArtifact(first, first.format).ref, planCanonicalArtifact(second, second.format).ref);
 });
 
 test('validateModelPricing rejects table tampering, authority failure, and endpoint mismatch', () => {
@@ -255,7 +260,7 @@ test('validateModelPricing accepts only independently verified managed-local zer
   });
 });
 
-test('createModelRequestReservation freezes the conservative N/O/N/N vector', () => {
+test('createModelRequestReservation reserves the full signed ceiling, independent of the prompt estimate', () => {
   const result = validateTrusted();
   assert.equal(result.ok, true);
   const pricing = result.ok ? result.pricing : (null as never);
@@ -268,6 +273,9 @@ test('createModelRequestReservation freezes the conservative N/O/N/N vector', ()
     costMicros: 660
   });
 
+  assert.deepEqual(createModelRequestReservation(1, 1, pricing), createModelRequestReservation(100, 20, pricing));
+  assert.throws(() => createModelRequestReservation(101, 20, pricing), /ceiling/);
+  assert.throws(() => createModelRequestReservation(100, 21, pricing), /ceiling/);
   const zeroPricing: ValidatedModelPricing = {
     kind: 'zero_cost',
     bound: { kind: 'zero_cost', maxRunCostMicros: 0, provenanceRef: 'e'.repeat(64) },

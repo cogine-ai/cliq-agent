@@ -1,3 +1,4 @@
+import { immutableSnapshot } from './immutable.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { planCanonicalArtifact } from '../kernel/artifact-plan.js';
 import { assertArtifactRef, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
@@ -54,6 +55,8 @@ export type ModelPriceTableV1 = {
   currency: 'USD';
   unit: 'micros_per_million_tokens';
   prices: ModelTokenPrices;
+  /** Signed bound for every released request, including rejected/ambiguous requests. Not an estimate. */
+  requestTokenCeiling: ModelTokenComponents;
   validFrom: string;
   validThrough: string;
   tableDigest: string;
@@ -132,6 +135,7 @@ const PRICE_TABLE_KEYS = [
   'currency',
   'unit',
   'prices',
+  'requestTokenCeiling',
   'validFrom',
   'validThrough',
   'tableDigest'
@@ -213,25 +217,37 @@ export function calculateModelCostMicros(usage: ModelTokenComponents, prices: Mo
 }
 
 export function createModelRequestReservation(
-  inputTokenCount: number,
+  contextLimitTokens: number,
   maximumOutputTokens: number,
   pricing: ValidatedModelPricing
 ): ModelRequestReservation {
-  checkedSafeInteger(inputTokenCount, 'input token count');
+  checkedSafeInteger(contextLimitTokens, 'context limit');
   checkedSafeInteger(maximumOutputTokens, 'maximum output tokens');
   if (maximumOutputTokens < 1) throw new RangeError('maximum output tokens must be positive');
-  const modelTokens = checkedAdd(inputTokenCount, maximumOutputTokens, 'model token reservation');
-  const components: ModelTokenComponents = {
-    inputTokens: inputTokenCount,
-    outputTokens: maximumOutputTokens,
-    cacheReadTokens: inputTokenCount,
-    cacheWriteTokens: inputTokenCount
-  };
+  const components: ModelTokenComponents =
+    pricing.kind === 'zero_cost'
+      ? { inputTokens: contextLimitTokens, outputTokens: maximumOutputTokens, cacheReadTokens: 0, cacheWriteTokens: 0 }
+      : pricing.table.requestTokenCeiling;
+  if (components.inputTokens < contextLimitTokens || components.outputTokens < maximumOutputTokens) {
+    throw new RangeError('signed request token ceiling does not cover the admitted model limits');
+  }
   return {
     ...components,
-    modelTokens,
+    modelTokens: checkedAdd(components.inputTokens, components.outputTokens, 'model token reservation'),
     costMicros: pricing.kind === 'zero_cost' ? 0 : calculateModelCostMicros(components, pricing.table.prices)
   };
+}
+
+function validTokenCeiling(value: unknown): value is ModelTokenComponents {
+  const keys = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'];
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, keys) &&
+    keys.every((key) => isNonnegativeSafeInteger(value[key])) &&
+    (value.inputTokens as number) > 0 &&
+    (value.outputTokens as number) > 0 &&
+    Number.isSafeInteger((value.inputTokens as number) + (value.outputTokens as number))
+  );
 }
 
 export function priceTableDigest(table: ModelPriceTableV1): string {
@@ -265,6 +281,7 @@ function validPriceTableSchema(value: unknown): value is ModelPriceTableV1 {
     value.currency === 'USD' &&
     value.unit === 'micros_per_million_tokens' &&
     validPrices(value.prices) &&
+    validTokenCeiling(value.requestTokenCeiling) &&
     isNonemptyString(value.validFrom) &&
     isNonemptyString(value.validThrough) &&
     isArtifactRef(value.tableDigest)
@@ -305,11 +322,7 @@ function validLocalProvenanceSchema(value: unknown): value is LocalZeroCostProve
 function validBound(bound: unknown): bound is ModelPricingBound {
   if (!isRecord(bound) || typeof bound.kind !== 'string') return false;
   if (bound.kind === 'zero_cost') {
-    return (
-      hasExactKeys(bound, ZERO_BOUND_KEYS) &&
-      bound.maxRunCostMicros === 0 &&
-      isArtifactRef(bound.provenanceRef)
-    );
+    return hasExactKeys(bound, ZERO_BOUND_KEYS) && bound.maxRunCostMicros === 0 && isArtifactRef(bound.provenanceRef);
   }
   return (
     bound.kind === 'trusted_price_table' &&
@@ -327,15 +340,13 @@ function failure(reason: PricingValidationFailure): ValidateModelPricingResult {
   return { ok: false, code: 'MODEL_COST_UNKNOWN', reason };
 }
 
-export function validateModelPricing(input: ValidateModelPricingInput): ValidateModelPricingResult {
+export function validateModelPricing(original: ValidateModelPricingInput): ValidateModelPricingResult {
+  const { verifyLocalZeroCostAuthority, resolvePriceTableAuthority, ...data } = original;
+  const input = { ...immutableSnapshot(data), verifyLocalZeroCostAuthority, resolvePriceTableAuthority };
   if (!isNonemptyString(input.model)) throw new TypeError('model must be nonempty');
   assertArtifactRef(input.endpointIdentityDigest);
   for (const ref of input.credentialGrantRefs) assertArtifactRef(ref);
-  if (
-    input.credentialGrantRefs.some(
-      (ref, index) => index > 0 && ref <= input.credentialGrantRefs[index - 1]!
-    )
-  ) {
+  if (input.credentialGrantRefs.some((ref, index) => index > 0 && ref <= input.credentialGrantRefs[index - 1]!)) {
     return failure('pricing_identity_mismatch');
   }
   checkedSafeInteger(input.maxRunCostMicros, 'maximum Run cost');

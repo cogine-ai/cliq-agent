@@ -12,7 +12,6 @@ export type ProviderAdapterIdentity = {
 
 export type NormalizedModelCapabilityClaimsV1 = {
   nativeToolCalling: boolean;
-  constrainedOutput: boolean;
   streaming: boolean;
   trustedUsageEvidence: boolean;
   contextLimitTokens: number;
@@ -47,7 +46,6 @@ export type ModelCapabilityEvidenceV1 = {
         localModelManifestDigest: string;
       };
   nativeToolCalling: boolean;
-  constrainedOutput: boolean;
   streaming: boolean;
   trustedUsageEvidence: boolean;
   contextLimitTokens: number;
@@ -59,18 +57,17 @@ export type ModelCapabilityEvidenceV1 = {
 
 export type ProviderTransportCapabilities = Readonly<{
   nativeTools: boolean;
-  constrainedOutput: boolean;
   streaming: boolean;
 }>;
 
-const PROVIDER_TRANSPORT_CAPABILITIES: Readonly<Record<ProviderName, ProviderTransportCapabilities>> = Object.freeze({
-  openai: Object.freeze({ nativeTools: true, constrainedOutput: true, streaming: true }),
-  anthropic: Object.freeze({ nativeTools: true, constrainedOutput: false, streaming: true }),
-  openrouter: Object.freeze({ nativeTools: true, constrainedOutput: true, streaming: true }),
-  'openai-compatible': Object.freeze({ nativeTools: true, constrainedOutput: true, streaming: true }),
-  zhipu: Object.freeze({ nativeTools: true, constrainedOutput: false, streaming: true }),
-  ollama: Object.freeze({ nativeTools: true, constrainedOutput: true, streaming: true })
-});
+const PROVIDER_TRANSPORT_CAPABILITIES: Readonly<Record<ProviderName, ProviderTransportCapabilities>> = Object.freeze(
+  Object.fromEntries(
+    ['openai', 'anthropic', 'openrouter', 'openai-compatible', 'zhipu', 'ollama'].map((provider) => [
+      provider,
+      Object.freeze({ nativeTools: true, streaming: true })
+    ])
+  ) as Record<ProviderName, ProviderTransportCapabilities>
+);
 
 export function providerTransportCapabilities(provider: ProviderName): ProviderTransportCapabilities {
   return PROVIDER_TRANSPORT_CAPABILITIES[provider];
@@ -96,7 +93,6 @@ export type ModelCapabilityNegotiation = {
   mode: AgentNegotiatedMode;
   streaming: boolean;
   nativeToolCalling: boolean;
-  constrainedOutput: boolean;
   trustedUsageEvidence: boolean;
   contextLimitTokens: number;
   maxOutputTokens: number;
@@ -132,7 +128,6 @@ const EVIDENCE_KEYS = [
   'adapter',
   'source',
   'nativeToolCalling',
-  'constrainedOutput',
   'streaming',
   'trustedUsageEvidence',
   'contextLimitTokens',
@@ -204,7 +199,6 @@ function validSource(value: unknown): value is ModelCapabilityEvidenceV1['source
 function claimsFromEvidence(evidence: ModelCapabilityEvidenceV1): NormalizedModelCapabilityClaimsV1 {
   return {
     nativeToolCalling: evidence.nativeToolCalling,
-    constrainedOutput: evidence.constrainedOutput,
     streaming: evidence.streaming,
     trustedUsageEvidence: evidence.trustedUsageEvidence,
     contextLimitTokens: evidence.contextLimitTokens,
@@ -219,7 +213,6 @@ function claimsEqual(left: NormalizedModelCapabilityClaimsV1, right: NormalizedM
 function validClaims(claims: NormalizedModelCapabilityClaimsV1): boolean {
   return (
     typeof claims.nativeToolCalling === 'boolean' &&
-    typeof claims.constrainedOutput === 'boolean' &&
     typeof claims.streaming === 'boolean' &&
     typeof claims.trustedUsageEvidence === 'boolean' &&
     Number.isSafeInteger(claims.contextLimitTokens) &&
@@ -242,7 +235,8 @@ function validEvidenceSchema(value: unknown): value is ModelCapabilityEvidenceV1
   if (
     (value.provider === 'ollama' && value.source.kind !== 'managed_local') ||
     (value.provider !== 'ollama' && value.source.kind === 'managed_local')
-  ) return false;
+  )
+    return false;
   return validClaims(value as ModelCapabilityEvidenceV1);
 }
 
@@ -254,9 +248,7 @@ function fail(reason: CapabilityEvidenceFailure): ModelCapabilityNegotiationResu
   return { ok: false, mode: 'text-only', reason };
 }
 
-export function negotiateModelCapabilities(
-  input: NegotiateModelCapabilitiesInput
-): ModelCapabilityNegotiationResult {
+export function negotiateModelCapabilities(input: NegotiateModelCapabilitiesInput): ModelCapabilityNegotiationResult {
   if (!isNonemptyString(input.model) || !validAdapter(input.adapter)) {
     throw new TypeError('model and adapter identity must be complete');
   }
@@ -311,12 +303,7 @@ export function negotiateModelCapabilities(
   }
 
   const transport = providerTransportCapabilities(input.provider);
-  const mode: AgentNegotiatedMode =
-    transport.nativeTools && evidence.nativeToolCalling
-      ? 'native-tools'
-      : transport.constrainedOutput && evidence.constrainedOutput
-        ? 'constrained-ir'
-        : 'text-only';
+  const mode: AgentNegotiatedMode = transport.nativeTools && evidence.nativeToolCalling ? 'native-tools' : 'text-only';
   return {
     ok: true,
     negotiation: {
@@ -329,7 +316,6 @@ export function negotiateModelCapabilities(
       mode,
       streaming: input.streamingRequested && transport.streaming && evidence.streaming,
       nativeToolCalling: evidence.nativeToolCalling,
-      constrainedOutput: evidence.constrainedOutput,
       trustedUsageEvidence: evidence.trustedUsageEvidence,
       contextLimitTokens: evidence.contextLimitTokens,
       maxOutputTokens: evidence.maxOutputTokens

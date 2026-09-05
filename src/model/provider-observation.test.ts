@@ -4,11 +4,7 @@ import { test } from 'node:test';
 import type { ProviderName } from '../kernel/types.js';
 import type { AgentNegotiatedMode } from '../protocol/agent-ir.js';
 import { MODEL_RESPONSE_LIMIT_BYTES } from './attempt.js';
-import {
-  CONSTRAINED_MODEL_TURN_FORMAT,
-  observeProviderResponse,
-  type ObserveProviderResponseInput
-} from './provider-observation.js';
+import { observeProviderResponse, type ObserveProviderResponseInput } from './provider-observation.js';
 
 const OBSERVED_AT = '2026-09-05T00:00:00.000Z';
 
@@ -16,11 +12,7 @@ function bytes(value: unknown): Uint8Array {
   return Buffer.from(typeof value === 'string' ? value : JSON.stringify(value), 'utf8');
 }
 
-function observe(
-  provider: ProviderName,
-  body: unknown,
-  overrides: Partial<ObserveProviderResponseInput> = {}
-) {
+function observe(provider: ProviderName, body: unknown, overrides: Partial<ObserveProviderResponseInput> = {}) {
   return observeProviderResponse({
     provider,
     model: 'model-1',
@@ -103,9 +95,9 @@ function ollamaBody() {
   };
 }
 
-test('all six provider adapters preserve every native call in provider order', () => {
+test('Chat Completions, Anthropic, and Ollama adapters preserve every native call in provider order', () => {
   const fixtures: Array<[ProviderName, unknown]> = [
-    ['openai', openAiBody()],
+    ['openai-compatible', openAiBody()],
     ['openrouter', openAiBody()],
     ['openai-compatible', openAiBody()],
     ['zhipu', openAiBody()],
@@ -118,15 +110,23 @@ test('all six provider adapters preserve every native call in provider order', (
     if (result.observation.kind !== 'decoded') continue;
     assert.equal(result.observation.stopReason, 'tool_calls', provider);
     assert.equal(result.observation.toolCalls.length, 2, provider);
-    assert.deepEqual(result.observation.toolCalls.map((call) => call.wireIndex), [0, 1], provider);
-    assert.deepEqual(result.observation.toolCalls.map((call) => call.toolName), ['alpha', 'beta'], provider);
+    assert.deepEqual(
+      result.observation.toolCalls.map((call) => call.wireIndex),
+      [0, 1],
+      provider
+    );
+    assert.deepEqual(
+      result.observation.toolCalls.map((call) => call.toolName),
+      ['alpha', 'beta'],
+      provider
+    );
     assert.equal(result.events[0]?.type, 'start', provider);
     assert.equal(result.events.at(-1)?.type, 'end', provider);
   }
 });
 
 test('OpenAI-family JSON preserves valid values and exact malformed argument fragments', () => {
-  const result = observe('openai', openAiBody());
+  const result = observe('openai-compatible', openAiBody());
   assert.equal(result.observation.kind, 'decoded');
   if (result.observation.kind !== 'decoded') return;
   assert.equal(result.observation.responseId, 'response-1');
@@ -199,17 +199,23 @@ test('OpenAI streaming reconstructs three interleaved calls without reordering f
     }
   ];
   const source = `${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('')}data: [DONE]\n\n`;
-  const result = observe('openai', source, { mediaType: 'text/event-stream; charset=utf-8' });
+  const result = observe('openai-compatible', source, { mediaType: 'text/event-stream; charset=utf-8' });
   assert.equal(result.observation.kind, 'decoded');
   if (result.observation.kind !== 'decoded') return;
   assert.equal(result.observation.text, 'work');
   assert.equal(result.observation.reasoning, 'think');
-  assert.deepEqual(result.observation.toolCalls.map((call) => call.wireCallId), ['call-a', 'call-b', 'call-c']);
-  assert.deepEqual(result.observation.toolCalls.map((call) => plain(call.input)), [
-    { encoding: 'jcs_json', value: { a: 1 } },
-    { encoding: 'jcs_json', value: { b: 2 } },
-    { encoding: 'jcs_json', value: { c: 3 } }
-  ]);
+  assert.deepEqual(
+    result.observation.toolCalls.map((call) => call.wireCallId),
+    ['call-a', 'call-b', 'call-c']
+  );
+  assert.deepEqual(
+    result.observation.toolCalls.map((call) => plain(call.input)),
+    [
+      { encoding: 'jcs_json', value: { a: 1 } },
+      { encoding: 'jcs_json', value: { b: 2 } },
+      { encoding: 'jcs_json', value: { c: 3 } }
+    ]
+  );
   assert.deepEqual(result.observation.usage, {
     inputTokens: 12,
     outputTokens: 7,
@@ -225,8 +231,16 @@ test('Anthropic streaming reconstructs interleaved tool input blocks', () => {
       type: 'message_start',
       message: { id: 'message-1', model: 'model-1', usage: { input_tokens: 9, output_tokens: 0 } }
     },
-    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call-a', name: 'alpha', input: {} } },
-    { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'call-b', name: 'beta', input: {} } },
+    {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'tool_use', id: 'call-a', name: 'alpha', input: {} }
+    },
+    {
+      type: 'content_block_start',
+      index: 1,
+      content_block: { type: 'tool_use', id: 'call-b', name: 'beta', input: {} }
+    },
     { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"a":' } },
     { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"b":2}' } },
     { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '1}' } },
@@ -239,10 +253,13 @@ test('Anthropic streaming reconstructs interleaved tool input blocks', () => {
   const result = observe('anthropic', source, { mediaType: 'text/event-stream' });
   assert.equal(result.observation.kind, 'decoded');
   if (result.observation.kind !== 'decoded') return;
-  assert.deepEqual(result.observation.toolCalls.map((call) => plain(call.input)), [
-    { encoding: 'jcs_json', value: { a: 1 } },
-    { encoding: 'jcs_json', value: { b: 2 } }
-  ]);
+  assert.deepEqual(
+    result.observation.toolCalls.map((call) => plain(call.input)),
+    [
+      { encoding: 'jcs_json', value: { a: 1 } },
+      { encoding: 'jcs_json', value: { b: 2 } }
+    ]
+  );
   assert.deepEqual(result.observation.usage, {
     inputTokens: 9,
     outputTokens: 6,
@@ -275,62 +292,16 @@ test('Ollama NDJSON retains ordered calls and complete usage', () => {
   if (result.observation.kind !== 'decoded') return;
   assert.equal(result.observation.stopReason, 'tool_calls');
   assert.equal(result.observation.text, 'work');
-  assert.deepEqual(result.observation.toolCalls.map((call) => call.toolName), ['alpha', 'beta']);
+  assert.deepEqual(
+    result.observation.toolCalls.map((call) => call.toolName),
+    ['alpha', 'beta']
+  );
   assert.deepEqual(result.observation.usage, {
     inputTokens: 11,
     outputTokens: 4,
     cacheReadTokens: 0,
     cacheWriteTokens: 0
   });
-});
-
-test('constrained IR accepts only the versioned completed-turn envelope and derives no wire ids', () => {
-  const envelope = {
-    schemaVersion: 1,
-    format: CONSTRAINED_MODEL_TURN_FORMAT,
-    turn: {
-      stopReason: 'tool_calls',
-      text: 'working',
-      toolCalls: [
-        { toolName: 'alpha', input: { a: 1 } },
-        { toolName: 'beta', input: { b: 2 } }
-      ]
-    }
-  };
-  const result = observe('openai', {
-    id: 'response-1',
-    model: 'model-1',
-    choices: [{ index: 0, finish_reason: 'stop', message: { content: JSON.stringify(envelope) } }]
-  }, { negotiatedMode: 'constrained-ir' });
-  assert.equal(result.observation.kind, 'decoded');
-  if (result.observation.kind !== 'decoded') return;
-  assert.equal(result.observation.constrainedOutputAcknowledged, true);
-  assert.equal(result.observation.stopReason, 'tool_calls');
-  assert.deepEqual(result.observation.toolCalls.map((call) => call.wireCallId), [undefined, undefined]);
-  assert.deepEqual(result.observation.toolCalls.map((call) => call.toolName), ['alpha', 'beta']);
-
-  const extraField = { ...envelope, hidden: true };
-  const rejected = observe('openai', {
-    model: 'model-1',
-    choices: [{ index: 0, finish_reason: 'stop', message: { content: JSON.stringify(extraField) } }]
-  }, { negotiatedMode: 'constrained-ir' });
-  assert.equal(rejected.observation.kind, 'capability_shape_mismatch');
-});
-
-test('constrained IR preserves terminal provider failures before envelope validation', () => {
-  const truncated = observe('openai', {
-    model: 'model-1',
-    choices: [{ index: 0, finish_reason: 'length', message: { content: '{"schemaVersion":1' } }]
-  }, { negotiatedMode: 'constrained-ir' });
-  assert.equal(truncated.observation.kind, 'decoded');
-  assert.equal(truncated.observation.kind === 'decoded' ? truncated.observation.stopReason : undefined, 'length');
-
-  const refused = observe('openai', {
-    model: 'model-1',
-    choices: [{ index: 0, finish_reason: 'stop', message: { content: null, refusal: 'Cannot comply.' } }]
-  }, { negotiatedMode: 'constrained-ir' });
-  assert.equal(refused.observation.kind, 'decoded');
-  assert.equal(refused.observation.kind === 'decoded' ? refused.observation.stopReason : undefined, 'content_filter');
 });
 
 test('OpenAI streaming refusal is classified as content filtering', () => {
@@ -347,17 +318,21 @@ test('OpenAI streaming refusal is classified as content filtering', () => {
     }
   ];
   const source = `${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('')}data: [DONE]\n\n`;
-  const result = observe('openai', source, { mediaType: 'text/event-stream' });
+  const result = observe('openai-compatible', source, { mediaType: 'text/event-stream' });
   assert.equal(result.observation.kind, 'decoded');
   assert.equal(result.observation.kind === 'decoded' ? result.observation.stopReason : undefined, 'content_filter');
 });
 
 test('text-only JSON-looking assistant content stays inert text', () => {
   const legacyAction = '{"bash":"rm -rf /tmp/should-not-run"}';
-  const result = observe('zhipu', {
-    model: 'model-1',
-    choices: [{ index: 0, finish_reason: 'stop', message: { content: legacyAction } }]
-  }, { negotiatedMode: 'text-only' });
+  const result = observe(
+    'zhipu',
+    {
+      model: 'model-1',
+      choices: [{ index: 0, finish_reason: 'stop', message: { content: legacyAction } }]
+    },
+    { negotiatedMode: 'text-only' }
+  );
   assert.equal(result.observation.kind, 'decoded');
   if (result.observation.kind !== 'decoded') return;
   assert.equal(result.observation.text, legacyAction);
@@ -371,7 +346,7 @@ test('native malformed calls remain visible for central response-level or batch 
     { id: '', type: 'function', function: { name: 'alpha', arguments: '{}' } },
     { id: 'call-b', type: 'function', function: { name: '', arguments: '{bad' } }
   ];
-  const result = observe('openai', body);
+  const result = observe('openai-compatible', body);
   assert.equal(result.observation.kind, 'decoded');
   if (result.observation.kind !== 'decoded') return;
   assert.equal(result.observation.toolCalls.length, 2);
@@ -384,10 +359,10 @@ test('native malformed calls remain visible for central response-level or batch 
 });
 
 test('strict wire parsing rejects duplicate keys, invalid UTF-8, and model substitution', () => {
-  const duplicate = observe('openai', '{"model":"model-1","model":"model-1","choices":[]}');
+  const duplicate = observe('openai-compatible', '{"model":"model-1","model":"model-1","choices":[]}');
   assert.equal(duplicate.observation.kind, 'malformed');
 
-  const invalidUtf8 = observe('openai', null, { bytes: Uint8Array.of(0xc3, 0x28) });
+  const invalidUtf8 = observe('openai-compatible', null, { bytes: Uint8Array.of(0xc3, 0x28) });
   assert.equal(invalidUtf8.observation.kind, 'malformed');
 
   const substitution = observe('anthropic', { ...anthropicBody(), model: 'other-model' });
@@ -397,7 +372,7 @@ test('strict wire parsing rejects duplicate keys, invalid UTF-8, and model subst
 test('positive HTTP and in-band provider rejections never enter decoded turns', () => {
   const redirect = observe('openrouter', { redirect: true }, { status: 307 });
   assert.equal(redirect.observation.kind, 'provider_rejection');
-  const inBand = observe('openai', { error: { type: 'rate_limit_error' } });
+  const inBand = observe('openai-compatible', { error: { type: 'rate_limit_error' } });
   assert.equal(inBand.observation.kind, 'provider_rejection');
   assert.equal(inBand.events.at(-1)?.type, 'error');
 });
@@ -416,7 +391,7 @@ test('oversized responses retain exactly the first limit plus one bytes', () => 
 test('nonterminal stop reasons retain calls for central unusable-response compilation', () => {
   const body = openAiBody();
   body.choices[0]!.finish_reason = 'length';
-  const result = observe('openai', body);
+  const result = observe('openai-compatible', body);
   assert.equal(result.observation.kind, 'decoded');
   if (result.observation.kind !== 'decoded') return;
   assert.equal(result.observation.stopReason, 'length');
@@ -438,12 +413,11 @@ test('provider streams fail closed on partial usage and events after terminal bo
     'malformed'
   );
 
-  const afterOpenAiDone = [
-    'data: [DONE]\n\n',
-    `data: ${JSON.stringify({ model: 'model-1', choices: [] })}\n\n`
-  ].join('');
+  const afterOpenAiDone = ['data: [DONE]\n\n', `data: ${JSON.stringify({ model: 'model-1', choices: [] })}\n\n`].join(
+    ''
+  );
   assert.equal(
-    observe('openai', afterOpenAiDone, { mediaType: 'text/event-stream' }).observation.kind,
+    observe('openai-compatible', afterOpenAiDone, { mediaType: 'text/event-stream' }).observation.kind,
     'malformed'
   );
 
@@ -459,7 +433,7 @@ test('provider streams fail closed on partial usage and events after terminal bo
     'data: [DONE]\n\n'
   ].join('');
   assert.equal(
-    observe('openai', afterOpenAiFinish, { mediaType: 'text/event-stream' }).observation.kind,
+    observe('openai-compatible', afterOpenAiFinish, { mediaType: 'text/event-stream' }).observation.kind,
     'malformed'
   );
 
@@ -467,10 +441,7 @@ test('provider streams fail closed on partial usage and events after terminal bo
     JSON.stringify({ model: 'model-1', done: true, done_reason: 'stop', message: { content: 'done' } }),
     JSON.stringify({ model: 'model-1', done: false, message: { content: 'late' } })
   ].join('\n');
-  assert.equal(
-    observe('ollama', ollamaAfterDone, { mediaType: 'application/x-ndjson' }).observation.kind,
-    'malformed'
-  );
+  assert.equal(observe('ollama', ollamaAfterDone, { mediaType: 'application/x-ndjson' }).observation.kind, 'malformed');
 
   const incompleteOpenAi = `data: ${JSON.stringify({
     id: 'response-1',
@@ -478,7 +449,7 @@ test('provider streams fail closed on partial usage and events after terminal bo
     choices: [{ index: 0, delta: { content: 'partial' }, finish_reason: 'stop' }]
   })}\n\n`;
   assert.equal(
-    observe('openai', incompleteOpenAi, { mediaType: 'text/event-stream' }).observation.kind,
+    observe('openai-compatible', incompleteOpenAi, { mediaType: 'text/event-stream' }).observation.kind,
     'malformed'
   );
 

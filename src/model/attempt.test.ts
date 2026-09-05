@@ -94,9 +94,7 @@ function decodedObservation(
 
 function compileInput(
   observation: ObservedModelResponse,
-  overrides: Partial<
-    Extract<CompileModelObservationInput, { request: { kind: 'normal' } }>
-  > = {}
+  overrides: Partial<Extract<CompileModelObservationInput, { request: { kind: 'normal' } }>> = {}
 ): Extract<CompileModelObservationInput, { request: { kind: 'normal' } }> {
   return {
     runId: 'run-1',
@@ -147,19 +145,22 @@ test('compileModelObservation creates one deterministic final AgentModelTurn', (
     cacheWriteTokens: 1,
     costMicros: 17
   });
-  assert.equal(first.turn.responseDigest, canonicalSha256({
-    format: 'cliq-agent-normalized-response-v1',
-    provider: 'openai',
-    model: 'gpt-test',
-    responseId: 'response-1',
-    usage: first.turn.usage,
-    usageTrusted: false,
-    negotiatedMode: 'native-tools',
-    requestDigest: REQUEST_DIGEST,
-    stopReason: 'end',
-    textRef: first.turn.textRef,
-    toolCalls: []
-  }));
+  assert.equal(
+    first.turn.responseDigest,
+    canonicalSha256({
+      format: 'cliq-agent-normalized-response-v1',
+      provider: 'openai',
+      model: 'gpt-test',
+      responseId: 'response-1',
+      usage: first.turn.usage,
+      usageTrusted: false,
+      negotiatedMode: 'native-tools',
+      requestDigest: REQUEST_DIGEST,
+      stopReason: 'end',
+      textRef: first.turn.textRef,
+      toolCalls: []
+    })
+  );
 
   const text = decodedArtifact<{ utf8: string; textDigest: string }>(first.artifacts, first.turn.textRef);
   assert.equal(text.utf8, 'line one\nline two');
@@ -193,10 +194,13 @@ test('compileModelObservation retains every call and its exact malformed argumen
   const result = compileModelObservation(compileInput(observation, { resolveToolInput: resolver }));
 
   assert.equal(result.kind, 'usable');
-  assert.deepEqual(result.turn.toolCalls.map(({ callId, index, toolName }) => ({ callId, index, toolName })), [
-    { callId: 'call-1', index: 0, toolName: 'read' },
-    { callId: 'call-2', index: 1, toolName: 'read' }
-  ]);
+  assert.deepEqual(
+    result.turn.toolCalls.map(({ callId, index, toolName }) => ({ callId, index, toolName })),
+    [
+      { callId: 'call-1', index: 0, toolName: 'read' },
+      { callId: 'call-2', index: 1, toolName: 'read' }
+    ]
+  );
   assert.equal(seen.length, 2);
   assert.equal(seen[1]?.observed.encoding, 'utf8_json_fragment');
   assert.equal(seen[1]?.observed.encoding === 'utf8_json_fragment' ? seen[1].observed.utf8 : '', '{"path":"broken"');
@@ -236,28 +240,32 @@ test('compileModelObservation rejects the whole response before resolution when 
 
 test('compileModelObservation rejects duplicate native ids and invalid stop/call pairs', () => {
   const duplicate = compileModelObservation(
-    compileInput(decodedObservation({
-      stopReason: 'tool_calls',
-      toolCalls: [
-        { wireCallId: 'same', toolName: 'read', input: { encoding: 'jcs_json', value: {} } },
-        { wireCallId: 'same', toolName: 'read', input: { encoding: 'jcs_json', value: {} } }
-      ]
-    }))
+    compileInput(
+      decodedObservation({
+        stopReason: 'tool_calls',
+        toolCalls: [
+          { wireCallId: 'same', toolName: 'read', input: { encoding: 'jcs_json', value: {} } },
+          { wireCallId: 'same', toolName: 'read', input: { encoding: 'jcs_json', value: {} } }
+        ]
+      })
+    )
   );
   assert.equal(duplicate.kind, 'unusable');
   assert.equal(duplicate.response.failureCode, 'missing_or_duplicate_call_id');
 
   const invalidPair = compileModelObservation(
-    compileInput(decodedObservation({
-      stopReason: 'end',
-      toolCalls: [{ wireCallId: 'call-1', toolName: 'read', input: { encoding: 'jcs_json', value: {} } }]
-    }))
+    compileInput(
+      decodedObservation({
+        stopReason: 'end',
+        toolCalls: [{ wireCallId: 'call-1', toolName: 'read', input: { encoding: 'jcs_json', value: {} } }]
+      })
+    )
   );
   assert.equal(invalidPair.kind, 'unusable');
   assert.equal(invalidPair.response.failureCode, 'invalid_stop_call_shape');
 });
 
-test('compileModelObservation fails closed for forbidden mode calls and unacknowledged constrained output', () => {
+test('compileModelObservation fails closed for forbidden mode calls', () => {
   const textOnly = compileModelObservation(
     compileInput(
       decodedObservation({
@@ -269,12 +277,6 @@ test('compileModelObservation fails closed for forbidden mode calls and unacknow
   );
   assert.equal(textOnly.kind, 'unusable');
   assert.equal(textOnly.response.failureCode, 'tool_calls_forbidden_by_mode');
-
-  const constrained = compileModelObservation(
-    compileInput(decodedObservation(), { negotiatedMode: 'constrained-ir' })
-  );
-  assert.equal(constrained.kind, 'unusable');
-  assert.equal(constrained.response.failureCode, 'capability_shape_mismatch');
 });
 
 test('compileModelObservation maps nonterminal stops and provider rejection to closed failures', () => {
@@ -352,9 +354,11 @@ test('compileModelObservation only accepts cancellation with the pre-existing St
 
 test('compileModelObservation rejects invalid usage rather than persisting partial telemetry', () => {
   const result = compileModelObservation(
-    compileInput(decodedObservation({
-      usage: { inputTokens: 99, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 }
-    }))
+    compileInput(
+      decodedObservation({
+        usage: { inputTokens: 99, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 }
+      })
+    )
   );
   assert.equal(result.kind, 'unusable');
   assert.equal(result.response.failureCode, 'malformed_transport_payload');
@@ -453,9 +457,7 @@ test('compileModelObservation rejects unsafe tool names before invoking resoluti
         decodedObservation({
           stopReason: 'tool_calls',
           text: '',
-          toolCalls: [
-            { wireCallId: 'call-1', toolName, input: { encoding: 'jcs_json', value: {} } }
-          ]
+          toolCalls: [{ wireCallId: 'call-1', toolName, input: { encoding: 'jcs_json', value: {} } }]
         }),
         {
           resolveToolInput(input) {
@@ -471,7 +473,7 @@ test('compileModelObservation rejects unsafe tool names before invoking resoluti
   }
 });
 
-test('context compaction accepts only bounded text-only end turns under the pinned token cap', () => {
+test('context compaction accepts only bounded text-only end turns with the requested output cap', () => {
   const compactionBase = {
     ...compileInput(decodedObservation({ text: '# Summary\n\nComplete.', stopReason: 'end' })),
     negotiatedMode: 'text-only' as const,
@@ -481,10 +483,7 @@ test('context compaction accepts only bounded text-only end turns under the pinn
       requestDigest: REQUEST_DIGEST
     },
     compaction: {
-      maximumOutputTokens: 8,
-      countOutputTokens(utf8: Uint8Array) {
-        return Math.ceil(utf8.byteLength / 4);
-      }
+      maximumOutputTokens: 8
     }
   } satisfies CompileModelObservationInput;
   const accepted = compileModelObservation(compactionBase);
@@ -493,7 +492,11 @@ test('context compaction accepts only bounded text-only end turns under the pinn
 
   const overTokenCap = compileModelObservation({
     ...compactionBase,
-    compaction: { maximumOutputTokens: 1, countOutputTokens: () => 2 }
+    compaction: { maximumOutputTokens: 1 },
+    observation: decodedObservation({
+      text: 'Summary',
+      usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 }
+    })
   });
   assert.equal(overTokenCap.kind, 'unusable');
   assert.equal(overTokenCap.response.failureCode, 'context_compaction_requires_end_markdown');
@@ -507,9 +510,7 @@ test('context compaction accepts only bounded text-only end turns under the pinn
     observation: decodedObservation({
       stopReason: 'tool_calls',
       text: '',
-      toolCalls: [
-        { wireCallId: 'call-1', toolName: 'read', input: { encoding: 'jcs_json', value: {} } }
-      ]
+      toolCalls: [{ wireCallId: 'call-1', toolName: 'read', input: { encoding: 'jcs_json', value: {} } }]
     })
   });
   assert.equal(toolBearing.kind, 'unusable');

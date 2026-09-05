@@ -1,8 +1,9 @@
 import type { ArtifactRef, ProviderName, ReplayClass } from '../kernel/types.js';
 
-export const CONSTRAINED_MODEL_TURN_FORMAT = 'cliq-constrained-model-turn-v1';
+export type AgentNegotiatedMode = 'native-tools' | 'text-only';
 
-export type AgentNegotiatedMode = 'native-tools' | 'constrained-ir' | 'text-only';
+/** Opaque provider-owned reasoning replay data; never executable tool input. */
+export type ProviderContinuation = { provider: ProviderName; model: string; items: unknown[] };
 
 export type ModelTextV1 = {
   schemaVersion: 1;
@@ -12,15 +13,16 @@ export type ModelTextV1 = {
   textDigest: string;
 };
 
+export type ObservedToolArguments =
+  | { encoding: 'jcs_json'; value: unknown; utf8?: never }
+  | { encoding: 'utf8_json_fragment'; utf8: string; value?: never };
+
 export type ObservedToolCallInputV1 = {
   schemaVersion: 1;
   format: 'cliq-observed-tool-call-input-v1';
   byteCount: number;
   observedInputDigest: string;
-} & (
-  | { encoding: 'jcs_json'; value: unknown; utf8?: never }
-  | { encoding: 'utf8_json_fragment'; utf8: string; value?: never }
-);
+} & ObservedToolArguments;
 
 export type ToolCallInputBaseV1 = {
   schemaVersion: 1;
@@ -95,6 +97,7 @@ export type AgentModelStreamEvent =
   | { type: 'end'; stopReason: 'end' | 'tool_calls' | 'length' | 'content_filter' | 'cancelled' | 'unknown' };
 
 type AgentModelTurnBase = {
+  continuation?: ProviderContinuation;
   schemaVersion: 1;
   format: 'cliq-agent-model-turn-v1';
   provider: ProviderName;

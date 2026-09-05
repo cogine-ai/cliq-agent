@@ -5,6 +5,7 @@ import { assertBoundedJsonValue } from '../kernel/json.js';
 import type { ArtifactRef, ProviderName } from '../kernel/types.js';
 import type {
   AgentModelTurn,
+  ProviderContinuation,
   AgentNegotiatedMode,
   AgentToolCall,
   AgentUsage,
@@ -13,27 +14,20 @@ import type {
   ModelUnusableResponseV1,
   ModelTextV1,
   ObservedToolCallInputV1,
+  ObservedToolArguments,
   ToolCallInputV1
 } from '../protocol/agent-ir.js';
 
 export const MODEL_RESPONSE_LIMIT_BYTES = 1_048_576;
 export const COMPACTION_SUMMARY_LIMIT_BYTES = 262_144;
 
-export type ProviderObservedStopReason =
-  | 'end'
-  | 'tool_calls'
-  | 'length'
-  | 'content_filter'
-  | 'cancelled'
-  | 'unknown';
+export type ProviderObservedStopReason = 'end' | 'tool_calls' | 'length' | 'content_filter' | 'cancelled' | 'unknown';
 
 export type ObservedToolCall = {
   wireIndex?: number;
   wireCallId?: string;
   toolName?: string;
-  input:
-    | { encoding: 'jcs_json'; value: unknown }
-    | { encoding: 'utf8_json_fragment'; utf8: string };
+  input: ObservedToolArguments;
 };
 
 export type ObservedUsage = {
@@ -60,7 +54,7 @@ export type ObservedModelResponse =
       reasoning?: string;
       toolCalls: ObservedToolCall[];
       usage?: ObservedUsage;
-      constrainedOutputAcknowledged?: boolean;
+      continuation?: ProviderContinuation;
     })
   | (ObservedResponseBase & {
       kind: 'malformed';
@@ -129,7 +123,6 @@ export type CompileModelObservationInput = CompileModelObservationInputBase &
         request: { kind: 'context_compaction'; requestRef: ArtifactRef; requestDigest: string };
         compaction: {
           maximumOutputTokens: number;
-          countOutputTokens: (utf8: Uint8Array) => number;
         };
       }
   );
@@ -171,8 +164,7 @@ function validateTrustedInput(input: CompileModelObservationInput): void {
     if (
       input.compaction === undefined ||
       !Number.isSafeInteger(input.compaction.maximumOutputTokens) ||
-      input.compaction.maximumOutputTokens < 1 ||
-      typeof input.compaction.countOutputTokens !== 'function'
+      input.compaction.maximumOutputTokens < 1
     ) {
       throw new TypeError('context compaction token authority must be complete');
     }
@@ -212,18 +204,7 @@ function base64urlSha256(value: unknown): string {
   return Buffer.from(canonicalSha256(value), 'hex').toString('base64url');
 }
 
-function normalizeCallId(
-  input: CompileModelObservationInput,
-  call: ObservedToolCall,
-  index: number
-): string | null {
-  if (input.negotiatedMode === 'constrained-ir') {
-    return base64urlSha256({
-      protocol: 'cliq-constrained-ir-call-v1',
-      opId: input.opId,
-      index
-    });
-  }
+function normalizeCallId(input: CompileModelObservationInput, call: ObservedToolCall, index: number): string | null {
   if (input.provider === 'ollama') {
     return base64urlSha256({
       protocol: 'cliq-ollama-native-call-v1',
@@ -469,6 +450,7 @@ function responseDigest(turn: Omit<AgentModelTurn, 'responseDigest'>): string {
     provider: turn.provider,
     model: turn.model,
     ...(turn.responseId === undefined ? {} : { responseId: turn.responseId }),
+    ...(turn.continuation === undefined ? {} : { continuation: turn.continuation }),
     ...(turn.usage === undefined ? {} : { usage: turn.usage }),
     usageTrusted: false,
     negotiatedMode: turn.negotiatedMode,
@@ -534,11 +516,9 @@ export function compileModelObservation(input: CompileModelObservationInput): Co
   if (input.request.kind === 'context_compaction') {
     const compaction = input.compaction;
     let byteCount = Number.POSITIVE_INFINITY;
-    let tokenCount = Number.POSITIVE_INFINITY;
     try {
       const summaryBytes = Buffer.from(normalizedModelText(observation.text), 'utf8');
       byteCount = summaryBytes.byteLength;
-      tokenCount = compaction?.countOutputTokens(summaryBytes) ?? Number.POSITIVE_INFINITY;
     } catch {
       // The closed compaction failure below retains the exact wire observation.
     }
@@ -548,10 +528,9 @@ export function compileModelObservation(input: CompileModelObservationInput): Co
       observation.toolCalls.length !== 0 ||
       byteCount < 1 ||
       byteCount > COMPACTION_SUMMARY_LIMIT_BYTES ||
-      !Number.isSafeInteger(tokenCount) ||
-      tokenCount < 1 ||
       compaction === undefined ||
-      tokenCount > compaction.maximumOutputTokens
+      byteCount > compaction.maximumOutputTokens * 3 ||
+      (observation.usage !== undefined && observation.usage.outputTokens > compaction.maximumOutputTokens)
     ) {
       return unusableFromComplete(input, 'context_compaction_requires_end_markdown');
     }
@@ -561,9 +540,6 @@ export function compileModelObservation(input: CompileModelObservationInput): Co
   if (terminalStopFailure !== null) return unusableFromComplete(input, terminalStopFailure);
   if (input.negotiatedMode === 'text-only' && observation.toolCalls.length > 0) {
     return unusableFromComplete(input, 'tool_calls_forbidden_by_mode');
-  }
-  if (input.negotiatedMode === 'constrained-ir' && observation.constrainedOutputAcknowledged !== true) {
-    return unusableFromComplete(input, 'capability_shape_mismatch');
   }
 
   if (
@@ -641,6 +617,12 @@ export function compileModelObservation(input: CompileModelObservationInput): Co
     });
   }
 
+  if (
+    observation.continuation !== undefined &&
+    (observation.continuation.provider !== input.provider || observation.continuation.model !== input.model)
+  ) {
+    return unusableFromComplete(input, 'capability_shape_mismatch');
+  }
   const usage = validatedUsage(input, observation.usage);
   if (observation.usage !== undefined && usage === undefined) {
     return unusableFromComplete(input, 'malformed_transport_payload');
@@ -652,6 +634,7 @@ export function compileModelObservation(input: CompileModelObservationInput): Co
     provider: input.provider,
     model: input.model,
     ...(observation.responseId === undefined ? {} : { responseId: observation.responseId }),
+    ...(observation.continuation === undefined ? {} : { continuation: observation.continuation }),
     ...(usage === undefined ? {} : { usage }),
     usageTrusted: false as const,
     negotiatedMode: input.negotiatedMode,

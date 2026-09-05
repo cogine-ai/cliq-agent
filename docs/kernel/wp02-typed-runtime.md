@@ -1,245 +1,177 @@
 # WP02 Typed Runtime Implementation Design
 
-This document records the implementation architecture for work package 02 of
-the [Durable Verified Run Kernel RFC](../rfcs/2026-08-11-durable-verified-run-kernel.md).
-The backlog-ready specification remains the normative behaviour contract; this
-document fixes module seams, dependency direction, and merge gates so the
-implementation does not optimize one local slice at the expense of the final
-Kernel.
+This design implements [WP02](../backlog/durable-verified-run-kernel/02-typed-runtime-and-provider-capabilities.md)
+under the [Durable Verified Run Kernel RFC](../rfcs/2026-08-11-durable-verified-run-kernel.md).
+The RFC owns shared durable schemas; this document owns implementation seams.
 
-## Delivery shape
+## One program, two review gates
 
-WP02 is designed as one program and delivered through two merge gates. These
-are review gates, not independent protocols or compatibility layers.
+1. **Gate A — trusted model attempt:** immutable loaded authority, exact native
+   request bytes, incremental response observation, and one compiled result.
+2. **Gate B — typed continuation:** direct tool inputs, whole-batch validation,
+   ordered results, policy/context/UI integration, and durable compaction.
 
-1. **Trusted model attempt**: frozen model authority, deterministic request
-   preparation, six provider wire adapters, lossless response observation, and
-   central compilation into durable Agent IR or one closed unusable response.
-2. **Typed runtime continuation**: direct tool input contracts, batch-wide
-   validation, ordered continuation, policy/context/event/UI projections, and
-   durable compaction contracts.
+These are integration gates, not new product slices or independently evolving
+protocols. Gate A does not switch production composition or claim that Gate B,
+broker integration, or provider qualification is complete.
 
-There are no smaller public milestones inside either gate. Internal commits
-may make development and review easier, but they must not introduce temporary
-production semantics.
+The old Session/`ModelAction` runner remains isolated until WP06's single
+Kernel Cut. There is no typed-to-legacy bridge. WP06 removes the old runner,
+parser and repository command hooks; historical payloads remain opaque import
+data. No permanent compatibility promise is introduced.
 
-## Coexistence and removal
+## One loaded model module
 
-The current Session/`ModelAction` runner remains isolated and unchanged while
-the Kernel path is incomplete. The new path never emits `ModelAction`, invokes
-the legacy parser, or converts typed calls into legacy records. Historical
-legacy data may be decoded for read, display, or migration only.
-
-At the single Kernel Cut, the composition root switches to the typed runtime
-and WP06 removes the old runner and parser. Until then the typed runtime is not
-the default path. This is temporary code coexistence, not a compatibility
-promise between the two protocols.
-
-## Ownership
-
-WP02 is a pure protocol and planning layer. It does not write SQLite or CAS,
-commit Journal entries, dispatch tools, or own recovery.
-
-- WP02 produces canonical artifact bytes and refs, normalized outcomes, and
-  deterministic transition/dispatch proposals.
-- WP01 rehashes those artifacts and atomically commits authoritative state.
-- WP03 executes an authorized effect through the broker and sandbox.
-- WP04 schedules, resumes, reconciles, and applies retry policy.
-- WP05 consumes the same candidate/result contracts.
-- WP06 supplies signed runtime/provider material, public protocol adaptation,
-  and the final composition switch.
-
-No downstream package may trust a caller-provided digest merely because it was
-produced by WP02; the owning state transition revalidates the exact bytes.
-
-## Trusted model attempt module
-
-The external seam has two lifecycle operations because a durable Journal claim
-and external I/O necessarily occur between them:
+`validateRunAssembly` loads and verifies the exact retained assembly closure.
+Its successful result exposes only a `ModelSession`, not mutable configuration,
+price tables, tool definitions, tokenizer functions or adapter callbacks.
 
 ```text
-prepareModelAttempt(authority, projection, invocation)
-  -> canonical request artifacts + exact outbound request
-
-provider adapter observes exact response bytes
-  -> ObservedModelResponse
-
-compileModelObservation(prepared request, observation, tool resolver)
-  -> artifact publication plan
-   + AgentModelTurn | ModelUnusableResponseV1
+validateRunAssembly(retained material) -> ModelSession
+ModelSession.prepare(typed projection, invocation) -> PreparedModelAttempt
+  [WP01 publishes artifacts and claims the exact request; WP03 performs I/O]
+ModelSession.start(prepared, response head) -> response
+response.push(bytes) -> non-authoritative stream events
+response.finish(time, tool-input resolver) -> events + usable/unusable result
 ```
 
-Preparation hides prompt rendering, provider-native serialization, tokenizer
-counting, price arithmetic, request digests, and reservation construction.
-Compilation hides stop/call validation, call identity normalization, observed
-input retention, tool-input resolution, usage validation, response digests,
-and unusable-response classification.
+The prepared object is an identity-bound handle owned by that loaded session.
+A copied, forged, cross-session or deserialized handle is rejected. Recovery
+reloads the retained assembly and prepares the retained projection again;
+identical inputs must reproduce the exact request ref and body bytes. Public
+byte getters return copies; nested authority and request fields are immutable.
 
-The module returns results and has no side effects. Tests and callers cross the
-same seam.
+Static evidence, signature roots, tool/schema closure, envelope members and
+context equations are checked on load/recovery, not on every request.
+Per-attempt work checks only changing invocation/projection data, serializes
+the native body, estimates context size, and computes the fixed reservation.
+The input resolver must return the exact frozen tool/schema identity; its
+schema-normalized values are consumed by Gate B, never dispatched here.
 
-## Provider adapter seam
+A normal attempt publishes only the native body and one `ModelRequestV1`.
+Compaction additionally publishes its typed two-message projection. There is
+no framed-prompt, native-body wrapper, prompt profile, custom BPE vocabulary,
+runtime golden-vector execution, or intermediate JSON encode/decode pipeline.
+Adapter code is retained through the signed RuntimeBundle, as other executable
+authority already is. Golden fixtures are independent build-time tests.
 
-A provider adapter is a wire adapter, not a durable authority producer. It may:
+Tool arguments remain typed JSON values or explicitly retained malformed
+fragments in memory and history. Only string-native provider fields encode
+them; object-native providers receive the existing values without decoding
+them again.
 
-- serialize the exact provider-native request from the closed signed profile;
-- preserve complete response bytes or the exact over-limit prefix;
-- reconstruct streaming text, reasoning, call identity, argument fragments,
-  usage, provider response id, and stop information without filtering entries;
-- normalize provider wire vocabulary into an untrusted observation.
+## Native provider boundary
 
-It may not:
+Autonomous execution requires positive, matching native-tool evidence.
+Valid negative/absent native capability means `text-only`; malformed, expired,
+unsigned or identity-mismatched evidence fails admission. There is no
+`constrained-ir` branch and no runtime downgrade or text-action repair.
 
-- decide whether a turn is usable;
-- discard a malformed or incomplete call;
-- infer model capability from provider name or transport compatibility;
-- parse ordinary assistant text as executable input;
-- mint durable digests or publish artifacts;
-- retry a request or follow a redirect.
+- OpenAI uses Responses, `store:false`, explicit output bounds,
+  `truncation:'disabled'`, and encrypted reasoning continuation.
+- Anthropic uses Messages and preserves thinking signatures/redacted blocks.
+- OpenRouter, OpenAI-compatible and Zhipu retain Chat Completions adapters.
+- Managed Ollama retains Chat/NDJSON and deterministic invocation-bound call ids.
 
-OpenAI, OpenRouter, OpenAI-compatible, and Zhipu may share one internal
-OpenAI-chat implementation, but they remain separate conformance cases with
-separate provider identities and request algorithms. Anthropic and managed
-Ollama use their own wire implementations.
+These are distinct protocol conformance cases, not six runner implementations.
+The stream framer decodes UTF-8 across chunks, incrementally parses SSE/NDJSON,
+and bounds retained bytes to 1 MiB plus one byte for an oversized observation.
+It does not wait for EOF to deliver text/reasoning/tool deltas. End events and
+usage are returned exactly once. Buffered tests use the same observer.
 
-## JSON boundary
+Only the central compiler may create a usable turn. Partial, contradictory,
+filtered, truncated, rejected, oversized or mode-incompatible responses cannot
+dispatch tools. Every identifiable call survives normalization, including a
+missing name or malformed argument fragment. Missing/duplicate mandatory ids
+invalidate the whole response before tool resolution. A missing tool name is
+retained as empty in durable truth; native history uses the reserved,
+unexposed `__cliq_missing_tool_name` placeholder only to close its result.
 
-JSON is not the runtime control protocol. The autonomous path never asks a
-model to print an action object into ordinary assistant text and never repairs,
-extracts, or retries such text. Native provider tool calls are decoded once at
-the untrusted wire boundary and immediately become typed observations; the
-central compiler then produces typed Agent IR. JSON-looking text in
-`text-only` mode remains inert model text.
+Provider-owned reasoning continuation is opaque, bounded, provider/model-bound
+data. It is carried through the stored turn and next projection, never
+interpreted as tools, permissions or instructions by the runtime. Streamed
+signatures must not be lost. Gate B reconstructs this field from the retained
+turn, not from a mutable provider cache.
 
-`constrained-ir` is a narrow compatibility path, not the default harness
-protocol. It is available only with positive signed capability evidence and a
-provider mechanism that enforces the supplied schema or grammar. The response
-uses the versioned `cliq-constrained-model-turn-v1` wire envelope, is decoded
-by the same strict bounded decoder, and still passes the central stop/call and
-tool-input validation. The generated OpenAI-family schema is a root object
-(never a root `anyOf`); provider schema enforcement does not replace Cliq's
-cross-field validation.
+`abort(time, stopIntentRef, resolver)` is only for a broker-confirmed abort
+caused by an already persisted StopIntent. It cannot execute partial calls or
+overwrite a complete response. WP01 independently validates the StopIntent
+and decides whether a completed result may be published during stop drain.
+Unknown network outcomes are Journal/recovery facts, not fabricated cancels.
 
-JSON remains intentionally at three non-executable boundaries:
+## Estimates are not hard billing authority
 
-- provider HTTP, SSE, or NDJSON wire formats that require it;
-- model-visible JSON Schema definitions for native or constrained calls;
-- RFC 8785/JCS bytes for content-addressed, signed, replayable artifacts.
+Context planning uses a fixed, cheap byte estimate: text is
+`ceil(UTF8 bytes / 3)`; normal messages add four estimate units each, and
+native tool definitions/arguments/continuation also contribute. It is a
+deterministic heuristic, not an exact remote tokenizer, a billable-token
+measurement, or proof that a provider will accept the context. Provider usage
+is observational telemetry, never settlement authority.
 
-Those uses provide interoperability or deterministic identity. They do not
-make arbitrary model text executable. A source guard rejects legacy action
-parsers, JSON repair, and direct `JSON.parse` in the typed model-attempt
-modules; the isolated old runner is removed at the WP06 Kernel Cut.
+A billable request reserves the complete four-component
+`ModelPriceTableV1.requestTokenCeiling` and its checked signed-table cost,
+independently of that estimate and the smaller requested output limit.
+The signed ceiling must cover **every request this retained adapter can release**,
+including rejected and ambiguous outcomes, for its exact endpoint/model and
+validity interval. A signature alone does not establish a true ceiling:
+WP06 qualification must establish that fact from authoritative billing bounds.
+A rate-only table, guessed tokenizer, empirical average, or unspecified bound
+is ineligible for a hard-budget Run (`MODEL_COST_UNKNOWN`).
 
-## Complete observation
+Input/output ceilings must cover admitted context and both output caps.
+Cache ceilings are explicit components, not inferred from prompt estimates.
+Observed component/output-cap violations are rejected, but detecting one
+after release cannot retroactively guarantee spend; eligibility must be sound
+before release. The conservative full reservation is consumed for released or
+possibly released attempts; only proven no-release settles zero. This retains
+WP01's settlement rule and may reduce the useful work admitted by small budgets.
+No provider-hard-cap mutation or new pricing plugin is added.
 
-`ObservedModelResponse` retains every wire fact needed by the central compiler:
+Managed-local zero cost still requires the independent signed service/model,
+no-egress boundary and live-instance checks. Its token reservation uses
+admitted context plus the requested output cap, not a remote billing claim.
 
-- exact provider/model and response media type (the negotiated mode comes from
-  the immutable request authority, never from the response);
-- exact complete bytes, or exactly the first response-limit-plus-one bytes;
-- response id and normalized stop information when decodable;
-- untrimmed assembled text;
-- every call in provider order, including missing ids/names and malformed JSON
-  fragments;
-- complete usage fields when supplied;
-- the StopIntent binding when Cliq caused an authenticated abort;
-- whether constrained output was actually requested and acknowledged.
+## Compaction remains a durable operation
 
-A positively received provider rejection is also an observation. A local
-failure before request release and an uncertain transport outcome are not model
-responses and remain WP01/WP04 Journal outcomes.
+Keep the RFC's fixed integer `C/O/H/T/R/S/K/P` policy, whole-prefix selection,
+protected context, raw-item retention, and atomic plan/summary/context/checkpoint
+commit. Context counters are estimate units; they are not hard token proofs.
+`K` estimates the actual retained two-message envelope. Normal output `O`
+and summary output `S` independently fit the model's maximum; `S <= O` is
+not required.
 
-## Central compiler invariants
+Compaction disables tools and accepts only a nonempty, complete `end` summary.
+The summary is at most `min(262144, 3*S)` UTF-8 bytes, so its text estimate is
+at most `S` without a private tokenizer. Combined with source estimate
+`>= S+512`, each successful replacement reduces estimated source content by
+at least 512 units; Gate B also verifies that the complete prompt estimate
+decreases after accounting for message overhead. Actual model output is
+requested with cap `S`; reported
+output beyond it is invalid. A provider can still reject an underestimated
+context: stop explicitly, never silently truncate or repair/retry output.
 
-The central compiler is the only module allowed to produce
-`AgentModelTurn` or `ModelUnusableResponseV1`.
+## Ownership and verification
 
-- `end` requires nonempty UTF-8 text and zero calls.
-- `tool_calls` requires at least one retained call and permits accompanying
-  text only as non-executable assistant content.
-- `cancelled` requires the exact pre-existing StopIntent that caused the abort.
-- `length`, `content_filter`, unknown stops, incompatible stop/call pairs,
-  forbidden-mode calls, duplicate/missing required call ids, malformed wire
-  payloads, oversize responses, and provider rejections become one closed
-  unusable response.
-- Native ids are required for all providers except managed Ollama. Ollama and
-  constrained-IR ids are deterministically derived from invocation identity
-  and call index.
-- Every call is retained. Unknown tools and invalid inputs remain in the batch
-  as rejected inputs for synthetic results; one invalid call must never make a
-  neighbouring call disappear.
-- Only schema-normalized resolved input may reach policy or dispatch.
-- A context-compaction result is accepted only as a text-only `end` turn whose
-  nonempty Markdown summary satisfies both the byte bound and the pinned
-  tokenizer/output-token cap.
-- `responseDigest` covers the RFC normalized projection, not provider wire
-  bytes. Unusable responses retain the exact observed bytes instead.
-- All text, call input, and response artifacts are bounded to 1 MiB unless the
-  RFC defines a smaller limit.
+WP02 plans artifacts and typed outcomes; it owns no SQLite/CAS writes, Journal
+claim, effect, retry or recovery scheduler. WP01 rehashes and atomically commits,
+WP03 dispatches through permission/broker/sandbox, WP04 resumes/reconciles,
+WP05 verifies, and WP06 qualifies releases and switches composition. Workspace
+Trust still precedes configuration/runtime assembly; Tool Permission and the
+OS boundary remain independent gates.
 
-## Capability and pricing authority
+Regression tests cross the loaded-session seam: independently specified native
+bytes; configuration mutation; forged handles; full schema substitution;
+reload determinism; all calls and their next request; opaque continuation;
+real chunked deltas; cancellation; output/usage ceilings; and compaction with
+a small normal output limit. Focused codec/arithmetic tests cover edge cases
+that cannot be reached economically through every integration fixture.
 
-Capability negotiation consumes one signature-validated source projection and
-one fixed adapter transport declaration. Unknown, absent, expired, mismatched,
-or unverifiable evidence yields `text-only`; it never enables an autonomous
-mode.
+Gate A requires `npm run test:agent-runtime`, `npm run build`, and `npm test`.
+Offline conformance does not certify a live model, true billing ceiling,
+durable broker integration or the final Kernel Cut.
 
-```text
-adapter.nativeTools && evidence.nativeToolCalling
-  -> native-tools
-else adapter.constrainedOutput && evidence.constrainedOutput
-  -> constrained-ir
-else
-  -> text-only
-```
-
-The selected mode and the exact evidence, adapter, endpoint, context limits,
-output limit, retry policy, and exposed tool sequence are frozen in
-`RunAssemblyV1`. There is no runtime downgrade after admission.
-
-Billable endpoints require a matching signed price table through the Run
-deadline. Only exact managed-local Ollama provenance is zero-cost. Reservation
-arithmetic uses checked safe integers and independently rounds each of the four
-token-price components upward before checked addition.
-
-## Dependency direction
-
-```text
-kernel canonical/identity types
-            ^
-            |
-protocol Agent IR <- trusted model attempt <- provider wire adapters
-            ^                 ^
-            |                 |
-      WP01 state         capability/pricing authority
-            ^                 ^
-            +------ WP06 signed assembly material
-
-typed runtime continuation -> WP01 transition proposals
-                           -> WP03 dispatch proposals
-                           -> WP04 recovery inputs
-```
-
-The typed modules must not import Session records, `ModelAction`, JSON repair,
-legacy prompt fallback, the old runner, or repository command hooks. A source
-guard test enforces this direction.
-
-## Gate A completion
-
-The trusted-model-attempt gate is complete only when:
-
-- canonical Agent IR and closed validation errors are implemented;
-- capability negotiation and pricing arithmetic fail closed;
-- deterministic prompt/native-request artifacts can be prepared from retained
-  profiles without SDK reserialization;
-- all six providers preserve complete non-streaming and streaming observations
-  and pass the same conformance suite;
-- the central compiler covers every stop/call/mode matrix branch and never
-  silently drops a call;
-- artifact plans are deterministic and rehash independently;
-- source guards prove the new module has no legacy imports;
-- `npm run test:agent-runtime`, `npm run build`, and `npm test` pass.
-
-No production composition switch, direct tool dispatch, durable state write,
-or legacy deletion is part of this gate.
+JSON remains at provider wire, native tool-schema and canonical persistence
+boundaries. In-process execution passes typed values; assistant JSON-looking
+text is inert. Minimal core means removing unnecessary interpretation and
+authority layers, not eliminating a serialization format used by providers
+and durable storage.

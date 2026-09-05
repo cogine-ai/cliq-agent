@@ -45,14 +45,11 @@ export type RunAssemblyV1 = {
         };
     credentialGrantRefs: ArtifactRef[];
     adapter: { adapterId: string; version: string; codeDigest: string };
-    nativeRequestProfileRef: ArtifactRef;
-    nativeRequestProfileDigest: string;
     negotiation: {
-      mode: 'native-tools' | 'constrained-ir' | 'text-only';
+      mode: 'native-tools' | 'text-only';
       capabilityEvidenceRef: ArtifactRef;
       capabilityDigest: string;
       nativeToolCalling: boolean;
-      constrainedOutput: boolean;
       streaming: boolean;
       trustedUsageEvidence: boolean;
       contextLimitTokens: number;
@@ -115,11 +112,6 @@ export type RunAssemblyV1 = {
     >;
   };
   context: {
-    promptTemplateRef: ArtifactRef;
-    promptTemplateDigest: string;
-    tokenizerRef: ArtifactRef;
-    tokenizerDigest: string;
-    tokenizerVersion: string;
     compactionPromptEnvelopeRef: ArtifactRef;
     compactionPromptEnvelopeDigest: string;
     contextLimitTokens: number;
