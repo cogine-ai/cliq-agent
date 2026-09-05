@@ -174,13 +174,37 @@ export async function prepareInvocation(
   owner: StateOwnerContext,
   input: PrepareInvocationInput
 ): Promise<{ entry: InvocationJournalEntry; run: Run }> {
+  if (input.opKind === 'model') {
+    throw new KernelStorageError('INVALID_REQUEST', 'model invocations require the typed model admission path');
+  }
+  const run = readRun(driver, input.runId);
+  const spec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
+  const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
+  if (assembly.format === 'cliq-run-assembly-v1') {
+    throw new KernelStorageError('INVALID_REQUEST', 'typed agent Runs require frontier-specific invocation admission');
+  }
+  return prepareValidatedInvocation(driver, artifacts, owner, input);
+}
+
+/** State reducer implementation detail, never a caller-controlled StateStore option. */
+export async function prepareValidatedInvocation(
+  driver: SqliteDriver,
+  artifacts: ArtifactCatalog,
+  owner: StateOwnerContext,
+  input: PrepareInvocationInput,
+  typed?: {
+    metadata: PublishedArtifact[];
+    validate: (connection: SqliteConnection, run: Run, attempt: number) => void;
+    commit?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry) => void;
+  }
+): Promise<{ entry: InvocationJournalEntry; run: Run }> {
   decodeBudgetUsage(input.reservation, 'invocation reservation');
   if (isZeroBudget(input.reservation)) {
     throw new KernelStorageError('INVALID_REQUEST', 'ordinary invocation reservation must be nonzero');
   }
   await artifacts.readBytes(input.requestRef);
   if (input.grantRef !== undefined) await artifacts.readBytes(input.grantRef);
-  const invocationMetadata = await Promise.all([
+  const invocationMetadata = typed?.metadata ?? await Promise.all([
     artifacts.describe(input.requestRef, 'application/json', 'cliq-invocation-request-v1'),
     ...(input.grantRef === undefined
       ? []
@@ -212,6 +236,7 @@ export async function prepareInvocation(
     );
     const highest = readHighestPreparedAttempt(connection, input.runId, input.opId);
     const attempt = highest === undefined ? 0 : highest.attempt + 1;
+    typed?.validate(connection, run, attempt);
     if (highest !== undefined) {
       const previous = readInvocationAttempt(connection, input.runId, input.opId, highest.attempt);
       if (!previousAttemptAllowsRetry(previous)) {
@@ -251,6 +276,7 @@ export async function prepareInvocation(
         JSON.stringify(run.budgetReserved)
       );
     if (update.changes !== 1n) throw new KernelStorageError('REVISION_CONFLICT', 'Run reservation CAS failed');
+    typed?.commit?.(connection, run, entry);
     const updatedRun = readRun(connection, run.id);
     appendRunStateEvent(connection, updatedRun, now);
     result = { entry, run: updatedRun };
@@ -344,12 +370,23 @@ export type SettleInvocationInput = {
   expectedRunRevision: number;
 };
 
-async function settleInitialAttempt(
+/** Builds CAS artifacts before, and applies their validated rows inside, the settlement transaction. */
+export type SettlementContinuation = (input: {
+  run: Run;
+  prepared: InvocationJournalEntry;
+  settlement: BudgetSettlementV1;
+}) => Promise<{
+  metadata: PublishedArtifact[];
+  commit: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry) => void;
+}>;
+
+export async function settleValidatedInvocation(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
   input: SettleInvocationInput,
-  terminal: InitialSettlementKind
+  terminal: InitialSettlementKind,
+  continuation?: SettlementContinuation
 ): Promise<{ entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run }> {
   const artifactRefs = terminal.phase === 'completed'
     ? [terminal.resultRef, terminal.receiptRef]
@@ -357,7 +394,7 @@ async function settleInitialAttempt(
       ? [terminal.errorRef, terminal.evidenceRef]
       : [terminal.evidenceRef];
   await Promise.all(artifactRefs.filter((ref): ref is string => ref !== undefined).map((ref) => artifacts.readBytes(ref)));
-  const terminalMetadata = await Promise.all(
+  const terminalMetadata = continuation === undefined ? await Promise.all(
     artifactRefs
       .filter((ref): ref is string => ref !== undefined)
       .map((ref, index) => artifacts.describe(
@@ -373,7 +410,7 @@ async function settleInitialAttempt(
               : 'cliq-post-claim-no-release-evidence-v1'
             : 'cliq-invocation-ambiguity-evidence-v1'
       ))
-  );
+  ) : [];
 
   for (let retry = 0; retry < SETTLEMENT_RETRY_LIMIT; retry += 1) {
     const snapshotRun = readRun(driver, input.runId);
@@ -384,6 +421,12 @@ async function settleInitialAttempt(
     const prepared = entries.find((entry) => entry.phase === 'prepared');
     const claim = entries.find((entry) => entry.phase === 'dispatch_claimed');
     if (prepared === undefined) throw new KernelStorageError('NOT_FOUND', 'prepared invocation attempt is missing');
+    if (prepared.opKind === 'model' && terminal.phase === 'completed' && continuation === undefined) {
+      throw new KernelStorageError('INVALID_REQUEST', 'model completion requires its typed continuation');
+    }
+    if (prepared.opKind === 'model' && terminal.phase === 'failed' && terminal.requireClaim && continuation === undefined) {
+      throw new KernelStorageError('INVALID_REQUEST', 'claimed model refunds require validated broker no-release evidence');
+    }
     if (entries.some((entry) => ['completed', 'failed', 'unknown', 'abandoned'].includes(entry.phase))) {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'invocation attempt is already settled');
     }
@@ -393,7 +436,7 @@ async function settleInitialAttempt(
     if (terminal.phase === 'failed' && !terminal.requireClaim && claim !== undefined) {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'pre-dispatch failure cannot follow a claim');
     }
-    const consumed = terminal.phase === 'unknown'
+    const consumed = terminal.phase === 'unknown' || (prepared.opKind === 'model' && terminal.phase === 'completed')
       ? prepared.budgetDelta
       : decodeBudgetUsage(terminal.consumed, 'invocation consumed budget');
     const released = prepared.budgetDelta;
@@ -431,6 +474,7 @@ async function settleInitialAttempt(
     };
     settlement.settlementDigest = digestOmitting(settlement, 'settlementDigest');
     const settlementArtifact = await artifacts.publishCanonical(settlement, 'cliq-budget-settlement-v1');
+    const continuationPlan = await continuation?.({ run: snapshotRun, prepared, settlement });
     try {
       return commitInitialSettlement(
         driver,
@@ -442,7 +486,8 @@ async function settleInitialAttempt(
         snapshotRun,
         settlement,
         settlementArtifact,
-        terminalMetadata
+        [...terminalMetadata, ...(continuationPlan?.metadata ?? [])],
+        continuationPlan?.commit
       );
     } catch (error) {
       if (error instanceof ReducerSnapshotChanged) continue;
@@ -462,7 +507,8 @@ function commitInitialSettlement(
   runSnapshot: Run,
   settlement: BudgetSettlementV1,
   settlementArtifact: PublishedArtifact,
-  terminalMetadata: PublishedArtifact[]
+  terminalMetadata: PublishedArtifact[],
+  commitContinuation?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry) => void
 ): { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run } {
   let result!: { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run };
   let fenceOutcome: TimeFenceAdvance | undefined;
@@ -532,6 +578,7 @@ function commitInitialSettlement(
         JSON.stringify(run.budgetConsumed)
       );
     if (update.changes !== 1n) throw new ReducerSnapshotChanged();
+    commitContinuation?.(connection, run, entry);
     const updatedRun = readRun(connection, run.id);
     appendRunStateEvent(connection, updatedRun, settlement.settledAt);
     result = { entry, settlement, run: updatedRun };
@@ -549,7 +596,7 @@ export function completeInvocation(
   if (input.resultRef === undefined && input.receiptRef === undefined) {
     throw new KernelStorageError('INVALID_REQUEST', 'completed invocation requires a result or receipt');
   }
-  return settleInitialAttempt(driver, artifacts, owner, input, {
+  return settleValidatedInvocation(driver, artifacts, owner, input, {
     phase: 'completed',
     resultRef: input.resultRef,
     receiptRef: input.receiptRef,
@@ -563,7 +610,7 @@ export function failInvocationBeforeDispatch(
   owner: StateOwnerContext,
   input: SettleInvocationInput & { errorRef: string }
 ): Promise<{ entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run }> {
-  return settleInitialAttempt(driver, artifacts, owner, input, {
+  return settleValidatedInvocation(driver, artifacts, owner, input, {
     phase: 'failed',
     errorRef: input.errorRef,
     consumed: ZERO_BUDGET,
@@ -577,7 +624,7 @@ export function failClaimedInvocationWithoutRelease(
   owner: StateOwnerContext,
   input: SettleInvocationInput & { errorRef: string; evidenceRef: string; evidenceDigest: string }
 ): Promise<{ entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run }> {
-  return settleInitialAttempt(driver, artifacts, owner, input, {
+  return settleValidatedInvocation(driver, artifacts, owner, input, {
     phase: 'failed',
     errorRef: input.errorRef,
     evidenceRef: input.evidenceRef,
@@ -593,7 +640,7 @@ export function markInvocationUnknown(
   owner: StateOwnerContext,
   input: SettleInvocationInput & { evidenceRef: string; evidenceDigest: string }
 ): Promise<{ entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run }> {
-  return settleInitialAttempt(driver, artifacts, owner, input, {
+  return settleValidatedInvocation(driver, artifacts, owner, input, {
     phase: 'unknown',
     evidenceRef: input.evidenceRef,
     evidenceDigest: input.evidenceDigest

@@ -269,10 +269,6 @@ function nonempty(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && !value.includes('\0');
 }
 
-function positiveSafeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
-}
-
 function nonnegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
@@ -819,7 +815,9 @@ function prepare(
   }
   validateStringIdentity(invocation.runId, 'Run id');
   validateStringIdentity(invocation.opId, 'operation id');
-  if (!positiveSafeInteger(invocation.attempt)) throw new TypeError('attempt must be positive');
+  if (!nonnegativeSafeInteger(invocation.attempt)) {
+    throw new TypeError('attempt must be a nonnegative safe integer');
+  }
   const compact = source.compactionPlanRef !== undefined;
   const mode = compact ? 'text-only' : authority.negotiatedMode;
   const maximumOutputTokens = compact ? authority.maximumCompactionOutputTokens : authority.maximumOutputTokens;

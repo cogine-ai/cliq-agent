@@ -15,6 +15,85 @@ These are integration gates, not new product slices or independently evolving
 protocols. Gate A does not switch production composition or claim that Gate B,
 broker integration, or provider qualification is complete.
 
+Gate A landed in PR #489 (`a153d47`). Gate B also includes the minimum WP01
+companion work needed to exercise the real SQLite/CAS continuation. The user
+approved that scope on 2026-09-05. This does not transfer storage ownership to
+WP02 or include the rest of WP01 migration, WP03 brokers, WP04 scheduling,
+WP05 verification, or WP06 production cutover.
+
+The existing M2 Journal reserves and settles budgets but has no model-turn,
+tool-batch/result, or compaction commit reducers. Its generic request/result
+metadata is not validation of the retained typed model contract. Gate B must
+bind the exact model request and full reservation before claim, commit a
+completed observation together with its typed continuation, and recover that
+continuation from the retained state. A mock state adapter cannot establish
+these properties.
+
+The implementation tests cross `ModelSession` and `StateStore`: whole-batch
+prevalidation, one ordered result per call, denied/error continuation, stale
+revision and duplicate completion rejection, and atomic context/Checkpoint
+updates. Store methods derive changes from the current frontier and retained
+artifacts; no public generic item append, frontier patch, or caller-selected
+budget settlement is added. SQLite transactions and the existing CAS remain
+the only durable implementation. Private transaction helpers may be shared
+only after the typed reducers have validated their complete input closure.
+
+### Gate B implementation status
+
+The current change connects the complete model-attempt/context lifecycle to
+StateStore. This is a reviewable integration checkpoint inside Gate B, not a
+new work package or a declaration that Gate B has passed:
+
+- `StateStore.loadAgentRun` loads the retained assembly against the actual Run
+  admission/deadline/budget, then derives normal prompts from retained context.
+  Its handle retains static authority only, never a second mutable Run state.
+  Input schemas compile once from the verified manifest using a pinned standard
+  JSON Schema validator (Ajv, draft-07); validation consumes typed values without
+  coercion, defaults, stripping, JSON repair, external schema loading, async
+  schemas, or a caller-supplied resolver. Unknown dialects/keywords fail closed.
+- `prepareModel` derives the operation, zero-based Journal attempt, exact native
+  body and full signed reservation. Generic invocation admission cannot bypass
+  that path for typed Runs; generic completion/refunds cannot replace its checks.
+- `completeModel` independently reads/revalidates the retained result closure and
+  commits settlement, model item, batch, synthetic results, context, frontier and
+  Checkpoint in one transaction. Invalid batches dispatch nothing. Unusable
+  observations retain their raw bytes and full charge, with no semantic retry.
+- Recovery requires transitive model/input/result artifacts. Loading the agent
+  reconstructs projections from their original immutable sources, reproduces
+  retained native requests, and revalidates normalized inputs and continuation
+  items. `readModelAttempt` returns the exact retained attempt and its Journal
+  phase; it does not grant permission to resend a claimed or settled request.
+- `prepareModel` selects the greatest safe whole prefix under the frozen
+  compaction equations, protecting the recent suffix and complete tool batches.
+  Source text is JCS of the existing model-visible message array, with no audit
+  refs or extra instruction framing. The compaction plan/frontier, request and
+  full reservation commit together. Its result commits the summary item,
+  replacement context and ready Checkpoint with an unchanged workspace state.
+  Original items remain durable; control digests bind the normative ordered
+  `{itemSeq,kind,payloadRef}` tuples. The complete next prompt must shrink.
+- An impossible compaction publishes exact estimate evidence and makes no
+  invocation. Invalid or ineffective executed compaction is fully charged,
+  leaves the old context intact, and returns `context_compaction_failed` evidence
+  without semantic retry. A valid but ineffective summary remains a usable
+  observation in the Journal, not an accepted context summary.
+
+Gate B still requires direct builtin execution contracts and policy/UI
+projections, ordinary ordered tool-result commits (including denied/error and
+post-effect checkpoint validation), and user-input/repair/child projections.
+Those require the canonical grant, policy/approval, Journal and post-effect
+Checkpoint closure; accepting a caller's result or boolean would not establish
+it. The user authorized advancing to a reasonable new PR on 2026-09-05, so this
+model-state integration is reviewed before that separate authority-bearing
+execution work, without creating additional public milestones.
+
+`candidate_required` and `stop_required` describe the retained
+observation's handoff to WP05/WP04; they are not permission to mark the Run
+successful or bypass stop arbitration/drain. Completed handoffs survive restart
+through `readModelAttempt`; context exhaustion is reproducible from the unchanged
+context and frozen policy. Neither is an implemented StopIntent/candidate reducer.
+Broker/sandbox effects, scheduling, dispatch backoff, and production composition
+remain outside this implementation. Restart does not revive an old worker lease.
+
 The old Session/`ModelAction` runner remains isolated until WP06's single
 Kernel Cut. There is no typed-to-legacy bridge. WP06 removes the old runner,
 parser and repository command hooks; historical payloads remain opaque import

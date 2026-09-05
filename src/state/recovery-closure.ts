@@ -13,6 +13,7 @@ import type {
   WorkspaceStateManifest
 } from '../kernel/types.js';
 import type { ArtifactCatalog } from './artifacts.js';
+import { validateAgentRecovery } from './agent-recovery.js';
 import {
   decodeAdmittedContext,
   decodeBudgetSettlement,
@@ -655,6 +656,14 @@ export async function readRecoveryClosure(
   );
   const groups = validateJournalGraph(journal);
   const journalBudgets = await validateJournalArtifactsAndBudgets(artifacts, groups);
+  if (journal.some((entry) => entry.opKind === 'model')) {
+    try {
+      await validateAgentRecovery({ artifacts, run, spec: runSpec, items, journal,
+        context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) });
+    } catch (error) {
+      recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`);
+    }
+  }
   if (
     !budgetLessThanOrEqual(journalBudgets.reserved, run.budgetReserved) ||
     !budgetLessThanOrEqual(journalBudgets.consumed, run.budgetConsumed)
