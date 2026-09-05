@@ -1,5 +1,133 @@
 export type ArtifactRef = string;
 
+export type ProviderName =
+  | 'openrouter'
+  | 'anthropic'
+  | 'openai'
+  | 'openai-compatible'
+  | 'zhipu'
+  | 'ollama';
+
+export type ModelPricingBound =
+  | {
+      kind: 'zero_cost';
+      maxRunCostMicros: 0;
+      provenanceRef: ArtifactRef;
+    }
+  | {
+      kind: 'trusted_price_table';
+      priceTableRef: ArtifactRef;
+      priceTableDigest: string;
+      calculationAlgorithm: 'cliq-price-ceil-v1';
+      maxRunCostMicros: number;
+      validThrough: string;
+      provenanceRef: ArtifactRef;
+    };
+
+export type RunAssemblyV1 = {
+  schemaVersion: 1;
+  format: 'cliq-run-assembly-v1';
+  provider: {
+    name: ProviderName;
+    model: string;
+    endpoint:
+      | {
+          kind: 'local_zero_cost';
+          identityDigest: string;
+          localProvenanceRef: ArtifactRef;
+        }
+      | {
+          kind: 'registered';
+          registrationKind: 'bundled_default' | 'user';
+          endpointRegistrationRef: ArtifactRef;
+          endpointIdentityDigest: string;
+          tlsPolicyDigest: string;
+        };
+    credentialGrantRefs: ArtifactRef[];
+    adapter: { adapterId: string; version: string; codeDigest: string };
+    negotiation: {
+      mode: 'native-tools' | 'text-only';
+      capabilityEvidenceRef: ArtifactRef;
+      capabilityDigest: string;
+      nativeToolCalling: boolean;
+      streaming: boolean;
+      trustedUsageEvidence: boolean;
+      contextLimitTokens: number;
+      maxOutputTokens: number;
+      exposedToolNames: string[];
+    };
+    pricing: ModelPricingBound;
+  };
+  mcpServers: Array<{
+    registrationId: string;
+    registryRevisionRef: ArtifactRef;
+    registryRevision: number;
+    manifestDigest: string;
+  }>;
+  tools: {
+    manifestRef: ArtifactRef;
+    manifestDigest: string;
+  };
+  instructions: {
+    systemPromptRef: ArtifactRef;
+    systemPromptDigest: string;
+    workspaceInstructionsRef: ArtifactRef;
+    workspaceInstructionsDigest: string;
+    skills: Array<{ skillId: string; manifestRef: ArtifactRef; manifestDigest: string }>;
+  };
+  runtime: {
+    runtimeBundleRef: ArtifactRef;
+    runtimeBundleManifestDigest: string;
+    workerExecutableId: string;
+    workerExecutableDigest: string;
+    sandboxBackend: 'macos_vm' | 'linux_namespace';
+    guestToolchainManifestRef?: ArtifactRef;
+    guestToolchainManifestDigest?: string;
+  };
+  retry: {
+    model: {
+      maxDispatchedAttempts: 3;
+      maxZeroByteTransportRetriesPerAttempt: 0;
+      postAttemptDelaysMs: [500, 2000];
+    };
+    tools: Array<
+      | {
+          toolName: string;
+          replayClass: 'retry';
+          maxDispatchedAttempts: 3;
+          postAttemptDelaysMs: [500, 2000];
+        }
+      | {
+          toolName: string;
+          replayClass: 'workspace-rollback-retry';
+          maxDispatchedAttempts: 2;
+          postAttemptDelaysMs: [500];
+        }
+      | {
+          toolName: string;
+          replayClass: 'reconcile' | 'manual';
+          maxDispatchedAttempts: 1;
+          postAttemptDelaysMs: [];
+        }
+    >;
+  };
+  context: {
+    compactionPromptEnvelopeRef: ArtifactRef;
+    compactionPromptEnvelopeDigest: string;
+    contextLimitTokens: number;
+    reservedOutputTokens: number;
+    hardPromptTokens: number;
+    triggerThresholdTokens: number;
+    protectedRecentTokens: number;
+    summaryTokenCap: number;
+    compactionEnvelopeTokens: number;
+    sourceInputTokenCap: number;
+    maxSummaryBytes: 262144;
+  };
+  assemblyDigest: string;
+  createdAt: string;
+};
+
 export type RunObjectiveV1 = {
   schemaVersion: 1;
   format: 'cliq-run-objective-v1';

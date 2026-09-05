@@ -31,6 +31,7 @@
   "files": [
     "dist/**/*.js",
     "!dist/**/*.test.js",
+    "!dist/model/testing/**",
     "skills/**",
     "!skills/**/__pycache__/**",
     "!skills/**/*.pyc",
@@ -48,6 +49,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "node --test --test-concurrency=1 --import tsx \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
+    "test:agent-runtime": "node --test --test-concurrency=1 --import tsx src/kernel/artifact-plan.test.ts src/kernel/json.test.ts src/model/attempt.test.ts src/model/capabilities.test.ts src/model/pricing.test.ts src/model/provider-observation.test.ts src/model/request.test.ts src/model/run-assembly.test.ts src/model/typed-runtime-boundary.test.ts",
     "test:state": "node --test --test-concurrency=1 --import tsx \"src/kernel/**/*.test.ts\" \"src/state/**/*.test.ts\"",
     "test:state-fault": "node --test --test-concurrency=1 --import tsx src/state/state-fault.test.ts",
     "test:state-probe": "node --test --test-concurrency=1 --import tsx src/state/probe.test.ts",

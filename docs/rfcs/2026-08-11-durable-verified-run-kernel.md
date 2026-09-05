@@ -1605,7 +1605,6 @@ type LocalModelObjectClosureV1 = {
 
 type NormalizedModelCapabilityClaimsV1 = {
   nativeToolCalling: boolean
-  constrainedOutput: boolean
   streaming: boolean
   trustedUsageEvidence: boolean
   contextLimitTokens: number
@@ -1644,7 +1643,6 @@ type EndpointModelNegotiationRequestV1 = {
   protocol: 'cliq-model-capability-query-v1'
   requestedClaims: [
     'nativeToolCalling',
-    'constrainedOutput',
     'streaming',
     'trustedUsageEvidence',
     'contextLimitTokens',
@@ -1714,7 +1712,6 @@ type ModelCapabilityEvidenceV1 = {
         localModelManifestDigest: string
       }
   nativeToolCalling: boolean
-  constrainedOutput: boolean
   streaming: boolean
   trustedUsageEvidence: boolean
   contextLimitTokens: number
@@ -2015,6 +2012,12 @@ type ModelPriceTableV1 = {
     cacheRead: number
     cacheWrite: number
   }
+  requestTokenCeiling: {
+    inputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+    cacheWriteTokens: number
+  }
   validFrom: string
   validThrough: string
   tableDigest: string
@@ -2266,140 +2269,15 @@ type ToolContractManifestV1 = {
   manifestDigest: string
 }
 
-type PromptSerializationProfileV1 = {
-  schemaVersion: 1
-  format: 'cliq-prompt-serialization-profile-v1'
+type ProviderContinuation = {
   provider: RunAssemblyV1['provider']['name']
   model: string
-  algorithm: 'cliq-jcs-framed-chat-v1'
-  normalPrefixUtf8: string
-  normalSuffixUtf8: string
-  compactionPrefixUtf8: string
-  compactionSuffixUtf8: string
-  goldenVectors: Array<{ payloadJcsUtf8: string; renderedBytesBase64url: string }>
-  profileDigest: string
+  items: unknown[] // opaque provider reasoning/signature material, never tool authority
 }
 
-type ProviderNativeRequestProfileV1 = {
-  schemaVersion: 1
-  format: 'cliq-provider-native-request-profile-v1'
-  provider: RunAssemblyV1['provider']['name']
-  model: string
-  algorithm:
-    | 'cliq-openai-chat-completions-json-v1'
-    | 'cliq-anthropic-messages-json-v1'
-    | 'cliq-openrouter-chat-completions-json-v1'
-    | 'cliq-openai-compatible-chat-completions-json-v1'
-    | 'cliq-zhipu-chat-completions-json-v1'
-    | 'cliq-ollama-chat-json-v1'
-  requestPath: string
-  mediaType: 'application/json'
-  goldenVectors: Array<{
-    requestKind: 'normal' | 'compaction'
-    negotiatedMode: 'native-tools' | 'constrained-ir' | 'text-only'
-    maximumOutputTokens: number
-    sourceJcsUtf8: string
-    bodyBytesBase64url: string
-    inputTokenCount: number
-  }>
-  profileDigest: string
-}
-
-type ProviderNativeRequestBodyV1 = {
-  schemaVersion: 1
-  format: 'cliq-provider-native-request-body-v1'
-  provider: RunAssemblyV1['provider']['name']
-  model: string
-  negotiatedMode: 'native-tools' | 'constrained-ir' | 'text-only'
-  profileRef: ArtifactRef
-  profileDigest: string
-  source:
-    | { kind: 'normal'; promptProjectionRef: ArtifactRef; promptProjectionDigest: string }
-    | {
-        kind: 'compaction'
-        compactionPlanRef: ArtifactRef
-        promptEnvelopeRef: ArtifactRef
-        promptEnvelopeDigest: string
-        renderedPromptRef: ArtifactRef
-        renderedPromptDigest: string
-      }
-  requestPath: string
-  mediaType: 'application/json'
-  bodyBytesRef: ArtifactRef
-  bodyBytesDigest: string
-  bodyByteCount: number
-  inputTokenCount: number
-  nativeRequestDigest: string
-}
-
-type TokenizerVocabularyV1 = {
-  schemaVersion: 1
-  format: 'cliq-byte-bpe-vocabulary-v1'
-  tokens: Array<{ tokenId: number; bytesBase64url: string }>
-  vocabularyDigest: string
-}
-
-type TokenizerMergeRanksV1 = {
-  schemaVersion: 1
-  format: 'cliq-byte-bpe-merge-ranks-v1'
-  merges: Array<{
-    rank: number
-    leftTokenId: number
-    rightTokenId: number
-    resultTokenId: number
-  }>
-  mergeRanksDigest: string
-}
-
-type TokenizerProfileV1 = {
-  schemaVersion: 1
-  format: 'cliq-tokenizer-profile-v1'
-  provider: RunAssemblyV1['provider']['name']
-  model: string
-  algorithm: 'cliq-byte-bpe-v1'
-  vocabularyRef: ArtifactRef
-  vocabularyDigest: string
-  mergeRanksRef: ArtifactRef
-  mergeRanksDigest: string
-  specialTokenPolicy: 'disabled_profile_framing_only'
-  goldenVectors: Array<{ renderedBytesBase64url: string; tokenIds: number[] }>
-  profileDigest: string
-}
-
-type PromptSerializationManifestV1 = {
-  schemaVersion: 1
-  format: 'cliq-prompt-serialization-v1'
-  provider: RunAssemblyV1['provider']['name']
-  model: string
-  runtimeBundleRef: ArtifactRef
-  runtimeBundleManifestDigest: string
-  entryId: string
-  entryVersion: string
-  entryDigest: string
-  profileRef: ArtifactRef
-  profileDigest: string
-  protocol: 'cliq-render-chat-messages-v1'
-  messageAstVersion: 'cliq-chat-messages-v1'
-  manifestDigest: string
-}
-
-type TokenizerManifestV1 = {
-  schemaVersion: 1
-  format: 'cliq-tokenizer-v1'
-  provider: RunAssemblyV1['provider']['name']
-  model: string
-  runtimeBundleRef: ArtifactRef
-  runtimeBundleManifestDigest: string
-  entryId: string
-  entryVersion: string
-  entryDigest: string
-  profileRef: ArtifactRef
-  profileDigest: string
-  protocol: 'cliq-count-rendered-prompt-tokens-v1'
-  promptSerializationRef: ArtifactRef
-  promptSerializationDigest: string
-  manifestDigest: string
-}
+type ObservedToolArguments =
+  | { encoding: 'jcs_json'; value: unknown; utf8?: never }
+  | { encoding: 'utf8_json_fragment'; utf8: string; value?: never }
 
 type NormalPromptToolCallV1 = {
   callId: string
@@ -2407,7 +2285,7 @@ type NormalPromptToolCallV1 = {
   toolName: string
   inputRef: ArtifactRef
   inputDigest: string
-  argumentsUtf8: string
+  arguments: ObservedToolArguments
 }
 
 type NormalPromptMessageV1 =
@@ -2434,6 +2312,7 @@ type NormalPromptMessageV1 =
       sourceItemId: string
       contentUtf8: string
       toolCalls: NormalPromptToolCallV1[]
+      continuation?: ProviderContinuation
     }
   | {
       index: number
@@ -2466,53 +2345,28 @@ type NormalPromptProjectionV1 = {
   projectionDigest: string
 }
 
-type NormalModelRequestV1 = {
+type ModelRequestV1 = {
   schemaVersion: 1
-  format: 'cliq-normal-model-request-v1'
+  format: 'cliq-model-request-v1'
+  kind: 'normal' | 'context_compaction'
   runId: string
   opId: string
   attempt: number
+  assemblyRef: ArtifactRef
+  assemblyDigest: string
   provider: RunAssemblyV1['provider']['name']
   model: string
-  negotiatedMode: 'native-tools' | 'constrained-ir' | 'text-only'
+  negotiatedMode: 'native-tools' | 'text-only'
   promptProjectionRef: ArtifactRef
   promptProjectionDigest: string
-  promptSerializationRef: ArtifactRef
-  promptSerializationDigest: string
-  nativeRequestRef: ArtifactRef
-  nativeRequestDigest: string
-  tokenizerRef: ArtifactRef
-  tokenizerDigest: string
+  compactionPlanRef?: ArtifactRef
+  requestPath: string
+  mediaType: 'application/json'
+  bodyBytesRef: ArtifactRef
+  bodyByteCount: number
+  streaming: boolean
   maximumOutputTokens: number
-  inputTokenCount: number
-  reservation: {
-    inputTokens: number
-    outputTokens: number
-    cacheReadTokens: number
-    cacheWriteTokens: number
-    modelTokens: number
-    costMicros: number
-  }
-  requestDigest: string
-}
-
-type CompactionModelRequestV1 = {
-  schemaVersion: 1
-  format: 'cliq-compaction-model-request-v1'
-  runId: string
-  opId: string
-  attempt: number
-  compactionPlanRef: ArtifactRef
-  promptEnvelopeRef: ArtifactRef
-  promptEnvelopeDigest: string
-  renderedPromptRef: ArtifactRef
-  renderedPromptDigest: string
-  nativeRequestRef: ArtifactRef
-  nativeRequestDigest: string
-  tokenizerRef: ArtifactRef
-  tokenizerDigest: string
-  inputTokenCount: number
-  maximumOutputTokens: number
+  estimatedInputTokens: number
   reservation: {
     inputTokens: number
     outputTokens: number
@@ -2545,14 +2399,11 @@ type RunAssemblyV1 = {
         }
     credentialGrantRefs: ArtifactRef[]
     adapter: { adapterId: string; version: string; codeDigest: string }
-    nativeRequestProfileRef: ArtifactRef
-    nativeRequestProfileDigest: string
     negotiation: {
-      mode: 'native-tools' | 'constrained-ir' | 'text-only'
+      mode: 'native-tools' | 'text-only'
       capabilityEvidenceRef: ArtifactRef
       capabilityDigest: string
       nativeToolCalling: boolean
-      constrainedOutput: boolean
       streaming: boolean
       trustedUsageEvidence: boolean
       contextLimitTokens: number
@@ -2600,11 +2451,6 @@ type RunAssemblyV1 = {
     >
   }
   context: {
-    promptTemplateRef: ArtifactRef
-    promptTemplateDigest: string
-    tokenizerRef: ArtifactRef
-    tokenizerDigest: string
-    tokenizerVersion: string
     compactionPromptEnvelopeRef: ArtifactRef
     compactionPromptEnvelopeDigest: string
     contextLimitTokens: number
@@ -2677,7 +2523,7 @@ Only after all noncredential import bytes are staged and verified does final cut
 
 Explicit rollback cannot restore a marker and then start an old binary. Before the legacy authority marker is published, the new binary requires `--allow-plaintext-legacy-credentials` (or interactive equivalent), reads each still-active platform item through the same-user authority, writes one `0600` staged ProviderAuthStore-v1 file, fsyncs and validates it, and atomically installs it at the legacy path. Missing/revoked/unreadable credentials block rollback with exact re-enrollment instructions; no old runtime starts first. Credential materialization joins the rollback sentinel/staging protocol and the legacy authority marker remains last. Raw secrets are thereby reintroduced only by explicit rollback consent, never by a retained backup. No claim of secure erasure of prior filesystem blocks is made.
 
-Provider capability evidence is also a closed artifact, not an adapter boolean. `ModelCapabilityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; provider/model/endpoint and adapter id/version/code digest equal the assembly. Its six claim fields are byte-for-byte equal to the selected source's `NormalizedModelCapabilityClaimsV1`; a ref or digest without this projection equality is not authority.
+Provider capability evidence is also a closed artifact, not an adapter boolean. `ModelCapabilityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; provider/model/endpoint and adapter id/version/code digest equal the assembly. Its five claim fields are byte-for-byte equal to the selected source's `NormalizedModelCapabilityClaimsV1`; a ref or digest without this projection equality is not authority.
 
 For a catalog source, `catalogEntryRef` decodes only as `SignedModelCatalogEntryV1`, its digest is `SHA-256(JCS(entry with catalogEntryDigest and signatureRef omitted))`, and the detached Ed25519 signature is by a bundled Cliq catalog key. Runtime bundle/ref, provider/model/endpoint identity, adapter identity, claims, and validity equal the evidence and assembly. For endpoint negotiation, `negotiationReceiptRef` decodes only as `EndpointModelNegotiationReceiptV1`; `receiptDigest` omits itself under JCS, endpoint registration/identity/TLS and owner match the immutable registered endpoint, and adapter/provider/model/claims/validity equal the evidence.
 
@@ -2700,7 +2546,7 @@ the logical query to provider-specific transport only under its exact code
 digest and registered endpoint/credential broker. The redacted response
 ref/digest decodes exact
 `EndpointModelNegotiationResponseV1`; `responseDigest` omits itself, its request
-pair rehashes the same request, and its protocol/times/complete six claims equal
+pair rehashes the same request, and its protocol/times/complete five claims equal
 the receipt. The response artifact is at most 1 MiB JCS and contains only the
 closed fields above—no headers, credentials, cookies, raw body, diagnostics,
 unknown extensions, or omitted claim. The adapter's provider-specific parser
@@ -2710,7 +2556,7 @@ response claims, and capability evidence/assembly claims are exactly receipt
 claims. A raw provider body, mutable discovery cache, or adapter assertion
 cannot directly set a claim.
 
-Managed local evidence instead binds the exact signed service/model manifests. `LocalModelManifestV1` has unique byte-sorted file paths, safe sizes, digest-valid CAS files/tokenizer, one complete signed `claims: NormalizedModelCapabilityClaimsV1`, and `modelManifestDigest = SHA-256(JCS(manifest with modelManifestDigest and signatureRef omitted))`; its Ed25519 signature is from a bundled Cliq model trust key. Managed-local evidence repeats all six model-manifest claims byte-for-byte; the service health probe may confirm them but never widen them. All catalog/receipt/evidence times are ordered, evidence limits are safe integers, `contextLimitTokens >= 32768`, `1 <= maxOutputTokens <= floor(contextLimitTokens/4)`, and `validThrough >= Run.deadlineAt`. RunAssembly negotiation booleans/limits/digest/ref repeat the evidence exactly; mode is `native-tools` only when native tool calling is true, otherwise `constrained-ir` only when constrained output is true, otherwise `text-only`. Unknown, expired, unsigned, endpoint/adapter/model-mismatched, source-claim-mismatched, or mutable evidence sets every autonomous capability false rather than enabling execution by provider name.
+Managed local evidence instead binds the exact signed service/model manifests. `LocalModelManifestV1` has unique byte-sorted file paths, safe sizes, digest-valid CAS files/tokenizer, one complete signed `claims: NormalizedModelCapabilityClaimsV1`, and `modelManifestDigest = SHA-256(JCS(manifest with modelManifestDigest and signatureRef omitted))`; its Ed25519 signature is from a bundled Cliq model trust key. Managed-local evidence repeats all six model-manifest claims byte-for-byte; the service health probe may confirm them but never widen them. All catalog/receipt/evidence times are ordered, evidence limits are safe integers, `contextLimitTokens >= 32768`, `1 <= maxOutputTokens <= floor(contextLimitTokens/4)`, and `validThrough >= Run.deadlineAt`. RunAssembly negotiation booleans/limits/digest/ref repeat the evidence exactly; mode is `native-tools` only when native tool calling is true, otherwise `text-only`. Unknown, expired, unsigned, endpoint/adapter/model-mismatched, source-claim-mismatched, or mutable evidence sets every autonomous capability false rather than enabling execution by provider name.
 
 Local model selection has one exact producer. The explicit same-user `cliq models enroll --manifest <absolute-package-path>/model-manifest.json` command is outside the Run control protocol, performs no download/network access, and accepts only this fixed descriptor-relative package layout: the selected basename is literally `model-manifest.json`, its parent contains one same-owner directory named `objects`, and the tokenizer/model bytes are regular files named `objects/<64-lower-case-hex-ArtifactRef>`. The importer opens the package root, manifest, object directory, and every object by held no-follow descriptors; rejects symlinks, hardlinks, special files, owner/mode drift, duplicate refs, extra/missing manifest entries, replacement between reads, or any object whose exact size/SHA-256 differs; and never interprets a caller path from inside the manifest. It imports those verified bytes into descriptor-protected `${stateRoot}/local-models/objects/<ArtifactRef>` and fsyncs each new object plus the directory. Source descriptors are transient input evidence, not durable authority after the content-addressed copy.
 
@@ -2742,34 +2588,30 @@ The only row transitions are `active(rowVersion=1,useCount=0) -> consumed(rowVer
 
 Verifier execution derivation is the one closed consumed-identity exception. `authorization.create(verifier_execution)` atomically consumes the named active `execution_identity_read(purpose='verifier')` grant with `consumer.kind='authorization_derivation'` and publishes exactly one derived verifier-execution grant whose id/target digest the receipt names. That identity grant cannot derive again. A later `VerifierRequest` without `executionGrantId` requires and consumes an active `identityReadGrantId`; with `executionGrantId`, it must repeat the consumed identity id and admission accepts it only by following that exact derivation receipt to the active derived grant, then consumes the derived grant into this Run's template. Any other consumed identity, mismatched verifier core/target/maxima, or missing derivation receipt is `AUTHORIZATION_REQUIRED`. Thus the wire may carry both ids without treating a consumed grant as reusable authority.
 
-`assemblyRef` resolves only to `RunAssemblyV1`; `assemblyDigest = SHA-256(JCS(assembly with assemblyDigest omitted))`, every array is unique in declared order, unknown fields fail, and all referenced bytes/digests validate before admission. The Supervisor derives it from the public model request plus trusted endpoint/credential enrollment, live capability negotiation, frozen price/cap evidence, canonical tool registry, post-Trust instructions/skills, and the retained runtime/guest manifests. Public clients cannot supply these refs. Registered model credentials must be `EndpointCredentialGrantBinding(purpose='model_endpoint')` for the exact endpoint; only `local_zero_cost` uses none. Native-tools requires `nativeToolCalling=true`; constrained-IR requires `constrainedOutput=true`; text-only exposes no tools. `provider.negotiation.contextLimitTokens` equals `context.contextLimitTokens`, `1 <= context.reservedOutputTokens <= provider.negotiation.maxOutputTokens`, and every normal request uses that exact reserved output cap.
+`assemblyRef` resolves only to `RunAssemblyV1`; `assemblyDigest = SHA-256(JCS(assembly with assemblyDigest omitted))`, every array is unique in declared order, unknown fields fail, and all referenced bytes/digests validate before admission. The Supervisor derives it from the public model request plus trusted endpoint/credential enrollment, live capability negotiation, frozen price/cap evidence, canonical tool registry, post-Trust instructions/skills, and the retained runtime/guest manifests. Public clients cannot supply these refs. Registered model credentials must be `EndpointCredentialGrantBinding(purpose='model_endpoint')` for the exact endpoint; only `local_zero_cost` uses none. Native-tools requires `nativeToolCalling=true`; text-only exposes no tools. `provider.negotiation.contextLimitTokens` equals `context.contextLimitTokens`, `1 <= context.reservedOutputTokens <= provider.negotiation.maxOutputTokens`, and every normal request uses that exact reserved output cap.
 
-`context.promptTemplateRef` decodes only to `PromptSerializationManifestV1`, and `context.tokenizerRef` only to `TokenizerManifestV1`; their digest members are SHA-256 of JCS with `manifestDigest` omitted. `context.promptTemplateDigest` equals the decoded serializer `manifestDigest`, `context.tokenizerDigest` equals the decoded tokenizer `manifestDigest`, and `context.tokenizerVersion` equals its `entryVersion`. Provider/model and RuntimeBundle ref/manifest digest equal the assembly. The signed bundle resolves the first entry to role `prompt_serializer` and the second to role `tokenizer`, with exact entry id/version/complete-file digest. Each entry digest equals its manifest's `profileRef`; decoding those bytes yields exact `PromptSerializationProfileV1` or `TokenizerProfileV1`, whose provider/model match and whose `profileDigest` omits only itself and equals the manifest field. The tokenizer profile's vocabulary/merge pairs closed-decode exact `TokenizerVocabularyV1`/`TokenizerMergeRanksV1`: the two `bundle_object` entry digests equal the complete-byte `vocabularyRef`/`mergeRanksRef`, while the decoded objects' independently self-omitting `vocabularyDigest`/`mergeRanksDigest` equal the profile's semantic digest fields. These complete-byte and semantic hash domains are never equated. The tokenizer manifest repeats the exact prompt-serialization ref/digest. These are non-executable data profiles interpreted only by fixed Supervisor code; unsupported provider/model, missing member bytes, or a failed golden vector makes that model ineligible before Run admission.
+Model authority is loaded once from the exact retained assembly and signed RuntimeBundle. Provider adapter code supplies pure native serialization directly from typed messages/tools; it is not selected by a prompt profile, tokenizer profile, source-JCS callback, mutable registry or SDK default. Static signature/reference/tool-schema/envelope checks run on admission and recovery. Per-attempt work checks the changing projection and invocation, then serializes and hashes the exact body. A loaded `ModelSession` owns immutable configuration and identity-bound prepared handles; storage still rehashes and validates every authoritative commit. There is no custom BPE, fictional framed prompt, or per-request execution of golden vectors. Independent expected-wire fixtures qualify the retained code at build/release time.
 
-`cliq-jcs-framed-chat-v1` has one byte-exact renderer. For a normal projection it forms UTF-8 JCS of `{format:'cliq-model-visible-prompt-v1',messages,tools,responseContract}`. Each system/user message projects only `{role,contentUtf8}`; assistant projects `{role,contentUtf8,toolCalls:[{callId,index,toolName,argumentsUtf8}]}`; tool projects `{role,toolCallId,contentUtf8}`; tool definitions project only `{index,name,description,inputSchema}`; and `responseContract` is `{mode:<the assembly negotiated mode>,toolCallsAllowed:<mode is not text-only>}`. Source ids, artifact refs/digests, Run ids, revisions, and audit fields never enter these model-visible bytes. The rendered byte sequence is `UTF8(normalPrefixUtf8) || payload-JCS || UTF8(normalSuffixUtf8)`. For compaction, the payload is UTF-8 JCS of `{format:'cliq-compaction-prompt-v1',messages:[{role:'system',contentUtf8:<system instruction>},{role:'user',contentUtf8:<prefix + source + suffix>}],tools:[],responseContract:<the exact envelope resultContract>}` and uses the compaction prefix/suffix. Profile strings are well-formed Unicode-scalar NFC with no NUL; each profile contains 8..64 unique bounded golden payload/render pairs, and bundle self-test plus admission must reproduce every pair.
 
-`cliq-byte-bpe-v1` tokenizes those exact rendered bytes without SDK or provider calls. `TokenizerVocabularyV1.tokens` is unique by safe-integer `tokenId` and decoded byte string, byte-sorted by token id, and contains exactly one one-byte token for each value 0..255. Merge ranks are contiguous from zero, unique by ordered input pair and result id, reference existing vocabulary ids, and the result bytes equal left bytes followed by right bytes; every non-byte token is introduced by exactly one merge. Start with the one-byte token ids. Repeatedly find every adjacent pair present in the rank table, merge the globally lowest rank (leftmost on a tie), and stop when none remains; the resulting id count is `N`. Special-token recognition is disabled because all framing is already explicit profile data. Vocabulary is limited to 1,000,000 entries, merges to 1,000,000, decoded token bytes to 1 MiB each, and profiles contain 8..64 unique bounded rendered-byte/token-id golden vectors that self-test and admission reproduce exactly. Storage/recovery reruns both algorithms before accepting every stored count. An SDK estimate, mutable installed tokenizer, provider-side count endpoint, executable plugin, hidden special token, or adapter-local delimiter is not authority.
 
-The selected signed RuntimeBundle obeys work package 06's exact `structuredArtifacts` closure. Every root record binds kind/id/provider/model, one complete-byte root entry/ref, its independently recomputed semantic digest, and the unique byte-sorted all-and-only transitive member refs. Each member is a signed non-executable `bundle_object` whose entry digest equals its complete-byte ArtifactRef; install descriptor-verifies and imports all roots/members into CAS before activation. The root-kind decoder separately validates the self-omitting semantic digest, so the two hash domains never collapse. There must be exactly one `prompt_serialization_profile`, `provider_request_profile`, `tokenizer_profile`, `system_prompt`, and `compaction_prompt` record matching the assembly provider/model; zero or multiple matches reject admission. The provider-request record decodes exact `ProviderNativeRequestProfileV1`, and its complete-byte ref/semantic digest equal `RunAssemblyV1.provider.nativeRequestProfileRef/nativeRequestProfileDigest`. The system record decodes nonempty exact `ModelTextV1`, and `instructions.systemPromptRef/systemPromptDigest` equal its complete-byte ref and semantic `textDigest`. The compaction record decodes exact `CompactionPromptEnvelopeV1`, its semantic digest equals `compactionPromptEnvelopeDigest`, and its member set is exactly the three referenced `ModelTextV1` artifacts. Prompt/provider-request/tokenizer profiles and their vocabulary/merge members follow the equations above. The same general closure supplies bundled-skill raw files, guest image/signature, MCP recovery static arguments/predicates, and Windows projection schemas; a fresh install never assumes a preseeded CAS or rereads an ambient package path during recovery.
+The selected signed RuntimeBundle obeys work package 06's exact `structuredArtifacts` closure. Each root binds kind/id/provider/model, a complete-byte root ref, an independently recomputed self-omitting semantic digest, and unique byte-sorted all-and-only member refs. Members are signed non-executable `bundle_object` entries whose digests equal their complete-byte ArtifactRefs. Install descriptor-verifies and imports every root/member before activation. Exactly one `system_prompt` and one `compaction_prompt` root match the assembly provider/model: the former is nonempty `ModelTextV1` and binds `instructions.systemPromptRef/systemPromptDigest`; the latter is `CompactionPromptEnvelopeV1`, binds the assembly envelope pair, and has exactly its three `ModelTextV1` members. Complete-byte and semantic digests never collapse. The same general closure retains bundled-skill files, guest image/signature, MCP recovery arguments/predicates and Windows projection schemas. Recovery never assumes preseeded CAS or rereads ambient package paths. The actual tokenizer/model files of managed local inference remain part of its signed model closure; they are not a host-side remote token counter.
 
 Normal prompt construction is a total stored projection, not adapter assembly. `NormalPromptProjectionV1.projectionDigest = SHA-256(JCS(projection with projectionDigest omitted))`; its Run/spec/assembly/context refs equal the current authoritative Run and ready Checkpoint, `contextManifestDigest` equals the decoded `ContextManifest.projectionDigest`, `basedOnRunRevision` is the revision being dispatched, and `frontierDigest = SHA-256(JCS(the exact current RunFrontier))`. Message indices and tool indices are contiguous from zero. The producer walks only the frozen artifacts in this order:
 
 1. Emit one system message from a closed instruction projection. The first, mandatory nonempty piece is the decoded signed-RuntimeBundle `RunAssembly.instructions.systemPromptRef` `ModelTextV1.utf8`. If the decoded workspace manifest has entries, the next piece is UTF-8 JCS of `{format:'cliq-workspace-instruction-prompt-v1',entries:[{order,canonicalRootRelativePath,appliesToSubtree:true,instructionUtf8}]}`, using every manifest entry in order and the exact decoded `ModelTextV1.utf8`; this preserves each nested scope instead of guessing one ambient target path. Each selected skill then contributes UTF-8 JCS of `{format:'cliq-skill-instruction-prompt-v1',skillId,sourceScope,instructionUtf8}` in the assembly's explicit skill order. Omit only the empty workspace block, require every skill instruction to be nonempty, and join the remaining exact pieces with two LF bytes. Every ref/digest, source identity, and text digest rehashes, and `sourceKind='assembly_instructions'`, `sourceId=assemblyRef`.
 2. Walk the admitted `SessionContextProjection` segments in order. A raw segment may project only `run_terminal` items and emits one user message per item using the exact JCS rendering in section 4.2. A summary emits one user message containing its decoded `ModelTextV1.utf8`. `excluded_control` emits none; every legacy kind must be there. Then emit one user message for each `AdmittedContextManifest.parentContextRefs` and `additionalArtifactRefs`, in their stored array order, each of which must decode a bounded `ModelTextV1`. Source kind/id identify the exact Session item, compaction item, or context artifact ref.
 3. Emit one user message for the exact `RunObjectiveV1.utf8` named by `RunSpec.objectiveRef`, with `sourceKind='run_objective'` and that ref as `sourceId`.
-4. Walk the current `ContextManifest.segments` in order. A summary emits its exact `ModelTextV1` as one user message. An `excluded_control` segment emits none. Every raw item must be one of the following model-visible forms; every other item belongs in `excluded_control`: a `ModelTurnItem` emits one assistant message whose text equals its `ModelTextV1` and whose ordered calls equal the decoded `AgentModelTurn`; each call's `argumentsUtf8` is `UTF8(JCS(observed.value))` for `jcs_json` or the exact observed fragment otherwise, and its ref/digest/id/index/name equal `ToolCallInputV1`; a `ToolResultItem` emits one tool message whose content is `UTF8(JCS(decoded ToolResultModelContentV1.content))`; a `UserInputItem` emits one user message containing exact text or `UTF8(JCS(value))` from its ref-free `UserInputModelContentV1`; a `RepairDiagnosticItem` emits one user message per ordered diagnostic using only `VerifierRepairModelContentV1.message`; and a `ChildResultItem` emits one user message containing `UTF8(JCS(ChildResultModelContentV1.content))`. The source item id and source kind match each message. No authority/audit payload, raw verifier output, principal, grant, StopIntent, containment fact, or legacy payload is serialized.
+4. Walk the current `ContextManifest.segments` in order. A summary emits its exact `ModelTextV1` as one user message. An `excluded_control` segment emits none. Every raw item must be one of the following model-visible forms; every other item belongs in `excluded_control`: a `ModelTurnItem` emits one assistant message whose text equals its `ModelTextV1` and whose ordered calls equal the decoded `AgentModelTurn`; each call's `arguments` retains `{encoding:'jcs_json',value}` or `{encoding:'utf8_json_fragment',utf8}` directly from its observation, with no internal stringify/parse round trip, and its ref/digest/id/index/name equal `ToolCallInputV1`; a `ToolResultItem` emits one tool message whose content is `UTF8(JCS(decoded ToolResultModelContentV1.content))`; a `UserInputItem` emits one user message containing exact text or `UTF8(JCS(value))` from its ref-free `UserInputModelContentV1`; a `RepairDiagnosticItem` emits one user message per ordered diagnostic using only `VerifierRepairModelContentV1.message`; and a `ChildResultItem` emits one user message containing `UTF8(JCS(ChildResultModelContentV1.content))`. The source item id and source kind match each message. No authority/audit payload, raw verifier output, principal, grant, StopIntent, containment fact, or legacy payload is serialized.
 
 The `tools` array is empty for text-only mode. Otherwise it is the contiguous projection of `provider.negotiation.exposedToolNames` in that order: every name selects exactly one `ToolContractManifestV1` entry, description is byte-identical, and `inputSchemaRef/inputSchemaDigest/inputSchema` rehash and decode the exact finite JSON-domain schema. There are no hidden or adapter-added tools. The entire projection's JCS is bounded to the admitted context/model limit before dispatch; an indivisible oversized message follows the context-window failure rule rather than truncation.
 
-The Journal `requestRef` for a normal model attempt decodes exact `NormalModelRequestV1`; `requestDigest = SHA-256(JCS(request with requestDigest omitted))`. Run/op/attempt equal the prepared Journal row; provider/model/mode, serializer/tokenizer refs/digests, and `maximumOutputTokens` equal the assembly, with the latter exactly `context.reservedOutputTokens`. Its prompt ref/digest rehashes the just-described projection. The pinned serializer renders that projection, the pinned tokenizer supplies the exact normal count `N`, `inputTokenCount=N`, and its stored reservation/aggregate values satisfy the pricing equation below and equal the prepared Journal delta. `N` is counted only over the exact `cliq-jcs-framed-chat-v1` rendered bytes; provider response usage, HTTP/SDK framing, and the native adapter can neither supply nor alter it.
+Every normal or context-compaction model Journal `requestRef` decodes the single `ModelRequestV1`; `requestDigest` omits itself under JCS. Run/op/attempt, assembly ref/digest, provider/model/mode, projection pair, body ref/count/path, streaming flag, output cap, estimate and reservation equal the prepared attempt. Normal mode is the frozen assembly mode, output cap is `O`, and `compactionPlanRef` is absent. Compaction mode is `text-only`, cap is `S`, and the plan is the current frontier's exact plan. Its stored projection is the retained envelope's system message plus user prefix/source/suffix, with no tools or fabricated framing. `AgentModelTurn` repeats the applicable projection pair and request digest. Recovery reloads the same immutable closure and re-prepares the retained projection, reproducing the same request and wire bytes before accepting a response.
 
-Provider-native serialization is a versioned executable contract, not semantics inferred from an algorithm label or finite examples. The sole signed `provider_adapter` entry selected by `RunAssemblyV1.provider.adapter` exports pure `serializeNativeRequestV1`. Its closed input is JCS `{algorithm,requestKind,provider,model,negotiatedMode,maximumOutputTokens,sourceJcsUtf8}`: normal mode equals the assembly negotiation, compaction mode is literal `text-only`, and `sourceJcsUtf8` is exactly the model-visible normal payload JCS above or the compaction payload JCS with the exact rendered source inserted; no ref, credential, time, nonce, environment, SDK default, or unlisted field enters it. Each golden vector carries all four varying inputs—request kind, mode, output cap, and source JCS—plus the expected body and independently counted tokens. The function returns only `{requestPath,mediaType:'application/json',bodyBytes}`; the path must equal the profile, body bytes must be at most 1 MiB, and the function has no clock, randomness, network, filesystem, secret, mutable registry, or process-environment input. The algorithm literal selects one exact export behavior in that retained adapter code digest; provider/model/profile and adapter id/version/code digest must equal the assembly and signed RuntimeBundle entry. Admission and recovery execute those same retained bytes and reproduce all 8..64 profile vectors, but the vectors are conformance checks rather than a substitute for the total signed function. Missing adapter bytes, a different code digest, nondeterministic output, or an algorithm the selected adapter does not implement makes the provider/model ineligible.
 
-Before publication of the model request, the Supervisor invokes that exact contract and publishes secret-free `ProviderNativeRequestBodyV1`. The body profile's provider/model match, algorithm is the one provider literal, `profileDigest` and `nativeRequestDigest` omit themselves under JCS, `bodyBytesRef===bodyBytesDigest` hashes the exact returned bytes, byte count is exact, request path is the returned/profile path, and body input-token count equals independently recomputed `N`. `NormalModelRequestV1.nativeRequestRef/nativeRequestDigest` rehash that artifact, and its source is this prompt pair. Projection rendering, provider-body serialization, and counting are rerun at recovery. The broker sends those exact retained body bytes and may add only endpoint-authorized transport/authentication headers; SDK object reserialization, hidden messages/tools/schemas, redirect rewriting, or any body mutation after the digest is forbidden. The completed `AgentModelTurn.requestDigest` and its prompt-projection ref/digest equal this request.
+Preparation publishes the exact secret-free native body (at most 1 MiB) and one common request artifact; compaction additionally publishes its typed projection. OpenAI uses Responses with `store:false`, explicit output cap, disabled truncation and encrypted reasoning continuation; Anthropic uses Messages; OpenRouter/OpenAI-compatible/Zhipu use their explicit Chat Completions mappings; managed Ollama uses Chat. The broker sends those bytes verbatim and injects only endpoint-authorized transport/auth headers. It cannot reserialize, add messages/tools/defaults, change the path, follow redirects or retry inside an attempt. Opaque provider reasoning/signature blocks are bounded, identity-bound data retained in the turn and next projection, never tool or permission authority. All identifiable native calls and their ordered synthetic/executed results remain in history. An empty tool name remains empty in durable truth; native history uses only the reserved, unexposed `__cliq_missing_tool_name` placeholder to close its result, without repairing the call.
 
-A context-compaction Journal `requestRef` instead decodes exact `CompactionModelRequestV1`. Its plan ref is the current frontier's exact `RunContextCompactionPlan`; prompt-envelope and tokenizer pairs equal that plan/assembly; `renderedPromptRef` is the immutable exact UTF-8 envelope rendering with the selected source inserted once at the literal slot and `renderedPromptDigest === renderedPromptRef`; and Run/op/attempt equal the prepared row. `inputTokenCount` is the independently recomputed pinned-tokenizer count, `maximumOutputTokens` equals the plan's summary token cap, the same `(N,O,N,N)` reservation equation applies, and `requestDigest` omits itself. Its `nativeRequestRef/nativeRequestDigest` decodes the same exact provider-body artifact contract with `source.kind='compaction'` and all plan/envelope/rendered-prompt fields equal; its body token count equals the request. Recovery re-renders, reserializes, rehashes, and recounts before accepting either a result or settlement. Compaction cannot reuse a normal prompt request or an adapter-local message/body array.
 
-`mcpServers` is byte-sorted by registration id, has exactly one entry for each unique public requested server id and no others, and each ref/digest/revision validates an immutable registry revision. `ToolContractManifestV1.entries` is byte-sorted by exposed `name`; names are globally unique across built-ins and every selected MCP registry, and admission rejects rather than renames/shadows any collision. An MCP entry must match exactly one selected server revision and its server tool name/schema/recovery contract digest; its `replayClass` is byte-for-byte the decoded registry tool recovery kind. A built-in entry matches the retained adapter identity and its closed type forbids `reconcile`; Kernel Cut has no hidden built-in reconciliation adapter. Provider `exposedToolNames` is exactly the manifest entry-name sequence for native/constrained mode and empty for text-only. Retry entries are the same ordered names/replay classes. The assembly `tools.manifestDigest` equals the referenced manifest's digest; there is no second schema array for adapters to reinterpret. The signed `RuntimeBundleManifest` named by `runtime.runtimeBundleRef` resolves `workerExecutableId` to role `worker`, `provider.adapter.adapterId/version/codeDigest` to one `provider_adapter` entry, every built-in tool's adapter id/version/code digest to one `tool_adapter` entry, every bundled skill's complete-byte closure ref plus independently validated semantic closure digest to a non-executable `skill_bundle` entry, and the sole `default_https_trust_store` id/content to a non-executable `trust_store` entry. Entry ids, roles, and versions match byte-for-byte; each entry's signed digest hashes its complete retained file and is compared only with that file's ArtifactRef, never with a structured artifact's self-omitting semantic digest. Selected MCP and guest executables follow their own retained manifest identities. Recovery never loads a mutable installed adapter, skill closure, trust path, or CA bundle merely because its semantic version/path appears compatible.
+`mcpServers` is byte-sorted by registration id, has exactly one entry for each unique public requested server id and no others, and each ref/digest/revision validates an immutable registry revision. `ToolContractManifestV1.entries` is byte-sorted by exposed `name`; names are globally unique across built-ins and every selected MCP registry, and admission rejects rather than renames/shadows any collision. An MCP entry must match exactly one selected server revision and its server tool name/schema/recovery contract digest; its `replayClass` is byte-for-byte the decoded registry tool recovery kind. A built-in entry matches the retained adapter identity and its closed type forbids `reconcile`; Kernel Cut has no hidden built-in reconciliation adapter. Provider `exposedToolNames` is exactly the manifest entry-name sequence for native mode and empty for text-only. Retry entries are the same ordered names/replay classes. The assembly `tools.manifestDigest` equals the referenced manifest's digest; there is no second schema array for adapters to reinterpret. The signed `RuntimeBundleManifest` named by `runtime.runtimeBundleRef` resolves `workerExecutableId` to role `worker`, `provider.adapter.adapterId/version/codeDigest` to one `provider_adapter` entry, every built-in tool's adapter id/version/code digest to one `tool_adapter` entry, every bundled skill's complete-byte closure ref plus independently validated semantic closure digest to a non-executable `skill_bundle` entry, and the sole `default_https_trust_store` id/content to a non-executable `trust_store` entry. Entry ids, roles, and versions match byte-for-byte; each entry's signed digest hashes its complete retained file and is compared only with that file's ArtifactRef, never with a structured artifact's self-omitting semantic digest. Selected MCP and guest executables follow their own retained manifest identities. Recovery never loads a mutable installed adapter, skill closure, trust path, or CA bundle merely because its semantic version/path appears compatible.
 
 `WorkspaceInstructionManifestV1` is required even when empty. Workspace Trust authorizes this separate declarative-context capture; it does **not** add these files to `SourceManifest`, a private generation, result/diff, or publication authority and does not create tool/read permission. The source pair decodes exact `WorkspaceInstructionSourceManifestV1`, whose workspace identity ref/digest equals the Session's held `WorkspaceIdentityV1`; `sourceDigest = SHA-256(JCS(source manifest with sourceDigest omitted))`. Trusted code walks that held root by descriptor-relative no-follow traversal and captures the all-and-only regular files at literal `AGENTS.md` or suffix `/AGENTS.md`. Each must be owned by the workspace owner, have literal mode `0600` (decimal 384) or `0644` (decimal 420), and have link count exactly one; executable, group/other-writable, hardlinked, symlink/special/external, owner-mismatched, or changed files fail admission, as do more than 64 files, 1 MiB total bytes, a scan race, or invalid text. Source entries are unique and byte-sorted by canonical path. Each `sourceEntryDigest = SHA-256(JCS({canonicalRootRelativePath,directoryDepth,fileDescriptor,rawBytesRef,rawBytesDigest,rawByteCount}))`; raw digest/count rehash the complete held-file bytes and `fileDescriptor` is reobserved unchanged before releasing the handle.
 
@@ -2777,11 +2619,13 @@ The instruction manifest's source ref/digest and workspace digest equal that art
 
 Every selected `SkillManifestV1` has a unique `(sourceScope,skillId)`, a mandatory `sourceIdentityRef/sourceIdentityDigest`, and an exact immutable instruction/resource closure; duplicate unqualified ids across scopes are an admission error rather than implicit shadowing. `SkillSourceIdentityV1.sourceIdentityDigest`, `BundledSkillClosureV1.closureDigest`, and `SkillManifestV1.manifestDigest` each omit only themselves under JCS. Source-identity files are unique byte-sorted canonical paths and are exactly `SKILL.md` plus the manifest resources, with matching ref/digest/byte count; `SKILL.md` must be nonempty NFC/LF-normalized UTF-8 with no NUL and deterministically publishes the manifest's exact `ModelTextV1` instruction, while every resource ref/digest equals its source file's raw bytes. Descriptor-captured workspace/user files are same-owner regular files with literal mode `0600|0644|0700|0755`, link count one, unchanged pre/post `fstat`, and complete rehashed bytes; executable modes remain data-only under `kind='executable-disabled'`. A workspace identity rehashes the Session's held `WorkspaceIdentityV1`, requires the displayed same-owner workspace-relative skill-root descriptor at `0700|0755`, and computes each entry digest as SHA-256 JCS of `{sourceScope:'workspace',workspaceIdentityDigest,rootDescriptor,canonicalRelativePath,fileDescriptor,rawBytesRef,rawBytesDigest,rawByteCount}` after descriptor-relative no-follow capture; like `AGENTS.md`, this declarative context closure is separate from SourceManifest and grants no source/tool authority. A user identity rehashes the authenticated `LocalPrincipalIdentityV1`, requires the held owner-only `0700` root descriptor, and uses the exact projection `{sourceScope:'user',principalIdentityDigest,rootDescriptor,canonicalRelativePath,fileDescriptor,rawBytesRef,rawBytesDigest,rawByteCount}`. A bundled identity resolves its `BundledSkillClosureV1`; projecting each identity file to `{canonicalRelativePath,rawBytesRef,rawBytesDigest,rawByteCount}` must equal the closure's file array byte-for-byte in order, and `sourceEntryDigest = SHA-256(JCS({sourceScope:'bundled',bundledClosureDigest,canonicalRelativePath,rawBytesRef,rawBytesDigest,rawByteCount}))`. The Run's signed RuntimeBundle names the closure artifact as an exact `role='skill_bundle', executable=false` entry whose id/version equal `bundleEntryId/bundleEntryVersion`; the entry's signed complete-file digest equals `bundledClosureRef`, and decoding those exact retained bytes yields `BundledSkillClosureV1` whose independently recomputed self-omitting `closureDigest` equals `bundledClosureDigest`. The complete-byte `bundledClosureRef` and semantic `bundledClosureDigest` are distinct hash domains and are never required to equal. The bundle entry points only to the closure bytes and not back to the source identity, so the hash graph is acyclic. Resources are maximum 128/16 MiB, descriptor-contained below the selected skill root, transitively frozen with no cycle or escape, and never executed merely by inclusion. Skills appear in the explicit request order. All source, manifest, instruction, and resource refs remain CAS roots; recovery never rereads mutable `AGENTS.md`, `SKILL.md`, user directories, bundle-install paths, or resource paths.
 
-Pricing artifacts are closed rather than executable plugins. For `ModelPriceTableV1`, every price is a nonnegative safe integer, `tableDigest = SHA-256(JCS(table with tableDigest and signatureRef omitted))`, and `signatureRef` contains a valid Ed25519 signature of that digest by a bundled Cliq trust-root key. Provider/model/endpoint are exact, the interval contains admission through `Run.deadlineAt`, and a table cannot use a wildcard or mutable alias. `cliq-price-ceil-v1` computes each component as `ceil(tokens * microsPerMillion / 1_000_000)` with checked safe-integer arithmetic for input, output, cache-read, and cache-write tokens, then checked-adds the four components. For every normal or compaction request, let `N` be the pinned-tokenizer count of the exact serialized prompt and `O` its frozen maximum output tokens. The sole reservation vector is `(inputTokens=N,outputTokens=O,cacheReadTokens=N,cacheWriteTokens=N)`; `modelTokens=N+O`; remote `costMicros` is the fixed price algorithm over that vector and local-zero-cost is zero. `NormalModelRequestV1` stores all six values under `requestDigest`, and the prepared Journal delta is exactly `{modelTokens,costMicros,toolCalls:0,repairAttempts:0}`. This conservative vector never guesses a cache hit/write. No adapter-supplied floating point, currency conversion, mutable calculator, or unstored maximum is authority.
+Pricing artifacts are closed rather than executable plugins. `ModelPriceTableV1` contains nonnegative safe-integer rates and a required four-component `requestTokenCeiling`. `tableDigest = SHA-256(JCS(table with tableDigest and signatureRef omitted))`; its Ed25519 signature, provider/model/endpoint identity and validity through `Run.deadlineAt` all verify. The signed ceiling must bound every request the retained adapter may release (at most 1 MiB), including rejected or ambiguous attempts, for the exact target and billing semantics. Its input/output maxima cover admitted `C` and both requested output caps; cache-read/write maxima are explicit. A signature is not proof of a genuine billing bound: WP06 qualification must substantiate it from authoritative bounds. Rates without a credible complete ceiling, tokenizer estimates or empirical averages are not hard-budget authority and fail `MODEL_COST_UNKNOWN`.
+
+Every remote normal/compaction attempt stores and reserves the full signed vector, irrespective of prompt estimate or its smaller requested output cap. `modelTokens=inputTokens+outputTokens`; `cliq-price-ceil-v1` computes each `ceil(tokens * microsPerMillion / 1_000_000)` with checked integers, then checked-adds all four costs. Managed-local zero cost reserves `(C,requestedOutput,0,0)` and zero cost. The prepared Journal delta is exactly `{modelTokens,costMicros,toolCalls:0,repairAttempts:0}`. Released or possibly released outcomes consume this full reservation; only proven no-release settles zero. Usage is untrusted telemetry, never a refund. Observed per-component or output-cap violations are rejected, but post-release detection cannot retroactively guarantee spend. Conservative reservation may limit useful work for a small budget; it must not be silently relaxed.
 
 Kernel Cut has no provider-hard-cap pricing branch. Creating or reserving a remote cap before the admission transaction would add a second crash/reconciliation protocol, so billable providers are eligible only through the signed immutable table above. `trusted_price_table.maxRunCostMicros` equals the admitted `RunSpec.budgets.costMicros` exactly; individual call reservations are computed only by `cliq-price-ceil-v1` and must fit the remaining ceiling. A shared account limit, local estimate, opaque cap, expired table, missing unit, mismatched endpoint/model, invalid signature, unsafe arithmetic, or mutable calculator fails admission with `MODEL_COST_UNKNOWN` before provider I/O.
 
-The context block is arithmetic, not tuning prose. Let its fields be `C/O/H/T/R/S/K/P` in displayed order from `contextLimitTokens` through `sourceInputTokenCap`: `C>=32768`; `1<=O<=floor(C/4)`; `H=C-O`; `H-8192>=16384`; `T=min(floor(7*C/10),H-8192)`; `R=min(32768,floor(C/4))`; `S=min(8192,floor(C/8))`; `K` is the pinned-tokenizer count of the exact decoded `CompactionPromptEnvelopeV1` rendering with its source slot replaced by the empty UTF-8 string; `P=min(floor(C/2),C-S-K)` and `P>=4096`. The assembly compaction ref/digest decodes that artifact exactly. The normal prompt template/tokenizer and compaction envelope are immutable assembly inputs; every compaction plan copies these refs/digests and values exactly. macOS strong mode requires both runtime bundle and guest toolchain refs; Linux may omit guest fields only when its selected namespace backend executes the retained runtime identity directly. RunSpec, every ContextManifest/Checkpoint, model/compaction request, worker launch, and recovery closure must resolve the identical assembly ref; runtime/guest/CAS GC retains its full graph.
+The context block is a deterministic planning policy, not exact remote token authority. Text estimate is `ceil(UTF8 byte length/3)`; normal projection estimates add four units per message and include tool definitions, call names/arguments and opaque continuation. Let the stored fields be `C/O/H/T/R/S/K/P`: `C>=32768`, `1<=O<=floor(C/4)`, `H=C-O`, `H-8192>=16384`, `T=min(floor(7*C/10),H-8192)`, `R=min(32768,floor(C/4))`, `S=min(8192,floor(C/8))`. Both `O` and `S` independently fit the provider maximum; `S<=O` is not required. `K` estimates exactly two retained envelope messages with empty source, including their eight overhead units. `P=min(floor(C/2),C-S-K)` and `P>=4096`. Assembly and plan bind the exact envelope/ref/digest and these scalars. Estimates may undercount provider tokenization; rejection stops explicitly without hidden truncation or semantic repair. macOS retains both runtime and guest identities; Linux may omit guest fields only for its retained namespace runtime. RunSpec, ContextManifest/Checkpoint, requests, worker launch and recovery all resolve the same assembly and complete retained graph.
 
 The assembly freezes one Kernel-Cut `ModelRetryPolicy`: exactly three dispatched attempts, zero hidden same-attempt transport retries, and post-attempt delays `[500ms,2000ms]`. Provider response headers—including `Retry-After`—cannot alter this schedule: every positively received rejection is the completed, non-retried typed response above, while only failed/unknown transport attempts may follow these stored delays. Every redispatch after a claim is therefore a new Journal attempt/reservation; SDK auto-retry and an implementation claim that zero request bytes/no billing occurred cannot hide another wire attempt. Exhaustion terminates the model frontier as `failed(runtime_failed)` rather than spinning or silently changing model/mode.
 
@@ -5692,9 +5536,99 @@ The provider-neutral runtime consumes typed events for:
 - provider usage, retry, and failure;
 - approval, child, waiting, checkpoint, and verification events.
 
-Provider-native tool calls are preferred. A provider may use schema/grammar-constrained structured output when it guarantees the response shape. A provider with neither capability runs in text-only mode and cannot enter autonomous tool execution.
+Provider-native tool calls are the sole autonomous model protocol. There is no constrained-action envelope in Kernel Cut. Valid models without native capability are text-only; malformed or unverified evidence cannot authorize admission. OpenAI Responses and Pi-style typed continuation guide a small core: native conversion only at the provider boundary, one typed in-process result, no parsing of assistant text as control.
 
 The core runner does not parse, repair, or extract a `ModelAction` from arbitrary assistant text.
+
+Canonical completed-turn and in-process stream contracts:
+
+```ts
+type AgentNegotiatedMode = 'native-tools' | 'text-only';
+
+type AgentToolCall = {
+  callId: string;
+  toolName: string;
+  inputRef: ArtifactRef;
+  inputDigest: string;
+  index: number;
+};
+
+type AgentUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costMicros: number;
+};
+
+type AgentModelStreamEvent =
+  | { type: 'start'; provider: RunAssemblyV1['provider']['name']; model: string; streaming: boolean }
+  | { type: 'text_delta'; text: string }
+  | { type: 'reasoning_delta'; text: string }
+  | { type: 'tool_call_start'; index: number; wireCallId?: string; toolName?: string }
+  | { type: 'tool_call_arguments_delta'; index: number; utf8: string }
+  | { type: 'tool_call_complete'; index: number; wireCallId?: string; toolName?: string }
+  | {
+      type: 'usage';
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheWriteTokens: number;
+    }
+  | { type: 'retry'; attempt: number; delayMs: 500 | 2000 }
+  | { type: 'error'; code: string }
+  | { type: 'end'; stopReason: 'end' | 'tool_calls' | 'length' | 'content_filter' | 'cancelled' | 'unknown' };
+
+type AgentModelTurnBase = {
+  continuation?: ProviderContinuation;
+  schemaVersion: 1;
+  format: 'cliq-agent-model-turn-v1';
+  provider: RunAssemblyV1['provider']['name'];
+  model: string;
+  responseId?: string;
+  usage?: AgentUsage;
+  usageTrusted: false;
+  negotiatedMode: AgentNegotiatedMode;
+  promptProjectionRef: ArtifactRef;
+  promptProjectionDigest: string;
+  requestDigest: string;
+  responseDigest: string;
+};
+
+type AgentModelTurn = AgentModelTurnBase & (
+  | {
+      stopReason: 'end';
+      textRef: ArtifactRef;
+      toolCalls: [];
+      abortStopIntentRef?: never;
+    }
+  | {
+      stopReason: 'tool_calls';
+      textRef: ArtifactRef;
+      toolCalls: [AgentToolCall, ...AgentToolCall[]];
+      abortStopIntentRef?: never;
+    }
+  | {
+      stopReason: 'cancelled';
+      textRef: ArtifactRef;
+      toolCalls: [];
+      abortStopIntentRef: ArtifactRef;
+    }
+);
+
+type ToolInvocation<TInput extends Record<string, unknown> = Record<string, unknown>> = {
+  callId: string;
+  index: number;
+  toolName: string;
+  input: TInput;
+  replayClass: ReplayClass;
+};
+```
+
+`continuation` contains only bounded provider-owned reasoning/signature blocks,
+with the same provider/model as the turn. Storage and prompt reconstruction
+preserve it; runtime never interprets it as tool authority. An event is
+non-authoritative until the complete response passes central compilation.
 
 ### 11.2 Capability Negotiation
 
@@ -5721,11 +5655,11 @@ Cancellation, deadline, or failure atomically appends `cancelled` results for un
 
 ### 11.4 Durable Run-Context Compaction
 
-Long horizon cannot depend on an ever-growing prompt or implicit provider truncation. `assemblyRef` freezes the exact prompt serializer, pinned tokenizer, context limit `C`, and maximum reserved normal output `O`. Admission requires `C >= 32768`, `1 <= O <= floor(C/4)`, and `C - O - 8192 >= 16384`; a provider/model that cannot truthfully expose those values is not eligible for a durable Run. Let `H = C - O`, normal-dispatch trigger `T = min(floor(7*C/10), H-8192)`, recent-window floor `R = min(32768, floor(C/4))`, compaction-summary token cap `S = min(8192, floor(C/8))`, and `K` be the pinned-tokenizer count of one exact `cliq-chat-messages-v1` AST: system message content is the bytes at `systemInstructionRef`; user message content is the byte-exact concatenation `userPrefixRef + empty source + userSuffixRef`; there are no other messages or implicit separators. The pinned `PromptSerializationManifestV1` renders that AST, then the pinned `TokenizerManifestV1` counts its bytes. `envelopeDigest = SHA-256(JCS(envelope with envelopeDigest omitted))`; each referenced text artifact is valid NFC UTF-8, rehashes to its named digest, and the combined fixed text is at most 256 KiB. The literal placeholder denotes the one logical slot between prefix and suffix and may not occur in any fixed text; it is never emitted. The result contract forbids tools and accepts only complete `end` Markdown. No plan scalar or source text participates in the envelope digest, so `K` is acyclic and independently recomputable. The source-content input cap is `P = min(floor(C/2), C-S-K)` and admission requires `P >= 4096`. Summary output must satisfy both `<=S` tokens and `<=256 KiB` UTF-8. These integers are stored in the assembly/plan and recomputed by storage; floating point, SDK estimates, alternate roles, chat-template defaults, or adapter delimiters cannot choose a boundary.
+Long horizon cannot depend on an ever-growing prompt or implicit provider truncation. The assembly freezes `C/O/H/T/R/S/K/P` under the estimate policy above and the exact `CompactionPromptEnvelopeV1`. Each of its three `ModelTextV1` members is valid NFC/no-NUL UTF-8, rehashes, and the combined fixed text is at most 256 KiB. The logical source placeholder cannot occur in fixed text and is not emitted. `K` estimates exactly system content and user prefix + empty source + suffix, plus two-message overhead; plan/source data do not participate in the envelope digest. A compaction response requests actual provider output cap `S` and accepts only complete nonempty Markdown of at most `min(262144,3*S)` UTF-8 bytes, whose text estimate is therefore at most `S`. Context estimates are not signed billing bounds or proof of provider context acceptance.
 
-Before every normal model dispatch, trusted code tokenizes the exact next prompt projection. If its count `N <= T`, it dispatches normally. Otherwise it computes one deterministic contiguous compactable prefix. Fixed admitted Session/parent context, instructions/skills/tool schemas, and every current frontier/wait/StopIntent/open invocation/unsettled child/current candidate/verifier reference are protected. Starting from the newest Run context segment, whole segments are protected until they contain at least `R` projected model-visible tokens; protection extends backward to the earliest segment containing any other live reference. Candidate boundaries are the remaining closed segment ends, all beginning at Run item sequence one. For each boundary, source tokens are the pinned-tokenizer count of the current model-visible projection (existing summaries included; excluded-control payloads omitted). A candidate is legal only when source tokens `<=P`, source tokens `>=S+512`, and it ends strictly before the protected suffix. Choose the legal candidate with the greatest `throughItemSeq`; there is no adapter tie-break. Thus every success reduces projected context by at least 512 tokens. If `N>T` and no legal candidate exists—including fixed/protected context that cannot fit, an indivisible oversized item, or a prefix too small to reduce—the reducer performs no model call and proposes `runtime_failed(context_window_exhausted)` with the exact manifest/token-count evidence. It never truncates, splits an item, loosens protection, or loops on the same summary.
+Before normal dispatch, trusted code estimates the next prompt. If `N<=T`, dispatch normally. Otherwise protect fixed admitted Session/parent context, instructions/skills/tools and every live frontier/wait/StopIntent/invocation/child/candidate/verifier reference. Protect newest whole segments until their model-visible content estimates total at least `R`, extending backward for other live references. Candidates are contiguous sequence-one prefixes ending at closed segment boundaries before the protected suffix. Their source is the current model-visible projection, including existing summaries but excluding control payloads. A legal source has estimated content `<=P` and `>=S+512`; choose the greatest `throughItemSeq`. Summary replacement reduces estimated source content by at least 512 units; admission of the replacement must also verify that the complete next-prompt estimate decreases (including message overhead). If `N>T` and no legal range exists, make no call and propose `runtime_failed(context_window_exhausted)` with exact manifest/estimate evidence. Never truncate, split an item, loosen protection or loop on the same summary.
 
-For the chosen range the reducer creates an immutable `RunContextCompactionPlan`, advances the agent frontier to `phase='context_compaction'`, and performs a normal Journaled tools-disabled `model` invocation with ordinary token/cost reservation, frozen model retry policy, and `ReplayClass='retry'`. Plan `promptEnvelopeRef/promptEnvelopeDigest`, tokenizer ref, `C/O/T/R/S/K/P`, and max bytes equal the exact RunAssembly context block; `promptOverheadTokens=K`; source range/digest/token count equals the selected ContextManifest projection and is inserted only at the one source slot. Its only accepted result is a positively complete UTF-8 Markdown summary within both caps; this is content, not a model control envelope, so a negotiated text-only provider can compact without free-text action parsing. `RunContextCompactionItem.summaryRef` equals that highest/current completed compaction turn's exact `AgentModelTurn.textRef`, decodes `ModelTextV1`, and repeats its `textDigest` as `summaryDigest`; the replacement ContextManifest summary segment repeats both. The text is NFC/no-NUL, satisfies the plan byte and token caps, and cannot be caller- or worker-substituted after the billed response. A tool call, truncated/filter/cancel/unknown stop, or oversize output is a protocol failure and never becomes an agent action. Raw Run items are never deleted.
+For the chosen range, publish immutable `RunContextCompactionPlan`, set `phase='context_compaction'`, and use an ordinary tools-disabled Journaled model attempt with frozen retry/budget policy. Plan envelope pair, `C/O/T/R/S/K/P` and byte limit equal assembly; `promptOverheadTokens=K`; source range/digest/estimate equal the chosen projection. `RunContextCompactionItem.summaryRef` must be that highest/current completed turn's `AgentModelTurn.textRef`, decoding bounded NFC/no-NUL `ModelTextV1`; both item and replacement segment repeat its `textDigest`. A text-only provider may compact because the response is content, not a control envelope. Tool-bearing, non-end, malformed or oversized responses cannot become a summary. Raw items remain durable.
 
 On success one transaction appends `RunContextCompactionItem`, publishes a context manifest that replaces exactly the covered prefix with the bounded summary while retaining the source range/digest and explicit preserved refs, restores the same normal-model agent frontier, and publishes a ready Checkpoint reusing the unchanged workspace-state artifact. The summary is model-visible; compaction control/evidence is not. Crash sees either the old manifest/frontier or the complete new manifest/item/Checkpoint. Pre-dispatch/transport `failed|unknown` attempts follow the frozen model retry policy. An executed tool-bearing, malformed, non-end, or oversize response is Journal `completed` with an unusable-response artifact and immediately proposes `runtime_failed(context_compaction_failed)`—a completed attempt is never retried. Budget exhaustion proposes the exact budget StopIntent. Cliq never silently drops tokens or asks an implementation to invent a pruning heuristic.
 
@@ -5773,7 +5707,7 @@ type ModelUnusableResponseV1 = {
     | { kind: 'context_compaction'; requestRef: ArtifactRef; requestDigest: string }
   provider: 'openai' | 'anthropic' | 'openrouter' | 'openai-compatible' | 'zhipu' | 'ollama'
   model: string
-  negotiatedMode: 'native-tools' | 'constrained-ir' | 'text-only'
+  negotiatedMode: 'native-tools' | 'text-only'
   failureCode:
     | 'malformed_transport_payload'
     | 'response_too_large'
@@ -5907,7 +5841,6 @@ type RunContextCompactionPlan = {
   promptOverheadTokens: number
   sourceInputTokenCap: number
   sourceProjectedTokens: number
-  tokenizerRef: ArtifactRef
   createdAt: string
 }
 
@@ -7175,7 +7108,7 @@ Delivery source identity is one fixed four-manifest equation. Let **B** be `sour
 
 Dependency `none` is legal iff the frozen dependency policy is absent/disabled. `ready` must name the current candidate-derived policy/plan, the identity-matched `DependencyReadyItem`, acquisition `completed` Journal fact, and ready Checkpoint whose source digest still equals `resultSourceRef`. `inherited_verified` is legal only for delivery with identical result source and revalidates the source terminal RunResult, source closure, immutable provenance, verifier/dependency plan, receipts, and artifact digests; it never relabels receipts. The transaction that consumes the final verifier/dependency result publishes this closure first. For `afterPass='finalize'` it atomically installs the finalize frontier. For `afterPass='delivery_approval'` it atomically installs the proof-carrying delivery approval frontier; approval and publication preserve the same ref until the final forward projection transaction installs delivery finalize. `commitRunResult` accepts exactly that ref and re-walks the closure against storage; a schema-valid CAS artifact, alternate receipt list, caller-derived summary, or closure dropped/reconstructed across publication cannot finalize the Run.
 
-`AgentModelTurn` and transport deltas are defined in work package 02, but its durable `modelTurnRef` contains the exact provider/model/response identity, one `ModelTextV1` ref, ordered `AgentToolCall` input ref/digest pairs, normalized stop reason, negotiated mode, optional untrusted usage telemetry, and request/response digests. `usageTrusted` is literal `false`; no per-turn adapter claim changes budget authority. `ModelTextV1.textDigest`, `ObservedToolCallInputV1.observedInputDigest`, and `ToolCallInputV1.inputDigest` each omit themselves under JCS; text byte count is its exact UTF-8 length. Every `ToolCallInputV1.observedInputRef` rehashes its named observation. The assembled provider argument is bounded to 1,048,576 bytes. Valid JSON uses `encoding='jcs_json'`, retains the exact JSON-domain value, and counts its RFC 8785 bytes; otherwise `utf8_json_fragment` retains and counts the exact assembled UTF-8 text. This retained observation is the sole source for lossless assistant-call context reconstruction. A `resolved` input alone contains the validated schema-normalized object and exact selected tool schema ref/digest and alone may enter policy, grant, Journal, or dispatch. `rejected_unknown_tool` forbids schema/value and carries the deterministic diagnostic; `rejected_invalid_input` repeats the known schema, forbids value, and carries its validator diagnostic. Both rejected forms remain in an identity-valid batch solely to produce ordered synthetic results. `ModelTurnItem.textRef` equals the decoded turn's text ref. A call turn's ordered `(callId,index,toolName,inputRef,inputDigest)` list equals `ToolBatchItem.calls` byte-for-byte and its batch text ref is the same turn text. Its stop matrix is storage-enforced: `end` has zero calls and nonempty decoded final text; `tool_calls` has one or more complete call identities whose inputs are exact resolved/rejected artifacts; and `cancelled` has zero calls plus an exact `abortStopIntentRef` that was current before Cliq issued the authenticated abort for this invocation. `length|content_filter|unknown` never inhabit `AgentModelTurn` or `ModelTurnItem`; a positively received response with one of those normalized stops publishes `ModelUnusableResponseV1` with respectively `stop_reason_length|stop_reason_content_filter|stop_reason_unknown`, while any partial calls remain only in its private observed bytes. `ModelTurnItem` copies the abort member iff cancelled and otherwise forbids it. A provider/transport cancellation not caused by such an abort is never normalized into cancellation authority: a completed unusable response proposes generic runtime protocol failure, while uncertain dispatch remains Journal `unknown` under the frozen retry policy. Invalid stop/call/text pairs are `MODEL_PROTOCOL_ERROR`, fully charged when the response occurred, and create no candidate/batch. `VerificationReceipt` is the exact work package 05 schema and is additionally constrained by sections 13.2-13.4. `ChildHandleItem` and `ChildResultItem` use section 12's exact fields plus the common version/id/run/timestamp fields.
+`AgentModelTurn` and transport deltas use section 11.1's canonical schemas, implemented by work package 02; the durable `modelTurnRef` contains the exact provider/model/response identity, one `ModelTextV1` ref, ordered `AgentToolCall` input ref/digest pairs, normalized stop reason, negotiated mode, optional untrusted usage telemetry, and request/response digests. `usageTrusted` is literal `false`; no per-turn adapter claim changes budget authority. `ModelTextV1.textDigest`, `ObservedToolCallInputV1.observedInputDigest`, and `ToolCallInputV1.inputDigest` each omit themselves under JCS; text byte count is its exact UTF-8 length. Every `ToolCallInputV1.observedInputRef` rehashes its named observation. The assembled provider argument is bounded to 1,048,576 bytes. Valid JSON uses `encoding='jcs_json'`, retains the exact JSON-domain value, and counts its RFC 8785 bytes; otherwise `utf8_json_fragment` retains and counts the exact assembled UTF-8 text. This retained observation is the sole source for lossless assistant-call context reconstruction. A `resolved` input alone contains the validated schema-normalized object and exact selected tool schema ref/digest and alone may enter policy, grant, Journal, or dispatch. `rejected_unknown_tool` forbids schema/value and carries the deterministic diagnostic; `rejected_invalid_input` repeats the known schema, forbids value, and carries its validator diagnostic. Both rejected forms remain in an identity-valid batch solely to produce ordered synthetic results. `ModelTurnItem.textRef` equals the decoded turn's text ref. A call turn's ordered `(callId,index,toolName,inputRef,inputDigest)` list equals `ToolBatchItem.calls` byte-for-byte and its batch text ref is the same turn text. Its stop matrix is storage-enforced: `end` has zero calls and nonempty decoded final text; `tool_calls` has one or more complete call identities whose inputs are exact resolved/rejected artifacts; and `cancelled` has zero calls plus an exact `abortStopIntentRef` that was current before Cliq issued the authenticated abort for this invocation. `length|content_filter|unknown` never inhabit `AgentModelTurn` or `ModelTurnItem`; a positively received response with one of those normalized stops publishes `ModelUnusableResponseV1` with respectively `stop_reason_length|stop_reason_content_filter|stop_reason_unknown`, while any partial calls remain only in its private observed bytes. `ModelTurnItem` copies the abort member iff cancelled and otherwise forbids it. A provider/transport cancellation not caused by such an abort is never normalized into cancellation authority: a completed unusable response proposes generic runtime protocol failure, while uncertain dispatch remains Journal `unknown` under the frozen retry policy. Invalid stop/call/text pairs are `MODEL_PROTOCOL_ERROR`, fully charged when the response occurred, and create no candidate/batch. `VerificationReceipt` is the exact work package 05 schema and is additionally constrained by sections 13.2-13.4. `ChildHandleItem` and `ChildResultItem` use section 12's exact fields plus the common version/id/run/timestamp fields.
 
 Native call identity is normalized before that validation. OpenAI, Anthropic,
 OpenRouter, OpenAI-compatible, and Zhipu require a nonempty provider-native id
@@ -7191,7 +7124,7 @@ call id to be nonempty and unique; missing/duplicate native ids from any other
 provider remain a response-level protocol error with no assistant turn or
 tool execution.
 
-For a usable turn, `AgentModelTurn.responseDigest` is exactly SHA-256 of RFC 8785/JCS `{format:'cliq-agent-normalized-response-v1',provider,model,responseId?,usage?,usageTrusted:false,negotiatedMode,requestDigest,stopReason,textRef,toolCalls,abortStopIntentRef?}`, with absent optional members omitted and calls in retained index order. Every value is copied byte-for-byte from the turn and storage recomputes this projection. It never hashes discarded provider wire bytes or the whole self-containing turn; raw unusable bytes are retained only by `ModelUnusableResponseV1`.
+For a usable turn, `AgentModelTurn.responseDigest` is exactly SHA-256 of RFC 8785/JCS `{format:'cliq-agent-normalized-response-v1',provider,model,responseId?,continuation?,usage?,usageTrusted:false,negotiatedMode,requestDigest,stopReason,textRef,toolCalls,abortStopIntentRef?}`, with absent optional members omitted and calls in retained index order. Every value is copied byte-for-byte from the turn and storage recomputes this projection. It never hashes discarded provider wire bytes or the whole self-containing turn; raw unusable bytes are retained only by `ModelUnusableResponseV1`.
 
 Run-item decoding is a closed discriminated union over the types in this appendix/sections 12-14; unknown kinds fail closed. Except for the dedicated fenced retry-unknown artifact, every `ToolResultItem.resultRef` decodes exact `ToolResultPayloadV1`, whose `payloadDigest = SHA-256(JCS(payload with payloadDigest omitted))` and whose Run/batch/call/index/tool/outcome equal the item and original call. `executed` repeats the exact completed Journal op/attempt/result and selected output schema. `denied` repeats either the immutable policy ref/decision digest or exact `ApprovalDecisionV1`. `error` uses only the closed code set, always carries one rehashed diagnostic, and carries op/attempt/Journal error all together iff dispatch created that op. `batch_not_executed` lists the complete unique byte-sorted invalid call-id set from the same prevalidation transaction. Ordinary `cancelled` repeats the winning StopIntent and deterministic notice. A fenced retry-unknown cancelled item instead points directly to exact `RetryUnknownCancelledResult` under the terminal rule above.
 
@@ -7600,7 +7533,7 @@ artifact—and never the authority item—is the child payload admitted to paren
 model context or an await ToolResult. A child row, unrelated RunResult, loose
 diagnostic, or caller-composed summary cannot settle an allocation.
 
-Child assembly/policy derivation is an equation, not an adapter choice. The child inherits the parent's exact provider/model/endpoint, runtime/guest, prompt/tokenizer/context/compaction, instruction, skill, model-retry, and algorithm identities. `zero_cost` and a still-valid trusted price table are copied exactly; no external pricing authority is created during delegation. The Supervisor filters the parent's `ToolContractManifestV1` to the byte-sorted requested-and-granted exposed built-in **names** and MCP registrations; `read_only` additionally removes every entry whose access is not `read|plan`, shell, source-write, publication, dependency scripts, and mutating delegation. `mcpServers`, exposed tool names, tool retry entries, and credential refs are recomputed exactly from that filtered manifest; every ref is a subset of the parent closure and no refreshed registry may enter. It emits a new child assembly/digest and a new `RunPolicySnapshotV1` with the same engine/mode/decision rules restricted by the grant, setting every ungranted action class to `deny`.
+Child assembly/policy derivation is an equation, not an adapter choice. The child inherits the parent's exact provider/model/endpoint, runtime/guest, context/compaction, instruction, skill, model-retry, and algorithm identities. `zero_cost` and a still-valid trusted price table are copied exactly; no external pricing authority is created during delegation. The Supervisor filters the parent's `ToolContractManifestV1` to the byte-sorted requested-and-granted exposed built-in **names** and MCP registrations; `read_only` additionally removes every entry whose access is not `read|plan`, shell, source-write, publication, dependency scripts, and mutating delegation. `mcpServers`, exposed tool names, tool retry entries, and credential refs are recomputed exactly from that filtered manifest; every ref is a subset of the parent closure and no refreshed registry may enter. It emits a new child assembly/digest and a new `RunPolicySnapshotV1` with the same engine/mode/decision rules restricted by the grant, setting every ungranted action class to `deny`.
 
 Verifier/dependency derivation is equally closed. `inherit_parent` sets `childVerifierSpecRef` to the exact parent verifier spec and `childDependencyPolicyRef` to the exact parent policy when present; `none` uses the canonical empty VerifierSpec, requires `childDependencyPolicyRef` absent, and requires the derived consent. `childCredentialGrantRefs` is the byte-sorted unique union recomputed from the child provider, filtered MCP revisions, and inherited dependency policy, contains no other ref, and is a subset of the parent's frozen union. `ChildCapabilityGrantV1` binds all those refs plus parent refs, full delegate identity, granted set, child assembly/tool/policy refs, verifier mode, budgets, and deadline. `grantCoreDigest` hashes JCS with both digest fields and `derivedUnverifiedConsentRef` omitted; `grantDigest` omits only itself. The child RunSpec must name the exact assembly/policy/verifier/dependency/credential/consent refs, and storage validates parent request + operation grant + capability grant + child allocation + child admission atomically. A child never inherits a broader parent manifest merely because the parent could use it.
 
@@ -10275,7 +10208,7 @@ The following decisions are closed:
 - OS-managed local Supervisor with lease/epoch fencing;
 - private independent workspace generations and real sandbox enforcement;
 - trusted credential/effect broker;
-- provider-native or constrained typed tool calls, with no free-text action fallback;
+- provider-native typed tool calls, with no free-text action fallback;
 - immutable results, same-digest verifier receipts, and explicit delivery Runs;
 - child Runs as the only recursive execution primitive;
 - one-time migration, no long-term dual write, and one Kernel Cut.

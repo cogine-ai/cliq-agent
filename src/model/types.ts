@@ -1,10 +1,6 @@
-export type ProviderName =
-  | 'openrouter'
-  | 'anthropic'
-  | 'openai'
-  | 'openai-compatible'
-  | 'zhipu'
-  | 'ollama';
+import type { ProviderName as KernelProviderName } from '../kernel/types.js';
+
+export type ProviderName = KernelProviderName;
 
 export type ModelModality = 'text' | 'image' | 'audio' | 'video';
 

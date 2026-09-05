@@ -1,0 +1,58 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { test } from 'node:test';
+
+const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const TYPED_RUNTIME_SOURCES = [
+  'protocol/agent-ir.ts',
+  'kernel/artifact-plan.ts',
+  'kernel/json.ts',
+  'model/attempt.ts',
+  'model/capabilities.ts',
+  'model/pricing.ts',
+  'model/provider-observation.ts',
+  'model/request.ts',
+  'model/run-assembly.ts',
+  'model/model-session.ts',
+  'model/immutable.ts'
+] as const;
+
+const LEGACY_DEPENDENCIES = [
+  /protocol\/model\/actions/u,
+  /protocol\/model\/json-repair/u,
+  /providers\/prompt-mapping/u,
+  /runtime\/runner/u
+] as const;
+
+const LEGACY_CONTROL_SYMBOLS = [
+  /\bModelAction\b/u,
+  /\bparseModelAction\b/u,
+  /\brepairJsonStrings\b/u,
+  /\bbuildTextActionFallbackInstructions\b/u,
+  /TEXT ACTION FALLBACK MODE/u,
+  /['"]text-action['"]/u
+] as const;
+
+test('typed model-attempt modules have no dependency on the legacy JSON-action runner', async () => {
+  for (const relativePath of TYPED_RUNTIME_SOURCES) {
+    const source = await readFile(resolve(SOURCE_ROOT, relativePath), 'utf8');
+    for (const pattern of [...LEGACY_DEPENDENCIES, ...LEGACY_CONTROL_SYMBOLS]) {
+      assert.doesNotMatch(source, pattern, `${relativePath} matched forbidden legacy pattern ${pattern}`);
+    }
+    if (relativePath.startsWith('model/')) {
+      assert.doesNotMatch(source, /from ['"]\.\/types\.js['"]/u, `${relativePath} imports legacy model types`);
+    }
+  }
+});
+
+test('typed model modules use the strict wire decoder instead of direct JSON.parse', async () => {
+  for (const relativePath of TYPED_RUNTIME_SOURCES.filter((path) => path.startsWith('model/'))) {
+    const source = await readFile(resolve(SOURCE_ROOT, relativePath), 'utf8');
+    assert.doesNotMatch(source, /\bJSON\.parse\s*\(/u, `${relativePath} bypasses the strict JSON boundary`);
+    if (relativePath === 'model/request.ts') {
+      assert.doesNotMatch(source, /\bparseJsonStrict\b/u, 'request preparation must not re-decode typed tool arguments');
+    }
+  }
+});
