@@ -4,11 +4,17 @@ import type { ToolContractManifestV1, RunSpec } from '../../kernel/types.js';
 import type { ModelTextV1 } from '../../protocol/agent-ir.js';
 import { reseal, testFixture } from '../../model/testing/fixtures.js';
 import { createActiveFixture } from './fixtures.js';
+import { builtinInputContracts } from '../../tools/builtin-inputs.js';
 
 /** Real CAS + SQLite/lease, with offline signed-authority verification fixtures; no provider or tool I/O. */
 export async function createAgentFixture(label: string, budgets?: Partial<RunSpec['budgets']>) {
   const authority = testFixture();
-  const selected = authority.material.resolveVerifiedTools(authority.assembly.tools)!;
+  const read = builtinInputContracts.read;
+  const schemaRef = canonicalSha256(read.inputSchema);
+  const selected = [{ name: 'read', description: 'Read a file', inputSchema: read.inputSchema,
+    inputSchemaRef: schemaRef, inputSchemaDigest: schemaRef, replayClass: 'retry' as const }];
+  authority.assembly.provider.negotiation.exposedToolNames = ['read'];
+  authority.assembly.retry.tools[0]!.toolName = 'read';
   const credentials: string[] = [];
   const fixture = await createActiveFixture(label, { budgets, credentialGrantRefs: credentials, assembly: async (store) => {
     const grant = await store.artifacts.publishCanonical({ format: 'cliq-offline-credential-fixture-v1' }, 'cliq-offline-credential-fixture-v1');

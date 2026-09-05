@@ -5,7 +5,8 @@ import { rm } from 'node:fs/promises';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import type { ContinuationItem, RunFrontier, RunContextCompactionPlan } from '../kernel/types.js';
-import { AgentContextExhaustedError } from './reducers/agent.js';
+import { AgentContextExhaustedError, AgentHandoffPendingError } from './reducers/agent.js';
+import { KernelStorageError } from './errors.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
 import { sampleCanonicalNow } from './canonical-time.js';
@@ -28,7 +29,7 @@ function response(fixture: Awaited<ReturnType<typeof createAgentFixture>>, prepa
       ...(text ? [{ type: 'message', id: 'msg', role: 'assistant', status: 'completed',
         content: [{ type: 'output_text', text, annotations: [] }] }] : []),
       ...calls.map((call) => ({ type: 'function_call', id: `wire:${call.id}`, call_id: call.id,
-        name: call.name ?? 'read_file', arguments: call.arguments }))] })));
+        name: call.name ?? 'read', arguments: call.arguments }))] })));
   return reader.finish(sampleCanonicalNow(), fixture.agent.resolveToolInput);
 }
 
@@ -41,7 +42,7 @@ test('real model admission binds zero-based identity, native bytes and the full 
     assert.deepEqual(admitted.entry.budgetDelta, { modelTokens: 40_960, costMicros: 114_688, toolCalls: 0, repairAttempts: 0 });
     assert.deepEqual(await fixture.store.artifacts.readBytes(admitted.prepared.request.bodyBytesRef),
       Buffer.from(admitted.prepared.outbound.bodyBytes));
-    const result = response(fixture, admitted, [{ id: 'a', arguments: '{"path":"a.ts"}' }, { id: 'b', arguments: '{"path":"b.ts"}' }]);
+    const result = response(fixture, admitted, [{ id: 'a', arguments: '{"path":"./src//a.ts"}' }, { id: 'b', arguments: '{"path":"b.ts"}' }]);
     assert.equal(result.kind, 'usable');
     const completed = await fixture.agent.completeModel({ opId: admitted.entry.opId, attempt: 0, expectedRunRevision: admitted.run.revision, result });
     assert.equal(completed.disposition, 'tool_batch');
@@ -54,6 +55,19 @@ test('real model admission binds zero-based identity, native bytes and the full 
     assert.deepEqual(frontier, { schemaVersion: 1, kind: 'tool', batchItemId: items[1]!.itemId, orderedCallIds: ['a', 'b'], nextCallIndex: 0 });
     assert.equal(closure.latestCheckpoint.runItemSeq, 2);
     assert.equal(closure.latestCheckpoint.journalSeq, completed.entry.seq);
+    const current = await fixture.agent.readToolInvocation();
+    assert.deepEqual(current.invocation, { callId: 'a', index: 0, toolName: 'read', input: { path: 'src/a.ts' }, replayClass: 'retry' });
+    assert.deepEqual(current.subject.channel, { kind: 'fs-read', path: 'src/a.ts' });
+    assert.equal(current.subject.display.path, 'src/a.ts');
+    assert.equal(Object.isFrozen(current.invocation.input), true);
+    assert.equal('grant' in current, false);
+    await fixture.store.close();
+    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material });
+    const restored = await fixture.agent.readToolInvocation();
+    assert.deepEqual(restored.invocation, current.invocation);
+    assert.equal(restored.loopSignature, current.loopSignature);
+    assert.deepEqual(restored.execution, current.execution);
   } finally { await disposeFixture(fixture); }
 });
 
@@ -139,7 +153,7 @@ test('executed invalid compaction is fully charged, preserves raw context and ca
     assert.deepEqual(after.items, before.items);
     assert.equal(after.latestCheckpoint.contextManifestRef, before.latestCheckpoint.contextManifestRef);
     await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: completed.run.revision, leaseEpoch: fixture.leaseEpoch }),
-      /prior invocation attempt is not retryable/);
+      error => error instanceof AgentHandoffPendingError && error.disposition === 'stop_required' && error.evidenceRef === completed.entry.resultRef);
   } finally { await disposeFixture(fixture); }
 });
 
@@ -205,6 +219,7 @@ test('an invalid batch atomically retains every call and ordered result, then re
     assert.deepEqual(items.map((item) => item.kind), ['model_turn', 'assistant_tool_batch', 'tool_result', 'tool_result', 'tool_result']);
     assert.deepEqual(items.filter((item) => item.kind === 'tool_result').map((item) => item.outcome), ['batch_not_executed', 'error', 'error']);
     assert.equal(closure.journal.filter((entry) => entry.opKind !== 'model').length, 0);
+    await assert.rejects(fixture.agent.readToolInvocation(), { code: 'STATE_TRANSITION_INVALID' });
     const next = await fixture.agent.prepareModel({ expectedRunRevision: completed.run.revision, leaseEpoch: fixture.leaseEpoch });
     assert.deepEqual(next.projection.messages.map((message) => message.role), ['system', 'user', 'assistant', 'tool', 'tool', 'tool']);
     const assistant = next.projection.messages[2]!;
@@ -285,7 +300,7 @@ test('an unusable native response is durably charged once without a fabricated b
     assert.equal(closure.journal.at(-1)?.resultRef, result.responseRef);
     assert.equal(closure.latestCheckpoint.journalSeq, completed.entry.seq);
     await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: completed.run.revision, leaseEpoch: fixture.leaseEpoch }),
-      { code: 'STATE_TRANSITION_INVALID' });
+      { code: 'AGENT_HANDOFF_PENDING' });
   } finally { await disposeFixture(fixture); }
 });
 
@@ -335,10 +350,90 @@ test('JSON-looking final text stays inert and cannot mark an unverified Run succ
     const closure = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(closure.items.length, 1);
     assert.equal(closure.journal.filter((entry) => entry.opKind !== 'model').length, 0);
-    await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: completed.run.revision, leaseEpoch: fixture.leaseEpoch }));
+    await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: completed.run.revision, leaseEpoch: fixture.leaseEpoch }),
+      error => error instanceof AgentHandoffPendingError && error.disposition === 'candidate_required' && error.evidenceRef === completed.entry.resultRef);
     await fixture.store.close();
     fixture.store = await openStateStore(fixture.stateRoot);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material });
     assert.equal((await fixture.agent.readModelAttempt())?.disposition, 'candidate_required');
+    await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch }),
+      { code: 'AGENT_HANDOFF_PENDING', disposition: 'candidate_required' });
+  } finally { await disposeFixture(fixture); }
+});
+
+test('the current tool projection rejects skipped, reordered and foreign batch frontiers', async () => {
+  const fixture = await createAgentFixture('typed-tool-cursor');
+  const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const admitted = await prepare(fixture);
+    const result = response(fixture, admitted, [{ id: 'a', arguments: '{"path":"a"}' }, { id: 'b', arguments: '{"path":"b"}' }]);
+    const completed = await fixture.agent.completeModel({ opId: admitted.entry.opId, attempt: 0, expectedRunRevision: admitted.run.revision, result });
+    const current = await fixture.agent.readToolInvocation();
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    for (const frontier of [
+      { ...current.frontier, nextCallIndex: 1 }, { ...current.frontier, nextCallIndex: 2 },
+      { ...current.frontier, orderedCallIds: ['b', 'a'] }, { ...current.frontier, batchItemId: 'foreign-batch' },
+      { ...current.frontier, schemaVersion: 2 }, { ...current.frontier, ignoredAuthority: true }
+    ]) {
+      const artifact = await fixture.store.artifacts.publishCanonical(frontier, 'cliq-run-frontier-v1');
+      fault.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(artifact.ref, fixture.runId);
+      await assert.rejects(fixture.agent.readToolInvocation(), { code: 'RECOVERY_REQUIRED' });
+      fault.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(completed.run.frontierRef!, fixture.runId);
+      assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    }
+    assert.equal((await fixture.agent.readToolInvocation()).invocation.callId, 'a');
+  } finally { fault.close(); await disposeFixture(fixture); }
+});
+
+test('model dispatch claims bind the current frontier before and inside the permanent claim transaction', async () => {
+  const fixture = await createAgentFixture('typed-claim-frontier');
+  const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const admitted = await fixture.agent.prepareModel({ expectedRunRevision: fixture.runRevision, leaseEpoch: fixture.leaseEpoch });
+    const input = { runId: fixture.runId, expectedRunRevision: admitted.run.revision, leaseEpoch: fixture.leaseEpoch,
+      opId: admitted.entry.opId, attempt: 0, dispatchId: 'exact-dispatch' };
+    const frontier = await fixture.store.artifacts.readCanonical<RunFrontier>(admitted.run.frontierRef!);
+    assert.equal(frontier.kind, 'agent');
+    const other = await fixture.store.artifacts.publishCanonical({ ...frontier, turnId: 'different-turn' }, 'cliq-run-frontier-v1');
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const staleContext = await fixture.store.artifacts.publishCanonical({ ...frontier, contextItemSeq: 1 }, 'cliq-run-frontier-v1');
+    for (const ref of [other.ref, staleContext.ref]) {
+      fault.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(ref, fixture.runId);
+      await assert.rejects(fixture.store.claimInvocationDispatch(input), { code: 'RECOVERY_REQUIRED' });
+    }
+    fault.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(admitted.run.frontierRef!, fixture.runId);
+    const raced = fixture.store.claimInvocationDispatch(input);
+    fault.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(other.ref, fixture.runId);
+    await assert.rejects(raced, { code: 'REVISION_CONFLICT' });
+    fault.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(admitted.run.frontierRef!, fixture.runId);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    const body = admitted.prepared.artifacts.find((artifact) => artifact.ref === admitted.prepared.request.bodyBytesRef)!;
+    await rm(path.join(fixture.stateRoot, 'cas', body.ref));
+    await assert.rejects(fixture.store.claimInvocationDispatch(input), /ENOENT/);
+    await fixture.store.artifacts.publishBytes(body.bytes, body.mediaType, body.schemaKind);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    const claim = fixture.store.claimInvocationDispatch(input);
+    input.opId = 'mutated-after-call';
+    input.dispatchId = 'mutated-after-call';
+    const claimed = await claim;
+    assert.equal(claimed.opId, admitted.entry.opId);
+    assert.equal(claimed.dispatchId, 'exact-dispatch');
+    await assert.rejects(fixture.store.claimInvocationDispatch({ ...input, opId: admitted.entry.opId }), { code: 'STATE_TRANSITION_INVALID' });
+  } finally { fault.close(); await disposeFixture(fixture); }
+});
+
+test('the loaded state seam classifies authority and caller validation failures without hiding their cause', async () => {
+  const fixture = await createAgentFixture('typed-error-codes');
+  try {
+    await assert.rejects(fixture.store.loadAgentRun({ runId: fixture.runId,
+      material: { ...fixture.authority.material, resolveVerifiedTools: () => null } }),
+    error => error instanceof KernelStorageError && error.code === 'RECOVERY_REQUIRED' && error.cause instanceof TypeError);
+    const admitted = await prepare(fixture);
+    const result = response(fixture, admitted, [{ id: 'a', arguments: '{"path":"a"}' }]);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    await assert.rejects(fixture.agent.completeModel({ opId: admitted.entry.opId, attempt: 0, expectedRunRevision: admitted.run.revision,
+      result: { ...result, artifacts: null } as unknown as typeof result }),
+    error => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST' && error.cause instanceof TypeError);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
   } finally { await disposeFixture(fixture); }
 });

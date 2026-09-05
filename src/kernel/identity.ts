@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from './canonical.js';
-import type { ArtifactRef } from './types.js';
+import type { ArtifactRef, RunFrontier } from './types.js';
 
 export const ARTIFACT_REF_PATTERN = /^[0-9a-f]{64}$/;
 export const REQUEST_ID_PATTERN =
@@ -17,6 +17,11 @@ export function assertArtifactRef(value: string): asserts value is ArtifactRef {
 
 export function identityHash(...values: unknown[]): string {
   return Buffer.from(canonicalSha256(values), 'hex').toString('base64url');
+}
+
+export function modelOperationId(runId: string, frontier: Extract<RunFrontier, { kind: 'agent' }>): string {
+  return identityHash('cliq-model-operation-v1', runId, frontier.turnId, frontier.phase,
+    ...(frontier.compactionPlanRef ? [frontier.compactionPlanRef] : []));
 }
 
 export function digestOmitting<T extends Record<string, unknown>>(

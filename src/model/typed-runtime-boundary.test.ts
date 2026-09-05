@@ -21,6 +21,12 @@ const TYPED_RUNTIME_SOURCES = [
   'runtime/continuation.ts',
   'runtime/context-compaction.ts',
   'tools/input-contract.ts',
+  'tools/input-schema.ts',
+  'tools/builtin-inputs.ts',
+  'policy/decision.ts',
+  'policy/engine.ts',
+  'policy/decision-table.ts',
+  'policy/bash-parse.ts',
   'state/agent-context.ts',
   'state/agent-recovery.ts',
   'state/reducers/agent.ts'
@@ -50,6 +56,10 @@ test('typed model-attempt modules have no dependency on the legacy JSON-action r
     }
     if (relativePath.startsWith('model/')) {
       assert.doesNotMatch(source, /from ['"]\.\/types\.js['"]/u, `${relativePath} imports legacy model types`);
+    }
+    if (relativePath.startsWith('tools/')) {
+      assert.doesNotMatch(source, /from ['"](?:node:fs(?:\/promises)?|\.\/types\.js|\.\.\/policy\/(?:types|subjects)\.js)['"]/u,
+        `${relativePath} imports host I/O or the retiring tool/policy contract`);
     }
   }
 });
