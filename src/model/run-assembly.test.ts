@@ -118,6 +118,40 @@ test('validateRunAssembly enforces context equations, transitive references, and
   });
 });
 
+test('validateRunAssembly requires a verified guest toolchain for macOS and paired guest identities on either backend', () => {
+  for (const [backend, guestRef, guestDigest, accepted] of [
+    ['macos_vm', undefined, undefined, false],
+    ['macos_vm', ref(80), undefined, false],
+    ['macos_vm', undefined, ref(81), false],
+    ['macos_vm', ref(80), ref(81), true],
+    ['linux_namespace', undefined, undefined, true],
+    ['linux_namespace', ref(80), undefined, false],
+    ['linux_namespace', undefined, ref(81), false],
+    ['linux_namespace', ref(80), ref(81), true]
+  ] as const) {
+    const input = testFixture();
+    input.assembly.runtime.sandboxBackend = backend;
+    if (guestRef !== undefined) input.assembly.runtime.guestToolchainManifestRef = guestRef;
+    if (guestDigest !== undefined) input.assembly.runtime.guestToolchainManifestDigest = guestDigest;
+    reseal(input);
+    const label = `${backend}, guestRef=${guestRef}, guestDigest=${guestDigest}`;
+    const result = validateRunAssembly(input);
+    if (!accepted) {
+      assert.deepEqual(result, { ok: false, code: 'RUN_ASSEMBLY_INVALID', reason: 'assembly_schema_invalid' }, label);
+      continue;
+    }
+    assert.equal(result.ok, true, label);
+    if (guestRef !== undefined) {
+      input.material.verifyReference = ({ kind }) => kind !== 'guest_toolchain_manifest';
+      assert.deepEqual(
+        validateRunAssembly(input),
+        { ok: false, code: 'RUN_ASSEMBLY_INVALID', reason: 'assembly_reference_invalid' },
+        label
+      );
+    }
+  }
+});
+
 test('validateRunAssembly rejects unknown fields and stale artifact identity', () => {
   const extended = testFixture();
   (extended.assembly as RunAssemblyV1 & { hidden?: boolean }).hidden = true;
@@ -173,4 +207,26 @@ test('verified source and provenance still have to name the same retained bundle
     code: 'RUN_ASSEMBLY_INVALID',
     reason: 'provider_authority_mismatch'
   });
+});
+
+test('managed-local provenance must bind the exact admitted capability evidence after resealing', () => {
+  for (const field of ['capabilityEvidenceRef', 'capabilityDigest'] as const) {
+    const input = testFixture('ollama');
+    assert.equal(validateRunAssembly(input).ok, true);
+    const material = input.material.localProvenance!;
+    material.value[field] = ref(999);
+    material.value.provenanceDigest = digestOmitting(material.value, 'provenanceDigest');
+    material.ref = planCanonicalArtifact(material.value, material.value.format).ref;
+    assert.equal(input.assembly.provider.endpoint.kind, 'local_zero_cost');
+    input.assembly.provider.endpoint.localProvenanceRef = material.ref;
+    input.assembly.provider.pricing.provenanceRef = material.ref;
+    input.material.verifyProviderEndpoint = ({ endpoint }) =>
+      endpoint.kind === 'local_zero_cost' && endpoint.localProvenanceRef === material.ref;
+    reseal(input);
+    assert.deepEqual(
+      validateRunAssembly(input),
+      { ok: false, code: 'RUN_ASSEMBLY_INVALID', reason: 'provider_authority_mismatch' },
+      field
+    );
+  }
 });

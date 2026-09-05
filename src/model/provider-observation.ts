@@ -1075,7 +1075,8 @@ export function createProviderResponseObserver(head: ProviderResponseHead): Prov
   }
   const mediaType = normalizeMediaType(input.mediaType);
   const streaming = mediaType === 'text/event-stream' || mediaType === 'application/x-ndjson';
-  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+  // Strip only the wire-leading BOM from decoded text; captured bytes remain unchanged.
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
   let captured = Buffer.allocUnsafe(4096);
   let length = 0;
   let pending = '';

@@ -7,6 +7,7 @@ import type { ModelTextV1, ToolCallInputV1 } from '../protocol/agent-ir.js';
 import type { ObservedToolArguments } from '../protocol/agent-ir.js';
 import { type ResolveToolInput, type CompiledModelObservation } from './attempt.js';
 import { validateRunAssembly } from './run-assembly.js';
+import { priceTableDigest } from './pricing.js';
 import { MISSING_TOOL_NAME, type NormalPromptProjectionV1 } from './request.js';
 import { normalInput, ref, reseal, testFixture } from './testing/fixtures.js';
 
@@ -460,6 +461,56 @@ test('streaming delivers deltas before terminal bytes, preserves UTF-8 chunking,
   assert.throws(() => reader.push(Buffer.from('later')), /closed/);
 });
 
+test('model sessions ignore a leading wire BOM without losing initial deltas or embedded BOM characters', () => {
+  const cases: Array<{ provider: ProviderName; mediaType: string; payload: Buffer }> = [
+    {
+      provider: 'openai-compatible',
+      mediaType: 'text/event-stream',
+      payload: Buffer.concat([
+        sse({ model: 'model-1', choices: [{ index: 0, delta: { content: 'first ' }, finish_reason: null }] }),
+        sse({ model: 'model-1', choices: [{ index: 0, delta: { content: '\uFEFFsecond' }, finish_reason: 'stop' }] }),
+        Buffer.from('data: [DONE]\n\n')
+      ])
+    },
+    {
+      provider: 'openai',
+      mediaType: 'application/json',
+      payload: encode(response([message('first \uFEFFsecond')]))
+    },
+    {
+      provider: 'ollama',
+      mediaType: 'application/x-ndjson',
+      payload: Buffer.concat([
+        encode({ model: 'model-1', message: { content: 'first ' }, done: false }),
+        Buffer.from('\n'),
+        encode({ model: 'model-1', message: { content: '\uFEFFsecond' }, done: true, done_reason: 'stop' }),
+        Buffer.from('\n')
+      ])
+    }
+  ];
+  for (const { provider, mediaType, payload } of cases) {
+    const input = testFixture(provider);
+    const model = load(input);
+    const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), payload]);
+    for (const chunked of [false, true]) {
+      const reader = model.start(model.prepare(normalInput(input)), { status: 200, mediaType });
+      const events = chunked
+        ? [...bytes].flatMap((byte) => reader.push(Uint8Array.of(byte)))
+        : reader.push(bytes);
+      const result = reader.finish(AT, resolveToolInput);
+      const label = `${provider}, chunked=${chunked}`;
+      assert.equal(result.kind, 'usable', label);
+      assert.equal(result.turn.stopReason, 'end', label);
+      assert.equal(artifact<ModelTextV1>(result, result.turn.textRef).utf8, 'first \uFEFFsecond', label);
+      assert.equal(
+        [...events, ...result.events].filter((event) => event.type === 'text_delta').map((event) => event.text).join(''),
+        'first \uFEFFsecond',
+        label
+      );
+    }
+  }
+});
+
 test('truncated or contradictory streams cannot produce usable turns', () => {
   const input = testFixture();
   const model = load(input);
@@ -475,9 +526,20 @@ test('truncated or contradictory streams cannot produce usable turns', () => {
 
 test('signed request ceilings are mandatory and input estimates never reduce their reservations', () => {
   const input = testFixture();
-  const table = input.material.priceTable!.value;
+  const material = input.material.priceTable!;
+  const table = material.value;
   delete (table as Partial<typeof table>).requestTokenCeiling;
-  assert.equal(validateRunAssembly(input).ok, false);
+  table.tableDigest = priceTableDigest(table);
+  material.ref = planCanonicalArtifact(table, table.format).ref;
+  assert.equal(input.assembly.provider.pricing.kind, 'trusted_price_table');
+  input.assembly.provider.pricing.priceTableRef = material.ref;
+  input.assembly.provider.pricing.priceTableDigest = table.tableDigest;
+  reseal(input);
+  assert.deepEqual(validateRunAssembly(input), {
+    ok: false,
+    code: 'MODEL_COST_UNKNOWN',
+    reason: 'pricing_authority_invalid'
+  });
   const valid = testFixture();
   const model = load(valid);
   const short = model.prepare(normalInput(valid));

@@ -31,6 +31,7 @@
   "files": [
     "dist/**/*.js",
     "!dist/**/*.test.js",
+    "!dist/model/testing/**",
     "skills/**",
     "!skills/**/__pycache__/**",
     "!skills/**/*.pyc",
