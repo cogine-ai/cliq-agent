@@ -31,7 +31,7 @@ import { readRequiredWorkspaceGenerationByRef } from '../repositories/workspace-
 import { insertRunEvent, readRun } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
-import { decodeRunSpec } from '../decoders.js';
+import { decodeBudgetSettlement, decodeRunSpec } from '../decoders.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -430,6 +430,7 @@ async function settleInitialAttempt(
       settlementDigest: ''
     };
     settlement.settlementDigest = digestOmitting(settlement, 'settlementDigest');
+    decodeBudgetSettlement(settlement);
     const settlementArtifact = await artifacts.publishCanonical(settlement, 'cliq-budget-settlement-v1');
     try {
       return commitInitialSettlement(

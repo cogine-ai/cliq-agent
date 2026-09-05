@@ -598,6 +598,60 @@ test('recovery requires every terminal Journal artifact to remain in CAS', async
   }
 });
 
+test('completeInvocation rejects consumed budget above the prepared reservation', async () => {
+  const fixture = await createActiveFixture('settlement-cap');
+  try {
+    const request = await fixture.store.artifacts.publishCanonical(
+      { schemaVersion: 1, format: 'cliq-tool-request-test-v1' },
+      'cliq-tool-request-v1'
+    );
+    const prepared = await fixture.store.prepareInvocation({
+      runId: fixture.runId,
+      expectedRunRevision: fixture.runRevision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: 'settlement-cap-op',
+      opKind: 'tool',
+      target: 'test.read',
+      requestRef: request.ref,
+      replayClass: 'retry',
+      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
+    });
+    await fixture.store.claimInvocationDispatch({
+      runId: fixture.runId,
+      expectedRunRevision: prepared.run.revision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: prepared.entry.opId,
+      attempt: 0,
+      dispatchId: 'dispatch-settlement-cap',
+      brokerFenceTokenDigest: digest('dispatch-settlement-cap:fence')
+    });
+    const resultArtifact = await fixture.store.artifacts.publishCanonical(
+      { schemaVersion: 1, format: 'cliq-tool-result-test-v1', ok: true },
+      'cliq-tool-result-v1'
+    );
+    await assert.rejects(
+      fixture.store.completeInvocation({
+        runId: fixture.runId,
+        opId: prepared.entry.opId,
+        attempt: 0,
+        expectedRunRevision: prepared.run.revision,
+        resultRef: resultArtifact.ref,
+        consumed: { modelTokens: 0, costMicros: 0, toolCalls: 2, repairAttempts: 0 }
+      }),
+      (error) =>
+        error instanceof KernelStorageError &&
+        error.code === 'ARTIFACT_MISMATCH' &&
+        error.message.includes('budget settlement equations do not balance')
+    );
+    const run = fixture.store.getRun(fixture.runId);
+    assert.equal(run.budgetReserved.toolCalls, 1);
+    assert.equal(run.budgetConsumed.toolCalls, 0);
+    await fixture.store.readRecoveryClosure(fixture.runId);
+  } finally {
+    await disposeFixture(fixture);
+  }
+});
+
 test('budget reservation and revoked generation fence dispatch and heartbeat', async () => {
   const fixture = await createActiveFixture('fencing');
   try {
