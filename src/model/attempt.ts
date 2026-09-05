@@ -149,8 +149,8 @@ function validateTrustedInput(input: CompileModelObservationInput): void {
   requireNonempty(input.runId, 'runId');
   requireNonempty(input.opId, 'opId');
   requireNonempty(input.model, 'model');
-  if (!Number.isSafeInteger(input.attempt) || input.attempt < 1) {
-    throw new TypeError('attempt must be a positive safe integer');
+  if (!Number.isSafeInteger(input.attempt) || input.attempt < 0) {
+    throw new TypeError('attempt must be a nonnegative safe integer');
   }
   if (!Number.isSafeInteger(input.reservedModelTokens) || input.reservedModelTokens < 0) {
     throw new TypeError('reservedModelTokens must be a nonnegative safe integer');
@@ -444,7 +444,7 @@ function unusableFromComplete(
   return unusable(input, failureCode, input.observation.bytes, false);
 }
 
-function responseDigest(turn: Omit<AgentModelTurn, 'responseDigest'>): string {
+export function modelResponseDigest(turn: Omit<AgentModelTurn, 'responseDigest'>): string {
   return canonicalSha256({
     format: 'cliq-agent-normalized-response-v1',
     provider: turn.provider,
@@ -668,7 +668,7 @@ export function compileModelObservation(input: CompileModelObservationInput): Co
 
   const turn: AgentModelTurn = {
     ...withoutResponseDigest,
-    responseDigest: responseDigest(withoutResponseDigest)
+    responseDigest: modelResponseDigest(withoutResponseDigest)
   } as AgentModelTurn;
   const turnArtifact = planCanonicalArtifact(turn, turn.format);
   appendArtifact(artifacts, artifactRefs, turnArtifact);

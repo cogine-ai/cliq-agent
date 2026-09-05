@@ -524,6 +524,20 @@ test('truncated or contradictory streams cannot produce usable turns', () => {
   }
 });
 
+test('model sessions accept the zero-based attempt identity owned by the durable Journal', () => {
+  const input = testFixture();
+  const model = load(input);
+  const normal = normalInput(input);
+  normal.invocation.attempt = 0;
+  const prepared = model.prepare(normal);
+  assert.equal(prepared.request.attempt, 0);
+  const reader = model.start(prepared, { status: 200, mediaType: 'application/json' });
+  reader.push(encode(response([message('Done.')])));
+  assert.equal(reader.finish(AT, resolveToolInput).kind, 'usable');
+  normal.invocation.attempt = -1;
+  assert.throws(() => model.prepare(normal), /attempt/);
+});
+
 test('signed request ceilings are mandatory and input estimates never reduce their reservations', () => {
   const input = testFixture();
   const material = input.material.priceTable!;

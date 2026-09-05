@@ -50,6 +50,7 @@ import {
   decodeStateRootIdentity
 } from './decoders.js';
 import { admitRun, type AdmitRunInput, type AdmitRunResult } from './reducers/admission.js';
+import { loadAgentRun, type LoadAgentRunInput } from './reducers/agent.js';
 import {
   abandonUnknownInvocation,
   claimInvocationDispatch,
@@ -102,6 +103,7 @@ import {
 import { hostPlatform } from './workspace-identity.js';
 
 export type {
+  LoadAgentRunInput,
   ActivateWorkerLeaseInput,
   AdmitRunInput,
   AdmitRunResult,
@@ -548,6 +550,10 @@ export class StateStore {
 
   prepareInvocation(input: PrepareInvocationInput) {
     return prepareInvocation(this.driver, this.artifacts, this.owner, input);
+  }
+
+  loadAgentRun(input: LoadAgentRunInput) {
+    return loadAgentRun(this.driver, this.artifacts, this.owner, input);
   }
 
   claimInvocationDispatch(input: ClaimInvocationDispatchInput) {

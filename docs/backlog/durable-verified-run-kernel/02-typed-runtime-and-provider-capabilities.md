@@ -85,8 +85,10 @@ Out:
 
 - Concurrent execution of calls within a response; WP05 child Runs own bounded
   parallelism.
-- Durable state writes, claims, sandbox/broker execution, scheduling or crash
-  reconciliation (WP01/03/04).
+- Durable state ownership, claims, sandbox/broker execution, scheduling or
+  crash reconciliation (WP01/03/04). Gate B includes only the necessary WP01
+  typed-request and model/tool/compaction commit reducers as companion work;
+  those writes remain inside StateStore, never in the WP02 planners.
 - New providers, a provider/plugin ABI, executable pricing, provider-cap
   provisioning, repository command hooks, or a replacement hook system.
 - Public CLI/TUI/JSONL/RPC schema changes and the composition switch (WP06).

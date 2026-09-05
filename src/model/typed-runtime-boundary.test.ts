@@ -16,7 +16,14 @@ const TYPED_RUNTIME_SOURCES = [
   'model/request.ts',
   'model/run-assembly.ts',
   'model/model-session.ts',
-  'model/immutable.ts'
+  'model/immutable.ts',
+  'kernel/continuation.ts',
+  'runtime/continuation.ts',
+  'runtime/context-compaction.ts',
+  'tools/input-contract.ts',
+  'state/agent-context.ts',
+  'state/agent-recovery.ts',
+  'state/reducers/agent.ts'
 ] as const;
 
 const LEGACY_DEPENDENCIES = [
