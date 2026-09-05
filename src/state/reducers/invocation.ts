@@ -1,10 +1,12 @@
-import { digestOmitting, parseCanonicalTime } from '../../kernel/identity.js';
+import { digestOmitting, modelOperationId, parseCanonicalTime } from '../../kernel/identity.js';
 import type {
   BudgetSettlementV1,
   BudgetUsage,
   InvocationJournalEntry,
   ReplayClass,
   Run,
+  RunFrontier,
+  RunContextCompactionPlan,
   RunEvent,
   WorkerLaunch,
   WorkspaceGenerationStateV1
@@ -12,7 +14,7 @@ import type {
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
-import { KernelStorageError } from '../errors.js';
+import { KernelStorageError, stateOperation } from '../errors.js';
 import {
   addBudget,
   assertBudgetWithin,
@@ -28,10 +30,12 @@ import {
 } from '../repositories/journal.js';
 import { readRequiredWorkerLaunch } from '../repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef } from '../repositories/workspace-generations.js';
-import { insertRunEvent, readRun } from '../rows.js';
+import { insertRunEvent, readCheckpoint, readRun } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
-import { decodeRunSpec } from '../decoders.js';
+import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
+import { readCanonicalArtifact } from '../agent-context.js';
+import type { ModelRequestV1, NormalPromptProjectionV1, ModelVisiblePromptV1 } from '../../model/request.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -296,12 +300,57 @@ export type ClaimInvocationDispatchInput = {
   brokerFenceTokenDigest?: string;
 };
 
+const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
+  driver: SqliteDriver, artifacts: ArtifactCatalog, prepared: InvocationJournalEntry
+) => {
+  const run = readRun(driver, prepared.runId);
+  if (run.nextStep !== 'agent' || !run.frontierRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model claim requires the current agent frontier');
+  const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
+  const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
+  const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
+  const checkpoint = readCheckpoint(driver, run.latestCheckpointId);
+  const context = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));
+  if (frontier.kind !== 'agent' || !['model_turn', 'context_compaction'].includes(frontier.phase) ||
+      (frontier.phase === 'context_compaction') !== (frontier.compactionPlanRef !== undefined) ||
+      prepared.opId !== modelOperationId(run.id, frontier) ||
+      request.schemaVersion !== 1 || request.format !== 'cliq-model-request-v1' ||
+      request.requestDigest !== digestOmitting(request, 'requestDigest') || request.runId !== run.id ||
+      request.opId !== prepared.opId || request.attempt !== prepared.attempt || request.assemblyRef !== context.assemblyRef ||
+      spec.operation !== 'agent' || request.assemblyRef !== spec.assemblyRef || context.admittedContextRef !== spec.admittedContextRef ||
+      request.kind !== (frontier.phase === 'model_turn' ? 'normal' : 'context_compaction') || request.compactionPlanRef !== frontier.compactionPlanRef ||
+      context.runId !== run.id || checkpoint.runId !== run.id || context.throughItemSeq !== checkpoint.runItemSeq ||
+      frontier.contextItemSeq !== checkpoint.runItemSeq || latestRunItemSequence(driver, run.id) !== checkpoint.runItemSeq) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'prepared model claim differs from its current frontier and ready context');
+  }
+  if ((await artifacts.readBytes(request.bodyBytesRef)).byteLength !== request.bodyByteCount) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'model claim native body byte count mismatch');
+  }
+  const projection = await readCanonicalArtifact<NormalPromptProjectionV1 | ModelVisiblePromptV1>(artifacts, request.promptProjectionRef);
+  if (request.kind === 'normal') {
+    if (!('frontierDigest' in projection) || projection.runId !== run.id || projection.runSpecRef !== run.specRef ||
+        projection.frontierDigest !== run.frontierRef || projection.contextManifestRef !== checkpoint.contextManifestRef ||
+        projection.projectionDigest !== request.promptProjectionDigest || digestOmitting(projection, 'projectionDigest') !== projection.projectionDigest) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'model claim projection differs from the current context');
+    }
+  } else {
+    const plan = await readCanonicalArtifact<RunContextCompactionPlan>(artifacts, request.compactionPlanRef!);
+    if (plan.runId !== run.id || plan.sourceContextManifestRef !== checkpoint.contextManifestRef ||
+        projection.format !== 'cliq-compaction-prompt-v1' || request.promptProjectionDigest !== request.promptProjectionRef) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'model claim compaction plan differs from the current context');
+    }
+  }
+  return { run, checkpoint, prepared };
+});
+
 export async function claimInvocationDispatch(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
   input: ClaimInvocationDispatchInput
 ): Promise<InvocationJournalEntry> {
+  input = { ...input };
+  const preparedSnapshot = readHighestPreparedAttempt(driver, input.runId, input.opId);
+  const modelCut = preparedSnapshot?.opKind === 'model' ? await readModelClaimCut(driver, artifacts, preparedSnapshot) : undefined;
   if (input.sandboxLaunchSpecRef !== undefined) await artifacts.readBytes(input.sandboxLaunchSpecRef);
   const launchSpecMetadata = input.sandboxLaunchSpecRef === undefined
     ? undefined
@@ -321,7 +370,7 @@ export async function claimInvocationDispatch(
     const now = sampleCanonicalNow();
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (fenceOutcome !== 'healthy') return;
-    assertLiveDispatchState(
+    const { run } = assertLiveDispatchState(
       connection,
       owner,
       input.runId,
@@ -332,6 +381,12 @@ export async function claimInvocationDispatch(
     const highest = readHighestPreparedAttempt(connection, input.runId, input.opId);
     if (highest === undefined || highest.attempt !== input.attempt || highest.leaseEpoch !== input.leaseEpoch) {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'dispatch claim is not for the highest prepared attempt');
+    }
+    if (highest.opKind === 'model' && (!modelCut || highest.requestRef !== modelCut.prepared.requestRef ||
+        run.nextStep !== 'agent' || run.frontierRef !== modelCut.run.frontierRef || run.latestCheckpointId !== modelCut.run.latestCheckpointId ||
+        readCheckpoint(connection, run.latestCheckpointId).contextManifestRef !== modelCut.checkpoint.contextManifestRef ||
+        latestRunItemSequence(connection, run.id) !== modelCut.checkpoint.runItemSeq)) {
+      throw new KernelStorageError('REVISION_CONFLICT', 'model claim no longer matches its validated state cut');
     }
     const attemptEntries = readInvocationAttempt(connection, input.runId, input.opId, input.attempt);
     if (attemptEntries.length !== 1 || attemptEntries[0]?.phase !== 'prepared') {

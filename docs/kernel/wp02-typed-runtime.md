@@ -15,7 +15,8 @@ These are integration gates, not new product slices or independently evolving
 protocols. Gate A does not switch production composition or claim that Gate B,
 broker integration, or provider qualification is complete.
 
-Gate A landed in PR #489 (`a153d47`). Gate B also includes the minimum WP01
+Gate A landed in PR #489 (`a153d47`); the model/context continuation landed in
+PR #490 (`c29179f`). Gate B also includes the minimum WP01
 companion work needed to exercise the real SQLite/CAS continuation. The user
 approved that scope on 2026-09-05. This does not transfer storage ownership to
 WP02 or include the rest of WP01 migration, WP03 brokers, WP04 scheduling,
@@ -40,9 +41,9 @@ only after the typed reducers have validated their complete input closure.
 
 ### Gate B implementation status
 
-The current change connects the complete model-attempt/context lifecycle to
-StateStore. This is a reviewable integration checkpoint inside Gate B, not a
-new work package or a declaration that Gate B has passed:
+The model-attempt/context lifecycle and direct tool-input projection now connect
+to StateStore. These are integration checkpoints inside Gate B, not new work
+packages or a declaration that Gate B has passed:
 
 - `StateStore.loadAgentRun` loads the retained assembly against the actual Run
   admission/deadline/budget, then derives normal prompts from retained context.
@@ -51,9 +52,24 @@ new work package or a declaration that Gate B has passed:
   JSON Schema validator (Ajv, draft-07); validation consumes typed values without
   coercion, defaults, stripping, JSON repair, external schema loading, async
   schemas, or a caller-supplied resolver. Unknown dialects/keywords fail closed.
+- `loadToolContracts` binds compiled builtin input semantics to the frozen
+  name/version/schema/access/replay contract. `read`, `edit`, `bash`, `ls`,
+  `find`, `grep`, `plan`, and `todo` accept direct typed inputs. The same
+  normalized value determines policy intent, display and the loop signature.
+  MCP uses its final exec-class contract and exact frozen registration/server
+  tool identity, even if its exposed name matches a builtin. There is no tool
+  executor or ambient skill activation behind this interface.
+- `readToolInvocation` reads a SQLite recovery cut, revalidates **every** call
+  in the retained batch, and checks that the frontier follows exactly its
+  ordered result prefix. Its immutable result contains the current invocation,
+  action-free policy subject and display, not an OperationGrant or dispatch
+  permission. Restart reproduces the same normalized input and loop signature.
 - `prepareModel` derives the operation, zero-based Journal attempt, exact native
   body and full signed reservation. Generic invocation admission cannot bypass
   that path for typed Runs; generic completion/refunds cannot replace its checks.
+  The shared permanent claim additionally binds the exact agent frontier,
+  native request body/projection and ready context (or compaction source), then
+  rechecks the cut inside the existing live-lease/highest-attempt transaction.
 - `completeModel` independently reads/revalidates the retained result closure and
   commits settlement, model item, batch, synthetic results, context, frontier and
   Checkpoint in one transaction. Invalid batches dispatch nothing. Unusable
@@ -77,8 +93,8 @@ new work package or a declaration that Gate B has passed:
   without semantic retry. A valid but ineffective summary remains a usable
   observation in the Journal, not an accepted context summary.
 
-Gate B still requires direct builtin execution contracts and policy/UI
-projections, ordinary ordered tool-result commits (including denied/error and
+Gate B still requires trusted builtin execution and canonical policy/approval
+evidence, ordinary ordered tool-result commits (including denied/error and
 post-effect checkpoint validation), and user-input/repair/child projections.
 Those require the canonical grant, policy/approval, Journal and post-effect
 Checkpoint closure; accepting a caller's result or boolean would not establish
@@ -89,7 +105,9 @@ execution work, without creating additional public milestones.
 `candidate_required` and `stop_required` describe the retained
 observation's handoff to WP05/WP04; they are not permission to mark the Run
 successful or bypass stop arbitration/drain. Completed handoffs survive restart
-through `readModelAttempt`; context exhaustion is reproducible from the unchanged
+through `readModelAttempt`; `prepareModel` reports `AGENT_HANDOFF_PENDING` with
+the disposition and retained evidence reference instead of a cursor TypeError
+or a misleading retry attempt. Context exhaustion is reproducible from the unchanged
 context and frozen policy. Neither is an implemented StopIntent/candidate reducer.
 Broker/sandbox effects, scheduling, dispatch backoff, and production composition
 remain outside this implementation. Restart does not revive an old worker lease.
@@ -98,6 +116,48 @@ The old Session/`ModelAction` runner remains isolated until WP06's single
 Kernel Cut. There is no typed-to-legacy bridge. WP06 removes the old runner,
 parser and repository command hooks; historical payloads remain opaque import
 data. No permanent compatibility promise is introduced.
+
+### Direct tool intent, not execution authority
+
+Builtin input schemas and semantic checks live together in `builtin-inputs`;
+no old action envelope, tool registry, host filesystem or session-plan store is
+imported. Paths are lexical workspace-relative identities: redundant `.` and
+separators normalize, omitted directory roots become `.`, and absolute paths,
+drive paths, parent components, backslashes and NUL reject before batch admission.
+Line ranges must be positive safe integers in ascending order. Plan operations
+have distinct closed shapes; missing fields are not repaired or inferred.
+Actual symlink/descriptor containment and effect handling still belong to WP03.
+
+`PolicySubject` is action-free. The existing decision table, shell-head parser
+and mode engine consume it directly; the retiring runner alone retains its old
+action field for hooks. Modes and rule composition are unchanged: builtin
+denies enter through `composePermissionTable`, not a new implicit policy.
+These pure decisions do not manufacture the RFC's `PolicyChannelEvidenceV1`,
+approval records, target/request binding, or `OperationGrantV1`.
+
+The loop signature hashes the full frozen manifest entry and normalized input,
+excluding call ID/index. It is an observation key, not deduplication authority:
+a repeated call must never be skipped or have a result reused on that basis.
+`manifestEntryDigest` identifies that entry; it is not the nested MCP registry's
+separate `execution.toolContractDigest`.
+
+`skill`/`skillResource` are not exposed as builtin execution contracts yet.
+Selected skill instructions continue to load from frozen CAS manifests; future
+resource access must use that retained closure, not the old ambient activation
+or live-file fallback. Unknown builtin identities fail loading explicitly.
+
+Public loaded-state validation failures carry `KernelStorageError` codes and
+their original cause. Invalid completion arguments are `INVALID_REQUEST`;
+unreproducible retained state/authority is `RECOVERY_REQUIRED`. Existing lease,
+revision, artifact and infrastructure errors retain their classification.
+
+The non-blocking #490 review was checked against the implementation. Highest
+attempt and permanent duplicate-claim checks already existed; the necessary
+addition is current-frontier/context binding, not banning all model claims.
+Candidate/stop reducers remain WP05/WP04 work, with explicit handoff errors here.
+Broad per-handle CAS memoization is deferred: it could hide a lost or corrupted
+retained artifact. History replay/compaction performance needs measurement;
+no claim of linear-time recovery is made by this change.
 
 ## One loaded model module
 

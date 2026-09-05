@@ -5,7 +5,7 @@ import {
   type PermissionTable,
   type TableDecision
 } from './decision-table.js';
-import type { ApprovalDecision, ApprovalSubject, PolicyMode } from './types.js';
+import type { ApprovalDecision, PolicySubject, PolicyMode } from './decision.js';
 
 type PolicyEngineOptions = {
   mode: PolicyMode;
@@ -19,7 +19,7 @@ type PolicyEngineOptions = {
 };
 
 export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: PolicyEngineOptions) {
-  async function decide(subject: ApprovalSubject): Promise<ApprovalDecision> {
+  async function decide(subject: PolicySubject): Promise<ApprovalDecision> {
     if (mode === 'plan') {
       const hardDeny = decidePlanHardDeny(subject);
       if (hardDeny) return hardDeny;
@@ -53,7 +53,7 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
 
   function applyTableDecision(
     tableDecision: TableDecision,
-    subject: Extract<ApprovalSubject, { kind: 'tool' }>
+    subject: Extract<PolicySubject, { kind: 'tool' }>
   ): ApprovalDecision | undefined {
     switch (tableDecision.kind) {
       case 'deny':
@@ -79,7 +79,7 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
     }
   }
 
-  function decidePlanHardDeny(subject: ApprovalSubject): ApprovalDecision | undefined {
+  function decidePlanHardDeny(subject: PolicySubject): ApprovalDecision | undefined {
     if (subject.kind === 'permission-request') {
       return {
         behavior: 'deny',
@@ -107,12 +107,12 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
   function describeRule(
     kind: 'allow' | 'deny',
     rule: PermissionRule,
-    subject: Extract<ApprovalSubject, { kind: 'tool' }>
+    subject: Extract<PolicySubject, { kind: 'tool' }>
   ): string {
     return `${kind} by ${rule.source} rule "${rule.channel}: ${rule.pattern}" (subject: ${subject.toolName})`;
   }
 
-  function requiresConfirmation(subject: ApprovalSubject): boolean {
+  function requiresConfirmation(subject: PolicySubject): boolean {
     if (subject.kind === 'tx-apply') {
       if (mode === 'default') return true;
       if (mode === 'accept-edits') return subject.blockingFailures.length > 0;
@@ -128,7 +128,7 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
     return false;
   }
 
-  function formatApprovalPrompt(subject: ApprovalSubject): string {
+  function formatApprovalPrompt(subject: PolicySubject): string {
     const lines: string[] = [];
 
     if (subject.kind === 'tool') {
@@ -168,7 +168,7 @@ export function createPolicyEngine({ mode, table = EMPTY_PERMISSION_TABLE }: Pol
     return lines.join('\n');
   }
 
-  function decidePermissionRequest(subject: Extract<ApprovalSubject, { kind: 'permission-request' }>): ApprovalDecision {
+  function decidePermissionRequest(subject: Extract<PolicySubject, { kind: 'permission-request' }>): ApprovalDecision {
     if (mode === 'yolo') {
       return { behavior: 'allow', decidedBy: 'policy' };
     }

@@ -1,106 +1,11 @@
 import type { ModelAction } from '../protocol/model/actions.js';
-import type { DiffSummary, ValidatorResultSummary } from '../workspace/transactions/types.js';
+import type { ApprovalDecision, PolicySubject } from './decision.js';
 
-export type PolicyMode = 'default' | 'accept-edits' | 'plan' | 'yolo';
+export type { AccessChannel, AccessChannelKind, ApprovalDecision, PolicyConfirm, PolicyMode, ToolAccess } from './decision.js';
 
-export type ToolAccess = 'read' | 'write' | 'exec' | 'plan';
-
-/**
- * Fine-grained "what is the model actually trying to do?" classification used by
- * the policy decision table (see {@link AccessChannel} matchers in
- * `src/policy/decision-table.ts`). This is intentionally orthogonal to
- * {@link ToolAccess}: `access` keeps the legacy read/write/exec trichotomy that
- * the existing PolicyMode preset relies on, while `channel` is the surface that
- * allow/deny/ask rules match against.
- *
- * Channels are open-ended on purpose so we can land MCP and network runtime
- * execution later without re-shaping the subject type.
- *
- * MCP action subjects are derivable from the model action shape, but no MCP
- * server runtime exists in tree yet. Do not add broad unknown-server deny
- * rules to BUILTIN_DENY until the runtime defines a stable server identifier
- * convention.
- *
- * TODO(#63): `network` channel only records the model's stated intent here.
- * Real enforcement (DNS allowlist, egress firewall, sandbox netns) is the
- * responsibility of the OS sandbox layer tracked in #63. Until then the
- * `host` field is best-effort and a missing host MUST NOT be treated as
- * "no network access".
- */
-export type AccessChannel =
-  | { kind: 'fs-read'; path: string }
-  | { kind: 'fs-write'; path: string; op: 'create' | 'modify' | 'delete' }
-  | {
-      kind: 'bash';
-      commandHead: string;
-      /**
-       * True when syntax after the head can execute additional shell code and
-       * therefore must not be auto-approved by a bash allow rule.
-       */
-      unsafeForAllow: boolean;
-      /**
-       * When a nested shell inline script (`bash -c`, etc.) resolves to a
-       * builtin-deny head such as `rm`, surface it here so deny rules apply
-       * even though the outer command head differs (e.g. `bash -c "rm …"`).
-       */
-      nestedBuiltinDenyHead?: string;
-    }
-  | { kind: 'mcp'; server: string; tool: string }
-  | { kind: 'network'; host?: string }
-  | { kind: 'plan'; op: 'draft' | 'update' | 'finalize'; planId?: string }
-  | { kind: 'plan-progress'; planId?: string };
-
-export type AccessChannelKind = AccessChannel['kind'];
-
-export type PolicyConfirm = (prompt: string) => Promise<boolean>;
-
+/** Only the retiring runner and its hooks carry the old action alongside policy intent. */
 export type ApprovalSubject =
-  | {
-      kind: 'tool';
-      toolName: string;
-      access: ToolAccess;
-      /**
-       * Fine-grained channel for the decision-table matcher. Always present
-       * on tool subjects; legacy `access` is retained for the PolicyMode
-       * preset and for backward compatibility with hooks that read it.
-       */
-      channel: AccessChannel;
-      action: ModelAction;
-      display: {
-        title: string;
-        detail?: string;
-        path?: string;
-        command?: string;
-        server?: string;
-        tool?: string;
-      };
-      tx?: {
-        enabled: boolean;
-        txId?: string;
-        mode?: 'edit';
-      };
-    }
-  | {
-      kind: 'tx-apply';
-      txId: string;
-      diffSummary: DiffSummary;
-      validators: ValidatorResultSummary[];
-      blockingFailures: string[];
-      artifactRef: string;
-    }
-  | {
-      kind: 'permission-request';
-      source: 'hook' | 'tool' | 'runtime';
-      toolName?: string;
-      reason: string;
-      requestedCapabilities: string[];
-    };
-
+  | (Extract<PolicySubject, { kind: 'tool' }> & { action: ModelAction })
+  | Exclude<PolicySubject, { kind: 'tool' }>;
 export type ApprovalSubjectKind = ApprovalSubject['kind'];
-
-export type ApprovalDecision =
-  | { behavior: 'allow'; reason?: string; decidedBy: 'policy' | 'user' | 'hook' }
-  | { behavior: 'deny'; reason: string; decidedBy: 'policy' | 'user' | 'hook' }
-  | { behavior: 'ask'; prompt: string; decidedBy: 'policy' | 'hook' };
-
 export type ApprovalDecider = (subject: ApprovalSubject) => Promise<ApprovalDecision>;

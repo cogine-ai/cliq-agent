@@ -1,13 +1,13 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { planArtifactBytes, planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
-import { assertArtifactRef, digestOmitting, identityHash, sha256Bytes } from '../../kernel/identity.js';
+import { assertArtifactRef, digestOmitting, identityHash, modelOperationId as modelOpId, sha256Bytes } from '../../kernel/identity.js';
 import type {
-  Run, RunAssemblyV1, RunFrontier, ContextManifest, ContinuationItem, ToolContractManifestV1, RunContextCompactionPlan
+  Run, RunAssemblyV1, RunFrontier, ContextManifest, ContinuationItem, ToolContractManifestV1, RunContextCompactionPlan, ToolBatchItem
 } from '../../kernel/types.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import type { ModelAttemptResult } from '../../model/model-session.js';
 import type { ModelUnusableResponseV1 } from '../../protocol/agent-ir.js';
-import { createToolInputResolver } from '../../tools/input-contract.js';
+import { loadToolContracts } from '../../tools/input-contract.js';
 import { validateRunAssembly, type RunAssemblyValidationMaterial } from '../../model/run-assembly.js';
 import { estimatePromptTokens, projectModelVisiblePrompt, type ModelRequestV1, type NormalPromptProjectionV1 } from '../../model/request.js';
 import { planModelContinuation, validateModelTurn, validateUnusableModelResponse, type ModelContinuationPlan } from '../../runtime/continuation.js';
@@ -15,7 +15,7 @@ import { contextSourceDigest, planContextCompaction, validateContextItems, type 
 import { loadInstructionText, projectNormalContext, readCanonicalArtifact, readModelTurnMaterial } from '../agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
-import { KernelStorageError } from '../errors.js';
+import { KernelStorageError, stateOperation } from '../errors.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { readHighestPreparedAttempt, readInvocationAttempt } from '../repositories/journal.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
@@ -38,12 +38,7 @@ async function publishPlans(artifacts: ArtifactCatalog, plans: readonly PlannedA
   }));
 }
 
-function modelOpId(runId: string, frontier: Extract<RunFrontier, { kind: 'agent' }>): string {
-  return identityHash('cliq-model-operation-v1', runId, frontier.turnId, frontier.phase,
-    ...(frontier.compactionPlanRef ? [frontier.compactionPlanRef] : []));
-}
-
-async function agentCut(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string, revision: number) {
+const agentCut = stateOperation('RECOVERY_REQUIRED', async (driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string, revision: number) => {
   const run = readRun(driver, runId);
   if (run.revision !== revision) throw new KernelStorageError('REVISION_CONFLICT', 'agent Run revision changed');
   if (!run.frontierRef || run.nextStep !== 'agent') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run is not at an agent frontier');
@@ -51,6 +46,13 @@ async function agentCut(driver: SqliteDriver, artifacts: ArtifactCatalog, runId:
   if (frontier.kind !== 'agent' || !['model_turn', 'context_compaction'].includes(frontier.phase) ||
       (frontier.phase === 'context_compaction') !== (frontier.compactionPlanRef !== undefined)) {
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model attempt requires an exact agent frontier');
+  }
+  const highest = readHighestPreparedAttempt(driver, runId, modelOpId(runId, frontier));
+  const last = highest && readInvocationAttempt(driver, runId, highest.opId, highest.attempt).at(-1);
+  if (last?.phase === 'completed') {
+    const root = await readCanonicalArtifact<{ format: string; stopReason?: string }>(artifacts, last.resultRef!);
+    throw new AgentHandoffPendingError(frontier.phase === 'model_turn' && root.format === 'cliq-agent-model-turn-v1' && root.stopReason === 'end'
+      ? 'candidate_required' : 'stop_required', last.resultRef!);
   }
   const checkpoint = readCheckpoint(driver, run.latestCheckpointId);
   const context = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));
@@ -61,7 +63,7 @@ async function agentCut(driver: SqliteDriver, artifacts: ArtifactCatalog, runId:
   const items = await readContextItems(driver, artifacts, runId, context.throughItemSeq);
   validateContextItems(context, items);
   return { run, frontier, checkpoint, context, items };
-}
+});
 
 async function readContextItems(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string, through: number): Promise<ContextItem[]> {
   const rows = driver.prepare('SELECT item_seq, item_id, kind, payload_ref FROM items WHERE run_id = ? AND item_seq <= ? ORDER BY item_seq')
@@ -79,6 +81,12 @@ export class AgentContextExhaustedError extends KernelStorageError {
   }
 }
 
+export class AgentHandoffPendingError extends KernelStorageError {
+  constructor(readonly disposition: 'candidate_required' | 'stop_required', readonly evidenceRef: string) {
+    super('AGENT_HANDOFF_PENDING', `completed model observation requires ${disposition}`);
+  }
+}
+
 function appendItems(connection: SqliteConnection, run: Run, items: ContinuationItem[], refs: string[], throughItemSeq: number): void {
   items.forEach((item, index) => connection.prepare(
     'INSERT INTO items (item_id, session_id, run_id, item_seq, kind, payload_ref, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?)'
@@ -86,7 +94,7 @@ function appendItems(connection: SqliteConnection, run: Run, items: Continuation
 }
 
 /** A loaded authority handle only: every mutable Run/frontier/Journal value is read from SQLite on each operation. */
-export async function loadAgentRun(
+export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function loadAgentRun(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: LoadAgentRunInput
 ) {
   const runId = input.runId;
@@ -105,7 +113,7 @@ export async function loadAgentRun(
       new Set(manifest.entries.map((entry) => entry.name)).size !== manifest.entries.length) {
     throw new TypeError('Run tool manifest does not match its retained assembly');
   }
-  const tools = immutableSnapshot(await Promise.all(manifest.entries.map(async (entry) => {
+  const contracts = immutableSnapshot(await Promise.all(manifest.entries.map(async (entry) => {
     const output = entry.outputSchemaRef !== undefined;
     if (!exactKeys(entry, ['name', 'version', 'description', 'access', 'inputSchemaRef', 'inputSchemaDigest', 'replayClass', 'execution',
       ...(output ? ['outputSchemaRef', 'outputSchemaDigest'] : [])]) || typeof entry.version !== 'string' || !entry.version ||
@@ -128,9 +136,10 @@ export async function loadAgentRun(
     if (output && canonicalSha256(await readCanonicalArtifact(artifacts, entry.outputSchemaRef!)) !== entry.outputSchemaDigest) {
       throw new TypeError('tool output schema digest mismatch');
     }
-    return { name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
-      inputSchemaDigest: entry.inputSchemaDigest, inputSchema: schema, replayClass: entry.replayClass };
+    return { ...entry, inputSchema: schema };
   })));
+  const tools = contracts.map((entry) => ({ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
+    inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
   const validated = validateRunAssembly({ assemblyRef: spec.assemblyRef, assembly, admittedAt: admittedRun.createdAt,
     deadlineAt: admittedRun.deadlineAt, maxRunCostMicros: spec.budgets.costMicros, runSpecCredentialGrantRefs: spec.credentialGrantRefs,
     material: { ...material, resolveVerifiedTools: (reference) => {
@@ -140,11 +149,12 @@ export async function loadAgentRun(
   if (!validated.ok) throw new TypeError(`${validated.code}: ${validated.reason}`);
   const { model } = validated;
   const systemInstruction = await loadInstructionText(artifacts, assembly);
-  const resolveToolInput = createToolInputResolver(tools);
+  const toolContracts = loadToolContracts(contracts);
+  const { resolveToolInput } = toolContracts;
   const project = (run: Run, context: ContextManifest, contextRef: string) => projectNormalContext({
     artifacts, run, spec, assembly, context, contextRef, systemInstruction, tools
   });
-  async function compactionSource(run: Run, planRef: string) {
+  const compactionSource = stateOperation('RECOVERY_REQUIRED', async (run: Run, planRef: string) => {
     const plan = await readCanonicalArtifact<RunContextCompactionPlan>(artifacts, planRef);
     const context = decodeContextManifest(await readCanonicalArtifact(artifacts, plan.sourceContextManifestRef));
     const items = await readContextItems(driver, artifacts, runId, context.throughItemSeq);
@@ -155,8 +165,8 @@ export async function loadAgentRun(
       throw new TypeError('compaction plan cannot be reproduced from retained context and frozen policy');
     }
     return reproduced;
-  }
-  async function reproduceRequest(run: Run, request: ModelRequestV1) {
+  });
+  const reproduceRequest = stateOperation('RECOVERY_REQUIRED', async (run: Run, request: ModelRequestV1) => {
     if (run.specRef !== admittedRun.specRef || run.deadlineAt !== admittedRun.deadlineAt || run.createdAt !== admittedRun.createdAt) {
       throw new TypeError('loaded model authority no longer belongs to this Run');
     }
@@ -177,7 +187,7 @@ export async function loadAgentRun(
       context, projection.contextManifestRef);
     if (canonicalSha256(reproduced) !== request.promptProjectionRef) throw new TypeError('retained projection differs from its durable sources');
     return model.prepare({ kind: 'normal', invocation, projectionRef: request.promptProjectionRef, projection });
-  }
+  });
   for (const entry of recovered.journal.filter((entry) => entry.opKind === 'model' && entry.phase === 'prepared')) {
     const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, entry.requestRef);
     const reproduced = await reproduceRequest(admittedRun, request);
@@ -207,8 +217,43 @@ export async function loadAgentRun(
   return Object.freeze({
     model,
     resolveToolInput,
+    /** Read the current durable call. This projection is neither a grant nor permission to dispatch it. */
+    readToolInvocation: stateOperation('RECOVERY_REQUIRED', async () => {
+      const closure = await readRecoveryClosure(driver, artifacts, runId);
+      if (closure.run.specRef !== admittedRun.specRef || closure.run.deadlineAt !== admittedRun.deadlineAt || closure.run.createdAt !== admittedRun.createdAt) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'loaded tool authority no longer belongs to this Run');
+      }
+      if (!closure.run.frontierRef || closure.run.nextStep !== 'tool') {
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run is not at a tool frontier');
+      }
+      const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, closure.run.frontierRef);
+      if (frontier.kind !== 'tool') throw new KernelStorageError('RECOVERY_REQUIRED', 'tool step has no tool frontier');
+      const batchIndex = closure.items.findIndex((item) => item.itemId === frontier.batchItemId);
+      const row = closure.items[batchIndex];
+      if (!row) throw new KernelStorageError('RECOVERY_REQUIRED', 'current tool batch is missing');
+      const batch = await readCanonicalArtifact<ToolBatchItem>(artifacts, row.payloadRef);
+      if (batch.kind !== 'assistant_tool_batch') throw new KernelStorageError('RECOVERY_REQUIRED', 'tool frontier does not name a batch');
+      const material = await readModelTurnMaterial(artifacts, batch.modelTurnRef);
+      const prepared = closure.journal.filter((entry) => entry.opId === batch.modelOpId && entry.phase === 'prepared').at(-1);
+      if (!prepared || prepared.attempt !== batch.modelAttempt) throw new KernelStorageError('RECOVERY_REQUIRED', 'tool batch has no current model owner');
+      validateModelTurn(await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef), material, resolveToolInput);
+      const results = await Promise.all(closure.items.slice(batchIndex + 1)
+        .map((row) => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)));
+      if (frontier.schemaVersion !== 1 || !exactKeys(frontier, ['schemaVersion', 'kind', 'batchItemId', 'orderedCallIds', 'nextCallIndex']) ||
+          canonicalSha256(frontier.orderedCallIds) !== canonicalSha256(batch.calls.map((call) => call.callId)) ||
+          !Number.isSafeInteger(frontier.nextCallIndex) || frontier.nextCallIndex < 0 || frontier.nextCallIndex >= batch.calls.length ||
+          results.length !== frontier.nextCallIndex || results.some((item, index) => item.kind !== 'tool_result' ||
+            item.batchItemId !== batch.itemId || item.index !== index || item.callId !== batch.calls[index]?.callId) ||
+          material.inputs.some(({ value }) => value.disposition !== 'resolved')) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'tool frontier must follow the exact ordered result prefix of a fully valid batch');
+      }
+      const input = material.inputs[frontier.nextCallIndex]!.value;
+      if (input.disposition !== 'resolved') throw new KernelStorageError('RECOVERY_REQUIRED', 'current tool input is not resolved');
+      return immutableSnapshot({ run: closure.run, frontier, batchItemId: batch.itemId,
+        ...toolContracts.projectInvocation({ callId: input.callId, index: input.index, toolName: input.toolName, input: input.value }) });
+    }),
     /** Rehydrate the exact durable attempt; a dispatch_claimed/settled entry is never permission to resend it. */
-    async readModelAttempt() {
+    readModelAttempt: stateOperation('RECOVERY_REQUIRED', async () => {
       const closure = await readRecoveryClosure(driver, artifacts, runId);
       const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, closure.run.frontierRef!);
       if (frontier.kind !== 'agent') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run is not at a model frontier');
@@ -226,8 +271,8 @@ export async function loadAgentRun(
           ? 'candidate_required' : 'stop_required';
       }
       return { run: closure.run, entry, state, prepared, disposition };
-    },
-    async prepareModel(input: { expectedRunRevision: number; leaseEpoch: number }) {
+    }),
+    prepareModel: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {
       const { expectedRunRevision, leaseEpoch } = input;
       const cut = await agentCut(driver, artifacts, runId, expectedRunRevision);
       if (cut.run.specRef !== admittedRun.specRef || cut.run.deadlineAt !== admittedRun.deadlineAt || cut.run.createdAt !== admittedRun.createdAt) {
@@ -276,8 +321,8 @@ export async function loadAgentRun(
         connection.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(frontierPlan.ref, runId);
       } });
       return { ...admitted, prepared, projection };
-    },
-    async completeModel(input: Omit<SettleInvocationInput, 'runId'> & { result: ModelAttemptResult }) {
+    }),
+    completeModel: stateOperation('INVALID_REQUEST', async (input: Omit<SettleInvocationInput, 'runId'> & { result: ModelAttemptResult }) => {
       // Snapshot before the first await; planned byte getters cannot swap data during CAS publication.
       const { opId, attempt, expectedRunRevision } = input;
       const plans = input.result.artifacts.map((plan) => planArtifactBytes(plan.bytes, plan.mediaType, plan.schemaKind));
@@ -286,18 +331,18 @@ export async function loadAgentRun(
         : { kind: 'unusable' as const, ref: input.result.responseRef };
       const entries = readInvocationAttempt(driver, runId, opId, attempt);
       const prepared = entries.find((entry) => entry.phase === 'prepared');
-      if (prepared?.opKind !== 'model') throw new TypeError('model completion has no matching prepared Journal entry');
+      if (prepared?.opKind !== 'model') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model completion has no matching prepared Journal entry');
       const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
       const cut = await agentCut(driver, artifacts, runId, expectedRunRevision);
       if (request.kind !== (cut.frontier.phase === 'model_turn' ? 'normal' : 'context_compaction') ||
           request.compactionPlanRef !== cut.frontier.compactionPlanRef || request.runId !== runId || request.opId !== opId || request.attempt !== attempt ||
           opId !== modelOpId(runId, cut.frontier) || readHighestPreparedAttempt(driver, runId, opId)?.attempt !== attempt) {
-        throw new TypeError('model completion does not match the current frontier or highest attempt');
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model completion does not match the current frontier or highest attempt');
       }
       const replayed = await reproduceRequest(cut.run, request);
       if (replayed.requestRef !== prepared.requestRef || canonicalSha256(prepared.budgetDelta) !== canonicalSha256({
         modelTokens: request.reservation.modelTokens, costMicros: request.reservation.costMicros, toolCalls: 0, repairAttempts: 0
-      })) throw new TypeError('retained request or reservation cannot be reproduced from its loaded authority');
+      })) throw new KernelStorageError('RECOVERY_REQUIRED', 'retained request or reservation cannot be reproduced from its loaded authority');
       await publishPlans(artifacts, plans);
       const material = result.kind === 'usable' ? await readModelTurnMaterial(artifacts, result.ref) : undefined;
       const resultMetadata: PublishedArtifact[] = [];
@@ -402,6 +447,6 @@ export async function loadAgentRun(
         failure: { kind: 'context_compaction_failed' as const, compactionPlanRef: request.compactionPlanRef!, modelOpId: opId,
           attempt, evidenceRef: result.ref }
       } : {}) };
-    }
+    })
   });
-}
+});

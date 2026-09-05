@@ -1,4 +1,4 @@
-import type { AccessChannel, AccessChannelKind } from './types.js';
+import type { AccessChannel, AccessChannelKind } from './decision.js';
 
 /**
  * Source of a permission rule, used purely for diagnostics ("decidedBy: rule
