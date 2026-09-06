@@ -555,6 +555,11 @@ export async function sealWorkerGeneration(
   owner: StateOwnerContext,
   input: SealWorkerGenerationInput
 ): Promise<{ run: Run; checkpoint: Checkpoint; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 }> {
+  input = { ...input };
+  const initialLaunch = readRequiredWorkerLaunch(driver, input.launchId);
+  const initialRun = readRun(driver, initialLaunch.runId);
+  const spec = await artifacts.readCanonical<{ assemblyRef: string }>(initialRun.specRef);
+  const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
   const [context, workspaceState, snapshot] = await Promise.all([
     artifacts.readCanonical(input.contextManifestRef).then(decodeContextManifest),
     artifacts.readCanonical(input.workspaceStateRef).then(decodeWorkspaceState),
@@ -598,6 +603,14 @@ export async function sealWorkerGeneration(
     if (fenceOutcome !== 'healthy') return;
     const currentLaunch = readRequiredWorkerLaunch(connection, input.launchId);
     const run = readRun(connection, currentLaunch.runId);
+    // This path adopts workspace bytes and requeues the Run. Unknown/abandoned attempts
+    // are not completion proof; manual abandonment needs a separate terminal-only closure.
+    if (assembly.format === 'cliq-run-assembly-v1' && connection.prepare(`SELECT 1 FROM run_journal AS claim
+      WHERE claim.run_id = ? AND claim.op_kind IN ('tool', 'mcp') AND claim.phase = 'dispatch_claimed'
+      AND NOT EXISTS (SELECT 1 FROM run_journal AS done WHERE done.run_id = claim.run_id
+        AND done.op_id = claim.op_id AND done.attempt = claim.attempt AND done.phase = 'completed') LIMIT 1`).get(run.id)) {
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'claimed typed tools must publish their result and post-effect Checkpoint together');
+    }
     if (
       run.status !== 'running' ||
       run.revision !== input.expectedRunRevision ||

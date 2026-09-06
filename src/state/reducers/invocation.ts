@@ -47,7 +47,7 @@ const SETTLEMENT_RETRY_LIMIT = 8;
 
 class ReducerSnapshotChanged extends Error {}
 
-function requireHealthyFence(outcome: TimeFenceAdvance | undefined): void {
+export function requireHealthyFence(outcome: TimeFenceAdvance | undefined): void {
   if (outcome === 'clock_regressed' || outcome === 'still_regressed') {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical clock is not healthy');
   }
@@ -71,7 +71,7 @@ function latestRunItemSequence(connection: SqliteConnection, runId: string): num
   return Number(row?.item_seq ?? 0);
 }
 
-function appendRunStateEvent(connection: SqliteConnection, run: Run, occurredAt: string): void {
+export function appendRunStateEvent(connection: SqliteConnection, run: Run, occurredAt: string): void {
   const event: Extract<RunEvent, { kind: 'state_changed' }> = {
     schemaVersion: 1,
     kind: 'state_changed',
@@ -99,7 +99,7 @@ type LiveDispatchState = {
   generation: WorkspaceGenerationStateV1;
 };
 
-function assertLiveDispatchState(
+export function assertLiveDispatchState(
   connection: SqliteConnection,
   owner: StateOwnerContext,
   runId: string,
@@ -349,6 +349,24 @@ export async function claimInvocationDispatch(
   input: ClaimInvocationDispatchInput
 ): Promise<InvocationJournalEntry> {
   input = { ...input };
+  const prepared = readHighestPreparedAttempt(driver, input.runId, input.opId);
+  if (prepared && (prepared.opKind === 'tool' || prepared.opKind === 'mcp')) {
+    const run = readRun(driver, input.runId);
+    const spec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
+    const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
+    if (assembly.format === 'cliq-run-assembly-v1') {
+      throw new KernelStorageError('INVALID_REQUEST', 'typed tool claims require current canonical policy/grant validation');
+    }
+  }
+  return claimValidatedInvocation(driver, artifacts, owner, input);
+}
+
+/** Internal claim seam. Only the typed reducer supplies its independently reproduced authority check. */
+export async function claimValidatedInvocation(
+  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: ClaimInvocationDispatchInput,
+  validate?: (connection: SqliteConnection, run: Run, prepared: InvocationJournalEntry, now: string) => void
+): Promise<InvocationJournalEntry> {
+  input = { ...input };
   const preparedSnapshot = readHighestPreparedAttempt(driver, input.runId, input.opId);
   const modelCut = preparedSnapshot?.opKind === 'model' ? await readModelClaimCut(driver, artifacts, preparedSnapshot) : undefined;
   if (input.sandboxLaunchSpecRef !== undefined) await artifacts.readBytes(input.sandboxLaunchSpecRef);
@@ -392,6 +410,7 @@ export async function claimInvocationDispatch(
     if (attemptEntries.length !== 1 || attemptEntries[0]?.phase !== 'prepared') {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'invocation attempt is already claimed or settled');
     }
+    validate?.(connection, run, highest, now);
     claimed = {
       ...highest,
       seq: nextJournalSequence(connection, input.runId),
@@ -476,6 +495,13 @@ export async function settleValidatedInvocation(
     const prepared = entries.find((entry) => entry.phase === 'prepared');
     const claim = entries.find((entry) => entry.phase === 'dispatch_claimed');
     if (prepared === undefined) throw new KernelStorageError('NOT_FOUND', 'prepared invocation attempt is missing');
+    if (continuation === undefined && (prepared.opKind === 'tool' || prepared.opKind === 'mcp')) {
+      const spec = decodeRunSpec(await artifacts.readCanonical(snapshotRun.specRef));
+      const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
+      if (assembly.format === 'cliq-run-assembly-v1' && terminal.phase !== 'unknown') {
+        throw new KernelStorageError('INVALID_REQUEST', 'typed tool settlement requires its ordered continuation and checkpoint');
+      }
+    }
     if (prepared.opKind === 'model' && terminal.phase === 'completed' && continuation === undefined) {
       throw new KernelStorageError('INVALID_REQUEST', 'model completion requires its typed continuation');
     }

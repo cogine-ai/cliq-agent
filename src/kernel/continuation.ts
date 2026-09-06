@@ -1,5 +1,6 @@
 import type { AgentToolCall } from '../protocol/agent-ir.js';
 import type { ArtifactRef, ReplayClass } from './types.js';
+import type { ToolPolicyDecisionItem } from './tool-authorization.js';
 
 export type ToolContractManifestV1 = {
   schemaVersion: 1;
@@ -128,4 +129,4 @@ export type RunContextCompactionItem = ItemIdentity & {
   sourceItemsDigest: string;
 };
 
-export type ContinuationItem = ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem;
+export type ContinuationItem = ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem;

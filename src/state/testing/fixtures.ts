@@ -1,6 +1,7 @@
 import { randomFillSync } from 'node:crypto';
 import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { canonicalSha256 } from '../../kernel/canonical.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1, RunSpec, SourceManifest, SourceProjectionSpec, VerifierSpec,
@@ -130,6 +131,7 @@ export type ActiveFixtureOptions = {
   runWallTimeMs?: number;
   leaseDurationMs?: number;
   assembly?: (store: StateStore) => Promise<string>;
+  policy?: (store: StateStore, identity: WorkspaceIdentityV1) => Promise<string>;
   budgets?: Partial<RunSpec['budgets']>;
   credentialGrantRefs?: string[];
 };
@@ -155,6 +157,7 @@ export async function createActiveFixture(
   )) as WorkspaceIdentityV1;
   const source = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest);
   if (options.assembly) source.assemblyRef = await options.assembly(store);
+  if (options.policy) source.policyRef = await options.policy(store, workspaceIdentity);
   const admitted = await store.admitRun({
     principalId,
     requestId: uuidv7(),
@@ -253,10 +256,10 @@ export async function createActiveFixture(
     snapshotEvidenceRef: snapshotArtifact.ref,
     snapshotEvidenceDigest: snapshot.evidenceDigest
   });
-  const [plan, launchSpec, containment] = await Promise.all([
+  const [plan, launchSpec] = await Promise.all([
     store.artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-containment-plan-test-v1', generationId }, 'cliq-process-containment-plan-v1'),
-    store.artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-worker-launch-spec-test-v1', generationId }, 'cliq-sandbox-launch-spec-v1'),
-    store.artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-containment-test-v1', generationId }, 'cliq-process-containment-v1')
+    store.artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-worker-launch-spec-test-v1', generationId,
+      launchSpecDigest: canonicalSha256({ schemaVersion: 1, format: 'cliq-worker-launch-spec-test-v1', generationId }) }, 'cliq-sandbox-launch-spec-v1')
   ]);
   const launchId = identityHash('cliq-worker-launch-test-v1', admitted.run.id, label);
   const reserved = await store.reserveWorkerLaunch({
@@ -269,6 +272,16 @@ export async function createActiveFixture(
     containmentPlanRef: plan.ref,
     sandboxLaunchSpecRef: launchSpec.ref
   });
+  // Offline containment identity only. This fixture never launches or claims to qualify a backend.
+  const containment = await store.artifacts.publishCanonical({ schemaVersion: 1, planRef: plan.ref,
+    sandboxLaunchSpecRef: launchSpec.ref,
+    sandboxLaunchSpecDigest: (await store.artifacts.readCanonical<{ launchSpecDigest: string }>(launchSpec.ref)).launchSpecDigest,
+    owner: { kind: 'worker_activation', runId: admitted.run.id, intendedLeaseEpoch: 1, workerLaunchId: launchId },
+    filesystemBinding: { kind: 'run-generation', generationRef: generationArtifact.ref }, launchNonceDigest: reserved.spawnNonceDigest,
+    backend: { kind: 'linux', pidNamespaceReservationId: `${label}-namespace`, pidNamespaceId: 'pid:[test]',
+      cgroupPath: '/cliq/test', cgroupId: `${label}-cgroup`, namespaceInitStartToken: 'test-init', subreaperStartToken: 'test-subreaper' },
+    createdAt: sampleCanonicalNow()
+  }, 'cliq-process-containment-v1');
   const workerIdentity: WorkerIdentity = {
     schemaVersion: 1,
     executableRealpath: '/cliq/test-worker',

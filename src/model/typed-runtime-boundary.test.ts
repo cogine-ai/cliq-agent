@@ -18,6 +18,7 @@ const TYPED_RUNTIME_SOURCES = [
   'model/model-session.ts',
   'model/immutable.ts',
   'kernel/continuation.ts',
+  'kernel/tool-authorization.ts',
   'runtime/continuation.ts',
   'runtime/context-compaction.ts',
   'tools/input-contract.ts',
@@ -27,9 +28,17 @@ const TYPED_RUNTIME_SOURCES = [
   'policy/engine.ts',
   'policy/decision-table.ts',
   'policy/bash-parse.ts',
+  'policy/canonical-bash.ts',
+  'policy/runtime-authority.ts',
+  'policy/tool-policy.ts',
   'state/agent-context.ts',
   'state/agent-recovery.ts',
-  'state/reducers/agent.ts'
+  'state/continuation-commit.ts',
+  'state/tool-cut.ts',
+  'state/tool-checkpoint.ts',
+  'state/tool-recovery.ts',
+  'state/reducers/agent.ts',
+  'state/reducers/tool.ts'
 ] as const;
 
 const LEGACY_DEPENDENCIES = [
@@ -60,6 +69,14 @@ test('typed model-attempt modules have no dependency on the legacy JSON-action r
     if (relativePath.startsWith('tools/')) {
       assert.doesNotMatch(source, /from ['"](?:node:fs(?:\/promises)?|\.\/types\.js|\.\.\/policy\/(?:types|subjects)\.js)['"]/u,
         `${relativePath} imports host I/O or the retiring tool/policy contract`);
+    }
+    if (relativePath.startsWith('policy/')) {
+      assert.doesNotMatch(source, /from ['"]\.\/(?:types|subjects)\.js['"]/u,
+        `${relativePath} imports the retiring policy contract`);
+    }
+    if (['policy/canonical-bash.ts', 'policy/tool-policy.ts', 'tools/builtin-inputs.ts'].includes(relativePath)) {
+      assert.doesNotMatch(source, /from ['"][^'"]*\/(?:engine|decision-table|bash-parse)\.js['"]/u,
+        `${relativePath} imports the retiring policy interpreter`);
     }
   }
 });

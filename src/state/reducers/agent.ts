@@ -23,10 +23,19 @@ import { readCheckpoint, readRun, ZERO_BUDGET } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import type { StateOwnerContext } from '../state-owner.js';
 import { prepareValidatedInvocation, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
+import { loadToolContinuation } from './tool.js';
+import { readToolCut } from '../tool-cut.js';
+import type { ReleaseTrustKey } from '../../policy/runtime-authority.js';
 
 export type LoadAgentRunInput = {
   runId: string;
   material: RunAssemblyValidationMaterial;
+  /**
+   * Trusted Supervisor release roots, never worker/Run/repository-controlled. Required for tool authority
+   * and to load any Run with retained policy decisions, even for read-only tool projections;
+   * omission in that case fails with RECOVERY_REQUIRED because those decisions must be replayed.
+   */
+  releaseKeys?: readonly ReleaseTrustKey[];
 };
 export type AgentRunState = Awaited<ReturnType<typeof loadAgentRun>>;
 
@@ -98,6 +107,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: LoadAgentRunInput
 ) {
   const runId = input.runId;
+  const releaseKeys = input.releaseKeys === undefined ? undefined : immutableSnapshot(input.releaseKeys);
   const material = Object.fromEntries(Object.entries(input.material).map(([key, value]) =>
     [key, typeof value === 'function' ? value : immutableSnapshot(value)])) as RunAssemblyValidationMaterial;
   const recovered = await readRecoveryClosure(driver, artifacts, runId);
@@ -214,43 +224,21 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     }
   }
 
+  const toolContinuation = await loadToolContinuation(driver, artifacts, owner, {
+    run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys
+  });
   return Object.freeze({
+    ...toolContinuation,
     model,
     resolveToolInput,
     /** Read the current durable call. This projection is neither a grant nor permission to dispatch it. */
     readToolInvocation: stateOperation('RECOVERY_REQUIRED', async () => {
-      const closure = await readRecoveryClosure(driver, artifacts, runId);
-      if (closure.run.specRef !== admittedRun.specRef || closure.run.deadlineAt !== admittedRun.deadlineAt || closure.run.createdAt !== admittedRun.createdAt) {
-        throw new KernelStorageError('RECOVERY_REQUIRED', 'loaded tool authority no longer belongs to this Run');
-      }
-      if (!closure.run.frontierRef || closure.run.nextStep !== 'tool') {
-        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run is not at a tool frontier');
-      }
-      const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, closure.run.frontierRef);
-      if (frontier.kind !== 'tool') throw new KernelStorageError('RECOVERY_REQUIRED', 'tool step has no tool frontier');
-      const batchIndex = closure.items.findIndex((item) => item.itemId === frontier.batchItemId);
-      const row = closure.items[batchIndex];
-      if (!row) throw new KernelStorageError('RECOVERY_REQUIRED', 'current tool batch is missing');
-      const batch = await readCanonicalArtifact<ToolBatchItem>(artifacts, row.payloadRef);
-      if (batch.kind !== 'assistant_tool_batch') throw new KernelStorageError('RECOVERY_REQUIRED', 'tool frontier does not name a batch');
-      const material = await readModelTurnMaterial(artifacts, batch.modelTurnRef);
-      const prepared = closure.journal.filter((entry) => entry.opId === batch.modelOpId && entry.phase === 'prepared').at(-1);
-      if (!prepared || prepared.attempt !== batch.modelAttempt) throw new KernelStorageError('RECOVERY_REQUIRED', 'tool batch has no current model owner');
-      validateModelTurn(await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef), material, resolveToolInput);
-      const results = await Promise.all(closure.items.slice(batchIndex + 1)
-        .map((row) => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)));
-      if (frontier.schemaVersion !== 1 || !exactKeys(frontier, ['schemaVersion', 'kind', 'batchItemId', 'orderedCallIds', 'nextCallIndex']) ||
-          canonicalSha256(frontier.orderedCallIds) !== canonicalSha256(batch.calls.map((call) => call.callId)) ||
-          !Number.isSafeInteger(frontier.nextCallIndex) || frontier.nextCallIndex < 0 || frontier.nextCallIndex >= batch.calls.length ||
-          results.length !== frontier.nextCallIndex || results.some((item, index) => item.kind !== 'tool_result' ||
-            item.batchItemId !== batch.itemId || item.index !== index || item.callId !== batch.calls[index]?.callId) ||
-          material.inputs.some(({ value }) => value.disposition !== 'resolved')) {
-        throw new KernelStorageError('RECOVERY_REQUIRED', 'tool frontier must follow the exact ordered result prefix of a fully valid batch');
-      }
-      const input = material.inputs[frontier.nextCallIndex]!.value;
-      if (input.disposition !== 'resolved') throw new KernelStorageError('RECOVERY_REQUIRED', 'current tool input is not resolved');
-      return immutableSnapshot({ run: closure.run, frontier, batchItemId: batch.itemId,
-        ...toolContracts.projectInvocation({ callId: input.callId, index: input.index, toolName: input.toolName, input: input.value }) });
+      const selected = await readToolCut(driver, artifacts, runId, resolveToolInput);
+      if (selected.run.specRef !== admittedRun.specRef || selected.run.deadlineAt !== admittedRun.deadlineAt ||
+          selected.run.createdAt !== admittedRun.createdAt) throw new TypeError('loaded tool authority no longer belongs to this Run');
+      const input = selected.call;
+      return immutableSnapshot({ run: selected.run, frontier: selected.frontier, batchItemId: selected.batch.itemId,
+        ...toolContracts.projectInvocation({ callId: input.callId, index: input.index, toolName: input.toolName, input: input.value! }) });
     }),
     /** Rehydrate the exact durable attempt; a dispatch_claimed/settled entry is never permission to resend it. */
     readModelAttempt: stateOperation('RECOVERY_REQUIRED', async () => {
