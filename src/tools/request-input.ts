@@ -30,7 +30,8 @@ export function compileInputResponse(schema: unknown): (value: unknown) => boole
     if (Object.hasOwn(node, 'items')) visit(node.items);
   };
   visit(schema);
-  const validate: ValidateFunction = new Ajv2020({ strict: true, ownProperties: true, allowUnionTypes: true })
+  // Restrict keywords, not legal schema combinations (e.g. minimum without type).
+  const validate: ValidateFunction = new Ajv2020({ strict: true, strictTypes: false, strictRequired: false, ownProperties: true })
     .compile(immutableSnapshot(schema) as AnySchema);
   return (value) => { assertBoundedJsonValue(value, 'user input'); return validate(value); };
 }

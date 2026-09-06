@@ -4,7 +4,7 @@ import path from 'node:path';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
-import type { ContinuationItem, RunFrontier, RunSpec } from '../kernel/types.js';
+import type { ContextManifest, ContinuationItem, RunFrontier, RunSpec } from '../kernel/types.js';
 import type { RunInput, UserInputPayloadV1, UserInputValue } from '../kernel/user-input.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, disposeFixture, uuidv7 } from './testing/fixtures.js';
@@ -13,6 +13,8 @@ import { quiescedToolCheckpoint } from './testing/tool-effects.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { validateUserInputRecovery } from './input-recovery.js';
+import { validateAgentRecovery } from './agent-recovery.js';
+import { contextSourceDigest } from '../runtime/context-compaction.js';
 
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const question = { prompt: 'Which name should I use?', responseKind: 'text', maximumResponseBytes: 128 };
@@ -248,19 +250,53 @@ test('recovery rejects substituted input control ownership and immutable respons
   } finally { writer.close(); await disposeFixture(fixture); }
 });
 
-test('recovery rejects an executed input result when its entire input history is missing', async () => {
-  const fixture = await createAgentFixture('input-orphan-result', undefined, { mode: 'default', tools: ['request_input'] });
+test('recovery rejects orphan input results, including substituted invocation or unknown sources', async () => {
+  const fixture = await createAgentFixture('input-orphan-result', undefined, { mode: 'default', tools: ['read', 'request_input'] });
   try {
-    await batch(fixture, [{ name: 'request_input', input: question }]);
+    await batch(fixture, [{ name: 'read', input: { path: 'a' } }, { name: 'request_input', input: question }]);
+    const prepared = await prepareTool(fixture);
+    const claimed = await claimTool(fixture, prepared);
+    await fixture.agent.completeTool({ opId: prepared.entry.opId, attempt: prepared.entry.attempt,
+      expectedRunRevision: prepared.run.revision, observationRef: await observation(fixture, claimed, 'file content') });
+    const ordinaryCheckpoint = (await fixture.store.readRecoveryClosure(fixture.runId)).latestCheckpoint;
     await waitForInput(fixture);
     await fixture.agent.submitInput(await command(fixture, { kind: 'text', value: 'Alice' }));
     const closure = await fixture.store.readRecoveryClosure(fixture.runId);
     const items = await Promise.all(closure.items.map((row) => fixture.store.artifacts.readCanonical<ContinuationItem>(row.payloadRef)));
+    const spec = await fixture.store.artifacts.readCanonical<RunSpec>(closure.run.specRef);
+    const retained = items.filter((item) => item.kind !== 'input_request' && item.kind !== 'user_input');
     await assert.rejects(validateUserInputRecovery({ artifacts: fixture.store.artifacts, run: closure.run,
-      spec: await fixture.store.artifacts.readCanonical<RunSpec>(closure.run.specRef),
-      journal: closure.journal, checkpoints: [closure.latestCheckpoint],
-      items: new Map(items.filter((item) => item.kind !== 'input_request' && item.kind !== 'user_input').map((item) => [item.itemId, item]))
+      spec, journal: closure.journal, checkpoints: [closure.latestCheckpoint], items: new Map(retained.map((item) => [item.itemId, item]))
     }), /input result has no owning authenticated input/);
+    const ordinary = retained.find((item) => item.kind === 'tool_result' && item.index === 0);
+    assert.ok(ordinary?.kind === 'tool_result');
+    const ordinaryPayload = await fixture.store.artifacts.readCanonical<Record<string, unknown>>(ordinary.resultRef);
+    const result = retained.find((item) => item.kind === 'tool_result' && item.index === 1);
+    assert.ok(result?.kind === 'tool_result');
+    const { source: _source, inputItemRef: _item, inputRef: _input, inputDigest: _digest, ...base } =
+      await fixture.store.artifacts.readCanonical<Record<string, unknown>>(result.resultRef);
+    const borrowed = Object.fromEntries(['source', 'opId', 'attempt', 'journalResultRef', 'journalResultDigest']
+      .map((key) => [key, ordinaryPayload[key]]));
+    for (const source of [{ source: 'invocation', opId: 'forged', attempt: 0,
+      journalResultRef: canonicalSha256('no-journal'), journalResultDigest: canonicalSha256('no-result') }, borrowed, { source: 'unknown' }, {}]) {
+      const payload: Record<string, unknown> = { ...base, ...source };
+      payload.payloadDigest = digestOmitting(payload, 'payloadDigest');
+      const published = await fixture.store.artifacts.publishCanonical(payload, 'cliq-tool-result-payload-v1');
+      const forged = { ...result, opId: source.opId ?? 'forged', resultRef: published.ref };
+      const row = await fixture.store.artifacts.publishCanonical(forged, 'cliq-tool-result-item-v1');
+      const rows = closure.items.filter((row) => retained.some((item) => item.itemId === row.itemId)).map((item, index) => ({
+        ...item, itemSeq: index + 1, payloadRef: item.itemId === result.itemId ? row.ref : item.payloadRef
+      }));
+      const context = await fixture.store.artifacts.readCanonical<ContextManifest>(closure.latestCheckpoint.contextManifestRef);
+      context.throughItemSeq = rows.length;
+      context.segments = rows.map((row, index) => ['assistant_tool_batch', 'policy_decision'].includes(retained[index]!.kind)
+        ? { kind: 'excluded_control', fromItemSeq: row.itemSeq, throughItemSeq: row.itemSeq,
+          sourceItemsDigest: contextSourceDigest([{ itemSeq: row.itemSeq, itemRef: row.payloadRef, item: retained[index]! }]) }
+        : { kind: 'raw', fromItemSeq: row.itemSeq, throughItemSeq: row.itemSeq, items: [{ itemSeq: row.itemSeq, itemRef: row.payloadRef }] });
+      context.projectionDigest = digestOmitting(context, 'projectionDigest');
+      await assert.rejects(validateAgentRecovery({ artifacts: fixture.store.artifacts, run: closure.run, spec, items: rows,
+        journal: closure.journal, context, checkpoints: [ordinaryCheckpoint] }), source.source === 'invocation' ? /completed Journal owner/ : /unknown source/);
+    }
   } finally { await disposeFixture(fixture); }
 });
 

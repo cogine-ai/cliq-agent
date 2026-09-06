@@ -4,6 +4,7 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import type { ObservedToolCallInputV1 } from '../protocol/agent-ir.js';
 import { loadToolContracts, type ToolInputAuthority } from './input-contract.js';
 import { builtinInputContracts } from './builtin-inputs.js';
+import { compileInputResponse } from './request-input.js';
 import { createPolicyEngine } from '../policy/engine.js';
 import { composePermissionTable } from '../policy/decision-table.js';
 
@@ -212,6 +213,7 @@ test('input response schemas accept only the retained deterministic 2020-12 subs
   }) });
   for (const responseSchema of [{ type: 'string', minLength: 0, maxLength: 3 }, { type: 'number', minimum: -1, maximum: 3 },
     { type: ['string', 'null'] }, { const: { ok: true } }, { enum: [null, 1, 'a'] },
+    { minimum: 0 }, { properties: { x: { minimum: 0 } } }, { type: 'object', required: ['x'] },
     { type: 'array', minItems: 1, maxItems: 2, items: { type: 'integer' } },
     { type: 'object', properties: { value: { type: 'boolean' } }, required: ['value'], additionalProperties: false }]) {
     assert.equal(resolve(responseSchema).kind, 'resolved');
@@ -221,6 +223,13 @@ test('input response schemas accept only the retained deterministic 2020-12 subs
     { type: 'object', additionalProperties: true }, { allOf: [{ type: 'string' }] }, { oneOf: [{ type: 'string' }] },
     { type: 'array', items: { $ref: '#/a' } }, { type: 'object', properties: { answer: { custom: true } } },
     { type: 'string', enum: ['x'.repeat(65_536)] }]) assert.equal(resolve(responseSchema).kind, 'invalid_input');
+  const minimum = compileInputResponse({ minimum: 0 });
+  assert.equal(minimum(-1), false);
+  assert.equal(minimum(0), true);
+  assert.equal(minimum('unchanged'), true); // Numeric constraints do not implicitly require a number.
+  const required = compileInputResponse({ type: 'object', required: ['x'] });
+  assert.equal(required({}), false);
+  assert.equal(required({ x: 0 }), true);
 });
 
 test('MCP schemas with the same local $id are compiled independently', () => {

@@ -6,6 +6,7 @@ import type {
 } from '../kernel/types.js';
 import type { ModelUnusableResponseV1 } from '../protocol/agent-ir.js';
 import { modelResponseDigest } from '../model/attempt.js';
+import { toolOperationId } from '../policy/tool-policy.js';
 import type { ModelRequestV1, NormalPromptProjectionV1, ModelVisiblePromptV1 } from '../model/request.js';
 import { validateUnusableModelResponse } from '../runtime/continuation.js';
 import { contextSourceDigest, validateContextItems } from '../runtime/context-compaction.js';
@@ -115,6 +116,14 @@ export async function validateAgentRecovery(input: {
           content.callId !== item.callId || content.index !== item.index || content.toolName !== call.toolName || content.outcome !== item.outcome ||
           digestOmitting(content, 'contentDigest') !== payload.modelContentDigest || content.contentDigest !== payload.modelContentDigest) {
         throw new TypeError('tool result is not owned by its retained batch call');
+      }
+      if (payload.outcome === 'executed') {
+        if (payload.source === 'invocation') {
+          if (item.opId !== payload.opId || payload.opId !== toolOperationId(run.id, item.batchItemId, item.callId) ||
+              !journal.some((entry) => (entry.opKind === 'tool' || entry.opKind === 'mcp') &&
+              entry.phase === 'completed' && entry.opId === payload.opId && entry.attempt === payload.attempt &&
+              entry.resultRef === payload.journalResultRef)) throw new TypeError('executed invocation result has no completed Journal owner');
+        } else if (payload.source !== 'user_input') throw new TypeError('executed tool result has an unknown source');
       }
       if (payload.outcome === 'error') await artifacts.readBytes(payload.diagnosticRef);
     }
