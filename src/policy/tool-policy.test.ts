@@ -127,6 +127,49 @@ test('policy and grants bind normalized input, workspace, full target, rule evid
   assert.throws(() => evaluator.grant(shell.request, shell.target, shell.call, ask, now, expiresAt), /direct allow/);
 });
 
+test('path-qualified Bash executables cannot inherit bare-head allow grants, including quoted and escaped paths', () => {
+  const resolver = loadToolContracts(contracts);
+  for (const pattern of ['printf', 'printf *', '*']) {
+    const evaluator = load(policy('default', [{ pattern }]));
+    for (const command of ['printf ok', '"printf" ok', 'printf /tmp/output']) {
+      const call = request('bash', { command });
+      const evidence = evaluator.evaluate(call.request, call.target, call.call, now);
+      assert.equal(evidence.effectiveDisposition, 'allow', command);
+      assert.doesNotThrow(() => evaluator.grant(call.request, call.target, call.call, evidence, now, expiresAt));
+    }
+    for (const command of ['/tmp/evil/printf ok', './printf ok', '../bin/printf ok', '/usr/bin/printf ok',
+      '"/tmp/evil/printf" ok', './"printf" ok', '.\\/printf ok', 'env ./printf ok', '/usr/bin/env ./printf ok', 'command -- ./printf ok']) {
+      const call = request('bash', { command });
+      const evidence = evaluator.evaluate(call.request, call.target, call.call, now);
+      assert.equal(evidence.effectiveDisposition, 'ask', `${pattern}: ${command}`);
+      assert.deepEqual(evidence.matchedRuleIds, ['rule-0']);
+      assert.throws(() => evaluator.grant(call.request, call.target, call.call, evidence, now, expiresAt), /direct allow/);
+      const { subject } = resolver.projectInvocation({ callId: 'call', index: 0, toolName: 'bash', input: { command } });
+      assert.deepEqual(subject.channel, { kind: 'bash', commandHead: 'printf', unsafeForAllow: true });
+    }
+  }
+  const call = request('bash', { command: './printf ok' });
+  for (const mode of ['default', 'plan', 'yolo'] as const) {
+    const evidence = load(policy(mode)).evaluate(call.request, call.target, call.call, now);
+    assert.equal(evidence.effectiveDisposition, modeDecisions(mode).exec);
+    assert.equal(evidence.decisionSource, 'mode_fallthrough');
+    assert.deepEqual(evidence.matchedRuleIds, []);
+  }
+});
+
+test('path-qualified Bash heads retain builtin and explicit deny evidence through wrappers and nested shells', () => {
+  const evaluator = load(policy('yolo', [{ pattern: '*', disposition: 'allow' }, { pattern: 'printf', disposition: 'deny' }]));
+  for (const command of ['/usr/bin/rm a', './rm a', '"./rm" a',
+    ...['env', 'command', 'exec', 'builtin', 'nohup', 'sudo', '/usr/bin/env'].map((wrapper) => `${wrapper} /bin/rm a`),
+    '/bin/sh -c "/bin/rm a"', 'printf "$(/bin/rm a)"', './printf ok']) {
+    const call = request('bash', { command });
+    const evidence = evaluator.evaluate(call.request, call.target, call.call, now);
+    assert.equal(evidence.effectiveDisposition, 'deny', command);
+    assert.deepEqual(evidence.matchedRuleIds, [command === './printf ok' ? 'rule-1' : 'builtin:bash:rm'], command);
+  }
+  assert.deepEqual(parseCanonicalBash('/bin/sh -c "/bin/rm a; /bin/rm b"').nestedBuiltinDenyHeads, ['rm', 'rm']);
+});
+
 test('MCP exposed names never inherit builtin access, target or idempotency semantics', () => {
   const prior = contracts;
   const originalAssembly = fixture.authority.assembly;

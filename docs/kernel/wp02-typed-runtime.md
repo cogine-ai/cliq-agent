@@ -107,8 +107,11 @@ change, without adding public milestones:
   exact selected builtin/worker/provider entries, and the sole non-executable
   policy profile with its empty structured-member closure. Complete-byte CAS
   refs and self-omitting semantic digests remain separate. Keys never come from
-  Run/repository/worker input. This verifies selected authority, not bundle
-  installation, every other structured-root kind, or the running executable.
+  Run/repository/worker input. Once a Run retains any policy decision, loading
+  it requires those keys even for read-only tool projections; missing keys are
+  `RECOVERY_REQUIRED`, not permission to skip decision replay. This verifies
+  selected authority, not bundle installation, every other structured-root kind,
+  or the running executable.
 - The fixed `tool-policy` evaluator uses the RFC mode table and rule precedence,
   reproduces channel evidence from the normalized call and exact request/target,
   and derives only direct-policy ordinary-tool grants. The entire winning
@@ -148,8 +151,16 @@ The containment/snapshot fixtures are offline records, not actual OS inspection
 or proof that a tool, broker, sandbox or release bundle is qualified.
 
 Gate B still needs trusted builtin/broker execution, durable approval and
-user-input/repair/child projections. Existing attempts are not silently retried:
-retry/reconciliation and stop arbitration remain WP04-owned handoffs. Actual
+user-input/repair/child projections. Existing attempts are not silently retried.
+WP04 still owns recovery of prepared tools after worker loss, reconciliation of
+claimed-then-`unknown` tools, and authenticated manual abandonment/terminal drain;
+none of those recovery reducers is implemented here. An `unknown` or low-level
+Journal `abandoned` row leaves its call open: it cannot become `completed`,
+advance the batch, or authorize generic generation sealing. That sealing path
+adopts workspace bytes and requeues the Run, whereas RFC section 8.3 requires
+manual abandonment to terminate as cancelled with an identity-matched
+`ToolAbandonedItem`, never a fabricated result. This is an explicit fail-closed
+handoff, not a completed recovery/liveness guarantee. Actual
 tool/MCP I/O, containment implementation, the second immediately-before-I/O
 gate, control UI/protocol, scheduling, bundle installation, paid-provider
 qualification and production cutover remain outside this change. Neither Gate B
@@ -189,8 +200,10 @@ same parser; persisted evidence retains every recognized nested deny occurrence
 in order, whereas the non-authoritative display subject needs only the first.
 Its bounded literal-shell grammar is not a general shell interpreter. Unknown,
 dynamic or ambiguous syntax loses the outer allow-rule key and remains unsafe;
-no host parser or legacy fallback is consulted. Actual executable/descriptor
-containment is independent of policy interpretation.
+no host parser or legacy fallback is consulted. Path-qualified executable words
+retain their basename for deny matching but are unsafe for allow rules; a bare
+command-name allow cannot authorize an arbitrary same-named path. Actual
+executable/descriptor containment is independent of policy interpretation.
 
 The loop signature hashes the full frozen manifest entry and normalized input,
 excluding call ID/index. It is an observation key, not deduplication authority:

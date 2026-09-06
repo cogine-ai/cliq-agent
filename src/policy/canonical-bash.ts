@@ -87,6 +87,11 @@ export function parseCanonicalBash(shellText: string): {
   let unsupported = false, unsafe = false;
   const denies: Array<{ position: number[]; directOuter: boolean }> = [];
   let outer: string | undefined;
+  const commandHead = (word: string) => {
+    // A path is not the identity authorized by a bare-head allow rule; retain its basename for denies.
+    unsafe ||= word.includes('/');
+    return basename(word);
+  };
   const inspect = (script: string, depth: number, isOuter: boolean, position: number[]) => {
     if (depth > 8) { unsupported = true; return; }
     const parsed = lex(script, (source, offset) => inspect(source, depth + 1, false, [...position, offset]));
@@ -96,7 +101,7 @@ export function parseCanonicalBash(shellText: string): {
       const words = command.words.map((word) => word.text);
       let i = 0;
       while (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[i] ?? '')) { unsafe = true; i++; }
-      let head = basename(words[i] ?? '');
+      let head = commandHead(words[i] ?? '');
       while (['env', 'command', 'exec', 'builtin', 'nohup', 'sudo'].includes(head)) {
         unsafe = true; i++;
         if (head === 'env') {
@@ -104,7 +109,7 @@ export function parseCanonicalBash(shellText: string): {
           if (words[i] === '--') i++;
         } else if (words[i] === '--') i++;
         if (words[i]?.startsWith('-')) { unsupported = true; break; }
-        head = basename(words[i] ?? '');
+        head = commandHead(words[i] ?? '');
       }
       if (!head || Buffer.byteLength(head) > 4096 || /[^\p{L}\p{N}_.+:-]/u.test(head)) { unsupported = true; continue; }
       const first = isOuter && commandIndex === 0;

@@ -30,7 +30,11 @@ import type { ReleaseTrustKey } from '../../policy/runtime-authority.js';
 export type LoadAgentRunInput = {
   runId: string;
   material: RunAssemblyValidationMaterial;
-  /** Trusted Supervisor release roots, never worker/Run/repository-controlled. Required for tool authority. */
+  /**
+   * Trusted Supervisor release roots, never worker/Run/repository-controlled. Required for tool authority
+   * and to load any Run with retained policy decisions, even for read-only tool projections;
+   * omission in that case fails with RECOVERY_REQUIRED because those decisions must be replayed.
+   */
   releaseKeys?: readonly ReleaseTrustKey[];
 };
 export type AgentRunState = Awaited<ReturnType<typeof loadAgentRun>>;

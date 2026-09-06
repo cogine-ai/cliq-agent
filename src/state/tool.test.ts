@@ -173,6 +173,8 @@ test('only trusted loaded authority can prepare, and racing admissions commit on
     const after = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(after.run.budgetReserved.toolCalls, 1);
     assert.equal(after.journal.filter((entry) => entry.opKind === 'tool').length, 1);
+    await assert.rejects(fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material }),
+      { code: 'RECOVERY_REQUIRED', message: /trusted release key set/ });
     const items = await Promise.all(after.items.map((item) => fixture.store.artifacts.readCanonical<{ kind: string }>(item.payloadRef)));
     assert.equal(items.filter((item) => item.kind === 'policy_decision').length, 1);
     const prepared = after.journal.at(-1)!;
@@ -225,6 +227,50 @@ test('schema/size failures and received tool errors remain fully charged, model-
     const model = await fixture.agent.prepareModel({ expectedRunRevision: last.run.revision, leaseEpoch: fixture.leaseEpoch });
     assert.deepEqual(model.projection.messages.filter((message) => message.role === 'tool').map((message) => message.contentUtf8),
       ['{"code":"TOOL_PROTOCOL_ERROR"}', '{"code":"TOOL_PROTOCOL_ERROR"}', '{"code":"TOOL_EXECUTION_FAILED"}']);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('unknown and abandoned typed tools cannot seal changed workspace bytes or continue the open call', async () => {
+  const fixture = await createAgentFixture('tool-unresolved', undefined, { mode: 'accept-edits', tools: ['edit', 'read'] });
+  try {
+    await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } }, { name: 'read', input: { path: 'a' } }]);
+    const prepared = await prepareTool(fixture), claimed = await claimTool(fixture, prepared);
+    const ambiguity = await fixture.store.artifacts.publishCanonical({ reason: 'offline ambiguous tool fixture' }, 'cliq-invocation-ambiguity-evidence-v1');
+    const unknown = await fixture.store.markInvocationUnknown({ runId: fixture.runId, opId: prepared.entry.opId, attempt: 0,
+      expectedRunRevision: prepared.run.revision, evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
+    await assert.rejects(fixture.agent.prepareTool({ expectedRunRevision: unknown.run.revision, leaseEpoch: fixture.leaseEpoch }), /tool attempt already exists/);
+    const proof = await postEffectObservation(fixture, await observation(fixture, claimed, { changed: true }), prepared.checkpointId);
+    for (const phase of ['unknown', 'abandoned']) {
+      if (phase === 'abandoned') {
+        // A low-level Journal acknowledgement is not the authenticated terminal Run closure.
+        const acknowledgement = await fixture.store.artifacts.publishCanonical({ acknowledgeExactRisk: true }, 'cliq-manual-abandon-attestation-v1');
+        const abandoned = await fixture.store.abandonUnknownInvocation({ runId: fixture.runId, opId: prepared.entry.opId,
+          attempt: 0, attestationRef: acknowledgement.ref });
+        assert.equal(abandoned.budgetSettlementRef, unknown.entry.budgetSettlementRef);
+      }
+      const before = await fixture.store.readRecoveryClosure(fixture.runId);
+      assert.equal(before.journal.at(-1)!.phase, phase);
+      assert.equal(before.run.status, 'running');
+      assert.equal(before.run.budgetConsumed.toolCalls, 1);
+      assert.equal(before.run.budgetReserved.toolCalls, 0);
+      assert.equal(before.latestCheckpoint.workspaceStateRef, proof.priorWorkspaceStateRef);
+      await assert.rejects(fixture.store.sealWorkerGeneration({ launchId: fixture.launchId, expectedRunRevision: before.run.revision,
+        expectedGenerationRowVersion: before.workspaceGenerations[0]!.rowVersion, quiesceId: 'tool-test-quiesce', checkpointId: prepared.checkpointId,
+        contextManifestRef: before.latestCheckpoint.contextManifestRef, workspaceStateRef: proof.workspaceStateRef,
+        snapshotEvidenceRef: proof.observation.postEffect!.snapshotEvidenceRef, snapshotEvidenceDigest: proof.snapshot.evidenceDigest,
+        retirementEvidenceRef: proof.observation.postEffect!.retirementEvidenceRef, checkpointReason: 'auto' }), /post-effect Checkpoint together/);
+      assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+      assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
+    }
+    await fixture.store.close();
+    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
+    assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
+    const recovered = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(await Promise.all(recovered.items.map(async (item) => (await fixture.store.artifacts.readCanonical<{ kind: string }>(item.payloadRef)).kind)),
+      ['model_turn', 'assistant_tool_batch', 'policy_decision']);
+    assert.equal(recovered.latestCheckpoint.workspaceStateRef, proof.priorWorkspaceStateRef);
+    assert.equal(recovered.run.budgetConsumed.toolCalls, 1);
   } finally { await disposeFixture(fixture); }
 });
 

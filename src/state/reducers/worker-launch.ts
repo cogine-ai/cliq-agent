@@ -603,6 +603,8 @@ export async function sealWorkerGeneration(
     if (fenceOutcome !== 'healthy') return;
     const currentLaunch = readRequiredWorkerLaunch(connection, input.launchId);
     const run = readRun(connection, currentLaunch.runId);
+    // This path adopts workspace bytes and requeues the Run. Unknown/abandoned attempts
+    // are not completion proof; manual abandonment needs a separate terminal-only closure.
     if (assembly.format === 'cliq-run-assembly-v1' && connection.prepare(`SELECT 1 FROM run_journal AS claim
       WHERE claim.run_id = ? AND claim.op_kind IN ('tool', 'mcp') AND claim.phase = 'dispatch_claimed'
       AND NOT EXISTS (SELECT 1 FROM run_journal AS done WHERE done.run_id = claim.run_id

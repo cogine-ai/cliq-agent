@@ -3,12 +3,14 @@ import { digestOmitting } from '../../kernel/identity.js';
 import type { ToolContractManifestV1, RunSpec } from '../../kernel/types.js';
 import type { ModelTextV1 } from '../../protocol/agent-ir.js';
 import { reseal, testFixture } from '../../model/testing/fixtures.js';
+import { priceTableDigest } from '../../model/pricing.js';
 import { createActiveFixture, disposeFixture } from './fixtures.js';
 import { builtinInputContracts } from '../../tools/builtin-inputs.js';
 import { signedToolBundle } from './tool-authority.js';
 import { BUILTIN_POLICY_RULES, modeDecisions } from '../../policy/tool-policy.js';
 import type { RunPolicySnapshotV1 } from '../../kernel/tool-authorization.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
+import { DEFAULT_RUN_BUDGETS } from '../rows.js';
 
 /** Real CAS + SQLite/lease, with offline signed-authority verification fixtures; no provider or tool I/O. */
 export async function createAgentFixture(label: string, budgets?: Partial<RunSpec['budgets']>, options: {
@@ -57,13 +59,24 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
     }
     if (options.mode !== undefined) {
       signed = await signedToolBundle(store.artifacts, authority.assembly, manifest.entries);
-      const capability = authority.material.capabilityEvidence.value;
-      if (capability.source.kind === 'signed_catalog') capability.source.runtimeBundleRef = authority.assembly.runtime.runtimeBundleRef;
-      capability.evidenceDigest = digestOmitting(capability, 'evidenceDigest');
-      authority.material.capabilityEvidence.ref = canonicalSha256(capability);
-      authority.assembly.provider.negotiation.capabilityEvidenceRef = authority.material.capabilityEvidence.ref;
-      authority.assembly.provider.negotiation.capabilityDigest = capability.evidenceDigest;
     }
+    // SQLite admission uses the real clock; the pure model fixture's fixed dates cannot cover these Runs.
+    const createdAt = sampleCanonicalNow();
+    const validThrough = new Date(Date.parse(createdAt) + (budgets?.wallTimeMs ?? DEFAULT_RUN_BUDGETS.wallTimeMs) + 60_000).toISOString();
+    authority.assembly.createdAt = createdAt;
+    const capability = authority.material.capabilityEvidence.value;
+    Object.assign(capability, { observedAt: createdAt, validThrough });
+    if (capability.source.kind === 'signed_catalog') capability.source.runtimeBundleRef = authority.assembly.runtime.runtimeBundleRef;
+    capability.evidenceDigest = digestOmitting(capability, 'evidenceDigest');
+    authority.material.capabilityEvidence.ref = canonicalSha256(capability);
+    authority.assembly.provider.negotiation.capabilityEvidenceRef = authority.material.capabilityEvidence.ref;
+    authority.assembly.provider.negotiation.capabilityDigest = capability.evidenceDigest;
+    const priceTable = authority.material.priceTable!;
+    Object.assign(priceTable.value, { validFrom: createdAt, validThrough });
+    priceTable.value.tableDigest = priceTableDigest(priceTable.value);
+    priceTable.ref = canonicalSha256(priceTable.value);
+    if (authority.assembly.provider.pricing.kind !== 'trusted_price_table') throw new Error('agent fixture requires priced model authority');
+    Object.assign(authority.assembly.provider.pricing, { priceTableRef: priceTable.ref, priceTableDigest: priceTable.value.tableDigest, validThrough });
     reseal(authority);
     return (await store.artifacts.publishCanonical(authority.assembly, authority.assembly.format)).ref;
   }, ...(options.mode === undefined ? {} : { policy: async (store, identity) => {
