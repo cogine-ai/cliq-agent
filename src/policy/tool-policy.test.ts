@@ -187,8 +187,9 @@ test('path-qualified Bash executables cannot inherit bare-head allow grants, inc
       assert.equal(evidence.effectiveDisposition, 'ask', `${pattern}: ${command}`);
       assert.deepEqual(evidence.matchedRuleIds, ['rule-0']);
       assert.throws(() => evaluator.grant(call.request, call.target, call.call, evidence, now, expiresAt), /direct allow/);
-      const { subject } = resolver.projectInvocation({ callId: 'call', index: 0, toolName: 'bash', input: { command } });
-      assert.deepEqual(subject.channel, { kind: 'bash', commandHead: 'printf', unsafeForAllow: true });
+      const view = resolver.projectInvocation({ callId: 'call', index: 0, toolName: 'bash', input: { command } });
+      assert.ok(view.kind === 'tool');
+      assert.deepEqual(view.subject.channel, { kind: 'bash', commandHead: 'printf', unsafeForAllow: true });
     }
   }
   const call = request('bash', { command: './printf ok' });

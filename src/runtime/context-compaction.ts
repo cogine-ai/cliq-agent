@@ -40,7 +40,7 @@ export function validateContextItems(context: ContextManifest, items: readonly C
       if (canonicalSha256(segment.items) !== canonicalSha256(source.map(({ itemSeq, itemRef }) => ({ itemSeq, itemRef })))) {
         throw new TypeError('raw context does not match its source rows');
       }
-      if (source.some(({ item }) => item.kind !== 'model_turn' && item.kind !== 'tool_result')) {
+      if (source.some(({ item }) => item.kind !== 'model_turn' && item.kind !== 'tool_result' && item.kind !== 'user_input')) {
         throw new TypeError('control items cannot enter raw model context');
       }
     } else {
@@ -55,7 +55,7 @@ export function validateContextItems(context: ContextManifest, items: readonly C
           throw new TypeError('summary is not backed by its exact compaction item and source range');
         }
       } else if (segment.kind !== 'excluded_control' || source.some(({ item }) =>
-        item.kind !== 'assistant_tool_batch' && item.kind !== 'context_compaction' && item.kind !== 'policy_decision')) {
+        item.kind !== 'assistant_tool_batch' && item.kind !== 'context_compaction' && item.kind !== 'policy_decision' && item.kind !== 'input_request')) {
         throw new TypeError('model-visible items cannot be hidden as excluded control');
       }
     }
@@ -74,7 +74,7 @@ function segmentMessages(segment: ContextSegment, items: readonly ContextItem[],
 }
 
 function visibleMessages(messages: NormalPromptMessageV1[], projection: NormalPromptProjectionV1) {
-  return projectModelVisiblePrompt({ ...projection, messages, tools: [] }, 'text-only').messages;
+  return projectModelVisiblePrompt({ ...projection, messages: [...messages].sort((a, b) => a.index - b.index), tools: [] }, 'text-only').messages;
 }
 
 /** Only closed whole batches can be separated; a protected result protects its assistant call as well. */
@@ -97,6 +97,10 @@ function closedBoundaries(items: readonly ContextItem[]): Set<number> {
         throw new TypeError('tool results must close their batch once in provider order');
       }
       if (++nextIndex === batch.calls.length) batch = undefined;
+    } else if (item.kind === 'input_request' || item.kind === 'user_input') {
+      if (!batch || item.batchItemId !== batch.itemId || item.index !== nextIndex || item.callId !== batch.calls[nextIndex]?.callId) {
+        throw new TypeError('input control item cannot overtake its open call');
+      }
     } else if (item.kind !== 'context_compaction' && item.kind !== 'policy_decision') throw new TypeError('unsupported live context item');
     if (!batch && !awaitingBatch) closed.add(itemSeq);
   }

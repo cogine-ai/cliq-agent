@@ -12,6 +12,7 @@ import { contextSourceDigest, validateContextItems } from '../runtime/context-co
 import { readCanonicalArtifact, readModelTurnMaterial, readText } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { validateToolRecovery } from './tool-recovery.js';
+import { validateUserInputRecovery } from './input-recovery.js';
 import type { Checkpoint } from '../kernel/types.js';
 
 /** Recovery checks retained reachability/identity; loading the agent additionally reproduces native requests and validates schemas. */
@@ -119,6 +120,7 @@ export async function validateAgentRecovery(input: {
     }
   }
   await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
+  await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
   validateContextItems(input.context, input.items.map((row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: items.get(row.itemId)!
   })));

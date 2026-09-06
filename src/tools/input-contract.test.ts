@@ -90,6 +90,7 @@ test('each builtin validates its direct input, including semantic constraints, w
     assert.equal(result.kind, 'resolved', name);
     if (result.kind !== 'resolved') continue;
     const view = contracts.projectInvocation({ ...call, toolName: name, input: result.value });
+    assert.ok(view.kind === 'tool');
     assert.equal(view.subject.toolName, name);
     assert.equal(view.invocation.replayClass, builtinInputContracts[name].replayClass);
     assert.equal(Object.isFrozen(view.invocation.input), true);
@@ -109,6 +110,7 @@ test('workspace paths have one lexical identity for input, policy, display and l
   if (first.kind !== 'resolved') return;
   assert.deepEqual(first.value, { path: 'src/a.ts' });
   const view = contracts.projectInvocation({ ...call, input: first.value });
+  assert.ok(view.kind === 'tool');
   assert.deepEqual(view.subject.channel, { kind: 'fs-read', path: 'src/a.ts' });
   assert.equal(view.subject.display.path, view.invocation.input.path);
   assert.equal(contracts.projectInvocation({ ...call, callId: 'other', index: 19, input: { path: 'src/a.ts' } }).loopSignature, view.loopSignature);
@@ -130,7 +132,9 @@ test('typed subjects reuse policy modes and sticky denies without going through 
     const resolved = contracts.resolveToolInput({ ...call, toolName, observedInput: observed(value) });
     assert.equal(resolved.kind, 'resolved');
     if (resolved.kind !== 'resolved') throw new Error('test input rejected');
-    return contracts.projectInvocation({ ...call, toolName, input: resolved.value }).subject;
+    const view = contracts.projectInvocation({ ...call, toolName, input: resolved.value });
+    assert.ok(view.kind === 'tool');
+    return view.subject;
   }
   const edit = subject('edit', { path: './.git//config', old_text: '', new_text: 'change' });
   const yolo = createPolicyEngine({ mode: 'yolo', table: composePermissionTable() });
@@ -155,6 +159,7 @@ test('a same-named MCP tool retains remote schema and registration identity inst
   const resolved = contracts.resolveToolInput({ ...call, observedInput: observed(input) });
   assert.equal(resolved.kind, 'resolved');
   const view = contracts.projectInvocation({ ...call, input });
+  assert.ok(view.kind === 'tool');
   input.path = 'mutated';
   assert.deepEqual(view.subject.channel, { kind: 'mcp', server: 'registered-server', tool: 'remote-read' });
   assert.equal(view.subject.access, 'exec');
@@ -176,6 +181,46 @@ test('builtin identity, schema, access and replay class must match the compiled 
     { ...read, execution: { ...read.execution, adapterId: 'skill' } },
     { ...read, execution: { ...read.execution, adapterVersion: 'other' } }
   ]) assert.throws(() => loadToolContracts([changed as ToolInputAuthority]), /compiled input semantics/);
+});
+
+test('request_input exposes a closed control invocation, never a permission subject or same-named MCP fallback', () => {
+  const contracts = loadToolContracts([builtin('request_input')]);
+  const resolve = (value: unknown) => contracts.resolveToolInput({ ...call, toolName: 'request_input', observedInput: observed(value) });
+  const input = { prompt: 'Cafe\u0301?', responseKind: 'text', maximumResponseBytes: 64 };
+  const result = resolve(input);
+  assert.ok(result.kind === 'resolved');
+  assert.equal(result.value.prompt, 'Café?');
+  const view = contracts.projectInvocation({ ...call, toolName: 'request_input', input: result.value });
+  assert.equal(view.kind, 'input');
+  assert.equal('subject' in view, false);
+  assert.equal(view.display.detail, 'Café?');
+  for (const value of [{ ...input, prompt: '' }, { ...input, prompt: '\0' }, { ...input, prompt: '\ud800' },
+    { ...input, maximumResponseBytes: 0 }, { ...input, maximumResponseBytes: 1_048_577 },
+    { ...input, maximumResponseBytes: 1.5 }, { ...input, responseSchema: {} }, { ...input, responseKind: 'json' },
+    { ...input, extra: true }]) assert.equal(resolve(value).kind, 'invalid_input');
+  const remote = { ...tool(schema), name: 'request_input' };
+  const mcp = loadToolContracts([remote]).projectInvocation({ ...call, toolName: 'request_input', input: { path: 'a' } });
+  assert.equal(mcp.kind, 'tool');
+  assert.throws(() => loadToolContracts([{ ...builtin('request_input'), access: 'read' }]), /compiled input semantics/);
+  assert.throws(() => loadToolContracts([{ ...remote, access: 'control' }]), /exec-class/);
+});
+
+test('input response schemas accept only the retained deterministic 2020-12 subset', () => {
+  const contracts = loadToolContracts([builtin('request_input')]);
+  const resolve = (responseSchema: unknown) => contracts.resolveToolInput({ ...call, toolName: 'request_input', observedInput: observed({
+    prompt: 'Choose', responseKind: 'json', responseSchema, maximumResponseBytes: 1_048_576
+  }) });
+  for (const responseSchema of [{ type: 'string', minLength: 0, maxLength: 3 }, { type: 'number', minimum: -1, maximum: 3 },
+    { type: ['string', 'null'] }, { const: { ok: true } }, { enum: [null, 1, 'a'] },
+    { type: 'array', minItems: 1, maxItems: 2, items: { type: 'integer' } },
+    { type: 'object', properties: { value: { type: 'boolean' } }, required: ['value'], additionalProperties: false }]) {
+    assert.equal(resolve(responseSchema).kind, 'resolved');
+  }
+  for (const responseSchema of [{ $ref: '#/a' }, { $id: 'https://example.invalid/schema' }, { $async: true },
+    { type: 'string', pattern: '.*' }, { type: 'string', format: 'email' }, { type: 'string', default: 'answer' },
+    { type: 'object', additionalProperties: true }, { allOf: [{ type: 'string' }] }, { oneOf: [{ type: 'string' }] },
+    { type: 'array', items: { $ref: '#/a' } }, { type: 'object', properties: { answer: { custom: true } } },
+    { type: 'string', enum: ['x'.repeat(65_536)] }]) assert.equal(resolve(responseSchema).kind, 'invalid_input');
 });
 
 test('MCP schemas with the same local $id are compiled independently', () => {

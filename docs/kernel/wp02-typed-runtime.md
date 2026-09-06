@@ -18,14 +18,15 @@ broker integration, or provider qualification is complete.
 Gate A landed in PR #489 (`a153d47`); the model/context continuation landed in
 PR #490 (`c29179f`), and direct tool-input contracts landed in PR #491
 (`eb93f46`), and canonical tool policy/continuation landed in PR #492
-(`04b2ba6`). Gate B also includes the minimum WP01
+(`04b2ba6`), followed by durable ordinary-tool approval in PR #494 (`3b0de21`).
+Gate B also includes the minimum WP01
 companion work needed to exercise the real SQLite/CAS continuation. The user
 approved that scope on 2026-09-05 and the minimum WP03 canonical tool
 policy/profile/grant companion on 2026-09-06. This does not transfer storage or
 security ownership to WP02 or include the rest of WP01 migration, WP03 brokers,
 WP04 scheduling, WP05 verification, or WP06 production cutover. The follow-up
-integrates the existing RFC ordinary-tool approval reducer as minimum WP01/WP04
-companion work, not a separate product slice or a new approval protocol.
+integrates the existing RFC ordinary-tool approval and user-input reducers as
+minimum WP01/WP04 companion work, not separate product slices or new protocols.
 
 The original M2 Journal reserved and settled budgets but had no model-turn,
 tool-batch/result, or compaction commit reducers. Generic request/result
@@ -61,16 +62,18 @@ packages or a declaration that Gate B has passed:
   schemas, or a caller-supplied resolver. Unknown dialects/keywords fail closed.
 - `loadToolContracts` binds compiled builtin input semantics to the frozen
   name/version/schema/access/replay contract. `read`, `edit`, `bash`, `ls`,
-  `find`, `grep`, `plan`, and `todo` accept direct typed inputs. The same
-  normalized value determines policy intent, display and the loop signature.
+  `find`, `grep`, `plan`, `todo`, and `request_input` accept direct typed inputs.
+  The same normalized value determines display and the loop signature, plus
+  policy intent for ordinary tools; `request_input` is a control transition.
   MCP uses its final exec-class contract and exact frozen registration/server
   tool identity, even if its exposed name matches a builtin. There is no tool
   executor or ambient skill activation behind this interface.
 - `readToolInvocation` reads a SQLite recovery cut, revalidates **every** call
   in the retained batch, and checks that the frontier follows exactly its
-  ordered result prefix. Its immutable result contains the current invocation,
-  action-free policy subject and display, not an OperationGrant or dispatch
-  permission. Restart reproduces the same normalized input and loop signature.
+  ordered result prefix. Its immutable result contains the current invocation
+  and display, plus an action-free policy subject only for ordinary tools, not
+  an OperationGrant or dispatch permission. Restart reproduces the same
+  normalized input and loop signature.
 - `prepareModel` derives the operation, zero-based Journal attempt, exact native
   body and full signed reservation. Generic invocation admission cannot bypass
   that path for typed Runs; generic completion/refunds cannot replace its checks.
@@ -200,7 +203,7 @@ budget charge, generic wait clear or legacy callback is accepted.
   the no-dispatch refund. Unknown and abandoned tools are independently reopened
   while their result-less frontier and original workspace remain unchanged.
 
-Gate B still needs trusted builtin/broker execution and user-input/repair/child
+Gate B still needs trusted builtin/broker execution and repair/child
 projections. Existing attempts are not silently retried; the one implemented
 renewal above proves that the expired preparation was never claimed.
 WP04 still owns recovery of prepared tools after worker loss, reconciliation of
@@ -217,6 +220,48 @@ gate, non-tool approval subjects, UDS/public control transport and UI, schedulin
 bundle installation, paid-provider
 qualification and production cutover remain outside this change. Neither Gate B
 nor WP03 is declared complete.
+
+### Durable user input
+
+`request_input` closes the native-call -> durable wait -> authenticated answer
+-> ordered continuation loop through the existing loaded Run. `prepareTool`
+returns an `input_required` prompt and planned wait/checkpoint identity; the
+only added mutators are `waitForInput` and `submitInput` (`run.input`).
+
+- The frozen builtin has `access='control'` and no policy subject, operation
+  grant, Journal dispatch or tool-budget charge. It cannot be substituted by
+  a same-named MCP tool. Native input carries prompt text, text/JSON response
+  kind, an explicit byte bound and a JSON response schema only when needed.
+  The response schema is checked during whole-batch prevalidation using the
+  RFC's closed, non-executable JSON-Schema-2020-12 subset, via the existing Ajv
+  dependency. No coercion, defaults, regex, references or remote loading.
+- Waiting seals a live worker using the existing current-inspector death and
+  unchanged-workspace snapshot proof. The request item, context/checkpoint and
+  revision-checked wait commit together. A worker-free queued Run can ask the
+  next question directly; reserved/preactivated competitors still block it.
+- Answering validates the exact prompt, typed value, byte bound, principal,
+  live in-process channel, waiting ref and revision. Input payload, input item,
+  one ordered ToolResult, context/checkpoint, Run/event and immutable control
+  response commit atomically. Same request bytes replay the original response
+  through a newly authenticated channel; different bytes conflict. Distinct
+  request IDs racing one wait have exactly one committed winner.
+- The RFC now explicitly separates executed `invocation` results from
+  `user_input` results, and binds the latter's payload to its original control
+  request/channel. No fake Journal completion is used for user answers.
+  These are pre-Kernel-Cut schema changes, not a legacy compatibility layer.
+- Recovery reconstructs prompts and replies from retained native input,
+  checks their full artifact/control/checkpoint ownership, and keeps all
+  authority refs out of model content. Model messages defer the user-input
+  projection until the entire native batch's tool results are emitted;
+  compaction uses the same order and cannot split an open batch.
+
+Tests exercise real SQLite/CAS, text and bounded schema-matching JSON, restart,
+fresh worker activation, ordered multi-call continuation, duplicate and racing
+requests, malformed/stale/foreign/cancelled/expired requests, worker/response
+substitution and transactional rollback. Death/snapshot records remain offline
+fixtures. UDS transport, UI, actual brokers, worker-loss recovery, terminal drain,
+repair/child integration and production cutover remain their owning packages'
+work. This completes the input interaction, not all of Gate B or WP04.
 
 `candidate_required` and `stop_required` describe the retained
 observation's handoff to WP05/WP04; they are not permission to mark the Run

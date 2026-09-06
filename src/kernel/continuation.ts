@@ -1,6 +1,7 @@
 import type { AgentToolCall } from '../protocol/agent-ir.js';
 import type { ArtifactRef, ReplayClass } from './types.js';
 import type { ToolPolicyDecisionItem } from './tool-authorization.js';
+import type { InputRequestItem, UserInputItem } from './user-input.js';
 
 export type ToolContractManifestV1 = {
   schemaVersion: 1;
@@ -9,7 +10,7 @@ export type ToolContractManifestV1 = {
     name: string;
     version: string;
     description: string;
-    access: 'read' | 'write' | 'exec' | 'plan';
+    access: 'read' | 'write' | 'exec' | 'plan' | 'control';
     inputSchemaRef: ArtifactRef;
     inputSchemaDigest: string;
     outputSchemaRef?: ArtifactRef;
@@ -80,8 +81,9 @@ export type ToolResultPayloadV1 = {
   modelContentDigest: string;
   payloadDigest: string;
 } & (
-  | { outcome: 'executed'; opId: string; attempt: number; journalResultRef: ArtifactRef;
+  | { outcome: 'executed'; source: 'invocation'; opId: string; attempt: number; journalResultRef: ArtifactRef;
       journalResultDigest: string; outputSchemaRef?: ArtifactRef; outputSchemaDigest?: string }
+  | { outcome: 'executed'; source: 'user_input'; inputItemRef: ArtifactRef; inputRef: ArtifactRef; inputDigest: string }
   | { outcome: 'denied'; code: 'TOOL_CALL_DENIED'; denial:
       | { source: 'policy'; policyRef: ArtifactRef; decisionDigest: string }
       | { source: 'user'; approvalDecisionRef: ArtifactRef; approvalDecisionDigest: string } }
@@ -129,4 +131,4 @@ export type RunContextCompactionItem = ItemIdentity & {
   sourceItemsDigest: string;
 };
 
-export type ContinuationItem = ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem;
+export type ContinuationItem = ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem;

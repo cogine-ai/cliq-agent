@@ -7,7 +7,7 @@ import type { NormalPromptMessageV1, NormalPromptProjectionV1 } from '../model/r
 import { ref, testFixture } from '../model/testing/fixtures.js';
 import { contextSourceDigest, planContextCompaction, validateContextItems, type ContextItem } from './context-compaction.js';
 
-function history(texts: string[]) {
+function history(texts: string[], inputAnswer?: string) {
   const authority = testFixture();
   const items: ContextItem[] = [];
   const context: ContextManifest = { schemaVersion: 1, format: 'cliq-context-manifest-v1', runId: 'run', throughItemSeq: 0,
@@ -16,22 +16,31 @@ function history(texts: string[]) {
   const append = (item: ContinuationItem) => {
     const entry = { itemSeq: items.length + 1, itemRef: canonicalSha256(item), item };
     items.push(entry);
-    context.segments.push(item.kind === 'assistant_tool_batch' || item.kind === 'context_compaction'
+    context.segments.push(item.kind === 'assistant_tool_batch' || item.kind === 'context_compaction' || item.kind === 'input_request'
       ? { kind: 'excluded_control', fromItemSeq: entry.itemSeq, throughItemSeq: entry.itemSeq, sourceItemsDigest: contextSourceDigest([entry]) }
       : { kind: 'raw', fromItemSeq: entry.itemSeq, throughItemSeq: entry.itemSeq, items: [{ itemSeq: entry.itemSeq, itemRef: entry.itemRef }] });
   };
   texts.forEach((text, n) => {
+    const hasInput = n === 0 && inputAnswer !== undefined;
     const base = { schemaVersion: 1 as const, runId: 'run', createdAt: '2026-09-05T00:00:00.000Z' };
     append({ ...base, kind: 'model_turn', itemId: `turn-${n}`, modelOpId: `op-${n}`, modelAttempt: 0,
       modelTurnRef: ref(4), textRef: ref(5), stopReason: 'tool_calls' });
     const batch: ToolBatchItem = { ...base, kind: 'assistant_tool_batch', itemId: `batch-${n}`, modelOpId: `op-${n}`, modelAttempt: 0,
-      modelTurnRef: ref(4), textRef: ref(5), calls: [{ callId: `call-${n}`, index: 0, toolName: 'read', inputRef: ref(6), inputDigest: ref(7) }] };
+      modelTurnRef: ref(4), textRef: ref(5), calls: [{ callId: `call-${n}`, index: 0, toolName: hasInput ? 'request_input' : 'read', inputRef: ref(6), inputDigest: ref(7) }] };
     append(batch);
+    if (hasInput) {
+      const identity = { ...base, batchItemId: batch.itemId, callId: `call-${n}`, index: 0, promptRef: ref(12), promptDigest: ref(13) };
+      append({ ...identity, kind: 'input_request', itemId: `question-${n}` });
+      append({ ...identity, kind: 'user_input', itemId: `answer-${n}`, inputRequestItemId: `question-${n}`,
+        inputRef: ref(14), inputDigest: ref(15), modelContentRef: ref(16), modelContentDigest: ref(17), principalId: 'principal' });
+    }
     append({ ...base, kind: 'tool_result', itemId: `result-${n}`, batchItemId: batch.itemId,
-      callId: `call-${n}`, index: 0, outcome: 'error', resultRef: ref(8) });
+      callId: `call-${n}`, index: 0, outcome: hasInput ? 'executed' : 'error', resultRef: ref(8) });
     messages.push({ index: messages.length, role: 'assistant', sourceItemId: `turn-${n}`, contentUtf8: text,
       toolCalls: batch.calls.map((call) => ({ ...call, arguments: { encoding: 'jcs_json', value: { path: 'file' } } })) });
-    messages.push({ index: messages.length, role: 'tool', sourceItemId: `result-${n}`, toolCallId: `call-${n}`, contentUtf8: '{"code":"TOOL_INPUT_INVALID"}' });
+    messages.push({ index: messages.length, role: 'tool', sourceItemId: `result-${n}`, toolCallId: `call-${n}`,
+      contentUtf8: hasInput ? JSON.stringify(inputAnswer) : '{"code":"TOOL_INPUT_INVALID"}' });
+    if (hasInput) messages.push({ index: messages.length, role: 'user', sourceKind: 'user_input', sourceId: `answer-${n}`, contentUtf8: inputAnswer! });
   });
   context.throughItemSeq = items.length;
   context.projectionDigest = digestOmitting(context, 'projectionDigest');
@@ -102,4 +111,29 @@ test('context validation rejects gaps, hidden model content and the old non-norm
     input.context.projectionDigest = digestOmitting(input.context, 'projectionDigest');
     assert.throws(() => validateContextItems(input.context, input.items));
   }
+});
+
+test('compaction preserves deferred user-message order and keeps the input/result batch indivisible', () => {
+  const input = history(['a'.repeat(20_000), 'b'.repeat(20_000), 'c'.repeat(28_000)], 'Alice');
+  const selected = planContextCompaction(input);
+  assert.equal(selected.kind, 'compact');
+  if (selected.kind !== 'compact') return;
+  assert.equal(selected.plan.compactThroughItemSeq, 8);
+  const source = JSON.parse(selected.sourceContextUtf8) as { role: string; content: unknown }[];
+  assert.deepEqual(source.map((message) => message.role), ['assistant', 'tool', 'user', 'assistant', 'tool']);
+  assert.doesNotMatch(selected.sourceContextUtf8, /promptRef|inputRef|principal|question-0/);
+
+  const hidden = history(['small'], 'Alice');
+  hidden.context.segments[3] = { kind: 'excluded_control', fromItemSeq: 4, throughItemSeq: 4,
+    sourceItemsDigest: contextSourceDigest(hidden.items.slice(3, 4)) };
+  hidden.context.projectionDigest = digestOmitting(hidden.context, 'projectionDigest');
+  assert.throws(() => validateContextItems(hidden.context, hidden.items), /model-visible items cannot be hidden/);
+
+  const open = history(['small'], 'Alice');
+  open.items.pop();
+  open.context.segments.pop();
+  open.context.throughItemSeq--;
+  open.context.projectionDigest = digestOmitting(open.context, 'projectionDigest');
+  open.contextRef = canonicalSha256(open.context);
+  assert.throws(() => planContextCompaction(open), /open batch/);
 });

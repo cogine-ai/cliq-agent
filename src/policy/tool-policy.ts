@@ -93,6 +93,7 @@ export function loadToolPolicy(input: {
     const entry = byName.get(request.toolName);
     if (!entry) throw new TypeError('tool request selects an unknown frozen contract');
     const projected = resolver.projectInvocation({ callId: call.callId, index: call.index, toolName: call.toolName, input: call.value! });
+    if (projected.kind !== 'tool' || entry.access === 'control') throw new TypeError('input control cannot mint an operation grant');
     if (entry.inputSchemaRef !== call.inputSchemaRef || entry.inputSchemaDigest !== call.inputSchemaDigest) throw new TypeError('tool input schema substitution');
     const targetCore = { schemaVersion: 1, format: 'cliq-tool-target-v1', runId: request.runId, workspaceIdentityRef, workspaceIdentityDigest,
       toolManifestRef: assembly.tools.manifestRef, toolManifestDigest: assembly.tools.manifestDigest,
