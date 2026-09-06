@@ -548,6 +548,9 @@ async function validateLaunchGraph(
   } else if (run.activeWorkerLaunchId !== undefined) {
     recoveryFailure('non-running Run retains an active WorkerLaunch pointer');
   }
+  if (run.status === 'waiting' && run.waitingReason === 'approval' && launches.some((launch) => launch.phase !== 'retired')) {
+    recoveryFailure('approval wait retains an unretired WorkerLaunch');
+  }
 }
 
 export async function readRecoveryClosure(

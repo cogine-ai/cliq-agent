@@ -17,6 +17,28 @@ export async function validateControlChannelClosure(
     principalId: string;
   }
 ): Promise<{ channel: LocalControlChannelIdentityV1; metadata: PublishedArtifact[] }> {
+  const closure = await readRetainedControlChannelClosure(artifacts, owner, input);
+  const channel = closure.channel;
+  if (channel.transport.kind !== 'in_process') throw new KernelStorageError('ARTIFACT_MISMATCH', 'unsupported live control transport');
+  const [processIdentity, ownerProcessIdentity] = await Promise.all([
+    artifacts.readCanonical(channel.transport.processIdentityRef).then(decodePlatformProcessIdentity),
+    artifacts.readCanonical(owner.processIdentityRef).then(decodePlatformProcessIdentity)
+  ]);
+  if (ownerProcessIdentity.identityDigest !== owner.processIdentityDigest ||
+      processIdentity.ownerUid !== ownerProcessIdentity.ownerUid ||
+      processIdentity.platform !== ownerProcessIdentity.platform || processIdentity.pid !== ownerProcessIdentity.pid ||
+      processIdentity.pid !== process.pid || processIdentity.processStartToken !== ownerProcessIdentity.processStartToken ||
+      processIdentity.executableImageDigest !== ownerProcessIdentity.executableImageDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel process identity does not match the current owner');
+  }
+  return closure;
+}
+
+/** Historical audit only. A control-row owner must also bind these bytes; this never authenticates a new request. */
+export async function readRetainedControlChannelClosure(
+  artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  input: { channelIdentityRef: string; channelIdentityDigest: string; principalId: string }
+): Promise<{ channel: LocalControlChannelIdentityV1; metadata: PublishedArtifact[] }> {
   const channel = decodeControlChannel(await artifacts.readCanonical(input.channelIdentityRef));
   if (
     channel.channelIdentityDigest !== input.channelIdentityDigest ||
@@ -41,22 +63,10 @@ export async function validateControlChannelClosure(
     artifacts.describe(channel.principalIdentityRef, 'application/json', 'cliq-local-principal-identity-v1')
   ]);
   if (channel.transport.kind === 'in_process') {
-    const [processIdentity, ownerProcessIdentity] = await Promise.all([
-      artifacts
-        .readCanonical(channel.transport.processIdentityRef)
-        .then(decodePlatformProcessIdentity),
-      artifacts.readCanonical(owner.processIdentityRef).then(decodePlatformProcessIdentity)
-    ]);
+    const processIdentity = decodePlatformProcessIdentity(await artifacts.readCanonical(channel.transport.processIdentityRef));
     if (
       processIdentity.identityDigest !== channel.transport.processIdentityDigest ||
-      ownerProcessIdentity.identityDigest !== owner.processIdentityDigest ||
-      processIdentity.platform !== ownerProcessIdentity.platform ||
-      processIdentity.pid !== ownerProcessIdentity.pid ||
-      processIdentity.pid !== process.pid ||
-      processIdentity.processStartToken !== ownerProcessIdentity.processStartToken ||
-      processIdentity.ownerUid !== ownerProcessIdentity.ownerUid ||
       processIdentity.ownerUid !== owner.filesystem.ownerUid ||
-      processIdentity.executableImageDigest !== ownerProcessIdentity.executableImageDigest ||
       processIdentity.platform !== principal.platform ||
       processIdentity.observedAt !== channel.openedAt
     ) {

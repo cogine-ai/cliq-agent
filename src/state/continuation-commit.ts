@@ -27,7 +27,9 @@ export async function prepareContinuationCommit(artifacts: ArtifactCatalog, inpu
   const frontierPlan = planCanonicalArtifact(input.frontier, 'cliq-run-frontier-v1');
   const metadata = await Promise.all([...itemPlans, contextPlan, frontierPlan, ...(input.artifacts ?? [])]
     .map((plan) => artifacts.publishBytes(plan.bytes, plan.mediaType, plan.schemaKind)));
-  return { metadata, commit(connection: SqliteConnection, run: Run, journalSeq: number, createdAt: string) {
+  return { metadata, throughItemSeq: context.throughItemSeq,
+    runUpdate: { latestCheckpointId: checkpointId, frontierRef: frontierPlan.ref, nextStep: input.frontier.kind },
+    commit(connection: SqliteConnection, run: Run, journalSeq: number, createdAt: string) {
     for (const entry of added) connection.prepare(
       'INSERT INTO items (item_id, session_id, run_id, item_seq, kind, payload_ref, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?)'
     ).run(entry.item.itemId, run.id, BigInt(entry.itemSeq), entry.item.kind, entry.itemRef, entry.item.createdAt);

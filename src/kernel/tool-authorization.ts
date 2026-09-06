@@ -74,15 +74,18 @@ export type ToolPolicyChannelEvidenceV1 = ToolPolicyChannel & {
   effectiveDisposition: PolicyDisposition; evaluatedAt: string; evidenceDigest: string;
 };
 
-/** Only direct-policy ordinary tools are admitted here. Approval grants require the control reducer. */
+/** Ordinary-tool grants only; interactive provenance is committed by the authenticated control reducer. */
 export type ToolOperationGrantV1 = {
   schemaVersion: 1; format: 'cliq-operation-grant-v1'; grantId: string;
   principalId: string; runId: string; policyRef: ArtifactRef; frontierRef: ArtifactRef;
   opId: string; requestRef: ArtifactRef; requestDigest: string; targetRef: ArtifactRef; targetDigest: string;
   subject: { kind: 'tool_call'; batchItemId: string; callId: string; callIndex: number; toolName: string;
     toolContractDigest: string; replayClass: ReplayClass; policySubjectKind: 'ordinary_tool' };
-  provenance: { kind: 'policy_snapshot'; actionClass: PolicyActionClass; channelEvidenceRef: ArtifactRef;
-    channelEvidenceDigest: string; matchedRuleIds: string[]; effectiveDisposition: 'allow'; decisionDigest: string };
+  provenance:
+    | { kind: 'policy_snapshot'; actionClass: PolicyActionClass; channelEvidenceRef: ArtifactRef;
+        channelEvidenceDigest: string; matchedRuleIds: string[]; effectiveDisposition: 'allow'; decisionDigest: string }
+    | { kind: 'user_approval'; waitingSubjectRef: ArtifactRef; decisionRef: ArtifactRef; requestId: string;
+        channelEvidenceRef: ArtifactRef; channelEvidenceDigest: string };
   maxDispatchedAttempts: number; issuedAt: string; expiresAt: string; grantDigest: string;
 };
 
@@ -90,18 +93,51 @@ export type ToolPolicyDecisionItem = {
   schemaVersion: 1; itemId: string; runId: string; kind: 'policy_decision'; subjectKind: 'tool_call';
   opId: string; principalId: string; decisionRef: ArtifactRef;
   policyChannelEvidenceRef: ArtifactRef; policyChannelEvidenceDigest: string;
-  createdAt: string; decisionSource: 'direct_policy';
+  createdAt: string;
 } & (
-  | { decision: 'allow'; grantRef: ArtifactRef }
-  | { decision: 'deny'; denialOutcome: { kind: 'tool_result_denied'; subjectKind: 'tool_call'; outcomeItemRef: ArtifactRef } }
+  | { decisionSource: 'direct_policy'; waitingSubjectRef?: never }
+  | { decisionSource: 'interactive_approval'; waitingSubjectRef: ArtifactRef }
+) & (
+  | { decision: 'allow'; grantRef: ArtifactRef; denialOutcome?: never }
+  | { decision: 'deny'; grantRef?: never; denialOutcome: { kind: 'tool_result_denied'; subjectKind: 'tool_call'; outcomeItemRef: ArtifactRef } }
 );
+
+/** Other approval subjects belong to their own reducers, never a generic tool-shaped fallback. */
+export type ToolApprovalSubject = ToolOperationGrantV1['subject'] & {
+  opId: string; target: string; policyChannelEvidenceRef: ArtifactRef; policyChannelEvidenceDigest: string;
+};
+
+export type ToolApprovalWait = {
+  schemaVersion: 1; kind: 'approval'; runId: string; createdFromRevision: number; createdAt: string;
+  frontierRef: ArtifactRef; subject: ToolApprovalSubject;
+};
+
+export type ToolApprovalDecisionV1 = {
+  schemaVersion: 1; format: 'cliq-approval-decision-v1'; decisionId: string;
+  principalId: string; channelIdentityRef: ArtifactRef; channelIdentityDigest: string;
+  runId: string; waitingSubjectRef: ArtifactRef; waitingSubjectDigest: string; frontierRef: ArtifactRef;
+  subject: ToolApprovalSubject; subjectDigest: string; requestId: string; requestDigest: string;
+  expectedRunRevision: number; decision: 'allow' | 'deny'; requestedTtlMs?: number; grantExpiresAt?: string;
+  createdAt: string; decisionDigest: string;
+};
+
+export type ToolCheckpointProof = {
+  workspaceStateRef: ArtifactRef; snapshotEvidenceRef: ArtifactRef; retirementEvidenceRef: ArtifactRef;
+};
+
+/** Positive State-owned no-dispatch closure, committed with the replacement wait and reservation refund. */
+export type ToolGrantExpiryV1 = {
+  schemaVersion: 1; format: 'cliq-tool-grant-expiry-v1'; code: 'TOOL_GRANT_EXPIRED_BEFORE_DISPATCH';
+  runId: string; opId: string; attempt: number; preparedJournalSeq: number; grantRef: ArtifactRef;
+  waitingSubjectRef: ArtifactRef; observedAt: string;
+};
 
 /** Retained adapter observation. State derives model content and settlement; this is never an execution permit. */
 export type ToolObservationV1 = {
   schemaVersion: 1; format: 'cliq-tool-observation-v1'; runId: string; opId: string; attempt: number;
   requestRef: ArtifactRef; targetRef: ArtifactRef; grantRef: ArtifactRef; dispatchId: string;
   observedAt: string; observationDigest: string;
-  postEffect?: { workspaceStateRef: ArtifactRef; snapshotEvidenceRef: ArtifactRef; retirementEvidenceRef: ArtifactRef };
+  postEffect?: ToolCheckpointProof;
 } & (
   | { outcome: 'executed'; content: unknown }
   | { outcome: 'error'; code: 'TOOL_EXECUTION_FAILED' | 'TOOL_PROTOCOL_ERROR' | 'TOOL_RESOURCE_EXHAUSTED';
