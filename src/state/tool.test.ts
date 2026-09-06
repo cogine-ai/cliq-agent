@@ -8,45 +8,11 @@ import { digestOmitting } from '../kernel/identity.js';
 import type { ToolObservationV1, ToolPolicyChannelEvidenceV1, ToolOperationGrantV1 } from '../kernel/tool-authorization.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
-import { sampleCanonicalNow } from './canonical-time.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore } from './store.js';
 import { postEffectObservation } from './testing/tool-effects.js';
 
-type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
-
-async function batch(fixture: Fixture, calls: Array<{ name: string; input: unknown }>) {
-  const prepared = await fixture.agent.prepareModel({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
-  await fixture.store.claimInvocationDispatch({ runId: fixture.runId, expectedRunRevision: prepared.run.revision,
-    leaseEpoch: fixture.leaseEpoch, opId: prepared.entry.opId, attempt: 0, dispatchId: 'model-dispatch' });
-  const response = fixture.agent.model.start(prepared.prepared, { status: 200, mediaType: 'application/json' });
-  response.push(Buffer.from(JSON.stringify({ id: 'response', object: 'response', status: 'completed', model: 'model-1',
-    output: calls.map((call, index) => ({ type: 'function_call', id: `wire-${index}`, call_id: `call-${index}`,
-      name: call.name, arguments: JSON.stringify(call.input) })) })));
-  return fixture.agent.completeModel({ opId: prepared.entry.opId, attempt: 0, expectedRunRevision: prepared.run.revision,
-    result: response.finish(sampleCanonicalNow(), fixture.agent.resolveToolInput) });
-}
-
-async function prepareTool(fixture: Fixture) {
-  const result = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
-  assert.equal(result.disposition, 'prepared');
-  if (result.disposition !== 'prepared') throw new Error('test expected a direct policy allow');
-  return result;
-}
-
-async function claimTool(fixture: Fixture, prepared: Awaited<ReturnType<typeof prepareTool>>) {
-  return fixture.agent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: fixture.leaseEpoch,
-    opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId: `tool-dispatch-${prepared.request.callIndex}` });
-}
-
-async function observation(fixture: Fixture, claimed: Awaited<ReturnType<typeof claimTool>>, content: unknown) {
-  const value: ToolObservationV1 = { schemaVersion: 1, format: 'cliq-tool-observation-v1', runId: fixture.runId,
-    opId: claimed.entry.opId, attempt: claimed.entry.attempt, requestRef: claimed.entry.requestRef, targetRef: claimed.entry.target,
-    grantRef: claimed.entry.grantRef!, dispatchId: claimed.entry.dispatchId!, outcome: 'executed', content,
-    observedAt: sampleCanonicalNow(), observationDigest: '' };
-  value.observationDigest = digestOmitting(value, 'observationDigest');
-  return (await fixture.store.artifacts.publishCanonical(value, value.format)).ref;
-}
+import { batch, prepareTool, claimTool, observation } from './testing/tool-calls.js';
 
 test('canonical allow, permanent claim and ordered results continue through the real loaded Run without authority in prompts', async () => {
   const fixture = await createAgentFixture('tool-ordered', undefined, { mode: 'default' });
@@ -261,10 +227,13 @@ test('unknown and abandoned typed tools cannot seal changed workspace bytes or c
         retirementEvidenceRef: proof.observation.postEffect!.retirementEvidenceRef, checkpointReason: 'auto' }), /post-effect Checkpoint together/);
       assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
       assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
+      // Exercise both durable cuts independently; restarting only after abandonment missed unknown-only recovery.
+      await fixture.store.close();
+      fixture.store = await openStateStore(fixture.stateRoot);
+      fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
+      assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).journal.at(-1)!.phase, phase);
+      assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
     }
-    await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
-    fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
     assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
     const recovered = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.deepEqual(await Promise.all(recovered.items.map(async (item) => (await fixture.store.artifacts.readCanonical<{ kind: string }>(item.payloadRef)).kind)),

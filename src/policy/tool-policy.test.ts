@@ -4,15 +4,16 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { RunSpec, ToolContractManifestV1 } from '../kernel/types.js';
-import type { RunPolicySnapshotV1, ToolRequestV1, ToolTargetV1 } from '../kernel/tool-authorization.js';
+import type { RunPolicySnapshotV1, ToolRequestV1, ToolTargetV1, ToolApprovalDecisionV1 } from '../kernel/tool-authorization.js';
 import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
 import { createAgentFixture } from '../state/testing/agent-fixtures.js';
-import { disposeFixture } from '../state/testing/fixtures.js';
+import { disposeFixture, uuidv7 } from '../state/testing/fixtures.js';
 import { loadToolContracts, type ToolInputAuthority } from '../tools/input-contract.js';
 import { BUILTIN_POLICY_RULES, loadToolPolicy, modeDecisions, toolOperationId } from './tool-policy.js';
 import { verifyToolRuntimeAuthority } from './runtime-authority.js';
 import { parseCanonicalBash } from './canonical-bash.js';
 import { sampleCanonicalNow } from '../state/canonical-time.js';
+import { toolApprovalDecision } from './tool-approval.js';
 
 let fixture: Awaited<ReturnType<typeof createAgentFixture>>;
 let snapshot: RunPolicySnapshotV1;
@@ -125,6 +126,48 @@ test('policy and grants bind normalized input, workspace, full target, rule evid
   const shell = request('bash', { command: 'printf ok' });
   const ask = evaluator.evaluate(shell.request, shell.target, shell.call, now);
   assert.throws(() => evaluator.grant(shell.request, shell.target, shell.call, ask, now, expiresAt), /direct allow/);
+});
+
+test('interactive grant derives only from the exact ask, closed decision and bounded user TTL', () => {
+  const evaluator = load(policy('default'));
+  const selected = request('bash', { command: 'printf ok' });
+  const evidence = evaluator.evaluate(selected.request, selected.target, selected.call, now);
+  const wait = evaluator.approvalWait(selected.request, selected.target, evidence, 7);
+  const input = { principalId: snapshot.principalId, channelIdentityRef: canonicalSha256('authenticated-channel'),
+    channelIdentityDigest: canonicalSha256('channel-digest'), requestId: uuidv7(), expectedRunRevision: 8,
+    waitingOnRef: canonicalSha256(wait), decision: 'allow' as const };
+  for (const ttlMs of [undefined, 1, 10_000, 86_400_000]) {
+    const decision = toolApprovalDecision(wait, { ...input, ...(ttlMs === undefined ? {} : { ttlMs }) }, now, expiresAt);
+    const grant = evaluator.approve(selected.request, selected.target, selected.call, evidence, wait, decision, expiresAt)!;
+    assert.equal(grant.expiresAt, new Date(Math.min(Date.parse(now) + (ttlMs ?? 3_600_000), Date.parse(expiresAt))).toISOString());
+    assert.equal(decision.requestedTtlMs, ttlMs);
+    assert.equal(grant.maxDispatchedAttempts, 1);
+    assert.equal(grant.grantDigest, digestOmitting(grant, 'grantDigest'));
+    assert.deepEqual(grant.provenance, { kind: 'user_approval', waitingSubjectRef: input.waitingOnRef, decisionRef: canonicalSha256(decision),
+      requestId: input.requestId, channelEvidenceRef: canonicalSha256(evidence), channelEvidenceDigest: evidence.evidenceDigest });
+  }
+  const original = toolApprovalDecision(wait, input, now, expiresAt);
+  for (const mutate of [
+    (value: ToolApprovalDecisionV1) => { value.principalId = 'another-principal'; },
+    (value: ToolApprovalDecisionV1) => { value.runId = 'another-run'; },
+    (value: ToolApprovalDecisionV1) => { value.waitingSubjectRef = canonicalSha256('another-wait'); },
+    (value: ToolApprovalDecisionV1) => { value.subject.toolName = 'read'; },
+    (value: ToolApprovalDecisionV1) => { value.subject.policyChannelEvidenceDigest = canonicalSha256('another-parser-result'); },
+    (value: ToolApprovalDecisionV1) => { value.expectedRunRevision++; },
+    (value: ToolApprovalDecisionV1) => { value.requestId = uuidv7(); },
+    (value: ToolApprovalDecisionV1) => { value.grantExpiresAt = new Date(Date.parse(expiresAt) + 1).toISOString(); },
+    (value: ToolApprovalDecisionV1) => { Object.assign(value, { legacyAllow: true }); }
+  ]) {
+    const changed = structuredClone(original); mutate(changed); changed.decisionDigest = digestOmitting(changed, 'decisionDigest');
+    assert.throws(() => evaluator.approve(selected.request, selected.target, selected.call, evidence, wait, changed, expiresAt));
+  }
+  const denial = toolApprovalDecision(wait, { ...input, decision: 'deny' }, now, expiresAt);
+  assert.equal(evaluator.approve(selected.request, selected.target, selected.call, evidence, wait, denial, expiresAt), undefined);
+  for (const name of ['read', 'bash'] as const) {
+    const nonAsk = request(name, name === 'read' ? { path: 'a' } : { command: 'rm a' });
+    const result = evaluator.evaluate(nonAsk.request, nonAsk.target, nonAsk.call, now);
+    assert.throws(() => evaluator.approvalWait(nonAsk.request, nonAsk.target, result, 7), /only ask/);
+  }
 });
 
 test('path-qualified Bash executables cannot inherit bare-head allow grants, including quoted and escaped paths', () => {

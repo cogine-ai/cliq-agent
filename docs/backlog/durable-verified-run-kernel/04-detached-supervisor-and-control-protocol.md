@@ -16,6 +16,15 @@ Brief / issue / roadmap item:
 - Product promise: **Delegate. Detach. Return to verified work.**
 - This package owns durable admission, the per-user Supervisor, FIFO scheduling, worker launch intents/leases/containment lifecycle, typed waiting and stop reducers, restart recovery, and the versioned local control protocol used by every client surface.
 
+Implementation note: the [WP02 integration](../../kernel/wp02-typed-runtime.md#durable-ordinary-tool-approval)
+now exercises the RFC ordinary-tool approval branch through the loaded Run and
+real StateStore: quiesced durable waits, authenticated in-process `run.approve`
+commits, idempotent responses, denied-call continuation and no-dispatch expiry
+renewal. Reuse these reducers for client/transport integration; do not create a
+second approval state machine. Other wait subjects, UDS capture/server routing,
+scheduling, worker-loss reconciliation, cancellation and terminal drain remain
+in this package. This partial integration does not complete WP04.
+
 Related issues:
 
 - GitHub issue `#76` (TUI Run state) depends on this package's authoritative Run snapshot and event-cursor protocol; the TUI must not invent a separate lifecycle.

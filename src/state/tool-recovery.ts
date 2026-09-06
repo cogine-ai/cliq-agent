@@ -1,9 +1,10 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
+import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, RunFrontier, RunSpec, ToolContractManifestV1, ToolResultPayloadV1, ToolResultModelContentV1 } from '../kernel/types.js';
 import type { RunPolicySnapshotV1, ToolObservationV1, ToolOperationGrantV1, ToolPolicyChannelEvidenceV1, ToolPolicyDecisionItem,
-  ToolRequestV1, ToolTargetV1 } from '../kernel/tool-authorization.js';
+  ToolRequestV1, ToolTargetV1, ToolApprovalWait, ToolApprovalDecisionV1, ToolGrantExpiryV1 } from '../kernel/tool-authorization.js';
 import { toolOperationId } from '../policy/tool-policy.js';
+import { toolApprovalCheckpointId, toolApprovalDecision } from '../policy/tool-approval.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
@@ -20,17 +21,14 @@ export async function validateToolRecovery(input: {
   const decisions = new Map<string, ToolPolicyDecisionItem>();
   const requests = new Map<string, ToolRequestV1>();
   const calls = [...items.values()].filter((item) => item.kind === 'assistant_tool_batch');
-  for (const item of items.values()) if (item.kind === 'policy_decision') {
-    const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(artifacts, item.policyChannelEvidenceRef);
+  async function policyRequest(evidenceRef: string) {
+    const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(artifacts, evidenceRef);
     const request = await readCanonicalArtifact<ToolRequestV1>(artifacts, evidence.requestRef);
     const target = await readCanonicalArtifact<ToolTargetV1>(artifacts, evidence.targetRef);
     const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, evidence.frontierRef);
     const batch = calls.find((batch) => batch.itemId === request.batchItemId);
     const call = batch?.calls[request.callIndex];
-    if (item.runId !== run.id || item.subjectKind !== 'tool_call' || item.decisionSource !== 'direct_policy' ||
-        item.decisionRef !== item.policyChannelEvidenceRef || evidence.evidenceDigest !== item.policyChannelEvidenceDigest ||
-        digestOmitting(evidence, 'evidenceDigest') !== evidence.evidenceDigest || evidence.effectiveDisposition !== item.decision ||
-        evidence.opId !== item.opId || evidence.principalId !== item.principalId || evidence.runId !== run.id || evidence.policyRef !== spec.policyRef ||
+    if (digestOmitting(evidence, 'evidenceDigest') !== evidence.evidenceDigest || evidence.runId !== run.id || evidence.policyRef !== spec.policyRef ||
         request.format !== 'cliq-tool-request-v1' || request.requestDigest !== evidence.requestDigest ||
         digestOmitting(request, 'requestDigest') !== request.requestDigest || request.runId !== run.id || request.assemblyRef !== spec.assemblyRef ||
         request.opId !== evidence.opId || request.opId !== toolOperationId(run.id, request.batchItemId, request.callId) ||
@@ -46,20 +44,90 @@ export async function validateToolRecovery(input: {
     if (policy.policyDigest !== evidence.policyDigest || digestOmitting(policy, 'policyDigest') !== policy.policyDigest) throw new TypeError('policy evidence snapshot digest mismatch');
     await artifacts.readBytes(policy.engine.runtimeBundleRef);
     await artifacts.readBytes(policy.engine.profileRef);
-    await artifacts.readBytes(policy.toolManifestRef);
+    const manifest = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, policy.toolManifestRef);
+    const contract = manifest.entries.find((entry) => entry.name === request.toolName);
+    if (manifest.manifestDigest !== policy.toolManifestDigest || digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest ||
+        target.toolManifestRef !== policy.toolManifestRef || target.toolManifestDigest !== manifest.manifestDigest ||
+        !contract || canonicalSha256(contract) !== target.toolContractDigest) throw new TypeError('tool approval/decision substitutes its frozen contract');
     for (const rule of policy.decisionRules) if (rule.sourceRef) await artifacts.readBytes(rule.sourceRef);
     requests.set(evidence.requestRef, request);
+    return { evidence, request, target, frontier, batch: batch!, call: call!, contract };
+  }
+  async function approvalWait(waitingRef: string) {
+    const wait = await readCanonicalArtifact<ToolApprovalWait>(artifacts, waitingRef);
+    const proof = await policyRequest(wait.subject.policyChannelEvidenceRef);
+    const { evidence, request, target, contract } = proof;
+    if (!exactKeys(wait, ['schemaVersion', 'kind', 'runId', 'createdFromRevision', 'createdAt', 'frontierRef', 'subject']) ||
+        wait.schemaVersion !== 1 || wait.kind !== 'approval' || wait.runId !== run.id || wait.frontierRef !== request.frontierRef ||
+        !Number.isSafeInteger(wait.createdFromRevision) || wait.createdFromRevision < 1 || wait.createdAt !== evidence.evaluatedAt ||
+        wait.createdAt < run.createdAt || wait.createdAt >= run.deadlineAt || evidence.effectiveDisposition !== 'ask') throw new TypeError('invalid retained tool approval wait');
+    parseCanonicalTime(wait.createdAt);
+    requireEqual(wait.subject, { kind: 'tool_call', policySubjectKind: 'ordinary_tool', batchItemId: request.batchItemId,
+      callId: request.callId, callIndex: request.callIndex, opId: request.opId, target: request.targetRef, toolName: request.toolName,
+      toolContractDigest: target.toolContractDigest, replayClass: contract.replayClass,
+      policyChannelEvidenceRef: canonicalSha256(evidence), policyChannelEvidenceDigest: evidence.evidenceDigest }, 'retained approval subject');
+    const checkpoint = input.checkpoints.find((checkpoint) => checkpoint.id === toolApprovalCheckpointId(waitingRef));
+    const prior = input.checkpoints.filter((checkpoint) => checkpoint.basedOnRunRevision < wait.createdFromRevision).at(-1);
+    if (!checkpoint || !prior || checkpoint.basedOnRunRevision !== wait.createdFromRevision || checkpoint.createdAt < wait.createdAt ||
+        checkpoint.workspaceStateRef !== prior.workspaceStateRef || checkpoint.contextManifestRef !== prior.contextManifestRef ||
+        checkpoint.runItemSeq !== prior.runItemSeq) throw new TypeError('approval wait has no unchanged ready Checkpoint');
+    return { ...proof, wait, checkpoint };
+  }
+  if (run.waitingReason === 'approval' || (run.status === 'waiting' && run.nextStep === 'tool')) {
+    if (run.status !== 'waiting' || run.waitingReason !== 'approval' || !run.waitingOnRef || run.activeWorkerLaunchId || run.nextStep !== 'tool') {
+      throw new TypeError('approval wait retains an execution worker or lacks its exact subject');
+    }
+    const { wait, checkpoint } = await approvalWait(run.waitingOnRef);
+    if (run.revision !== wait.createdFromRevision + 1 || run.frontierRef !== wait.frontierRef || run.latestCheckpointId !== checkpoint.id) {
+      throw new TypeError('waiting Run substitutes its revision, frontier or Checkpoint');
+    }
+  }
+  const approvedWaits = new Set<string>();
+  for (const item of items.values()) if (item.kind === 'policy_decision') {
+    const { evidence, request, target, batch, call } = await policyRequest(item.policyChannelEvidenceRef);
+    const priorResults = [...items.values()].slice(0, [...items.keys()].indexOf(item.itemId))
+      .filter((prior) => prior.kind === 'tool_result' && prior.batchItemId === request.batchItemId);
+    if (item.runId !== run.id || item.subjectKind !== 'tool_call' || evidence.evidenceDigest !== item.policyChannelEvidenceDigest ||
+        evidence.opId !== item.opId || evidence.principalId !== item.principalId || priorResults.length !== request.callIndex ||
+        !['direct_policy', 'interactive_approval'].includes(item.decisionSource)) throw new TypeError('policy decision does not own the current ordered call');
+    let approval: ToolApprovalDecisionV1 | undefined;
+    if (item.decisionSource === 'direct_policy') {
+      if (item.waitingSubjectRef !== undefined || item.decisionRef !== item.policyChannelEvidenceRef || evidence.effectiveDisposition !== item.decision) {
+        throw new TypeError('direct policy decision substitutes its evidence or invents a wait');
+      }
+    } else {
+      if (approvedWaits.has(item.waitingSubjectRef)) throw new TypeError('one approval wait cannot have two decisions');
+      approvedWaits.add(item.waitingSubjectRef);
+      const proof = await approvalWait(item.waitingSubjectRef);
+      approval = await readCanonicalArtifact<ToolApprovalDecisionV1>(artifacts, item.decisionRef);
+      requireEqual(proof.evidence, evidence, 'approval item policy evidence');
+      requireEqual(approval, toolApprovalDecision(proof.wait, { principalId: evidence.principalId, channelIdentityRef: approval.channelIdentityRef,
+        channelIdentityDigest: approval.channelIdentityDigest, requestId: approval.requestId, expectedRunRevision: approval.expectedRunRevision,
+        waitingOnRef: item.waitingSubjectRef, decision: item.decision, ...(approval.requestedTtlMs === undefined ? {} : { ttlMs: approval.requestedTtlMs }) },
+        approval.createdAt, run.deadlineAt), 'retained approval decision');
+      await artifacts.readBytes(approval.channelIdentityRef);
+      const checkpoint = input.checkpoints.find((checkpoint) => checkpoint.id === identityHash('cliq-tool-approval-decision-checkpoint-v1', item.decisionRef));
+      if (!checkpoint || checkpoint.createdAt !== approval.createdAt || checkpoint.basedOnRunRevision !== approval.expectedRunRevision ||
+          checkpoint.workspaceStateRef !== proof.checkpoint.workspaceStateRef || checkpoint.journalSeq !== proof.checkpoint.journalSeq ||
+          checkpoint.runItemSeq !== [...items.keys()].indexOf(item.itemId) + (item.decision === 'allow' ? 1 : 2)) throw new TypeError('approval decision has no atomic continuation Checkpoint');
+    }
     if (item.decision === 'allow') {
       if (decisions.has(item.grantRef)) throw new TypeError('one operation grant cannot have duplicate decision items');
       const grant = await readCanonicalArtifact<ToolOperationGrantV1>(artifacts, item.grantRef);
-      if (grant.grantDigest !== digestOmitting(grant, 'grantDigest') || grant.provenance.kind !== 'policy_snapshot' ||
+      if (grant.grantDigest !== digestOmitting(grant, 'grantDigest') ||
+          grant.provenance.kind !== (approval ? 'user_approval' : 'policy_snapshot') ||
           grant.provenance.channelEvidenceRef !== item.policyChannelEvidenceRef || grant.provenance.channelEvidenceDigest !== evidence.evidenceDigest ||
           grant.requestRef !== evidence.requestRef || grant.requestDigest !== evidence.requestDigest || grant.targetRef !== evidence.targetRef ||
           grant.targetDigest !== evidence.targetDigest || grant.opId !== request.opId || grant.runId !== run.id || grant.frontierRef !== evidence.frontierRef ||
           grant.subject.callId !== call.callId || grant.subject.callIndex !== call.index || grant.subject.batchItemId !== batch!.itemId ||
           grant.subject.toolName !== call.toolName || grant.subject.toolContractDigest !== target.toolContractDigest ||
           grant.issuedAt < evidence.evaluatedAt || grant.expiresAt > run.deadlineAt || parseCanonicalTime(grant.expiresAt) <= parseCanonicalTime(grant.issuedAt)) {
-        throw new TypeError('retained grant differs from its committed direct-policy decision');
+        throw new TypeError('retained grant differs from its committed policy decision');
+      }
+      if (approval) {
+        requireEqual(grant.provenance, { kind: 'user_approval', waitingSubjectRef: approval.waitingSubjectRef, decisionRef: item.decisionRef,
+          requestId: approval.requestId, channelEvidenceRef: item.policyChannelEvidenceRef, channelEvidenceDigest: evidence.evidenceDigest }, 'approval grant provenance');
+        if (grant.issuedAt !== approval.createdAt || grant.expiresAt !== approval.grantExpiresAt) throw new TypeError('approval grant substitutes its lifetime');
       }
       decisions.set(item.grantRef, item);
     } else {
@@ -68,8 +136,9 @@ export async function validateToolRecovery(input: {
           outcome.callId !== call.callId || outcome.index !== call.index || !items.has(outcome.itemId)) throw new TypeError('policy denial has no owning ordered result');
       requireEqual(outcome, items.get(outcome.itemId), 'committed denied outcome');
       const payload = await readCanonicalArtifact<ToolResultPayloadV1>(artifacts, outcome.resultRef);
-      if (payload.outcome !== 'denied' || payload.denial.source !== 'policy' || payload.denial.policyRef !== spec.policyRef ||
-          payload.denial.decisionDigest !== evidence.evidenceDigest || payload.code !== 'TOOL_CALL_DENIED') throw new TypeError('denied result substitutes its policy proof');
+      if (payload.outcome !== 'denied' || payload.code !== 'TOOL_CALL_DENIED') throw new TypeError('denied result substitutes its policy proof');
+      requireEqual(payload.denial, approval ? { source: 'user', approvalDecisionRef: item.decisionRef, approvalDecisionDigest: approval.decisionDigest }
+        : { source: 'policy', policyRef: spec.policyRef, decisionDigest: evidence.evidenceDigest }, 'denial authority');
       const content = await readCanonicalArtifact<ToolResultModelContentV1>(artifacts, payload.modelContentRef);
       requireEqual(content.content, { code: 'TOOL_CALL_DENIED' }, 'model-safe denial');
     }
@@ -85,8 +154,23 @@ export async function validateToolRecovery(input: {
     requireEqual(prepared.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }, 'tool reservation');
     const attempts = journal.filter((entry) => entry.opId === prepared.opId);
     const claims = attempts.filter((entry) => entry.phase === 'dispatch_claimed');
-    if (claims.length > grant.maxDispatchedAttempts || claims.some((entry) => entry.grantRef !== prepared.grantRef ||
+    const grantClaims = claims.filter((entry) => entry.grantRef === prepared.grantRef);
+    if (claims.length > grant.maxDispatchedAttempts || grantClaims.some((entry) =>
         entry.timestamp < grant.issuedAt || entry.timestamp >= grant.expiresAt)) throw new TypeError('tool grant claim lifetime or use count mismatch');
+    if (prepared.timestamp < grant.issuedAt || prepared.timestamp >= grant.expiresAt) throw new TypeError('tool preparation uses an expired grant');
+    const failed = attempts.find((entry) => entry.attempt === prepared.attempt && entry.phase === 'failed');
+    if (failed) {
+      const expiry = await readCanonicalArtifact<ToolGrantExpiryV1>(artifacts, failed.errorRef!);
+      const proof = await approvalWait(expiry.waitingSubjectRef);
+      requireEqual(proof.request, request, 'renewed approval request');
+      requireEqual(expiry, { schemaVersion: 1, format: 'cliq-tool-grant-expiry-v1', code: 'TOOL_GRANT_EXPIRED_BEFORE_DISPATCH',
+        runId: run.id, opId: prepared.opId, attempt: prepared.attempt, preparedJournalSeq: prepared.seq,
+        grantRef: prepared.grantRef, waitingSubjectRef: expiry.waitingSubjectRef, observedAt: proof.wait.createdAt }, 'no-dispatch expiry');
+      if (grant.provenance.kind !== 'user_approval' || claims.some((claim) => claim.attempt === prepared.attempt) ||
+          expiry.observedAt < grant.expiresAt || failed.timestamp < expiry.observedAt || proof.checkpoint.journalSeq !== failed.seq ||
+          proof.checkpoint.createdAt !== failed.timestamp) throw new TypeError('expired tool grant has no atomic positive no-dispatch closure');
+      requireEqual(failed.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, 'no-dispatch refund');
+    }
     const completion = attempts.find((entry) => entry.attempt === prepared.attempt && entry.phase === 'completed');
     if (!completion) continue;
     const claim = claims.find((entry) => entry.attempt === completion.attempt);

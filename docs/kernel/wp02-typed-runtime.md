@@ -17,12 +17,15 @@ broker integration, or provider qualification is complete.
 
 Gate A landed in PR #489 (`a153d47`); the model/context continuation landed in
 PR #490 (`c29179f`), and direct tool-input contracts landed in PR #491
-(`eb93f46`). Gate B also includes the minimum WP01
+(`eb93f46`), and canonical tool policy/continuation landed in PR #492
+(`04b2ba6`). Gate B also includes the minimum WP01
 companion work needed to exercise the real SQLite/CAS continuation. The user
 approved that scope on 2026-09-05 and the minimum WP03 canonical tool
 policy/profile/grant companion on 2026-09-06. This does not transfer storage or
 security ownership to WP02 or include the rest of WP01 migration, WP03 brokers,
-WP04 scheduling, WP05 verification, or WP06 production cutover.
+WP04 scheduling, WP05 verification, or WP06 production cutover. The follow-up
+integrates the existing RFC ordinary-tool approval reducer as minimum WP01/WP04
+companion work, not a separate product slice or a new approval protocol.
 
 The original M2 Journal reserved and settled budgets but had no model-turn,
 tool-batch/result, or compaction commit reducers. Generic request/result
@@ -107,14 +110,16 @@ change, without adding public milestones:
   exact selected builtin/worker/provider entries, and the sole non-executable
   policy profile with its empty structured-member closure. Complete-byte CAS
   refs and self-omitting semantic digests remain separate. Keys never come from
-  Run/repository/worker input. Once a Run retains any policy decision, loading
+  Run/repository/worker input. Once a Run retains any policy decision or tool
+  approval wait, loading
   it requires those keys even for read-only tool projections; missing keys are
   `RECOVERY_REQUIRED`, not permission to skip decision replay. This verifies
   selected authority, not bundle installation, every other structured-root kind,
   or the running executable.
 - The fixed `tool-policy` evaluator uses the RFC mode table and rule precedence,
   reproduces channel evidence from the normalized call and exact request/target,
-  and derives only direct-policy ordinary-tool grants. The entire winning
+  and derives ordinary-tool grants from direct allows or exact retained user
+  approvals over an `ask`. The entire winning
   evidence is compared, including unsafe-allow downgrades and the real winning
   rule id. Source refs, builtin denies, workspace/principal, frozen execution
   contract, retry ceiling and Run lifetime cannot be substituted.
@@ -122,8 +127,10 @@ change, without adding public milestones:
   commits a direct allow's policy item, grant, one-call reservation and Journal
   preparation together. A deny closes exactly its current call with a ref-free
   `TOOL_CALL_DENIED` result and no Journal/charge. An ask returns
-  `approval_required` evidence without grant, claim, cursor advance or mutable
-  Run change. It is **not yet** a durable WaitingSubject/control-approval reducer.
+  `approval_required` evidence plus a planned WaitingSubject/checkpoint identity
+  without grant, claim, cursor advance or mutable Run change. The trusted caller
+  then quiesces the worker and commits `waitForToolApproval`; ask detection alone
+  is not permission to leave a worker alive while showing an approval prompt.
 - `claimTool` independently reproduces the grant, then permanently claims only
   the current exact request under the live lease, revision, time fence, expiry
   and attempt ceiling. Generic StateStore claim/settlement methods cannot bypass
@@ -150,8 +157,52 @@ authority and retirement evidence, restart, and transaction fault injection.
 The containment/snapshot fixtures are offline records, not actual OS inspection
 or proof that a tool, broker, sandbox or release bundle is qualified.
 
-Gate B still needs trusted builtin/broker execution, durable approval and
-user-input/repair/child projections. Existing attempts are not silently retried.
+### Durable ordinary-tool approval
+
+The loaded Run adds only two mutators: `waitForToolApproval` and `approveTool`.
+They operate on the current SQLite cut and the same fixed policy, request,
+normalized call and ordered frontier. No caller-selected grant, parse, result,
+budget charge, generic wait clear or legacy callback is accepted.
+
+- `waitForToolApproval` consumes the exact planned wait and, if a worker exists,
+  current-inspector containment death plus snapshot proof. The workspace must
+  equal the existing ready checkpoint: asking cannot adopt unaccounted edits.
+  Generation seal, worker retirement, unchanged context/checkpoint and the
+  revision-checked waiting Run commit together. A worker-free queued Run can
+  wait without another seal. Competing reserved/preactivated workers prevent
+  the commit; the owning launch reducer must close them first.
+- `approveTool` authenticates the local in-process channel and principal, then
+  validates the exact revision/wait/frontier and canonical `run.approve` request.
+  It commits the ApprovalDecision, policy item, optional grant or one denied
+  result, checkpoint, Run snapshot, event and control-request row together.
+  Allow preserves the result-less call; deny advances exactly one call. Both
+  leave the Run queued without a worker. Resume uses fresh generation/lease
+  activation, never the retired worker or an implicit tool dispatch.
+- Identical request IDs replay their original immutable response, including
+  after restart or after later progress, using a freshly authenticated channel.
+  Different request bytes conflict. Historical decisions are checked against
+  their retained channel identity and exact durable control-row/response owner;
+  old process evidence is audit history, never authentication for a new request.
+- Default TTL is one hour capped by the Run deadline; an explicit positive
+  integer TTL is capped at 24 hours and the deadline. Expiry before preparation
+  returns the same call to a new wait. After preparation but before claim,
+  `prepareTool` returns a new wait plan; committing it atomically appends a
+  State-derived `cliq-tool-grant-expiry-v1` no-dispatch failure, refunds the
+  reservation and seals the generation. The next approval uses a new grant and
+  the next zero-based Journal attempt. Once claimed, expiry cannot erase the
+  effect: completion still validates authority at claim time. There is no
+  automatic reapproval, implicit replay or result fabricated for an expired grant.
+- Recovery validates wait/decision/checkpoint ownership, same-call renewals,
+  grant lifetimes and dispatch ceilings across renewals, with approval and audit
+  refs excluded from model-visible content. Tests exercise real SQLite/CAS
+  close/reopen, fresh offline worker activation, duplicate/concurrent/stale and
+  foreign requests, all three expiry cuts, and transaction rollback including
+  the no-dispatch refund. Unknown and abandoned tools are independently reopened
+  while their result-less frontier and original workspace remain unchanged.
+
+Gate B still needs trusted builtin/broker execution and user-input/repair/child
+projections. Existing attempts are not silently retried; the one implemented
+renewal above proves that the expired preparation was never claimed.
 WP04 still owns recovery of prepared tools after worker loss, reconciliation of
 claimed-then-`unknown` tools, and authenticated manual abandonment/terminal drain;
 none of those recovery reducers is implemented here. An `unknown` or low-level
@@ -162,7 +213,8 @@ manual abandonment to terminate as cancelled with an identity-matched
 `ToolAbandonedItem`, never a fabricated result. This is an explicit fail-closed
 handoff, not a completed recovery/liveness guarantee. Actual
 tool/MCP I/O, containment implementation, the second immediately-before-I/O
-gate, control UI/protocol, scheduling, bundle installation, paid-provider
+gate, non-tool approval subjects, UDS/public control transport and UI, scheduling,
+bundle installation, paid-provider
 qualification and production cutover remain outside this change. Neither Gate B
 nor WP03 is declared complete.
 

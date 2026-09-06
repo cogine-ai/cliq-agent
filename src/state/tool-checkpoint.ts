@@ -1,7 +1,7 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { Run, RunAssemblyV1, RunSpec, SupervisorInspectorIdentityV1 } from '../kernel/types.js';
-import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
+import type { ToolCheckpointProof } from '../kernel/tool-authorization.js';
 import { exactKeys, requireEqual, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
@@ -11,8 +11,6 @@ import { readRequiredWorkerLaunch, updateWorkerLaunch } from './repositories/wor
 import { readRequiredWorkspaceGenerationByRef, updateWorkspaceGeneration } from './repositories/workspace-generations.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import type { StateOwnerContext } from './state-owner.js';
-
-type ToolPostEffectCheckpoint = NonNullable<ToolObservationV1['postEffect']>;
 
 export const toolCheckpointId = (runId: string, opId: string, attempt: number) =>
   identityHash('cliq-tool-checkpoint-v1', runId, opId, String(attempt));
@@ -26,9 +24,9 @@ type DeathEvidence = {
   observedAt: string; evidenceDigest: string;
 };
 
-/** Consume a quiesced generation's retained proof; never turn a pre-effect checkpoint or a worker boolean into post-effect truth. */
+/** Shared seal for tool completion and pre-effect approval waits. Both require exact current-inspector death and snapshot proof. */
 export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
-  run: Run; spec: RunSpec; assembly: RunAssemblyV1; checkpointId: string; observedAt: string; postEffect: ToolPostEffectCheckpoint;
+  run: Run; spec: RunSpec; assembly: RunAssemblyV1; checkpointId: string; observedAt: string; postEffect: ToolCheckpointProof;
 }) {
   const { run, spec, assembly, checkpointId, observedAt, postEffect } = input;
   if (!run.activeWorkerLaunchId) throw new TypeError('post-effect result has no owning worker launch');

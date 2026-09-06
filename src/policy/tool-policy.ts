@@ -1,6 +1,6 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
-import type { PolicyActionClass, PolicyDisposition, RunPolicySnapshotV1, ToolOperationGrantV1,
+import type { PolicyActionClass, PolicyDisposition, RunPolicySnapshotV1, ToolOperationGrantV1, ToolApprovalWait, ToolApprovalDecisionV1,
   ToolPolicyChannel, ToolPolicyChannelEvidenceV1, ToolRequestV1, ToolTargetV1 } from '../kernel/tool-authorization.js';
 import type { RunAssemblyV1 } from '../kernel/types.js';
 import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
@@ -8,6 +8,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { loadToolContracts, type ToolInputAuthority } from '../tools/input-contract.js';
 import { parseCanonicalBash } from './canonical-bash.js';
 import { exactKeys, requireEqual } from './runtime-authority.js';
+import { toolApprovalDecision } from './tool-approval.js';
 
 const CLASSES: PolicyActionClass[] = ['read', 'plan', 'write', 'exec', 'mcp', 'verifier',
   'dependency_install_scripts', 'delivery', 'child_read_only', 'child_mutating'];
@@ -151,24 +152,52 @@ export function loadToolPolicy(input: {
     requireEqual(evidence, evaluate(request, target, call, evidence.evaluatedAt), 'policy channel evidence');
     if (evidence.effectiveDisposition !== 'allow' || parseCanonicalTime(issuedAt) < parseCanonicalTime(evidence.evaluatedAt) ||
         parseCanonicalTime(expiresAt) <= parseCanonicalTime(issuedAt)) throw new TypeError('only a current direct allow can mint a tool grant');
+    const decision = { policyRef, channelEvidenceRef: canonicalSha256(evidence), channelEvidenceDigest: evidence.evidenceDigest,
+      actionClass: evidence.actionClass, requestDigest: request.requestDigest, targetDigest: request.targetDigest,
+      matchedRuleIds: evidence.matchedRuleIds, effectiveDisposition: 'allow' as const };
+    return operationGrant(request, target, issuedAt, expiresAt, { kind: 'policy_snapshot', actionClass: evidence.actionClass,
+      channelEvidenceRef: decision.channelEvidenceRef, channelEvidenceDigest: evidence.evidenceDigest,
+      matchedRuleIds: evidence.matchedRuleIds, effectiveDisposition: 'allow', decisionDigest: canonicalSha256(decision) });
+  }
+
+  function approve(request: ToolRequestV1, target: ToolTargetV1, call: ToolCallInputV1, evidence: ToolPolicyChannelEvidenceV1,
+    wait: ToolApprovalWait, decision: ToolApprovalDecisionV1, deadlineAt: string): ToolOperationGrantV1 | undefined {
+    requireEqual(evidence, evaluate(request, target, call, evidence.evaluatedAt), 'approval policy evidence');
+    requireEqual(wait, approvalWait(request, target, evidence, wait.createdFromRevision), 'approval wait');
+    requireEqual(decision, toolApprovalDecision(wait, { principalId, channelIdentityRef: decision.channelIdentityRef,
+      channelIdentityDigest: decision.channelIdentityDigest, requestId: decision.requestId,
+      expectedRunRevision: decision.expectedRunRevision, waitingOnRef: canonicalSha256(wait), decision: decision.decision,
+      ...(decision.requestedTtlMs === undefined ? {} : { ttlMs: decision.requestedTtlMs }) }, decision.createdAt, deadlineAt), 'approval decision');
+    if (decision.decision === 'deny') return undefined;
+    return operationGrant(request, target, decision.createdAt, decision.grantExpiresAt!, { kind: 'user_approval',
+      waitingSubjectRef: canonicalSha256(wait), decisionRef: canonicalSha256(decision), requestId: decision.requestId,
+      channelEvidenceRef: canonicalSha256(evidence), channelEvidenceDigest: evidence.evidenceDigest });
+  }
+
+  function approvalWait(request: ToolRequestV1, target: ToolTargetV1, evidence: ToolPolicyChannelEvidenceV1, revision: number): ToolApprovalWait {
+    if (evidence.effectiveDisposition !== 'ask' || !Number.isSafeInteger(revision) || revision < 1) throw new TypeError('only ask can create an approval wait');
+    return immutableSnapshot({ schemaVersion: 1, kind: 'approval', runId: request.runId, frontierRef: request.frontierRef,
+      createdFromRevision: revision, createdAt: evidence.evaluatedAt, subject: { kind: 'tool_call', policySubjectKind: 'ordinary_tool',
+        opId: request.opId, target: request.targetRef, batchItemId: request.batchItemId, callId: request.callId, callIndex: request.callIndex,
+        toolName: request.toolName, toolContractDigest: target.toolContractDigest, replayClass: byName.get(request.toolName)!.replayClass,
+        policyChannelEvidenceRef: canonicalSha256(evidence), policyChannelEvidenceDigest: evidence.evidenceDigest } });
+  }
+
+  function operationGrant(request: ToolRequestV1, target: ToolTargetV1, issuedAt: string, expiresAt: string,
+    provenance: ToolOperationGrantV1['provenance']): ToolOperationGrantV1 {
     const entry = byName.get(request.toolName)!;
     const retry = assembly.retry.tools.find((tool) => tool.toolName === entry.name);
     if (!retry || retry.replayClass !== entry.replayClass) throw new TypeError('tool retry authority mismatch');
     const subject: ToolOperationGrantV1['subject'] = { kind: 'tool_call', batchItemId: request.batchItemId,
       callId: request.callId, callIndex: request.callIndex, toolName: request.toolName, toolContractDigest: target.toolContractDigest,
       replayClass: entry.replayClass, policySubjectKind: 'ordinary_tool' };
-    const decision = { policyRef, channelEvidenceRef: canonicalSha256(evidence), channelEvidenceDigest: evidence.evidenceDigest,
-      actionClass: evidence.actionClass, requestDigest: request.requestDigest, targetDigest: request.targetDigest,
-      matchedRuleIds: evidence.matchedRuleIds, effectiveDisposition: 'allow' as const };
     const core = { schemaVersion: 1 as const, format: 'cliq-operation-grant-v1' as const,
       grantId: identityHash('cliq-operation-grant-v1', request.runId, request.opId, request.requestDigest, subject, issuedAt),
       principalId, runId: request.runId, policyRef, frontierRef: request.frontierRef, opId: request.opId,
       requestRef: canonicalSha256(request), requestDigest: request.requestDigest, targetRef: request.targetRef, targetDigest: request.targetDigest,
-      subject, provenance: { kind: 'policy_snapshot' as const, actionClass: evidence.actionClass,
-        channelEvidenceRef: decision.channelEvidenceRef, channelEvidenceDigest: evidence.evidenceDigest,
-        matchedRuleIds: evidence.matchedRuleIds, effectiveDisposition: 'allow' as const, decisionDigest: canonicalSha256(decision) },
+      subject, provenance,
       maxDispatchedAttempts: retry.maxDispatchedAttempts, issuedAt, expiresAt };
     return immutableSnapshot({ ...core, grantDigest: canonicalSha256(core) });
   }
-  return Object.freeze({ evaluate, grant });
+  return Object.freeze({ evaluate, grant, approvalWait, approve });
 }

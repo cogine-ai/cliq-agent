@@ -175,25 +175,44 @@ export async function createActiveFixture(
     ...channel,
     ...source
   });
-  const initial = await store.readRecoveryClosure(admitted.run.id);
+  try {
+    return { stateRoot, workspace, store, channelIdentityRef: channel.channelIdentityRef,
+      ...await activateFixtureWorker({ store, stateRoot, runId: admitted.run.id }, label, options.leaseDurationMs) };
+  } catch (error) {
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/** A fresh offline generation/worker from the current ready checkpoint, including after a control wait or restart. */
+export async function activateFixtureWorker(
+  fixture: Pick<ActiveFixture, 'store' | 'stateRoot' | 'runId'>, label: string, leaseDurationMs = 60_000
+) {
+  const { store, stateRoot, runId } = fixture;
+  const run = store.getRun(runId);
+  const initial = await store.readRecoveryClosure(runId);
+  const workspaceIdentity = await store.artifacts.readCanonical<WorkspaceIdentityV1>(store.getSession(run.sessionId).workspaceIdentityRef);
   const workspaceState = (await store.artifacts.readCanonical(
     initial.latestCheckpoint.workspaceStateRef
   )) as WorkspaceStateManifest;
+  const entries = await store.artifacts.readCanonical<WorkspaceEntryManifest>(workspaceState.entriesRef);
   const stateRootFixture = await store.artifacts.publishCanonical(
     { schemaVersion: 1, format: 'cliq-state-root-test-fixture-v1', stateRoot },
     'cliq-state-root-test-fixture-v1'
   );
-  const generationId = identityHash('cliq-workspace-generation-test-v1', admitted.run.id, label);
+  const generationId = identityHash('cliq-workspace-generation-test-v1', runId, label);
   const identity: WorkspaceGenerationIdentityV1 = {
     schemaVersion: 1,
     format: 'cliq-workspace-generation-identity-v1',
     generationId,
-    runId: admitted.run.id,
+    runId: runId,
     workspaceIdentityDigest: workspaceIdentity.identityDigest,
     sourceCheckpointId: initial.latestCheckpoint.id,
     sourceWorkspaceStateRef: initial.latestCheckpoint.workspaceStateRef,
     sourceWorkspaceStateDigest: workspaceState.stateDigest,
-    sourceTreeDigest: source.treeDigest,
+    sourceTreeDigest: entries.treeDigest,
     creationNonceDigest: digest(`${label}:generation-nonce`),
     locator: process.platform === 'linux'
       ? {
@@ -226,7 +245,7 @@ export async function createActiveFixture(
   identity.identityDigest = digestOmitting(identity, 'identityDigest');
   const generationArtifact = await store.artifacts.publishCanonical(identity, identity.format);
   const materializing = await store.registerWorkspaceGeneration({
-    runId: admitted.run.id,
+    runId: runId,
     generationRef: generationArtifact.ref,
     generationIdentityDigest: identity.identityDigest
   });
@@ -234,14 +253,14 @@ export async function createActiveFixture(
     schemaVersion: 1,
     format: 'cliq-workspace-generation-snapshot-evidence-v1',
     purpose: 'materialized_from_checkpoint',
-    runId: admitted.run.id,
+    runId: runId,
     generationRef: generationArtifact.ref,
     generationIdentityDigest: identity.identityDigest,
     checkpointId: initial.latestCheckpoint.id,
     workspaceStateRef: initial.latestCheckpoint.workspaceStateRef,
     workspaceStateDigest: workspaceState.stateDigest,
     entriesRef: workspaceState.entriesRef,
-    treeDigest: source.treeDigest,
+    treeDigest: entries.treeDigest,
     descriptorRewalkComplete: true,
     fileFsyncComplete: true,
     directoryFsyncComplete: true,
@@ -261,11 +280,11 @@ export async function createActiveFixture(
     store.artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-worker-launch-spec-test-v1', generationId,
       launchSpecDigest: canonicalSha256({ schemaVersion: 1, format: 'cliq-worker-launch-spec-test-v1', generationId }) }, 'cliq-sandbox-launch-spec-v1')
   ]);
-  const launchId = identityHash('cliq-worker-launch-test-v1', admitted.run.id, label);
+  const launchId = identityHash('cliq-worker-launch-test-v1', runId, label);
   const reserved = await store.reserveWorkerLaunch({
     launchId,
-    runId: admitted.run.id,
-    expectedRunRevision: admitted.run.revision,
+    runId: runId,
+    expectedRunRevision: run.revision,
     spawnNonceDigest: digest(`${label}:spawn`),
     activationNonceDigest: digest(`${label}:activate`),
     workspaceGenerationRef: generationArtifact.ref,
@@ -276,7 +295,7 @@ export async function createActiveFixture(
   const containment = await store.artifacts.publishCanonical({ schemaVersion: 1, planRef: plan.ref,
     sandboxLaunchSpecRef: launchSpec.ref,
     sandboxLaunchSpecDigest: (await store.artifacts.readCanonical<{ launchSpecDigest: string }>(launchSpec.ref)).launchSpecDigest,
-    owner: { kind: 'worker_activation', runId: admitted.run.id, intendedLeaseEpoch: 1, workerLaunchId: launchId },
+    owner: { kind: 'worker_activation', runId: runId, intendedLeaseEpoch: run.leaseEpoch + 1, workerLaunchId: launchId },
     filesystemBinding: { kind: 'run-generation', generationRef: generationArtifact.ref }, launchNonceDigest: reserved.spawnNonceDigest,
     backend: { kind: 'linux', pidNamespaceReservationId: `${label}-namespace`, pidNamespaceId: 'pid:[test]',
       cgroupPath: '/cliq/test', cgroupId: `${label}-cgroup`, namespaceInitStartToken: 'test-init', subreaperStartToken: 'test-subreaper' },
@@ -290,7 +309,7 @@ export async function createActiveFixture(
     processStartToken: `${process.pid}:test`,
     spawnNonceDigest: reserved.spawnNonceDigest,
     activationNonceDigest: reserved.activationNonceDigest,
-    intendedLeaseEpoch: 1,
+    intendedLeaseEpoch: run.leaseEpoch + 1,
     launchId,
     supervisorInstanceId: reserved.supervisorInstanceId,
     processContainmentRef: containment.ref
@@ -301,35 +320,11 @@ export async function createActiveFixture(
     workerIdentityDigest: workerArtifact.ref,
     processContainmentRef: containment.ref
   });
-  let activated: ReturnType<StateStore['activateWorkerLease']>;
-  try {
-    activated = store.activateWorkerLease({
-      launchId,
-      expectedRunRevision: admitted.run.revision,
-      expectedGenerationRowVersion: preactivatedGeneration.rowVersion,
-      leaseDurationMs: options.leaseDurationMs ?? 60_000
-    });
-  } catch (error) {
-    await store.close();
-    await rm(stateRoot, { recursive: true, force: true });
-    await rm(workspace, { recursive: true, force: true });
-    throw error;
-  }
-  return {
-    stateRoot,
-    workspace,
-    store,
-    channelIdentityRef: channel.channelIdentityRef,
-    runId: admitted.run.id,
-    runRevision: activated.run.revision,
-    generationId,
-    generationRef: generationArtifact.ref,
-    generationRowVersion: activated.generation.rowVersion,
-    launchId,
-    leaseVersion: activated.launch.leaseVersion,
-    leaseEpoch: activated.run.leaseEpoch,
-    workerIdentityDigest: workerArtifact.ref
-  };
+  const activated = store.activateWorkerLease({ launchId, expectedRunRevision: run.revision,
+    expectedGenerationRowVersion: preactivatedGeneration.rowVersion, leaseDurationMs });
+  return { runId, runRevision: activated.run.revision, generationId, generationRef: generationArtifact.ref,
+    generationRowVersion: activated.generation.rowVersion, launchId, leaseVersion: activated.launch.leaseVersion,
+    leaseEpoch: activated.run.leaseEpoch, workerIdentityDigest: workerArtifact.ref };
 }
 
 export async function disposeFixture(fixture: ActiveFixture): Promise<void> {

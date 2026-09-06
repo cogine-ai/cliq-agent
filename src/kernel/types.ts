@@ -1446,7 +1446,8 @@ export type RecoveryClosureV1 = {
 
 export type ControlResultV1 =
   | { method: 'session.create'; snapshot: SessionSnapshotV1 }
-  | { method: 'run.submit'; snapshot: RunSnapshotV1 };
+  | { method: 'run.submit'; snapshot: RunSnapshotV1 }
+  | { method: 'run.approve'; snapshot: RunSnapshotV1; decisionRef: ArtifactRef };
 
 export type ControlApplicationResponseV1 =
   | { protocolVersion: 1; ok: true; result: ControlResultV1 }
