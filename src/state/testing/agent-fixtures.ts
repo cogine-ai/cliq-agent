@@ -76,7 +76,9 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
     priceTable.value.tableDigest = priceTableDigest(priceTable.value);
     priceTable.ref = canonicalSha256(priceTable.value);
     if (authority.assembly.provider.pricing.kind !== 'trusted_price_table') throw new Error('agent fixture requires priced model authority');
-    Object.assign(authority.assembly.provider.pricing, { priceTableRef: priceTable.ref, priceTableDigest: priceTable.value.tableDigest, validThrough });
+    Object.assign(authority.assembly.provider.pricing, { priceTableRef: priceTable.ref, priceTableDigest: priceTable.value.tableDigest,
+      maxRunCostMicros: budgets?.costMicros ?? DEFAULT_RUN_BUDGETS.costMicros, validThrough });
+    await store.artifacts.publishCanonical(priceTable.value, priceTable.value.format);
     reseal(authority);
     return (await store.artifacts.publishCanonical(authority.assembly, authority.assembly.format)).ref;
   }, ...(options.mode === undefined ? {} : { policy: async (store, identity) => {

@@ -41,6 +41,7 @@ const TYPED_RUNTIME_SOURCES = [
   'state/agent-recovery.ts',
   'state/input-recovery.ts',
   'state/stop-recovery.ts',
+  'state/resource-stop.ts',
   'state/continuation-commit.ts',
   'state/tool-cut.ts',
   'state/tool-checkpoint.ts',

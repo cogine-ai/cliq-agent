@@ -5,6 +5,7 @@ import { estimatePromptTokens, estimateTextTokens, projectModelVisiblePrompt,
   type NormalPromptMessageV1, type NormalPromptProjectionV1 } from '../model/request.js';
 
 export type ContextItem = { itemSeq: number; itemRef: string; item: ContinuationItem };
+type ContextProjection = Pick<NormalPromptProjectionV1, 'messages' | 'tools'> & Partial<Pick<NormalPromptProjectionV1, 'projectionDigest'>>;
 
 /** The logical source identity, also used for excluded-control segments. */
 export function contextSourceDigest(items: readonly ContextItem[]): string {
@@ -64,7 +65,7 @@ export function validateContextItems(context: ContextManifest, items: readonly C
   if (through !== items.length) throw new TypeError('context partition has a missing suffix');
 }
 
-function segmentMessages(segment: ContextSegment, items: readonly ContextItem[], projection: NormalPromptProjectionV1) {
+function segmentMessages(segment: ContextSegment, items: readonly ContextItem[], projection: ContextProjection) {
   const ids = new Set(segment.kind === 'raw'
     ? items.slice(segment.fromItemSeq - 1, segment.throughItemSeq).map(({ item }) => item.itemId)
     : segment.kind === 'summary'
@@ -73,7 +74,7 @@ function segmentMessages(segment: ContextSegment, items: readonly ContextItem[],
   return projection.messages.filter((message) => ids.has('sourceItemId' in message ? message.sourceItemId : message.sourceId));
 }
 
-function visibleMessages(messages: NormalPromptMessageV1[], projection: NormalPromptProjectionV1) {
+function visibleMessages(messages: NormalPromptMessageV1[], projection: ContextProjection) {
   return projectModelVisiblePrompt({ ...projection, messages: [...messages].sort((a, b) => a.index - b.index), tools: [] }, 'text-only').messages;
 }
 
@@ -110,7 +111,7 @@ function closedBoundaries(items: readonly ContextItem[]): Set<number> {
 
 export function planContextCompaction(input: {
   context: ContextManifest; contextRef: string; items: readonly ContextItem[];
-  projection: NormalPromptProjectionV1; policy: RunAssemblyV1['context']; createdAt: string;
+  projection: ContextProjection; policy: RunAssemblyV1['context']; createdAt: string;
 }) {
   const { context, contextRef, items, projection, policy } = input;
   parseCanonicalTime(input.createdAt);
@@ -147,7 +148,7 @@ export function planContextCompaction(input: {
     const fixedTokens = nextPromptTokens - contentTokens.reduce((sum, value) => sum + value, 0);
     return { kind: 'exhausted' as const, evidence: {
       schemaVersion: 1, format: 'cliq-context-window-exhausted-evidence-v1', runId: context.runId,
-      contextManifestRef: contextRef, promptProjectionDigest: projection.projectionDigest,
+      contextManifestRef: contextRef, ...(projection.projectionDigest ? { promptProjectionDigest: projection.projectionDigest } : {}),
       nextPromptTokens, triggerThresholdTokens: policy.triggerThresholdTokens, hardPromptTokens: policy.hardPromptTokens,
       protectedFromItemSeq: protectedFrom, protectedTokens: fixedTokens + recentTokens,
       sourceInputTokenCap: policy.sourceInputTokenCap, summaryTokenCap: policy.summaryTokenCap
@@ -163,4 +164,15 @@ export function planContextCompaction(input: {
     promptEnvelopeDigest: policy.compactionPromptEnvelopeDigest, promptOverheadTokens: policy.compactionEnvelopeTokens,
     sourceInputTokenCap: policy.sourceInputTokenCap, sourceProjectedTokens: selected.sourceProjectedTokens, createdAt: input.createdAt };
   return { kind: 'compact' as const, plan, sourceContextUtf8: selected.sourceContextUtf8 };
+}
+
+/** Replace only the selected prefix; its owning reducer separately appends the control item. */
+export function replaceCompactedPrefix(context: ContextManifest, plan: RunContextCompactionPlan,
+  summary: { itemId: string; summaryRef: string; summaryDigest: string }): ContextManifest {
+  const next = structuredClone(context);
+  next.segments = [{ kind: 'summary', fromItemSeq: 1, throughItemSeq: plan.compactThroughItemSeq,
+    compactionItemId: summary.itemId, summaryRef: summary.summaryRef, summaryDigest: summary.summaryDigest,
+    sourceItemsDigest: plan.sourceItemsDigest, preservedItemRefs: [] },
+    ...next.segments.filter((segment) => segment.fromItemSeq > plan.compactThroughItemSeq)];
+  return next;
 }

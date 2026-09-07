@@ -10,7 +10,7 @@ import { immutableSnapshot } from '../../model/immutable.js';
 import type { ResolveToolInput } from '../../model/attempt.js';
 import { loadToolContracts, type ToolInputAuthority } from '../../tools/input-contract.js';
 import { compileOutputSchema } from '../../tools/input-schema.js';
-import { loadToolPolicy, toolOperationId } from '../../policy/tool-policy.js';
+import { loadToolPolicy, planToolRequest } from '../../policy/tool-policy.js';
 import { toolApprovalCheckpointId, toolApprovalDecision, toolApprovalRequestDigest, type ToolApprovalInput } from '../../policy/tool-approval.js';
 import { exactKeys, requireEqual, verifyToolRuntimeAuthority, type ReleaseTrustKey, type RuntimeBundleManifest } from '../../policy/runtime-authority.js';
 import { readCanonicalArtifact } from '../agent-context.js';
@@ -127,20 +127,9 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   function requestFor(selected: ToolCut) {
     const call = selected.call;
     const entry = contracts.find((entry) => entry.name === call.toolName)!;
-    const { inputSchema: _schema, ...contract } = entry;
-    const targetCore = { schemaVersion: 1 as const, format: 'cliq-tool-target-v1' as const, runId,
-      workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentityDigest: workspace.identityDigest,
-      toolManifestRef: assembly.tools.manifestRef, toolManifestDigest: assembly.tools.manifestDigest,
-      toolName: call.toolName, toolContractDigest: canonicalSha256(contract), execution: entry.execution };
-    const target: ToolTargetV1 = { ...targetCore, targetDigest: canonicalSha256(targetCore) };
-    const opId = toolOperationId(runId, selected.batch.itemId, call.callId);
-    const core = { schemaVersion: 1 as const, format: 'cliq-tool-request-v1' as const, runId, opId,
-      frontierRef: selected.run.frontierRef!, assemblyRef: spec.assemblyRef, batchItemId: selected.batch.itemId,
-      callId: call.callId, callIndex: call.index, toolName: call.toolName, inputRef: canonicalSha256(call), inputDigest: call.inputDigest,
-      targetRef: canonicalSha256(target), targetDigest: target.targetDigest,
-      ...(entry.execution.kind === 'mcp' ? { idempotencyKey: identityHash('cliq-mcp-tool-idempotency-v1', runId, opId,
-        entry.execution.registryRevisionRef, entry.execution.serverToolName) } : {}) };
-    return { request: { ...core, requestDigest: canonicalSha256(core) } satisfies ToolRequestV1, target, entry };
+    return planToolRequest({ runId, frontierRef: selected.run.frontierRef!, batchItemId: selected.batch.itemId,
+      assemblyRef: spec.assemblyRef, assembly, workspaceIdentityRef: session.workspaceIdentityRef,
+      workspaceIdentityDigest: workspace.identityDigest, entry, call });
   }
   async function verifyGrant(grantRef: string) {
     const evaluator = requirePolicy();
