@@ -19,7 +19,8 @@ Gate A landed in PR #489 (`a153d47`); the model/context continuation landed in
 PR #490 (`c29179f`), and direct tool-input contracts landed in PR #491
 (`eb93f46`), and canonical tool policy/continuation landed in PR #492
 (`04b2ba6`), followed by durable ordinary-tool approval in PR #494 (`3b0de21`)
-and durable user input in PR #495 (`fafc940`).
+and durable user input in PR #495 (`fafc940`), then model retry eligibility in
+PR #496 (`b1f7ca6`).
 Gate B also includes the minimum WP01
 companion work needed to exercise the real SQLite/CAS continuation. The user
 approved that scope on 2026-09-05 and the minimum WP03 canonical tool
@@ -324,6 +325,62 @@ Regression tests cross real SQLite/CAS for exact delay boundaries, zero-dispatch
 replacements, racing preparations, rollback, full charges and budget exhaustion,
 received rejections, late result rejection, corrupted retry history/request,
 compaction, and close/reopen with fresh offline worker activation.
+
+### Durable root-agent cancellation and deadline stop
+
+The next integration closes one lifecycle, from authenticated `run.cancel` or
+canonical deadline expiry to a quiescent terminal Run and its Session outcome.
+It reuses the loaded Run, existing control rows, Journal, worker seal and
+continuation commit. There is no second lifecycle, generic Run patch, timer,
+scheduler, new tool executor or compatibility bridge.
+
+- `cancelRun` authenticates the in-process channel and owning principal,
+  checks the exact revision, and atomically retains the RFC user StopIntent,
+  monotonic cancellation fence, immutable response, control row and event.
+  Same request bytes replay the original snapshot through a freshly
+  authenticated channel, including after terminal/restart; different bytes
+  conflict. Distinct requests racing one revision have one winner.
+- `expireRun` derives only the RFC deadline intent from the canonical clock
+  and immutable deadline. User cancellation outranks deadline; equal
+  precedence keeps the first committed intent. These reducers implement only
+  those two evidence branches; they cannot select arbitrary reasons or claim
+  that other stop origins have been implemented.
+- Both preserve the current frontier and any input/approval wait while
+  fencing productive work. The original worker may still be alive, and a
+  positively returned claimed model/tool result may still settle against the
+  current revision. A stopped Run does not regain dispatch authority when
+  that result advances its continuation or seals its worker.
+- `commitTerminalStop` independently revalidates the current cut. A live
+  worker requires the existing signed current-inspector death/snapshot proof
+  over the **accounted** workspace; a queued/waiting Run revalidates its
+  historical seals against their owning inspector epochs. Unaccounted edits,
+  pending launches, unsealed generations and unresolved dispatches block it.
+- In one transaction, terminal drain refunds only preparations that were
+  never claimed, appends every undispatched suffix call's ordered cancelled
+  result, writes the context/checkpoint and exact stop-derived TerminalDetail,
+  retires the worker, clears frontier/wait fields, and commits terminal truth.
+  Claimed completed work keeps its real result and full charge. Cancelled
+  calls create no fake Journal dispatch or answer, and their model content
+  contains no control/authorization refs.
+- The same transaction appends exactly one root `SessionRunTerminalItem`,
+  extends its Session projection by one uncoalesced raw segment, and increments
+  the Session cursor/revision. Concurrent roots preserve both outcomes in
+  commit order. Retrying a committed terminal operation only reads its verified
+  result; it cannot append another Session item. Recovery walks the reason,
+  control owner, call closures, refunds, historical worker proofs and Session
+  projection, not display events.
+
+This implements root agent Runs at the existing agent/tool/input/ordinary
+approval frontiers. Child Runs/allocations, MCP-server lifetime closure,
+pending-launch recovery, unknown/manual/workspace-rollback reconciliation,
+runtime/integrity/budget-counter/verification stop evidence, candidate/results,
+UDS/UI, scheduling and production composition remain their owning packages'
+work. An unknown model attempt from #496 still cannot terminalize or be
+refunded without authenticated dispatch-closure evidence. Unsupported cuts
+fail closed; neither Gate B nor WP04 is complete.
+
+Tests use real SQLite/CAS and offline signed containment fixtures, not actual
+process termination, broker revocation or production sandbox qualification.
 
 The old Session/`ModelAction` runner remains isolated until WP06's single
 Kernel Cut. There is no typed-to-legacy bridge. WP06 removes the old runner,

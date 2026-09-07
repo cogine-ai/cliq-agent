@@ -60,11 +60,16 @@ export async function validateUserInputRecovery(cut: InputCut) {
     if (matches.length > 1) throw new TypeError('input request has duplicate replies');
     const reply = matches[0];
     const payload = reply && await readCanonicalArtifact<UserInputPayloadV1>(artifacts, reply.inputRef);
-    const waitRef = payload?.waitingSubjectRef ?? (run.waitingReason === 'input' ? run.waitingOnRef : undefined);
-    if (!waitRef) throw new TypeError('input request has no retained wait owner');
-    const wait = await readCanonicalArtifact<InputWait>(artifacts, waitRef);
     const frontier: RunFrontier = { schemaVersion: 1, kind: 'tool', batchItemId: item.batchItemId,
       orderedCallIds: batch!.kind === 'assistant_tool_batch' ? batch!.calls.map((call) => call.callId) : [], nextCallIndex: item.index };
+    const stopped = run.stopIntentRef && ['failed', 'cancelled'].includes(run.status) && !reply;
+    const historicWaits = stopped ? cut.checkpoints.filter((checkpoint) => checkpoint.runItemSeq === position + 1).map((checkpoint) => ({ checkpoint,
+      proof: planInputWait({ id: run.id, revision: checkpoint.basedOnRunRevision, frontierRef: canonicalSha256(frontier) }, item.batchItemId, input, item.createdAt)
+    })).filter(({ checkpoint, proof }) => checkpoint.id === proof.checkpointId) : [];
+    if (stopped && historicWaits.length !== 1) throw new TypeError('stopped input has no unique retained wait checkpoint');
+    const waitRef = payload?.waitingSubjectRef ?? (run.waitingReason === 'input' ? run.waitingOnRef : historicWaits[0]?.proof.waitingOnRef);
+    if (!waitRef) throw new TypeError('input request has no retained wait owner');
+    const wait = await readCanonicalArtifact<InputWait>(artifacts, waitRef);
     const proof = planInputWait({ id: run.id, revision: wait.createdFromRevision, frontierRef: canonicalSha256(frontier) }, item.batchItemId, input, item.createdAt);
     requireEqual(wait, proof.wait, 'retained input wait');
     requireEqual(item, proof.item, 'retained input request');
@@ -80,8 +85,15 @@ export async function validateUserInputRecovery(cut: InputCut) {
         checkpoint.runItemSeq !== position + 1 || prior.runItemSeq !== position || checkpoint.journalSeq !== prior.journalSeq ||
         checkpoint.workspaceStateRef !== prior.workspaceStateRef) throw new TypeError('input wait has no atomic unchanged-workspace checkpoint');
     if (!reply || !payload) {
+      if (stopped) {
+        const result = items[position + 1];
+        if (result?.kind !== 'tool_result' || result.outcome !== 'cancelled' || result.batchItemId !== item.batchItemId ||
+            result.callId !== item.callId || result.index !== item.index) throw new TypeError('stopped input has no ordered cancellation result');
+        recovered.push({ proof, checkpoint });
+        continue;
+      }
       if (run.status !== 'waiting' || run.waitingReason !== 'input' || run.waitingOnRef !== waitRef || run.activeWorkerLaunchId ||
-          run.revision !== wait.createdFromRevision + 1 || run.latestCheckpointId !== checkpoint.id || run.frontierRef !== wait.frontierRef ||
+          (run.stopIntentRef ? run.revision < wait.createdFromRevision + 1 : run.revision !== wait.createdFromRevision + 1) || run.latestCheckpointId !== checkpoint.id || run.frontierRef !== wait.frontierRef ||
           run.nextStep !== 'tool' || position !== items.length - 1) throw new TypeError('unanswered input does not own the current worker-free wait');
       recovered.push({ proof, checkpoint });
       continue;

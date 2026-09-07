@@ -14,6 +14,7 @@ import type {
 } from '../kernel/types.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { validateAgentRecovery } from './agent-recovery.js';
+import { validateStopRecovery } from './stop-recovery.js';
 import {
   decodeAdmittedContext,
   decodeBudgetSettlement,
@@ -689,7 +690,7 @@ export async function readRecoveryClosure(
   await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
   await validateChildAllocationArtifacts(artifacts, childAllocations);
 
-  return {
+  const closure: RecoveryClosureV1 = {
     runSpec,
     run,
     latestCheckpoint,
@@ -699,4 +700,7 @@ export async function readRecoveryClosure(
     workspaceGenerations,
     childAllocations
   };
+  try { await validateStopRecovery(driver, artifacts, closure); }
+  catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`); }
+  return closure;
 }
