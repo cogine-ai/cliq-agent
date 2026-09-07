@@ -20,9 +20,11 @@ const TYPED_RUNTIME_SOURCES = [
   'kernel/continuation.ts',
   'kernel/tool-authorization.ts',
   'kernel/user-input.ts',
+  'kernel/stop.ts',
   'runtime/continuation.ts',
   'runtime/model-retry.ts',
   'runtime/user-input.ts',
+  'runtime/stop.ts',
   'runtime/context-compaction.ts',
   'tools/input-contract.ts',
   'tools/input-schema.ts',
@@ -38,12 +40,14 @@ const TYPED_RUNTIME_SOURCES = [
   'state/agent-context.ts',
   'state/agent-recovery.ts',
   'state/input-recovery.ts',
+  'state/stop-recovery.ts',
   'state/continuation-commit.ts',
   'state/tool-cut.ts',
   'state/tool-checkpoint.ts',
   'state/tool-recovery.ts',
   'state/reducers/agent.ts',
   'state/reducers/input.ts',
+  'state/reducers/stop.ts',
   'state/reducers/tool.ts'
 ] as const;
 

@@ -252,6 +252,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     /** Rehydrate the exact durable attempt; a dispatch_claimed/settled entry is never permission to resend it. */
     readModelAttempt: stateOperation('RECOVERY_REQUIRED', async () => {
       const closure = await readRecoveryClosure(driver, artifacts, runId);
+      if (!closure.run.frontierRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal Run has no model frontier');
       const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, closure.run.frontierRef!);
       if (frontier.kind !== 'agent') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run is not at a model frontier');
       const opId = modelOpId(runId, frontier);

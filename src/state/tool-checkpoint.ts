@@ -1,6 +1,6 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
-import type { Run, RunAssemblyV1, RunSpec, SupervisorInspectorIdentityV1 } from '../kernel/types.js';
+import type { Run, RunAssemblyV1, RunSpec, SupervisorInspectorIdentityV1, WorkerLaunch, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import type { ToolCheckpointProof } from '../kernel/tool-authorization.js';
 import { exactKeys, requireEqual, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -10,7 +10,8 @@ import { KernelStorageError } from './errors.js';
 import { readRequiredWorkerLaunch, updateWorkerLaunch } from './repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef, updateWorkspaceGeneration } from './repositories/workspace-generations.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
-import type { StateOwnerContext } from './state-owner.js';
+import { readStateOwner, type StateOwnerContext } from './state-owner.js';
+import { readCheckpoint } from './rows.js';
 
 export const toolCheckpointId = (runId: string, opId: string, attempt: number) =>
   identityHash('cliq-tool-checkpoint-v1', runId, opId, String(attempt));
@@ -24,18 +25,12 @@ type DeathEvidence = {
   observedAt: string; evidenceDigest: string;
 };
 
-/** Shared seal for tool completion and pre-effect approval waits. Both require exact current-inspector death and snapshot proof. */
-export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
+async function readCheckpointProof(artifacts: ArtifactCatalog, owner: Pick<StateOwnerContext,
+  'supervisorInstanceId' | 'ownerEpoch' | 'processIdentityRef' | 'processIdentityDigest' | 'stateLockIdentityRef' | 'stateLockIdentityDigest'>, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; checkpointId: string; observedAt: string; postEffect: ToolCheckpointProof;
+  launch: WorkerLaunch; generation: WorkspaceGenerationStateV1;
 }) {
-  const { run, spec, assembly, checkpointId, observedAt, postEffect } = input;
-  if (!run.activeWorkerLaunchId) throw new TypeError('post-effect result has no owning worker launch');
-  const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId);
-  const generation = readRequiredWorkspaceGenerationByRef(driver, launch.workspaceGenerationRef);
-  if (launch.phase !== 'activated' || launch.generationWriteState !== 'checkpointing' || !launch.quiesceId ||
-      generation.phase !== 'checkpointing' || generation.quiesceId !== launch.quiesceId ||
-      generation.activeWorkerLaunchId !== launch.launchId || generation.leaseEpoch !== run.leaseEpoch ||
-      launch.leaseEpoch !== run.leaseEpoch) throw new KernelStorageError('LEASE_FENCED', 'tool result requires a quiesced checkpointing generation');
+  const { run, spec, assembly, checkpointId, observedAt, postEffect, launch, generation } = input;
   const state = decodeWorkspaceState(await readCanonicalArtifact(artifacts, postEffect.workspaceStateRef));
   const entries = decodeWorkspaceEntries(await readCanonicalArtifact(artifacts, state.entriesRef));
   const source = decodeSourceManifest(await readCanonicalArtifact(artifacts, spec.baseWorkspaceManifestRef));
@@ -62,7 +57,7 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
     throw new TypeError('tool checkpoint has no exact post-effect containment retirement proof');
   }
   parseCanonicalTime(death.observedAt);
-  requireEqual(death.owner, { kind: 'worker_activation', runId: run.id, intendedLeaseEpoch: run.leaseEpoch, workerLaunchId: launch.launchId }, 'retired worker owner');
+  requireEqual(death.owner, { kind: 'worker_activation', runId: run.id, intendedLeaseEpoch: launch.leaseEpoch, workerLaunchId: launch.launchId }, 'retired worker owner');
   const containment = await readCanonicalArtifact<{
     schemaVersion: number; planRef: string; sandboxLaunchSpecRef: string; sandboxLaunchSpecDigest: string;
     owner: DeathEvidence['owner']; filesystemBinding: unknown; launchNonceDigest: string;
@@ -110,7 +105,24 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
     [postEffect.snapshotEvidenceRef, snapshot.format], [postEffect.retirementEvidenceRef, 'cliq-process-containment-death-evidence-v1'],
     [death.inspectorIdentityRef, 'cliq-supervisor-inspector-identity-v1']
   ].map(([ref, format]) => artifacts.describe(ref!, 'application/json', format!)));
+  return { metadata, snapshot, deathObservedAt: death.observedAt };
+}
+
+/** Shared worker seal for tool completion, control waits and terminal stop. Only this path accepts current authority for mutation. */
+export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
+  run: Run; spec: RunSpec; assembly: RunAssemblyV1; checkpointId: string; observedAt: string; postEffect: ToolCheckpointProof;
+}) {
+  const { run, postEffect } = input;
+  if (!run.activeWorkerLaunchId) throw new TypeError('post-effect result has no owning worker launch');
+  const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId);
+  const generation = readRequiredWorkspaceGenerationByRef(driver, launch.workspaceGenerationRef);
+  if (launch.phase !== 'activated' || launch.generationWriteState !== 'checkpointing' || !launch.quiesceId ||
+      generation.phase !== 'checkpointing' || generation.quiesceId !== launch.quiesceId ||
+      generation.activeWorkerLaunchId !== launch.launchId || generation.leaseEpoch !== run.leaseEpoch ||
+      launch.leaseEpoch !== run.leaseEpoch) throw new KernelStorageError('LEASE_FENCED', 'tool result requires a quiesced checkpointing generation');
+  const { metadata, snapshot, deathObservedAt } = await readCheckpointProof(artifacts, owner, { ...input, launch, generation });
   return { metadata, commit(connection: SqliteConnection, currentRun: Run, createdAt: string) {
+    if (parseCanonicalTime(createdAt) - parseCanonicalTime(deathObservedAt) > 5_000) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale; reobserve containment death');
     if (createdAt < snapshot.observedAt || currentRun.activeWorkerLaunchId !== launch.launchId || currentRun.leaseEpoch !== run.leaseEpoch ||
         canonicalSha256(readRequiredWorkerLaunch(connection, launch.launchId)) !== canonicalSha256(launch) ||
         canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef)) !== canonicalSha256(generation)) {
@@ -127,4 +139,24 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
       retiredAt: createdAt, retirementEvidenceRef: postEffect.retirementEvidenceRef });
     connection.prepare("UPDATE runs SET status = 'queued', active_worker_launch_id = NULL WHERE id = ?").run(run.id);
   } };
+}
+
+/** Historical seal validation, never authority to retire or adopt an old worker. */
+export async function validateRetainedWorkerSeal(driver: SqliteDriver, artifacts: ArtifactCatalog, input: {
+  run: Run; spec: RunSpec; assembly: RunAssemblyV1; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1;
+}) {
+  const { launch, generation } = input;
+  if (launch.phase !== 'retired' || launch.generationWriteState !== 'sealed' || !launch.retirementEvidenceRef || !launch.activatedAt || !launch.retiredAt ||
+      generation.phase !== 'sealed' || !generation.snapshotEvidenceRef) throw new TypeError('stop has no positively sealed historical worker');
+  const snapshot = decodeWorkspaceGenerationSnapshotEvidence(await readCanonicalArtifact(artifacts, generation.snapshotEvidenceRef));
+  const checkpoint = readCheckpoint(driver, snapshot.checkpointId);
+  if (checkpoint.runId !== input.run.id || checkpoint.workspaceStateRef !== snapshot.workspaceStateRef || checkpoint.createdAt !== launch.retiredAt ||
+      snapshot.observedAt > launch.retiredAt) throw new TypeError('retired worker has no owning sealed checkpoint');
+  const death = await readCanonicalArtifact<DeathEvidence>(artifacts, launch.retirementEvidenceRef);
+  const inspector = await readCanonicalArtifact<SupervisorInspectorIdentityV1>(artifacts, death.inspectorIdentityRef);
+  const owner = readStateOwner(driver, inspector.stateOwnerEpoch);
+  if (!owner || owner.acquiredAt > death.observedAt || (owner.state === 'terminal' && owner.releasedAt < death.observedAt)) throw new TypeError('historical inspector was not the state owner at retirement');
+  const { deathObservedAt } = await readCheckpointProof(artifacts, owner, { ...input, checkpointId: checkpoint.id, observedAt: launch.activatedAt,
+    postEffect: { workspaceStateRef: checkpoint.workspaceStateRef, snapshotEvidenceRef: generation.snapshotEvidenceRef, retirementEvidenceRef: launch.retirementEvidenceRef } });
+  if (parseCanonicalTime(launch.retiredAt) - parseCanonicalTime(deathObservedAt) > 5_000) throw new TypeError('historical retirement proof was stale at commit');
 }

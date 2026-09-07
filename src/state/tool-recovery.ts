@@ -78,7 +78,7 @@ export async function validateToolRecovery(input: {
       throw new TypeError('approval wait retains an execution worker or lacks its exact subject');
     }
     const { wait, checkpoint } = await approvalWait(run.waitingOnRef);
-    if (run.revision !== wait.createdFromRevision + 1 || run.frontierRef !== wait.frontierRef || run.latestCheckpointId !== checkpoint.id) {
+    if ((run.stopIntentRef ? run.revision < wait.createdFromRevision + 1 : run.revision !== wait.createdFromRevision + 1) || run.frontierRef !== wait.frontierRef || run.latestCheckpointId !== checkpoint.id) {
       throw new TypeError('waiting Run substitutes its revision, frontier or Checkpoint');
     }
   }
@@ -159,7 +159,11 @@ export async function validateToolRecovery(input: {
         entry.timestamp < grant.issuedAt || entry.timestamp >= grant.expiresAt)) throw new TypeError('tool grant claim lifetime or use count mismatch');
     if (prepared.timestamp < grant.issuedAt || prepared.timestamp >= grant.expiresAt) throw new TypeError('tool preparation uses an expired grant');
     const failed = attempts.find((entry) => entry.attempt === prepared.attempt && entry.phase === 'failed');
-    if (failed) {
+    if (failed && run.stopIntentRef && failed.errorRef === run.stopIntentRef) {
+      if (!['failed', 'cancelled'].includes(run.status) || failed.timestamp !== run.updatedAt ||
+          claims.some((claim) => claim.attempt === prepared.attempt)) throw new TypeError('stop refund is not an atomic undispatched terminal closure');
+      requireEqual(failed.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, 'stop no-dispatch refund');
+    } else if (failed) {
       const expiry = await readCanonicalArtifact<ToolGrantExpiryV1>(artifacts, failed.errorRef!);
       const proof = await approvalWait(expiry.waitingSubjectRef);
       requireEqual(proof.request, request, 'renewed approval request');

@@ -89,6 +89,9 @@ export function appendRunStateEvent(connection: SqliteConnection, run: Run, occu
   if (run.frontierRef !== undefined) event.frontierRef = run.frontierRef;
   if (run.waitingReason !== undefined) event.waitingReason = run.waitingReason;
   if (run.waitingOnRef !== undefined) event.waitingOnRef = run.waitingOnRef;
+  if (run.resultRef !== undefined) event.resultRef = run.resultRef;
+  if (run.terminalReason !== undefined) event.terminalReason = run.terminalReason;
+  if (run.terminalDetailRef !== undefined) event.terminalDetailRef = run.terminalDetailRef;
   insertRunEvent(connection, event);
 }
 

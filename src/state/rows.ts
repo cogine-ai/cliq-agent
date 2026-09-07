@@ -177,16 +177,17 @@ export function readControlRequest(
   principalId: string,
   method: string,
   requestId: string
-): { requestDigest: string; responseRef: string } | undefined {
+): { requestDigest: string; responseRef: string; channelIdentityRef: string; channelIdentityDigest: string; committedAt: string } | undefined {
   const row = connection
     .prepare(
-      `SELECT request_digest, response_ref FROM control_requests
+      `SELECT request_digest, response_ref, channel_identity_ref, channel_identity_digest, committed_at FROM control_requests
        WHERE principal_id = ? AND method = ? AND request_id = ?`
     )
-    .get<{ request_digest: string; response_ref: string }>(principalId, method, requestId);
+    .get<{ request_digest: string; response_ref: string; channel_identity_ref: string; channel_identity_digest: string; committed_at: string }>(principalId, method, requestId);
   return row === undefined
     ? undefined
-    : { requestDigest: row.request_digest, responseRef: row.response_ref };
+    : { requestDigest: row.request_digest, responseRef: row.response_ref, channelIdentityRef: row.channel_identity_ref,
+      channelIdentityDigest: row.channel_identity_digest, committedAt: row.committed_at };
 }
 
 export function insertControlRequest(

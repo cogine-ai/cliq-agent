@@ -26,6 +26,7 @@ import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import { prepareToolCheckpoint, toolCheckpointId } from '../tool-checkpoint.js';
 import { readToolCut, type ToolCut } from '../tool-cut.js';
+import { loadAgentStop } from './stop.js';
 import { appendRunStateEvent, assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation,
   requireHealthyFence, settleValidatedInvocation, type ClaimInvocationDispatchInput } from './invocation.js';
 import { loadInputContinuation } from './input.js';
@@ -243,15 +244,17 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     requireEqual(proof.request, requestFor(selected).request, 'waiting current tool request');
   }
 
-  const inputContinuation = await loadInputContinuation(driver, artifacts, owner, {
-    run: admittedRun, spec, assembly, principalId: workspace.ownerPrincipalId, resolveToolInput, contracts,
+  const controlAuthority = {
+    run: admittedRun, spec, assembly, principalId: workspace.ownerPrincipalId, resolveToolInput,
     async assertAuthority() {
       requirePolicy();
       for (const ref of policyArtifactRefs) await artifacts.readBytes(ref);
     }
-  });
+  };
+  const inputContinuation = await loadInputContinuation(driver, artifacts, owner, { ...controlAuthority, contracts });
 
   return {
+    ...loadAgentStop(driver, artifacts, owner, controlAuthority),
     waitForInput: inputContinuation.waitForInput,
     submitInput: inputContinuation.submitInput,
     prepareTool: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {

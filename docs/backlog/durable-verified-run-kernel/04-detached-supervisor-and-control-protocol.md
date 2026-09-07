@@ -25,9 +25,14 @@ second approval state machine. The same integration now includes the complete
 `request_input`/`run.input` control loop: typed text/JSON prompts, quiesced waits,
 authenticated idempotent replies, ordered native results and restart recovery.
 Use its loaded-Run reducers for input transport/UI integration too; user answers
-are control commits, not synthetic Journal dispatches. Other wait subjects, UDS capture/server routing,
-scheduling, worker-loss reconciliation, cancellation and terminal drain remain
-in this package. This partial integration does not complete WP04.
+are control commits, not synthetic Journal dispatches. The same integration now
+provides `cancelRun`, `expireRun` and `commitTerminalStop` for root agent Runs:
+authenticated cancellation/deadline fencing, quiescent undispatched-call drain,
+no-claim refunds and atomic Session terminal publication. Reuse this stop core;
+do not build another control-state machine. Child/MCP/ambiguous-effect closure,
+other stop origins/wait subjects, UDS capture/server routing, scheduling and
+worker-loss reconciliation remain in this package. This partial integration
+does not complete WP04; see the [exact scope](../../kernel/wp02-typed-runtime.md#durable-root-agent-cancellation-and-deadline-stop).
 
 Related issues:
 
