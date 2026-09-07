@@ -69,6 +69,12 @@ export function readInvocationAttempt(
     .map(journalEntryFromRow);
 }
 
+export function readOperationJournal(connection: SqliteConnection | SqliteDriver, runId: string, opId: string): InvocationJournalEntry[] {
+  return connection.prepare(`SELECT run_id, seq, op_id, op_kind, attempt, phase, entry_json
+    FROM run_journal WHERE run_id = ? AND op_id = ? ORDER BY seq`)
+    .all<JournalSqlRow>(runId, opId).map(journalEntryFromRow);
+}
+
 export function readHighestPreparedAttempt(
   connection: SqliteConnection | SqliteDriver,
   runId: string,

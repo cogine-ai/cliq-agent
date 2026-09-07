@@ -3,6 +3,7 @@ export type KernelStorageErrorCode =
   | 'REQUEST_ID_CONFLICT'
   | 'ARTIFACT_MISMATCH'
   | 'AGENT_HANDOFF_PENDING'
+  | 'MODEL_RETRY_PENDING'
   | 'BUDGET_EXHAUSTED'
   | 'INVALID_REQUEST'
   | 'LEASE_FENCED'
@@ -20,6 +21,13 @@ export class KernelStorageError extends Error {
     super(message, options);
     this.name = 'KernelStorageError';
     this.code = code;
+  }
+}
+
+/** Scheduling information, not an instruction to sleep inside a StateStore transaction. */
+export class ModelRetryPendingError extends KernelStorageError {
+  constructor(readonly nextAttempt: number, readonly notBefore: string) {
+    super('MODEL_RETRY_PENDING', `model retry ${nextAttempt} is not eligible before ${notBefore}`);
   }
 }
 

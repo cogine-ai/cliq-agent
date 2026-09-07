@@ -11,18 +11,19 @@ import { loadToolContracts } from '../../tools/input-contract.js';
 import { validateRunAssembly, type RunAssemblyValidationMaterial } from '../../model/run-assembly.js';
 import { estimatePromptTokens, projectModelVisiblePrompt, type ModelRequestV1, type NormalPromptProjectionV1 } from '../../model/request.js';
 import { planModelContinuation, validateModelTurn, validateUnusableModelResponse, type ModelContinuationPlan } from '../../runtime/continuation.js';
+import { assertSameModelOperation, modelRetryState, type ModelRetryState } from '../../runtime/model-retry.js';
 import { contextSourceDigest, planContextCompaction, validateContextItems, type ContextItem } from '../../runtime/context-compaction.js';
 import { loadInstructionText, projectNormalContext, readCanonicalArtifact, readModelTurnMaterial } from '../agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
-import { KernelStorageError, stateOperation } from '../errors.js';
+import { KernelStorageError, ModelRetryPendingError, stateOperation } from '../errors.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
-import { readHighestPreparedAttempt, readInvocationAttempt } from '../repositories/journal.js';
+import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from '../repositories/journal.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
 import { readCheckpoint, readRun, ZERO_BUDGET } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import type { StateOwnerContext } from '../state-owner.js';
-import { prepareValidatedInvocation, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
+import { prepareValidatedInvocation, readModelRetryHistory, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
 import { loadToolContinuation } from './tool.js';
 import { readToolCut } from '../tool-cut.js';
 import type { ReleaseTrustKey } from '../../policy/runtime-authority.js';
@@ -91,9 +92,17 @@ export class AgentContextExhaustedError extends KernelStorageError {
 }
 
 export class AgentHandoffPendingError extends KernelStorageError {
-  constructor(readonly disposition: 'candidate_required' | 'stop_required', readonly evidenceRef: string) {
-    super('AGENT_HANDOFF_PENDING', `completed model observation requires ${disposition}`);
+  constructor(readonly disposition: 'candidate_required' | 'stop_required', readonly evidenceRef: string,
+    readonly reason?: 'model_retry_exhausted') {
+    super('AGENT_HANDOFF_PENDING', `${reason ?? 'completed model observation'} requires ${disposition}`);
   }
+}
+
+function requireRetryReady(retry: ModelRetryState): number {
+  if (retry.kind === 'backoff') throw new ModelRetryPendingError(retry.nextAttempt, retry.notBefore);
+  if (retry.kind === 'exhausted') throw new AgentHandoffPendingError('stop_required', retry.evidenceRef, 'model_retry_exhausted');
+  if (retry.kind !== 'ready') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'current model attempt must settle before replacement');
+  return retry.nextAttempt;
 }
 
 function appendItems(connection: SqliteConnection, run: Run, items: ContinuationItem[], refs: string[], throughItemSeq: number): void {
@@ -249,6 +258,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       const entry = closure.journal.filter((entry) => entry.opId === opId && entry.phase === 'prepared').at(-1);
       if (!entry) return undefined;
       const state = closure.journal.filter((next) => next.opId === opId && next.attempt === entry.attempt).at(-1)!;
+      const retry = modelRetryState(assembly.retry.model, closure.journal.filter((next) => next.opId === opId), sampleCanonicalNow());
       const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, entry.requestRef);
       const prepared = await reproduceRequest(closure.run, request);
       if (prepared.requestRef !== entry.requestRef) throw new TypeError('retained model request cannot be reproduced');
@@ -258,7 +268,8 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         disposition = request.kind === 'normal' && root.format === 'cliq-agent-model-turn-v1' && root.stopReason === 'end'
           ? 'candidate_required' : 'stop_required';
       }
-      return { run: closure.run, entry, state, prepared, disposition };
+      if (retry.kind === 'exhausted') disposition = 'stop_required';
+      return { run: closure.run, entry, state, prepared, disposition, retry: immutableSnapshot(retry) };
     }),
     prepareModel: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {
       const { expectedRunRevision, leaseEpoch } = input;
@@ -284,26 +295,25 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         ? { ...cut.frontier, phase: 'context_compaction', compactionPlanRef: planArtifact.ref } : cut.frontier;
       const frontierPlan = planCanonicalArtifact(frontier, 'cliq-run-frontier-v1');
       const opId = modelOpId(runId, frontier);
-      const highest = readHighestPreparedAttempt(driver, runId, opId);
-      const dispatches = Number(driver.prepare("SELECT count(*) AS count FROM run_journal WHERE run_id = ? AND op_id = ? AND phase = 'dispatch_claimed'")
-        .get<{ count: unknown }>(runId, opId)?.count);
-      if (dispatches >= assembly.retry.model.maxDispatchedAttempts) {
-        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'the frozen model dispatch limit is exhausted');
-      }
-      const attempt = highest === undefined ? 0 : highest.attempt + 1;
+      const history = await readModelRetryHistory(driver, artifacts, runId, opId);
+      const attempt = requireRetryReady(modelRetryState(assembly.retry.model, history, sampleCanonicalNow()));
       const projectionArtifact = planCanonicalArtifact(projection, projection.format);
       const prepared = compaction ? model.prepare({ kind: 'context_compaction', invocation: { runId, opId, attempt },
         compactionPlanRef: planArtifact!.ref, sourceContextUtf8: compaction.sourceContextUtf8 })
         : model.prepare({ kind: 'normal', invocation: { runId, opId, attempt }, projectionRef: projectionArtifact.ref, projection });
+      if (history.length) assertSameModelOperation(await readCanonicalArtifact<ModelRequestV1>(artifacts, history[0]!.requestRef), prepared.request);
       const metadata = await publishPlans(artifacts, [projectionArtifact, frontierPlan, ...(planArtifact ? [planArtifact] : []), ...prepared.artifacts]);
       const admitted = await prepareValidatedInvocation(driver, artifacts, owner, {
         runId, expectedRunRevision, leaseEpoch, opId, opKind: 'model',
         target: assembly.provider.model, requestRef: prepared.requestRef, replayClass: 'retry',
         reservation: { modelTokens: prepared.request.reservation.modelTokens, costMicros: prepared.request.reservation.costMicros,
           toolCalls: 0, repairAttempts: 0 }
-      }, { metadata, validate: (_connection, run, actualAttempt) => {
+      }, { metadata, validate: (connection, run, actualAttempt) => {
         if (actualAttempt !== attempt || run.frontierRef !== cut.run.frontierRef || run.latestCheckpointId !== cut.run.latestCheckpointId) {
           throw new KernelStorageError('REVISION_CONFLICT', 'model request no longer matches its state cut');
+        }
+        if (requireRetryReady(modelRetryState(assembly.retry.model, readOperationJournal(connection, runId, opId), sampleCanonicalNow())) !== attempt) {
+          throw new KernelStorageError('REVISION_CONFLICT', 'model retry history changed before reservation');
         }
       }, commit(connection) {
         connection.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(frontierPlan.ref, runId);

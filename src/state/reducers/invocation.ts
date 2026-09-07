@@ -5,6 +5,7 @@ import type {
   InvocationJournalEntry,
   ReplayClass,
   Run,
+  RunAssemblyV1,
   RunFrontier,
   RunContextCompactionPlan,
   RunEvent,
@@ -26,16 +27,18 @@ import {
   appendInvocationJournalEntry,
   nextJournalSequence,
   readHighestPreparedAttempt,
-  readInvocationAttempt
+  readInvocationAttempt,
+  readOperationJournal
 } from '../repositories/journal.js';
 import { readRequiredWorkerLaunch } from '../repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef } from '../repositories/workspace-generations.js';
 import { insertRunEvent, readCheckpoint, readRun } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
-import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
+import { decodeBudgetSettlement, decodeContextManifest, decodeRunSpec } from '../decoders.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import type { ModelRequestV1, NormalPromptProjectionV1, ModelVisiblePromptV1 } from '../../model/request.js';
+import { assertSameModelOperation, modelRetryState } from '../../runtime/model-retry.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -300,6 +303,28 @@ export type ClaimInvocationDispatchInput = {
   brokerFenceTokenDigest?: string;
 };
 
+/** Verify retained retry requests and their first settlement clock before any preparation or claim. */
+export async function readModelRetryHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string, opId: string) {
+  const history = readOperationJournal(driver, runId, opId);
+  let originalRequest: ModelRequestV1 | undefined;
+  const settled = new Set<number>();
+  for (const entry of history) {
+    if (entry.phase === 'prepared') {
+      const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, entry.requestRef);
+      if (originalRequest !== undefined) assertSameModelOperation(originalRequest, request);
+      else originalRequest = request;
+    }
+    if (!entry.budgetSettlementRef || settled.has(entry.attempt)) continue;
+    const settlement = decodeBudgetSettlement(await readCanonicalArtifact(artifacts, entry.budgetSettlementRef));
+    if (settlement.runId !== runId || settlement.opId !== opId || settlement.attempt !== entry.attempt ||
+        settlement.terminalJournalSeq !== entry.seq || settlement.terminalPhase !== entry.phase || settlement.settledAt !== entry.timestamp) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'model retry clock differs from its retained first settlement');
+    }
+    settled.add(entry.attempt);
+  }
+  return history;
+}
+
 const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
   driver: SqliteDriver, artifacts: ArtifactCatalog, prepared: InvocationJournalEntry
 ) => {
@@ -308,6 +333,7 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
   const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
   const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
   const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
+  const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
   const checkpoint = readCheckpoint(driver, run.latestCheckpointId);
   const context = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));
   if (frontier.kind !== 'agent' || !['model_turn', 'context_compaction'].includes(frontier.phase) ||
@@ -315,7 +341,7 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
       prepared.opId !== modelOperationId(run.id, frontier) ||
       request.schemaVersion !== 1 || request.format !== 'cliq-model-request-v1' ||
       request.requestDigest !== digestOmitting(request, 'requestDigest') || request.runId !== run.id ||
-      request.opId !== prepared.opId || request.attempt !== prepared.attempt || request.assemblyRef !== context.assemblyRef ||
+      request.opId !== prepared.opId || request.attempt !== prepared.attempt || request.model !== prepared.target || request.assemblyRef !== context.assemblyRef ||
       spec.operation !== 'agent' || request.assemblyRef !== spec.assemblyRef || context.admittedContextRef !== spec.admittedContextRef ||
       request.kind !== (frontier.phase === 'model_turn' ? 'normal' : 'context_compaction') || request.compactionPlanRef !== frontier.compactionPlanRef ||
       context.runId !== run.id || checkpoint.runId !== run.id || context.throughItemSeq !== checkpoint.runItemSeq ||
@@ -339,7 +365,9 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
       throw new KernelStorageError('RECOVERY_REQUIRED', 'model claim compaction plan differs from the current context');
     }
   }
-  return { run, checkpoint, prepared };
+  const history = await readModelRetryHistory(driver, artifacts, run.id, prepared.opId);
+  modelRetryState(assembly.retry.model, history, sampleCanonicalNow());
+  return { run, checkpoint, prepared, retryPolicy: assembly.retry.model };
 });
 
 export async function claimInvocationDispatch(
@@ -425,6 +453,7 @@ export async function claimValidatedInvocation(
     if (input.brokerFenceTokenDigest !== undefined) {
       claimed.brokerFenceTokenDigest = input.brokerFenceTokenDigest;
     }
+    if (modelCut) modelRetryState(modelCut.retryPolicy, [...readOperationJournal(connection, run.id, highest.opId), claimed], now);
     if (launchSpecMetadata !== undefined) insertArtifactMetadata(connection, launchSpecMetadata, now);
     appendInvocationJournalEntry(connection, claimed);
   });

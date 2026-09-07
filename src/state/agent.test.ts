@@ -132,7 +132,11 @@ test('compaction journals the greatest closed prefix, atomically replaces contex
     assert.ok(recoveredNext);
     assert.equal(recoveredNext.prepared.requestRef, next.prepared.requestRef);
     assert.deepEqual(recoveredNext.prepared.outbound.bodyBytes, next.prepared.outbound.bodyBytes);
+    // A pending attempt rejects replacement before admission; its old lease still cannot claim it after restart.
     await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: next.run.revision, leaseEpoch: fixture.leaseEpoch }),
+      { code: 'STATE_TRANSITION_INVALID' });
+    await assert.rejects(fixture.store.claimInvocationDispatch({ runId: fixture.runId, expectedRunRevision: next.run.revision,
+      leaseEpoch: fixture.leaseEpoch, opId: next.entry.opId, attempt: next.entry.attempt, dispatchId: 'stale-worker-dispatch' }),
       { code: 'LEASE_FENCED' });
   } finally { fault.close(); await disposeFixture(fixture); }
 });
@@ -155,6 +159,37 @@ test('executed invalid compaction is fully charged, preserves raw context and ca
     assert.equal(after.latestCheckpoint.contextManifestRef, before.latestCheckpoint.contextManifestRef);
     await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: completed.run.revision, leaseEpoch: fixture.leaseEpoch }),
       error => error instanceof AgentHandoffPendingError && error.disposition === 'stop_required' && error.evidenceRef === completed.entry.resultRef);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('ambiguous compaction retries keep their exact plan and bytes, installing only the current summary', async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const fixture = await createAgentFixture('typed-compaction-retry', { modelTokens: 1_000_000, costMicros: 10_000_000 });
+  try {
+    await longContext(fixture);
+    const original = await prepare(fixture);
+    assert.equal(original.prepared.request.kind, 'context_compaction');
+    const ambiguity = await fixture.store.artifacts.publishCanonical({ reason: 'offline ambiguous compaction fixture' }, 'cliq-invocation-ambiguity-evidence-v1');
+    await fixture.store.markInvocationUnknown({ runId: fixture.runId, opId: original.entry.opId, attempt: 0,
+      expectedRunRevision: original.run.revision, evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
+    await assert.rejects(prepare(fixture), { code: 'MODEL_RETRY_PENDING' });
+    now += 500;
+    const replacement = await prepare(fixture);
+    assert.equal(replacement.entry.attempt, 1);
+    assert.equal(replacement.entry.opId, original.entry.opId);
+    assert.equal(replacement.prepared.request.compactionPlanRef, original.prepared.request.compactionPlanRef);
+    assert.deepEqual(replacement.prepared.outbound, original.prepared.outbound);
+    const completed = await fixture.agent.completeModel({ opId: replacement.entry.opId, attempt: 1,
+      expectedRunRevision: replacement.run.revision, result: response(fixture, replacement, [], '# Summary\n\nEarlier calls were rejected.') });
+    assert.equal(completed.disposition, 'context_compacted');
+    const closure = await fixture.store.readRecoveryClosure(fixture.runId);
+    const items = await Promise.all(closure.items.map(item => fixture.store.artifacts.readCanonical<ContinuationItem>(item.payloadRef)));
+    assert.equal(items.filter(item => item.kind === 'context_compaction').length, 1);
+    assert.equal((await prepare(fixture)).prepared.request.kind, 'normal');
+    await fixture.store.close();
+    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material });
   } finally { await disposeFixture(fixture); }
 });
 
