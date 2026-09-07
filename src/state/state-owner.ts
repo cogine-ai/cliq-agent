@@ -163,7 +163,7 @@ export function assertContiguousStateOwnerHistory(connection: SqliteConnection |
   }
 }
 
-function terminalRecord(
+export function terminalStateOwnerRecord(
   active: Extract<StateOwnerRecordV1, { state: 'active' }>,
   evidence: StateOwnerTransitionEvidenceV1,
   evidenceRef: string,
@@ -225,7 +225,7 @@ export async function gracefullyReleaseStateOwner(
     }
     const recordedAt = maxCanonicalTime(transactionObservedAt, lockedFence.lastAcceptedAt);
     advanceTimeFence(connection, active.ownerEpoch, transactionObservedAt);
-    terminal = terminalRecord(active, evidence, published.ref, recordedAt);
+    terminal = terminalStateOwnerRecord(active, evidence, published.ref, recordedAt);
     insertArtifactMetadata(connection, published, recordedAt);
     const result = connection
       .prepare(

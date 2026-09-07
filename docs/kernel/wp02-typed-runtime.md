@@ -469,8 +469,11 @@ signed owners instead of mixing a schema-only owner with another runtime's
 inspector. The [native StateOwner integration](m2-state-core.md#native-stateowner-lifecycle)
 now acquires a real same-process OS lock before SQLite, uses exact platform
 process-start observation, and validates the signed helper entry before loading.
-It does not qualify containment or signed installation, install a release, or
-add runtime-upgrade/takeover handling.
+It now handles owner crash takeover only after native prior-process death proof,
+atomically retaining the predecessor and establishing a fresh owner epoch.
+This neither adopts an old worker nor settles/replays an old effect. It does not
+qualify containment or signed installation, install a release, or add runtime
+upgrades or worker-loss reconciliation.
 
 Malformed, oversized, operation-invalid and provider-rejected received responses
 all use this closure. Compaction failures retain their dedicated resource-stop
@@ -482,7 +485,7 @@ does not manufacture those proofs from a retry counter. Child/MCP closure,
 credential/local-service failures, successful candidate/verification results,
 actual broker/sandbox execution and production composition remain outside this
 integration. Tests use real SQLite/CAS with offline signed inspector/containment
-fixtures, not a live provider or qualified platform inspector.
+fixtures, not a live provider or qualified whole-containment inspector.
 
 The old Session/`ModelAction` runner remains isolated until WP06's single
 Kernel Cut. There is no typed-to-legacy bridge. WP06 removes the old runner,

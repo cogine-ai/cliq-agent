@@ -1,16 +1,14 @@
 import assert from 'node:assert/strict';
-import { execFileSync, fork } from 'node:child_process';
-import { once } from 'node:events';
+import { execFileSync } from 'node:child_process';
 import { chmod, link, lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import type { PlatformProcessIdentityV1 } from '../kernel/types.js';
 import { loadNativeStateOwner } from './native-owner.js';
-import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
-import { readLatestStateOwner } from './state-owner.js';
+import type { SqliteDriver } from './sqlite-driver.js';
 import { openStateStore } from './store.js';
 import { makePrivateDir } from './testing/fixtures.js';
+import { childFor, ownerAt } from './testing/state-owner-process.js';
 
 const native = await loadNativeStateOwner();
 const busy = /StateOwner OS lock is already held/;
@@ -19,34 +17,6 @@ async function rootFor(t: TestContext) {
   const root = await makePrivateDir('.cliq-native-owner-');
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
-}
-
-type ChildReply = { state: string; message?: string; epoch?: number; pid?: number; token?: string };
-async function childFor(t: TestContext, root: string, mode: 'store' | 'native' = 'store') {
-  const child = fork(new URL('./testing/state-owner-child.ts', import.meta.url), [root, mode], {
-    execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc']
-  });
-  let diagnostic = '';
-  child.stderr!.on('data', (chunk: Buffer) => { diagnostic = (diagnostic + chunk.toString()).slice(-4096); });
-  const exited = once(child, 'exit');
-  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
-  const reply = async () => {
-    try {
-      const [message] = await once(child, 'message', { signal: AbortSignal.timeout(30_000) });
-      return message as ChildReply;
-    } catch (error) { throw new Error(`StateOwner child did not reply: ${diagnostic}`, { cause: error }); }
-  };
-  assert.equal((await reply()).state, 'ready');
-  return { child, exited, request(command: 'acquire' | 'close') {
-    const pending = reply();
-    child.send(command);
-    return pending;
-  } };
-}
-
-function ownerAt(root: string) {
-  const driver = openSqliteDriver(path.join(root, KERNEL_DATABASE_FILENAME));
-  try { return readLatestStateOwner(driver)!; } finally { driver.close(); }
 }
 
 test('native StateOwner lock holds exact descriptor identities until explicit close', async (t) => {
@@ -199,18 +169,33 @@ test('simultaneous native acquisitions exclude each other before any SQLite acce
   await children[results.findIndex(result => result.state === 'held')]!.request('close');
 });
 
-test('SIGKILL releases the OS lock but does not authorize takeover of an active durable owner', async (t) => {
+test('native death inspection requires a held lock and positive PID/start-token absence or mismatch', async (t) => {
   const root = await rootFor(t);
   const child = await childFor(t, root);
-  assert.equal((await child.request('acquire')).state, 'held');
-  const prior = ownerAt(root);
+  const acquired = await child.request('acquire');
+  assert.equal(acquired.state, 'held');
+  assert.equal((await child.request('drop-lock')).state, 'released');
+  const held = native.acquireLock(root, false);
+  try {
+    assert.throws(() => held.assertPriorProcessDead(acquired.pid!, acquired.token!), /still present/);
+    assert.throws(() => held.assertPriorProcessDead(process.pid, native.processStartToken()), /still present/);
+    assert.notEqual(acquired.token, native.processStartToken());
+    // Retaining another process's start token exercises the PID-reuse branch.
+    held.assertPriorProcessDead(process.pid, acquired.token!);
+    for (const pid of [0, -1, 1.5, NaN, Infinity, 2 ** 32 + process.pid]) {
+      assert.throws(() => held.assertPriorProcessDead(pid, acquired.token!), /invalid prior/);
+    }
+    for (const token of ['', 'unknown-token', 'x'.repeat(128), `${acquired.token}\0ignored`]) {
+      assert.throws(() => held.assertPriorProcessDead(acquired.pid!, token), /invalid prior/);
+    }
+    assert.throws(() => held.assertPriorProcessDead.call({} as never, acquired.pid!, acquired.token!), /invalid StateOwner lock handle/);
+  } finally { held.close(); }
   child.child.kill('SIGKILL');
   const [, signal] = await child.exited;
   assert.equal(signal, 'SIGKILL');
-  native.acquireLock(root, false).close();
-  await assert.rejects(openStateStore(root), /epoch 1 is still active/);
-  assert.deepEqual(ownerAt(root), prior);
-  native.acquireLock(root, false).close();
+  assert.throws(() => held.assertPriorProcessDead(acquired.pid!, acquired.token!), /changed or closed/);
+  const successor = native.acquireLock(root, false);
+  try { successor.assertPriorProcessDead(acquired.pid!, acquired.token!); } finally { successor.close(); }
 });
 
 test('failed graceful release keeps the OS lock until durable terminalization succeeds', async (t) => {
