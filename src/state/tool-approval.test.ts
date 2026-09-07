@@ -32,7 +32,7 @@ async function control(fixture: Fixture, decision: 'allow' | 'deny', ttlMs?: num
 }
 async function reopen(fixture: Fixture) {
   await fixture.store.close();
-  fixture.store = await openStateStore(fixture.stateRoot);
+  fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
   fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
 }
 

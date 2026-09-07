@@ -101,6 +101,11 @@ import {
   type StateOwnerContext
 } from './state-owner.js';
 import { hostPlatform } from './workspace-identity.js';
+import { immutableSnapshot } from '../model/immutable.js';
+import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+
+/** Trusted Supervisor bootstrap input, never loaded from Run/workspace configuration. Required again on signed-owner reopen. */
+export type StateStoreRuntimeAuthority = { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[] };
 
 export type {
   LoadAgentRunInput,
@@ -452,9 +457,19 @@ export class StateStore {
     };
   }
 
-  static async open(stateRoot: string): Promise<StateStore> {
+  static async open(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority): Promise<StateStore> {
+    runtimeAuthority = runtimeAuthority === undefined ? undefined : immutableSnapshot(runtimeAuthority);
     if (process.platform !== 'darwin' && process.platform !== 'linux') {
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', `state store is unsupported on ${process.platform}`);
+    }
+    if (runtimeAuthority) {
+      verifyRuntimeBundle(runtimeAuthority.bundle, runtimeAuthority.releaseKeys);
+      const supervisor = runtimeAuthority.bundle.entries.find((entry) => entry.role === 'supervisor')!;
+      if (supervisor.digest !== (await currentProcessBase()).executableImageDigest ||
+          runtimeAuthority.bundle.stateSchemaRange.min > KERNEL_STATE_SCHEMA_VERSION ||
+          runtimeAuthority.bundle.stateSchemaRange.max < KERNEL_STATE_SCHEMA_VERSION) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'signed Supervisor does not match this process or state schema');
+      }
     }
     await assertPrivateStateRoot(stateRoot);
     const casRoot = path.join(stateRoot, KERNEL_CAS_DIRECTORY);
@@ -491,7 +506,7 @@ export class StateStore {
       await ensurePrivateDirectory(casRoot, allowLayoutCreation);
       await ensurePrivateDirectory(runtimeRoot, allowLayoutCreation);
       const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
-      const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts);
+      const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts, runtimeAuthority?.bundle);
       const ownerContext = await stateOwnerContextFromArtifacts(stateRoot, artifacts, owner);
       return new StateStore(stateRoot, driver, artifacts, ownerContext);
     } catch (error) {
@@ -632,14 +647,15 @@ export class StateStore {
   }
 }
 
-export async function openStateStore(stateRoot: string): Promise<StateStore> {
-  return StateStore.open(stateRoot);
+export async function openStateStore(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority): Promise<StateStore> {
+  return StateStore.open(stateRoot, runtimeAuthority);
 }
 
 async function acquireOrBootstrapStateOwner(
   stateRoot: string,
   driver: SqliteDriver,
-  artifacts: ArtifactCatalog
+  artifacts: ArtifactCatalog,
+  runtimeBundle?: RuntimeBundleManifest
 ): Promise<Extract<StateOwnerRecordV1, { state: 'active' }>> {
   assertContiguousStateOwnerHistory(driver);
   const existingOwner = readActiveStateOwner(driver);
@@ -657,6 +673,15 @@ async function acquireOrBootstrapStateOwner(
     }
     if (latestOwner.state !== 'terminal' || latestOwner.terminalReason !== 'graceful_release') {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'latest state owner is not cleanly acquirable');
+    }
+    const retainedRuntime = await artifacts.readCanonical<{ format?: string }>(latestOwner.runtimeBundleRef);
+    const supervisor = runtimeBundle?.entries.find((entry) => entry.role === 'supervisor');
+    if (runtimeBundle ? canonicalSha256(runtimeBundle) !== latestOwner.runtimeBundleRef ||
+        runtimeBundle.manifestDigest !== latestOwner.runtimeBundleManifestDigest ||
+        supervisor?.entryId !== latestOwner.supervisorEntryId || supervisor.version !== latestOwner.supervisorEntryVersion ||
+        supervisor.digest !== latestOwner.supervisorExecutableDigest :
+        retainedRuntime.format !== 'cliq-kernel-schema-manifest-v1') {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'reopen requires the same signed Supervisor authority; runtime upgrades need their own transition');
     }
     return acquireAfterGracefulRelease(stateRoot, driver, artifacts, latestOwner);
   }
@@ -727,6 +752,8 @@ async function acquireOrBootstrapStateOwner(
   };
   schemaManifest.manifestDigest = digestOmitting(schemaManifest, 'manifestDigest');
   const schemaArtifact = await artifacts.publishCanonical(schemaManifest, 'cliq-kernel-schema-manifest-v1');
+  const runtimeArtifact = runtimeBundle ? await artifacts.publishCanonical(runtimeBundle, 'cliq-runtime-bundle-v1') : schemaArtifact;
+  const supervisor = runtimeBundle?.entries.find((entry) => entry.role === 'supervisor');
 
   const emptyDatabase = {
     schemaVersion: 1,
@@ -793,8 +820,8 @@ async function acquireOrBootstrapStateOwner(
     format: 'cliq-state-owner-acquisition-evidence-v1',
     ownerEpoch: 1,
     supervisorInstanceId,
-    runtimeBundleRef: schemaArtifact.ref,
-    runtimeBundleManifestDigest: schemaManifest.manifestDigest,
+    runtimeBundleRef: runtimeArtifact.ref,
+    runtimeBundleManifestDigest: runtimeBundle?.manifestDigest ?? schemaManifest.manifestDigest,
     processIdentityRef: processArtifact.ref,
     processIdentityDigest: processIdentity.identityDigest,
     stateLockIdentityRef: lockArtifact.ref,
@@ -817,10 +844,10 @@ async function acquireOrBootstrapStateOwner(
     schemaVersion: 1,
     ownerEpoch: 1,
     supervisorInstanceId,
-    runtimeBundleRef: schemaArtifact.ref,
-    runtimeBundleManifestDigest: schemaManifest.manifestDigest,
-    supervisorEntryId: 'state-store',
-    supervisorEntryVersion: 'm2',
+    runtimeBundleRef: runtimeArtifact.ref,
+    runtimeBundleManifestDigest: runtimeBundle?.manifestDigest ?? schemaManifest.manifestDigest,
+    supervisorEntryId: supervisor?.entryId ?? 'state-store',
+    supervisorEntryVersion: supervisor?.version ?? 'm2',
     supervisorExecutableDigest: processIdentity.executableImageDigest,
     processIdentityRef: processArtifact.ref,
     processIdentityDigest: processIdentity.identityDigest,
@@ -845,6 +872,7 @@ async function acquireOrBootstrapStateOwner(
         processArtifact,
         lockArtifact,
         schemaArtifact,
+        ...(runtimeBundle ? [runtimeArtifact] : []),
         databaseArtifact,
         casArtifact,
         generationArtifact,

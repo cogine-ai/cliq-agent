@@ -9,7 +9,7 @@ import type {
   WorkspaceGenerationSnapshotEvidenceV1, WorkspaceIdentityV1, WorkspaceStateManifest
 } from '../../kernel/types.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
-import { openStateStore, publishInProcessChannel, type StateStore } from '../store.js';
+import { openStateStore, publishInProcessChannel, type StateStore, type StateStoreRuntimeAuthority } from '../store.js';
 
 export function uuidv7(): string {
   const bytes = Buffer.alloc(16);
@@ -128,6 +128,7 @@ export type ActiveFixture = {
 };
 
 export type ActiveFixtureOptions = {
+  runtimeAuthority?: StateStoreRuntimeAuthority;
   runWallTimeMs?: number;
   leaseDurationMs?: number;
   assembly?: (store: StateStore) => Promise<string>;
@@ -142,7 +143,7 @@ export async function createActiveFixture(
 ): Promise<ActiveFixture> {
   const stateRoot = await makePrivateDir(`.cliq-m2-${label}-state-`);
   const workspace = await makePrivateDir(`.cliq-m2-${label}-ws-`);
-  const store = await openStateStore(stateRoot);
+  const store = await openStateStore(stateRoot, options.runtimeAuthority);
   const principalId = 'cliq-m2-principal';
   const channel = await publishInProcessChannel(store, principalId);
   const session = await store.createSession({

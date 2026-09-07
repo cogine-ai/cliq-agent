@@ -2,6 +2,14 @@ import type { ArtifactRef, BudgetUsage, RunStatus, RunTerminalReason } from './t
 
 type StopIdentity = { schemaVersion: 1; runId: string; createdAt: string };
 
+/** Implemented model-response branch of the RFC's closed RuntimeFailureEvidenceV1 union. */
+export type ModelResponseFailureEvidenceV1 = {
+  schemaVersion: 1; format: 'cliq-runtime-failure-evidence-v1'; runId: string;
+  frontierRef: ArtifactRef; frontierDigest: string; failingOpId: string;
+  inspectorIdentityRef: ArtifactRef; inspectorIdentityDigest: string; observedAt: string; evidenceDigest: string;
+  failureKind: 'model_unusable_response'; unusableResponseRef: ArtifactRef; unusableResponseDigest: string;
+};
+
 /** RFC stop authority. Individual reducers accept only the branches whose evidence they can prove. */
 export type StopIntent = StopIdentity & (
   | { origin: 'kernel_integrity'; targetStatus: 'failed'; reason: 'verifier_mutated_source';

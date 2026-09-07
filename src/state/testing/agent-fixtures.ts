@@ -25,9 +25,16 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
   authority.assembly.retry.tools = selected.map((tool) => tool.replayClass === 'retry'
     ? { toolName: tool.name, replayClass: 'retry', maxDispatchedAttempts: 3, postAttemptDelaysMs: [500, 2000] }
     : { toolName: tool.name, replayClass: 'manual', maxDispatchedAttempts: 1, postAttemptDelaysMs: [] });
-  let signed: Awaited<ReturnType<typeof signedToolBundle>> | undefined;
+  const manifest: ToolContractManifestV1 = { schemaVersion: 1, format: 'cliq-tool-contracts-v1', entries: selected.map((tool, index) => ({
+    name: tool.name, version: '1', description: tool.description, access: builtins[index]!.access, inputSchemaRef: tool.inputSchemaRef,
+    inputSchemaDigest: tool.inputSchemaDigest, replayClass: tool.replayClass, execution: { kind: 'builtin', adapterId: tool.name,
+      adapterVersion: '1', adapterCodeDigest: canonicalSha256({ adapter: tool.name }) },
+    ...(options.outputSchema === undefined ? {} : { outputSchemaRef: canonicalSha256(options.outputSchema), outputSchemaDigest: canonicalSha256(options.outputSchema) })
+  })), manifestDigest: '' };
+  manifest.manifestDigest = digestOmitting(manifest, 'manifestDigest');
+  const signed = options.mode === undefined ? undefined : await signedToolBundle(authority.assembly, manifest.entries);
   const credentials: string[] = [];
-  const fixture = await createActiveFixture(label, { budgets, credentialGrantRefs: credentials, assembly: async (store) => {
+  const fixture = await createActiveFixture(label, { budgets, runtimeAuthority: signed, credentialGrantRefs: credentials, assembly: async (store) => {
     const grant = await store.artifacts.publishCanonical({ format: 'cliq-offline-credential-fixture-v1' }, 'cliq-offline-credential-fixture-v1');
     credentials.push(grant.ref);
     authority.assembly.provider.credentialGrantRefs = credentials;
@@ -35,13 +42,6 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
     authority.runSpecCredentialGrantRefs = credentials;
     for (const tool of selected) await store.artifacts.publishCanonical(tool.inputSchema, 'cliq-tool-input-schema-v1');
     if (options.outputSchema !== undefined) await store.artifacts.publishCanonical(options.outputSchema, 'cliq-tool-output-schema-v1');
-    const manifest: ToolContractManifestV1 = { schemaVersion: 1, format: 'cliq-tool-contracts-v1', entries: selected.map((tool, index) => ({
-      name: tool.name, version: '1', description: tool.description, access: builtins[index]!.access, inputSchemaRef: tool.inputSchemaRef,
-      inputSchemaDigest: tool.inputSchemaDigest, replayClass: tool.replayClass, execution: { kind: 'builtin', adapterId: tool.name,
-        adapterVersion: '1', adapterCodeDigest: canonicalSha256({ adapter: tool.name }) },
-      ...(options.outputSchema === undefined ? {} : { outputSchemaRef: canonicalSha256(options.outputSchema), outputSchemaDigest: canonicalSha256(options.outputSchema) })
-    })), manifestDigest: '' };
-    manifest.manifestDigest = digestOmitting(manifest, 'manifestDigest');
     const root = await store.artifacts.publishCanonical(manifest, manifest.format);
     authority.assembly.tools = { manifestRef: root.ref, manifestDigest: manifest.manifestDigest };
     authority.material.resolveVerifiedTools = (reference) => reference.manifestRef === root.ref && reference.manifestDigest === manifest.manifestDigest ? selected : null;
@@ -57,9 +57,7 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
     for (const part of [envelope.systemInstruction, envelope.userPrefix, envelope.userSuffix, envelope]) {
       await store.artifacts.publishCanonical(part.value, part.value.format);
     }
-    if (options.mode !== undefined) {
-      signed = await signedToolBundle(store.artifacts, authority.assembly, manifest.entries);
-    }
+    if (signed) await store.artifacts.publishCanonical(signed.profile, signed.profile.format);
     // SQLite admission uses the real clock; the pure model fixture's fixed dates cannot cover these Runs.
     const createdAt = sampleCanonicalNow();
     const validThrough = new Date(Date.parse(createdAt) + (budgets?.wallTimeMs ?? DEFAULT_RUN_BUDGETS.wallTimeMs) + 60_000).toISOString();

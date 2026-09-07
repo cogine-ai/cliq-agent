@@ -14,6 +14,7 @@ import type { SqliteDriver } from './sqlite-driver.js';
 import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readResourceStopCause } from './resource-stop.js';
+import { validateModelFailureStop } from './model-failure.js';
 
 export type CancelResponse = Extract<ControlApplicationResponseV1, { ok: true }> & { result: Extract<ControlResultV1, { method: 'run.cancel' }> };
 
@@ -49,7 +50,9 @@ export async function readAgentStop(driver: SqliteDriver, artifacts: ArtifactCat
     const { response, row } = await readCancelResponse(driver, artifacts, run, intent.principalId, intent.requestId);
     if (response.result.snapshot.run.stopIntentRef !== run.stopIntentRef || row.committedAt !== intent.createdAt) throw new TypeError('winning cancellation has no exact control-row owner');
   } else if (run.cancelRequested) throw new TypeError('resource/deadline stop cannot override user cancellation');
-  if (intent.origin === 'budget' || intent.origin === 'runtime') {
+  if (intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime') {
+    await validateModelFailureStop(driver, artifacts, closure, intent);
+  } else if (intent.origin === 'budget' || intent.origin === 'runtime') {
     const cause = await readResourceStopCause(driver, artifacts, closure, intent.createdAt);
     if (!cause) throw new TypeError('resource stop has no reproducible failure');
     requireEqual(intent, { schemaVersion: 1, runId: run.id, createdAt: intent.createdAt, ...cause }, 'resource stop cause');

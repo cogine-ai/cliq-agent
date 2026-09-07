@@ -26,7 +26,7 @@ async function finish(fixture: Fixture, checkpointId: string) {
 }
 async function reopen(fixture: Fixture) {
   await fixture.store.close();
-  fixture.store = await openStateStore(fixture.stateRoot);
+  fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
   fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
 }
 const runItems = async (fixture: Fixture) => Promise.all((await fixture.store.readRecoveryClosure(fixture.runId)).items.map((row) =>

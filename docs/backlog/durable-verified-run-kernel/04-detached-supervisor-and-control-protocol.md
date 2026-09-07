@@ -31,7 +31,14 @@ authenticated cancellation/deadline fencing, quiescent undispatched-call drain,
 no-claim refunds and atomic Session terminal publication. `stopForResourceFailure`
 extends that core with exact next-request token/cost/tool-call exhaustion and
 uncompactable/failed-compaction context, independently rederived during recovery.
-It does not stop unresolved external attempts or grant tool permission. Reuse this stop core;
+`stopForModelFailure` also closes received unusable normal-model responses with
+an owner-derived, current-inspector-bound `RuntimeFailureEvidenceV1`, exact
+terminal primary evidence and historical recovery. Its bootstrap companion binds
+StateOwner to an explicitly trusted signed runtime and the actual process image;
+checkpoint and failure inspectors now share the complete owner/runtime/nonce
+check. Signed-owner reopen requires the same runtime authority. Compaction keeps its dedicated
+resource-stop subtype. Neither path stops unresolved external attempts or grants
+tool permission. Reuse this stop core;
 do not build another control-state machine. Child/MCP/ambiguous-effect closure,
 other stop origins/wait subjects, UDS capture/server routing, scheduling and
 worker-loss reconciliation remain in this package. This partial integration

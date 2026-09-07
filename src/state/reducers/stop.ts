@@ -1,6 +1,6 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
-import { digestOmitting, identityHash } from '../../kernel/identity.js';
+import { digestOmitting, identityHash, parseCanonicalTime } from '../../kernel/identity.js';
 import type { BudgetSettlementV1, ContinuationItem, InvocationJournalEntry, Run, RunAssemblyV1, RunCancel, RunFrontier, RunSpec, SessionRunTerminalItem } from '../../kernel/types.js';
 import type { ToolCheckpointProof } from '../../kernel/tool-authorization.js';
 import { immutableSnapshot } from '../../model/immutable.js';
@@ -9,7 +9,7 @@ import { exactKeys, requireEqual } from '../../policy/runtime-authority.js';
 import { toolOperationId } from '../../policy/tool-policy.js';
 import { cancelledCall, cancelRequestDigest, agentStopDetail, openStopBatch, selectAgentStop, stopCheckpointId, stopInvocationHistory, type AgentStopIntent } from '../../runtime/stop.js';
 import { readCanonicalArtifact } from '../agent-context.js';
-import { insertArtifactMetadata, type ArtifactCatalog } from '../artifacts.js';
+import { insertArtifactMetadata, type ArtifactCatalog, type PublishedArtifact } from '../artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { validateControlChannelClosure } from '../control-channel.js';
 import { prepareContinuationCommit } from '../continuation-commit.js';
@@ -24,6 +24,7 @@ import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import { readCancelResponse, readAgentStop, type CancelResponse } from '../stop-recovery.js';
 import { readResourceStopCause } from '../resource-stop.js';
+import { prepareModelFailureStop } from '../model-failure.js';
 import { prepareToolCheckpoint, validateRetainedWorkerSeal } from '../tool-checkpoint.js';
 import { readToolCut } from '../tool-cut.js';
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
@@ -36,6 +37,8 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
   const { run: admitted, spec, assembly, principalId } = authority;
   const runId = admitted.id;
   const result = (run: Run) => ({ run, checkpointId: stopCheckpointId(runId, run.stopIntentRef!) });
+  const deadlineIntent = (createdAt: string): AgentStopIntent => ({ schemaVersion: 1, runId, createdAt, origin: 'deadline',
+    targetStatus: 'failed', reason: 'budget_exhausted', deadlineAt: admitted.deadlineAt });
   async function cut(revision: number) {
     if (!Number.isSafeInteger(revision) || revision < 1) throw new TypeError('invalid stop revision');
     const selected = await readRecoveryClosure(driver, artifacts, runId);
@@ -65,14 +68,16 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     const outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     return { accepted: outcome === 'healthy', outcome };
   }
-  async function commitDerivedStop(selected: Awaited<ReturnType<typeof cut>>, derive: (now: string) => Promise<AgentStopIntent | undefined>) {
+  async function commitDerivedStop(selected: Awaited<ReturnType<typeof cut>>, derive: (now: string) => Promise<{
+    intent: AgentStopIntent; metadata?: PublishedArtifact[];
+  } | undefined>) {
     const prior = selected.run.stopIntentRef ? await readAgentStop(driver, artifacts, selected) : undefined;
     if (prior?.origin === 'user_cancel') return immutableSnapshot(result(selected.run));
     for (let retry = 0; retry < 8; retry++) {
       const now = sampleCanonicalNow();
       const proposal = await derive(now);
-      if (!proposal) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'current continuation has no resource failure');
-      const intent = selectAgentStop(prior, proposal);
+      if (!proposal) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'current continuation has no supported failure');
+      const intent = selectAgentStop(prior, proposal.intent);
       if (intent === prior) return immutableSnapshot(result(selected.run));
       const artifact = await artifacts.publishCanonical(intent, 'cliq-stop-intent-v1');
       let time: ReturnType<typeof acceptTime> | undefined, updated: Run | undefined;
@@ -80,6 +85,11 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         time = acceptTime(connection, now);
         if (!time.accepted) return;
         assertCut(connection, selected);
+        if (intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime' &&
+            parseCanonicalTime(sampleCanonicalNow()) - parseCanonicalTime(now) > 5_000) {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'model failure observation is stale; reobserve the Journal');
+        }
+        for (const metadata of proposal.metadata ?? []) insertArtifactMetadata(connection, metadata, now);
         insertArtifactMetadata(connection, artifact, now);
         connection.prepare('UPDATE runs SET stop_intent_ref = ?, revision = revision + 1, updated_at = ? WHERE id = ?').run(artifact.ref, now, runId);
         updated = readRun(connection, runId);
@@ -88,7 +98,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       requireHealthyFence(time?.outcome);
       if (updated) return immutableSnapshot(result(updated));
     }
-    throw new KernelStorageError('REVISION_CONFLICT', 'resource/time cut kept changing');
+    throw new KernelStorageError('REVISION_CONFLICT', 'failure/time cut kept changing');
   }
   return {
     cancelRun: stateOperation('INVALID_REQUEST', async (input: RunCancel) => {
@@ -150,8 +160,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       if (sampleCanonicalNow() < selected.run.deadlineAt) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run deadline has not elapsed');
       return commitDerivedStop(selected, async (now) => {
         if (now < selected.run.deadlineAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'deadline clock regressed');
-        return { schemaVersion: 1, runId, createdAt: now, origin: 'deadline', targetStatus: 'failed',
-          reason: 'budget_exhausted', deadlineAt: selected.run.deadlineAt };
+        return { intent: deadlineIntent(now) };
       });
     }),
     stopForResourceFailure: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
@@ -161,10 +170,24 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       await authority.assertAuthority();
       const selected = await cut(input.expectedRunRevision);
       return commitDerivedStop(selected, async (now) => {
-        if (now >= selected.run.deadlineAt) return { schemaVersion: 1, runId, createdAt: now, origin: 'deadline',
-          targetStatus: 'failed', reason: 'budget_exhausted', deadlineAt: selected.run.deadlineAt };
+        if (now >= selected.run.deadlineAt) return { intent: deadlineIntent(now) };
         const cause = await readResourceStopCause(driver, artifacts, selected, now);
-        return cause ? { schemaVersion: 1, runId, createdAt: now, ...cause } : undefined;
+        return cause ? { intent: { schemaVersion: 1, runId, createdAt: now, ...cause } } : undefined;
+      });
+    }),
+    stopForModelFailure: stateOperation('INVALID_REQUEST', async (input: {
+      expectedRunRevision: number; inspectorIdentityRef: string; inspectorIdentityDigest: string;
+    }) => {
+      input = immutableSnapshot(input);
+      if (!exactKeys(input, ['expectedRunRevision', 'inspectorIdentityRef', 'inspectorIdentityDigest'])) throw new TypeError('unknown model failure stop field');
+      assertActiveStateOwner(driver, owner);
+      await authority.assertAuthority();
+      const selected = await cut(input.expectedRunRevision);
+      return commitDerivedStop(selected, async (now) => {
+        if (now >= selected.run.deadlineAt) return { intent: deadlineIntent(now) };
+        return prepareModelFailureStop(artifacts, assertActiveStateOwner(driver, owner), assembly, selected, {
+          inspectorIdentityRef: input.inspectorIdentityRef, inspectorIdentityDigest: input.inspectorIdentityDigest
+        }, now);
       });
     }),
     commitTerminalStop: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number; checkpoint?: ToolCheckpointProof }) => {

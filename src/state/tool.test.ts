@@ -88,7 +88,7 @@ test('direct deny closes exactly its own call with no Journal or charge, while a
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), beforeAsk);
     assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 1);
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
     assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 1);
   } finally { await disposeFixture(fixture); }
@@ -111,7 +111,7 @@ test('tool settlement fault injection rolls back Journal, budget, result, fronti
     assert.equal(completed.entry.phase, 'completed');
     assert.equal(completed.run.nextStep, 'agent');
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
     assert.equal(fixture.store.getRun(fixture.runId).budgetConsumed.toolCalls, 1);
   } finally { fault.close(); await disposeFixture(fixture); }
@@ -229,7 +229,7 @@ test('unknown and abandoned typed tools cannot seal changed workspace bytes or c
       assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
       // Exercise both durable cuts independently; restarting only after abandonment missed unknown-only recovery.
       await fixture.store.close();
-      fixture.store = await openStateStore(fixture.stateRoot);
+      fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
       fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
       assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).journal.at(-1)!.phase, phase);
       assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
@@ -321,7 +321,7 @@ test('mutating completion requires exact retirement/snapshot proof and seals res
     fault.prepare('UPDATE checkpoints SET workspace_state_ref = ? WHERE id = ?').run(proof.workspaceStateRef, prepared.checkpointId);
     fault.exec(trigger);
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
     assert.equal(fixture.store.getRun(fixture.runId).budgetConsumed.toolCalls, 1);
   } finally { fault.close(); await disposeFixture(fixture); }
