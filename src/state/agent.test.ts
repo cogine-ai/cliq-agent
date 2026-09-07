@@ -56,6 +56,7 @@ test('real model admission binds zero-based identity, native bytes and the full 
     assert.equal(closure.latestCheckpoint.runItemSeq, 2);
     assert.equal(closure.latestCheckpoint.journalSeq, completed.entry.seq);
     const current = await fixture.agent.readToolInvocation();
+    assert.ok(current.kind === 'tool');
     assert.deepEqual(current.invocation, { callId: 'a', index: 0, toolName: 'read', input: { path: 'src/a.ts' }, replayClass: 'retry' });
     assert.deepEqual(current.subject.channel, { kind: 'fs-read', path: 'src/a.ts' });
     assert.equal(current.subject.display.path, 'src/a.ts');

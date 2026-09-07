@@ -19,11 +19,14 @@ const TYPED_RUNTIME_SOURCES = [
   'model/immutable.ts',
   'kernel/continuation.ts',
   'kernel/tool-authorization.ts',
+  'kernel/user-input.ts',
   'runtime/continuation.ts',
+  'runtime/user-input.ts',
   'runtime/context-compaction.ts',
   'tools/input-contract.ts',
   'tools/input-schema.ts',
   'tools/builtin-inputs.ts',
+  'tools/request-input.ts',
   'policy/decision.ts',
   'policy/engine.ts',
   'policy/decision-table.ts',
@@ -33,11 +36,13 @@ const TYPED_RUNTIME_SOURCES = [
   'policy/tool-policy.ts',
   'state/agent-context.ts',
   'state/agent-recovery.ts',
+  'state/input-recovery.ts',
   'state/continuation-commit.ts',
   'state/tool-cut.ts',
   'state/tool-checkpoint.ts',
   'state/tool-recovery.ts',
   'state/reducers/agent.ts',
+  'state/reducers/input.ts',
   'state/reducers/tool.ts'
 ] as const;
 

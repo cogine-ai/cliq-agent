@@ -40,6 +40,10 @@ export const readToolCut = stateOperation('RECOVERY_REQUIRED', async (
   for (const { item } of items.slice(batchIndex + 1)) {
     if (item.kind === 'policy_decision') {
       if (item.subjectKind !== 'tool_call') throw new TypeError('unexpected policy subject inside tool batch');
+    } else if (item.kind === 'input_request' || item.kind === 'user_input') {
+      if (item.batchItemId !== batch.itemId || item.index !== next || item.callId !== batch.calls[next]?.callId) {
+        throw new TypeError('input control item differs from its result-less call');
+      }
     } else if (item.kind === 'tool_result' && item.batchItemId === batch.itemId && item.index === next && item.callId === batch.calls[next]?.callId) next++;
     else throw new TypeError('tool frontier has a non-contiguous result prefix');
   }

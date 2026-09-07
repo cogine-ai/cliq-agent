@@ -73,7 +73,7 @@ export async function validateToolRecovery(input: {
         checkpoint.runItemSeq !== prior.runItemSeq) throw new TypeError('approval wait has no unchanged ready Checkpoint');
     return { ...proof, wait, checkpoint };
   }
-  if (run.waitingReason === 'approval' || (run.status === 'waiting' && run.nextStep === 'tool')) {
+  if (run.waitingReason === 'approval' || (run.status === 'waiting' && run.nextStep === 'tool' && run.waitingReason !== 'input')) {
     if (run.status !== 'waiting' || run.waitingReason !== 'approval' || !run.waitingOnRef || run.activeWorkerLaunchId || run.nextStep !== 'tool') {
       throw new TypeError('approval wait retains an execution worker or lacks its exact subject');
     }
@@ -193,7 +193,7 @@ export async function validateToolRecovery(input: {
     if (!contract || canonicalSha256(contract) !== target.toolContractDigest || manifest.manifestDigest !== target.toolManifestDigest ||
         digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest) throw new TypeError('tool result contract substitution');
     if (result.outcome === 'executed') {
-      if (payload.outcome !== 'executed' || payload.journalResultRef !== completion.resultRef ||
+      if (payload.outcome !== 'executed' || payload.source !== 'invocation' || payload.journalResultRef !== completion.resultRef ||
           payload.journalResultDigest !== result.observationDigest || payload.outputSchemaRef !== contract.outputSchemaRef ||
           payload.outputSchemaDigest !== contract.outputSchemaDigest) throw new TypeError('executed result substitutes its Journal source');
       requireEqual(content.content, result.content, 'executed model content');
@@ -212,7 +212,7 @@ export async function validateToolRecovery(input: {
       if (diagnostic.observationRef) await artifacts.readBytes(diagnostic.observationRef);
       requireEqual(content.content, { code: result.code }, 'model-safe tool error');
     }
-    if (payload.opId !== prepared.opId || payload.attempt !== prepared.attempt) throw new TypeError('tool payload operation identity mismatch');
+    if (!('opId' in payload) || payload.opId !== prepared.opId || payload.attempt !== prepared.attempt) throw new TypeError('tool payload operation identity mismatch');
     const checkpoint = input.checkpoints.find((checkpoint) => checkpoint.id === toolCheckpointId(run.id, prepared.opId, prepared.attempt));
     const itemSeq = [...items.keys()].indexOf(item.itemId) + 1;
     if (!checkpoint || checkpoint.runId !== run.id || checkpoint.journalSeq !== completion.seq || checkpoint.runItemSeq !== itemSeq ||

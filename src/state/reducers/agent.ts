@@ -127,7 +127,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     const output = entry.outputSchemaRef !== undefined;
     if (!exactKeys(entry, ['name', 'version', 'description', 'access', 'inputSchemaRef', 'inputSchemaDigest', 'replayClass', 'execution',
       ...(output ? ['outputSchemaRef', 'outputSchemaDigest'] : [])]) || typeof entry.version !== 'string' || !entry.version ||
-        !['read', 'write', 'exec', 'plan'].includes(entry.access)) throw new TypeError('invalid frozen tool contract schema');
+        !['read', 'write', 'exec', 'plan', 'control'].includes(entry.access)) throw new TypeError('invalid frozen tool contract schema');
     const execution = entry.execution;
     if (execution.kind === 'builtin') {
       if (!exactKeys(execution, ['kind', 'adapterId', 'adapterVersion', 'adapterCodeDigest']) ||

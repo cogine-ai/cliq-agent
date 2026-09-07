@@ -28,10 +28,11 @@ import { prepareToolCheckpoint, toolCheckpointId } from '../tool-checkpoint.js';
 import { readToolCut, type ToolCut } from '../tool-cut.js';
 import { appendRunStateEvent, assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation,
   requireHealthyFence, settleValidatedInvocation, type ClaimInvocationDispatchInput } from './invocation.js';
+import { loadInputContinuation } from './input.js';
 
 const TOOL_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
 type ApprovalResponse = { protocolVersion: 1; ok: true; result: Extract<ControlResultV1, { method: 'run.approve' }> };
-type ResultFields<T = ToolResultPayloadV1> = T extends ToolResultPayloadV1
+type ResultFields<T = Exclude<ToolResultPayloadV1, { source: 'user_input' }>> = T extends ToolResultPayloadV1
   ? Omit<T, 'schemaVersion' | 'format' | 'runId' | 'batchItemId' | 'callId' | 'index' | 'toolName' | 'modelContentRef' | 'modelContentDigest' | 'payloadDigest'> : never;
 
 function policyItem(evidence: ToolPolicyChannelEvidenceV1, decision: { grantRef: string } | { outcomeItemRef: string },
@@ -236,13 +237,23 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     requireEqual(item, policyItem(evidence, item.decision === 'allow' ? { grantRef: item.grantRef } : { outcomeItemRef: item.denialOutcome.outcomeItemRef }, approval), 'policy item');
     if (item.decision !== (approval?.decision ?? evidence.effectiveDisposition)) throw new TypeError('policy item disposition mismatch');
   }
-  if (admittedRun.waitingOnRef) {
+  if (admittedRun.waitingReason === 'approval' && admittedRun.waitingOnRef) {
     const selected = await cut();
     const proof = await waitProof(admittedRun.waitingOnRef);
     requireEqual(proof.request, requestFor(selected).request, 'waiting current tool request');
   }
 
+  const inputContinuation = await loadInputContinuation(driver, artifacts, owner, {
+    run: admittedRun, spec, assembly, principalId: workspace.ownerPrincipalId, resolveToolInput, contracts,
+    async assertAuthority() {
+      requirePolicy();
+      for (const ref of policyArtifactRefs) await artifacts.readBytes(ref);
+    }
+  });
+
   return {
+    waitForInput: inputContinuation.waitForInput,
+    submitInput: inputContinuation.submitInput,
     prepareTool: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {
       const { expectedRunRevision, leaseEpoch } = input;
       const evaluator = requirePolicy();
@@ -254,6 +265,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       else if (selected.run.activeWorkerLaunchId || selected.run.leaseEpoch !== leaseEpoch || selected.run.cancelRequested ||
           selected.run.stopIntentRef || sampleCanonicalNow() >= selected.run.deadlineAt) throw new KernelStorageError('LEASE_FENCED', 'queued approval selection is stale');
       const { request, target, entry } = requestFor(selected);
+      if (entry.access === 'control') return inputContinuation.plan(selected);
       const approved = await approvedGrant(selected, request);
       const prior = readHighestPreparedAttempt(driver, runId, request.opId);
       const canRenew = approved && approved.grant.expiresAt <= sampleCanonicalNow() && prior?.grantRef === approved.grantRef &&
@@ -529,7 +541,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       // A received tool error is a known, executed result, not proof that dispatch released nothing.
       return immutableSnapshot(await settleValidatedInvocation(driver, artifacts, owner, { ...input, runId },
         { phase: 'completed', resultRef: observationRef, consumed: TOOL_BUDGET }, async ({ run, settlement }) => {
-        const payload = observed.outcome === 'executed' ? { outcome: 'executed' as const, opId: input.opId, attempt: input.attempt,
+        const payload = observed.outcome === 'executed' ? { outcome: 'executed' as const, source: 'invocation' as const, opId: input.opId, attempt: input.attempt,
           journalResultRef: observationRef, journalResultDigest: observed.observationDigest,
           ...(expected.entry.outputSchemaRef ? { outputSchemaRef: expected.entry.outputSchemaRef, outputSchemaDigest: expected.entry.outputSchemaDigest } : {}) }
           : { outcome: 'error' as const, code: observed.code, opId: input.opId, attempt: input.attempt,

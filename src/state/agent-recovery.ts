@@ -6,12 +6,14 @@ import type {
 } from '../kernel/types.js';
 import type { ModelUnusableResponseV1 } from '../protocol/agent-ir.js';
 import { modelResponseDigest } from '../model/attempt.js';
+import { toolOperationId } from '../policy/tool-policy.js';
 import type { ModelRequestV1, NormalPromptProjectionV1, ModelVisiblePromptV1 } from '../model/request.js';
 import { validateUnusableModelResponse } from '../runtime/continuation.js';
 import { contextSourceDigest, validateContextItems } from '../runtime/context-compaction.js';
 import { readCanonicalArtifact, readModelTurnMaterial, readText } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { validateToolRecovery } from './tool-recovery.js';
+import { validateUserInputRecovery } from './input-recovery.js';
 import type { Checkpoint } from '../kernel/types.js';
 
 /** Recovery checks retained reachability/identity; loading the agent additionally reproduces native requests and validates schemas. */
@@ -115,10 +117,19 @@ export async function validateAgentRecovery(input: {
           digestOmitting(content, 'contentDigest') !== payload.modelContentDigest || content.contentDigest !== payload.modelContentDigest) {
         throw new TypeError('tool result is not owned by its retained batch call');
       }
+      if (payload.outcome === 'executed') {
+        if (payload.source === 'invocation') {
+          if (item.opId !== payload.opId || payload.opId !== toolOperationId(run.id, item.batchItemId, item.callId) ||
+              !journal.some((entry) => (entry.opKind === 'tool' || entry.opKind === 'mcp') &&
+              entry.phase === 'completed' && entry.opId === payload.opId && entry.attempt === payload.attempt &&
+              entry.resultRef === payload.journalResultRef)) throw new TypeError('executed invocation result has no completed Journal owner');
+        } else if (payload.source !== 'user_input') throw new TypeError('executed tool result has an unknown source');
+      }
       if (payload.outcome === 'error') await artifacts.readBytes(payload.diagnosticRef);
     }
   }
   await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
+  await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
   validateContextItems(input.context, input.items.map((row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: items.get(row.itemId)!
   })));

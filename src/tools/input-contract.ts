@@ -9,7 +9,8 @@ import { builtinInputContracts } from './builtin-inputs.js';
 import { compileInputSchema } from './input-schema.js';
 
 export type ToolInputAuthority = ToolContractManifestV1['entries'][number] & { inputSchema: unknown };
-type ParsedInput = { input: Record<string, unknown> } & Pick<Extract<PolicySubject, { kind: 'tool' }>, 'channel' | 'display'>;
+type ParsedInput = { input: Record<string, unknown>; channel?: Extract<PolicySubject, { kind: 'tool' }>['channel'];
+  display: Extract<PolicySubject, { kind: 'tool' }>['display'] };
 
 /** One frozen contract owns validation, normalized intent and invocation display. None is execution permission. */
 export function loadToolContracts(tools: readonly ToolInputAuthority[]) {
@@ -23,7 +24,8 @@ export function loadToolContracts(tools: readonly ToolInputAuthority[]) {
       const builtin = Object.hasOwn(builtinInputContracts, entry.execution.adapterId)
         ? builtinInputContracts[entry.execution.adapterId as keyof typeof builtinInputContracts] : undefined;
       if (!builtin || entry.name !== builtin.name || entry.version !== builtin.version || entry.execution.adapterVersion !== builtin.version ||
-          entry.access !== builtin.access || entry.replayClass !== builtin.replayClass || canonicalSha256(builtin.inputSchema) !== entry.inputSchemaDigest) {
+          entry.access !== builtin.access || entry.replayClass !== builtin.replayClass || canonicalSha256(builtin.inputSchema) !== entry.inputSchemaDigest ||
+          (entry.access === 'control' && entry.outputSchemaRef !== undefined)) {
         throw new TypeError('builtin contract differs from the compiled input semantics');
       }
       parseInput = builtin.parseInput;
@@ -64,10 +66,13 @@ export function loadToolContracts(tools: readonly ToolInputAuthority[]) {
           !Number.isSafeInteger(call.index) || call.index < 0) throw new TypeError('invocation requires a resolved, normalized tool input');
       const invocation: ToolInvocation = { callId: call.callId, index: call.index, toolName: call.toolName,
         input: parsed.input, replayClass: contract.entry.replayClass };
+      const common = { invocation, execution: contract.entry.execution, manifestEntryDigest: contract.entryDigest,
+        display: parsed.display, loopSignature: canonicalSha256(['cliq-tool-loop-v1', contract.entryDigest, parsed.input]) };
+      if (contract.entry.access === 'control') return immutableSnapshot({ ...common, kind: 'input' as const });
+      if (!parsed.channel) throw new TypeError('ordinary tool has no policy intent');
       const subject: Extract<PolicySubject, { kind: 'tool' }> = { kind: 'tool', toolName: call.toolName,
         access: contract.entry.access, channel: parsed.channel, display: parsed.display };
-      return immutableSnapshot({ invocation, subject, execution: contract.entry.execution, manifestEntryDigest: contract.entryDigest,
-        loopSignature: canonicalSha256(['cliq-tool-loop-v1', contract.entryDigest, parsed.input]) });
+      return immutableSnapshot({ ...common, kind: 'tool' as const, subject });
     }
   });
 }

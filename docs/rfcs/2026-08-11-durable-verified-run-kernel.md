@@ -2239,7 +2239,7 @@ type ToolContractManifestV1 = {
     name: string
     version: string
     description: string
-    access: 'read' | 'write' | 'exec' | 'plan'
+    access: 'read' | 'write' | 'exec' | 'plan' | 'control'
     inputSchemaRef: ArtifactRef
     inputSchemaDigest: string
     outputSchemaRef?: ArtifactRef
@@ -2484,6 +2484,10 @@ Session label to reconstruct the objective.
 | `accept-edits` | `read`, `plan`, `write`, `child_read_only` | `exec`, `mcp`, `verifier`, `dependency_install_scripts`, `delivery`, `child_mutating` | none |
 | `plan` | `read`, `plan`, `child_read_only` | none | `write`, `exec`, `mcp`, `verifier`, `dependency_install_scripts`, `delivery`, `child_mutating` |
 | `yolo` | every listed class | none | none |
+
+The closed builtin `request_input` contract has `access='control'` and no
+`PolicyActionClass`; section 9.3 owns its authenticated input transition.
+It does not enter this permission table or produce an OperationGrant.
 
 The v1 builtin floor is the ordered prefix `builtin:bash:rm` (`bash`, `rm`),
 `builtin:fs-write:git-tree` (`fs-write`, `.git/*`), and
@@ -5136,6 +5140,44 @@ exactly the payload string or schema-normalized JSON value—never its principal
 prompt, schema, or audit refs. If more calls remain the transaction preserves a
 tool frontier; otherwise it creates an agent frontier with cause `input`.
 
+`request_input` is the closed built-in control contract: `access='control'`,
+`replayClass='manual'`, adapter id `request_input`, version `1`, and no manifest
+output schema. It is not an ordinary policy action and cannot mint an
+OperationGrant, prepare/claim a Journal invocation, perform target I/O, or
+charge a tool dispatch. A same-named MCP tool remains an ordinary MCP call.
+Its native input is `{prompt,responseKind,maximumResponseBytes,responseSchema?}`:
+prompt is nonempty NFC/no-NUL text of at most 262144 UTF-8 bytes; the byte limit
+is required and `1..1048576`; `responseSchema` is required exactly for `json`.
+The entire response schema is prevalidated with the whole native batch.
+Other fields, unsupported schemas and malformed prompts reject the call before
+any call in that batch dispatches. Requesting input does not grant any file,
+command, network or child authority, in any policy mode.
+
+The wait atomically appends the exact InputRequestItem, unchanged-workspace
+ready Checkpoint and input WaitingSubject. If a worker exists, current-inspector
+containment-death and unchanged-workspace snapshot proof seal its generation
+and retire it in that transaction; competing unretired launches forbid waiting.
+The request item is excluded from model content. Answering is a worker-free
+control commit, retaining the exact WaitingSubject, canonical request identity
+and authenticated channel in UserInputPayloadV1. Recovery replays the prompt
+from the frozen native call and checks the exact control row and response.
+Both wait and answer preserve the Journal and budget; continuation needs a
+fresh worker activation. No synthetic external invocation is created.
+
+Input ToolResults use `source='user_input'` and bind the committed UserInputItem
+and payload, whereas externally dispatched ToolResults use `source='invocation'`
+and bind their Journal completion. These branches are disjoint and cannot
+substitute for each other. Input text must fit both its prompt UTF-8 limit and
+the existing 1-MiB JCS model-content limit; JSON fits both limits in JCS bytes.
+
+For normal prompt projection, defer UserInputItem user messages until all
+ToolResults of their owning batch have been emitted, preserving input order
+and emitting them before the next assistant message. This is the explicit
+exception to raw-item emission order in section 11: native tool results must
+remain contiguous after their assistant call batch. The durable item order
+stays InputRequestItem, UserInputItem, ToolResult. Compaction selects whole
+batches and uses this same model-message order, not audit-item order.
+
 `run.reconcile(resolution='probe_now')` only asks the trusted Supervisor to run the exact inspection contract already frozen by `ReconciliationSubject` and its immutable Journal/registry/DeliveryPlan/containment graph. It is legal only with no probe in flight. The invocation form exists only for `opKind='mcp'` with `recovery='mcp_reconcile'` and repeats the immutable registry/profile/template/predicate refs and digests; model, verifier, MCP-server, ordinary built-in tool, retry, and manual invocations cannot enter that branch. Model/verifier unknowns use their frozen retry-or-runtime-stop reducers, MCP-server uncertainty uses exact instance/containment lifecycle recovery, publication has its own subject, and worker loss has its own subject. The control request supplies no target, adapter, predicate, or response payload and cannot widen frozen bytes.
 
 An MCP subject observation contains only `McpRecoveryProbeEvidenceV1`; `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Run/wait/op/attempt, automatic-or-user probe ordinal and in-flight nonce, registry/tool/profile/template/predicates, broker dispatch/target, and response ref/digest equal the current subject, outer probe wrapper, and exact secretless status request. The response is bounded canonical JSON under the registered status-output contract. `disposition` is `completed` iff only the completed predicate matches, `failed` iff only the failed predicate matches, otherwise `unresolved`; both/neither/schema failure is unresolved and cannot advance. A completed/failed disposition appends the matching Journal resolution plus normalized result/error and advances the exact tool frontier; unresolved only records the outer evidence and clears the nonce.
@@ -6083,12 +6125,20 @@ type ToolResultModelContentV1 = {
 type ToolResultPayloadV1 = ToolResultPayloadBaseV1 & (
   | {
       outcome: 'executed'
+      source: 'invocation'
       opId: string
       attempt: number
       journalResultRef: ArtifactRef
       journalResultDigest: string
       outputSchemaRef?: ArtifactRef
       outputSchemaDigest?: string
+    }
+  | {
+      outcome: 'executed'
+      source: 'user_input'
+      inputItemRef: ArtifactRef
+      inputRef: ArtifactRef
+      inputDigest: string
     }
   | {
       outcome: 'denied'
@@ -6458,6 +6508,12 @@ type UserInputPayloadBaseV1 = {
   promptRef: ArtifactRef
   promptDigest: string
   principalId: string
+  waitingSubjectRef: ArtifactRef
+  requestId: string
+  requestDigest: string
+  expectedRunRevision: number
+  channelIdentityRef: ArtifactRef
+  channelIdentityDigest: string
   byteCount: number
   modelContentRef: ArtifactRef
   modelContentDigest: string
@@ -7257,7 +7313,7 @@ tool execution.
 
 For a usable turn, `AgentModelTurn.responseDigest` is exactly SHA-256 of RFC 8785/JCS `{format:'cliq-agent-normalized-response-v1',provider,model,responseId?,continuation?,usage?,usageTrusted:false,negotiatedMode,requestDigest,stopReason,textRef,toolCalls,abortStopIntentRef?}`, with absent optional members omitted and calls in retained index order. Every value is copied byte-for-byte from the turn and storage recomputes this projection. It never hashes discarded provider wire bytes or the whole self-containing turn; raw unusable bytes are retained only by `ModelUnusableResponseV1`.
 
-Run-item decoding is a closed discriminated union over the types in this appendix/sections 12-14; unknown kinds fail closed. Except for the dedicated fenced retry-unknown artifact, every `ToolResultItem.resultRef` decodes exact `ToolResultPayloadV1`, whose `payloadDigest = SHA-256(JCS(payload with payloadDigest omitted))` and whose Run/batch/call/index/tool/outcome equal the item and original call. `executed` repeats the exact completed Journal op/attempt/result and selected output schema. `denied` repeats either the immutable policy ref/decision digest or exact `ApprovalDecisionV1`. `error` uses only the closed code set, always carries one rehashed diagnostic, and carries op/attempt/Journal error all together iff dispatch created that op. `batch_not_executed` lists the complete unique byte-sorted invalid call-id set from the same prevalidation transaction. Ordinary `cancelled` repeats the winning StopIntent and deterministic notice. A fenced retry-unknown cancelled item instead points directly to exact `RetryUnknownCancelledResult` under the terminal rule above.
+Run-item decoding is a closed discriminated union over the types in this appendix/sections 12-14; unknown kinds fail closed. Except for the dedicated fenced retry-unknown artifact, every `ToolResultItem.resultRef` decodes exact `ToolResultPayloadV1`, whose `payloadDigest = SHA-256(JCS(payload with payloadDigest omitted))` and whose Run/batch/call/index/tool/outcome equal the item and original call. `executed,source='invocation'` repeats the exact completed Journal op/attempt/result and selected output schema; `executed,source='user_input'` instead binds the authenticated input item and payload below. `denied` repeats either the immutable policy ref/decision digest or exact `ApprovalDecisionV1`. `error` uses only the closed code set, always carries one rehashed diagnostic, and carries op/attempt/Journal error all together iff dispatch created that op. `batch_not_executed` lists the complete unique byte-sorted invalid call-id set from the same prevalidation transaction. Ordinary `cancelled` repeats the winning StopIntent and deterministic notice. A fenced retry-unknown cancelled item instead points directly to exact `RetryUnknownCancelledResult` under the terminal rule above.
 
 The model never receives the audit payload. Every ordinary payload's `modelContentRef` rehashes exact `ToolResultModelContentV1`, its call identity/outcome match, `contentDigest = SHA-256(JCS(content artifact with contentDigest omitted))`, and its canonical JSON content is at most 1,048,576 bytes. For `executed`, content is the selected output-schema-normalized result (or the registered contract's canonical schema-absent JSON result). Synthetic projections are exact and ref-free: denied is `{code:'TOOL_CALL_DENIED'}`; error is `{code}`; batch-not-executed is `{code:'BATCH_REJECTED_BEFORE_DISPATCH',invalidCallIds}`; cancelled is `{code:'TOOL_CALL_CANCELLED',cancellationKind}`. No principal, policy/grant/decision/StopIntent/Journal/diagnostic/attestation/containment ref or digest enters that artifact. Model context projection includes only these decoded model-content artifacts, `UserInputItem.modelContentRef`, `RepairDiagnosticItem` model-safe diagnostics, and `ChildResultItem.modelContentRef` when their owning frontier reducers admit them. It excludes the full input/ToolResult/child authority payload, grants, principal ids, policy artifacts, attestations, containment evidence, and `ToolAbandonedItem`; a `PolicyDecisionItem` is represented only by its ref-free denied content or stop outcome. Thus audit truth and prompt content are related by explicit projection, not by serializing authority artifacts.
 
@@ -7284,6 +7340,16 @@ principal, prompt/schema, request, Run/call, or authority ref. The executed
 ToolResult model content value equals only that same kind-normalized payload
 value and its call identity. A kind/schema/bound/identity mismatch commits nothing;
 same request id/digest returns the already committed item/result/snapshot.
+
+UserInputPayloadV1 additionally binds the exact waiting ref, request id/digest,
+expected revision and authenticated channel pair. Its `requestDigest` is the
+canonical `run.input` wire request, excluding the transport-injected principal
+and channel; `(principalId,'run.input',requestId)` selects the durable control
+row, whose digest/channel/commit time and immutable response must agree. A
+fresh channel must authenticate even an idempotent replay; the retained channel
+is historical audit, never authority to submit a new request. The executed
+input ToolResult has no `opId`, attempt or Journal reference. The ordinary
+executed-Journal rule above applies only to `source='invocation'`.
 
 Every completed visible model attempt first appends one `ModelTurnItem`; a call turn's `ToolBatchItem.modelTurnRef` and `modelOpId/attempt` must match it. Every `FinalCandidateItem` decodes its base/result SourceManifests and exact `WorkspaceDiffV1`; the diff base/result refs equal the candidate, `sourceDigest` equals the result SourceManifest's `manifestDigest`, and `diffDigest` equals the decoded diff's self digest. The `agent` branch names a same-Run `ModelTurnItem(stopReason='end')`, requires `producingOpId === modelOpId`, and requires `summaryRef === textRef` where that `ModelTextV1` is nonempty. The `delivery` branch structurally forbids `producingOpId`, names the exact same-Run `DeliveryMergeItem`, and copies its captured-base/result/diff/summary refs; that summary also decodes `ModelTextV1`, while source Run, B/S/A/M, and plan fields satisfy the delivery equations above. No candidate points directly at an unowned provider artifact. `commitRunResult` requires its `baseSourceRef`, `resultSourceRef`, `diffRef`, and `summaryRef` to equal the current candidate byte-for-byte, then independently rehashes the result source and diff; `SessionRunTerminalItem.resultRef` names only that committed RunResult. A caller-derived summary, alternate diff, tree digest substituted for manifest digest, or delivery merge op invented after the fact is invalid.
 

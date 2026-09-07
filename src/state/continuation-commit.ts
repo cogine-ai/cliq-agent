@@ -16,7 +16,7 @@ export async function prepareContinuationCommit(artifacts: ArtifactCatalog, inpu
   const context = structuredClone(input.context);
   for (const entry of added) {
     const range = { fromItemSeq: entry.itemSeq, throughItemSeq: entry.itemSeq };
-    context.segments.push(entry.item.kind === 'model_turn' || entry.item.kind === 'tool_result'
+    context.segments.push(entry.item.kind === 'model_turn' || entry.item.kind === 'tool_result' || entry.item.kind === 'user_input'
       ? { kind: 'raw', ...range, items: [{ itemSeq: entry.itemSeq, itemRef: entry.itemRef }] }
       : { kind: 'excluded_control', ...range, sourceItemsDigest: contextSourceDigest([entry]) });
   }

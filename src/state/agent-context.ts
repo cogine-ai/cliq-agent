@@ -5,6 +5,7 @@ import type {
   ToolResultPayloadV1, ToolResultModelContentV1
 } from '../kernel/types.js';
 import type { AgentModelTurn, ModelTextV1, ToolCallInputV1, ObservedToolCallInputV1 } from '../protocol/agent-ir.js';
+import type { UserInputModelContentV1 } from '../kernel/user-input.js';
 import { verifyModelText } from '../model/attempt.js';
 import type { NormalPromptProjectionV1, NormalPromptMessageV1 } from '../model/request.js';
 import type { RunAssemblyToolAuthority } from '../model/run-assembly.js';
@@ -111,11 +112,15 @@ export async function projectNormalContext(input: {
   for (const ref of admitted.parentContextRefs) user('parent_context', ref, (await readText(artifacts, ref)).utf8);
   for (const ref of admitted.additionalArtifactRefs) user('additional_context', ref, (await readText(artifacts, ref)).utf8);
   user('run_objective', spec.objectiveRef, decodeRunObjective(await readCanonicalArtifact(artifacts, spec.objectiveRef)).utf8);
+  let pendingCalls: string[] = [];
+  const pendingInputs: Array<{ itemId: string; content: string }> = [];
   const projectItem = async (itemRef: string) => {
       const item = await readCanonicalArtifact<ContinuationItem>(artifacts, itemRef);
       if (item.runId !== run.id) throw new TypeError('context item belongs to another Run');
       if (item.kind === 'model_turn') {
         const { turn, text, inputs } = await readModelTurnMaterial(artifacts, item.modelTurnRef);
+        if (pendingCalls.length) throw new TypeError('model turn overtakes an unanswered tool call');
+        pendingCalls = turn.toolCalls.map((call) => call.callId);
         messages.push({ index: messages.length, role: 'assistant', sourceItemId: item.itemId, contentUtf8: text.utf8,
           toolCalls: turn.toolCalls.map((call, index) => {
             const observed = inputs[index]!.observed;
@@ -134,6 +139,16 @@ export async function projectNormalContext(input: {
         }
         messages.push({ index: messages.length, role: 'tool', sourceItemId: item.itemId,
           toolCallId: item.callId, contentUtf8: canonicalJsonBytes(content.content).toString('utf8') });
+        if (pendingCalls.shift() !== item.callId) throw new TypeError('tool result projection order mismatch');
+        // Native providers require all tool results before another user message.
+        if (!pendingCalls.length) for (const input of pendingInputs.splice(0)) user('user_input', input.itemId, input.content);
+      } else if (item.kind === 'user_input') {
+        const content = await readCanonicalArtifact<UserInputModelContentV1>(artifacts, item.modelContentRef);
+        if (content.schemaVersion !== 1 || content.format !== 'cliq-user-input-model-content-v1' ||
+            content.contentDigest !== item.modelContentDigest || digestOmitting(content, 'contentDigest') !== content.contentDigest ||
+            !['text', 'json'].includes(content.inputKind) || pendingCalls[0] !== item.callId) throw new TypeError('input context does not belong to its open call');
+        pendingInputs.push({ itemId: item.itemId, content: content.inputKind === 'text'
+          ? content.value as string : canonicalJsonBytes(content.value).toString('utf8') });
       } else throw new TypeError(`control item ${item.kind} cannot be projected as raw model context`);
   };
   for (const segment of context.segments) {
@@ -142,6 +157,7 @@ export async function projectNormalContext(input: {
       for (const ref of segment.preservedItemRefs) await projectItem(ref);
     } else if (segment.kind === 'raw') for (const entry of segment.items) await projectItem(entry.itemRef);
   }
+  if (pendingCalls.length || pendingInputs.length) throw new TypeError('model context contains an open tool batch');
   const value: NormalPromptProjectionV1 = { schemaVersion: 1, format: 'cliq-normal-prompt-projection-v1', runId: run.id,
     basedOnRunRevision: run.revision, frontierDigest: run.frontierRef!, runSpecRef: run.specRef,
     assemblyRef: spec.assemblyRef, assemblyDigest: assembly.assemblyDigest, contextManifestRef: contextRef,

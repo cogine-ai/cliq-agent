@@ -21,7 +21,11 @@ now exercises the RFC ordinary-tool approval branch through the loaded Run and
 real StateStore: quiesced durable waits, authenticated in-process `run.approve`
 commits, idempotent responses, denied-call continuation and no-dispatch expiry
 renewal. Reuse these reducers for client/transport integration; do not create a
-second approval state machine. Other wait subjects, UDS capture/server routing,
+second approval state machine. The same integration now includes the complete
+`request_input`/`run.input` control loop: typed text/JSON prompts, quiesced waits,
+authenticated idempotent replies, ordered native results and restart recovery.
+Use its loaded-Run reducers for input transport/UI integration too; user answers
+are control commits, not synthetic Journal dispatches. Other wait subjects, UDS capture/server routing,
 scheduling, worker-loss reconciliation, cancellation and terminal drain remain
 in this package. This partial integration does not complete WP04.
 
