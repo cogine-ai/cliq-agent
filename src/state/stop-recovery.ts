@@ -6,12 +6,11 @@ import { toolOperationId } from '../policy/tool-policy.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
-import { readRetainedControlChannelClosure } from './control-channel.js';
-import { decodeAdmittedContext, decodeSessionProjection, decodeStateLockIdentity } from './decoders.js';
+import { readHistoricalControlChannel } from './control-channel.js';
+import { decodeAdmittedContext, decodeSessionProjection } from './decoders.js';
 import { isZeroBudget } from './invariants.js';
 import { readControlRequest, readSession, readSessionPrincipalId } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
-import { readLatestStateOwner } from './state-owner.js';
 import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readResourceStopCause } from './resource-stop.js';
@@ -32,14 +31,8 @@ export async function readCancelResponse(driver: SqliteDriver, artifacts: Artifa
       !Number.isSafeInteger(snapshot.latestRunItemSeq) || snapshot.latestRunItemSeq < 0) throw new TypeError('cancellation response substitutes its Run snapshot');
   requireEqual(row.requestDigest, canonicalSha256({ protocolVersion: 1, method: 'run.cancel', requestId, runId: run.id,
     expectedRevision: snapshot.run.revision - 1 }), 'cancel request digest');
-  const owner = readLatestStateOwner(driver);
-  if (!owner) throw new TypeError('cancellation has no retained state owner');
-  const lock = decodeStateLockIdentity(await readCanonicalArtifact(artifacts, owner.stateLockIdentityRef));
-  requireEqual(lock.identityDigest, owner.stateLockIdentityDigest, 'cancellation state-owner lock');
-  const { channel } = await readRetainedControlChannelClosure(artifacts, {
-    stateRootIdentityRef: lock.stateRootIdentityRef, stateRootIdentityDigest: lock.stateRootIdentityDigest,
-    filesystem: { ownerUid: lock.ownerUid }
-  }, { channelIdentityRef: row.channelIdentityRef, channelIdentityDigest: row.channelIdentityDigest, principalId });
+  const { channel } = await readHistoricalControlChannel(driver, artifacts,
+    { channelIdentityRef: row.channelIdentityRef, channelIdentityDigest: row.channelIdentityDigest, principalId });
   if (channel.openedAt > row.committedAt ||
       readSessionPrincipalId(driver, run.sessionId) !== principalId ||
       driver.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(run.id)?.principal_id !== principalId) throw new TypeError('cancellation control channel has a foreign owner');

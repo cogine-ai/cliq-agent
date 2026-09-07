@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { test } from 'node:test';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
 import type { ContinuationItem, StopIntent, TerminalDetail } from '../kernel/types.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { AgentContextExhaustedError } from './reducers/agent.js';
@@ -160,8 +161,9 @@ for (const expired of [false, true]) test(`tool budget stopping respects ${expir
     const proof = await quiescedToolCheckpoint(fixture, pending.checkpointId);
     await fixture.agent.waitForToolApproval({ expectedRunRevision: revision(fixture), waitingOnRef: pending.waitingOnRef, checkpoint: proof.checkpoint });
     await assert.rejects(stop(fixture), { code: 'STATE_TRANSITION_INVALID' });
-    await fixture.agent.approveTool({ principalId: 'cliq-m2-principal', requestId: uuidv7(), expectedRunRevision: revision(fixture),
-      waitingOnRef: pending.waitingOnRef, decision: 'allow', ttlMs: 1000, ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') });
+    const command = { principalId: 'cliq-m2-principal', requestId: uuidv7(), expectedRunRevision: revision(fixture),
+      waitingOnRef: pending.waitingOnRef, decision: 'allow' as const, ttlMs: 1000, ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') };
+    await fixture.agent.approveTool(command);
     await reopen(fixture);
     if (expired) {
       now += 1000;
@@ -169,8 +171,25 @@ for (const expired of [false, true]) test(`tool budget stopping respects ${expir
       await assert.rejects(stop(fixture), { code: 'STATE_TRANSITION_INVALID' });
       assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     } else {
+      const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+      try {
+        const before = fixture.store.getRun(fixture.runId);
+        writer.prepare("UPDATE control_requests SET channel_identity_digest = ? WHERE method = 'run.approve' AND request_id = ?")
+          .run(canonicalSha256('substituted-channel'), command.requestId);
+        await assert.rejects(stop(fixture), /control-row owner/);
+        assert.deepEqual(fixture.store.getRun(fixture.runId), before);
+        writer.prepare("UPDATE control_requests SET channel_identity_digest = ? WHERE method = 'run.approve' AND request_id = ?")
+          .run(command.channelIdentityDigest, command.requestId);
+      } finally { writer.close(); }
       const stopped = await stop(fixture);
       assert.equal(stopped.run.activeWorkerLaunchId, undefined);
+      const recoveryWriter = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+      try {
+        recoveryWriter.prepare("UPDATE control_requests SET request_id = ? WHERE method = 'run.approve' AND request_id = ?").run('missing-owner', command.requestId);
+        await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), /control-row owner/);
+        await assert.rejects(fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture) }), /control-row owner/);
+        recoveryWriter.prepare("UPDATE control_requests SET request_id = ? WHERE method = 'run.approve' AND request_id = ?").run(command.requestId, 'missing-owner');
+      } finally { recoveryWriter.close(); }
       // Expiry after the stop does not invalidate the original, authority-bound reservation failure.
       now += 1000;
       await reopen(fixture);

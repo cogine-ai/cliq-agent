@@ -398,6 +398,8 @@ transaction and Session outcome as cancellation/deadline:
   Tool-call exhaustion requires an undispatched ordinary call that policy
   currently allows, or its exact unexpired interactive approval. Denied calls,
   input calls and pending/expired approvals are not resource failures.
+  Execution and resource-stop recovery share the complete approval verifier,
+  including the authenticated control row, historical channel and response.
 - Context exhaustion reproduces the whole-prefix planner from retained
   context and the frozen context policy. No legal prefix means no model call;
   the intent contains the exact manifest and token estimates.

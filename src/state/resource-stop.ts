@@ -1,7 +1,7 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { BudgetUsage, ContextManifest, ContinuationItem, RecoveryClosureV1, RunAssemblyV1, RunContextCompactionPlan, ToolContractManifestV1 } from '../kernel/types.js';
-import type { RunPolicySnapshotV1, ToolOperationGrantV1 } from '../kernel/tool-authorization.js';
+import type { RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
 import type { ToolCallInputV1, ModelUnusableResponseV1 } from '../protocol/agent-ir.js';
 import { createModelRequestReservation, priceTableDigest, type ModelPriceTableV1, type LocalZeroCostProvenanceV1 } from '../model/pricing.js';
 import { estimatePromptTokens, projectModelVisiblePrompt, type ModelRequestV1 } from '../model/request.js';
@@ -16,12 +16,14 @@ import { decodeContextManifest, decodeWorkspaceIdentity } from './decoders.js';
 import { isZeroBudget } from './invariants.js';
 import { readSession } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
+import { readToolApproval } from './tool-approval-recovery.js';
+import { stateOperation } from './errors.js';
 
 type WithoutIdentity<T> = T extends ResourceStopIntent ? Omit<T, 'schemaVersion' | 'runId' | 'createdAt'> : never;
 type ResourceCause = WithoutIdentity<ResourceStopIntent>;
 
 /** Reproduce deterministic resource failure from retained facts, not a caught error or caller reason. */
-export async function readResourceStopCause(driver: SqliteDriver, artifacts: ArtifactCatalog,
+export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async function readResourceStopCause(driver: SqliteDriver, artifacts: ArtifactCatalog,
   cut: Pick<RecoveryClosureV1, 'run' | 'runSpec' | 'latestCheckpoint' | 'items' | 'journal'>, observedAt: string
 ): Promise<ResourceCause | undefined> {
   const { run, runSpec: spec, latestCheckpoint: checkpoint, journal } = cut;
@@ -76,8 +78,11 @@ export async function readResourceStopCause(driver: SqliteDriver, artifacts: Art
     const decision = items.map(({ item }) => item).filter((item) => item.kind === 'policy_decision' && item.opId === opId).at(-1);
     let approved = false;
     if (decision?.kind === 'policy_decision' && decision.decision === 'allow' && decision.decisionSource === 'interactive_approval') {
-      const grant = await readCanonicalArtifact<ToolOperationGrantV1>(artifacts, decision.grantRef);
-      approved = grant.requestRef === canonicalSha256(request) && grant.issuedAt <= observedAt && grant.expiresAt > observedAt;
+      const proof = await readToolApproval(driver, artifacts, run, evaluator, decision.decisionRef);
+      if (!proof.grant) throw new TypeError('resource stop requires the retained allow decision');
+      requireEqual(proof.request, request, 'resource approved tool request');
+      requireEqual(canonicalSha256(proof.grant), decision.grantRef, 'resource approved tool grant');
+      approved = proof.grant.issuedAt <= observedAt && proof.grant.expiresAt > observedAt;
     }
     if (evidence.effectiveDisposition === 'deny' || (evidence.effectiveDisposition === 'ask' && !approved)) return undefined;
     return budgetCause({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
@@ -141,4 +146,4 @@ export async function readResourceStopCause(driver: SqliteDriver, artifacts: Art
     reservation = createModelRequestReservation(assembly.context.contextLimitTokens, output, { kind: bound.kind, bound, provenance });
   }
   return budgetCause({ modelTokens: reservation.modelTokens, costMicros: reservation.costMicros, toolCalls: 0, repairAttempts: 0 });
-}
+});
