@@ -17,6 +17,7 @@ export type HeldStateOwnerLock = Readonly<{
   runtime: DescriptorIdentity;
   lock: DescriptorIdentity;
   assertHeld(): void;
+  assertPriorProcessDead(pid: number, processStartToken: string): void;
   close(): void;
 }>;
 

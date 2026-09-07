@@ -14,6 +14,7 @@ import {
   digestOmitting,
   identityHash,
   normalizeAbsolutePath,
+  parseCanonicalTime,
   sha256Bytes,
   unsignedDecimalId
 } from '../kernel/identity.js';
@@ -31,7 +32,7 @@ import type {
   StateOwnerTransitionEvidenceV1,
   StateRootIdentityV1
 } from '../kernel/types.js';
-import { ArtifactCatalog } from './artifacts.js';
+import { ArtifactCatalog, type PublishedArtifact } from './artifacts.js';
 import {
   insertGenesisTimeFence,
   readTimeFence,
@@ -98,7 +99,9 @@ import {
   gracefullyReleaseStateOwner,
   readActiveStateOwner,
   readLatestStateOwner,
+  readStateOwner,
   insertStateOwnerArtifacts,
+  terminalStateOwnerRecord,
   type StateOwnerContext
 } from './state-owner.js';
 import { hostPlatform } from './workspace-identity.js';
@@ -318,6 +321,15 @@ async function stateOwnerContextFromArtifacts(
     owner,
     heldLock
   );
+  await readStateOwnerProcess(artifacts, owner);
+  return contextFromStateOwner(
+    owner,
+    filesystem,
+    { ref: lockIdentity.stateRootIdentityRef, digest: lockIdentity.stateRootIdentityDigest }
+  );
+}
+
+async function readStateOwnerProcess(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1): Promise<PlatformProcessIdentityV1> {
   const processIdentity = decodePlatformProcessIdentity(
     await artifacts.readCanonical(owner.processIdentityRef)
   );
@@ -329,6 +341,7 @@ async function stateOwnerContextFromArtifacts(
     processIdentity.executableImageDigest !== owner.supervisorExecutableDigest ||
     processIdentity.ownerUid !== requireEffectiveUid() ||
     processIdentity.platform !== hostPlatform() ||
+    processIdentity.observedAt !== owner.acquiredAt ||
     acquisition.evidenceDigest !== owner.acquisitionEvidenceDigest ||
     acquisition.ownerEpoch !== owner.ownerEpoch ||
     acquisition.supervisorInstanceId !== owner.supervisorInstanceId ||
@@ -344,13 +357,9 @@ async function stateOwnerContextFromArtifacts(
       ? acquisition.kind !== 'genesis'
       : acquisition.kind === 'genesis' || acquisition.priorOwnerEpoch !== owner.ownerEpoch - 1)
   ) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'active StateOwner acquisition closure does not match');
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner process/acquisition closure does not match');
   }
-  return contextFromStateOwner(
-    owner,
-    filesystem,
-    { ref: lockIdentity.stateRootIdentityRef, digest: lockIdentity.stateRootIdentityDigest }
-  );
+  return processIdentity;
 }
 
 export class StateStore {
@@ -420,16 +429,6 @@ export class StateStore {
           throw new KernelStorageError(
             'RECOVERY_REQUIRED',
             'schema-v1 authority requires the explicit WP01 generation migration path'
-          );
-        }
-      } else if (preflightSchemaVersion === KERNEL_STATE_SCHEMA_VERSION) {
-        const activeOwner = driver
-          .prepare(`SELECT owner_epoch FROM state_owners WHERE state = 'active' LIMIT 1`)
-          .get<{ owner_epoch: unknown }>();
-        if (activeOwner !== undefined) {
-          throw new KernelStorageError(
-            'RECOVERY_REQUIRED',
-            `state owner epoch ${String(activeOwner.owner_epoch)} is still active`
           );
         }
       }
@@ -601,18 +600,15 @@ async function acquireOrBootstrapStateOwner(
   assertContiguousStateOwnerHistory(driver);
   const existingOwner = readActiveStateOwner(driver);
   const fence = readTimeFence(driver);
-  if (existingOwner !== undefined) {
-    throw new KernelStorageError(
-      'RECOVERY_REQUIRED',
-      `state owner epoch ${existingOwner.ownerEpoch} is still active`
-    );
-  }
   const latestOwner = readLatestStateOwner(driver);
   if (latestOwner !== undefined) {
     if (fence === undefined || fence.stateOwnerEpoch !== latestOwner.ownerEpoch) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'state owner history and time fence do not match');
     }
-    if (latestOwner.state !== 'terminal' || latestOwner.terminalReason !== 'graceful_release') {
+    if (existingOwner !== undefined && existingOwner.rowDigest !== latestOwner.rowDigest) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'active state owner is not the latest owner');
+    }
+    if (latestOwner.state === 'terminal' && latestOwner.terminalReason !== 'graceful_release') {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'latest state owner is not cleanly acquirable');
     }
     const retainedRuntime = await artifacts.readCanonical<{ format?: string }>(latestOwner.runtimeBundleRef);
@@ -624,7 +620,7 @@ async function acquireOrBootstrapStateOwner(
         retainedRuntime.format !== 'cliq-kernel-schema-manifest-v1') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'reopen requires the same signed Supervisor authority; runtime upgrades need their own transition');
     }
-    return acquireAfterGracefulRelease(stateRoot, driver, artifacts, latestOwner, native, heldLock);
+    return acquireSuccessorStateOwner(stateRoot, driver, artifacts, latestOwner, native, heldLock);
   }
   if (fence !== undefined) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence exists without state owner history');
@@ -832,36 +828,69 @@ async function acquireOrBootstrapStateOwner(
   return owner;
 }
 
-async function acquireAfterGracefulRelease(
+async function readStateOwnerTransition(
+  artifacts: ArtifactCatalog,
+  prior: Extract<StateOwnerRecordV1, { state: 'terminal' }>,
+  successor?: StateOwnerRecordV1
+): Promise<StateOwnerTransitionEvidenceV1> {
+  const transition = decodeStateOwnerTransitionEvidence(await artifacts.readCanonical(prior.transitionEvidenceRef));
+  if (transition.kind !== prior.terminalReason || transition.evidenceDigest !== prior.transitionEvidenceDigest ||
+      transition.priorOwnerEpoch !== prior.ownerEpoch || transition.priorSupervisorInstanceId !== prior.supervisorInstanceId ||
+      transition.priorProcessIdentityRef !== prior.processIdentityRef || transition.priorProcessIdentityDigest !== prior.processIdentityDigest ||
+      transition.stateLockIdentityRef !== prior.stateLockIdentityRef || transition.stateLockIdentityDigest !== prior.stateLockIdentityDigest ||
+      (transition.kind === 'graceful_release'
+        ? transition.releasingProcessIdentityRef !== prior.processIdentityRef || transition.releasingProcessIdentityDigest !== prior.processIdentityDigest
+        : !successor || transition.successorOwnerEpoch !== successor.ownerEpoch ||
+          transition.successorSupervisorInstanceId !== successor.supervisorInstanceId ||
+          transition.successorRuntimeBundleRef !== successor.runtimeBundleRef ||
+          transition.successorRuntimeBundleManifestDigest !== successor.runtimeBundleManifestDigest ||
+          transition.successorProcessIdentityRef !== successor.processIdentityRef ||
+          transition.successorProcessIdentityDigest !== successor.processIdentityDigest ||
+          transition.successorInstanceNonceDigest !== successor.instanceNonceDigest || transition.observedAt !== successor.acquiredAt)) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner transition evidence does not match its prior/successor');
+  }
+  return transition;
+}
+
+async function validateOwnerPredecessor(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerRecordV1): Promise<void> {
+  const acquisition = decodeStateOwnerAcquisitionEvidence(await artifacts.readCanonical(owner.acquisitionEvidenceRef));
+  if (acquisition.kind === 'genesis') return;
+  const prior = readStateOwner(driver, acquisition.priorOwnerEpoch);
+  if (!prior || prior.state !== 'terminal' || prior.rowDigest !== acquisition.priorTerminalRowDigest ||
+      prior.terminalReason !== acquisition.priorTerminalReason || prior.transitionEvidenceRef !== acquisition.priorTransitionEvidenceRef ||
+      prior.transitionEvidenceDigest !== acquisition.priorTransitionEvidenceDigest ||
+      prior.stateLockIdentityRef !== owner.stateLockIdentityRef || prior.stateLockIdentityDigest !== owner.stateLockIdentityDigest) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner acquisition does not match its retained predecessor');
+  }
+  await readStateOwnerTransition(artifacts, prior, owner);
+}
+
+function assertPriorProcessDead(heldLock: HeldStateOwnerLock, identity: PlatformProcessIdentityV1): void {
+  try { heldLock.assertPriorProcessDead(identity.pid, identity.processStartToken); }
+  catch (error) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', error instanceof Error ? error.message : 'prior StateOwner process death is unproven');
+  }
+}
+
+async function acquireSuccessorStateOwner(
   stateRoot: string,
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
-  prior: Extract<StateOwnerRecordV1, { state: 'terminal' }>,
+  prior: StateOwnerRecordV1,
   native: NativeStateOwner,
   heldLock: HeldStateOwnerLock
 ): Promise<Extract<StateOwnerRecordV1, { state: 'active' }>> {
   await stateOwnerFilesystemFromArtifacts(stateRoot, artifacts, prior, heldLock);
-  const transition = decodeStateOwnerTransitionEvidence(
-    await artifacts.readCanonical(prior.transitionEvidenceRef)
-  );
-  if (
-    transition.kind !== 'graceful_release' ||
-    transition.evidenceDigest !== prior.transitionEvidenceDigest ||
-    transition.priorOwnerEpoch !== prior.ownerEpoch ||
-    transition.priorSupervisorInstanceId !== prior.supervisorInstanceId ||
-    transition.priorProcessIdentityRef !== prior.processIdentityRef ||
-    transition.priorProcessIdentityDigest !== prior.processIdentityDigest ||
-    transition.stateLockIdentityRef !== prior.stateLockIdentityRef ||
-    transition.stateLockIdentityDigest !== prior.stateLockIdentityDigest
-  ) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'graceful owner transition evidence does not match');
-  }
+  const priorProcess = await readStateOwnerProcess(artifacts, prior);
+  await validateOwnerPredecessor(driver, artifacts, prior);
+  if (prior.state === 'terminal') await readStateOwnerTransition(artifacts, prior);
 
   const currentFence = readTimeFence(driver);
   if (currentFence === undefined || currentFence.stateOwnerEpoch !== prior.ownerEpoch) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence does not match graceful owner history');
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence does not match prior owner history');
   }
   const acquiredAt = sampleCanonicalNow();
+  if (prior.state === 'active') assertPriorProcessDead(heldLock, priorProcess);
   const artifactCreatedAt = acquiredAt >= currentFence.lastAcceptedAt
     ? acquiredAt
     : currentFence.lastAcceptedAt;
@@ -878,6 +907,27 @@ async function acquireAfterGracefulRelease(
     String(ownerEpoch)
   );
   const instanceNonceDigest = sha256Bytes(randomBytes(32));
+  let terminal: Extract<StateOwnerRecordV1, { state: 'terminal' }>;
+  let transitionArtifact: PublishedArtifact | undefined;
+  if (prior.state === 'active') {
+    const transition: StateOwnerTransitionEvidenceV1 = {
+      schemaVersion: 1, format: 'cliq-state-owner-transition-evidence-v1',
+      priorOwnerEpoch: prior.ownerEpoch, priorSupervisorInstanceId: prior.supervisorInstanceId,
+      priorProcessIdentityRef: prior.processIdentityRef, priorProcessIdentityDigest: prior.processIdentityDigest,
+      stateLockIdentityRef: prior.stateLockIdentityRef, stateLockIdentityDigest: prior.stateLockIdentityDigest,
+      observedAt: acquiredAt, evidenceDigest: '', kind: 'superseded_after_owner_death',
+      priorProcessObservation: 'absent_or_start_token_mismatch', successorOwnerEpoch: ownerEpoch,
+      successorSupervisorInstanceId: supervisorInstanceId, successorRuntimeBundleRef: prior.runtimeBundleRef,
+      successorRuntimeBundleManifestDigest: prior.runtimeBundleManifestDigest,
+      successorProcessIdentityRef: processArtifact.ref, successorProcessIdentityDigest: processIdentity.identityDigest,
+      successorInstanceNonceDigest: instanceNonceDigest
+    };
+    transition.evidenceDigest = digestOmitting(transition, 'evidenceDigest');
+    transitionArtifact = await artifacts.publishCanonical(transition, 'cliq-state-owner-transition-evidence-v1');
+    terminal = terminalStateOwnerRecord(prior, transition, transitionArtifact.ref, artifactCreatedAt);
+  } else {
+    terminal = prior;
+  }
   const acquisition: StateOwnerAcquisitionEvidenceV1 = {
     schemaVersion: 1,
     format: 'cliq-state-owner-acquisition-evidence-v1',
@@ -892,12 +942,13 @@ async function acquireAfterGracefulRelease(
     instanceNonceDigest,
     acquiredAt,
     evidenceDigest: '',
-    kind: 'acquire_after_graceful_release',
+    ...(prior.state === 'active'
+      ? { kind: 'takeover_after_owner_death' as const, priorTerminalReason: 'superseded_after_owner_death' as const }
+      : { kind: 'acquire_after_graceful_release' as const, priorTerminalReason: 'graceful_release' as const }),
     priorOwnerEpoch: prior.ownerEpoch,
-    priorTerminalRowDigest: prior.rowDigest,
-    priorTransitionEvidenceRef: prior.transitionEvidenceRef,
-    priorTransitionEvidenceDigest: prior.transitionEvidenceDigest,
-    priorTerminalReason: 'graceful_release'
+    priorTerminalRowDigest: terminal.rowDigest,
+    priorTransitionEvidenceRef: terminal.transitionEvidenceRef,
+    priorTransitionEvidenceDigest: terminal.transitionEvidenceDigest
   };
   acquisition.evidenceDigest = digestOmitting(acquisition, 'evidenceDigest');
   const acquisitionArtifact = await artifacts.publishCanonical(
@@ -931,21 +982,33 @@ async function acquireAfterGracefulRelease(
   driver.transaction((connection) => {
     assertStateOwnerLock(heldLock);
     assertContiguousStateOwnerHistory(connection);
-    if (readActiveStateOwner(connection) !== undefined) {
+    const active = readActiveStateOwner(connection);
+    if (prior.state === 'active' ? active?.rowDigest !== prior.rowDigest : active !== undefined) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'another state owner acquired authority');
     }
     const lockedPrior = readLatestStateOwner(connection);
     if (
       lockedPrior === undefined ||
-      lockedPrior.state !== 'terminal' ||
+      lockedPrior.state !== prior.state ||
       lockedPrior.ownerEpoch !== prior.ownerEpoch ||
-      lockedPrior.rowDigest !== prior.rowDigest ||
-      lockedPrior.terminalReason !== 'graceful_release'
+      lockedPrior.rowDigest !== prior.rowDigest
     ) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'prior state owner changed during acquisition');
     }
-    fenceOutcome = transferTimeFenceOwner(connection, prior.ownerEpoch, ownerEpoch, acquiredAt);
-    insertStateOwnerArtifacts(connection, [processArtifact, acquisitionArtifact], artifactCreatedAt);
+    const committedAt = sampleCanonicalNow();
+    if (prior.state === 'active') {
+      const age = parseCanonicalTime(committedAt) - parseCanonicalTime(acquiredAt);
+      if (age < 0 || age > 5000) throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner death observation is outside the five-second commit window');
+      assertPriorProcessDead(heldLock, priorProcess);
+    }
+    fenceOutcome = transferTimeFenceOwner(connection, prior.ownerEpoch, ownerEpoch, committedAt);
+    insertStateOwnerArtifacts(connection, [processArtifact, ...(transitionArtifact ? [transitionArtifact] : []), acquisitionArtifact], artifactCreatedAt);
+    if (prior.state === 'active') {
+      const changed = connection.prepare(`UPDATE state_owners SET record_json = ?, state = 'terminal', row_digest = ?
+        WHERE owner_epoch = ? AND state = 'active' AND row_digest = ?`)
+        .run(JSON.stringify(terminal), terminal.rowDigest, BigInt(prior.ownerEpoch), prior.rowDigest);
+      if (changed.changes !== 1n) throw new KernelStorageError('RECOVERY_REQUIRED', 'prior state owner changed during takeover');
+    }
     connection
       .prepare(
         `INSERT INTO state_owners (

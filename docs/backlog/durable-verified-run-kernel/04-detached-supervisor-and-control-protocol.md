@@ -40,8 +40,12 @@ check. Signed-owner reopen requires the same runtime authority. Compaction keeps
 resource-stop subtype. The [StateOwner native foundation](../../kernel/m2-state-core.md#native-stateowner-lifecycle)
 now holds the real root/runtime/OS-lock descriptors in the owner process before
 opening SQLite, binds exact platform start identity and signed helper bytes,
-and closes only after durable graceful release. UDS credentials, positive death
-proof, crash takeover and signed installation qualification are still open.
+and closes only after durable graceful release. Startup now proves prior-owner
+process absence/start-token mismatch while holding that lock and atomically
+terminalizes the predecessor, acquires the next epoch and transfers the time
+fence. Owner takeover never adopts workers, replays effects or changes Run
+state. UDS credentials, whole-containment retirement, worker-loss reconciliation
+and signed installation qualification are still open.
 Neither path stops unresolved external attempts or grants
 tool permission. Reuse this stop core;
 do not build another control-state machine. Child/MCP/ambiguous-effect closure,

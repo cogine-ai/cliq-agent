@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,9 @@
 #include <unistd.h>
 #ifdef __APPLE__
 #include <libproc.h>
+#elif defined(__linux__)
+#include <linux/magic.h>
+#include <sys/vfs.h>
 #endif
 
 static napi_value native_error(napi_env env, const char *message) {
@@ -26,6 +30,8 @@ typedef struct {
 } state_lock;
 
 static const napi_type_tag lock_tag = {0x3d641bc705864cfbULL, 0xab53499f3ee988c4ULL};
+
+static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
@@ -190,6 +196,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
     napi_value result;
     const napi_property_descriptor methods[] = {
         {"assertHeld", NULL, assert_held, NULL, NULL, NULL, napi_default, NULL},
+        {"assertPriorProcessDead", NULL, assert_prior_process_dead, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -205,46 +212,107 @@ fail:
     return native_error(env, error);
 }
 
-static napi_value process_start_token(napi_env env, napi_callback_info info) {
-    (void)info;
-    char token[128];
+/* 1 = observed identity, 0 = positively absent, -1 = unavailable/invalid.
+ * Permission failures and hidden procfs entries are never death evidence. */
+static int observe_process(pid_t pid, char token[128]) {
 #ifdef __APPLE__
     struct proc_bsdinfo process;
     memset(&process, 0, sizeof(process));
-    if (proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &process, sizeof(process)) != sizeof(process) ||
-        process.pbi_pid != (uint32_t)getpid() || process.pbi_start_tvusec >= 1000000) {
-        return native_error(env, "cannot observe the current macOS process start time");
+    errno = 0;
+    int size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &process, sizeof(process));
+    if (size == 0 && errno == ESRCH) return 0;
+    if (size != sizeof(process) || process.pbi_pid != (uint32_t)pid ||
+        process.pbi_start_tvsec == 0 || process.pbi_start_tvusec >= 1000000) {
+        return -1;
     }
-    snprintf(token, sizeof(token), "darwin-proc-start-time:%llu:%06llu",
+    snprintf(token, 128, "darwin-proc-start-time:%llu:%06llu",
              (unsigned long long)process.pbi_start_tvsec, (unsigned long long)process.pbi_start_tvusec);
 #elif defined(__linux__)
-    char stat[4096];
-    FILE *file = fopen("/proc/self/stat", "re");
-    if (file == NULL) return native_error(env, "cannot open the current Linux process identity");
+    char stat[4096], path[64];
+    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        /* hidepid can also produce ENOENT. Require a separate kernel PID
+         * absence observation; no signal is sent and EPERM is indeterminate. */
+        return (errno == ENOENT || errno == ESRCH) && kill(pid, 0) < 0 && errno == ESRCH ? 0 : -1;
+    }
+    struct statfs filesystem;
+    if (fstatfs(fd, &filesystem) < 0 || filesystem.f_type != PROC_SUPER_MAGIC) { close(fd); return -1; }
+    FILE *file = fdopen(fd, "r");
+    if (file == NULL) { close(fd); return -1; }
     size_t size = fread(stat, 1, sizeof(stat) - 1, file);
     int failed = ferror(file);
     fclose(file);
-    if (failed || size == 0 || size == sizeof(stat) - 1) return native_error(env, "invalid Linux process identity");
+    if (failed || size == 0 || size == sizeof(stat) - 1) return -1;
     stat[size] = '\0';
+    char *pid_end;
+    errno = 0;
+    long observed_pid = strtol(stat, &pid_end, 10);
+    if (errno != 0 || observed_pid != pid || pid_end[0] != ' ' || pid_end[1] != '(') return -1;
     char *field = strrchr(stat, ')');
-    if (field == NULL || field[1] != ' ') return native_error(env, "invalid Linux process identity");
+    if (field == NULL || field[1] != ' ') return -1;
     field += 2;
     for (int index = 3; index < 22; index++) {
         field = strchr(field, ' ');
-        if (field == NULL) return native_error(env, "Linux process identity has no start token");
+        if (field == NULL) return -1;
         field++;
     }
-    if (*field < '0' || *field > '9') return native_error(env, "invalid Linux process start token");
+    if (*field < '0' || *field > '9') return -1;
     char *end;
     errno = 0;
     unsigned long long ticks = strtoull(field, &end, 10);
-    if (errno != 0 || *end != ' ') return native_error(env, "invalid Linux process start token");
-    snprintf(token, sizeof(token), "linux-proc-start-ticks:%llu", ticks);
+    if (errno != 0 || *end != ' ' || ticks == 0) return -1;
+    snprintf(token, 128, "linux-proc-start-ticks:%llu", ticks);
 #else
 #error StateOwner supports only macOS and Linux
 #endif
+    return 1;
+}
+
+static napi_value process_start_token(napi_env env, napi_callback_info info) {
+    (void)info;
+    char token[128];
+    if (observe_process(getpid(), token) != 1) return native_error(env, "cannot observe the current process start token");
     napi_value result;
     if (napi_create_string_utf8(env, token, NAPI_AUTO_LENGTH, &result) != napi_ok) return NULL;
+    return result;
+}
+
+static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info) {
+    state_lock *lock = unwrap_lock(env, info);
+    if (!lock) return NULL;
+    if (!lock_is_held(lock)) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
+    size_t argc = 2, length;
+    napi_value argv[2];
+    double number;
+    char prior[128], observed[128];
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 2 ||
+        napi_get_value_double(env, argv[0], &number) != napi_ok || !(number >= 1 && number <= INT_MAX) || number != (pid_t)number ||
+        napi_get_value_string_utf8(env, argv[1], NULL, 0, &length) != napi_ok || length == 0 || length >= sizeof(prior) ||
+        napi_get_value_string_utf8(env, argv[1], prior, sizeof(prior), &length) != napi_ok || strlen(prior) != length) {
+        return native_error(env, "invalid prior StateOwner process identity");
+    }
+    /* Only the helper's exact canonical token syntax is comparable. Unknown
+     * versions or arbitrary strings cannot be treated as a positive mismatch. */
+    unsigned long long first, second;
+    int end = 0;
+#ifdef __APPLE__
+    if (sscanf(prior, "darwin-proc-start-time:%llu:%llu%n", &first, &second, &end) != 2 ||
+        first == 0 || second >= 1000000 || (size_t)end != length) return native_error(env, "invalid prior StateOwner process start token");
+    snprintf(observed, sizeof(observed), "darwin-proc-start-time:%llu:%06llu", first, second);
+#else
+    (void)second;
+    if (sscanf(prior, "linux-proc-start-ticks:%llu%n", &first, &end) != 1 ||
+        first == 0 || (size_t)end != length) return native_error(env, "invalid prior StateOwner process start token");
+    snprintf(observed, sizeof(observed), "linux-proc-start-ticks:%llu", first);
+#endif
+    if (strcmp(prior, observed) != 0) return native_error(env, "invalid prior StateOwner process start token");
+    int status = observe_process((pid_t)number, observed);
+    if (status < 0) return native_error(env, "prior StateOwner process observation is unavailable");
+    if (status == 1 && strcmp(prior, observed) == 0) return native_error(env, "prior StateOwner process is still present");
+    if (!lock_is_held(lock)) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
+    napi_value result;
+    if (napi_get_undefined(env, &result) != napi_ok) return NULL;
     return result;
 }
 
