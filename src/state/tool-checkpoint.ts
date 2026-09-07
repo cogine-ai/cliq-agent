@@ -1,8 +1,8 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
+import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { Run, RunAssemblyV1, RunSpec, SupervisorInspectorIdentityV1, WorkerLaunch, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import type { ToolCheckpointProof } from '../kernel/tool-authorization.js';
-import { exactKeys, requireEqual, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceGenerationSnapshotEvidence, decodeWorkspaceState } from './decoders.js';
@@ -12,6 +12,7 @@ import { readRequiredWorkspaceGenerationByRef, updateWorkspaceGeneration } from 
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { readCheckpoint } from './rows.js';
+import { readSupervisorInspector } from './supervisor-inspector.js';
 
 export const toolCheckpointId = (runId: string, opId: string, attempt: number) =>
   identityHash('cliq-tool-checkpoint-v1', runId, opId, String(attempt));
@@ -77,29 +78,10 @@ async function readCheckpointProof(artifacts: ArtifactCatalog, owner: Pick<State
   if (!['linux', 'macos-vm'].includes(proof.kind) || !exactKeys(proof, [...identityKeys, ...Object.keys(positive)]) ||
       identityKeys.some((key) => proof[key] !== containment.backend[key] || typeof proof[key] !== 'string' || !proof[key]) ||
       Object.entries(positive).some(([key, value]) => proof[key] !== value)) throw new TypeError('containment retirement is not positive all-descendant death');
-  const inspector = await readCanonicalArtifact<SupervisorInspectorIdentityV1>(artifacts, death.inspectorIdentityRef);
-  const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
-  const supervisor = bundle.entries.find((entry) => entry.role === 'supervisor');
-  if (!exactKeys(inspector, ['schemaVersion', 'format', 'supervisorInstanceId', 'stateOwnerEpoch', 'runtimeBundleRef',
-    'runtimeBundleManifestDigest', 'supervisorEntryId', 'supervisorEntryVersion', 'supervisorExecutableDigest',
-    'processIdentityRef', 'processIdentityDigest', 'stateLockIdentityRef', 'stateLockIdentityDigest', 'instanceNonceDigest', 'activatedAt', 'identityDigest']) ||
-      inspector.schemaVersion !== 1 || inspector.format !== 'cliq-supervisor-inspector-identity-v1' ||
-      inspector.identityDigest !== death.inspectorIdentityDigest || digestOmitting(inspector, 'identityDigest') !== inspector.identityDigest ||
-      inspector.supervisorInstanceId !== owner.supervisorInstanceId || inspector.stateOwnerEpoch !== owner.ownerEpoch ||
-      inspector.runtimeBundleRef !== assembly.runtime.runtimeBundleRef || inspector.runtimeBundleManifestDigest !== assembly.runtime.runtimeBundleManifestDigest ||
-      inspector.processIdentityRef !== owner.processIdentityRef || inspector.processIdentityDigest !== owner.processIdentityDigest ||
-      inspector.stateLockIdentityRef !== owner.stateLockIdentityRef || inspector.stateLockIdentityDigest !== owner.stateLockIdentityDigest ||
-      inspector.supervisorEntryId !== supervisor?.entryId || inspector.supervisorEntryVersion !== supervisor.version ||
-      inspector.supervisorExecutableDigest !== supervisor.digest || !supervisor.executable || inspector.activatedAt > death.observedAt) {
-    throw new TypeError('retirement inspector does not match the current trusted state owner');
-  }
-  assertArtifactRef(inspector.instanceNonceDigest);
-  parseCanonicalTime(inspector.activatedAt);
+  await readSupervisorInspector(artifacts, owner, assembly, death);
   const launchSpec = await readCanonicalArtifact<{ launchSpecDigest: string }>(artifacts, launch.sandboxLaunchSpecRef);
   if (launchSpec.launchSpecDigest !== death.sandboxLaunchSpecDigest || digestOmitting(launchSpec, 'launchSpecDigest') !== launchSpec.launchSpecDigest) throw new TypeError('retirement launch spec digest mismatch');
   await artifacts.readBytes(death.planRef);
-  await artifacts.readBytes(inspector.processIdentityRef);
-  await artifacts.readBytes(inspector.stateLockIdentityRef);
   const metadata = await Promise.all([
     [postEffect.workspaceStateRef, state.format], [state.entriesRef, entries.format],
     [postEffect.snapshotEvidenceRef, snapshot.format], [postEffect.retirementEvidenceRef, 'cliq-process-containment-death-evidence-v1'],

@@ -6,7 +6,8 @@ import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import { exactKeys } from '../policy/runtime-authority.js';
 
 export type ResourceStopIntent = Extract<StopIntent, { origin: 'budget' } | { runtimeSubtype: 'context_compaction_failed' | 'context_window_exhausted' }>;
-export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'deadline' }> | ResourceStopIntent;
+export type ModelFailureStopIntent = Extract<StopIntent, { runtimeSubtype: 'runtime' }>;
+export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'deadline' }> | ResourceStopIntent | ModelFailureStopIntent;
 export const stopCheckpointId = (runId: string, stopIntentRef: string) => identityHash('cliq-stop-checkpoint-v1', runId, stopIntentRef);
 
 export function cancelRequestDigest(runId: string, input: RunCancel): string {
@@ -37,7 +38,7 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
     if (intent.targetStatus !== 'failed' || intent.reason !== 'budget_exhausted') throw new TypeError('invalid budget stop');
   } else if (intent.origin === 'runtime') {
     fields.push('runtimeSubtype');
-    if (intent.targetStatus !== 'failed' || intent.reason !== 'runtime_failed') throw new TypeError('invalid resource failure');
+    if (intent.targetStatus !== 'failed' || intent.reason !== 'runtime_failed') throw new TypeError('invalid runtime failure');
     if (intent.runtimeSubtype === 'context_compaction_failed') {
       fields.push('compactionPlanRef', 'modelOpId', 'attempt');
       assertArtifactRef(intent.compactionPlanRef);
@@ -47,6 +48,11 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
       assertArtifactRef(intent.contextManifestRef);
       if ([intent.nextPromptTokens, intent.triggerThresholdTokens, intent.hardPromptTokens, intent.protectedTokens, intent.sourceInputTokenCap]
         .some((n) => !Number.isSafeInteger(n) || n < 0) || intent.nextPromptTokens <= intent.triggerThresholdTokens) throw new TypeError('invalid context exhaustion');
+    } else if (intent.runtimeSubtype === 'runtime') {
+      fields.push('failingOpId', 'runtimeFailureRef', 'runtimeFailureDigest');
+      assertArtifactRef(intent.runtimeFailureRef);
+      assertArtifactRef(intent.runtimeFailureDigest);
+      if (typeof intent.failingOpId !== 'string' || !intent.failingOpId) throw new TypeError('invalid failing operation');
     } else throw new TypeError('stop branch requires its owning evidence reducer');
   } else throw new TypeError('stop branch requires its owning evidence reducer');
   parseCanonicalTime(intent.createdAt);
@@ -57,6 +63,8 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
 export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, createdAt: string): TerminalDetail {
   const reasonDetail: TerminalDetail['reasonDetail'] = intent.origin !== 'runtime'
     ? { kind: intent.origin === 'user_cancel' ? 'cancelled' : 'budget_exhausted', stopIntentRef }
+    : intent.runtimeSubtype === 'runtime'
+      ? { kind: 'runtime', failingOpId: intent.failingOpId, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest }
     : intent.runtimeSubtype === 'context_compaction_failed'
       ? { kind: intent.runtimeSubtype, compactionPlanRef: intent.compactionPlanRef, modelOpId: intent.modelOpId, attempt: intent.attempt, evidenceRef: stopIntentRef }
       : { kind: intent.runtimeSubtype, contextManifestRef: intent.contextManifestRef, nextPromptTokens: intent.nextPromptTokens,
@@ -64,7 +72,8 @@ export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, 
           protectedTokens: intent.protectedTokens, sourceInputTokenCap: intent.sourceInputTokenCap, evidenceRef: stopIntentRef };
   return { schemaVersion: 1, runId: intent.runId, reason: intent.reason,
     reasonDetail,
-    primaryEvidenceRef: stopIntentRef, publicationResultItemRefs: [], abandonedRetryInvocations: [], createdAt };
+    primaryEvidenceRef: intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime' ? intent.runtimeFailureRef : stopIntentRef,
+    publicationResultItemRefs: [], abandonedRetryInvocations: [], createdAt };
 }
 
 /** Equal precedence retains the first committed fact; supported resource stops cannot outrank cancellation. */

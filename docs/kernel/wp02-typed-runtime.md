@@ -376,7 +376,7 @@ scheduler, new tool executor or compatibility bridge.
 This implements root agent Runs at the existing agent/tool/input/ordinary
 approval frontiers. Child Runs/allocations, MCP-server lifetime closure,
 pending-launch recovery, unknown/manual/workspace-rollback reconciliation,
-generic runtime/integrity/verification stop evidence, candidate/results,
+remaining runtime/integrity/verification stop evidence, candidate/results,
 UDS/UI, scheduling and production composition remain their owning packages'
 work. An unknown model attempt from #496 still cannot terminalize or be
 refunded without authenticated dispatch-closure evidence. Unsupported cuts
@@ -425,6 +425,47 @@ Supervisor scheduling or production cutover work. Model-visible context reading
 is shared with compaction recovery, so terminal replay does not fabricate an
 execution frontier. Journal attempt indexing is shared by stop/drain recovery;
 this does not claim that all transcript recovery is linear-time.
+
+### Received model failure and terminal drain
+
+`stopForModelFailure({expectedRunRevision, inspectorIdentityRef,
+inspectorIdentityDigest})` closes positively received but unusable **normal**
+model responses through the same stop/drain core. The state owner reads the
+settled Journal and constructs the RFC
+`RuntimeFailureEvidenceV1(failureKind='model_unusable_response')`; callers cannot
+select a failure reason or supply an arbitrary evidence artifact.
+
+- The wrapper binds the latest normal-model operation, exact frontier and ready
+  context, completed Journal result and unusable-response digest. Original
+  response bytes and the full request charge remain unchanged. It adds no
+  model turn, candidate, tool batch, summary or semantic retry.
+- Its inspector must match the current state owner, process/lock identities and
+  frozen runtime's Supervisor entry. Inspector validation is shared with worker
+  checkpoint sealing. The observation is derived at canonical time and must
+  still be within five seconds when the stop commits.
+- Evidence metadata, the winning intent, Run revision and event commit together.
+  The existing terminal reducer independently requires complete worker and
+  invocation quiescence before atomic Session publication. Generic runtime
+  `TerminalDetail.primaryEvidenceRef` names the **failure wrapper**, not the
+  StopIntent or the provider response; reason-detail copies that same exact
+  wrapper ref/digest and failing operation.
+- Recovery rewalks the Journal/request/response/frontier and historical
+  inspector owner. Freshness is checked at the original stop commit, so a
+  restart or later drain does not invalidate an already committed observation.
+  New observations require the new state owner. Deadline/budget and user
+  cancellation keep their existing higher precedence.
+
+Malformed, oversized, operation-invalid and provider-rejected received responses
+all use this closure. Compaction failures retain their dedicated resource-stop
+subtype. Prepared/claimed attempts, free pre-dispatch failures, usable candidate
+handoffs and any unresolved `unknown` history cannot use it. In particular,
+`model_attempts_exhausted` and `retry_unknown_exhausted` still require their
+owning authenticated no-release/dispatch-closure implementation; this change
+does not manufacture those proofs from a retry counter. Child/MCP closure,
+credential/local-service failures, successful candidate/verification results,
+actual broker/sandbox execution and production composition remain outside this
+integration. Tests use real SQLite/CAS with offline signed inspector/containment
+fixtures, not a live provider or qualified platform inspector.
 
 The old Session/`ModelAction` runner remains isolated until WP06's single
 Kernel Cut. There is no typed-to-legacy bridge. WP06 removes the old runner,

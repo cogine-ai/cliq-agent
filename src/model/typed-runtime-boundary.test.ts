@@ -42,6 +42,8 @@ const TYPED_RUNTIME_SOURCES = [
   'state/input-recovery.ts',
   'state/stop-recovery.ts',
   'state/resource-stop.ts',
+  'state/model-failure.ts',
+  'state/supervisor-inspector.ts',
   'state/tool-approval-recovery.ts',
   'state/continuation-commit.ts',
   'state/tool-cut.ts',

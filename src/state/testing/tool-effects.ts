@@ -9,6 +9,24 @@ import { openSqliteDriver } from '../sqlite-driver.js';
 import { readActiveStateOwner } from '../state-owner.js';
 import type { createAgentFixture } from './agent-fixtures.js';
 
+export async function fixtureInspector(fixture: Awaited<ReturnType<typeof createAgentFixture>>) {
+  const reader = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  let owner;
+  try { owner = readActiveStateOwner(reader)!; } finally { reader.close(); }
+  const supervisor = fixture.signed!.bundle.entries.find((entry) => entry.role === 'supervisor')!;
+  const inspector: SupervisorInspectorIdentityV1 = { schemaVersion: 1, format: 'cliq-supervisor-inspector-identity-v1',
+    supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch,
+    runtimeBundleRef: fixture.authority.assembly.runtime.runtimeBundleRef,
+    runtimeBundleManifestDigest: fixture.authority.assembly.runtime.runtimeBundleManifestDigest,
+    supervisorEntryId: supervisor.entryId, supervisorEntryVersion: supervisor.version, supervisorExecutableDigest: supervisor.digest,
+    processIdentityRef: owner.processIdentityRef, processIdentityDigest: owner.processIdentityDigest,
+    stateLockIdentityRef: owner.stateLockIdentityRef, stateLockIdentityDigest: owner.stateLockIdentityDigest,
+    instanceNonceDigest: canonicalSha256('offline-inspector-nonce'), activatedAt: owner.acquiredAt, identityDigest: '' };
+  inspector.identityDigest = digestOmitting(inspector, 'identityDigest');
+  const artifact = await fixture.store.artifacts.publishCanonical(inspector, inspector.format);
+  return { inspector, identity: { inspectorIdentityRef: artifact.ref, inspectorIdentityDigest: inspector.identityDigest } };
+}
+
 /** Retained offline proof fixtures; no process is launched, killed or treated as platform-qualified. */
 export async function quiescedToolCheckpoint(fixture: Awaited<ReturnType<typeof createAgentFixture>>, checkpointId: string, changedWorkspace = false) {
   const { store, runId } = fixture;
@@ -31,25 +49,12 @@ export async function quiescedToolCheckpoint(fixture: Awaited<ReturnType<typeof 
     workspace.stateDigest = digestOmitting(workspace, 'stateDigest');
   }
   const state = await store.artifacts.publishCanonical(workspace, workspace.format);
-  const reader = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
-  let owner;
-  try { owner = readActiveStateOwner(reader)!; } finally { reader.close(); }
-  const supervisor = fixture.signed!.bundle.entries.find((entry) => entry.role === 'supervisor')!;
-  const inspector: SupervisorInspectorIdentityV1 = { schemaVersion: 1, format: 'cliq-supervisor-inspector-identity-v1',
-    supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch,
-    runtimeBundleRef: fixture.authority.assembly.runtime.runtimeBundleRef,
-    runtimeBundleManifestDigest: fixture.authority.assembly.runtime.runtimeBundleManifestDigest,
-    supervisorEntryId: supervisor.entryId, supervisorEntryVersion: supervisor.version, supervisorExecutableDigest: supervisor.digest,
-    processIdentityRef: owner.processIdentityRef, processIdentityDigest: owner.processIdentityDigest,
-    stateLockIdentityRef: owner.stateLockIdentityRef, stateLockIdentityDigest: owner.stateLockIdentityDigest,
-    instanceNonceDigest: canonicalSha256('offline-inspector-nonce'), activatedAt: owner.acquiredAt, identityDigest: '' };
-  inspector.identityDigest = digestOmitting(inspector, 'identityDigest');
-  const inspectorArtifact = await store.artifacts.publishCanonical(inspector, inspector.format);
+  const { inspector, identity } = await fixtureInspector(fixture);
   const containment = await store.artifacts.readCanonical<{ owner: unknown; backend: object; sandboxLaunchSpecDigest: string }>(launch.processContainmentRef!);
   const deathCore = { schemaVersion: 1, kind: 'containment_all_descendants_dead', containmentRef: launch.processContainmentRef,
     planRef: launch.containmentPlanRef, sandboxLaunchSpecRef: launch.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: containment.sandboxLaunchSpecDigest,
-    owner: containment.owner, launchNonceDigest: launch.spawnNonceDigest, inspectorSupervisorInstanceId: owner.supervisorInstanceId,
-    inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest,
+    owner: containment.owner, launchNonceDigest: launch.spawnNonceDigest, inspectorSupervisorInstanceId: inspector.supervisorInstanceId,
+    ...identity,
     backend: { ...containment.backend, cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 },
     observedAt: sampleCanonicalNow() };
   const death = await store.artifacts.publishCanonical({ ...deathCore, evidenceDigest: canonicalSha256(deathCore) }, 'cliq-process-containment-death-evidence-v1');

@@ -11,7 +11,7 @@ import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
-import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { fixtureInspector, quiescedToolCheckpoint } from './testing/tool-effects.js';
 
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const revision = (fixture: Fixture) => fixture.store.getRun(fixture.runId).revision;
@@ -210,6 +210,8 @@ for (const outcome of ['unusable', 'ineffective', 'reducing'] as const) test(`${
       outcome === 'unusable' ? 'read' : undefined);
     assert.equal(prepared.prepared.request.kind, 'context_compaction');
     assert.deepEqual(completed.settlement.consumed, prepared.entry.budgetDelta);
+    await assert.rejects(fixture.agent.stopForModelFailure({ expectedRunRevision: revision(fixture),
+      ...(await fixtureInspector(fixture)).identity }), { code: 'STATE_TRANSITION_INVALID' });
     if (outcome === 'reducing') {
       assert.equal(completed.disposition, 'context_compacted');
       await assert.rejects(stop(fixture), { code: 'STATE_TRANSITION_INVALID' });
