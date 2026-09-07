@@ -330,7 +330,12 @@ async function cleanupKnownTemporary(
   }
   assertOwnedImmutableFile(`artifact temporary ${name}`, current);
   if (!sameInode(current, expected)) throw new Error(`artifact temporary ${name} changed before cleanup`);
-  await fs.unlink(temporaryPath);
+  try {
+    await fs.unlink(temporaryPath);
+  } catch (error) {
+    // Another publisher may recover this linked temporary after our lstat.
+    if (!allowAlreadyRemoved || !isErrno(error, 'ENOENT')) throw error;
+  }
   await syncRoot(root, openedRoot);
 }
 

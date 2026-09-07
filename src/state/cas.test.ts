@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
 import {
   chmod,
   link,
@@ -53,6 +54,65 @@ test('concurrent publication of identical bytes joins the same immutable artifac
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test('publish succeeds when another publisher removes its linked temporary between lstat and unlink', async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-cleanup-race-'));
+  const root = path.join(home, 'objects');
+  try {
+    await mkdir(root, { mode: 0o700 });
+    const store = new ContentAddressedStore(root);
+    const bytes = Buffer.from('shared bytes', 'utf8');
+    const unlink = fs.unlink.bind(fs);
+    let secondStarted = false;
+    let secondRef: string | undefined;
+    t.mock.method(fs, 'unlink', async (temporaryPath: Parameters<typeof fs.unlink>[0]) => {
+      if (!secondStarted) {
+        secondStarted = true;
+        // Pause the first cleanup after lstat; the second publisher's real
+        // recovery removes that same temporary before the first unlink resumes.
+        secondRef = await store.publish(bytes);
+      }
+      return unlink(temporaryPath);
+    });
+
+    const firstRef = await store.publish(bytes);
+
+    assert.equal(firstRef, secondRef);
+    assert.deepEqual(await store.read(firstRef), bytes);
+    assert.deepEqual(await readdir(root), [firstRef]);
+    assert.equal((await fsStat(path.join(root, firstRef))).nlink, 1);
+  } finally {
+    t.mock.restoreAll();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+for (const { existingArtifact, code } of [
+  { existingArtifact: false, code: 'EACCES' },
+  { existingArtifact: true, code: 'ENOENT' }
+]) {
+  test(`publish preserves ${code} when cleaning ${existingArtifact ? 'an unlinked' : 'a linked'} temporary`, async (t) => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-cleanup-error-'));
+    const root = path.join(home, 'objects');
+    try {
+      await mkdir(root, { mode: 0o700 });
+      const store = new ContentAddressedStore(root);
+      const bytes = Buffer.from('shared bytes', 'utf8');
+      if (existingArtifact) await store.publish(bytes);
+      const unlink = fs.unlink.bind(fs);
+      const failure = Object.assign(new Error('injected temporary cleanup failure'), { code });
+      t.mock.method(fs, 'unlink', async (temporaryPath: Parameters<typeof fs.unlink>[0]) => {
+        if (code === 'ENOENT') await unlink(temporaryPath);
+        throw failure;
+      });
+
+      await assert.rejects(store.publish(bytes), (error) => error === failure);
+    } finally {
+      t.mock.restoreAll();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+}
 
 test('constructor rejects roots that are not normalized absolute paths', () => {
   assert.throws(() => new ContentAddressedStore('relative/objects'), /normalized absolute/i);
