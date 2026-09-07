@@ -39,7 +39,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
   const result = (run: Run) => ({ run, checkpointId: stopCheckpointId(runId, run.stopIntentRef!) });
   const deadlineIntent = (createdAt: string): AgentStopIntent => ({ schemaVersion: 1, runId, createdAt, origin: 'deadline',
     targetStatus: 'failed', reason: 'budget_exhausted', deadlineAt: admitted.deadlineAt });
-  async function cut(revision: number) {
+  async function cut(revision: number, allowWorkerRecovery = false) {
     if (!Number.isSafeInteger(revision) || revision < 1) throw new TypeError('invalid stop revision');
     const selected = await readRecoveryClosure(driver, artifacts, runId);
     const { run } = selected;
@@ -47,8 +47,10 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     if (run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt) throw new TypeError('stop authority no longer belongs to this Run');
     if (spec.operation !== 'agent' || run.parentRunId || selected.childAllocations.length ||
         driver.prepare('SELECT 1 FROM runs WHERE parent_run_id = ? LIMIT 1').get(runId)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'child stop requires the parent/child settlement reducer');
+    // Cancellation/deadline may fence a validated worker-death wait, but cannot clear it or drain it.
     if (!['queued', 'running', 'waiting'].includes(run.status) || !['agent', 'tool'].includes(run.nextStep ?? '') ||
-        (run.status === 'waiting' && !['approval', 'input'].includes(run.waitingReason ?? ''))) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop requires an agent continuation or ordinary control wait');
+        (run.status === 'waiting' && !['approval', 'input'].includes(run.waitingReason ?? '') &&
+          !(allowWorkerRecovery && run.waitingReason === 'reconciliation'))) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop requires an agent continuation or ordinary control wait');
     return selected;
   }
   function assertCut(connection: SqliteConnection, selected: Awaited<ReturnType<typeof cut>>) {
@@ -117,7 +119,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       };
       const existing = await replay();
       if (existing) return existing;
-      const selected = await cut(input.expectedRunRevision);
+      const selected = await cut(input.expectedRunRevision, true);
       const prior = selected.run.stopIntentRef ? await readAgentStop(driver, artifacts, selected) : undefined;
       for (let retry = 0; retry < 8; retry++) {
         const now = sampleCanonicalNow();
@@ -156,7 +158,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     expireRun: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
       input = immutableSnapshot(input);
       if (!exactKeys(input, ['expectedRunRevision'])) throw new TypeError('unknown deadline stop field');
-      const selected = await cut(input.expectedRunRevision);
+      const selected = await cut(input.expectedRunRevision, true);
       if (sampleCanonicalNow() < selected.run.deadlineAt) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run deadline has not elapsed');
       return commitDerivedStop(selected, async (now) => {
         if (now < selected.run.deadlineAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'deadline clock regressed');

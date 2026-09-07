@@ -1290,6 +1290,31 @@ export type WorkerIdentity = {
   processContainmentRef: ArtifactRef;
 };
 
+/** Initial worker-death branch of the RFC WaitingSubject. Probe execution has its own reducer. */
+export type WorkerDeathWait = {
+  schemaVersion: 1;
+  kind: 'reconciliation';
+  runId: string;
+  createdFromRevision: number;
+  createdAt: string;
+  frontierRef: ArtifactRef;
+  subject: {
+    kind: 'worker_death';
+    oldWorkerLaunchId: string;
+    oldLeaseEpoch: number;
+    oldWorkerIdentity: string;
+    processContainmentRef: ArtifactRef;
+    workspaceGenerationRef: ArtifactRef;
+    openInvocationRefs: ArtifactRef[];
+  };
+  probeState: {
+    phase: 'automatic_pending';
+    automaticProbeCount: 0;
+    userProbeCount: 0;
+    nextProbeAt: string;
+  };
+};
+
 export type WorkerLaunch = {
   schemaVersion: 1;
   launchId: string;

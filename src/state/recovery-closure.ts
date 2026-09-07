@@ -32,6 +32,7 @@ import {
   decodeWorkspaceState
 } from './decoders.js';
 import { KernelStorageError } from './errors.js';
+import { validateWorkerRecoveryWait } from './worker-recovery.js';
 import { addBudget, decodeBudgetUsage, isZeroBudget } from './invariants.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
 import { readInvocationJournal } from './repositories/journal.js';
@@ -524,7 +525,8 @@ async function validateLaunchGraph(
         identity.supervisorInstanceId !== launch.supervisorInstanceId ||
         identity.spawnNonceDigest !== launch.spawnNonceDigest ||
         identity.activationNonceDigest !== launch.activationNonceDigest ||
-        identity.processContainmentRef !== launch.processContainmentRef
+        identity.processContainmentRef !== launch.processContainmentRef ||
+        (launch.leaseEpoch !== undefined && identity.intendedLeaseEpoch !== launch.leaseEpoch)
       ) recoveryFailure('WorkerIdentity does not match WorkerLaunch');
     }
     if (launch.phase === 'activated') {
@@ -533,7 +535,8 @@ async function validateLaunchGraph(
         !('activeWorkerLaunchId' in generation) ||
         generation.activeWorkerLaunchId !== launch.launchId ||
         generation.leaseEpoch !== launch.leaseEpoch ||
-        generation.phase !== launch.generationWriteState
+        generation.phase !== launch.generationWriteState ||
+        generation.quiesceId !== launch.quiesceId
       ) recoveryFailure('activated WorkerLaunch and workspace generation write gate disagree');
     }
     if (launch.phase === 'reconciling' && generation.phase !== 'fenced_reconciling') {
@@ -688,6 +691,8 @@ export async function readRecoveryClosure(
   }
   await validateGenerationArtifacts(artifacts, workspaceGenerations);
   await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
+  try { await validateWorkerRecoveryWait(artifacts, databaseCut); }
+  catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`); }
   await validateChildAllocationArtifacts(artifacts, childAllocations);
 
   const closure: RecoveryClosureV1 = {
