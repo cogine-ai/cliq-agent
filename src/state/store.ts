@@ -89,6 +89,7 @@ import {
   type RegisterWorkspaceGenerationInput
 } from './reducers/workspace-transition.js';
 import { readRecoveryClosure } from './recovery-closure.js';
+import { beginWorkerRecovery, type BeginWorkerRecoveryInput } from './reducers/worker-recovery.js';
 import { readRun, readSession } from './rows.js';
 import { applyKernelSchema, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
 import { openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
@@ -118,6 +119,7 @@ export type {
   AdmitRunResult,
   BeginGenerationCheckpointInput,
   BeginGenerationRevocationInput,
+  BeginWorkerRecoveryInput,
   ClaimInvocationDispatchInput,
   CreateSessionInput,
   CreateSessionResult,
@@ -554,6 +556,10 @@ export class StateStore {
 
   readRecoveryClosure(runId: string): Promise<RecoveryClosureV1> {
     return readRecoveryClosure(this.driver, this.artifacts, runId);
+  }
+
+  beginWorkerRecovery(input: BeginWorkerRecoveryInput): Promise<Run> {
+    return beginWorkerRecovery(this.driver, this.artifacts, this.owner, input);
   }
 
   recoverCanonicalTime(): TimeFenceAdvance {

@@ -21,6 +21,10 @@ fully complete.
   materialization registration, read-only preactivation, atomic Run/lease/write
   activation, narrow heartbeat CAS, revocation, checkpointing, sealing, and
   worker retirement.
+- Atomic worker-loss fencing of the Run, activated launch and writable
+  generation into one exact `worker_death` wait, with restart validation and
+  retained invocation identities. Cancellation/deadline can still request a
+  stop without clearing that wait or asserting containment death.
 - Append-only invocation preparation, permanent singleflight dispatch claims,
   budget reservation/settlement, conservative unknown outcomes, and manual
   abandonment.
@@ -98,6 +102,53 @@ Real-process regressions cover live/free-lock refusal, `SIGKILL`, simultaneous
 successors, consecutive crashes, substituted historical evidence, signed-runtime
 closure, missing artifacts, lock replacement, CAS/transaction failure, and the
 exact 5000/5001 ms freshness edge. Old prepared and claimed effects remain intact.
+
+### Worker-loss fence after ownership acquisition
+
+`beginWorkerRecovery({runId, expectedRunRevision})` is a separate StateStore
+transaction, not part of owner acquisition. It derives the wait from one
+validated recovery cut; callers cannot supply a wait, generation or death
+claim. A trusted Supervisor may revoke even an unexpired worker, and the
+operation remains available after cancellation or deadline. It is revocation,
+not evidence that a process or containment has died.
+
+- The sole activated launch and its `active|revoking|checkpointing` generation
+  atomically become `reconciling` and `fenced_reconciling`. The generation keeps
+  its source snapshot, last verified tree, old launch/epoch and any quiesce id.
+  The Run loses its active pointer, increments revision, and installs the exact
+  initial `worker_death` wait. Its monotonic lease epoch is not reset.
+- `openInvocationRefs` retain canonical copies of the existing **prepared
+  Journal rows** for all unresolved attempts, in Journal order. These identify
+  the original op/attempt/epoch/request/reservation, including older unresolved
+  attempts; the Journal remains the sole authority for their current phases.
+  The fenced generation retains `fencedJournalSeq` from the same transaction;
+  recovery requires exactly the open set in that prefix, even when pre/post-fence
+  timestamps are equal. Extra pre-fence settled witnesses and post-fence
+  preparations/claims are rejected. Repeated requests do not collapse two
+  attempts into one. Late trusted Journal-only settlements do not rewrite the
+  wait or erase its original
+  identities. Normalized model/tool completion cannot advance its frontier or
+  Checkpoint underneath the wait; that requires the future recovery reducer.
+- Wait/witness metadata, both lifecycle rows, the Run and its state event
+  commit together. Changed Run, heartbeat, generation or Journal cuts reject
+  before mutation. Publication/transaction failures cannot partially fence a
+  worker or root authority. Restart rehashes the exact wait and witnesses and
+  checks the Run/launch/generation bindings and every still-open attempt.
+- Cancellation and deadline reuse the existing StopIntent reducers while
+  retaining the wait and budget. They cannot terminalize an unretired worker.
+  No dispatch, renewal, checkpoint sealing or replacement activation can use
+  the fenced rows; the fence itself changes no Journal, Checkpoint, Session,
+  workspace bytes or budget counters.
+
+This implements only the mandatory durable fence and its recovery validation.
+The initial probe state is `automatic_pending(0,0,nextProbeAt=createdAt)`;
+bounded probe dispatch, native whole-containment termination, broker revocation,
+descriptor-relative quarantine, preactivation-intent retirement and safe
+replacement/restoration remain their owning integrations' work. No probe is
+executed and no physical write capability is revoked by this storage operation.
+Tests use real SQLite/CAS, signed offline Run fixtures and real owner `SIGKILL`
+and restart, not a qualified worker-containment backend. Startup scheduling
+must call this reducer; merely opening the store still changes no Run.
 
 ### Native StateOwner build
 

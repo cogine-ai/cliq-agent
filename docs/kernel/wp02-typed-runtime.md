@@ -473,7 +473,14 @@ It now handles owner crash takeover only after native prior-process death proof,
 atomically retaining the predecessor and establishing a fresh owner epoch.
 This neither adopts an old worker nor settles/replays an old effect. It does not
 qualify containment or signed installation, install a release, or add runtime
-upgrades or worker-loss reconciliation.
+upgrades or full worker-loss recovery.
+
+The [worker-loss fence](m2-state-core.md#worker-loss-fence-after-ownership-acquisition)
+now provides the separate atomic `worker_death` wait over the old Run, launch,
+generation and unresolved Journal identities. Loaded cancellation/deadline
+reducers can persist a StopIntent during that wait without clearing it, refunding
+claims or publishing a terminal result. Native containment recovery and probe
+execution remain open; this is not automatic Run resumption.
 
 Malformed, oversized, operation-invalid and provider-rejected received responses
 all use this closure. Compaction failures retain their dedicated resource-stop

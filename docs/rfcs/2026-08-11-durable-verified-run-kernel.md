@@ -3976,6 +3976,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -3992,6 +3993,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -4008,6 +4010,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -4024,6 +4027,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -4038,6 +4042,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       leaseEpoch: number
       waitingSubjectRef: ArtifactRef
       waitingSubjectDigest: string
+      fencedJournalSeq: number
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -4057,6 +4062,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -4073,6 +4079,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef: ArtifactRef
       quarantineEvidenceDigest: string
       observedState: WorkspaceGenerationQuarantineEvidenceV1['observedState']
@@ -4089,6 +4096,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -5084,6 +5092,17 @@ Strong containment is backend-specific but semantically identical:
 - macOS uses the bundled, signed Virtualization.framework Linux microVM backend. Each activation has a disposable guest PID namespace/cgroup and no host credentials or writable host mount; guest containment emptiness plus VM termination establishes death. Seatbelt without that VM may protect descriptor-safe non-Run inspection helpers, but it is not a Run execution backend because it cannot provide the required durable worker/claim/all-descendant recovery contract.
 
 Every takeover first stops dispatch and performs one transaction that changes the old launch to `reconciling` with `generationWriteState='fenced_reconciling'`, creates the exact typed `worker_death` subject containing launch/identity/epoch/containment/generation/open attempts, CASes the generation from its current `active|revoking|checkpointing` phase to `fenced_reconciling` while retaining its prior snapshot/launch/epoch and binding that wait ref/digest/source phase/quiesce id, clears the Run's active pointer/lease, and installs the wait. This transaction is mandatory even when positive all-descendant death evidence is already immediately available; there is no direct pointer-bound generation-to-quarantine edge. The inspector then terminates or reobserves the old containment, and only a completed `WorkerRecoveryEvidenceV1` for that installed wait may drive `fenced_reconciling -> quarantined`. No second worker starts before that transition, and no branch falsely quarantines bytes before death proof.
+
+The fenced generation retains `fencedJournalSeq`, the nonnegative safe-integer
+Journal high-water committed by that same fence transaction (zero for an empty
+Journal). It is required only in `fenced_reconciling` and cannot change while
+that row remains fenced. `openInvocationRefs` exactly equal, in Journal order,
+the canonical prepared-row references whose attempts were unresolved in that
+prefix. Recovery rejects a missing/out-of-range cutoff, extra or omitted
+witnesses, and preparations or dispatch claims after it. Later trusted
+settlements or abandonment retain those original witnesses; their current
+phases still come only from the Journal. Neither timestamps (which may be equal
+on both sides of the fence) nor `run_events` reconstruct this historical cut.
 
 A new Supervisor instance never adopts or reconnects an old worker, even when its persisted lease has not yet expired. Launch claims and broker channels are bound to the old `supervisorInstanceId`; takeover revokes them, kills/proves the entire containment, quarantines/restores through a Checkpoint, and uses a fresh launch/epoch. This removes an adoption protocol and prevents two trusted processes from sharing effect authority.
 

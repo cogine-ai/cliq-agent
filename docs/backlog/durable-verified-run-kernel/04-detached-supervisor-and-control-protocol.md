@@ -46,6 +46,14 @@ terminalizes the predecessor, acquires the next epoch and transfers the time
 fence. Owner takeover never adopts workers, replays effects or changes Run
 state. UDS credentials, whole-containment retirement, worker-loss reconciliation
 and signed installation qualification are still open.
+The [worker-loss fence](../../kernel/m2-state-core.md#worker-loss-fence-after-ownership-acquisition)
+now exposes `beginWorkerRecovery` separately from owner acquisition: one CAS
+installs the initial exact `worker_death` wait and fences the Run/launch/generation
+while preserving unresolved invocation identities and all business history.
+Restart validates that closure; cancellation/deadline preserve it. Reuse this
+mandatory transition before inspection/quarantine. Probe execution, actual
+containment/broker revocation, preactivation retirement and replacement recovery
+remain open; the fence does not prove death or complete WP04.
 Neither path stops unresolved external attempts or grants
 tool permission. Reuse this stop core;
 do not build another control-state machine. Child/MCP/ambiguous-effect closure,
