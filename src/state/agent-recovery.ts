@@ -2,13 +2,14 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
   ContextManifest, ContinuationItem, InvocationJournalEntry, Run, RunItemReferenceV1, RunSpec,
-  ToolResultPayloadV1, ToolResultModelContentV1, RunContextCompactionPlan
+  ToolResultPayloadV1, ToolResultModelContentV1, RunContextCompactionPlan, RunAssemblyV1
 } from '../kernel/types.js';
 import type { ModelUnusableResponseV1 } from '../protocol/agent-ir.js';
 import { modelResponseDigest } from '../model/attempt.js';
 import { toolOperationId } from '../policy/tool-policy.js';
 import type { ModelRequestV1, NormalPromptProjectionV1, ModelVisiblePromptV1 } from '../model/request.js';
 import { validateUnusableModelResponse } from '../runtime/continuation.js';
+import { assertSameModelOperation, modelRetryState } from '../runtime/model-retry.js';
 import { contextSourceDigest, validateContextItems } from '../runtime/context-compaction.js';
 import { readCanonicalArtifact, readModelTurnMaterial, readText } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
@@ -24,11 +25,12 @@ export async function validateAgentRecovery(input: {
 }): Promise<void> {
   const { artifacts, run, spec, journal } = input;
   const requests = new Map<string, ModelRequestV1>();
+  const operationRequests = new Map<string, ModelRequestV1>();
   for (const prepared of journal.filter((entry) => entry.opKind === 'model' && entry.phase === 'prepared')) {
     const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
     if (request.schemaVersion !== 1 || request.format !== 'cliq-model-request-v1' ||
         request.runId !== run.id || request.assemblyRef !== spec.assemblyRef || request.opId !== prepared.opId ||
-        request.attempt !== prepared.attempt || request.requestDigest !== digestOmitting(request, 'requestDigest')) {
+        request.attempt !== prepared.attempt || request.model !== prepared.target || request.requestDigest !== digestOmitting(request, 'requestDigest')) {
       throw new TypeError('model Journal request identity does not rehash');
     }
     const bytes = await artifacts.readBytes(request.bodyBytesRef);
@@ -50,7 +52,14 @@ export async function validateAgentRecovery(input: {
       if (plan.runId !== run.id) throw new TypeError('compaction plan belongs to another Run');
       await readCanonicalArtifact(artifacts, plan.sourceContextManifestRef);
     }
+    const first = operationRequests.get(prepared.opId);
+    if (first) assertSameModelOperation(first, request);
+    else operationRequests.set(prepared.opId, request);
     requests.set(prepared.requestRef, request);
+  }
+  if (operationRequests.size) {
+    const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
+    for (const opId of operationRequests.keys()) modelRetryState(assembly.retry.model, journal.filter((entry) => entry.opId === opId), run.updatedAt);
   }
   const turns = new Map<string, Awaited<ReturnType<typeof readModelTurnMaterial>>>();
   for (const entry of journal.filter((entry) => entry.opKind === 'model' && entry.phase === 'completed')) {

@@ -21,6 +21,7 @@ const TYPED_RUNTIME_SOURCES = [
   'kernel/tool-authorization.ts',
   'kernel/user-input.ts',
   'runtime/continuation.ts',
+  'runtime/model-retry.ts',
   'runtime/user-input.ts',
   'runtime/context-compaction.ts',
   'tools/input-contract.ts',

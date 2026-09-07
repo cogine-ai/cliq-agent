@@ -5,6 +5,7 @@ import type {
   InvocationJournalEntry,
   ReplayClass,
   Run,
+  RunAssemblyV1,
   RunFrontier,
   RunContextCompactionPlan,
   RunEvent,
@@ -26,7 +27,8 @@ import {
   appendInvocationJournalEntry,
   nextJournalSequence,
   readHighestPreparedAttempt,
-  readInvocationAttempt
+  readInvocationAttempt,
+  readOperationJournal
 } from '../repositories/journal.js';
 import { readRequiredWorkerLaunch } from '../repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef } from '../repositories/workspace-generations.js';
@@ -36,6 +38,7 @@ import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.j
 import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import type { ModelRequestV1, NormalPromptProjectionV1, ModelVisiblePromptV1 } from '../../model/request.js';
+import { assertSameModelOperation, modelRetryState } from '../../runtime/model-retry.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -308,6 +311,7 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
   const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
   const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
   const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
+  const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
   const checkpoint = readCheckpoint(driver, run.latestCheckpointId);
   const context = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));
   if (frontier.kind !== 'agent' || !['model_turn', 'context_compaction'].includes(frontier.phase) ||
@@ -315,7 +319,7 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
       prepared.opId !== modelOperationId(run.id, frontier) ||
       request.schemaVersion !== 1 || request.format !== 'cliq-model-request-v1' ||
       request.requestDigest !== digestOmitting(request, 'requestDigest') || request.runId !== run.id ||
-      request.opId !== prepared.opId || request.attempt !== prepared.attempt || request.assemblyRef !== context.assemblyRef ||
+      request.opId !== prepared.opId || request.attempt !== prepared.attempt || request.model !== prepared.target || request.assemblyRef !== context.assemblyRef ||
       spec.operation !== 'agent' || request.assemblyRef !== spec.assemblyRef || context.admittedContextRef !== spec.admittedContextRef ||
       request.kind !== (frontier.phase === 'model_turn' ? 'normal' : 'context_compaction') || request.compactionPlanRef !== frontier.compactionPlanRef ||
       context.runId !== run.id || checkpoint.runId !== run.id || context.throughItemSeq !== checkpoint.runItemSeq ||
@@ -339,7 +343,10 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
       throw new KernelStorageError('RECOVERY_REQUIRED', 'model claim compaction plan differs from the current context');
     }
   }
-  return { run, checkpoint, prepared };
+  const history = readOperationJournal(driver, run.id, prepared.opId);
+  modelRetryState(assembly.retry.model, history, sampleCanonicalNow());
+  if (history.length) assertSameModelOperation(await readCanonicalArtifact<ModelRequestV1>(artifacts, history[0]!.requestRef), request);
+  return { run, checkpoint, prepared, retryPolicy: assembly.retry.model };
 });
 
 export async function claimInvocationDispatch(
@@ -425,6 +432,7 @@ export async function claimValidatedInvocation(
     if (input.brokerFenceTokenDigest !== undefined) {
       claimed.brokerFenceTokenDigest = input.brokerFenceTokenDigest;
     }
+    if (modelCut) modelRetryState(modelCut.retryPolicy, [...readOperationJournal(connection, run.id, highest.opId), claimed], now);
     if (launchSpecMetadata !== undefined) insertArtifactMetadata(connection, launchSpecMetadata, now);
     appendInvocationJournalEntry(connection, claimed);
   });

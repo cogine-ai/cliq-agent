@@ -18,7 +18,8 @@ broker integration, or provider qualification is complete.
 Gate A landed in PR #489 (`a153d47`); the model/context continuation landed in
 PR #490 (`c29179f`), and direct tool-input contracts landed in PR #491
 (`eb93f46`), and canonical tool policy/continuation landed in PR #492
-(`04b2ba6`), followed by durable ordinary-tool approval in PR #494 (`3b0de21`).
+(`04b2ba6`), followed by durable ordinary-tool approval in PR #494 (`3b0de21`)
+and durable user input in PR #495 (`fafc940`).
 Gate B also includes the minimum WP01
 companion work needed to exercise the real SQLite/CAS continuation. The user
 approved that scope on 2026-09-05 and the minimum WP03 canonical tool
@@ -88,7 +89,8 @@ packages or a declaration that Gate B has passed:
   reconstructs projections from their original immutable sources, reproduces
   retained native requests, and revalidates normalized inputs and continuation
   items. `readModelAttempt` returns the exact retained attempt and its Journal
-  phase; it does not grant permission to resend a claimed or settled request.
+  phase and Journal-derived retry readiness; neither grants permission to
+  resend a claimed or settled request.
 - `prepareModel` selects the greatest safe whole prefix under the frozen
   compaction equations, protecting the recent suffix and complete tool batches.
   Source text is JCS of the existing model-visible message array, with no audit
@@ -204,7 +206,7 @@ budget charge, generic wait clear or legacy callback is accepted.
   while their result-less frontier and original workspace remain unchanged.
 
 Gate B still needs trusted builtin/broker execution and repair/child
-projections. Existing attempts are not silently retried; the one implemented
+projections. Existing attempts are not silently redispatched; the tool grant
 renewal above proves that the expired preparation was never claimed.
 WP04 still owns recovery of prepared tools after worker loss, reconciliation of
 claimed-then-`unknown` tools, and authenticated manual abandonment/terminal drain;
@@ -270,8 +272,56 @@ through `readModelAttempt`; `prepareModel` reports `AGENT_HANDOFF_PENDING` with
 the disposition and retained evidence reference instead of a cursor TypeError
 or a misleading retry attempt. Context exhaustion is reproducible from the unchanged
 context and frozen policy. Neither is an implemented StopIntent/candidate reducer.
-Broker/sandbox effects, scheduling, dispatch backoff, and production composition
-remain outside this implementation. Restart does not revive an old worker lease.
+Broker/sandbox effects, scheduling, and production composition remain outside
+this implementation. Restart does not revive an old worker lease.
+
+### Model retry readiness and recovery
+
+One pure Journal interpreter owns the frozen three-dispatch ceiling and
+`[500ms, 2000ms]` backoff for both normal and compaction operations. Preparation,
+the permanent dispatch claim, and recovery use the same rules; no mutable retry
+counter, persisted timer, scheduler, public retry mutator, or transport callback
+is introduced.
+
+- A replacement uses the same opId and the next contiguous attempt. Every
+  earlier attempt must already be settled. The delay starts at the first
+  durable post-claim settlement timestamp; a later audit resolution or a
+  pre-dispatch failure does not reset it. Pre-dispatch failures cost zero and
+  do not count toward the three dispatched attempts.
+- Retry keeps the original native bytes, provider/model/mode, output bound,
+  reservation and compaction plan. Only the attempt and audit projection can
+  change. Each admitted replacement reserves anew in the same transaction as
+  its prepared row. The previous unknown's full pessimistic charge is retained.
+  A received rejection/unusable response stays `completed`, never a transport
+  retry; there is no SDK retry or response-header override in this path.
+- `readModelAttempt.retry` is an immutable, restart-derived projection:
+  `pending`, `backoff` with exact `notBefore`, `ready`, `completed`, or
+  `exhausted`. Preparing too early returns `MODEL_RETRY_PENDING` with that
+  timestamp and next attempt, without reserving budget or advancing state.
+  Readiness is necessary, not sufficient: live owner/lease, stop/deadline,
+  frontier and fresh budget checks still apply at the existing mutation gates.
+- After the third failed/unknown dispatched attempt, reading returns
+  `stop_required`; preparation returns `AGENT_HANDOFF_PENDING` with
+  `reason='model_retry_exhausted'` and the retained failure evidence. WP04 must
+  still create the RFC runtime-failure StopIntent and drain/terminate the Run.
+  This gate does not manufacture a terminal result or refund an unknown.
+- Recovery rejects historical backoff/ceiling violations and changed request
+  bytes/authority. A late resolution of an older unknown does not change the
+  highest attempt's eligibility. Existing completion checks still reject an
+  older result instead of installing it over a newer attempt.
+
+This is a retry **eligibility** gate, not transport failure classification or
+proof that a previous dispatch is no longer live. It consumes existing Journal
+settlement facts; WP03/WP04 still own authenticated ambiguity/no-release evidence,
+broker-token revocation, dispatch closure, and the immediately-before-I/O gate.
+The existing M2 generic unknown settlement seam is exercised only by explicitly
+offline fixtures here. It is not claimed to satisfy those production evidence
+contracts, and no real provider request is sent or automatically rescheduled.
+
+Regression tests cross real SQLite/CAS for exact delay boundaries, zero-dispatch
+replacements, racing preparations, rollback, full charges and budget exhaustion,
+received rejections, late result rejection, corrupted retry history/request,
+compaction, and close/reopen with fresh offline worker activation.
 
 The old Session/`ModelAction` runner remains isolated until WP06's single
 Kernel Cut. There is no typed-to-legacy bridge. WP06 removes the old runner,
