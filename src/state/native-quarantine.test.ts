@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
-import { chmod, link, lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, open, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { Module } from 'node:module';
 import { constants } from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { StateRootIdentityV1, WorkspaceGenerationIdentityV1 } from '../kernel/types.js';
 import { decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { loadNativeStateOwner, type HeldStateOwnerLock } from './native-owner.js';
+import { openStateStore } from './store.js';
 import { makePrivateDir } from './testing/fixtures.js';
 import { childFor } from './testing/state-owner-process.js';
 
@@ -109,6 +111,37 @@ test('quarantine retries the identical target after a real owner process is kill
     assert.equal(successor.quarantineGeneration(f.generation, f.version).quarantineFileId, String(f.stat.ino));
     assert.equal(await f.contents(f.target), linux ? 'uncheckpointed bytes' : 'uncheckpointed image bytes');
   } finally { successor.close(); }
+});
+
+test('quarantine accepts the StateStore-published root identity without changing SQLite bytes', async (t) => {
+  const f = await fixture(t);
+  f.held.close();
+  const store = await openStateStore(f.root);
+  t.after(() => store.close());
+  const actualRoot = store.stateRootIdentity;
+  const rootArtifact = await store.artifacts.readCanonical<StateRootIdentityV1>(actualRoot.ref);
+  assert.equal(canonicalSha256(rootArtifact), actualRoot.ref);
+  assert.equal(rootArtifact.identityDigest, actualRoot.digest);
+  const generation = changed(f.generation, g => Object.assign(g.locator, {
+    stateRootIdentityRef: actualRoot.ref, stateRootIdentityDigest: actualRoot.digest
+  }));
+  await store.close();
+  const before = await readFile(path.join(f.root, KERNEL_DATABASE_FILENAME));
+  const held = native.acquireLock(f.root, false);
+  try { held.quarantineGeneration(generation, f.version); } finally { held.close(); }
+  assert.deepEqual(await readFile(path.join(f.root, KERNEL_DATABASE_FILENAME)), before);
+});
+
+test('relocation is not containment death or revocation of an already-open writer', async (t) => {
+  const f = await fixture(t);
+  const writer = await open(linux ? path.join(f.source, 'nested/dirty') : f.source, 'r+');
+  try {
+    const move = f.held.quarantineGeneration(f.generation, f.version);
+    await writer.write('still open', 0, 'utf8');
+    assert.ok((await f.contents(f.target)).startsWith('still open'));
+    assert.equal('containmentDeathEvidenceRef' in move, false);
+    assert.equal('treeDigest' in move, false);
+  } finally { await writer.close(); }
 });
 
 test('generation quarantine rejects fabricated identity, path, root, version and platform before moving', async (t) => {

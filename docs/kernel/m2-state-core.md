@@ -168,7 +168,8 @@ No caller supplies a destination, filesystem handle, fallback or success flags.
   `runs/<runId>/generations/<generationId>`; macOS relocates the exact `0600`,
   single-link backing file at the same path with `.img` appended. Parent
   descriptors are same-user `0700`, no-follow and on the held StateRoot device.
-  Directory link counts are not file-hardlink counts: the Linux identity no
+  [Directory link counts](https://docs.kernel.org/filesystems/ext4/inodes.html)
+  are not file-hardlink counts: the Linux identity no
   longer includes the old impossible fixed `linkCount: 1` constraint. This is
   a pre-cut schema correction, not legacy identity compatibility.
 - All filesystem operations use held directory descriptors. The move uses

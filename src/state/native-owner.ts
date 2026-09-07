@@ -46,15 +46,22 @@ type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration'> & {
 };
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string };
 
+/** One canonical projection for bootstrap and native filesystem consumers.
+ * This derives bytes only; the caller must hold and validate the native lock. */
+export function stateRootIdentityFromDescriptor(stateRoot: string, descriptor: DescriptorIdentity): StateRootIdentityV1 {
+  const root: StateRootIdentityV1 = {
+    schemaVersion: 1, format: 'cliq-state-root-identity-v1', platform: process.platform === 'linux' ? 'linux' : 'macos',
+    canonicalAbsolutePath: stateRoot, ownerUid: descriptor.ownerUid, deviceId: descriptor.deviceId,
+    directoryFileId: descriptor.fileId, mode: 448, openedNoFollow: true, layoutVersion: 1, identityDigest: ''
+  };
+  root.identityDigest = digestOmitting(root, 'identityDigest');
+  return Object.freeze(root);
+}
+
 /** Hide the native locator arguments; callers supply only the frozen identity
  * and the durable source version. No caller-selected destination or fallback. */
 function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
-  const root: StateRootIdentityV1 = {
-    schemaVersion: 1, format: 'cliq-state-root-identity-v1', platform: process.platform === 'linux' ? 'linux' : 'macos',
-    canonicalAbsolutePath: stateRoot, ownerUid: held.root.ownerUid, deviceId: held.root.deviceId,
-    directoryFileId: held.root.fileId, mode: 448, openedNoFollow: true, layoutVersion: 1, identityDigest: ''
-  };
-  root.identityDigest = digestOmitting(root, 'identityDigest');
+  const root = stateRootIdentityFromDescriptor(stateRoot, held.root);
   const rootRef = canonicalSha256(root);
   const receiver = (value: unknown) => {
     if (value !== handle) throw new TypeError('invalid StateOwner lock handle');

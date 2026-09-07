@@ -43,7 +43,7 @@ import {
 } from './canonical-time.js';
 import { ContentAddressedStore } from './cas.js';
 import { KernelStorageError } from './errors.js';
-import { assertStateOwnerLock, loadNativeStateOwner, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
+import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
   decodePlatformProcessIdentity,
   decodeStateLockIdentity,
@@ -648,20 +648,7 @@ async function acquireOrBootstrapStateOwner(
   const casInfo = await lstat(casRoot, { bigint: true });
   assertStateOwnerLock(heldLock);
 
-  const stateRootIdentity: StateRootIdentityV1 = {
-    schemaVersion: 1,
-    format: 'cliq-state-root-identity-v1',
-    platform,
-    canonicalAbsolutePath: stateRoot,
-    ownerUid: uid,
-    deviceId: heldLock.root.deviceId,
-    directoryFileId: heldLock.root.fileId,
-    mode: 448,
-    openedNoFollow: true,
-    layoutVersion: 1,
-    identityDigest: ''
-  };
-  stateRootIdentity.identityDigest = digestOmitting(stateRootIdentity, 'identityDigest');
+  const stateRootIdentity = stateRootIdentityFromDescriptor(stateRoot, heldLock.root);
   const stateRootArtifact = await artifacts.publishCanonical(stateRootIdentity, 'cliq-state-root-identity-v1');
 
   const processIdentity = await currentProcessIdentity(native, now);
