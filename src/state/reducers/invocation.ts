@@ -303,11 +303,17 @@ export type ClaimInvocationDispatchInput = {
   brokerFenceTokenDigest?: string;
 };
 
-/** Read the retry clock's durable source before any preparation or claim; later audit rows reuse it unchanged. */
+/** Verify retained retry requests and their first settlement clock before any preparation or claim. */
 export async function readModelRetryHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string, opId: string) {
   const history = readOperationJournal(driver, runId, opId);
+  let originalRequest: ModelRequestV1 | undefined;
   const settled = new Set<number>();
   for (const entry of history) {
+    if (entry.phase === 'prepared') {
+      const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, entry.requestRef);
+      if (originalRequest !== undefined) assertSameModelOperation(originalRequest, request);
+      else originalRequest = request;
+    }
     if (!entry.budgetSettlementRef || settled.has(entry.attempt)) continue;
     const settlement = decodeBudgetSettlement(await readCanonicalArtifact(artifacts, entry.budgetSettlementRef));
     if (settlement.runId !== runId || settlement.opId !== opId || settlement.attempt !== entry.attempt ||
@@ -361,7 +367,6 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
   }
   const history = await readModelRetryHistory(driver, artifacts, run.id, prepared.opId);
   modelRetryState(assembly.retry.model, history, sampleCanonicalNow());
-  if (history.length) assertSameModelOperation(await readCanonicalArtifact<ModelRequestV1>(artifacts, history[0]!.requestRef), request);
   return { run, checkpoint, prepared, retryPolicy: assembly.retry.model };
 });
 

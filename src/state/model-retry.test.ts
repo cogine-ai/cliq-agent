@@ -242,6 +242,81 @@ test('recovery and shared model claim reject a bypassed backoff or substituted r
   } finally { fault.close(); await disposeFixture(fixture); }
 });
 
+for (const gate of ['prepare', 'claim'] as const) test(`model ${gate} rejects a changed intermediate retry even when the first and latest requests match`, async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const fixture = await createAgentFixture(`model-retry-intermediate-${gate}`);
+  const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const original = await prepare(fixture);
+    await claim(fixture, original);
+    await unknown(fixture, original);
+    now += 500;
+    const middle = await prepare(fixture);
+    await claim(fixture, middle);
+    await unknown(fixture, middle);
+    now += 2000;
+    const current = gate === 'claim' ? await prepare(fixture) : undefined;
+    if (current) assert.deepEqual(current.prepared.outbound, original.prepared.outbound);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+
+    // Keep the middle attempt internally consistent, including a valid rehashed body/request and all phase refs.
+    // Only comparing the first and latest requests misses this R0 -> R1 -> R0 history.
+    const originalBytes = Buffer.from(middle.prepared.outbound.bodyBytes);
+    const changedBytes = Buffer.from(originalBytes.toString('utf8').replace('Use tools carefully.', 'Use tools precisely.'));
+    assert.notDeepEqual(changedBytes, originalBytes);
+    assert.equal(changedBytes.byteLength, originalBytes.byteLength);
+    const body = await fixture.store.artifacts.publishBytes(changedBytes, 'application/json', 'cliq-model-request-body-v1');
+    const request = { ...middle.prepared.request, bodyBytesRef: body.ref };
+    request.requestDigest = digestOmitting(request, 'requestDigest');
+    const artifact = await fixture.store.artifacts.publishCanonical(request, request.format);
+    // Deliberate corruption of this disposable database; production Journal rows are append-only.
+    fault.exec('DROP TRIGGER run_journal_immutable_update');
+    const rewrite = (requestRef: string) => fault.prepare(`UPDATE run_journal SET entry_json = json_set(entry_json, '$.requestRef', ?)
+      WHERE run_id = ? AND op_id = ? AND attempt = ?`).run(requestRef, fixture.runId, middle.entry.opId, BigInt(middle.entry.attempt));
+    rewrite(artifact.ref);
+    const readJournal = () => fault.prepare('SELECT entry_json FROM run_journal WHERE run_id = ? ORDER BY seq').all(fixture.runId);
+    const corruptJournal = readJournal();
+    await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), /original request bytes or authority/);
+    await assert.rejects(current ? claim(fixture, current) : prepare(fixture),
+      { code: 'RECOVERY_REQUIRED', message: 'model retry changes its original request bytes or authority' });
+    assert.deepEqual(readJournal(), corruptJournal);
+    assert.deepEqual(fixture.store.getRun(fixture.runId), before.run);
+    rewrite(middle.entry.requestRef);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    const next = current ?? await prepare(fixture);
+    await claim(fixture, next);
+    assert.deepEqual((await fixture.agent.readModelAttempt())?.retry,
+      { kind: 'pending', attempt: 2, phase: 'dispatch_claimed', dispatchedAttempts: 3 });
+  } finally { fault.close(); await disposeFixture(fixture); }
+});
+
+test('model claim rejects a null original request instead of resetting retry authority', async () => {
+  const fixture = await createAgentFixture('model-retry-null-original');
+  const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const original = await prepare(fixture);
+    await failBeforeDispatch(fixture, original);
+    const current = await prepare(fixture);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const invalid = await fixture.store.artifacts.publishCanonical(null, 'cliq-model-request-v1');
+    // Canonical CAS bytes are not proof of a valid request shape. Corrupt all original attempt refs together.
+    fault.exec('DROP TRIGGER run_journal_immutable_update');
+    const rewrite = (requestRef: string) => fault.prepare(`UPDATE run_journal SET entry_json = json_set(entry_json, '$.requestRef', ?)
+      WHERE run_id = ? AND op_id = ? AND attempt = 0`).run(requestRef, fixture.runId, original.entry.opId);
+    rewrite(invalid.ref);
+    const readJournal = () => fault.prepare('SELECT entry_json FROM run_journal WHERE run_id = ? ORDER BY seq').all(fixture.runId);
+    const corruptJournal = readJournal();
+    await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
+    await assert.rejects(claim(fixture, current), { code: 'RECOVERY_REQUIRED' });
+    assert.deepEqual(readJournal(), corruptJournal);
+    assert.deepEqual(fixture.store.getRun(fixture.runId), before.run);
+    rewrite(original.entry.requestRef);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    await claim(fixture, current);
+  } finally { fault.close(); await disposeFixture(fixture); }
+});
+
 test('reopening during backoff derives readiness from settlement and keeps the request across worker generations', async (t) => {
   let now = Date.now();
   t.mock.method(Date, 'now', () => now);
