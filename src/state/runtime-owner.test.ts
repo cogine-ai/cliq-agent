@@ -133,6 +133,10 @@ test('signed bootstrap binds the native helper bytes, path, role and version bef
   const stateRoot = await makePrivateDir('.cliq-runtime-owner-native-');
   try {
     const authority = await signedToolBundle(testFixture().assembly, []);
+    const helperMismatch = {
+      code: 'ARTIFACT_MISMATCH',
+      message: 'StateOwner native helper does not match the signed RuntimeBundle'
+    };
     const changes = [
       { digest: canonicalSha256('foreign native helper') }, { byteCount: 1 },
       { relativePath: 'native/foreign/state-owner.node' }, { role: 'tool_adapter' },
@@ -141,12 +145,12 @@ test('signed bootstrap binds the native helper bytes, path, role and version bef
     for (const change of changes) {
       const bundle = structuredClone(authority.bundle);
       Object.assign(bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID)!, change);
-      await assert.rejects(openStateStore(stateRoot, resign(bundle)), /native helper|executable/);
+      await assert.rejects(openStateStore(stateRoot, resign(bundle)), helperMismatch);
       assert.deepEqual(await readdir(stateRoot), []);
     }
     const missing = structuredClone(authority.bundle);
     missing.entries = missing.entries.filter(entry => entry.entryId !== STATE_OWNER_NATIVE_ENTRY_ID);
-    await assert.rejects(openStateStore(stateRoot, resign(missing)), /native helper/);
+    await assert.rejects(openStateStore(stateRoot, resign(missing)), helperMismatch);
     assert.deepEqual(await readdir(stateRoot), []);
     const store = await openStateStore(stateRoot, authority);
     await store.close();
