@@ -402,6 +402,7 @@ async function validateJournalArtifactsAndBudgets(
       settlement.preparedJournalSeq !== group.prepared.seq ? 'preparedJournalSeq' : undefined,
       settlement.terminalJournalSeq !== firstTerminal.seq ? 'terminalJournalSeq' : undefined,
       settlement.terminalPhase !== firstTerminal.phase ? 'terminalPhase' : undefined,
+      settlement.settledAt !== firstTerminal.timestamp ? 'settledAt' : undefined,
       !budgetEqual(settlement.reserved, group.prepared.budgetDelta) ? 'reserved' : undefined,
       !budgetEqual(settlement.consumed, firstTerminal.budgetDelta) ? 'consumed' : undefined
     ].filter((field): field is string => field !== undefined);

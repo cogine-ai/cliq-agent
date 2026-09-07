@@ -207,14 +207,22 @@ test('recovery and shared model claim reject a bypassed backoff or substituted r
   try {
     const original = await prepare(fixture);
     await claim(fixture, original);
-    await unknown(fixture, original);
+    now += 100;
+    const settled = await unknown(fixture, original);
     now += 500;
     const replacement = await prepare(fixture);
     const retained = await fixture.store.readRecoveryClosure(fixture.runId);
     // Deliberate corruption of this disposable database; no production writer can update Journal rows.
     fault.exec('DROP TRIGGER run_journal_immutable_update');
     const rewrite = (entry: typeof replacement.entry) => fault.prepare('UPDATE run_journal SET entry_json = ? WHERE run_id = ? AND seq = ?')
-      .run(JSON.stringify(entry), fixture.runId, BigInt(replacement.entry.seq));
+      .run(JSON.stringify(entry), fixture.runId, BigInt(entry.seq));
+    // The row remains ordered and its real settlement artifact is unchanged: only their binding catches this.
+    rewrite({ ...settled.entry, timestamp: new Date(Date.parse(settled.entry.timestamp) - 100).toISOString() });
+    await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
+    await assert.rejects(prepare(fixture), /retry clock differs/);
+    await assert.rejects(claim(fixture, replacement), /retry clock differs/);
+    rewrite(settled.entry);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), retained);
     rewrite({ ...replacement.entry, timestamp: new Date(now - 1).toISOString() });
     await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
     await assert.rejects(claim(fixture, replacement), error => (error as Error).cause instanceof TypeError && /backoff/.test(String((error as Error).cause)));

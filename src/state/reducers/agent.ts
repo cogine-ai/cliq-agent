@@ -23,7 +23,7 @@ import { readRecoveryClosure } from '../recovery-closure.js';
 import { readCheckpoint, readRun, ZERO_BUDGET } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import type { StateOwnerContext } from '../state-owner.js';
-import { prepareValidatedInvocation, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
+import { prepareValidatedInvocation, readModelRetryHistory, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
 import { loadToolContinuation } from './tool.js';
 import { readToolCut } from '../tool-cut.js';
 import type { ReleaseTrustKey } from '../../policy/runtime-authority.js';
@@ -295,7 +295,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         ? { ...cut.frontier, phase: 'context_compaction', compactionPlanRef: planArtifact.ref } : cut.frontier;
       const frontierPlan = planCanonicalArtifact(frontier, 'cliq-run-frontier-v1');
       const opId = modelOpId(runId, frontier);
-      const history = readOperationJournal(driver, runId, opId);
+      const history = await readModelRetryHistory(driver, artifacts, runId, opId);
       const attempt = requireRetryReady(modelRetryState(assembly.retry.model, history, sampleCanonicalNow()));
       const projectionArtifact = planCanonicalArtifact(projection, projection.format);
       const prepared = compaction ? model.prepare({ kind: 'context_compaction', invocation: { runId, opId, attempt },

@@ -306,7 +306,9 @@ is introduced.
   still create the RFC runtime-failure StopIntent and drain/terminate the Run.
   This gate does not manufacture a terminal result or refund an unknown.
 - Recovery rejects historical backoff/ceiling violations and changed request
-  bytes/authority. A late resolution of an older unknown does not change the
+  bytes/authority. The first terminal row's time must equal its exact retained
+  BudgetSettlement time at preparation, claim and recovery; changing only the
+  Journal clock cannot shorten the delay. A late resolution of an older unknown does not change the
   highest attempt's eligibility. Existing completion checks still reject an
   older result instead of installing it over a newer attempt.
 

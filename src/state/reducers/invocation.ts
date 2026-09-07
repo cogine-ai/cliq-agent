@@ -35,7 +35,7 @@ import { readRequiredWorkspaceGenerationByRef } from '../repositories/workspace-
 import { insertRunEvent, readCheckpoint, readRun } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
-import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
+import { decodeBudgetSettlement, decodeContextManifest, decodeRunSpec } from '../decoders.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import type { ModelRequestV1, NormalPromptProjectionV1, ModelVisiblePromptV1 } from '../../model/request.js';
 import { assertSameModelOperation, modelRetryState } from '../../runtime/model-retry.js';
@@ -303,6 +303,22 @@ export type ClaimInvocationDispatchInput = {
   brokerFenceTokenDigest?: string;
 };
 
+/** Read the retry clock's durable source before any preparation or claim; later audit rows reuse it unchanged. */
+export async function readModelRetryHistory(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string, opId: string) {
+  const history = readOperationJournal(driver, runId, opId);
+  const settled = new Set<number>();
+  for (const entry of history) {
+    if (!entry.budgetSettlementRef || settled.has(entry.attempt)) continue;
+    const settlement = decodeBudgetSettlement(await readCanonicalArtifact(artifacts, entry.budgetSettlementRef));
+    if (settlement.runId !== runId || settlement.opId !== opId || settlement.attempt !== entry.attempt ||
+        settlement.terminalJournalSeq !== entry.seq || settlement.terminalPhase !== entry.phase || settlement.settledAt !== entry.timestamp) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'model retry clock differs from its retained first settlement');
+    }
+    settled.add(entry.attempt);
+  }
+  return history;
+}
+
 const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
   driver: SqliteDriver, artifacts: ArtifactCatalog, prepared: InvocationJournalEntry
 ) => {
@@ -343,7 +359,7 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
       throw new KernelStorageError('RECOVERY_REQUIRED', 'model claim compaction plan differs from the current context');
     }
   }
-  const history = readOperationJournal(driver, run.id, prepared.opId);
+  const history = await readModelRetryHistory(driver, artifacts, run.id, prepared.opId);
   modelRetryState(assembly.retry.model, history, sampleCanonicalNow());
   if (history.length) assertSameModelOperation(await readCanonicalArtifact<ModelRequestV1>(artifacts, history[0]!.requestRef), request);
   return { run, checkpoint, prepared, retryPolicy: assembly.retry.model };
