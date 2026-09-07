@@ -6,10 +6,12 @@ import { toolOperationId } from '../policy/tool-policy.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
-import { decodeAdmittedContext, decodeControlChannel, decodeLocalPrincipalIdentity, decodePlatformProcessIdentity, decodeSessionProjection } from './decoders.js';
+import { readRetainedControlChannelClosure } from './control-channel.js';
+import { decodeAdmittedContext, decodeSessionProjection, decodeStateLockIdentity } from './decoders.js';
 import { isZeroBudget } from './invariants.js';
 import { readControlRequest, readSession, readSessionPrincipalId } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
+import { readLatestStateOwner } from './state-owner.js';
 import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 
@@ -29,16 +31,17 @@ export async function readCancelResponse(driver: SqliteDriver, artifacts: Artifa
       !Number.isSafeInteger(snapshot.latestRunItemSeq) || snapshot.latestRunItemSeq < 0) throw new TypeError('cancellation response substitutes its Run snapshot');
   requireEqual(row.requestDigest, canonicalSha256({ protocolVersion: 1, method: 'run.cancel', requestId, runId: run.id,
     expectedRevision: snapshot.run.revision - 1 }), 'cancel request digest');
-  const channel = decodeControlChannel(await readCanonicalArtifact(artifacts, row.channelIdentityRef));
-  const principal = decodeLocalPrincipalIdentity(await readCanonicalArtifact(artifacts, channel.principalIdentityRef));
-  if (channel.channelIdentityDigest !== row.channelIdentityDigest || channel.principalId !== principalId || principal.principalId !== principalId ||
-      principal.identityDigest !== channel.principalIdentityDigest || channel.openedAt > row.committedAt ||
+  const owner = readLatestStateOwner(driver);
+  if (!owner) throw new TypeError('cancellation has no retained state owner');
+  const lock = decodeStateLockIdentity(await readCanonicalArtifact(artifacts, owner.stateLockIdentityRef));
+  requireEqual(lock.identityDigest, owner.stateLockIdentityDigest, 'cancellation state-owner lock');
+  const { channel } = await readRetainedControlChannelClosure(artifacts, {
+    stateRootIdentityRef: lock.stateRootIdentityRef, stateRootIdentityDigest: lock.stateRootIdentityDigest,
+    filesystem: { ownerUid: lock.ownerUid }
+  }, { channelIdentityRef: row.channelIdentityRef, channelIdentityDigest: row.channelIdentityDigest, principalId });
+  if (channel.openedAt > row.committedAt ||
       readSessionPrincipalId(driver, run.sessionId) !== principalId ||
       driver.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(run.id)?.principal_id !== principalId) throw new TypeError('cancellation control channel has a foreign owner');
-  if (channel.transport.kind !== 'in_process') throw new TypeError('unsupported retained cancellation transport');
-  const process = decodePlatformProcessIdentity(await readCanonicalArtifact(artifacts, channel.transport.processIdentityRef));
-  if (process.identityDigest !== channel.transport.processIdentityDigest || process.ownerUid !== principal.effectiveUid ||
-      process.platform !== principal.platform || process.observedAt !== channel.openedAt) throw new TypeError('cancellation channel process identity mismatch');
   const stop = decodeControlStop(await readCanonicalArtifact(artifacts, snapshot.run.stopIntentRef!), snapshot.run);
   if (stop.origin !== 'user_cancel' || stop.principalId !== principalId) throw new TypeError('cancellation snapshot has no owning StopIntent');
   return { response, row };

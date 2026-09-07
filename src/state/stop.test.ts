@@ -4,7 +4,7 @@ import path from 'node:path';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
-import type { ContinuationItem, RunCancel, SessionContextProjection, StopIntent, TerminalDetail, WorkerLaunch } from '../kernel/types.js';
+import type { ContinuationItem, LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, RunCancel, SessionContextProjection, StateRootIdentityV1, StopIntent, TerminalDetail, ToolResultModelContentV1, ToolResultPayloadV1, WorkerLaunch } from '../kernel/types.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
@@ -88,6 +88,14 @@ test('a prepared ordinary tool is refunded and the complete undispatched suffix 
     assert.equal(terminal.run.budgetConsumed.toolCalls, 0);
     const items = await runItems(fixture);
     assert.deepEqual(items.filter((item) => item.kind === 'tool_result').map((item) => [item.index, item.outcome]), [[0, 'cancelled'], [1, 'cancelled'], [2, 'cancelled']]);
+    for (const item of items) if (item.kind === 'tool_result') {
+      const payload = await fixture.store.artifacts.readCanonical<ToolResultPayloadV1>(item.resultRef);
+      const model = await fixture.store.artifacts.readCanonical<ToolResultModelContentV1>(payload.modelContentRef);
+      const core = { schemaVersion: 1, format: 'cliq-tool-result-model-content-v1', callId: item.callId, index: item.index,
+        toolName: payload.toolName, outcome: 'cancelled', content: { code: 'TOOL_CALL_CANCELLED', cancellationKind: 'undispatched_stop' } };
+      assert.deepEqual(model, { ...core, contentDigest: canonicalSha256(core) });
+      assert.equal(payload.modelContentDigest, model.contentDigest);
+    }
     assert.equal(items.filter((item) => item.kind === 'input_request').length, 0);
     await reopen(fixture);
     assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).run.status, 'cancelled');
@@ -303,6 +311,40 @@ test('stop and recovery reject substituted retirement, terminal reason and contr
     await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
     writer.prepare("UPDATE control_requests SET request_digest = ? WHERE method = 'run.cancel' AND request_id = ?").run(row.request_digest, command.requestId);
     await reopen(fixture);
+  } finally { writer.close(); await disposeFixture(fixture); }
+});
+
+test('cancellation recovery and live replay reject a self-consistent foreign-root channel with the same principal and UID', async () => {
+  const fixture = await createAgentFixture('stop-foreign-root', undefined, { mode: 'plan' });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const command = await cancelCommand(fixture);
+    const stopped = await fixture.agent.cancelRun(command);
+    const channel = await fixture.store.artifacts.readCanonical<LocalControlChannelIdentityV1>(command.channelIdentityRef);
+    const principal = await fixture.store.artifacts.readCanonical<LocalPrincipalIdentityV1>(channel.principalIdentityRef);
+    const root = await fixture.store.artifacts.readCanonical<StateRootIdentityV1>(principal.stateRootIdentityRef);
+    root.canonicalAbsolutePath += '-foreign';
+    root.directoryFileId = String(BigInt(root.directoryFileId) + 1n);
+    root.identityDigest = digestOmitting(root, 'identityDigest');
+    const rootArtifact = await fixture.store.artifacts.publishCanonical(root, root.format);
+    principal.stateRootIdentityRef = rootArtifact.ref;
+    principal.stateRootIdentityDigest = root.identityDigest;
+    principal.identityDigest = digestOmitting(principal, 'identityDigest');
+    const principalArtifact = await fixture.store.artifacts.publishCanonical(principal, principal.format);
+    channel.principalIdentityRef = principalArtifact.ref;
+    channel.principalIdentityDigest = principal.identityDigest;
+    channel.channelIdentityDigest = digestOmitting(channel, 'channelIdentityDigest');
+    const substituted = await fixture.store.artifacts.publishCanonical(channel, channel.format);
+    writer.prepare("UPDATE control_requests SET channel_identity_ref = ?, channel_identity_digest = ? WHERE method = 'run.cancel' AND request_id = ?")
+      .run(substituted.ref, channel.channelIdentityDigest, command.requestId);
+    await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
+    await assert.rejects(fixture.agent.cancelRun(command), { code: 'ARTIFACT_MISMATCH' });
+    assert.deepEqual(fixture.store.getRun(fixture.runId), stopped.run);
+    writer.prepare("UPDATE control_requests SET channel_identity_ref = ?, channel_identity_digest = ? WHERE method = 'run.cancel' AND request_id = ?")
+      .run(command.channelIdentityRef, command.channelIdentityDigest, command.requestId);
+    await reopen(fixture);
+    const replay = await fixture.agent.cancelRun({ ...command, ...await publishInProcessChannel(fixture.store, command.principalId) });
+    assert.deepEqual(replay.response, stopped.response);
   } finally { writer.close(); await disposeFixture(fixture); }
 });
 

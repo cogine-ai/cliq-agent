@@ -36,7 +36,10 @@ export async function validateControlChannelClosure(
 
 /** Historical audit only. A control-row owner must also bind these bytes; this never authenticates a new request. */
 export async function readRetainedControlChannelClosure(
-  artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  artifacts: ArtifactCatalog,
+  owner: Pick<StateOwnerContext, 'stateRootIdentityRef' | 'stateRootIdentityDigest'> & {
+    filesystem: Pick<StateOwnerContext['filesystem'], 'ownerUid'>;
+  },
   input: { channelIdentityRef: string; channelIdentityDigest: string; principalId: string }
 ): Promise<{ channel: LocalControlChannelIdentityV1; metadata: PublishedArtifact[] }> {
   const channel = decodeControlChannel(await artifacts.readCanonical(input.channelIdentityRef));

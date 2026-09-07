@@ -70,7 +70,8 @@ export function cancelledCall(batch: ToolBatchItem, index: number, stopIntentRef
   const notice: ModelTextV1 = { ...noticeCore, textDigest: canonicalSha256(noticeCore) };
   const noticePlan = planCanonicalArtifact(notice, notice.format);
   const modelCore = { schemaVersion: 1 as const, format: 'cliq-tool-result-model-content-v1' as const,
-    callId: call.callId, index, toolName: call.toolName, outcome: 'cancelled' as const, content: utf8 };
+    callId: call.callId, index, toolName: call.toolName, outcome: 'cancelled' as const,
+    content: { code: 'TOOL_CALL_CANCELLED', cancellationKind: 'undispatched_stop' } };
   const model: ToolResultModelContentV1 = { ...modelCore, contentDigest: canonicalSha256(modelCore) };
   const modelPlan = planCanonicalArtifact(model, model.format);
   const core = { schemaVersion: 1 as const, format: 'cliq-tool-result-payload-v1' as const, runId: batch.runId,
