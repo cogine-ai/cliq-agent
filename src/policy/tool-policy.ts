@@ -47,6 +47,26 @@ export function toolOperationId(runId: string, batchItemId: string, callId: stri
   return identityHash('cliq-tool-operation-v1', runId, batchItemId, callId);
 }
 
+/** The same immutable request identity feeds admission, policy and stop recovery. */
+export function planToolRequest(input: {
+  runId: string; frontierRef: string; batchItemId: string; assemblyRef: string; assembly: RunAssemblyV1;
+  workspaceIdentityRef: string; workspaceIdentityDigest: string; entry: ToolInputAuthority; call: ToolCallInputV1;
+}) {
+  const { runId, frontierRef, batchItemId, assemblyRef, assembly, workspaceIdentityRef, workspaceIdentityDigest, entry, call } = input;
+  const { inputSchema: _schema, ...contract } = entry;
+  const targetCore = { schemaVersion: 1 as const, format: 'cliq-tool-target-v1' as const, runId,
+    workspaceIdentityRef, workspaceIdentityDigest, toolManifestRef: assembly.tools.manifestRef,
+    toolManifestDigest: assembly.tools.manifestDigest, toolName: call.toolName, toolContractDigest: canonicalSha256(contract), execution: entry.execution };
+  const target: ToolTargetV1 = { ...targetCore, targetDigest: canonicalSha256(targetCore) };
+  const opId = toolOperationId(runId, batchItemId, call.callId);
+  const core = { schemaVersion: 1 as const, format: 'cliq-tool-request-v1' as const, runId, opId, frontierRef, assemblyRef,
+    batchItemId, callId: call.callId, callIndex: call.index, toolName: call.toolName, inputRef: canonicalSha256(call), inputDigest: call.inputDigest,
+    targetRef: canonicalSha256(target), targetDigest: target.targetDigest,
+    ...(entry.execution.kind === 'mcp' ? { idempotencyKey: identityHash('cliq-mcp-tool-idempotency-v1', runId, opId,
+      entry.execution.registryRevisionRef, entry.execution.serverToolName) } : {}) };
+  return { request: { ...core, requestDigest: canonicalSha256(core) } satisfies ToolRequestV1, target, entry };
+}
+
 /** Fixed evaluator over immutable requests. It accepts no caller-selected channel, primary key or decision. */
 export function loadToolPolicy(input: {
   policy: RunPolicySnapshotV1; policyRef: string; assembly: RunAssemblyV1; assemblyRef: string;

@@ -28,7 +28,10 @@ Use its loaded-Run reducers for input transport/UI integration too; user answers
 are control commits, not synthetic Journal dispatches. The same integration now
 provides `cancelRun`, `expireRun` and `commitTerminalStop` for root agent Runs:
 authenticated cancellation/deadline fencing, quiescent undispatched-call drain,
-no-claim refunds and atomic Session terminal publication. Reuse this stop core;
+no-claim refunds and atomic Session terminal publication. `stopForResourceFailure`
+extends that core with exact next-request token/cost/tool-call exhaustion and
+uncompactable/failed-compaction context, independently rederived during recovery.
+It does not stop unresolved external attempts or grant tool permission. Reuse this stop core;
 do not build another control-state machine. Child/MCP/ambiguous-effect closure,
 other stop origins/wait subjects, UDS capture/server routing, scheduling and
 worker-loss reconciliation remain in this package. This partial integration

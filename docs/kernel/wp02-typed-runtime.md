@@ -20,7 +20,8 @@ PR #490 (`c29179f`), and direct tool-input contracts landed in PR #491
 (`eb93f46`), and canonical tool policy/continuation landed in PR #492
 (`04b2ba6`), followed by durable ordinary-tool approval in PR #494 (`3b0de21`)
 and durable user input in PR #495 (`fafc940`), then model retry eligibility in
-PR #496 (`b1f7ca6`).
+PR #496 (`b1f7ca6`) and the root cancellation/deadline stop core in PR #497
+(`412d280`).
 Gate B also includes the minimum WP01
 companion work needed to exercise the real SQLite/CAS continuation. The user
 approved that scope on 2026-09-05 and the minimum WP03 canonical tool
@@ -272,7 +273,9 @@ successful or bypass stop arbitration/drain. Completed handoffs survive restart
 through `readModelAttempt`; `prepareModel` reports `AGENT_HANDOFF_PENDING` with
 the disposition and retained evidence reference instead of a cursor TypeError
 or a misleading retry attempt. Context exhaustion is reproducible from the unchanged
-context and frozen policy. Neither is an implemented StopIntent/candidate reducer.
+context and frozen policy. The resource-stop reducer below consumes deterministic
+budget/context failures; candidate and generic runtime-failure handoffs still
+require their owning reducers.
 Broker/sandbox effects, scheduling, and production composition remain outside
 this implementation. Restart does not revive an old worker lease.
 
@@ -328,7 +331,7 @@ compaction, and close/reopen with fresh offline worker activation.
 
 ### Durable root-agent cancellation and deadline stop
 
-The next integration closes one lifecycle, from authenticated `run.cancel` or
+PR #497 closes one lifecycle, from authenticated `run.cancel` or
 canonical deadline expiry to a quiescent terminal Run and its Session outcome.
 It reuses the loaded Run, existing control rows, Journal, worker seal and
 continuation commit. There is no second lifecycle, generic Run patch, timer,
@@ -342,9 +345,9 @@ scheduler, new tool executor or compatibility bridge.
   conflict. Distinct requests racing one revision have one winner.
 - `expireRun` derives only the RFC deadline intent from the canonical clock
   and immutable deadline. User cancellation outranks deadline; equal
-  precedence keeps the first committed intent. These reducers implement only
-  those two evidence branches; they cannot select arbitrary reasons or claim
-  that other stop origins have been implemented.
+  precedence keeps the first committed intent. With the resource integration
+  below, a deadline also replaces a lower-priority runtime-context failure.
+  Callers cannot select arbitrary reasons.
 - Both preserve the current frontier and any input/approval wait while
   fencing productive work. The original worker may still be alive, and a
   positively returned claimed model/tool result may still settle against the
@@ -373,7 +376,7 @@ scheduler, new tool executor or compatibility bridge.
 This implements root agent Runs at the existing agent/tool/input/ordinary
 approval frontiers. Child Runs/allocations, MCP-server lifetime closure,
 pending-launch recovery, unknown/manual/workspace-rollback reconciliation,
-runtime/integrity/budget-counter/verification stop evidence, candidate/results,
+generic runtime/integrity/verification stop evidence, candidate/results,
 UDS/UI, scheduling and production composition remain their owning packages'
 work. An unknown model attempt from #496 still cannot terminalize or be
 refunded without authenticated dispatch-closure evidence. Unsupported cuts
@@ -381,6 +384,47 @@ fail closed; neither Gate B nor WP04 is complete.
 
 Tests use real SQLite/CAS and offline signed containment fixtures, not actual
 process termination, broker revocation or production sandbox qualification.
+
+### Deterministic resource failure and terminal drain
+
+The loaded Run adds one `stopForResourceFailure({expectedRunRevision})`
+operation for the existing typed continuation. It takes no caller-selected
+reason, estimate, reservation or evidence reference. The owner derives and
+persists the exact RFC StopIntent, then uses the same `commitTerminalStop`
+transaction and Session outcome as cancellation/deadline:
+
+- Additive model-token/cost exhaustion uses the frozen model pricing and full
+  next-request reservation, not a caught error or a reduced retry reservation.
+  Tool-call exhaustion requires an undispatched ordinary call that policy
+  currently allows, or its exact unexpired interactive approval. Denied calls,
+  input calls and pending/expired approvals are not resource failures.
+  Execution and resource-stop recovery share the complete approval verifier,
+  including the authenticated control row, historical channel and response.
+- Context exhaustion reproduces the whole-prefix planner from retained
+  context and the frozen context policy. No legal prefix means no model call;
+  the intent contains the exact manifest and token estimates.
+- Executed unusable or ineffective compaction retains its completed result
+  and full charge. The reducer reproduces the original plan and validates the
+  response, or recomputes the before/after model-visible prompt to prove that
+  the summary does not shrink it. It never installs a failed summary or adds
+  a semantic retry.
+- A shared reader rederives these facts on recovery, at the committed intent's
+  canonical time. It also reconstructs the pre-drain tool cut from its ordered
+  cancelled suffix. Missing retained pricing/context/response artifacts or
+  substituted cause fields cannot produce a verified terminal result.
+- User cancellation outranks resources; deadline/additive budget outrank
+  runtime-context failures; equal precedence keeps the first committed intent.
+  Stops fence dispatch immediately but still require the existing complete
+  quiescence, accounted-workspace and atomic Session-publication checks.
+
+This reader accepts only settled histories: unknown/claimed effects and reserved
+attempts must reach their owning closure first, even if the next retry lacks
+budget. It does not invent generic provider-failure evidence, implement repair
+budgets, or complete candidate/verification, child/MCP, broker/worker-loss,
+Supervisor scheduling or production cutover work. Model-visible context reading
+is shared with compaction recovery, so terminal replay does not fabricate an
+execution frontier. Journal attempt indexing is shared by stop/drain recovery;
+this does not claim that all transcript recovery is linear-time.
 
 The old Session/`ModelAction` runner remains isolated until WP06's single
 Kernel Cut. There is no typed-to-legacy bridge. WP06 removes the old runner,
@@ -430,7 +474,8 @@ revision, artifact and infrastructure errors retain their classification.
 The non-blocking #490 review was checked against the implementation. Highest
 attempt and permanent duplicate-claim checks already existed; the necessary
 addition is current-frontier/context binding, not banning all model claims.
-Candidate/stop reducers remain WP05/WP04 work, with explicit handoff errors here.
+Candidate and unsupported stop branches remain WP05/WP04 work, with explicit
+handoff errors here; deterministic resource stops use the loaded reducer above.
 Broad per-handle CAS memoization is deferred: it could hide a lost or corrupted
 retained artifact. History replay/compaction performance needs measurement;
 no claim of linear-time recovery is made by this change.

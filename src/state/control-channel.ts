@@ -3,10 +3,26 @@ import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import {
   decodeControlChannel,
   decodeLocalPrincipalIdentity,
-  decodePlatformProcessIdentity
+  decodePlatformProcessIdentity,
+  decodeStateLockIdentity
 } from './decoders.js';
 import { KernelStorageError } from './errors.js';
-import type { StateOwnerContext } from './state-owner.js';
+import { readLatestStateOwner, type StateOwnerContext } from './state-owner.js';
+import type { SqliteDriver } from './sqlite-driver.js';
+import { readCanonicalArtifact } from './agent-context.js';
+
+/** Rewalk a historical channel against this database's retained StateRoot, without authenticating new input. */
+export async function readHistoricalControlChannel(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  input: { channelIdentityRef: string; channelIdentityDigest: string; principalId: string }) {
+  const owner = readLatestStateOwner(driver);
+  if (!owner) throw new TypeError('control history has no retained state owner');
+  const lock = decodeStateLockIdentity(await readCanonicalArtifact(artifacts, owner.stateLockIdentityRef));
+  if (lock.identityDigest !== owner.stateLockIdentityDigest) throw new TypeError('control history state-owner lock mismatch');
+  return readRetainedControlChannelClosure(artifacts, {
+    stateRootIdentityRef: lock.stateRootIdentityRef, stateRootIdentityDigest: lock.stateRootIdentityDigest,
+    filesystem: { ownerUid: lock.ownerUid }
+  }, input);
+}
 
 export async function validateControlChannelClosure(
   artifacts: ArtifactCatalog,

@@ -76,11 +76,14 @@ export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: 
   return pieces.join('\n\n');
 }
 
-export async function projectNormalContext(input: {
+type ContextProjectionInput = {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; assembly: RunAssemblyV1;
-  context: ContextManifest; contextRef: string; systemInstruction: string; tools: RunAssemblyToolAuthority[];
-}): Promise<NormalPromptProjectionV1> {
-  const { artifacts, run, spec, assembly, context, contextRef } = input;
+  context: ContextManifest; systemInstruction: string; tools: RunAssemblyToolAuthority[];
+};
+
+/** Model-visible context, shared by request projection and resource-stop recovery. */
+export async function readModelContext(input: ContextProjectionInput): Promise<Pick<NormalPromptProjectionV1, 'messages' | 'tools'>> {
+  const { artifacts, run, spec, assembly, context } = input;
   if (context.runId !== run.id || context.assemblyRef !== spec.assemblyRef || context.admittedContextRef !== spec.admittedContextRef) {
     throw new TypeError('context does not belong to the current Run');
   }
@@ -158,11 +161,17 @@ export async function projectNormalContext(input: {
     } else if (segment.kind === 'raw') for (const entry of segment.items) await projectItem(entry.itemRef);
   }
   if (pendingCalls.length || pendingInputs.length) throw new TypeError('model context contains an open tool batch');
+  return { messages,
+    tools: assembly.provider.negotiation.mode === 'text-only' ? [] : input.tools.map(({ replayClass: _, ...tool }, index) => ({ index, ...tool })) };
+}
+
+export async function projectNormalContext(input: ContextProjectionInput & { contextRef: string }): Promise<NormalPromptProjectionV1> {
+  const { run, spec, assembly, context, contextRef } = input;
+  const visible = await readModelContext(input);
   const value: NormalPromptProjectionV1 = { schemaVersion: 1, format: 'cliq-normal-prompt-projection-v1', runId: run.id,
     basedOnRunRevision: run.revision, frontierDigest: run.frontierRef!, runSpecRef: run.specRef,
     assemblyRef: spec.assemblyRef, assemblyDigest: assembly.assemblyDigest, contextManifestRef: contextRef,
-    contextManifestDigest: context.projectionDigest, messages,
-    tools: assembly.provider.negotiation.mode === 'text-only' ? [] : input.tools.map(({ replayClass: _, ...tool }, index) => ({ index, ...tool })),
+    contextManifestDigest: context.projectionDigest, ...visible,
     projectionDigest: '' };
   value.projectionDigest = digestOmitting(value, 'projectionDigest');
   return value;

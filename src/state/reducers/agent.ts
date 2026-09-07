@@ -12,8 +12,8 @@ import { validateRunAssembly, type RunAssemblyValidationMaterial } from '../../m
 import { estimatePromptTokens, projectModelVisiblePrompt, type ModelRequestV1, type NormalPromptProjectionV1 } from '../../model/request.js';
 import { planModelContinuation, validateModelTurn, validateUnusableModelResponse, type ModelContinuationPlan } from '../../runtime/continuation.js';
 import { assertSameModelOperation, modelRetryState, type ModelRetryState } from '../../runtime/model-retry.js';
-import { contextSourceDigest, planContextCompaction, validateContextItems, type ContextItem } from '../../runtime/context-compaction.js';
-import { loadInstructionText, projectNormalContext, readCanonicalArtifact, readModelTurnMaterial } from '../agent-context.js';
+import { contextSourceDigest, planContextCompaction, replaceCompactedPrefix, validateContextItems, type ContextItem } from '../../runtime/context-compaction.js';
+import { loadInstructionText, projectNormalContext, readCanonicalArtifact, readModelContext, readModelTurnMaterial } from '../agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
 import { KernelStorageError, ModelRetryPendingError, stateOperation } from '../errors.js';
@@ -177,7 +177,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     const plan = await readCanonicalArtifact<RunContextCompactionPlan>(artifacts, planRef);
     const context = decodeContextManifest(await readCanonicalArtifact(artifacts, plan.sourceContextManifestRef));
     const items = await readContextItems(driver, artifacts, runId, context.throughItemSeq);
-    const projection = await project(run, context, plan.sourceContextManifestRef);
+    const projection = await readModelContext({ artifacts, run, spec, assembly, context, systemInstruction, tools });
     const reproduced = planContextCompaction({ context, contextRef: plan.sourceContextManifestRef, items, projection,
       policy: assembly.context, createdAt: plan.createdAt });
     if (reproduced.kind !== 'compact' || canonicalSha256(reproduced.plan) !== planRef) {
@@ -395,13 +395,10 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         } else plan = planModelContinuation({ request, turnRef: result.ref, material,
           throughItemSeq: cut.context.throughItemSeq, createdAt: settlement.settledAt, resolveToolInput });
         let itemPlans = plan.items.map((item) => planCanonicalArtifact(item, `cliq-${item.kind.replaceAll('_', '-')}-item-v1`));
-        let context: ContextManifest = structuredClone(cut.context);
-        if (compaction && material) {
-          context.segments = [{ kind: 'summary', fromItemSeq: 1, throughItemSeq: compaction.plan.compactThroughItemSeq,
-            compactionItemId: plan.items[0]!.itemId, summaryRef: material.turn.textRef, summaryDigest: material.text.textDigest,
-            sourceItemsDigest: compaction.plan.sourceItemsDigest, preservedItemRefs: [] },
-            ...context.segments.filter((segment) => segment.fromItemSeq > compaction.plan.compactThroughItemSeq)];
-        }
+        let context = compaction && material
+          ? replaceCompactedPrefix(cut.context, compaction.plan, { itemId: plan.items[0]!.itemId,
+              summaryRef: material.turn.textRef, summaryDigest: material.text.textDigest })
+          : structuredClone(cut.context);
         plan.items.forEach((item, index) => {
           const seq = cut.context.throughItemSeq + index + 1;
           context.segments.push(item.kind === 'model_turn' || item.kind === 'tool_result'

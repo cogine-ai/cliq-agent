@@ -767,7 +767,7 @@ function validateProjection(input: PrepareNormalModelAttemptInput): void {
 }
 
 export function projectModelVisiblePrompt(
-  projection: NormalPromptProjectionV1,
+  projection: Pick<NormalPromptProjectionV1, 'messages' | 'tools'>,
   mode: AgentNegotiatedMode
 ): ModelVisiblePromptV1 {
   const messages: ModelVisibleMessage[] = projection.messages.map((message) => {

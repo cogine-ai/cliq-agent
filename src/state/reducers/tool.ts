@@ -1,22 +1,22 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../../kernel/canonical.js';
 import { planCanonicalArtifact } from '../../kernel/artifact-plan.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../../kernel/identity.js';
-import type { Run, RunAssemblyV1, RunFrontier, RunSpec, ToolResultItem, ToolResultPayloadV1, ToolResultModelContentV1, ControlResultV1 } from '../../kernel/types.js';
+import type { Run, RunAssemblyV1, RunFrontier, RunSpec, ToolResultItem, ToolResultPayloadV1, ToolResultModelContentV1 } from '../../kernel/types.js';
 import type { PolicyEngineProfileV1, RunPolicySnapshotV1, ToolObservationV1, ToolOperationGrantV1,
-  ToolPolicyChannelEvidenceV1, ToolPolicyDecisionItem, ToolRequestV1, ToolTargetV1, ToolApprovalWait, ToolApprovalDecisionV1,
+  ToolPolicyChannelEvidenceV1, ToolPolicyDecisionItem, ToolRequestV1, ToolTargetV1, ToolApprovalDecisionV1,
   ToolCheckpointProof, ToolGrantExpiryV1 } from '../../kernel/tool-authorization.js';
 import type { ToolCallInputV1 } from '../../protocol/agent-ir.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import type { ResolveToolInput } from '../../model/attempt.js';
 import { loadToolContracts, type ToolInputAuthority } from '../../tools/input-contract.js';
 import { compileOutputSchema } from '../../tools/input-schema.js';
-import { loadToolPolicy, toolOperationId } from '../../policy/tool-policy.js';
+import { loadToolPolicy, planToolRequest } from '../../policy/tool-policy.js';
 import { toolApprovalCheckpointId, toolApprovalDecision, toolApprovalRequestDigest, type ToolApprovalInput } from '../../policy/tool-approval.js';
 import { exactKeys, requireEqual, verifyToolRuntimeAuthority, type ReleaseTrustKey, type RuntimeBundleManifest } from '../../policy/runtime-authority.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from '../artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
-import { readRetainedControlChannelClosure, validateControlChannelClosure } from '../control-channel.js';
+import { validateControlChannelClosure } from '../control-channel.js';
 import { prepareContinuationCommit } from '../continuation-commit.js';
 import { decodeWorkspaceIdentity } from '../decoders.js';
 import { KernelStorageError, stateOperation } from '../errors.js';
@@ -26,13 +26,13 @@ import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import { prepareToolCheckpoint, toolCheckpointId } from '../tool-checkpoint.js';
 import { readToolCut, type ToolCut } from '../tool-cut.js';
+import { readToolApproval, readToolApprovalWait, type ApprovalResponse } from '../tool-approval-recovery.js';
 import { loadAgentStop } from './stop.js';
 import { appendRunStateEvent, assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation,
   requireHealthyFence, settleValidatedInvocation, type ClaimInvocationDispatchInput } from './invocation.js';
 import { loadInputContinuation } from './input.js';
 
 const TOOL_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
-type ApprovalResponse = { protocolVersion: 1; ok: true; result: Extract<ControlResultV1, { method: 'run.approve' }> };
 type ResultFields<T = Exclude<ToolResultPayloadV1, { source: 'user_input' }>> = T extends ToolResultPayloadV1
   ? Omit<T, 'schemaVersion' | 'format' | 'runId' | 'batchItemId' | 'callId' | 'index' | 'toolName' | 'modelContentRef' | 'modelContentDigest' | 'payloadDigest'> : never;
 
@@ -127,20 +127,9 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   function requestFor(selected: ToolCut) {
     const call = selected.call;
     const entry = contracts.find((entry) => entry.name === call.toolName)!;
-    const { inputSchema: _schema, ...contract } = entry;
-    const targetCore = { schemaVersion: 1 as const, format: 'cliq-tool-target-v1' as const, runId,
-      workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentityDigest: workspace.identityDigest,
-      toolManifestRef: assembly.tools.manifestRef, toolManifestDigest: assembly.tools.manifestDigest,
-      toolName: call.toolName, toolContractDigest: canonicalSha256(contract), execution: entry.execution };
-    const target: ToolTargetV1 = { ...targetCore, targetDigest: canonicalSha256(targetCore) };
-    const opId = toolOperationId(runId, selected.batch.itemId, call.callId);
-    const core = { schemaVersion: 1 as const, format: 'cliq-tool-request-v1' as const, runId, opId,
-      frontierRef: selected.run.frontierRef!, assemblyRef: spec.assemblyRef, batchItemId: selected.batch.itemId,
-      callId: call.callId, callIndex: call.index, toolName: call.toolName, inputRef: canonicalSha256(call), inputDigest: call.inputDigest,
-      targetRef: canonicalSha256(target), targetDigest: target.targetDigest,
-      ...(entry.execution.kind === 'mcp' ? { idempotencyKey: identityHash('cliq-mcp-tool-idempotency-v1', runId, opId,
-        entry.execution.registryRevisionRef, entry.execution.serverToolName) } : {}) };
-    return { request: { ...core, requestDigest: canonicalSha256(core) } satisfies ToolRequestV1, target, entry };
+    return planToolRequest({ runId, frontierRef: selected.run.frontierRef!, batchItemId: selected.batch.itemId,
+      assemblyRef: spec.assemblyRef, assembly, workspaceIdentityRef: session.workspaceIdentityRef,
+      workspaceIdentityDigest: workspace.identityDigest, entry, call });
   }
   async function verifyGrant(grantRef: string) {
     const evaluator = requirePolicy();
@@ -155,45 +144,8 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     return { grant, request, target, call, evidence };
   }
 
-  async function waitProof(waitingOnRef: string) {
-    const wait = await readCanonicalArtifact<ToolApprovalWait>(artifacts, waitingOnRef);
-    const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(artifacts, wait.subject.policyChannelEvidenceRef);
-    const request = await readCanonicalArtifact<ToolRequestV1>(artifacts, evidence.requestRef);
-    const target = await readCanonicalArtifact<ToolTargetV1>(artifacts, request.targetRef);
-    const call = await readCanonicalArtifact<ToolCallInputV1>(artifacts, request.inputRef);
-    requireEqual(evidence, requirePolicy().evaluate(request, target, call, evidence.evaluatedAt), 'waiting policy evidence');
-    requireEqual(wait, requirePolicy().approvalWait(request, target, evidence, wait.createdFromRevision), 'tool approval wait');
-    if (wait.runId !== runId || wait.createdAt < admittedRun.createdAt || wait.createdAt >= admittedRun.deadlineAt) throw new TypeError('approval wait exceeds its Run');
-    return { wait, evidence, request, target, call };
-  }
-
-  async function verifyApproval(decisionRef: string) {
-    const decision = await readCanonicalArtifact<ToolApprovalDecisionV1>(artifacts, decisionRef);
-    const proof = await waitProof(decision.waitingSubjectRef);
-    const grant = requirePolicy().approve(proof.request, proof.target, proof.call, proof.evidence, proof.wait, decision, admittedRun.deadlineAt);
-    const row = driver.prepare(`SELECT request_digest, channel_identity_ref, channel_identity_digest, response_ref, committed_at
-      FROM control_requests WHERE principal_id = ? AND method = 'run.approve' AND request_id = ?`)
-      .get<{ request_digest: string; channel_identity_ref: string; channel_identity_digest: string; response_ref: string; committed_at: string }>(decision.principalId, decision.requestId);
-    if (!row || row.request_digest !== decision.requestDigest || row.channel_identity_ref !== decision.channelIdentityRef ||
-        row.channel_identity_digest !== decision.channelIdentityDigest || row.committed_at !== decision.createdAt) {
-      throw new TypeError('approval decision has no exact authenticated control-row owner');
-    }
-    await readRetainedControlChannelClosure(artifacts, owner, decision);
-    const response = await readCanonicalArtifact<ApprovalResponse>(artifacts, row.response_ref);
-    const checkpointId = identityHash('cliq-tool-approval-decision-checkpoint-v1', decisionRef);
-    const checkpoint = readCheckpoint(driver, checkpointId);
-    if (response.protocolVersion !== 1 || response.ok !== true || response.result.method !== 'run.approve' ||
-        response.result.decisionRef !== decisionRef || response.result.snapshot.operation !== 'agent' || response.result.snapshot.schemaVersion !== 1 ||
-        response.result.snapshot.latestRunItemSeq !== checkpoint.runItemSeq || response.result.snapshot.run.latestCheckpointId !== checkpointId ||
-        response.result.snapshot.run.specRef !== admittedRun.specRef || response.result.snapshot.run.sessionId !== admittedRun.sessionId ||
-        (decision.decision === 'allow' && response.result.snapshot.run.frontierRef !== proof.wait.frontierRef) ||
-        response.result.snapshot.run.id !== runId || response.result.snapshot.run.revision !== decision.expectedRunRevision + 1 ||
-        response.result.snapshot.run.updatedAt !== decision.createdAt || response.result.snapshot.run.status !== 'queued' ||
-        response.result.snapshot.run.waitingOnRef !== undefined || response.result.snapshot.run.activeWorkerLaunchId !== undefined) {
-      throw new TypeError('approval response substitutes its committed decision or Run snapshot');
-    }
-    return { ...proof, decision, grant, response };
-  }
+  const waitProof = (ref: string) => readToolApprovalWait(artifacts, admittedRun, requirePolicy(), ref);
+  const verifyApproval = (ref: string) => readToolApproval(driver, artifacts, admittedRun, requirePolicy(), ref);
 
   function assertApprovalCut(connection: SqliteConnection, current: Run, selected: ToolCut): void {
     assertCut(connection, current, selected);
