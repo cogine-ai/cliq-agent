@@ -66,7 +66,7 @@ export const beginWorkerRecovery = stateOperation('RECOVERY_REQUIRED', async (
     if (outcome !== 'healthy') return;
     if (now < createdAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker recovery commit precedes its wait');
     const fence = { phase: 'fenced_reconciling' as const, rowVersion: generation.rowVersion + 1, updatedAt: now,
-      waitingSubjectRef: waitingOnRef, waitingSubjectDigest: waitingOnRef };
+      waitingSubjectRef: waitingOnRef, waitingSubjectDigest: waitingOnRef, fencedJournalSeq: cut.journal.length };
     const fenced: WorkspaceGenerationStateV1 = generation.phase === 'active'
       ? { ...generation, ...fence, fencedFromPhase: 'active' }
       : { ...generation, ...fence, fencedFromPhase: generation.phase };

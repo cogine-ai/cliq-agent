@@ -121,8 +121,12 @@ not evidence that a process or containment has died.
   Journal rows** for all unresolved attempts, in Journal order. These identify
   the original op/attempt/epoch/request/reservation, including older unresolved
   attempts; the Journal remains the sole authority for their current phases.
-  Repeated requests do not collapse two attempts into one. Late trusted
-  Journal-only settlements do not rewrite the wait or erase its original
+  The fenced generation retains `fencedJournalSeq` from the same transaction;
+  recovery requires exactly the open set in that prefix, even when pre/post-fence
+  timestamps are equal. Extra pre-fence settled witnesses and post-fence
+  preparations/claims are rejected. Repeated requests do not collapse two
+  attempts into one. Late trusted Journal-only settlements do not rewrite the
+  wait or erase its original
   identities. Normalized model/tool completion cannot advance its frontier or
   Checkpoint underneath the wait; that requires the future recovery reducer.
 - Wait/witness metadata, both lifecycle rows, the Run and its state event

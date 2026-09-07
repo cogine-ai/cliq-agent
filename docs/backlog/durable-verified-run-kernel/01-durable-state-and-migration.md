@@ -1987,6 +1987,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -2003,6 +2004,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -2019,6 +2021,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -2035,6 +2038,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -2049,6 +2053,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       leaseEpoch: number
       waitingSubjectRef: ArtifactRef
       waitingSubjectDigest: string
+      fencedJournalSeq: number
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -2068,6 +2073,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never
@@ -2084,6 +2090,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef: ArtifactRef
       quarantineEvidenceDigest: string
       observedState: WorkspaceGenerationQuarantineEvidenceV1['observedState']
@@ -2100,6 +2107,7 @@ type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
       waitingSubjectRef?: never
       waitingSubjectDigest?: never
       fencedFromPhase?: never
+      fencedJournalSeq?: never
       quarantineEvidenceRef?: never
       quarantineEvidenceDigest?: never
       observedState?: never

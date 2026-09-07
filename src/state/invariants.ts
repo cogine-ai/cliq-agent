@@ -437,11 +437,12 @@ export function decodeWorkspaceGenerationState(value: unknown): WorkspaceGenerat
     requireSafeInteger(record.leaseEpoch, 'WorkspaceGeneration.leaseEpoch', 1);
     requireString(record.quiesceId, 'WorkspaceGeneration.quiesceId');
   } else if (phase === 'fenced_reconciling') {
-    rejectUnknownKeys(record, [...GENERATION_BASE_KEYS, ...evidence, ...active, 'waitingSubjectRef', 'waitingSubjectDigest', 'fencedFromPhase', 'quiesceId'], 'WorkspaceGeneration(fenced_reconciling)');
+    rejectUnknownKeys(record, [...GENERATION_BASE_KEYS, ...evidence, ...active, 'waitingSubjectRef', 'waitingSubjectDigest', 'fencedFromPhase', 'fencedJournalSeq', 'quiesceId'], 'WorkspaceGeneration(fenced_reconciling)');
     requireEvidencePair(record, evidence[0], evidence[1], 'WorkspaceGeneration');
     requireString(record.activeWorkerLaunchId, 'WorkspaceGeneration.activeWorkerLaunchId');
     requireSafeInteger(record.leaseEpoch, 'WorkspaceGeneration.leaseEpoch', 1);
     requireEvidencePair(record, 'waitingSubjectRef', 'waitingSubjectDigest', 'WorkspaceGeneration');
+    requireSafeInteger(record.fencedJournalSeq, 'WorkspaceGeneration.fencedJournalSeq', 0);
     if (!['active', 'revoking', 'checkpointing'].includes(String(record.fencedFromPhase))) {
       invalid('fencedFromPhase is not closed');
     }

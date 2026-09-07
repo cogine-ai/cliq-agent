@@ -4,7 +4,6 @@ import type { InvocationJournalEntry, RecoveryClosureV1, WorkerDeathWait } from 
 import { requireEqual } from '../policy/runtime-authority.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { readCanonicalArtifact } from './agent-context.js';
-import { decodeInvocationJournalEntry } from './invariants.js';
 
 /** Immutable witnesses of existing Journal facts, not a second invocation state machine. */
 export function openWorkerInvocations(journal: readonly InvocationJournalEntry[]): InvocationJournalEntry[] {
@@ -40,28 +39,25 @@ export async function validateWorkerRecoveryWait(artifacts: ArtifactCatalog, cut
       wait.createdAt > generation.updatedAt || generation.updatedAt > run.updatedAt) {
     throw new TypeError('worker recovery wait has no prior activated Run cut');
   }
-  if (!Array.isArray(wait.subject?.openInvocationRefs)) throw new TypeError('worker recovery has no open invocation identities');
-  const witnesses = await Promise.all(wait.subject.openInvocationRefs.map(async ref => {
-    const entry = decodeInvocationJournalEntry(await readCanonicalArtifact(artifacts, ref));
-    if (entry.phase !== 'prepared' || entry.runId !== run.id || entry.timestamp > generation.updatedAt) {
-      throw new TypeError('worker recovery witness is not a prior prepared invocation');
-    }
-    requireEqual(entry, cut.journal[entry.seq - 1], 'open invocation Journal witness');
-    return entry;
+  if (generation.fencedJournalSeq > cut.journal.length || cut.journal.slice(generation.fencedJournalSeq)
+      .some(entry => entry.phase === 'prepared' || entry.phase === 'dispatch_claimed')) {
+    throw new TypeError('worker recovery Journal cut is missing or followed by productive work');
+  }
+  // The wait freezes membership at fencing, not the current settlement state.
+  // Journal sequence distinguishes either side even when timestamps are equal.
+  const open = openWorkerInvocations(cut.journal.slice(0, generation.fencedJournalSeq));
+  const refs = open.map(canonicalSha256);
+  requireEqual(wait.subject?.openInvocationRefs, refs, 'worker recovery open invocation witnesses');
+  await Promise.all(open.map(async entry => {
+    if (entry.timestamp > generation.updatedAt) throw new TypeError('worker recovery witness is not a prior prepared invocation');
+    requireEqual(await readCanonicalArtifact(artifacts, canonicalSha256(entry)), entry, 'open invocation Journal witness');
   }));
-  if (witnesses.some((entry, index) => index > 0 && entry.seq <= witnesses[index - 1]!.seq)) {
-    throw new TypeError('worker recovery invocation identities are not unique in Journal order');
-  }
-  const refs = new Set(wait.subject.openInvocationRefs);
-  if (openWorkerInvocations(cut.journal).some(entry => !refs.has(canonicalSha256(entry)))) {
-    throw new TypeError('worker recovery wait omits an unresolved invocation');
-  }
   const expected: WorkerDeathWait = {
     schemaVersion: 1, kind: 'reconciliation', runId: run.id, createdFromRevision: wait.createdFromRevision,
     createdAt: wait.createdAt, frontierRef: run.frontierRef,
     subject: { kind: 'worker_death', oldWorkerLaunchId: launch.launchId, oldLeaseEpoch: launch.leaseEpoch!,
       oldWorkerIdentity: launch.workerIdentityDigest, processContainmentRef: launch.processContainmentRef,
-      workspaceGenerationRef: generation.generationRef, openInvocationRefs: witnesses.map(canonicalSha256) },
+      workspaceGenerationRef: generation.generationRef, openInvocationRefs: refs },
     probeState: { phase: 'automatic_pending', automaticProbeCount: 0, userProbeCount: 0, nextProbeAt: wait.createdAt }
   };
   requireEqual(wait, expected, 'installed worker death wait');

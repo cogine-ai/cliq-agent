@@ -1402,6 +1402,7 @@ Implementation notes:
           waitingSubjectRef?: never
           waitingSubjectDigest?: never
           fencedFromPhase?: never
+          fencedJournalSeq?: never
           quarantineEvidenceRef?: never
           quarantineEvidenceDigest?: never
           observedState?: never
@@ -1418,6 +1419,7 @@ Implementation notes:
           waitingSubjectRef?: never
           waitingSubjectDigest?: never
           fencedFromPhase?: never
+          fencedJournalSeq?: never
           quarantineEvidenceRef?: never
           quarantineEvidenceDigest?: never
           observedState?: never
@@ -1434,6 +1436,7 @@ Implementation notes:
           waitingSubjectRef?: never
           waitingSubjectDigest?: never
           fencedFromPhase?: never
+          fencedJournalSeq?: never
           quarantineEvidenceRef?: never
           quarantineEvidenceDigest?: never
           observedState?: never
@@ -1450,6 +1453,7 @@ Implementation notes:
           waitingSubjectRef?: never
           waitingSubjectDigest?: never
           fencedFromPhase?: never
+          fencedJournalSeq?: never
           quarantineEvidenceRef?: never
           quarantineEvidenceDigest?: never
           observedState?: never
@@ -1464,6 +1468,7 @@ Implementation notes:
           leaseEpoch: number
           waitingSubjectRef: ArtifactRef
           waitingSubjectDigest: string
+          fencedJournalSeq: number
           quarantineEvidenceRef?: never
           quarantineEvidenceDigest?: never
           observedState?: never
@@ -1483,6 +1488,7 @@ Implementation notes:
           waitingSubjectRef?: never
           waitingSubjectDigest?: never
           fencedFromPhase?: never
+          fencedJournalSeq?: never
           quarantineEvidenceRef?: never
           quarantineEvidenceDigest?: never
           observedState?: never
@@ -1499,6 +1505,7 @@ Implementation notes:
           waitingSubjectRef?: never
           waitingSubjectDigest?: never
           fencedFromPhase?: never
+          fencedJournalSeq?: never
           quarantineEvidenceRef: ArtifactRef
           quarantineEvidenceDigest: string
           observedState: WorkspaceGenerationQuarantineEvidenceV1['observedState']
@@ -1515,6 +1522,7 @@ Implementation notes:
           waitingSubjectRef?: never
           waitingSubjectDigest?: never
           fencedFromPhase?: never
+          fencedJournalSeq?: never
           quarantineEvidenceRef?: never
           quarantineEvidenceDigest?: never
           observedState?: never

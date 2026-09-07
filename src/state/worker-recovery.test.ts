@@ -84,7 +84,8 @@ for (const phase of ['active', 'revoking', 'checkpointing'] as const) {
     assert.deepEqual(after.workerLaunches[0], { ...before.workerLaunches[0], phase: 'reconciling', generationWriteState: 'fenced_reconciling' });
     assert.deepEqual(after.workspaceGenerations[0], { ...before.workspaceGenerations[0], phase: 'fenced_reconciling',
       rowVersion: before.workspaceGenerations[0]!.rowVersion + 1, updatedAt: waiting.updatedAt,
-      waitingSubjectRef: waiting.waitingOnRef, waitingSubjectDigest: waiting.waitingOnRef, fencedFromPhase: phase });
+      waitingSubjectRef: waiting.waitingOnRef, waitingSubjectDigest: waiting.waitingOnRef, fencedFromPhase: phase,
+      fencedJournalSeq: before.journal.length });
     for (const entry of [unclaimed, claimed, unknown]) {
       assert.deepEqual(await fixture.store.artifacts.readCanonical(canonicalSha256(entry)), entry);
       assert.equal(withDb(fixture.stateRoot, driver => driver.prepare('SELECT schema_kind FROM artifacts WHERE ref = ?')
@@ -135,6 +136,7 @@ test('parallel worker fences commit one Run revision and never reset the install
   assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
   assert.equal(results.filter(result => result.status === 'rejected' && result.reason.code === 'REVISION_CONFLICT').length, 1);
   const frozen = await fixture.store.readRecoveryClosure(fixture.runId);
+  assert.equal(frozen.workspaceGenerations[0]!.fencedJournalSeq, 0);
   await assert.rejects(fixture.store.beginWorkerRecovery(input), { code: 'REVISION_CONFLICT' });
   assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), frozen);
 });
@@ -218,6 +220,51 @@ test('late no-dispatch and pessimistic unknown settlements preserve the frozen w
   assert.deepEqual(cut.run.budgetConsumed, { ...ZERO, toolCalls: 1 });
   assert.deepEqual(cut.journal.slice(-2).map(entry => entry.phase), ['failed', 'unknown']);
 });
+
+for (const phase of ['completed', 'failed', 'abandoned'] as const) {
+  test(`recovery rejects an extra ${phase} pre-fence witness but retains a same-millisecond late settlement`, async t => {
+    const fixture = await fixtureFor(t, `historical-${phase}`);
+    const now = withDb(fixture.stateRoot, driver => Date.parse(readTimeFence(driver)!.lastAcceptedAt)) + 1;
+    t.mock.method(Date, 'now', () => now);
+    const historical = await prepare(fixture, 'closed-before-fence', phase !== 'failed');
+    const open = await prepare(fixture, 'settled-after-fence', true);
+    const result = await fixture.store.artifacts.publishCanonical({ received: true }, 'cliq-test-result-v1');
+    const settle = { runId: fixture.runId, opId: historical.opId, attempt: historical.attempt };
+    if (phase === 'completed') await fixture.store.completeInvocation({ ...settle, expectedRunRevision: revision(fixture),
+      resultRef: result.ref, consumed: { ...ZERO, toolCalls: 1 } });
+    else if (phase === 'failed') {
+      const error = await fixture.store.artifacts.publishCanonical({ noDispatch: true }, 'cliq-test-error-v1');
+      await fixture.store.failInvocationBeforeDispatch({ ...settle, expectedRunRevision: revision(fixture), errorRef: error.ref });
+    } else {
+      const evidence = await fixture.store.artifacts.publishCanonical({ unknown: true }, 'cliq-test-ambiguity-v1');
+      await fixture.store.markInvocationUnknown({ ...settle, expectedRunRevision: revision(fixture), evidenceRef: evidence.ref, evidenceDigest: evidence.ref });
+      const attestation = await fixture.store.artifacts.publishCanonical({ abandon: true }, 'cliq-test-attestation-v1');
+      await fixture.store.abandonUnknownInvocation({ ...settle, attestationRef: attestation.ref });
+    }
+    const waiting = await begin(fixture);
+    const wait = await fixture.store.artifacts.readCanonical<WorkerDeathWait>(waiting.waitingOnRef!);
+    assert.deepEqual(wait.subject.openInvocationRefs, [canonicalSha256(open)]);
+    await fixture.store.completeInvocation({ runId: fixture.runId, expectedRunRevision: revision(fixture),
+      opId: open.opId, attempt: open.attempt, resultRef: result.ref, consumed: { ...ZERO, toolCalls: 1 } });
+    const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.ok(cut.journal.every(entry => entry.timestamp === wait.createdAt));
+    assert.equal(cut.run.waitingOnRef, waiting.waitingOnRef);
+    await fixture.store.close();
+    fixture.store = await openStateStore(fixture.stateRoot);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), cut);
+    await fixture.store.artifacts.publishCanonical(historical, 'cliq-invocation-journal-entry-v1');
+    withDb(fixture.stateRoot, driver => driver.exec('DROP TRIGGER workspace_generations_validate_update'));
+    for (const refs of [[historical, open].map(canonicalSha256), []]) {
+      const forged = await fixture.store.artifacts.publishCanonical({ ...wait, subject: { ...wait.subject, openInvocationRefs: refs } }, 'cliq-waiting-subject-v1');
+      withDb(fixture.stateRoot, driver => {
+        const generation = { ...cut.workspaceGenerations[0], waitingSubjectRef: forged.ref, waitingSubjectDigest: forged.ref };
+        driver.prepare('UPDATE workspace_generations SET row_json = ? WHERE generation_id = ?').run(JSON.stringify(generation), fixture.generationId);
+        driver.prepare('UPDATE runs SET waiting_on_ref = ? WHERE id = ?').run(forged.ref, fixture.runId);
+      });
+      await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
+    }
+  });
+}
 
 test('late native model completion cannot advance the frontier or checkpoint underneath worker recovery', async t => {
   const fixture = await createAgentFixture('worker-fence-late-model', undefined, { mode: 'plan' });
@@ -381,6 +428,27 @@ test('missing wait or invocation witnesses block recovery without changing retai
   await fixture.store.readRecoveryClosure(fixture.runId);
 });
 
+test('the fence Journal cutoff is immutable, required and rejects invalid or productive suffix cuts', async t => {
+  const fixture = await fixtureFor(t, 'journal-cut');
+  await prepare(fixture, 'open', true);
+  await begin(fixture);
+  const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+  const generation = cut.workspaceGenerations[0]!;
+  assert.equal(generation.fencedJournalSeq, cut.journal.length);
+  assert.throws(() => withDb(fixture.stateRoot, driver => driver.prepare(
+    'UPDATE workspace_generations SET row_version = row_version + 1, row_json = ? WHERE generation_id = ?'
+  ).run(JSON.stringify({ ...generation, rowVersion: generation.rowVersion + 1, fencedJournalSeq: 0 }), fixture.generationId)),
+  /workspace generation phase transition is invalid/);
+  withDb(fixture.stateRoot, driver => driver.exec('DROP TRIGGER workspace_generations_validate_update'));
+  for (const fencedJournalSeq of [undefined, null, -1, 0.5, '2', Number.MAX_SAFE_INTEGER + 1, cut.journal.length + 1, 0, cut.journal.length - 1]) {
+    withDb(fixture.stateRoot, driver => driver.prepare('UPDATE workspace_generations SET row_json = ? WHERE generation_id = ?')
+      .run(JSON.stringify({ ...generation, fencedJournalSeq }), fixture.generationId));
+    const before = snapshot(fixture.stateRoot);
+    await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
+    assert.deepEqual(snapshot(fixture.stateRoot), before);
+  }
+});
+
 test('worker identity epoch and quiesce drift reject fencing before any authority mutation', async t => {
   const fixture = await fixtureFor(t, 'source-closure');
   const original = withDb(fixture.stateRoot, driver => driver.prepare('SELECT row_json FROM worker_launches WHERE launch_id = ?')
@@ -406,7 +474,7 @@ test('worker identity epoch and quiesce drift reject fencing before any authorit
 test('worker fencing accepts no caller-selected wait, generation, evidence or extra fields', async t => {
   const fixture = await fixtureFor(t, 'input');
   const input = { runId: fixture.runId, expectedRunRevision: revision(fixture) };
-  for (const extra of ['waitingOnRef', 'generationRef', 'deathEvidenceRef']) {
+  for (const extra of ['waitingOnRef', 'generationRef', 'deathEvidenceRef', 'fencedJournalSeq']) {
     await assert.rejects(fixture.store.beginWorkerRecovery({ ...input, [extra]: digest(extra) }), { code: 'INVALID_REQUEST' });
   }
   await assert.rejects(fixture.store.beginWorkerRecovery({ ...input, expectedRunRevision: 0 }), { code: 'INVALID_REQUEST' });

@@ -881,6 +881,7 @@ export type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 &
         waitingSubjectRef?: never;
         waitingSubjectDigest?: never;
         fencedFromPhase?: never;
+        fencedJournalSeq?: never;
         quarantineEvidenceRef?: never;
         quarantineEvidenceDigest?: never;
         observedState?: never;
@@ -897,6 +898,7 @@ export type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 &
         waitingSubjectRef?: never;
         waitingSubjectDigest?: never;
         fencedFromPhase?: never;
+        fencedJournalSeq?: never;
         quarantineEvidenceRef?: never;
         quarantineEvidenceDigest?: never;
         observedState?: never;
@@ -913,6 +915,7 @@ export type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 &
         waitingSubjectRef?: never;
         waitingSubjectDigest?: never;
         fencedFromPhase?: never;
+        fencedJournalSeq?: never;
         quarantineEvidenceRef?: never;
         quarantineEvidenceDigest?: never;
         observedState?: never;
@@ -929,6 +932,7 @@ export type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 &
         waitingSubjectRef?: never;
         waitingSubjectDigest?: never;
         fencedFromPhase?: never;
+        fencedJournalSeq?: never;
         quarantineEvidenceRef?: never;
         quarantineEvidenceDigest?: never;
         observedState?: never;
@@ -943,6 +947,7 @@ export type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 &
         leaseEpoch: number;
         waitingSubjectRef: ArtifactRef;
         waitingSubjectDigest: string;
+        fencedJournalSeq: number;
         quarantineEvidenceRef?: never;
         quarantineEvidenceDigest?: never;
         observedState?: never;
@@ -963,6 +968,7 @@ export type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 &
         waitingSubjectRef?: never;
         waitingSubjectDigest?: never;
         fencedFromPhase?: never;
+        fencedJournalSeq?: never;
         quarantineEvidenceRef?: never;
         quarantineEvidenceDigest?: never;
         observedState?: never;
@@ -982,6 +988,7 @@ export type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 &
         waitingSubjectRef?: never;
         waitingSubjectDigest?: never;
         fencedFromPhase?: never;
+        fencedJournalSeq?: never;
         retirementEvidenceRef?: never;
         retirementEvidenceDigest?: never;
       }
@@ -997,6 +1004,7 @@ export type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 &
         waitingSubjectRef?: never;
         waitingSubjectDigest?: never;
         fencedFromPhase?: never;
+        fencedJournalSeq?: never;
         quarantineEvidenceRef?: never;
         quarantineEvidenceDigest?: never;
         observedState?: never;
