@@ -32,6 +32,7 @@ typedef struct {
 static const napi_type_tag lock_tag = {0x3d641bc705864cfbULL, 0xab53499f3ee988c4ULL};
 
 static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info);
+static napi_value move_generation(napi_env env, napi_callback_info info);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
@@ -197,6 +198,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
     const napi_property_descriptor methods[] = {
         {"assertHeld", NULL, assert_held, NULL, NULL, NULL, napi_default, NULL},
         {"assertPriorProcessDead", NULL, assert_prior_process_dead, NULL, NULL, NULL, napi_default, NULL},
+        {"moveGeneration", NULL, move_generation, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -210,6 +212,161 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
 fail:
     finalize_lock(env, lock, NULL);
     return native_error(env, error);
+}
+
+static int read_component(napi_env env, napi_value value, char *text, size_t capacity, size_t exact_length) {
+    size_t length;
+    if (napi_get_value_string_utf8(env, value, NULL, 0, &length) != napi_ok || length == 0 || length >= capacity ||
+        (exact_length && length != exact_length) ||
+        napi_get_value_string_utf8(env, value, text, capacity, &length) != napi_ok) return 0;
+    for (size_t i = 0; i < length; i++) {
+        char c = text[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) return 0;
+    }
+    return 1;
+}
+
+static int read_unsigned_id(napi_env env, napi_value value, unsigned long long *number) {
+    char text[21], canonical[21], *end;
+    size_t length;
+    if (napi_get_value_string_utf8(env, value, NULL, 0, &length) != napi_ok || length == 0 || length >= sizeof(text) ||
+        napi_get_value_string_utf8(env, value, text, sizeof(text), &length) != napi_ok || strlen(text) != length ||
+        text[0] < '0' || text[0] > '9') return 0;
+    errno = 0;
+    *number = strtoull(text, &end, 10);
+    if (errno || *end) return 0;
+    snprintf(canonical, sizeof(canonical), "%llu", *number);
+    return strcmp(text, canonical) == 0;
+}
+
+static int sync_directory(int fd) {
+    int status;
+    do { status = fsync(fd); } while (status < 0 && errno == EINTR);
+    return status == 0;
+}
+
+static int open_private_child(int parent, const char *name, int create, struct stat *identity, dev_t device) {
+    if (create && mkdirat(parent, name, 0700) < 0 && errno != EEXIST) return -1;
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    if (fstat(fd, identity) < 0 || !private_directory(identity) || identity->st_dev != device) { close(fd); return -1; }
+    return fd;
+}
+
+static int generation_identity(const struct stat *info, unsigned long long device, unsigned long long file) {
+#ifdef __APPLE__
+    int protected = private_lock_file(info); /* private, single-link 0600 backing image */
+    unsigned long long observed_device = (uint32_t)info->st_dev;
+#else
+    /* Directory link counts include child '..' entries; they are not file
+     * hardlink counts and are not immutable generation identity. */
+    int protected = private_directory(info);
+    unsigned long long observed_device = info->st_dev;
+#endif
+    return protected && observed_device == device && (unsigned long long)info->st_ino == file;
+}
+
+/* 0 is positive ENOENT only; wrong type/identity and other I/O errors fail. */
+static int generation_at(int parent, const char *name, unsigned long long device, unsigned long long file, struct stat *identity) {
+    if (fstatat(parent, name, identity, AT_SYMLINK_NOFOLLOW) < 0) return errno == ENOENT ? 0 : -1;
+    return generation_identity(identity, device, file) ? 1 : -1;
+}
+
+static int quarantine_parents_valid(state_lock *lock, int parents[5], struct stat identities[5], const char *names[5]) {
+    if (!lock_is_held(lock)) return 0;
+    for (int i = 0; i < 5; i++) {
+        struct stat held, named;
+        int parent = (i == 0 || i == 3) ? lock->root_fd : parents[i - 1];
+        if (fstat(parents[i], &held) < 0 || !private_directory(&held) || !same_inode(&held, &identities[i]) ||
+            fstatat(parent, names[i], &named, AT_SYMLINK_NOFOLLOW) < 0 || !same_inode(&named, &held)) return 0;
+    }
+    return 1;
+}
+
+/* A fixed descriptor-relative relocation, never execution/death authority.
+ * No directory scan, overwrite, copy/unlink fallback, rollback or deletion. */
+static napi_value move_generation(napi_env env, napi_callback_info info) {
+    state_lock *lock = unwrap_lock(env, info);
+    if (!lock) return NULL;
+    if (!lock_is_held(lock)) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
+    size_t argc = 6;
+    napi_value argv[6];
+    char run[129], generation[44], target[44], source[48];
+    unsigned long long device, file;
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 5 ||
+        !read_component(env, argv[0], run, sizeof(run), 0) || !read_component(env, argv[1], generation, sizeof(generation), 43) ||
+        !read_component(env, argv[2], target, sizeof(target), 43) ||
+        !read_unsigned_id(env, argv[3], &device) || !read_unsigned_id(env, argv[4], &file)) {
+        return native_error(env, "invalid generation quarantine identity");
+    }
+#ifdef __APPLE__
+    snprintf(source, sizeof(source), "%s.img", generation);
+#else
+    snprintf(source, sizeof(source), "%s", generation);
+#endif
+    int parents[5] = {-1, -1, -1, -1, -1}, generation_fd = -1;
+    struct stat identities[5], original, destination, opened;
+    const char *names[5] = {"runs", run, "generations", "quarantine", "workspace-generations"};
+    const char *error = "generation quarantine requires private same-device no-follow parent descriptors";
+    for (int i = 0; i < 3; i++) {
+        parents[i] = open_private_child(i == 0 ? lock->root_fd : parents[i - 1], names[i], 0, &identities[i], lock->root.st_dev);
+        if (parents[i] < 0) goto done;
+    }
+    error = "generation quarantine source identity differs or is unreadable";
+    int source_exists = generation_at(parents[2], source, device, file, &original);
+    if (source_exists < 0) goto done;
+    error = "generation quarantine target requires private same-device no-follow parent descriptors";
+    for (int i = 3; i < 5; i++) {
+        parents[i] = open_private_child(i == 3 ? lock->root_fd : parents[i - 1], names[i], source_exists, &identities[i], lock->root.st_dev);
+        if (parents[i] < 0) goto done;
+    }
+    error = "generation quarantine requires exactly one original or exact target; refusing conflict or identity drift";
+    int target_exists = generation_at(parents[4], target, device, file, &destination);
+    if (target_exists < 0 || source_exists + target_exists != 1) goto done;
+    int flags = O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC;
+#ifndef __APPLE__
+    flags |= O_DIRECTORY;
+#endif
+    generation_fd = openat(source_exists ? parents[2] : parents[4], source_exists ? source : target, flags);
+    if (generation_fd < 0 || fstat(generation_fd, &opened) < 0 || !generation_identity(&opened, device, file) ||
+        opened.st_dev != lock->root.st_dev) goto done;
+    error = "generation quarantine parent or source descriptor identity changed";
+    if (!quarantine_parents_valid(lock, parents, identities, names) ||
+        generation_at(parents[2], source, device, file, &original) != source_exists ||
+        generation_at(parents[4], target, device, file, &destination) != target_exists) goto done;
+    /* Persist newly created quarantine ancestors before moving. Retry also
+     * repeats these syncs: an earlier crash may have interrupted any one. */
+    error = "generation quarantine parent fsync failed; retry the exact locator pair";
+    if (!sync_directory(lock->root_fd)) goto done;
+    for (int i = 0; i < 5; i++) if (!sync_directory(parents[i])) goto done;
+    error = "generation quarantine parent or source descriptor identity changed";
+    if (!quarantine_parents_valid(lock, parents, identities, names) ||
+        generation_at(parents[2], source, device, file, &original) != source_exists ||
+        generation_at(parents[4], target, device, file, &destination) != target_exists) goto done;
+    if (source_exists) {
+        error = "generation quarantine no-replace rename failed; no overwrite or copy fallback is allowed";
+#ifdef __APPLE__
+        if (renameatx_np(parents[2], source, parents[4], target, RENAME_EXCL) < 0) goto done;
+#else
+        if (renameat2(parents[2], source, parents[4], target, RENAME_NOREPLACE) < 0) goto done;
+#endif
+    }
+    error = "generation quarantine parent fsync failed; retry the exact locator pair";
+    if (!sync_directory(parents[2]) || !sync_directory(parents[4])) goto done;
+    error = "generation quarantine post-move descriptor identity or original absence changed";
+    if (!quarantine_parents_valid(lock, parents, identities, names) || fstat(generation_fd, &opened) < 0 ||
+        !generation_identity(&opened, device, file) ||
+        generation_at(parents[2], source, device, file, &original) != 0 ||
+        generation_at(parents[4], target, device, file, &destination) != 1) goto done;
+    error = NULL;
+done:
+    if (generation_fd >= 0) close(generation_fd);
+    for (int i = 4; i >= 0; i--) if (parents[i] >= 0) close(parents[i]);
+    if (error) return native_error(env, error);
+    napi_value result, identity;
+    if (napi_create_object(env, &result) != napi_ok || !identity_member(env, result, "identity", &destination) ||
+        napi_get_named_property(env, result, "identity", &identity) != napi_ok) return NULL;
+    return identity;
 }
 
 /* 1 = observed identity, 0 = positively absent, -1 = unavailable/invalid.

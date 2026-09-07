@@ -778,7 +778,7 @@ export function decodeWorkspaceGenerationIdentity(value: unknown): WorkspaceGene
       value.locator,
       [
         'kind', 'stateRootIdentityRef', 'stateRootIdentityDigest', 'canonicalRootRelativePath',
-        'deviceId', 'directoryFileId', 'ownerUid', 'mode', 'linkCount'
+        'deviceId', 'directoryFileId', 'ownerUid', 'mode'
       ],
       'WorkspaceGenerationIdentity.locator'
     );
@@ -788,7 +788,7 @@ export function decodeWorkspaceGenerationIdentity(value: unknown): WorkspaceGene
     requireUnsignedDecimal(value.locator.deviceId, 'workspace generation deviceId');
     requireUnsignedDecimal(value.locator.directoryFileId, 'workspace generation directoryFileId');
     requireSafeInteger(value.locator.ownerUid, 'workspace generation ownerUid');
-    if (value.locator.mode !== 448 || value.locator.linkCount !== 1) {
+    if (value.locator.mode !== 448) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation directory protection is invalid');
     }
   } else if (value.locator.kind === 'macos_vm_volume') {

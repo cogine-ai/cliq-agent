@@ -224,8 +224,7 @@ export async function activateFixtureWorker(
           deviceId: '1',
           directoryFileId: '2',
           ownerUid: process.geteuid!(),
-          mode: 448,
-          linkCount: 1
+          mode: 448
         }
       : {
           kind: 'macos_vm_volume',

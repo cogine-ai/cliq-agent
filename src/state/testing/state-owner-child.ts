@@ -1,12 +1,14 @@
 import { loadNativeStateOwner, type HeldStateOwnerLock } from '../native-owner.js';
 import { openStateStore, type StateStore, type StateStoreRuntimeAuthority } from '../store.js';
 import { createActiveFixture, digest } from './fixtures.js';
+import type { WorkspaceGenerationIdentityV1 } from '../../kernel/types.js';
 
 // Test-only IPC barrier: no sleeps, inherited descriptors, or simulated locks.
 const stateRoot = process.argv[2]!;
 const native = await loadNativeStateOwner();
 let held: StateStore | HeldStateOwnerLock | undefined;
-process.on('message', async (message: string | { command: string; authority: StateStoreRuntimeAuthority }) => {
+process.on('message', async (message: string | { command: string; authority?: StateStoreRuntimeAuthority;
+  generation?: WorkspaceGenerationIdentityV1; sourceRowVersion?: number }) => {
   const command = typeof message === 'string' ? message : message.command;
   try {
     if (command === 'acquire') {
@@ -34,6 +36,9 @@ process.on('message', async (message: string | { command: string; authority: Sta
         : await openStateStore(stateRoot, typeof message === 'string' ? undefined : message.authority);
       process.send!({ state: 'held', pid: process.pid, token: native.processStartToken(),
         epoch: 'ownerEpoch' in held ? held.ownerEpoch : undefined });
+    } else if (command === 'quarantine' && held && 'quarantineGeneration' in held && typeof message !== 'string') {
+      held.quarantineGeneration(message.generation!, message.sourceRowVersion!);
+      process.send!({ state: 'quarantined' });
     } else if (command === 'close') {
       await held?.close();
       held = undefined;

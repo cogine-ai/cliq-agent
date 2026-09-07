@@ -25,6 +25,10 @@ fully complete.
   generation into one exact `worker_death` wait, with restart validation and
   retained invocation identities. Cancellation/deadline can still request a
   stop without clearing that wait or asserting containment death.
+- Native descriptor-relative generation quarantine relocation on Linux and
+  macOS, with a deterministic no-replace target, parent fsync, identity checks
+  and exact-pair crash retry. This is a filesystem primitive, not yet the
+  containment-death/evidence/SQLite recovery integration.
 - Append-only invocation preparation, permanent singleflight dispatch claims,
   budget reservation/settlement, conservative unknown outcomes, and manual
   abandonment.
@@ -41,9 +45,10 @@ fully complete.
 
 The helper observes this process's native start token and acquires the fixed
 StateRoot/runtime/lock closure. Its opaque held handle supplies descriptor
-identities, validation, bounded prior-process death inspection and idempotent
-close. It exposes no fd, caller-selected lock path, unlock/relock, signal-sending
-or general filesystem API. TypeScript still owns all SQLite state transitions.
+identities, validation, bounded prior-process death inspection, fixed generation
+quarantine relocation and idempotent close. It exposes no fd, caller-selected
+lock/quarantine path, unlock/relock, signal-sending or general filesystem API.
+TypeScript still owns all SQLite state transitions.
 
 - Acquisition opens every root component without following symlinks, holds
   same-user `0700` root/runtime descriptors and a `0600`, single-link regular
@@ -143,12 +148,57 @@ not evidence that a process or containment has died.
 This implements only the mandatory durable fence and its recovery validation.
 The initial probe state is `automatic_pending(0,0,nextProbeAt=createdAt)`;
 bounded probe dispatch, native whole-containment termination, broker revocation,
-descriptor-relative quarantine, preactivation-intent retirement and safe
+quarantine evidence/row integration, preactivation-intent retirement and safe
 replacement/restoration remain their owning integrations' work. No probe is
 executed and no physical write capability is revoked by this storage operation.
 Tests use real SQLite/CAS, signed offline Run fixtures and real owner `SIGKILL`
 and restart, not a qualified worker-containment backend. Startup scheduling
 must call this reducer; merely opening the store still changes no Run.
+
+### Native generation quarantine relocation
+
+The held native-owner interface exposes only
+`quarantineGeneration(generationIdentity, sourceRowVersion)`. It decodes and
+rehashes the closed identity, matches its StateRoot to the held root, verifies
+the generation-id derivation and host-specific fixed locator, and derives the
+sole target as `quarantine/workspace-generations/H(generationId, String(version))`.
+No caller supplies a destination, filesystem handle, fallback or success flags.
+
+- Linux relocates the exact `0700` directory at
+  `runs/<runId>/generations/<generationId>`; macOS relocates the exact `0600`,
+  single-link backing file at the same path with `.img` appended. Parent
+  descriptors are same-user `0700`, no-follow and on the held StateRoot device.
+  Directory link counts are not file-hardlink counts: the Linux identity no
+  longer includes the old impossible fixed `linkCount: 1` constraint. This is
+  a pre-cut schema correction, not legacy identity compatibility.
+- All filesystem operations use held directory descriptors. The move uses
+  Linux `renameat2(RENAME_NOREPLACE)` or macOS `renameatx_np(RENAME_EXCL)`;
+  unsupported filesystems fail without a path-based rename or copy/delete
+  fallback. All parent links are synced, including newly created quarantine
+  ancestors; both rename parents are synced before success is reported.
+- Original present/target absent moves the exact inode. Original absent/exact
+  target present reobserves and repeats fsync. Both present, both absent,
+  identity drift, unsafe permissions, symlinks and substituted parents reject.
+  Failure after rename never rolls back or scans for a different target; the
+  same durable source version is required on retry.
+- The returned immutable observation contains only the exact target inode,
+  original absence, no-replace and parent-fsync facts. It neither reads dirty
+  contents nor claims a complete tree, guest-volume inspection, process death,
+  revoked open descriptors/mounts, or committed generation state. Moving a file
+  does **not** stop a writer holding it open.
+
+The future trusted recovery coordinator must first validate the exact fenced
+row/current owner, revoke broker and containment write authority, obtain the
+required current-inspector death/failure evidence, and then combine this move
+with the closed quarantine evidence and versioned SQLite commit. No public
+StateStore/control method or startup path calls the primitive yet. Normal
+worker replacement and checkpoint restoration remain unavailable.
+
+Tests exercise real host filesystem moves, retained dirty contents, real owner
+`SIGKILL`/successor retry, the complete locator conflict matrix, no-follow and
+permission guards, and all eight parent-fsync failure points. A separately
+compiled **test-only** build of the same C source provides deterministic rename
+race/failure barriers; the production helper contains no fault controls.
 
 ### Native StateOwner build
 

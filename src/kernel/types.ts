@@ -698,7 +698,6 @@ export type WorkspaceGenerationIdentityV1 = {
         directoryFileId: string;
         ownerUid: number;
         mode: 448;
-        linkCount: 1;
       }
     | {
         kind: 'macos_vm_volume';

@@ -3,8 +3,11 @@ import { open } from 'node:fs/promises';
 import { Module } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
-import { sha256Bytes } from '../kernel/identity.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
+import { digestOmitting, identityHash, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
+import type { StateRootIdentityV1, WorkspaceGenerationIdentityV1 } from '../kernel/types.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 
 export const STATE_OWNER_NATIVE_ENTRY_ID = 'state_owner_native';
@@ -12,12 +15,24 @@ export const STATE_OWNER_NATIVE_RELATIVE_PATH = `native/${process.platform}-${pr
 export const STATE_OWNER_NATIVE_PATH = fileURLToPath(new URL(`../../dist/${STATE_OWNER_NATIVE_RELATIVE_PATH}`, import.meta.url));
 
 type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
+/** A physical move observation only: no containment death, tree or SQLite authority. */
+export type GenerationQuarantineMove = Readonly<{
+  quarantineCanonicalRootRelativePath: string;
+  quarantineDeviceId: string;
+  quarantineFileId: string;
+  originalLocatorAbsent: true;
+  renameNoReplace: true;
+  directoryFsyncComplete: true;
+}>;
 export type HeldStateOwnerLock = Readonly<{
   root: DescriptorIdentity;
   runtime: DescriptorIdentity;
   lock: DescriptorIdentity;
   assertHeld(): void;
   assertPriorProcessDead(pid: number, processStartToken: string): void;
+  /** Trusted Supervisor primitive. The caller must first fence/retire writers;
+   * this neither revokes open descriptors/mounts nor commits generation state. */
+  quarantineGeneration(generation: WorkspaceGenerationIdentityV1, sourceRowVersion: number): GenerationQuarantineMove;
   close(): void;
 }>;
 
@@ -25,6 +40,58 @@ export type NativeStateOwner = Readonly<{
   acquireLock(stateRoot: string, createLayout: boolean): HeldStateOwnerLock;
   processStartToken(): string;
 }>;
+
+type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration'> & {
+  moveGeneration(runId: string, generationId: string, quarantineId: string, deviceId: string, fileId: string): DescriptorIdentity;
+};
+type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string };
+
+/** Hide the native locator arguments; callers supply only the frozen identity
+ * and the durable source version. No caller-selected destination or fallback. */
+function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
+  const root: StateRootIdentityV1 = {
+    schemaVersion: 1, format: 'cliq-state-root-identity-v1', platform: process.platform === 'linux' ? 'linux' : 'macos',
+    canonicalAbsolutePath: stateRoot, ownerUid: held.root.ownerUid, deviceId: held.root.deviceId,
+    directoryFileId: held.root.fileId, mode: 448, openedNoFollow: true, layoutVersion: 1, identityDigest: ''
+  };
+  root.identityDigest = digestOmitting(root, 'identityDigest');
+  const rootRef = canonicalSha256(root);
+  const receiver = (value: unknown) => {
+    if (value !== handle) throw new TypeError('invalid StateOwner lock handle');
+  };
+  const handle: HeldStateOwnerLock = {
+    root: held.root, runtime: held.runtime, lock: held.lock,
+    assertHeld() { receiver(this); held.assertHeld(); },
+    assertPriorProcessDead(pid, token) { receiver(this); held.assertPriorProcessDead(pid, token); },
+    close() { receiver(this); held.close(); },
+    quarantineGeneration(value, sourceRowVersion) {
+      receiver(this);
+      held.assertHeld();
+      const generation = decodeWorkspaceGenerationIdentity(value);
+      const locator = generation.locator;
+      const linux = locator.kind === 'linux_directory';
+      const source = `runs/${generation.runId}/generations/${generation.generationId}${linux ? '' : '.img'}`;
+      if (!Number.isSafeInteger(sourceRowVersion) || sourceRowVersion < 1 ||
+          generation.generationId !== identityHash(generation.runId, generation.sourceCheckpointId,
+            generation.sourceWorkspaceStateRef, generation.creationNonceDigest) ||
+          linux !== (process.platform === 'linux') || locator.stateRootIdentityRef !== rootRef ||
+          locator.stateRootIdentityDigest !== root.identityDigest ||
+          (linux ? locator.canonicalRootRelativePath : locator.backingStoreCanonicalRootRelativePath) !== source ||
+          (linux ? locator.ownerUid : locator.backingStoreOwnerUid) !== root.ownerUid) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'generation quarantine requires the exact host, StateRoot, generation locator and source version');
+      }
+      const quarantineId = identityHash(generation.generationId, String(sourceRowVersion));
+      const moved = held.moveGeneration(generation.runId, generation.generationId, quarantineId,
+        linux ? locator.deviceId : locator.backingStoreDeviceId, linux ? locator.directoryFileId : locator.backingStoreFileId);
+      return Object.freeze({
+        quarantineCanonicalRootRelativePath: `quarantine/workspace-generations/${quarantineId}`,
+        quarantineDeviceId: moved.deviceId, quarantineFileId: moved.fileId,
+        originalLocatorAbsent: true, renameNoReplace: true, directoryFsyncComplete: true
+      });
+    }
+  };
+  return handle;
+}
 
 let loaded: { digest: string; implementation: NativeStateOwner } | undefined;
 
@@ -62,10 +129,18 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
     }
     const nativeModule = new Module(STATE_OWNER_NATIVE_PATH);
     process.dlopen(nativeModule, `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${file.fd}`);
-    const implementation: NativeStateOwner = nativeModule.exports;
-    if (typeof implementation.acquireLock !== 'function' || typeof implementation.processStartToken !== 'function') {
+    const binding: NativeBinding = nativeModule.exports;
+    if (typeof binding.acquireLock !== 'function' || typeof binding.processStartToken !== 'function') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper has an unsupported interface');
     }
+    const implementation: NativeStateOwner = {
+      acquireLock(stateRoot, createLayout) {
+        if (normalizeAbsolutePath(stateRoot) !== stateRoot) throw new TypeError('StateOwner root must be canonical');
+        const held = binding.acquireLock(stateRoot, createLayout);
+        try { return wrapLock(held, stateRoot); } catch (error) { held.close(); throw error; }
+      },
+      processStartToken: () => binding.processStartToken()
+    };
     loaded = { digest, implementation: Object.freeze(implementation) };
     return loaded.implementation;
   } finally {
