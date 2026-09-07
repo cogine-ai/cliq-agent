@@ -13,6 +13,7 @@ import { openSqliteDriver } from './sqlite-driver.js';
 import { readLatestStateOwner } from './state-owner.js';
 import { openStateStore, type StateStore, type StateStoreRuntimeAuthority } from './store.js';
 import { makePrivateDir } from './testing/fixtures.js';
+import { STATE_OWNER_NATIVE_ENTRY_ID } from './native-owner.js';
 import { signedToolBundle } from './testing/tool-authority.js';
 
 function resign(bundle: RuntimeBundleManifest): StateStoreRuntimeAuthority {
@@ -126,4 +127,32 @@ test('signed-owner reopen refuses a missing retained runtime before committing a
     store = await openStateStore(stateRoot, authority);
     assert.equal(ownerAt(stateRoot).ownerEpoch, released.ownerEpoch + 1);
   } finally { await store?.close(); await rm(stateRoot, { recursive: true, force: true }); }
+});
+
+test('signed bootstrap binds the native helper bytes, path, role and version before touching state', async () => {
+  const stateRoot = await makePrivateDir('.cliq-runtime-owner-native-');
+  try {
+    const authority = await signedToolBundle(testFixture().assembly, []);
+    const helperMismatch = {
+      code: 'ARTIFACT_MISMATCH',
+      message: 'StateOwner native helper does not match the signed RuntimeBundle'
+    };
+    const changes = [
+      { digest: canonicalSha256('foreign native helper') }, { byteCount: 1 },
+      { relativePath: 'native/foreign/state-owner.node' }, { role: 'tool_adapter' },
+      { version: '2' }, { executable: false }
+    ];
+    for (const change of changes) {
+      const bundle = structuredClone(authority.bundle);
+      Object.assign(bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID)!, change);
+      await assert.rejects(openStateStore(stateRoot, resign(bundle)), helperMismatch);
+      assert.deepEqual(await readdir(stateRoot), []);
+    }
+    const missing = structuredClone(authority.bundle);
+    missing.entries = missing.entries.filter(entry => entry.entryId !== STATE_OWNER_NATIVE_ENTRY_ID);
+    await assert.rejects(openStateStore(stateRoot, resign(missing)), helperMismatch);
+    assert.deepEqual(await readdir(stateRoot), []);
+    const store = await openStateStore(stateRoot, authority);
+    await store.close();
+  } finally { await rm(stateRoot, { recursive: true, force: true }); }
 });

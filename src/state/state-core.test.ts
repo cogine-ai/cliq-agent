@@ -506,6 +506,8 @@ test('recovery closed-decodes row_json instead of trusting redundant columns', a
 
 test('fresh genesis refuses residual rows in every authority table', async () => {
   const stateRoot = await makePrivateDir('.cliq-m2-genesis-db-residue-');
+  await mkdir(path.join(stateRoot, 'runtime'), { mode: 0o700 });
+  await writeFile(path.join(stateRoot, 'runtime', 'state-owner.lock'), '', { mode: 0o600 });
   const driver = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
   try {
     applyKernelSchema(driver);
@@ -638,7 +640,7 @@ test('open rejects and does not repair changed runtime or lock permissions', asy
     await chmod(runtimePath, 0o755);
     await assert.rejects(
       openStateStore(stateRoot),
-      (error) => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST'
+      (error) => error instanceof KernelStorageError && error.code === 'RECOVERY_REQUIRED'
     );
     assert.equal((await lstat(runtimePath)).mode & 0o7777, 0o755);
     await chmod(runtimePath, 0o700);

@@ -466,8 +466,11 @@ it cannot silently upgrade the runtime or fall back to schema-only authority.
 The earlier no-argument M2 storage-only bootstrap remains available to state-core
 callers, but cannot supply a valid signed inspector. Tests now bootstrap matching
 signed owners instead of mixing a schema-only owner with another runtime's
-inspector. This does not qualify native OS-lock/containment enforcement, install
-a release, or add runtime-upgrade/takeover handling.
+inspector. The [native StateOwner integration](m2-state-core.md#native-stateowner-lifecycle)
+now acquires a real same-process OS lock before SQLite, uses exact platform
+process-start observation, and validates the signed helper entry before loading.
+It does not qualify containment or signed installation, install a release, or
+add runtime-upgrade/takeover handling.
 
 Malformed, oversized, operation-invalid and provider-rejected received responses
 all use this closure. Compaction failures retain their dedicated resource-stop

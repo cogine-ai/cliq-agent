@@ -10,6 +10,13 @@ npm run build
 npm link
 ```
 
+On macOS/Linux, building or running the full test suite also compiles the small
+StateOwner Node-API helper. Install a C compiler (`cc`; Xcode Command Line Tools
+on macOS) and the headers supplied with your Node installation. See
+[StateOwner build and scope](docs/kernel/m2-state-core.md#native-stateowner-build)
+for nonstandard header locations and targeted tests. The default CLI still uses
+the existing runtime; this helper does not enable the Kernel Cut.
+
 Set your API key before running the CLI:
 
 ```bash

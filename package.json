@@ -45,6 +45,8 @@
     "access": "public"
   },
   "scripts": {
+    "pretest": "node scripts/kernel/build-state-owner-native.mjs",
+    "prebuild": "node scripts/kernel/build-state-owner-native.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",

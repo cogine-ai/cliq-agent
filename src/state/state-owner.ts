@@ -1,6 +1,3 @@
-import { lstatSync } from 'node:fs';
-import path from 'node:path';
-
 import { digestOmitting, requiredSafeInteger } from '../kernel/identity.js';
 import type {
   CanonicalTimeFenceV1,
@@ -12,6 +9,7 @@ import { insertArtifactMetadata } from './artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { decodeStateOwnerRecord } from './decoders.js';
 import { KernelStorageError } from './errors.js';
+import { assertStateOwnerLock, type HeldStateOwnerLock } from './native-owner.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 
 export type StateOwnerContext = {
@@ -24,20 +22,7 @@ export type StateOwnerContext = {
   stateLockIdentityDigest: string;
   stateRootIdentityRef: string;
   stateRootIdentityDigest: string;
-  filesystem: StateOwnerFilesystemContext;
-};
-
-export type StateOwnerFilesystemContext = {
-  stateRootPath: string;
-  stateRootDeviceId: string;
-  stateRootFileId: string;
-  ownerUid: number;
-  runtimePath: string;
-  runtimeDeviceId: string;
-  runtimeFileId: string;
-  lockPath: string;
-  lockDeviceId: string;
-  lockFileId: string;
+  filesystem: HeldStateOwnerLock;
 };
 
 type StateOwnerSqlRow = {
@@ -124,7 +109,7 @@ export function readActiveStateOwner(
 
 export function contextFromStateOwner(
   record: Extract<StateOwnerRecordV1, { state: 'active' }>,
-  filesystem: StateOwnerFilesystemContext,
+  filesystem: HeldStateOwnerLock,
   stateRootIdentity: { ref: string; digest: string }
 ): StateOwnerContext {
   return {
@@ -141,48 +126,11 @@ export function contextFromStateOwner(
   };
 }
 
-function assertFilesystemAuthority(expected: StateOwnerFilesystemContext): void {
-  try {
-    const root = lstatSync(expected.stateRootPath);
-    const runtime = lstatSync(expected.runtimePath);
-    const lock = lstatSync(expected.lockPath);
-    if (
-      root.isSymbolicLink() ||
-      !root.isDirectory() ||
-      root.uid !== expected.ownerUid ||
-      (root.mode & 0o7777) !== 0o700 ||
-      String(root.dev) !== expected.stateRootDeviceId ||
-      String(root.ino) !== expected.stateRootFileId ||
-      runtime.isSymbolicLink() ||
-      !runtime.isDirectory() ||
-      runtime.uid !== expected.ownerUid ||
-      (runtime.mode & 0o7777) !== 0o700 ||
-      String(runtime.dev) !== expected.runtimeDeviceId ||
-      String(runtime.ino) !== expected.runtimeFileId ||
-      lock.isSymbolicLink() ||
-      !lock.isFile() ||
-      lock.uid !== expected.ownerUid ||
-      (lock.mode & 0o7777) !== 0o600 ||
-      lock.nlink !== 1 ||
-      String(lock.dev) !== expected.lockDeviceId ||
-      String(lock.ino) !== expected.lockFileId ||
-      path.dirname(expected.lockPath) !== expected.runtimePath
-    ) {
-      throw new Error('filesystem identity changed');
-    }
-  } catch {
-    throw new KernelStorageError(
-      'RECOVERY_REQUIRED',
-      'state root, runtime directory, or state-owner lock identity changed'
-    );
-  }
-}
-
 export function assertActiveStateOwner(
   connection: SqliteConnection | SqliteDriver,
   expected: StateOwnerContext
 ): Extract<StateOwnerRecordV1, { state: 'active' }> {
-  assertFilesystemAuthority(expected.filesystem);
+  assertStateOwnerLock(expected.filesystem);
   const active = readActiveStateOwner(connection);
   if (
     active === undefined ||
