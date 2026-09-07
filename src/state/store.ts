@@ -1,5 +1,5 @@
-import { constants, type Stats } from 'node:fs';
-import { lstat, mkdir, open, readFile, readdir } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import { lstat, mkdir, readFile, readdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
@@ -42,6 +42,7 @@ import {
 } from './canonical-time.js';
 import { ContentAddressedStore } from './cas.js';
 import { KernelStorageError } from './errors.js';
+import { assertStateOwnerLock, loadNativeStateOwner, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
   decodePlatformProcessIdentity,
   decodeStateLockIdentity,
@@ -175,38 +176,22 @@ let currentProcessBasePromise:
   | Promise<{ processStartToken: string; executableImageDigest: string }>
   | undefined;
 
-async function currentProcessBase(): Promise<{
+async function currentProcessBase(native: NativeStateOwner): Promise<{
   processStartToken: string;
   executableImageDigest: string;
 }> {
   currentProcessBasePromise ??= (async () => {
     const executableImageDigest = sha256Bytes(await readFile(process.execPath));
-    if (process.platform === 'linux') {
-      let stat: string;
-      try {
-        stat = await readFile(`/proc/${process.pid}/stat`, 'utf8');
-      } catch {
-        throw new KernelStorageError('RECOVERY_REQUIRED', 'cannot read the current Linux process start token');
-      }
-      const close = stat.lastIndexOf(')');
-      const fields = close === -1 ? [] : stat.slice(close + 2).trim().split(/\s+/u);
-      const startTicks = fields[19];
-      if (startTicks === undefined || !/^\d+$/u.test(startTicks)) {
-        throw new KernelStorageError('RECOVERY_REQUIRED', 'Linux process stat has no valid start token');
-      }
-      return { processStartToken: `linux-proc-start-ticks:${startTicks}`, executableImageDigest };
-    }
-    const startEpochMs = Math.max(0, Math.floor(Date.now() - process.uptime() * 1_000));
     return {
-      processStartToken: `darwin-process-start-epoch-ms:${startEpochMs}`,
+      processStartToken: native.processStartToken(),
       executableImageDigest
     };
   })();
   return currentProcessBasePromise;
 }
 
-async function currentProcessIdentity(observedAt: string): Promise<PlatformProcessIdentityV1> {
-  const base = await currentProcessBase();
+async function currentProcessIdentity(native: NativeStateOwner, observedAt: string): Promise<PlatformProcessIdentityV1> {
+  const base = await currentProcessBase(native);
   const identity: PlatformProcessIdentityV1 = {
     schemaVersion: 1,
     format: 'cliq-platform-process-identity-v1',
@@ -279,43 +264,11 @@ async function ensurePrivateDirectory(directory: string, allowCreate: boolean): 
   }
 }
 
-async function ensureLockFile(lockPath: string): Promise<Stats> {
-  try {
-    const handle = await open(
-      lockPath,
-      constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
-      0o600
-    );
-    await handle.close();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-  }
-  const existing = await lstat(lockPath);
-  if (
-    existing.isSymbolicLink() ||
-    !existing.isFile() ||
-    existing.nlink !== 1 ||
-    existing.uid !== requireEffectiveUid()
-  ) {
-    throw new KernelStorageError('INVALID_REQUEST', 'state-owner lock must be a 0600 regular file with link count 1');
-  }
-  const info = await lstat(lockPath);
-  if (
-    info.isSymbolicLink() ||
-    !info.isFile() ||
-    info.nlink !== 1 ||
-    info.uid !== requireEffectiveUid() ||
-    (info.mode & 0o7777) !== 0o600
-  ) {
-    throw new KernelStorageError('INVALID_REQUEST', 'state-owner lock must be a 0600 regular file with link count 1');
-  }
-  return info;
-}
-
 async function stateOwnerFilesystemFromArtifacts(
   stateRoot: string,
   artifacts: ArtifactCatalog,
-  owner: StateOwnerRecordV1
+  owner: StateOwnerRecordV1,
+  heldLock: HeldStateOwnerLock
 ): Promise<{
   lockIdentity: StateLockIdentityV1;
   filesystem: StateOwnerContext['filesystem'];
@@ -338,67 +291,32 @@ async function stateOwnerFilesystemFromArtifacts(
   ) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner root identity does not rehash');
   }
-  const runtimePath = path.join(stateRoot, 'runtime');
-  const lockPath = path.join(stateRoot, lockIdentity.canonicalRootRelativePath);
-  let rootInfo: Stats;
-  let runtimeInfo: Stats;
-  let lockInfo: Stats;
-  try {
-    [rootInfo, runtimeInfo, lockInfo] = await Promise.all([
-      lstat(stateRoot),
-      lstat(runtimePath),
-      lstat(lockPath)
-    ]);
-  } catch {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner filesystem closure is incomplete');
-  }
+  assertStateOwnerLock(heldLock);
   if (
-    rootInfo.isSymbolicLink() ||
-    !rootInfo.isDirectory() ||
-    rootInfo.uid !== requireEffectiveUid() ||
-    (rootInfo.mode & 0o7777) !== 0o700 ||
-    runtimeInfo.isSymbolicLink() ||
-    !runtimeInfo.isDirectory() ||
-    runtimeInfo.uid !== requireEffectiveUid() ||
-    (runtimeInfo.mode & 0o7777) !== 0o700 ||
-    lockInfo.isSymbolicLink() ||
-    !lockInfo.isFile() ||
-    lockInfo.uid !== requireEffectiveUid() ||
-    (lockInfo.mode & 0o7777) !== 0o600 ||
-    lockInfo.nlink !== 1 ||
-    unsignedDecimalId(rootInfo.dev) !== rootIdentity.deviceId ||
-    unsignedDecimalId(rootInfo.ino) !== rootIdentity.directoryFileId ||
-    unsignedDecimalId(lockInfo.dev) !== lockIdentity.deviceId ||
-    unsignedDecimalId(lockInfo.ino) !== lockIdentity.fileId
+    heldLock.root.deviceId !== rootIdentity.deviceId ||
+    heldLock.root.fileId !== rootIdentity.directoryFileId ||
+    heldLock.lock.deviceId !== lockIdentity.deviceId ||
+    heldLock.lock.fileId !== lockIdentity.fileId
   ) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner filesystem identity changed during open');
   }
   return {
     lockIdentity,
-    filesystem: {
-      stateRootPath: stateRoot,
-      stateRootDeviceId: unsignedDecimalId(rootInfo.dev),
-      stateRootFileId: unsignedDecimalId(rootInfo.ino),
-      ownerUid: requireEffectiveUid(),
-      runtimePath,
-      runtimeDeviceId: unsignedDecimalId(runtimeInfo.dev),
-      runtimeFileId: unsignedDecimalId(runtimeInfo.ino),
-      lockPath,
-      lockDeviceId: unsignedDecimalId(lockInfo.dev),
-      lockFileId: unsignedDecimalId(lockInfo.ino)
-    }
+    filesystem: heldLock
   };
 }
 
 async function stateOwnerContextFromArtifacts(
   stateRoot: string,
   artifacts: ArtifactCatalog,
-  owner: Extract<StateOwnerRecordV1, { state: 'active' }>
+  owner: Extract<StateOwnerRecordV1, { state: 'active' }>,
+  heldLock: HeldStateOwnerLock
 ): Promise<StateOwnerContext> {
   const { lockIdentity, filesystem } = await stateOwnerFilesystemFromArtifacts(
     stateRoot,
     artifacts,
-    owner
+    owner,
+    heldLock
   );
   const processIdentity = decodePlatformProcessIdentity(
     await artifacts.readCanonical(owner.processIdentityRef)
@@ -437,6 +355,7 @@ async function stateOwnerContextFromArtifacts(
 
 export class StateStore {
   private closed = false;
+  private released = false;
   private closing: Promise<void> | undefined;
 
   private constructor(
@@ -464,8 +383,11 @@ export class StateStore {
     }
     if (runtimeAuthority) {
       verifyRuntimeBundle(runtimeAuthority.bundle, runtimeAuthority.releaseKeys);
+    }
+    const native = await loadNativeStateOwner(runtimeAuthority?.bundle);
+    if (runtimeAuthority) {
       const supervisor = runtimeAuthority.bundle.entries.find((entry) => entry.role === 'supervisor')!;
-      if (supervisor.digest !== (await currentProcessBase()).executableImageDigest ||
+      if (supervisor.digest !== (await currentProcessBase(native)).executableImageDigest ||
           runtimeAuthority.bundle.stateSchemaRange.min > KERNEL_STATE_SCHEMA_VERSION ||
           runtimeAuthority.bundle.stateSchemaRange.max < KERNEL_STATE_SCHEMA_VERSION) {
         throw new KernelStorageError('ARTIFACT_MISMATCH', 'signed Supervisor does not match this process or state schema');
@@ -473,9 +395,22 @@ export class StateStore {
     }
     await assertPrivateStateRoot(stateRoot);
     const casRoot = path.join(stateRoot, KERNEL_CAS_DIRECTORY);
-    const runtimeRoot = path.join(stateRoot, 'runtime');
-    const driver = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+    const databasePath = path.join(stateRoot, KERNEL_DATABASE_FILENAME);
+    const databaseExists = await lstat(databasePath).then(() => true, (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    });
+    let heldLock: HeldStateOwnerLock;
     try {
+      // An existing database must never silently recreate a missing lock inode.
+      heldLock = Object.freeze(native.acquireLock(stateRoot, !databaseExists));
+    } catch (error) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', error instanceof Error ? error.message : 'StateOwner OS lock acquisition failed');
+    }
+    let driver: SqliteDriver | undefined;
+    try {
+      assertStateOwnerLock(heldLock);
+      driver = openSqliteDriver(databasePath);
       const preflightSchemaVersion = readSchemaUserVersion(driver);
       if (preflightSchemaVersion === 1) {
         const priorOwners = driver
@@ -504,17 +439,17 @@ export class StateStore {
         .get<{ count: unknown }>();
       const allowLayoutCreation = Number(ownerHistory?.count ?? 0) === 0;
       await ensurePrivateDirectory(casRoot, allowLayoutCreation);
-      await ensurePrivateDirectory(runtimeRoot, allowLayoutCreation);
       const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
-      const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts, runtimeAuthority?.bundle);
-      const ownerContext = await stateOwnerContextFromArtifacts(stateRoot, artifacts, owner);
+      const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts, native, heldLock, runtimeAuthority?.bundle);
+      const ownerContext = await stateOwnerContextFromArtifacts(stateRoot, artifacts, owner, heldLock);
       return new StateStore(stateRoot, driver, artifacts, ownerContext);
     } catch (error) {
       try {
-        driver.close();
+        driver?.close();
       } catch {
         // Preserve the open/acquisition failure as the primary diagnostic.
       }
+      heldLock.close();
       throw error;
     }
   }
@@ -635,8 +570,12 @@ export class StateStore {
     if (this.closed) return Promise.resolve();
     if (this.closing !== undefined) return this.closing;
     const attempt = (async () => {
-      await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
+      if (!this.released) {
+        await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
+        this.released = true;
+      }
       this.driver.close();
+      this.owner.filesystem.close();
       this.closed = true;
     })();
     this.closing = attempt.catch((error: unknown) => {
@@ -655,6 +594,8 @@ async function acquireOrBootstrapStateOwner(
   stateRoot: string,
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
+  native: NativeStateOwner,
+  heldLock: HeldStateOwnerLock,
   runtimeBundle?: RuntimeBundleManifest
 ): Promise<Extract<StateOwnerRecordV1, { state: 'active' }>> {
   assertContiguousStateOwnerHistory(driver);
@@ -683,7 +624,7 @@ async function acquireOrBootstrapStateOwner(
         retainedRuntime.format !== 'cliq-kernel-schema-manifest-v1') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'reopen requires the same signed Supervisor authority; runtime upgrades need their own transition');
     }
-    return acquireAfterGracefulRelease(stateRoot, driver, artifacts, latestOwner);
+    return acquireAfterGracefulRelease(stateRoot, driver, artifacts, latestOwner, native, heldLock);
   }
   if (fence !== undefined) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence exists without state owner history');
@@ -702,9 +643,8 @@ async function acquireOrBootstrapStateOwner(
   const now = sampleCanonicalNow();
   const platform = hostPlatform();
   const uid = requireEffectiveUid();
-  const rootInfo = await lstat(stateRoot);
-  const casInfo = await lstat(casRoot);
-  const lockInfo = await ensureLockFile(path.join(stateRoot, 'runtime', 'state-owner.lock'));
+  const casInfo = await lstat(casRoot, { bigint: true });
+  assertStateOwnerLock(heldLock);
 
   const stateRootIdentity: StateRootIdentityV1 = {
     schemaVersion: 1,
@@ -712,8 +652,8 @@ async function acquireOrBootstrapStateOwner(
     platform,
     canonicalAbsolutePath: stateRoot,
     ownerUid: uid,
-    deviceId: unsignedDecimalId(rootInfo.dev),
-    directoryFileId: unsignedDecimalId(rootInfo.ino),
+    deviceId: heldLock.root.deviceId,
+    directoryFileId: heldLock.root.fileId,
     mode: 448,
     openedNoFollow: true,
     layoutVersion: 1,
@@ -722,7 +662,7 @@ async function acquireOrBootstrapStateOwner(
   stateRootIdentity.identityDigest = digestOmitting(stateRootIdentity, 'identityDigest');
   const stateRootArtifact = await artifacts.publishCanonical(stateRootIdentity, 'cliq-state-root-identity-v1');
 
-  const processIdentity = await currentProcessIdentity(now);
+  const processIdentity = await currentProcessIdentity(native, now);
   const processArtifact = await artifacts.publishCanonical(processIdentity, 'cliq-platform-process-identity-v1');
 
   const lockIdentity: StateLockIdentityV1 = {
@@ -731,9 +671,9 @@ async function acquireOrBootstrapStateOwner(
     stateRootIdentityRef: stateRootArtifact.ref,
     stateRootIdentityDigest: stateRootIdentity.identityDigest,
     canonicalRootRelativePath: 'runtime/state-owner.lock',
-    deviceId: unsignedDecimalId(lockInfo.dev),
-    fileId: unsignedDecimalId(lockInfo.ino),
-    ownerUid: lockInfo.uid,
+    deviceId: heldLock.lock.deviceId,
+    fileId: heldLock.lock.fileId,
+    ownerUid: heldLock.lock.ownerUid,
     mode: 384,
     linkCount: 1,
     identityDigest: ''
@@ -864,6 +804,7 @@ async function acquireOrBootstrapStateOwner(
   owner.rowDigest = digestOmitting(owner, 'rowDigest');
 
   driver.transaction((connection) => {
+    assertStateOwnerLock(heldLock);
     assertFreshAuthorityDatabaseEmpty(connection);
     insertStateOwnerArtifacts(
       connection,
@@ -895,9 +836,11 @@ async function acquireAfterGracefulRelease(
   stateRoot: string,
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
-  prior: Extract<StateOwnerRecordV1, { state: 'terminal' }>
+  prior: Extract<StateOwnerRecordV1, { state: 'terminal' }>,
+  native: NativeStateOwner,
+  heldLock: HeldStateOwnerLock
 ): Promise<Extract<StateOwnerRecordV1, { state: 'active' }>> {
-  await stateOwnerFilesystemFromArtifacts(stateRoot, artifacts, prior);
+  await stateOwnerFilesystemFromArtifacts(stateRoot, artifacts, prior, heldLock);
   const transition = decodeStateOwnerTransitionEvidence(
     await artifacts.readCanonical(prior.transitionEvidenceRef)
   );
@@ -922,7 +865,7 @@ async function acquireAfterGracefulRelease(
   const artifactCreatedAt = acquiredAt >= currentFence.lastAcceptedAt
     ? acquiredAt
     : currentFence.lastAcceptedAt;
-  const processIdentity = await currentProcessIdentity(acquiredAt);
+  const processIdentity = await currentProcessIdentity(native, acquiredAt);
   const processArtifact = await artifacts.publishCanonical(
     processIdentity,
     'cliq-platform-process-identity-v1'
@@ -986,6 +929,7 @@ async function acquireAfterGracefulRelease(
 
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
+    assertStateOwnerLock(heldLock);
     assertContiguousStateOwnerHistory(connection);
     if (readActiveStateOwner(connection) !== undefined) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'another state owner acquired authority');
@@ -1022,7 +966,7 @@ export async function publishInProcessChannel(
   client: LocalControlChannelIdentityV1['client'] = 'cli'
 ): Promise<{ channelIdentityRef: string; channelIdentityDigest: string }> {
   const now = sampleCanonicalNow();
-  const processIdentity = await currentProcessIdentity(now);
+  const processIdentity = await currentProcessIdentity(await loadNativeStateOwner(), now);
   const processArtifact = await store.artifacts.publishCanonical(
     processIdentity,
     'cliq-platform-process-identity-v1'

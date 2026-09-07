@@ -37,7 +37,12 @@ terminal primary evidence and historical recovery. Its bootstrap companion binds
 StateOwner to an explicitly trusted signed runtime and the actual process image;
 checkpoint and failure inspectors now share the complete owner/runtime/nonce
 check. Signed-owner reopen requires the same runtime authority. Compaction keeps its dedicated
-resource-stop subtype. Neither path stops unresolved external attempts or grants
+resource-stop subtype. The [StateOwner native foundation](../../kernel/m2-state-core.md#native-stateowner-lifecycle)
+now holds the real root/runtime/OS-lock descriptors in the owner process before
+opening SQLite, binds exact platform start identity and signed helper bytes,
+and closes only after durable graceful release. UDS credentials, positive death
+proof, crash takeover and signed installation qualification are still open.
+Neither path stops unresolved external attempts or grants
 tool permission. Reuse this stop core;
 do not build another control-state machine. Child/MCP/ambiguous-effect closure,
 other stop origins/wait subjects, UDS capture/server routing, scheduling and

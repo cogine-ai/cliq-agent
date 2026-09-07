@@ -4,13 +4,17 @@ import { canonicalJsonBytes, canonicalSha256 } from '../../kernel/canonical.js';
 import { sha256Bytes } from '../../kernel/identity.js';
 import type { RunAssemblyV1, ToolContractManifestV1 } from '../../kernel/types.js';
 import { policyProfile, type RuntimeBundleManifest } from '../../policy/runtime-authority.js';
+import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_PATH, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../native-owner.js';
 
 let supervisorImage: Promise<{ digest: string; byteCount: number }> | undefined;
+let nativeImage: Promise<{ digest: string; byteCount: number }> | undefined;
 
 /** A real Ed25519 signature under an explicitly injected test root. Not a Cliq release/installation qualification. */
 export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContractManifestV1['entries']) {
   supervisorImage ??= readFile(process.execPath).then((bytes) => ({ digest: sha256Bytes(bytes), byteCount: bytes.byteLength }));
+  nativeImage ??= readFile(STATE_OWNER_NATIVE_PATH).then((bytes) => ({ digest: sha256Bytes(bytes), byteCount: bytes.byteLength }));
   const image = await supervisorImage;
+  const helper = await nativeImage;
   const keys = generateKeyPairSync('ed25519');
   const profile = policyProfile();
   const profileRef = canonicalSha256(profile);
@@ -20,6 +24,7 @@ export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContr
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     stateSchemaRange: { min: 1, max: 2 }, workerProtocolRange: { min: 1, max: 1 },
     entries: [entry('supervisor-test', 'supervisor', true, image.digest, '1', image.byteCount), entry(assembly.runtime.workerExecutableId, 'worker', true, assembly.runtime.workerExecutableDigest),
+      { ...entry(STATE_OWNER_NATIVE_ENTRY_ID, 'platform_helper', true, helper.digest, '1', helper.byteCount), relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH },
       entry(assembly.provider.adapter.adapterId, 'provider_adapter', true, assembly.provider.adapter.codeDigest, assembly.provider.adapter.version),
       entry('policy-v1', 'policy_engine', false, profileRef, '1', canonicalJsonBytes(profile).byteLength),
       entry('default_https_trust_store', 'trust_store', false), entry('root-profile-test', 'sandbox_root_profile', false),

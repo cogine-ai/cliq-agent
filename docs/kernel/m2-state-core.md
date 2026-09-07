@@ -10,8 +10,9 @@ fully complete.
   items, Journal facts, worker launches, workspace generations, StateOwner
   history, and the canonical-time fence.
 - StateOwner bootstrap, graceful release, contiguous clean reacquisition, exact
-  identity/evidence decoding, root/runtime/lock revalidation on every write,
-  and explicit clock-regression recovery.
+  identity/evidence decoding, descriptor-held cross-process OS locking,
+  root/runtime/lock revalidation on every write, exact platform process-start
+  observation, and explicit clock-regression recovery.
 - Exact local-principal and in-process control-channel closure checks bound to
   the current StateRoot; UDS peers fail closed until native credential capture
   and the closed peer-observation decoder are available.
@@ -28,13 +29,71 @@ fully complete.
 - Focused state and fault-injection suites, including transaction rollback,
   direct lifecycle-skip rejection, stale-owner fencing, lock replacement,
   expired-lease revival, closed-schema rejection, and artifact registration.
+  Native regressions use real competing processes, simultaneous fresh startup,
+  graceful close/reopen, failed release/close, and abrupt `SIGKILL`.
+
+## Native StateOwner lifecycle
+
+The helper has only two operations: observe this process's native start token,
+and acquire the fixed StateRoot/runtime/lock closure. It returns an opaque held
+handle with descriptor identities, validation and idempotent close; it exposes
+no fd, caller-selected lock path, unlock/relock, process-death assertion, or
+general filesystem API. TypeScript still owns all SQLite state transitions.
+
+- Acquisition opens every root component without following symlinks, holds
+  same-user `0700` root/runtime descriptors and a `0600`, single-link regular
+  lock descriptor, then takes nonblocking exclusive `flock` **before SQLite is
+  opened or CAS is initialized**. Existing databases cannot recreate missing
+  runtime/lock layout. Lock/root artifacts use `fstat` identities, with unsigned
+  decimal device/inode ids, not separately reopened path observations.
+- The handle remains in the StateOwner process. Every existing owner write gate
+  validates the held descriptors against their exact locators and permissions;
+  validation never reacquires a lock. Successful graceful terminalization and
+  SQLite close precede descriptor close. Release/close failure retains the lock
+  for an explicit retry. Open failure closes every acquired descriptor.
+- macOS reads `proc_pidinfo(PROC_PIDTBSDINFO)` start seconds/microseconds; Linux
+  reads `/proc/self/stat` field 22. Neither uses wall-clock-minus-uptime estimates.
+- Process exit releases the OS lock, but an active durable predecessor still
+  blocks startup with `RECOVERY_REQUIRED`. A free lock is **not** death evidence
+  and does not authorize takeover, worker adoption or effect replay.
+- Signed-owner bootstrap additionally requires the exact executable
+  `platform_helper` entry `state_owner_native`, version `1`, at
+  `native/<platform>-<arch>/state-owner.node`. Its digest/size must match the held
+  helper file before loading. Signature verification happens first. The local
+  schema-only bootstrap cannot supply signed execution/inspector authority.
+
+### Native StateOwner build
+
+`npm run build` and `npm test` compile `native/state-owner/state-owner.c` using
+`cc` and the current Node installation's `include/node` headers. The output is
+an owner-only `0500` file under `dist/native/<platform>-<arch>/`; compilation
+atomically replaces it, without truncating an already loaded image. The loader
+opens the fixed file without following its final symlink, bounds it to 16 MiB,
+verifies its held bytes and loads through the descriptor. A different helper
+digest cannot replace the loaded implementation within the same process.
+There is no runtime compiler, downloaded addon, or approximate fallback.
+
+For a nonstandard Node installation, supply its matching headers explicitly:
+
+```bash
+node scripts/kernel/build-state-owner-native.mjs /absolute/path/to/include/node
+npx tsc -p tsconfig.json
+node --test --test-concurrency=1 --import tsx src/state/native-owner.test.ts src/state/runtime-owner.test.ts
+```
+
+Build before running other targeted suites. The existing CI matrix compiles and
+tests this helper on macOS/Linux with Node 22.13 and 24. Node-API version 8 keeps
+the binding independent of V8's addon ABI. This is source-checkout/CI integration:
+the host-built binary is intentionally excluded from the universal npm tarball.
+Signed multi-platform helper installation and release qualification remain WP06
+work; no default CLI, sandbox, broker or Supervisor service is enabled here.
 
 ## Deliberately still open
 
-- The descriptor-held cross-process OS lock, UDS peer-credential capture,
-  positive prior-process death proof, and atomic death takeover require the
-  signed native Supervisor/platform helper. The TypeScript path fails closed
-  instead of simulating that authority.
+- UDS peer-credential capture, positive prior-process death proof and atomic
+  death takeover still require their native Supervisor integration. SQLite/CAS
+  descriptor-relative I/O and signed installation qualification also remain
+  open; the held owner lock alone does not qualify those boundaries.
 - Legacy import, generation cutover, rollback-to-legacy, and native-Windows
   export-only handling remain the migration/rollback tail of WP01 and depend on
   the WP06 authority surfaces.

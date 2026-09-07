@@ -20,7 +20,7 @@ export async function readHistoricalControlChannel(driver: SqliteDriver, artifac
   if (lock.identityDigest !== owner.stateLockIdentityDigest) throw new TypeError('control history state-owner lock mismatch');
   return readRetainedControlChannelClosure(artifacts, {
     stateRootIdentityRef: lock.stateRootIdentityRef, stateRootIdentityDigest: lock.stateRootIdentityDigest,
-    filesystem: { ownerUid: lock.ownerUid }
+    filesystem: { root: { ownerUid: lock.ownerUid } }
   }, input);
 }
 
@@ -54,7 +54,7 @@ export async function validateControlChannelClosure(
 export async function readRetainedControlChannelClosure(
   artifacts: ArtifactCatalog,
   owner: Pick<StateOwnerContext, 'stateRootIdentityRef' | 'stateRootIdentityDigest'> & {
-    filesystem: Pick<StateOwnerContext['filesystem'], 'ownerUid'>;
+    filesystem: { root: Pick<StateOwnerContext['filesystem']['root'], 'ownerUid'> };
   },
   input: { channelIdentityRef: string; channelIdentityDigest: string; principalId: string }
 ): Promise<{ channel: LocalControlChannelIdentityV1; metadata: PublishedArtifact[] }> {
@@ -73,7 +73,7 @@ export async function readRetainedControlChannelClosure(
     principal.principalId !== input.principalId ||
     principal.stateRootIdentityRef !== owner.stateRootIdentityRef ||
     principal.stateRootIdentityDigest !== owner.stateRootIdentityDigest ||
-    principal.effectiveUid !== owner.filesystem.ownerUid
+    principal.effectiveUid !== owner.filesystem.root.ownerUid
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel principal identity is not current');
   }
@@ -85,7 +85,7 @@ export async function readRetainedControlChannelClosure(
     const processIdentity = decodePlatformProcessIdentity(await artifacts.readCanonical(channel.transport.processIdentityRef));
     if (
       processIdentity.identityDigest !== channel.transport.processIdentityDigest ||
-      processIdentity.ownerUid !== owner.filesystem.ownerUid ||
+      processIdentity.ownerUid !== owner.filesystem.root.ownerUid ||
       processIdentity.platform !== principal.platform ||
       processIdentity.observedAt !== channel.openedAt
     ) {
