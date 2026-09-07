@@ -5,12 +5,13 @@ import { test, type TestContext } from 'node:test';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import type { InvocationJournalEntry, WorkerDeathWait, WorkerIdentity } from '../kernel/types.js';
-import { readTimeFence } from './canonical-time.js';
+import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, createActiveFixture, digest, disposeFixture, makePrivateDir, uuidv7, type ActiveFixture } from './testing/fixtures.js';
 import { childFor } from './testing/state-owner-process.js';
+import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
 
 const ZERO = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
 const revision = (fixture: ActiveFixture) => fixture.store.getRun(fixture.runId).revision;
@@ -216,6 +217,46 @@ test('late no-dispatch and pessimistic unknown settlements preserve the frozen w
   assert.deepEqual(cut.run.budgetReserved, ZERO);
   assert.deepEqual(cut.run.budgetConsumed, { ...ZERO, toolCalls: 1 });
   assert.deepEqual(cut.journal.slice(-2).map(entry => entry.phase), ['failed', 'unknown']);
+});
+
+test('late native model completion cannot advance the frontier or checkpoint underneath worker recovery', async t => {
+  const fixture = await createAgentFixture('worker-fence-late-model', undefined, { mode: 'plan' });
+  t.after(() => disposeFixture(fixture));
+  const prepared = await fixture.agent.prepareModel({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
+  await fixture.store.claimInvocationDispatch({ runId: fixture.runId, expectedRunRevision: revision(fixture),
+    leaseEpoch: fixture.leaseEpoch, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId: 'late-model' });
+  const response = fixture.agent.model.start(prepared.prepared, { status: 200, mediaType: 'application/json' });
+  response.push(Buffer.from(JSON.stringify({ id: 'response', object: 'response', status: 'completed', model: 'model-1',
+    output: [{ type: 'function_call', id: 'wire-read', call_id: 'read', name: 'read', arguments: '{"path":"a"}' }] })));
+  const result = response.finish(sampleCanonicalNow(), fixture.agent.resolveToolInput);
+  assert.equal(result.kind, 'usable');
+  const waiting = await begin(fixture), before = snapshot(fixture.stateRoot);
+  await assert.rejects(fixture.agent.completeModel({ expectedRunRevision: waiting.revision,
+    opId: prepared.entry.opId, attempt: prepared.entry.attempt, result }), { code: 'STATE_TRANSITION_INVALID' });
+  assert.deepEqual(snapshot(fixture.stateRoot), before);
+  assert.deepEqual((await fixture.store.readRecoveryClosure(fixture.runId)).run, waiting);
+});
+
+test('a typed tool frontier survives worker fencing and restart but cannot consume a late result into its next call', async t => {
+  const fixture = await createAgentFixture('worker-fence-late-tool', undefined, { mode: 'plan' });
+  t.after(() => disposeFixture(fixture));
+  await batch(fixture, [{ name: 'read', input: { path: 'a' } }, { name: 'read', input: { path: 'b' } }]);
+  const prepared = await prepareTool(fixture), claim = await claimTool(fixture, prepared);
+  const observationRef = await observation(fixture, claim, 'retained actual bytes');
+  const waiting = await begin(fixture);
+  assert.deepEqual((await fixture.store.readRecoveryClosure(fixture.runId)).run, waiting);
+  const before = snapshot(fixture.stateRoot);
+  await assert.rejects(fixture.agent.completeTool({ expectedRunRevision: waiting.revision, opId: claim.entry.opId,
+    attempt: claim.entry.attempt, observationRef }), { code: 'STATE_TRANSITION_INVALID' });
+  assert.deepEqual(snapshot(fixture.stateRoot), before);
+  await fixture.store.close();
+  fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
+  fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
+  await assert.rejects(prepareTool(fixture), { code: 'LEASE_FENCED' });
+  const cancelled = await fixture.agent.cancelRun({ principalId: 'cliq-m2-principal', requestId: uuidv7(),
+    expectedRunRevision: revision(fixture), ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') });
+  assert.equal(cancelled.run.waitingOnRef, waiting.waitingOnRef);
+  assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).run.status, 'waiting');
 });
 
 for (const order of ['before', 'after'] as const) {

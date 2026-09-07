@@ -73,7 +73,10 @@ export async function validateToolRecovery(input: {
         checkpoint.runItemSeq !== prior.runItemSeq) throw new TypeError('approval wait has no unchanged ready Checkpoint');
     return { ...proof, wait, checkpoint };
   }
-  if (run.waitingReason === 'approval' || (run.status === 'waiting' && run.nextStep === 'tool' && run.waitingReason !== 'input')) {
+  // Worker-death reconciliation is validated against the full Run/launch/
+  // generation/Journal cut by readRecoveryClosure, not as a tool approval.
+  if (run.waitingReason === 'approval' || (run.status === 'waiting' && run.nextStep === 'tool' &&
+      run.waitingReason !== 'input' && run.waitingReason !== 'reconciliation')) {
     if (run.status !== 'waiting' || run.waitingReason !== 'approval' || !run.waitingOnRef || run.activeWorkerLaunchId || run.nextStep !== 'tool') {
       throw new TypeError('approval wait retains an execution worker or lacks its exact subject');
     }

@@ -637,6 +637,11 @@ function commitInitialSettlement(
       JSON.stringify(run.budgetReserved) !== JSON.stringify(runSnapshot.budgetReserved) ||
       JSON.stringify(run.budgetConsumed) !== JSON.stringify(runSnapshot.budgetConsumed)
     ) throw new ReducerSnapshotChanged();
+    // Journal-only evidence may settle, but only the recovery reducer may advance
+    // a frontier retained by its exact reconciliation wait.
+    if (commitContinuation && run.waitingReason === 'reconciliation') {
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'invocation continuation awaits worker recovery');
+    }
     const entries = readInvocationAttempt(connection, input.runId, input.opId, input.attempt);
     const prepared = entries.find((entry) => entry.phase === 'prepared');
     const claim = entries.find((entry) => entry.phase === 'dispatch_claimed');

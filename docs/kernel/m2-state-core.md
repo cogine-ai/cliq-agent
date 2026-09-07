@@ -122,7 +122,9 @@ not evidence that a process or containment has died.
   the original op/attempt/epoch/request/reservation, including older unresolved
   attempts; the Journal remains the sole authority for their current phases.
   Repeated requests do not collapse two attempts into one. Late trusted
-  settlements do not rewrite the wait or erase its original identities.
+  Journal-only settlements do not rewrite the wait or erase its original
+  identities. Normalized model/tool completion cannot advance its frontier or
+  Checkpoint underneath the wait; that requires the future recovery reducer.
 - Wait/witness metadata, both lifecycle rows, the Run and its state event
   commit together. Changed Run, heartbeat, generation or Journal cuts reject
   before mutation. Publication/transaction failures cannot partially fence a
