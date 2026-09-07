@@ -674,12 +674,13 @@ async function acquireOrBootstrapStateOwner(
     if (latestOwner.state !== 'terminal' || latestOwner.terminalReason !== 'graceful_release') {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'latest state owner is not cleanly acquirable');
     }
+    const retainedRuntime = await artifacts.readCanonical<{ format?: string }>(latestOwner.runtimeBundleRef);
     const supervisor = runtimeBundle?.entries.find((entry) => entry.role === 'supervisor');
     if (runtimeBundle ? canonicalSha256(runtimeBundle) !== latestOwner.runtimeBundleRef ||
         runtimeBundle.manifestDigest !== latestOwner.runtimeBundleManifestDigest ||
         supervisor?.entryId !== latestOwner.supervisorEntryId || supervisor.version !== latestOwner.supervisorEntryVersion ||
         supervisor.digest !== latestOwner.supervisorExecutableDigest :
-        (await artifacts.readCanonical<{ format: string }>(latestOwner.runtimeBundleRef)).format !== 'cliq-kernel-schema-manifest-v1') {
+        retainedRuntime.format !== 'cliq-kernel-schema-manifest-v1') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'reopen requires the same signed Supervisor authority; runtime upgrades need their own transition');
     }
     return acquireAfterGracefulRelease(stateRoot, driver, artifacts, latestOwner);

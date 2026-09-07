@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { readdir, rm } from 'node:fs/promises';
+import { readdir, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
-import { KERNEL_DATABASE_FILENAME } from '../config.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { PlatformProcessIdentityV1, StateOwnerAcquisitionEvidenceV1 } from '../kernel/types.js';
@@ -105,5 +105,25 @@ test('signed-owner reopen requires explicit trusted roots and the same runtime, 
     const acquisition = await store.artifacts.readCanonical<StateOwnerAcquisitionEvidenceV1>(second.acquisitionEvidenceRef);
     assert.equal(acquisition.kind, 'acquire_after_graceful_release');
     assert.equal(acquisition.instanceNonceDigest, second.instanceNonceDigest);
+  } finally { await store?.close(); await rm(stateRoot, { recursive: true, force: true }); }
+});
+
+test('signed-owner reopen refuses a missing retained runtime before committing a successor', async () => {
+  const stateRoot = await makePrivateDir('.cliq-runtime-owner-missing-');
+  let store: StateStore | undefined;
+  try {
+    const authority = await signedToolBundle(testFixture().assembly, []);
+    store = await openStateStore(stateRoot, authority);
+    await store.close();
+    const released = ownerAt(stateRoot);
+    const retained = path.join(stateRoot, KERNEL_CAS_DIRECTORY, released.runtimeBundleRef);
+    const saved = path.join(stateRoot, 'saved-runtime');
+    await rename(retained, saved);
+    try {
+      await assert.rejects(async () => { store = await openStateStore(stateRoot, authority); }, { code: 'ENOENT' });
+      assert.deepEqual(ownerAt(stateRoot), released);
+    } finally { await rename(saved, retained); }
+    store = await openStateStore(stateRoot, authority);
+    assert.equal(ownerAt(stateRoot).ownerEpoch, released.ownerEpoch + 1);
   } finally { await store?.close(); await rm(stateRoot, { recursive: true, force: true }); }
 });
