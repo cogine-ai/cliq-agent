@@ -21,7 +21,7 @@ export async function fixtureInspector(fixture: Awaited<ReturnType<typeof create
     supervisorEntryId: supervisor.entryId, supervisorEntryVersion: supervisor.version, supervisorExecutableDigest: supervisor.digest,
     processIdentityRef: owner.processIdentityRef, processIdentityDigest: owner.processIdentityDigest,
     stateLockIdentityRef: owner.stateLockIdentityRef, stateLockIdentityDigest: owner.stateLockIdentityDigest,
-    instanceNonceDigest: canonicalSha256('offline-inspector-nonce'), activatedAt: owner.acquiredAt, identityDigest: '' };
+    instanceNonceDigest: owner.instanceNonceDigest, activatedAt: owner.acquiredAt, identityDigest: '' };
   inspector.identityDigest = digestOmitting(inspector, 'identityDigest');
   const artifact = await fixture.store.artifacts.publishCanonical(inspector, inspector.format);
   return { inspector, identity: { inspectorIdentityRef: artifact.ref, inspectorIdentityDigest: inspector.identityDigest } };

@@ -185,7 +185,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       const selected = await cut(input.expectedRunRevision);
       return commitDerivedStop(selected, async (now) => {
         if (now >= selected.run.deadlineAt) return { intent: deadlineIntent(now) };
-        return prepareModelFailureStop(artifacts, owner, assembly, selected, {
+        return prepareModelFailureStop(artifacts, assertActiveStateOwner(driver, owner), assembly, selected, {
           inspectorIdentityRef: input.inspectorIdentityRef, inspectorIdentityDigest: input.inspectorIdentityDigest
         }, now);
       });

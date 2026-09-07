@@ -127,7 +127,7 @@ test('unknown attempts retain full charges, exact backoff, stable bytes and an e
     assert.equal(terminal.run.status, 'running'); // Stop/drain is the owner's responsibility, not this gate's.
     assert.deepEqual(terminal.journal.filter(row => row.phase === 'dispatch_claimed').map(row => row.attempt), [0, 2, 3]);
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material });
     assert.deepEqual((await fixture.agent.readModelAttempt())?.retry, exhausted?.retry);
   } finally { await disposeFixture(fixture); }
@@ -336,7 +336,7 @@ test('reopening during backoff derives readiness from settlement and keeps the r
       snapshotEvidenceDigest: proof.snapshot.evidenceDigest, checkpointReason: 'handoff' });
     await fixture.store.close();
     now += 499;
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed?.releaseKeys });
     assert.deepEqual((await fixture.agent.readModelAttempt())?.retry, retry);
     const worker = await activateFixtureWorker(fixture, 'model-retry-resumed');

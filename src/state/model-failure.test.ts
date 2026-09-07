@@ -27,7 +27,7 @@ const stop = async (fixture: Fixture) => fixture.agent.stopForModelFailure({ exp
   ...(await fixtureInspector(fixture)).identity });
 async function reopen(fixture: Fixture) {
   await fixture.store.close();
-  fixture.store = await openStateStore(fixture.stateRoot);
+  fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
   fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
 }
 const usableBytes = (text: string) => JSON.stringify({ id: 'response', object: 'response', status: 'completed', model: 'model-1', output: [
@@ -161,6 +161,8 @@ test('model failure requires the current inspector and rejects caller-selected r
     await assert.rejects(fixture.agent.stopForModelFailure({ ...command, inspectorIdentityDigest: canonicalSha256('wrong') }), /inspector/);
     for (const change of [
       { supervisorInstanceId: 'foreign-owner' }, { supervisorExecutableDigest: canonicalSha256('foreign-executable') },
+      { instanceNonceDigest: canonicalSha256('foreign-nonce') }, { supervisorEntryVersion: 'foreign-version' },
+      { runtimeBundleRef: canonicalSha256('foreign-bundle') },
       { stateLockIdentityDigest: canonicalSha256('foreign-lock') }, { activatedAt: '9999-01-01T00:00:00.000Z' },
       { extra: 'not a closed inspector' }
     ]) {
@@ -254,6 +256,9 @@ test('rehashing substituted failure evidence cannot change its Journal, frontier
     const foreignInspector = { ...inspector, supervisorInstanceId: 'foreign-owner', identityDigest: '' };
     foreignInspector.identityDigest = digestOmitting(foreignInspector, 'identityDigest');
     const foreignArtifact = await fixture.store.artifacts.publishCanonical(foreignInspector, foreignInspector.format);
+    const foreignNonce = { ...inspector, instanceNonceDigest: canonicalSha256('foreign-nonce'), identityDigest: '' };
+    foreignNonce.identityDigest = digestOmitting(foreignNonce, 'identityDigest');
+    const nonceArtifact = await fixture.store.artifacts.publishCanonical(foreignNonce, foreignNonce.format);
     for (const change of [
       { runId: 'foreign-run' }, { failingOpId: 'foreign-op' },
       { frontierDigest: canonicalSha256('foreign-frontier') },
@@ -261,6 +266,7 @@ test('rehashing substituted failure evidence cannot change its Journal, frontier
       { unusableResponseRef: evidence.frontierRef }, { unusableResponseDigest: canonicalSha256('foreign-response') },
       { observedAt: new Date(now - 5001).toISOString() }, { observedAt: new Date(now + 1).toISOString() },
       { inspectorIdentityRef: foreignArtifact.ref, inspectorIdentityDigest: foreignInspector.identityDigest },
+      { inspectorIdentityRef: nonceArtifact.ref, inspectorIdentityDigest: foreignNonce.identityDigest },
       { failureKind: 'model_attempts_exhausted' }, { failureCode: 'transport_exhausted' }
     ]) {
       const forged = { ...evidence, ...change };

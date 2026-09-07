@@ -63,7 +63,7 @@ test('real model admission binds zero-based identity, native bytes and the full 
     assert.equal(Object.isFrozen(current.invocation.input), true);
     assert.equal('grant' in current, false);
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material });
     const restored = await fixture.agent.readToolInvocation();
     assert.deepEqual(restored.invocation, current.invocation);
@@ -126,7 +126,7 @@ test('compaction journals the greatest closed prefix, atomically replaces contex
     assert.equal(next.projection.messages[2]?.contentUtf8, '# Summary\n\nThe first read was rejected.');
     assert.equal(next.projection.messages.filter((message) => message.role === 'assistant').length, 2);
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material });
     const recoveredNext = await fixture.agent.readModelAttempt();
     assert.ok(recoveredNext);
@@ -188,7 +188,7 @@ test('ambiguous compaction retries keep their exact plan and bytes, installing o
     assert.equal(items.filter(item => item.kind === 'context_compaction').length, 1);
     assert.equal((await prepare(fixture)).prepared.request.kind, 'normal');
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material });
   } finally { await disposeFixture(fixture); }
 });
@@ -212,7 +212,7 @@ test('a shape-valid summary that does not shrink the complete prompt is charged 
     assert.deepEqual(after.items, before.items);
     assert.equal(after.latestCheckpoint.contextManifestRef, before.latestCheckpoint.contextManifestRef);
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material });
     assert.equal((await fixture.agent.readModelAttempt())?.disposition, 'stop_required');
   } finally { await disposeFixture(fixture); }
@@ -266,7 +266,7 @@ test('an invalid batch atomically retains every call and ordered result, then re
       { code: 'BATCH_REJECTED_BEFORE_DISPATCH', invalidCallIds: ['a', 'b'] }, { code: 'TOOL_INPUT_INVALID' }, { code: 'TOOL_NOT_FOUND' }
     ]);
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     const recovered = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(recovered.items.length, 5);
     assert.equal(recovered.run.frontierRef, next.run.frontierRef);
@@ -389,7 +389,7 @@ test('JSON-looking final text stays inert and cannot mark an unverified Run succ
     await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: completed.run.revision, leaseEpoch: fixture.leaseEpoch }),
       error => error instanceof AgentHandoffPendingError && error.disposition === 'candidate_required' && error.evidenceRef === completed.entry.resultRef);
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material });
     assert.equal((await fixture.agent.readModelAttempt())?.disposition, 'candidate_required');
     await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch }),

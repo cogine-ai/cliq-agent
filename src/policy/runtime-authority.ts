@@ -36,20 +36,14 @@ export function policyProfile(): PolicyEngineProfileV1 {
   return { ...core, profileDigest: canonicalSha256(core) };
 }
 
-/** Verify the signed manifest and exact selected policy/tool identities, not installation or other structured-root semantics. */
-export function verifyToolRuntimeAuthority(input: {
-  assembly: RunAssemblyV1; policy: RunPolicySnapshotV1; bundle: RuntimeBundleManifest;
-  profile: PolicyEngineProfileV1; tools: ToolContractManifestV1['entries']; releaseKeys: readonly ReleaseTrustKey[];
-}): void {
-  const { assembly, policy, bundle, profile, tools, releaseKeys } = input;
+/** Signed manifest structure and role identities only; consumers still verify their selected bytes and semantics. */
+export function verifyRuntimeBundle(bundle: RuntimeBundleManifest, releaseKeys: readonly ReleaseTrustKey[]): void {
   const { signature: _signature, manifestDigest: _digest, ...bundleCore } = bundle;
   if (!exactKeys(bundle, ['schemaVersion', 'bundleVersion', 'controlProtocolRange', 'headlessSchemaRange',
     'stateSchemaRange', 'workerProtocolRange', 'entries', 'structuredArtifacts', 'guestToolchainManifestRefs',
     'publisherKeyId', 'manifestDigest', 'signature']) || bundle.schemaVersion !== 1 ||
       typeof bundle.bundleVersion !== 'string' || !bundle.bundleVersion || canonicalJsonBytes(bundle).byteLength > 1_048_576 ||
-      canonicalSha256(bundleCore) !== bundle.manifestDigest ||
-      canonicalSha256(bundle) !== assembly.runtime.runtimeBundleRef || bundle.manifestDigest !== assembly.runtime.runtimeBundleManifestDigest ||
-      policy.engine.runtimeBundleRef !== assembly.runtime.runtimeBundleRef) throw new TypeError('policy RuntimeBundle identity mismatch');
+      canonicalSha256(bundleCore) !== bundle.manifestDigest) throw new TypeError('RuntimeBundle identity mismatch');
   for (const range of [bundle.controlProtocolRange, bundle.headlessSchemaRange, bundle.stateSchemaRange, bundle.workerProtocolRange]) {
     if (!exactKeys(range, ['min', 'max']) || !Number.isSafeInteger(range.min) || !Number.isSafeInteger(range.max) ||
         range.min < 1 || range.min > range.max) throw new TypeError('invalid RuntimeBundle protocol range');
@@ -84,6 +78,18 @@ export function verifyToolRuntimeAuthority(input: {
       byRole('trust_store').length !== 1 || byRole('trust_store')[0]!.entryId !== 'default_https_trust_store' ||
       byRole('trust_store')[0]!.executable || byRole('sandbox_root_profile').length < 1 ||
       byRole('sandbox_root_profile').some((entry) => entry.executable)) throw new TypeError('RuntimeBundle required roles are missing or ambiguous');
+}
+
+/** Verify the signed manifest and exact selected policy/tool identities, not installation or other structured-root semantics. */
+export function verifyToolRuntimeAuthority(input: {
+  assembly: RunAssemblyV1; policy: RunPolicySnapshotV1; bundle: RuntimeBundleManifest;
+  profile: PolicyEngineProfileV1; tools: ToolContractManifestV1['entries']; releaseKeys: readonly ReleaseTrustKey[];
+}): void {
+  const { assembly, policy, bundle, profile, tools, releaseKeys } = input;
+  verifyRuntimeBundle(bundle, releaseKeys);
+  if (canonicalSha256(bundle) !== assembly.runtime.runtimeBundleRef || bundle.manifestDigest !== assembly.runtime.runtimeBundleManifestDigest ||
+      policy.engine.runtimeBundleRef !== assembly.runtime.runtimeBundleRef) throw new TypeError('policy RuntimeBundle identity mismatch');
+  const byRole = (role: string) => bundle.entries.filter((entry) => entry.role === role);
   const profileEntry = byRole('policy_engine')[0]!;
   if (profileEntry.executable || profileEntry.entryId !== policy.engine.profileEntryId || profileEntry.version !== policy.engine.version ||
       profileEntry.digest !== policy.engine.profileRef || profileEntry.byteCount !== canonicalJsonBytes(profile).byteLength) {

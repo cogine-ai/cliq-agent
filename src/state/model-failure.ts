@@ -1,6 +1,6 @@
 import { digestOmitting, modelOperationId, parseCanonicalTime } from '../kernel/identity.js';
 import type { ModelResponseFailureEvidenceV1 } from '../kernel/stop.js';
-import type { RecoveryClosureV1, RunAssemblyV1, RunFrontier, SupervisorInspectorIdentityV1 } from '../kernel/types.js';
+import type { RecoveryClosureV1, RunAssemblyV1, RunFrontier, StateOwnerRecordV1, SupervisorInspectorIdentityV1 } from '../kernel/types.js';
 import type { ModelRequestV1, NormalPromptProjectionV1 } from '../model/request.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import type { ModelUnusableResponseV1 } from '../protocol/agent-ir.js';
@@ -9,7 +9,7 @@ import { stopInvocationHistory, type ModelFailureStopIntent } from '../runtime/s
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { isZeroBudget } from './invariants.js';
-import { readStateOwner, type StateOwnerContext } from './state-owner.js';
+import { readStateOwner } from './state-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
 
@@ -46,7 +46,7 @@ async function readModelFailureCause(artifacts: ArtifactCatalog, cut: RecoveryCl
 }
 
 /** The state owner observes its Journal now and constructs the wrapper; callers supply no reason or evidence artifact. */
-export async function prepareModelFailureStop(artifacts: ArtifactCatalog, owner: StateOwnerContext, assembly: RunAssemblyV1,
+export async function prepareModelFailureStop(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, assembly: RunAssemblyV1,
   cut: RecoveryClosureV1, identity: Inspector, observedAt: string) {
   if (assembly.mcpServers.length) return undefined;
   const cause = await readModelFailureCause(artifacts, cut, observedAt);

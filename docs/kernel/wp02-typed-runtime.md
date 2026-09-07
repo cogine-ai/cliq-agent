@@ -439,8 +439,9 @@ select a failure reason or supply an arbitrary evidence artifact.
   context, completed Journal result and unusable-response digest. Original
   response bytes and the full request charge remain unchanged. It adds no
   model turn, candidate, tool batch, summary or semantic retry.
-- Its inspector must match the current state owner, process/lock identities and
-  frozen runtime's Supervisor entry. Inspector validation is shared with worker
+- Its inspector must match the current state owner's complete runtime/entry,
+  executable, instance nonce and process/lock identities, as well as the frozen
+  runtime's Supervisor entry. Inspector validation is shared with worker
   checkpoint sealing. The observation is derived at canonical time and must
   still be within five seconds when the stop commits.
 - Evidence metadata, the winning intent, Run revision and event commit together.
@@ -454,6 +455,19 @@ select a failure reason or supply an arbitrary evidence artifact.
   restart or later drain does not invalidate an already committed observation.
   New observations require the new state owner. Deadline/budget and user
   cancellation keep their existing higher precedence.
+
+The necessary bootstrap companion is
+`openStateStore(stateRoot, {bundle, releaseKeys})`: trusted Supervisor composition
+supplies the signed runtime before any Run or workspace configuration is loaded.
+Bootstrap verifies the release signature, state-schema range and actual current
+process image digest, then atomically binds the owner/acquisition to that bundle.
+Reopening a signed owner requires explicit trusted roots and the same bundle;
+it cannot silently upgrade the runtime or fall back to schema-only authority.
+The earlier no-argument M2 storage-only bootstrap remains available to state-core
+callers, but cannot supply a valid signed inspector. Tests now bootstrap matching
+signed owners instead of mixing a schema-only owner with another runtime's
+inspector. This does not qualify native OS-lock/containment enforcement, install
+a release, or add runtime-upgrade/takeover handling.
 
 Malformed, oversized, operation-invalid and provider-rejected received responses
 all use this closure. Compaction failures retain their dedicated resource-stop

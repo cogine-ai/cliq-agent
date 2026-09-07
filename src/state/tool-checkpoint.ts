@@ -1,6 +1,6 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
-import type { Run, RunAssemblyV1, RunSpec, SupervisorInspectorIdentityV1, WorkerLaunch, WorkspaceGenerationStateV1 } from '../kernel/types.js';
+import type { Run, RunAssemblyV1, RunSpec, StateOwnerRecordV1, SupervisorInspectorIdentityV1, WorkerLaunch, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import type { ToolCheckpointProof } from '../kernel/tool-authorization.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -10,7 +10,7 @@ import { KernelStorageError } from './errors.js';
 import { readRequiredWorkerLaunch, updateWorkerLaunch } from './repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef, updateWorkspaceGeneration } from './repositories/workspace-generations.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
-import { readStateOwner, type StateOwnerContext } from './state-owner.js';
+import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { readCheckpoint } from './rows.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
 
@@ -26,8 +26,7 @@ type DeathEvidence = {
   observedAt: string; evidenceDigest: string;
 };
 
-async function readCheckpointProof(artifacts: ArtifactCatalog, owner: Pick<StateOwnerContext,
-  'supervisorInstanceId' | 'ownerEpoch' | 'processIdentityRef' | 'processIdentityDigest' | 'stateLockIdentityRef' | 'stateLockIdentityDigest'>, input: {
+async function readCheckpointProof(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; checkpointId: string; observedAt: string; postEffect: ToolCheckpointProof;
   launch: WorkerLaunch; generation: WorkspaceGenerationStateV1;
 }) {
@@ -102,7 +101,7 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
       generation.phase !== 'checkpointing' || generation.quiesceId !== launch.quiesceId ||
       generation.activeWorkerLaunchId !== launch.launchId || generation.leaseEpoch !== run.leaseEpoch ||
       launch.leaseEpoch !== run.leaseEpoch) throw new KernelStorageError('LEASE_FENCED', 'tool result requires a quiesced checkpointing generation');
-  const { metadata, snapshot, deathObservedAt } = await readCheckpointProof(artifacts, owner, { ...input, launch, generation });
+  const { metadata, snapshot, deathObservedAt } = await readCheckpointProof(artifacts, assertActiveStateOwner(driver, owner), { ...input, launch, generation });
   return { metadata, commit(connection: SqliteConnection, currentRun: Run, createdAt: string) {
     if (parseCanonicalTime(createdAt) - parseCanonicalTime(deathObservedAt) > 5_000) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale; reobserve containment death');
     if (createdAt < snapshot.observedAt || currentRun.activeWorkerLaunchId !== launch.launchId || currentRun.leaseEpoch !== run.leaseEpoch ||

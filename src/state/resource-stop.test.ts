@@ -22,7 +22,7 @@ async function cancel(fixture: Fixture) {
 }
 async function reopen(fixture: Fixture) {
   await fixture.store.close();
-  fixture.store = await openStateStore(fixture.stateRoot);
+  fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
   fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
 }
 async function finish(fixture: Fixture, checkpointId: string) {
