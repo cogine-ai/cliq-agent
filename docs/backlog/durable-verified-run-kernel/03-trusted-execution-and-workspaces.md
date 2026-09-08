@@ -113,6 +113,13 @@ Likely files/modules:
 
 Implementation notes:
 
+The hidden native owner now provides the descriptor-relative quarantine move
+primitive described in [M2 state core](../../kernel/m2-state-core.md#native-generation-quarantine-relocation).
+It supports fixed Linux generation-directory and macOS backing-file locators,
+no-replace relocation, parent fsync and exact-target crash retry. It is not yet
+connected to containment death, guest inspection, quarantine evidence or the
+SQLite recovery reducer, and does not advance this work package's completion.
+
 1. **Freeze the platform matrix and launch contract.** The launcher accepts only this versioned closed contract; there is no unversioned `SandboxLaunchSpec`, owner bag, arbitrary argv/env/mount variant, or backend-specific widening:
 
     ```ts
@@ -1170,7 +1177,6 @@ Implementation notes:
             directoryFileId: string
             ownerUid: number
             mode: 448
-            linkCount: 1
           }
         | {
             kind: 'macos_vm_volume'

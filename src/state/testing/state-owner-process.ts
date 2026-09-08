@@ -7,6 +7,7 @@ import { KERNEL_DATABASE_FILENAME } from '../../config.js';
 import { openSqliteDriver } from '../sqlite-driver.js';
 import { readLatestStateOwner } from '../state-owner.js';
 import type { StateStoreRuntimeAuthority } from '../store.js';
+import type { WorkspaceGenerationIdentityV1 } from '../../kernel/types.js';
 
 type ChildReply = { state: string; message?: string; epoch?: number; pid?: number; token?: string;
   stateRoot?: string; runId?: string; launchId?: string; runRevision?: number; leaseEpoch?: number; leaseVersion?: number };
@@ -29,6 +30,10 @@ export async function childFor(t: TestContext, root: string, mode: 'store' | 'na
   return { child, exited, request(command: 'acquire' | 'close' | 'drop-lock', authority?: StateStoreRuntimeAuthority) {
     const pending = reply();
     child.send(authority ? { command, authority } : command);
+    return pending;
+  }, quarantine(generation: WorkspaceGenerationIdentityV1, sourceRowVersion: number) {
+    const pending = reply();
+    child.send({ command: 'quarantine', generation, sourceRowVersion });
     return pending;
   } };
 }
