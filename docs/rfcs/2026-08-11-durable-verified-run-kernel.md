@@ -3,7 +3,7 @@
 **Status:** Final
 **Date:** 2026-08-11
 **Decision Type:** Architecture
-**Implementation Status:** Hidden M0 qualification, M1 admission/state-store, and M2 WP01 state-core slices landed; Kernel Cut not implemented. Native ownership takeover and migration/rollback remain open, and the default CLI/TUI still uses the legacy runtime.
+**Implementation Status (2026-09-26, main `0f2fa146`):** Hidden M0/M1/M2 foundations, native StateOwner crash takeover, worker-loss fencing/quarantine primitives, and substantial WP02 typed continuation have landed. Supervisor/broker/verification/package integration and migration/rollback remain incomplete; the default CLI/TUI still uses the legacy runtime. See the [six-package design review](../kernel/2026-09-26-design-review.md) for current evidence and remaining boundaries. Kernel Cut has not passed.
 **Audience:** Core maintainers, implementers, reviewers, and integration authors
 
 > **Product promise:** **Delegate. Detach. Return to verified work.**
@@ -10391,6 +10391,12 @@ The direction fails if, after 500 eligible Runs, detach usage remains below 30%,
 ## 21. Implementation Work Packages
 
 All work packages are required for the same Kernel Cut:
+
+The [2026-09-26 design review](../kernel/2026-09-26-design-review.md) records
+the refreshed source comparison, implementation status, module boundaries,
+internal integration checkpoints and qualification workload definitions. Those
+checkpoints organize implementation within this cut; they do not change the
+semantic contract or create independent product releases.
 
 1. [Durable State And Migration](../backlog/durable-verified-run-kernel/01-durable-state-and-migration.md)
 2. [Typed Runtime And Provider Capabilities](../backlog/durable-verified-run-kernel/02-typed-runtime-and-provider-capabilities.md)

@@ -6,6 +6,12 @@
 
 READY WITH RISKS
 
+Reviewed against main `0f2fa146` on 2026-09-26. The current package and public
+clients still use legacy composition. The
+[cross-package review](../../kernel/2026-09-26-design-review.md) requires signed
+installation and generated-client integration from I1, with one public Kernel
+Cut only after all six package gates pass.
+
 The ecosystem and cutover decisions are closed. The work is implementable, but it is the final integration package: protocol compatibility, state migration, and removal of the legacy runtime create a high blast radius. It may be built in parallel, but it cannot ship as the default until work packages 01-05 and every RFC release gate pass together.
 
 ### Source
@@ -152,169 +158,17 @@ Implementation notes:
 
    The exact state-changing request types are:
 
-   ```ts
-   type MutationBase = {
-     protocolVersion: 1
-     requestId: string
-     requestDigest: string
-   }
-
-   type BudgetOptions = Partial<RunSpec['budgets']>
-
-   type NonSecretEnvValueRequest = {
-     kind: 'non_secret_literal'
-     value: string
-   }
-
-   type NonSecretArgumentRequest = {
-     kind: 'non_secret_literal'
-     value: string
-   }
-
-   type SourceSelectorRequest = {
-     path: string
-     scope: 'entry' | 'subtree'
-     readGrantId?: string
-   }
-
-   type VerifierRequest = {
-     id: string
-     version: string
-     required: boolean
-     executable:
-       | { kind: 'toolchain'; toolId: string }
-       | { kind: 'workspace_script'; path: string; expectedDigest?: string }
-     argv: NonSecretArgumentRequest[]
-     cwd: string
-     env: Record<string, NonSecretEnvValueRequest>
-     writableEphemeralPaths: string[]
-     identityReadGrantId: string
-     executionGrantId?: string
-     timeoutMs?: number
-     retries?: number
-     outputLimitBytes?: number
-   }
-
-   type DependencyRequest =
-     | { mode: 'none' }
-     | {
-         mode: 'locked'
-         registryEndpointIds: string[]
-         credentialGrantIds: string[]
-         allowInstallScripts: boolean
-         installScriptsGrantId?: string
-         maxPackages?: number
-         maxDownloadBytes?: number
-       }
-
-   type RunModelRequest =
-     | {
-         provider: 'ollama'
-         model: string
-         endpoint?: never
-         modelCredentialGrantIds?: never
-       }
-     | {
-         provider: 'openai' | 'anthropic' | 'openrouter' | 'openai-compatible' | 'zhipu'
-         model: string
-         endpoint: { kind: 'registered'; endpointRegistrationId: string }
-         modelCredentialGrantIds: string[]
-       }
-
-   type RunSubmitRequest = MutationBase & {
-     method: 'run.submit'
-     admissionKey: string
-     sessionId: string
-     expectedContextRevision: number
-     workspacePath: string
-     objective: string
-     model: RunModelRequest
-     policyMode: 'default' | 'accept-edits' | 'plan' | 'yolo'
-     budgets?: BudgetOptions
-     sandboxResources?: Partial<SandboxResourceSpec>
-     verifiers: VerifierRequest[]
-     dependency: DependencyRequest
-     sourceIncludes: SourceSelectorRequest[]
-     sourceExcludes: Array<Omit<SourceSelectorRequest, 'readGrantId'>>
-     maxChangedPaths?: number
-     maxChangedBytes?: number
-     registeredMcpServerIds: string[]
-     skillIds: string[]
-     allowUnverified: boolean
-   }
-   ```
+   Canonical types: `MutationBase`, `BudgetOptions`, `NonSecretEnvValueRequest` and 6 related definitions.
+   Import their complete definitions from
+   [RFC 15. Surfaces And Ecosystem Thin Waist](../../rfcs/2026-08-11-durable-verified-run-kernel.md#15-surfaces-and-ecosystem-thin-waist).
+   This package enforces that contract without a second schema copy.
 
    `RunModelRequest` rejects forbidden members rather than ignoring them. Ollama carries neither endpoint nor credential ids and resolves only the same-user active signed local-model registration/service. Every remote provider requires an explicit registered endpoint id; a bundled default is an ordinary immutable registration whose id came from `cliq auth`, not a hidden lookup. Every billable branch has 1..32 unique model-purpose credential ids bound to that exact endpoint/owner/TLS through the Run deadline. Any missing/empty/extra/duplicate/cross-target field fails before capability negotiation or I/O and remains in request/admission digest normalization.
 
-   ```ts
-   type RunCancelRequest = MutationBase & {
-     method: 'run.cancel'
-     runId: string
-     expectedRevision: number
-   }
-
-   type RunApproveRequest = MutationBase & {
-     method: 'run.approve'
-     runId: string
-     expectedRevision: number
-     waitingOnRef: ArtifactRef
-     decision: 'allow' | 'deny'
-     ttlMs?: number
-   }
-
-   type RunInputRequest = MutationBase & {
-     method: 'run.input'
-     runId: string
-     expectedRevision: number
-     waitingOnRef: ArtifactRef
-     input: { kind: 'text'; value: string } | { kind: 'json'; value: unknown }
-   }
-
-   type RunReconcileRequest = MutationBase & {
-     method: 'run.reconcile'
-     runId: string
-     expectedRevision: number
-     waitingOnRef: ArtifactRef
-     resolution:
-       | { kind: 'probe_now' }
-       | { kind: 'abandon_run'; acknowledgeExactRisk: true }
-   }
-
-   type RunApplyRequest = MutationBase & {
-     method: 'run.apply'
-     admissionKey: string
-     sourceRunId: string
-     expectedRunResultRef: ArtifactRef
-     budgets?: { wallTimeMs?: number; toolCalls?: number }
-     verifierExecutionGrantIds?: string[]
-   }
-
-   type SessionCreateRequest = MutationBase & {
-     method: 'session.create'
-     admissionKey: string
-     workspacePath: string
-     name?: string
-   }
-
-   type SessionForkRequest = MutationBase & {
-     method: 'session.fork'
-     admissionKey: string
-     sessionId: string
-     expectedContextRevision: number
-     throughItemSeq: number
-     name?: string
-   }
-
-   type SessionCompactRequest = MutationBase & {
-     method: 'session.compact'
-     sessionId: string
-     expectedContextRevision: number
-     fromItemSeq: number
-     throughItemSeq: number
-     summaryMarkdown: string
-     retainedItemIds: string[]
-   }
-   ```
+   Canonical types: `RunCancelRequest`, `RunApproveRequest`, `RunInputRequest` and 5 related definitions.
+   Import their complete definitions from
+   [RFC 15. Surfaces And Ecosystem Thin Waist](../../rfcs/2026-08-11-durable-verified-run-kernel.md#15-surfaces-and-ecosystem-thin-waist).
+   This package enforces that contract without a second schema copy.
 
    The same generated source imports verbatim the RFC's `ControlQueryRequestV1|ControlMutationRequestV1|ControlRequestV1`, discriminated `AuthorizationCreateRequest|AuthorizationRevokeRequest`, `McpRecoveryRequest|McpRegisterRequest|McpRefreshRequest`, and the complete result side: `ArtifactDescriptorV1`, `SessionSnapshotV1`, `SessionSummaryV1`, `RunSnapshotV1`, `RunItemReferenceV1`, `AuthorizationGrantSummaryV1`, `McpRegistrySummaryV1`, `RuntimeBundlePublicSummaryV1`, the method-discriminated `ControlResultV1`, `ControlErrorV1`, and `ControlApplicationResponseV1`. Those unions are the only public request/result/error source: every method maps to exactly one listed variant; query filters/cursors and list/get/attach arrays retain the RFC bounds; authorization/MCP summaries use its redaction; consumed authorization revoke is the exact `already_consumed` no-op variant. It must not expose an ArtifactRef where the public request uses an opaque grant/registration id. `run.get/list/attach`, `session.get/list`, `authorization.list`, `mcp.list`, `artifact.get`, `run.diff/result`, `session.handoff.create`, and `supervisor.status` are read-only and reject `requestId`. Handoff imports exact `SessionHandoffEntryV1|SessionHandoffV1`: omitted cursor means the captured projection cut; explicit cursor is zero or a current segment end; one snapshot walks visible run-terminal/summary entries and excluded ranges. JSON is exact JCS and Markdown uses the fixed LF/indented-entry renderer with no time/random/path option. Both descriptors rehash those bytes, so identical Session/revision/cursor returns identical CAS refs.
 
@@ -1323,37 +1177,10 @@ Implementation notes:
 9. Support only structurally stateless-per-call MCP tools. Every stdio tool call starts a fresh strong containment with empty private HOME/TMP, retained read-only signed executable closure, no persistent writable mount/network/workspace/state/credentials, and no reuse across calls. Stable launch `opId = H(runId,batchItemId,callIndex,callId,registryManifestDigest,lifecycleSeq)`. Every launch has fresh prepared/reservation/claim and one tool charge. After initialize/capability/probed-tools-list validation it publishes exact `McpServerInstanceIdentityV1`, whose omission digest binds the full Run/batch/call/index, registry, lifecycle claim, SandboxLaunch, containment, nonce, and negotiated digests; only it may address `tools/call`. After teardown it publishes exact `McpServerLaunchReceiptV1`, binding that identity, all three Journal sequence facts, settlement, stopped item, and positive containment death. The one transaction commits Journal completed with identity result/launch receipt, the full-identity `McpServerStoppedItem`, ToolResult, settlement, and frontier advance. Unproven teardown waits with no completed launch or visible result; completed early stop increments lifecycle sequence; ambiguous preterminal launch retries only after death proof. HTTP uses a fresh no-cookie/no-session broker request. Grant expiry/exhaustion requires the exact batch/index-bound approval; takeover never adopts an instance.
 10. The signed, content-addressed `GuestToolchainManifest` payload is exact:
 
-    ```ts
-    type GuestExecutableIdentity = {
-      logicalName: string
-      canonicalGuestPath: string
-      digest: string
-      version: string
-    }
-
-    type GuestToolchainManifest = {
-      schemaVersion: 1
-      format: 'cliq-guest-toolchain-v1'
-      guestImageRef: ArtifactRef
-      guestImageDigest: string
-      guestImageByteCount: number
-      guestImageFormat: 'raw-ext4-v1'
-      architecture: 'arm64' | 'x86_64'
-      kernelAbi: string
-      userspaceAbi: string
-      worker: GuestExecutableIdentity
-      shell: GuestExecutableIdentity
-      git: GuestExecutableIdentity
-      node: GuestExecutableIdentity
-      packageManager?: GuestExecutableIdentity
-      searchTools: readonly GuestExecutableIdentity[]
-      verifiers: readonly GuestExecutableIdentity[]
-      admittedExecutables: readonly GuestExecutableIdentity[]
-      publisherKeyId: string
-      manifestDigest: string
-      signatureRef: ArtifactRef
-    }
-    ```
+    Canonical types: `GuestExecutableIdentity`, `GuestToolchainManifest`.
+    Import their complete definitions from
+    [RFC 9.1 Lease, Activation, And Process Containment](../../rfcs/2026-08-11-durable-verified-run-kernel.md#91-lease-activation-and-process-containment).
+    This package enforces that contract without a second schema copy.
 
     `manifestDigest` omits itself and `signatureRef` under JCS; that signature verifies through work package 03's bundled Cliq release trust store, and unknown/user/revoked keys fail closed. `guestImageRef` is the CAS address of the complete immutable `raw-ext4-v1` bytes, its digest equals their SHA-256/ArtifactRef, and byte count is exact. Paths are absolute canonical guest paths, logical names/paths are unique, and all strings/lists are bounded. Work package 03 verifies the signature, retained image bytes, and every executable digest before activation; plan/runtime binding/actual containment and GC repeat the same image ref/digest so reboot never consults a mutable installed-image path. Admission resolves all tools/verifiers against this guest identity and includes the manifest in `assemblyRef` and the environment fingerprint. A host Mach-O-only command, incompatible native dependency, or missing guest executable returns `UNSUPPORTED_EXECUTION_IDENTITY` before Run admission. Host `node_modules` are never assumed usable in the Linux guest. Any dependency acquisition is a separately approved, Journaled broker fetch of a locked digest into the private guest generation; the guest shell has no ambient network.
 11. The signed, content-addressed RuntimeBundle payload makes compatibility a closed manifest decision backed by digest/file probes:
@@ -1444,7 +1271,72 @@ Preserve / do not touch:
 - Preserve historical documents and legacy backups as read-only evidence.
 - Do not allow MCP, skills, `AGENTS.md`, provider adapters, or UI clients to define new control-plane truth.
 
+### Implementation refinement — 2026-09-26
+
+**Ship the integration substrate early.** WP06 owns a minimal real signed bundle,
+stable bootstrap, generated client and install fixture from I1. Consume the
+native StateOwner helper, strong backend and actual Supervisor; do not treat the
+current source tree or universal npm tarball as an already qualified package.
+The first installed path may use a fixture provider for mechanics, clearly
+labelled as such. Only qualified live or managed-local model evidence satisfies
+I2/provider release checks. Features remain internal until the single cut.
+
+**One consumer contract.** Generate protocol types, strict decoders, examples
+and client bindings from the same canonical source. CLI/TUI/JSONL/RPC call the
+same client operations. The example must retain request/admission identity,
+replay a lost submit response, drain one attach high-water, recover expired
+cursors from the inline snapshot, and read result availability from Run state.
+It must not reconstruct mutable authority from event text or open SQLite.
+
+**Qualify the first useful journey.** Use the
+[developer journey and TTHW target](../../kernel/2026-09-26-design-review.md#8-developer-journey-and-release-decisions)
+on clean supported macOS/Linux installations. The user installs, completes
+secure model setup, trusts a repository, submits with one required verifier,
+disconnects and retrieves an inspectable verified result. Document only real
+shipped commands; generate help/example assertions from their actual parser.
+No hand-edited internal files, copied artifact hashes or database repairs may
+be required. Applying the result remains a separate explicit user action.
+
+Diagnostics identify the failing layer (trust, permission, backend, model/budget,
+credential store, protocol version, recovery or result availability), render the
+existing closed error fields, and give one supported next action. Do not invent
+an unversioned error payload, bypass switch or new control method. Noninteractive
+output keeps stdout machine-readable and secrets out of stdout/stderr/detail.
+
+**Own a release evidence matrix.** Each supported OS/architecture row records
+the installed client/bootstrap/runtime/helper/guest identities, credential-store
+availability, service restart/reboot result and migration/rollback result. Each
+advertised provider/model row records exact endpoint/adapter/capability/pricing
+identities, evidence validity and native/text-only conformance. A missing or
+skipped row is not a pass. On Linux, an unavailable Secret Service must produce
+an actionable supported-store diagnostic before a billable admission; it cannot
+fall back to plaintext or ambient credential environment.
+
+Exercise old-client/new-server and new-client/old-server handshakes, compatible
+bundle update with active pinned Runs, incompatible `drain_required`, failed
+candidate startup and reboot. Record installed versus active versus pinned
+versions separately. Retain referenced old bundles until reachability permits
+cleanup; a client reinstall must not overwrite the active runtime. Use the same
+real StateStore and recovery path for fresh install, migration and update tests.
+
 ### Acceptance Criteria
+
+- [ ] I1 runs from the actual installed signed package and generated client on
+  each supported backend; source-only/native-probe fixtures are labelled and
+  cannot satisfy installation or restart evidence.
+- [ ] The first-use journey meets the documented command/file/credential target
+  and records elapsed time and explicit trust/permission decisions. Setup errors
+  expose the failing layer and one supported recovery action through existing
+  schemas, with no secret echo or privileged shortcut.
+- [ ] The generated example covers submit replay, attach paging/cursor expiry,
+  result availability and explicit apply as distinct operations against the
+  real Supervisor, and the same assertions run for all four surfaces.
+- [ ] Release evidence covers every advertised platform and model combination,
+  including native helper ABI, secure-store absence, evidence expiry and exact
+  provider billing eligibility. Missing proof blocks that advertised capability.
+- [ ] Installed upgrade/skew/reboot plus large migration/rollback pass the shared
+  campaign with one authority and no fallback runtime, manual DB edits or lost
+  accepted Runs.
 
 - [ ] CLI, TUI, JSONL, and RPC observe and control the same Run through one versioned local protocol; none executes the Run in-process.
 - [ ] Supervisor, generated client, CLI, TUI, JSONL, and RPC all import the checked-in output of one `src/control/v1/source.ts`; regeneration is byte-stable and CI fails on generated drift or a hand-authored parallel wire type.
@@ -1564,8 +1456,8 @@ Manual:
 Required sequence:
 
 1. Freeze the cross-package storage/broker/Supervisor/result interfaces and canonical v1 error union, then generate protocol v1/schema v3 once; 01-05 implement against those checked-in types rather than adapter-local substitutes.
-2. In parallel, build all control clients/adapters, Session command composition, provider conformance, MCP registry/lifecycle, guest-toolchain consumption, RuntimeBundle publishing/activation, instructions, telemetry, and migration against authoritative fakes and golden fixtures.
-3. Publish the current Kernel build as the first signed RuntimeBundle, install the stable state-root bootstrap, and integrate all six work packages behind the internal test-only toggle. Detached admission remains disabled until bootstrap recovery, pinned-bundle relaunch, and single-Supervisor ownership pass.
+2. Build the generated client, signed RuntimeBundle and stable bootstrap with the I1 path using actual StateStore/CAS. Use fixtures only for pure serialization and unavailable external adapters; no fake establishes process, installation, migration or provider qualification.
+3. Extend that installed integration with all clients, Session composition, provider qualification, MCP, guest toolchains, instructions, telemetry and migration behind the internal test-only toggle. Public detached admission remains disabled until bootstrap recovery, pinned-bundle relaunch, single-Supervisor ownership and the full Kernel-Cut gates pass.
 4. Run generation/build/unit, protocol, fault, sandbox, MCP, bundle-upgrade, retention, migration, end-to-end, 24-hour, and 50-repository gates.
 5. Create validated legacy backups, switch every surface/service selection/document to the new kernel in one release transaction, remove the old runtime/toggle and all dual write, and publish one Kernel Cut.
 

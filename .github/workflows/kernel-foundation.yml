@@ -31,6 +31,8 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - run: node --test scripts/kernel/check-design-contracts.test.mjs
+      - run: node scripts/kernel/check-design-contracts.mjs
       - run: npm run build
       - run: npm test
 

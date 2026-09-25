@@ -6,7 +6,13 @@
 
 READY WITH RISKS
 
-The product decisions are closed and the work is implementable. The visible risk is integration across the new Run store, typed runner, private workspace, and Supervisor contracts; this package must be developed against fakes until work packages 01-04 land, then pass the shared fault suite before cutover.
+Reviewed against main `0f2fa146` on 2026-09-26. The product contracts are defined,
+but verification/delivery is not yet integrated. Build against the existing real
+StateStore and typed continuation now; use fakes only at external execution
+boundaries that are not available yet. Real containment and installed-process
+evidence remain mandatory before completion. The
+[cross-package review](../../kernel/2026-09-26-design-review.md) defines the
+integration checkpoints and the additional repair-utility gate.
 
 ### Source
 
@@ -882,7 +888,77 @@ Preserve / do not touch:
 - Preserve old Session checkpoints and transaction artifacts as historical/read-only migration inputs.
 - Do not let the worker write SQLite, CAS metadata, the real workspace, or another child/parent workspace directly.
 
+### Implementation refinement — 2026-09-26
+
+**Implement the smallest complete proof path first.** Start with one root Run,
+one immutable candidate, one explicit required verifier and `commitRunResult`
+against the actual SQLite/CAS store. Connect it to I1's installed execution
+boundary before extending children and delivery. This is an internal dependency
+order, not a release without those features. An in-memory repository can test a
+pure classification function but cannot prove atomic receipts, budget settlement
+or recovery after a verifier process exits.
+
+Keep three narrow responsibilities: plan verification for the frozen candidate,
+classify positively established execution evidence, and propose the closed
+repair/result/delivery commit. WP03 owns process execution and evidence; WP01
+owns the transaction and sole terminal gate; WP04 owns scheduling and waits.
+Do not let a verifier adapter or model callback write Run status. Use the same
+classification/plan logic for live completion and recovered evidence.
+
+| Observation | Permitted continuation |
+| --- | --- |
+| At least one required check, all passing against the exact result | Build the complete verification closure and propose success through StateStore |
+| No required checks | `completed_unverified`; advisory passes cannot promote it |
+| Required assertion fails with quiescent evidence | Bounded model repair within frozen ceilings, then a new candidate and the complete required verifier set |
+| Infrastructure fails | Frozen same-digest verifier retry; never model edits to fix infrastructure |
+| Source mutation/integrity violation | Integrity stop, including for advisory checks; no valid success receipt |
+| Effect/process outcome unresolved | Journal ambiguity and the exact reconciliation wait; neither success nor a guessed failure receipt |
+| User/parent stop or deadline races completion | Existing StopIntent precedence and quiescent drain; no opportunistic terminal shortcut |
+
+**Make the proof useful to its consumer.** The result view must distinguish
+source candidate, executing verifier identity, required/advisory role, outcome,
+and inherited-delivery provenance using the exact existing closure. Retain raw
+stdout/stderr as audit artifacts with truncation indicators. Model context reads
+only the permitted repair projection; clients must not label a candidate or an
+advisory pass as verified success.
+
+The current `cliq-verifier-repair-redaction-v1` projection intentionally supplies
+only a verifier identity and exit code. Its practical repair value is unproven.
+Add a fixed corpus of repairable type, test and lint failures across supported
+repositories, execute the actual projection under the default two-repair budget,
+and report solved tasks, additional inspection/model work and exhausted repairs.
+Freeze the corpus, selected model, scoring rules and minimum repair success
+threshold before execution; include every attempted case in the report. Use the
+same verifier set, model and budgets in any diagnostic comparison.
+The quality gate requires evidence that the selected release model can recover
+useful failures with this projection; passing state transitions alone is
+insufficient. If missing diagnostic information prevents repair, propose a
+separate bounded, versioned diagnostic projection with source-bound locations,
+fixed parser identities, injection/secret tests and compatibility rules. Do not
+silently pass raw verifier logs or weaken required checks to make the gate pass.
+
+**Add concurrency and publication by extending that proof.** A repaired candidate
+invalidates previous candidate gating; a merged child result requires parent
+verification. A delivery Run reuses receipts only through exact-source provenance
+and otherwise verifies its new merge. Fault injection must distinguish the
+immutable successful agent result from a failed, stopped or ambiguous delivery;
+multi-path publication remains non-atomic and preserves displaced bytes.
+
 ### Acceptance Criteria
+
+- [ ] A real-store, real-containment required-verifier path produces a durable
+  same-source closure/result and survives process death before and after receipt
+  publication. No-required-check and advisory-only paths remain unverified.
+- [ ] Table-driven classification crosses required/advisory, exact/changed
+  source, known/unknown execution and stop races. Infrastructure never triggers
+  model repair; unresolved containment never produces a completed receipt.
+- [ ] A repair-utility report exercises the actual v1 projection and frozen
+  budgets on the selected qualified model. Missing useful diagnostics is an
+  explicit product blocker, not a reason to alter the frozen redaction policy
+  inside an implementation PR.
+- [ ] Child merge, delivery drift and post-exchange crashes preserve exactly
+  one allocation settlement, the appropriate verification closure and displaced
+  bytes, with the original agent result unchanged.
 
 - [ ] `Run.status='succeeded'`/`terminalReason='verified'` is impossible unless a durable `RunResult` exists and every frozen required verifier has a `passed` receipt for exactly `RunResult.resultSourceRef`.
 - [ ] `VerificationClosureV1` decodes as the closed canonical schema, hashes with only `closureDigest` omitted, is the sole legal proof in every verification-closure-bearing delivery/finalize frontier, and exactly aligns its Run/candidate/result/plan plus contiguous unique entry identities with the current `VerifierPlan`.
@@ -962,12 +1038,12 @@ Manual:
 
 Required sequence:
 
-1. Implement artifact schemas and pure completion/ceiling reducers against storage, workspace, and Supervisor fakes.
+1. Implement artifact schemas and completion/ceiling reducers against actual StateStore/CAS; test pure planning with values and substitute only missing external workspace/process adapters.
 2. Add verifier execution and receipt publication on frozen views.
 3. Add bounded repair and same-digest terminal gate.
 4. Add child admission/wakeup and serial patch merge.
 5. Add delivery Run and journaled publication.
-6. Integrate 01-04, then run shared crash/sandbox/end-to-end gates before Kernel Cut.
+6. Extend the already integrated path with child/delivery crash, sandbox, repair-utility and end-to-end gates before Kernel Cut; do not defer real-store integration until the end.
 
 Rollback (only for hard-to-reverse changes):
 

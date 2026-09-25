@@ -6,6 +6,11 @@
 
 READY WITH RISKS
 
+Reviewed against main `0f2fa146` on 2026-09-26. The
+[cross-package review](../../kernel/2026-09-26-design-review.md) separates current
+platform probes/native primitives from the complete installed execution path.
+The strong support matrix and three security layers remain unchanged.
+
 This work package is implementable without further product decisions. The visible risks are the signed macOS microVM supply chain, Linux cgroup delegation, Git edge cases, and workspace-image cost; none permits a fallback to host-process detached mutation.
 
 ### Source
@@ -413,73 +418,19 @@ SQLite recovery reducer, and does not advance this work package's completion.
 
    `sandboxProfileRef` freezes this exact resource contract:
 
-    ```ts
-    type SandboxResourceSpec = {
-      maxProcesses: number               // default 256; range 1..1024
-      memoryBytes: number                // default 4 GiB; range 256 MiB..32 GiB, host-clamped
-      cpuQuotaMicrosPerSecond: number    // default 400000; range 10000..1600000
-      maxOpenFiles: number               // default 1024; range 64..8192
-      maxSingleFileBytes: number         // default 2 GiB; range 1 MiB..16 GiB
-      maxGenerationBytes: number         // default 20 GiB; range 256 MiB..100 GiB
-      maxInvocationOutputBytes: number   // default 16 MiB; range 64 KiB..64 MiB
-      maxIpcFrameBytes: number           // fixed 16 MiB
-      maxQueuedIpcBytes: number          // fixed 64 MiB per Run
-    }
-
-    type SandboxProfileV1 = {
-      schemaVersion: 1
-      format: 'cliq-sandbox-profile-v1'
-      backend: 'macos_vm' | 'linux_namespace'
-      allowedOwners: Array<
-        'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service'
-      >
-      filesystemPolicy: 'typed_launch_spec_only'
-      hostFilesystemReachability: 'none'
-      networkAtSpawn: 'none'
-      networkAfterRelease: 'typed_broker_only'
-      credentialReachability: 'typed_broker_only'
-      stateRootReachability: 'none'
-      inheritedHostEnvironment: false
-      resources: SandboxResourceSpec
-      profileDigest: string
-    }
-    ```
+    Canonical types: `SandboxResourceSpec`, `SandboxProfileV1`.
+    Import their complete definitions from
+    [RFC 10.1 Initial Strong-Support Matrix](../../rfcs/2026-08-11-durable-verified-run-kernel.md#101-initial-strong-support-matrix).
+    This package enforces that contract without a second schema copy.
 
    `profileDigest=SHA-256(JCS(profile with profileDigest omitted))`; `allowedOwners` is nonempty, unique, byte-sorted, and includes every launch owner using the profile. Admission selects the one probed strong backend, fills missing public resource values with the displayed defaults, fixes both IPC values, and rejects rather than raises a host-infeasible result. `RunSpec.sandboxProfileRef`, RunAssembly backend, every containment plan/launch ref+digest/backend, and the launch's inline `resources` all equal this artifact; admin/local-service producers use the same type with their exact owner set. Its fixed policies permit only a typed launch spec, no host filesystem/state-root/host-environment/network-at-spawn reachability, and typed-broker-only post-release network/credential access. No caller, worker, adapter, repository, or recovery path may increase/reinterpret/replace it. Values are safe integers; Linux enforces PID/memory/CPU/I/O with cgroup v2, `no_new_privs`, rlimits, namespace mounts, and quota-backed generation storage. macOS enforces the same guest-cgroup limits plus host VM memory/CPU/disk caps. PID/OOM/disk/output/IPC trips stop productive dispatch. They become positive infrastructure evidence only after the complete containment is dead and the generation is quiescent; until then the claimed attempt is `unknown`. Ordinary tools receive typed `RESOURCE_EXHAUSTED`; verifier classification remains work package 5. Output truncates only at its declared artifact boundary, never source/result state.
 
    macOS admission additionally freezes the signed content-addressed payload below. The signature covers canonical bytes with `signature` omitted and resolves only through the bundled Cliq release trust store; the CAS ref covers the complete signed bytes.
 
-    ```ts
-    type GuestExecutableIdentity = {
-      logicalName: string
-      canonicalGuestPath: string
-      digest: string
-      version: string
-    }
-
-    type GuestToolchainManifest = {
-      schemaVersion: 1
-      format: 'cliq-guest-toolchain-v1'
-      guestImageRef: ArtifactRef
-      guestImageDigest: string
-      guestImageByteCount: number
-      guestImageFormat: 'raw-ext4-v1'
-      architecture: 'arm64' | 'x86_64'
-      kernelAbi: string
-      userspaceAbi: string
-      worker: GuestExecutableIdentity
-      shell: GuestExecutableIdentity
-      git: GuestExecutableIdentity
-      node: GuestExecutableIdentity
-      packageManager?: GuestExecutableIdentity
-      searchTools: readonly GuestExecutableIdentity[]
-      verifiers: readonly GuestExecutableIdentity[]
-      admittedExecutables: readonly GuestExecutableIdentity[]
-      publisherKeyId: string
-      manifestDigest: string
-      signatureRef: ArtifactRef
-    }
-    ```
+    Canonical types: `GuestExecutableIdentity`, `GuestToolchainManifest`.
+    Import their complete definitions from
+    [RFC 9.1 Lease, Activation, And Process Containment](../../rfcs/2026-08-11-durable-verified-run-kernel.md#91-lease-activation-and-process-containment).
+    This package enforces that contract without a second schema copy.
 
    `manifestDigest=SHA-256(JCS(manifest with manifestDigest and signatureRef omitted))`, and `signatureRef` verifies that digest only through the bundled Cliq release key. `guestImageRef` retains the complete immutable raw-ext4 bytes, `guestImageDigest` equals their SHA-256/ArtifactRef, and `guestImageByteCount` is their exact positive safe-integer length. Absolute guest paths/logical names are unique and bounded. Boot verifies image/signature/architecture/ABIs and each executable digest; `assemblyRef` plus the environment fingerprint bind the manifest. The containment plan, `SandboxRuntimeBindingV1`, actual containment, launch evidence, assembly GC, and reboot relaunch repeat and rehash the same retained image ref/digest; a digest-only reference or current installed-image lookup is invalid. Tools and verifiers resolve against guest Linux identity, never a host Mach-O path. Missing/host-only/incompatible native identities return `UNSUPPORTED_EXECUTION_IDENTITY` before admission, and host `node_modules` are never presumed usable. Dependency acquisition is only a separately granted, Journaled broker fetch of a locked digest into the private generation; the guest shell has no ambient network.
 
@@ -630,23 +581,10 @@ SQLite recovery reducer, and does not advance this work package's completion.
 
    `RunSpec` freezes policy rather than an admission-time candidate plan:
 
-    ```ts
-    type DependencyPolicy = {
-      schemaVersion: 1
-      mode: 'none' | 'locked_node'
-      allowedAdapters: Array<DependencyAcquisitionPlan['adapter']>
-      registryEndpoints: Array<{
-        endpointRegistrationRef: ArtifactRef
-        endpointIdentityDigest: string
-        tlsPolicyDigest: string
-      }>
-      credentialGrantRefs: ArtifactRef[]
-      installScriptsPolicy: 'deny' | 'exact_lockfile_grant'
-      installScriptsGrantRef?: ArtifactRef
-      maxPackages: number
-      maxDownloadBytes: number
-    }
-    ```
+    Canonical types: `DependencyPolicy`.
+    Import their complete definitions from
+    [RFC 10.1 Initial Strong-Support Matrix](../../rfcs/2026-08-11-durable-verified-run-kernel.md#101-initial-strong-support-matrix).
+    This package enforces that contract without a second schema copy.
 
    `run.submit dependency.mode='locked'` resolves public endpoint/credential ids to immutable registration/grant refs, freezes canonical HTTPS endpoint and TLS-policy digests plus exact authority/service revision, secret generation, and external subject, and accepts exactly literal root `package.json` plus exactly one literal root lockfile and a compatible pinned guest package manager. `packageManifest.contentRef/contentDigest` and the lockfile ref/digest rehash those exact candidate `SourceManifest` entries. `package-lock.json` selects only `npm-ci-v1`; `pnpm-lock.yaml` only `pnpm-frozen-v1`; `yarn.lock` only `yarn-immutable-v1`. A `workspaces` member, nested package manifest or lockfile, second supported root lockfile, adapter/path mismatch, missing integrity, ambiguity, unlocked resolution, unsupported layout, or target mismatch fails before any package-manager process. `planDigest=SHA-256(JCS(plan with planDigest omitted))`. Re-registering an id cannot redirect an accepted Run; each FinalCandidate plan copies the frozen byte-sorted endpoint/grant projection unchanged and the broker redeems only the exact still-current frozen-generation item against that target. Rotation or subject drift returns authorization-required before I/O. Trusted code derives a fresh plan from that candidate's source/package manifest/lockfile under the policy and binds it into `VerifierPlan`; it never installs an admission-time plan against changed candidate bytes.
 
@@ -1155,388 +1093,10 @@ SQLite recovery reducer, and does not advance this work package's completion.
 
 8. **Give every mutable generation one immutable identity and one durable authority row.** Work package 1 exports and this package consumes these exact canonical contracts without widening:
 
-    ```ts
-    type WorkspaceGenerationIdentityV1 = {
-      schemaVersion: 1
-      format: 'cliq-workspace-generation-identity-v1'
-      generationId: string
-      runId: string
-      workspaceIdentityDigest: string
-      sourceCheckpointId: string
-      sourceWorkspaceStateRef: ArtifactRef
-      sourceWorkspaceStateDigest: string
-      sourceTreeDigest: string
-      creationNonceDigest: string
-      locator:
-        | {
-            kind: 'linux_directory'
-            stateRootIdentityRef: ArtifactRef
-            stateRootIdentityDigest: string
-            canonicalRootRelativePath: string
-            deviceId: string
-            directoryFileId: string
-            ownerUid: number
-            mode: 448
-          }
-        | {
-            kind: 'macos_vm_volume'
-            stateRootIdentityRef: ArtifactRef
-            stateRootIdentityDigest: string
-            backingStoreCanonicalRootRelativePath: string
-            backingStoreDeviceId: string
-            backingStoreFileId: string
-            backingStoreOwnerUid: number
-            backingStoreMode: 384
-            backingStoreLinkCount: 1
-            vmVolumeReservationId: string
-            guestVolumeId: string
-          }
-      createdAt: string
-      identityDigest: string
-    }
-
-    type WorkspaceGenerationSnapshotEvidenceV1 = {
-      schemaVersion: 1
-      format: 'cliq-workspace-generation-snapshot-evidence-v1'
-      purpose: 'materialized_from_checkpoint' | 'sealed_to_checkpoint'
-      runId: string
-      generationRef: ArtifactRef
-      generationIdentityDigest: string
-      checkpointId: string
-      workspaceStateRef: ArtifactRef
-      workspaceStateDigest: string
-      entriesRef: ArtifactRef
-      treeDigest: string
-      privateGitStateRef?: ArtifactRef
-      descriptorRewalkComplete: true
-      fileFsyncComplete: true
-      directoryFsyncComplete: true
-      observedAt: string
-      evidenceDigest: string
-    }
-
-    type WorkspaceGenerationFailureDetailV1 = {
-      schemaVersion: 1
-      format: 'cliq-workspace-generation-failure-detail-v1'
-      runId: string
-      generationRef: ArtifactRef
-      generationIdentityDigest: string
-      sourceCheckpointId: string
-      phase: 'materializing' | 'preactivated_readonly'
-      failureCode:
-        | 'descriptor_io_failed'
-        | 'artifact_missing_or_corrupt'
-        | 'path_or_entry_invalid'
-        | 'tree_or_state_digest_mismatch'
-        | 'git_closure_invalid'
-        | 'fsync_failed'
-        | 'runtime_incompatible'
-      failingCanonicalRootRelativePath?: string
-      observedAt: string
-      detailDigest: string
-    }
-
-    type WorkspaceGenerationQuarantineEvidenceV1 = {
-      schemaVersion: 1
-      format: 'cliq-workspace-generation-quarantine-evidence-v1'
-      runId: string
-      generationRef: ArtifactRef
-      generationIdentityDigest: string
-      sourceRowVersion: number
-      observedState:
-        | { kind: 'complete_tree'; treeDigest: string }
-        | {
-            kind: 'unreadable_partial'
-            failureCode: 'descriptor_io_failed' | 'artifact_missing_or_corrupt' | 'path_or_entry_invalid' | 'git_closure_invalid'
-          }
-      inspectorIdentityRef: ArtifactRef
-      inspectorIdentityDigest: string
-      quarantineCanonicalRootRelativePath: string
-      quarantineDeviceId: string
-      quarantineFileId: string
-      originalLocatorAbsent: true
-      renameNoReplace: true
-      directoryFsyncComplete: true
-      observedAt: string
-      evidenceDigest: string
-    } & (
-      | {
-          reason: 'materialization_failed'
-          fromPhase: 'materializing'
-          failureDetailRef: ArtifactRef
-          failureDetailDigest: string
-          workerRecoveryEvidenceRef?: never
-          workerRecoveryEvidenceDigest?: never
-          workerLaunchId?: never
-          quiesceId?: never
-          containmentDeathEvidenceRef?: never
-          containmentDeathEvidenceDigest?: never
-        }
-      | {
-          reason: 'preactivation_failed'
-          fromPhase: 'preactivated_readonly'
-          failureDetailRef: ArtifactRef
-          failureDetailDigest: string
-          workerRecoveryEvidenceRef?: never
-          workerRecoveryEvidenceDigest?: never
-          workerLaunchId?: never
-          quiesceId?: never
-          containmentNoSpawnEvidenceRef?: never
-          containmentNoSpawnEvidenceDigest?: never
-          containmentDeathEvidenceRef?: never
-          containmentDeathEvidenceDigest?: never
-        }
-      | {
-          reason: 'launch_aborted'
-          fromPhase: 'preactivated_readonly'
-          workerLaunchId: string
-          containmentNoSpawnEvidenceRef: ArtifactRef
-          containmentNoSpawnEvidenceDigest: string
-          failureDetailRef?: never
-          failureDetailDigest?: never
-          workerRecoveryEvidenceRef?: never
-          workerRecoveryEvidenceDigest?: never
-          quiesceId?: never
-          containmentDeathEvidenceRef?: never
-          containmentDeathEvidenceDigest?: never
-        }
-      | {
-          reason: 'launch_died_before_activation'
-          fromPhase: 'preactivated_readonly'
-          workerLaunchId: string
-          containmentDeathEvidenceRef: ArtifactRef
-          containmentDeathEvidenceDigest: string
-          failureDetailRef?: never
-          failureDetailDigest?: never
-          workerRecoveryEvidenceRef?: never
-          workerRecoveryEvidenceDigest?: never
-          quiesceId?: never
-          containmentNoSpawnEvidenceRef?: never
-          containmentNoSpawnEvidenceDigest?: never
-        }
-      | {
-          reason: 'worker_recovery'
-          fromPhase: 'fenced_reconciling'
-          workerRecoveryEvidenceRef: ArtifactRef
-          workerRecoveryEvidenceDigest: string
-          failureDetailRef?: never
-          failureDetailDigest?: never
-          workerLaunchId?: never
-          quiesceId?: never
-          containmentNoSpawnEvidenceRef?: never
-          containmentNoSpawnEvidenceDigest?: never
-          containmentDeathEvidenceRef?: never
-          containmentDeathEvidenceDigest?: never
-        }
-      | {
-          reason: 'checkpoint_failed'
-          fromPhase: 'revoking' | 'checkpointing'
-          workerLaunchId: string
-          quiesceId: string
-          containmentDeathEvidenceRef: ArtifactRef
-          containmentDeathEvidenceDigest: string
-          failureDetailRef?: never
-          failureDetailDigest?: never
-          workerRecoveryEvidenceRef?: never
-          workerRecoveryEvidenceDigest?: never
-          containmentNoSpawnEvidenceRef?: never
-          containmentNoSpawnEvidenceDigest?: never
-        }
-    )
-
-    type WorkspaceGenerationRetirementEvidenceV1 = {
-      schemaVersion: 1
-      format: 'cliq-workspace-generation-retirement-evidence-v1'
-      runId: string
-      generationRef: ArtifactRef
-      generationIdentityDigest: string
-      inspectorIdentityRef: ArtifactRef
-      inspectorIdentityDigest: string
-      observedAt: string
-      evidenceDigest: string
-    } & (
-      | {
-          fromPhase: 'sealed'
-          snapshotEvidenceRef: ArtifactRef
-          snapshotEvidenceDigest: string
-          workerLaunchId: string
-          containmentDeathEvidenceRef: ArtifactRef
-          containmentDeathEvidenceDigest: string
-          quarantineEvidenceRef?: never
-          quarantineEvidenceDigest?: never
-        }
-      | {
-          fromPhase: 'quarantined'
-          quarantineEvidenceRef: ArtifactRef
-          quarantineEvidenceDigest: string
-          sourceQuarantinedRowVersion: number
-          activeRunPointerCount: 0
-          nonretiredWorkerLaunchCount: 0
-          liveContainmentCount: 0
-          activeMountCount: 0
-          releasableBrokerClaimCount: 0
-          snapshotEvidenceRef?: never
-          snapshotEvidenceDigest?: never
-          workerLaunchId?: never
-          containmentDeathEvidenceRef?: never
-          containmentDeathEvidenceDigest?: never
-        }
-    )
-
-    type WorkspaceGenerationStateBaseV1 = {
-      schemaVersion: 1
-      generationId: string
-      runId: string
-      generationRef: ArtifactRef
-      generationIdentityDigest: string
-      rowVersion: number
-      sourceCheckpointId: string
-      sourceWorkspaceStateRef: ArtifactRef
-      sourceWorkspaceStateDigest: string
-      lastVerifiedTreeDigest: string
-      updatedAt: string
-    }
-
-    type WorkspaceGenerationStateV1 = WorkspaceGenerationStateBaseV1 & (
-      | {
-          phase: 'materializing'
-          snapshotEvidenceRef?: never
-          snapshotEvidenceDigest?: never
-          activeWorkerLaunchId?: never
-          leaseEpoch?: never
-          quiesceId?: never
-          waitingSubjectRef?: never
-          waitingSubjectDigest?: never
-          fencedFromPhase?: never
-          fencedJournalSeq?: never
-          quarantineEvidenceRef?: never
-          quarantineEvidenceDigest?: never
-          observedState?: never
-          retirementEvidenceRef?: never
-          retirementEvidenceDigest?: never
-        }
-      | {
-          phase: 'preactivated_readonly'
-          snapshotEvidenceRef: ArtifactRef
-          snapshotEvidenceDigest: string
-          activeWorkerLaunchId?: never
-          leaseEpoch?: never
-          quiesceId?: never
-          waitingSubjectRef?: never
-          waitingSubjectDigest?: never
-          fencedFromPhase?: never
-          fencedJournalSeq?: never
-          quarantineEvidenceRef?: never
-          quarantineEvidenceDigest?: never
-          observedState?: never
-          retirementEvidenceRef?: never
-          retirementEvidenceDigest?: never
-        }
-      | {
-          phase: 'active'
-          snapshotEvidenceRef: ArtifactRef
-          snapshotEvidenceDigest: string
-          activeWorkerLaunchId: string
-          leaseEpoch: number
-          quiesceId?: never
-          waitingSubjectRef?: never
-          waitingSubjectDigest?: never
-          fencedFromPhase?: never
-          fencedJournalSeq?: never
-          quarantineEvidenceRef?: never
-          quarantineEvidenceDigest?: never
-          observedState?: never
-          retirementEvidenceRef?: never
-          retirementEvidenceDigest?: never
-        }
-      | {
-          phase: 'revoking' | 'checkpointing'
-          snapshotEvidenceRef: ArtifactRef
-          snapshotEvidenceDigest: string
-          activeWorkerLaunchId: string
-          leaseEpoch: number
-          quiesceId: string
-          waitingSubjectRef?: never
-          waitingSubjectDigest?: never
-          fencedFromPhase?: never
-          fencedJournalSeq?: never
-          quarantineEvidenceRef?: never
-          quarantineEvidenceDigest?: never
-          observedState?: never
-          retirementEvidenceRef?: never
-          retirementEvidenceDigest?: never
-        }
-      | ({
-          phase: 'fenced_reconciling'
-          snapshotEvidenceRef: ArtifactRef
-          snapshotEvidenceDigest: string
-          activeWorkerLaunchId: string
-          leaseEpoch: number
-          waitingSubjectRef: ArtifactRef
-          waitingSubjectDigest: string
-          fencedJournalSeq: number
-          quarantineEvidenceRef?: never
-          quarantineEvidenceDigest?: never
-          observedState?: never
-          retirementEvidenceRef?: never
-          retirementEvidenceDigest?: never
-        } & (
-          | { fencedFromPhase: 'active'; quiesceId?: never }
-          | { fencedFromPhase: 'revoking' | 'checkpointing'; quiesceId: string }
-        ))
-      | {
-          phase: 'sealed'
-          snapshotEvidenceRef: ArtifactRef
-          snapshotEvidenceDigest: string
-          activeWorkerLaunchId?: never
-          leaseEpoch?: never
-          quiesceId?: never
-          waitingSubjectRef?: never
-          waitingSubjectDigest?: never
-          fencedFromPhase?: never
-          fencedJournalSeq?: never
-          quarantineEvidenceRef?: never
-          quarantineEvidenceDigest?: never
-          observedState?: never
-          retirementEvidenceRef?: never
-          retirementEvidenceDigest?: never
-        }
-      | {
-          phase: 'quarantined'
-          snapshotEvidenceRef?: never
-          snapshotEvidenceDigest?: never
-          activeWorkerLaunchId?: never
-          leaseEpoch?: never
-          quiesceId?: never
-          waitingSubjectRef?: never
-          waitingSubjectDigest?: never
-          fencedFromPhase?: never
-          fencedJournalSeq?: never
-          quarantineEvidenceRef: ArtifactRef
-          quarantineEvidenceDigest: string
-          observedState: WorkspaceGenerationQuarantineEvidenceV1['observedState']
-          retirementEvidenceRef?: never
-          retirementEvidenceDigest?: never
-        }
-      | {
-          phase: 'retired'
-          snapshotEvidenceRef?: never
-          snapshotEvidenceDigest?: never
-          activeWorkerLaunchId?: never
-          leaseEpoch?: never
-          quiesceId?: never
-          waitingSubjectRef?: never
-          waitingSubjectDigest?: never
-          fencedFromPhase?: never
-          fencedJournalSeq?: never
-          quarantineEvidenceRef?: never
-          quarantineEvidenceDigest?: never
-          observedState?: never
-          retirementEvidenceRef: ArtifactRef
-          retirementEvidenceDigest: string
-        }
-    )
-    ```
+    Canonical types: `WorkspaceGenerationIdentityV1`, `WorkspaceGenerationSnapshotEvidenceV1`, `WorkspaceGenerationFailureDetailV1` and 4 related definitions.
+    Import their complete definitions from
+    [RFC 7.1 What The References Contain](../../rfcs/2026-08-11-durable-verified-run-kernel.md#71-what-the-references-contain).
+    This package enforces that contract without a second schema copy.
 
    Every `workspaceGenerationRef|generationRef` decodes only exact `WorkspaceGenerationIdentityV1`; the ref rehashes the bytes, the omission digest verifies, the same-Run source Checkpoint/state/tree match, and `generationId=H(runId,sourceCheckpointId,sourceWorkspaceStateRef,creationNonceDigest)`. Linux materializes exactly the descriptor-relative StateRoot path and immutable directory tuple in the locator. macOS materializes the analogous private backing image plus uniquely reserved guest volume; no path, mutable handle, directory, VM id, or worker assertion can substitute for the retained identity.
 
@@ -1988,7 +1548,60 @@ Preserve / do not touch:
 - Do not weaken legacy attached behavior before the Kernel Cut, but never count it toward the detach guarantee; work package 6 removes that owner at cutover and native Windows then fails execution admission explicitly.
 - Do not add a `Task`, `EffectPlan`, workflow graph, in-process repository plugin, or weak worktree execution mode.
 
+### Implementation refinement — 2026-09-26
+
+**Make the execution boundary a deep module.** Supervisor callers provide the
+canonical closed launch/request and current typed authority. WP03 owns native
+descriptor handling, environment construction, process creation, I/O fencing,
+quiescence and evidence capture. Native helpers expose purpose-specific held
+handles/observations, not raw file descriptors or a general privileged filesystem
+API. WP01 commits lifecycle changes; WP04 chooses when to schedule/reconcile.
+WP03 must not add its own durable lease, owner database or outcome state machine.
+
+Reuse the native StateOwner lock/takeover and generation-quarantine primitives
+already present. A quarantine rename is not whole-containment death, and an OS
+lock is not proof that old workers stopped. Complete the missing descriptor I/O,
+containment inspection and broker-release integration in the
+[I1 installed path](../../kernel/2026-09-26-design-review.md#5-internal-integration-checkpoints).
+Every observation must name the actual launched bundle/helper and current
+inspector; a test double cannot produce release evidence.
+
+**Qualify the package users will run.** On supported macOS use a controlled
+machine capable of the signed Virtualization.framework guest; on Linux exercise
+the actual namespace/cgroup/subreaper bundle under the intended user-service
+configuration. Record signing/notarization, architecture, guest/toolchain,
+helper ABI and OS/backend probe results. A source build, host-only probe or
+skipped VM test does not qualify the other backend. Probe failures use the
+existing pre-admission error and bounded diagnostic path; no weaker fallback.
+
+**Optimize copies at the physical layer.** Measure source capture, generation
+materialization, guest/process boot, quiescence and Checkpoint publication
+separately for small, large-file and many-small-file repositories. Reflink or
+clonefile is allowed only with proven write independence; writable hardlinks,
+shared `.git`, writable source bind mounts and process pooling remain forbidden.
+Byte-copy fallback must pass the same identity/digest/isolation tests. A changed
+file should not force needless re-copy of immutable CAS bytes, but optimization
+must still enumerate every eligible change and validate the complete cut.
+
+Ambient daemon environment is not per-Run authority. Launch only the frozen
+allowlisted environment and fixed process recipe; changes to shell PATH, HOME,
+loader variables, credential env or the client environment cannot alter a
+pinned worker/verifier/MCP identity. Test child processes and IPC access as well
+as file/network denial. Redaction is not the secret boundary.
+
 ### Acceptance Criteria
+
+- [ ] The I1 package performs actual launch, mutation, quiescence, checkpoint,
+  owner restart and replacement generation on each supported backend. Capture
+  positive predecessor containment death and unchanged effect counts.
+- [ ] Source/guest/helper substitution, root replacement, denied inspection and
+  inherited secret/loader environment fail at the correct boundary before
+  productive authority; no simulated observation counts as platform evidence.
+- [ ] COW and byte-copy paths demonstrate independent source/Git writes and
+  identical manifest semantics; benchmark phase timings and bytes copied are
+  recorded with the shared qualification workloads.
+- [ ] Broker and native helper APIs cannot bypass StateStore claims, release
+  fences or typed lifecycle commits, and expose no generic privileged I/O path.
 
 - [ ] Workspace Trust is decided before any repository config, validator suggestion, instruction, skill, legacy hook/extension diagnostic, permission config, or runtime assembly is loaded; deny-path tests prove no repository-controlled file is read or executed, and allow-path tests prove legacy hooks/extensions are diagnosed but not launched.
 - [ ] Capture, authorization, admission, apply, and publication require exact immutable `WorkspaceIdentityV1.kind='live'` and descriptor-reopen its root no-follow. Principal/platform/NFC absolute path/owner/device/file must match; device/file are canonical unsigned decimal strings never converted through JS number and owner uid is safe integer. Git additionally requires exact `RepositoryIdentityV1` ref+digest and held literal in-root `.git` identity/object format; non-Git forbids them. Every artifact workspace/repository digest is identical. `run.submit.workspacePath` must resolve to it; `run.apply` has no path and derives the live source Session. Root/`.git` replacement returns `ARTIFACT_MISMATCH`; `legacy_unavailable` Sessions/forks create no Run/effect.

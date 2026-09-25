@@ -6,6 +6,11 @@
 
 READY WITH RISKS
 
+Reviewed against main `0f2fa146` on 2026-09-26. The
+[cross-package review](../../kernel/2026-09-26-design-review.md) records current
+implementation, source evidence and integration gates. Shared schemas remain
+owned by the RFC; this package owns their storage enforcement.
+
 The canonical RFC and work package 4 close the storage, fencing, migration, and rollback decisions required to implement this package. The remaining risks are SQLite/CAS cross-resource crash windows, legacy-state quiescence proof, schema migration durability, and restoring legacy authority without exposing a half-restored tree. Those are implementation risks covered by artifact-first publication, narrow typed transactions, platform-specific fail-closed import, fault injection, and authority-marker-last rollback; none permits a second state owner or a compatibility dual write.
 
 ### Source
@@ -22,7 +27,15 @@ Related issues:
 - GitHub issue `#46` contributes crash-durability lessons only. Its `Transaction` aggregate, overlay lifecycle, and `activeTxId` are historical import inputs, not the new execution model.
 - The [issue supersession map](issue-supersession-map.md) is normative for duplication and dependency handling.
 
-Related code:
+Legacy production code and current Kernel implementation:
+
+- `src/state/store.ts`, `src/state/reducers/`, `src/state/native-owner.ts`, and
+  `src/state/recovery-closure.ts` already implement the hidden admission/state
+  core and substantial typed continuation. Reuse them; do not start a second
+  repository/reducer hierarchy from the illustrative file list below.
+- [M2 implementation boundaries](../../kernel/m2-state-core.md) distinguish
+  completed owner takeover and quarantine primitives from pending descriptor
+  I/O, containment integration and migration.
 
 - `src/session/store.ts` and `src/session/types.ts` persist whole Session JSON documents and currently mix context, lifecycle, records, checkpoints, plans, and `activeTxId`.
 - `src/session/checkpoints.ts` and `src/session/checkpoints.test.ts` manage bookmark-style checkpoint metadata and expirable Git ghost commits; they do not publish a complete recoverable Run cut.
@@ -32,7 +45,9 @@ Related code:
 - `src/lib/path-lock.ts` is suitable for migration/rollback serialization only; it is not a worker lease or Run revision mechanism.
 - `src/headless/contract.ts`, `events.ts`, and `artifacts.ts` provide versioned envelope/event/artifact seams, but current headless execution remains process-owned.
 - `src/config.ts` currently defines `SESSION_VERSION` and legacy paths but no Kernel schema, authority generation, SQLite, or CAS layout.
-- `package.json` currently has `build` and `test`; the state, migration, and crash-fault suites named below do not yet exist.
+- `package.json` has `test:state`, `test:state-fault`, `test:state-probe`,
+  `test:agent-runtime`, and sandbox-probe commands. The complete migration and
+  aggregate Kernel-Cut suites below are still required, not existing green gates.
 
 ### User Outcome
 
@@ -42,7 +57,7 @@ Users upgrading on supported macOS or Linux retain legacy Sessions, ordered cont
 
 ### Problem
 
-The current persistence layer cannot satisfy the durable delegation contract:
+The legacy production persistence path cannot satisfy the durable delegation contract:
 
 - whole-Session JSON is both context and de facto execution state;
 - writes replace a complete aggregate and coordinate through path locks rather than Run revisions and launch fencing;
@@ -916,12 +931,20 @@ type ToolResultModelContentV1 = {
 type ToolResultPayloadV1 = ToolResultPayloadBaseV1 & (
   | {
       outcome: 'executed'
+      source: 'invocation'
       opId: string
       attempt: number
       journalResultRef: ArtifactRef
       journalResultDigest: string
       outputSchemaRef?: ArtifactRef
       outputSchemaDigest?: string
+    }
+  | {
+      outcome: 'executed'
+      source: 'user_input'
+      inputItemRef: ArtifactRef
+      inputRef: ArtifactRef
+      inputDigest: string
     }
   | {
       outcome: 'denied'
@@ -1013,6 +1036,12 @@ type UserInputPayloadBaseV1 = {
   promptRef: ArtifactRef
   promptDigest: string
   principalId: string
+  waitingSubjectRef: ArtifactRef
+  requestId: string
+  requestDigest: string
+  expectedRunRevision: number
+  channelIdentityRef: ArtifactRef
+  channelIdentityDigest: string
   byteCount: number
   modelContentRef: ArtifactRef
   modelContentDigest: string
@@ -2437,47 +2466,10 @@ Terminal closure of a `retry` unknown additionally decodes exact `InvocationDisp
 
 The immutable identity and mutable launch row are:
 
-```ts
-type WorkerIdentity = {
-  schemaVersion: 1
-  executableRealpath: string
-  executableDigest: string
-  pid: number
-  processStartToken: string
-  spawnNonceDigest: string
-  activationNonceDigest: string
-  intendedLeaseEpoch: number
-  launchId: string
-  supervisorInstanceId: string
-  processContainmentRef: ArtifactRef
-}
-
-type WorkerLaunch = {
-  schemaVersion: 1
-  launchId: string
-  runId: string
-  plannedRunRevision: number
-  supervisorInstanceId: string
-  spawnNonceDigest: string
-  activationNonceDigest: string
-  phase: 'reserved' | 'preactivated' | 'activated' | 'reconciling' | 'retired'
-  workspaceGenerationRef: ArtifactRef
-  containmentPlanRef: ArtifactRef
-  sandboxLaunchSpecRef: ArtifactRef
-  workerIdentityDigest?: string
-  processContainmentRef?: ArtifactRef
-  leaseEpoch?: number
-  leaseVersion: number
-  leaseExpiresAt?: string
-  generationWriteState: 'preactivated_readonly' | 'active' | 'revoking' | 'checkpointing' | 'fenced_reconciling' | 'sealed'
-  quiesceId?: string
-  createdAt: string
-  activationDeadlineAt: string
-  activatedAt?: string
-  retiredAt?: string
-  retirementEvidenceRef?: ArtifactRef
-}
-```
+Canonical types: `WorkerIdentity`, `WorkerLaunch`.
+Import their complete definitions from
+[RFC 9.1 Lease, Activation, And Process Containment](../../rfcs/2026-08-11-durable-verified-run-kernel.md#91-lease-activation-and-process-containment).
+This package enforces that contract without a second schema copy.
 
 Storage exposes these exact CAS operations:
 
@@ -2737,45 +2729,10 @@ Read-only `run.get|list|attach`, `session.get|list`, `authorization.list`, `mcp.
 
 The storage-owned list cache uses these exact canonical types:
 
-```ts
-type ListMethodV1 = 'session.list' | 'run.list' | 'authorization.list' | 'mcp.list'
-
-type ListCursorPayloadV1 = {
-  schemaVersion: 1
-  cutId: string
-  afterOrdinal: number
-  macBase64url: string
-}
-
-type ListReadCutEntryV1 = {
-  schemaVersion: 1
-  cutId: string
-  ordinal: number
-  sortCreatedAt: string
-  stableId: string
-  payload:
-    | { method: 'session.list'; value: SessionSummaryV1 }
-    | { method: 'run.list'; value: RunSnapshotV1 }
-    | { method: 'authorization.list'; value: AuthorizationGrantSummaryV1 }
-    | { method: 'mcp.list'; value: McpRegistrySummaryV1 }
-  rowDigest: string
-}
-
-type ListReadCutV1 = {
-  schemaVersion: 1
-  cutId: string
-  ownerPrincipalId: string
-  method: ListMethodV1
-  normalizedFilterDigest: string
-  normalizedLimit: number
-  createdAt: string
-  expiresAt: string
-  cursorSecretBase64url: string
-  entryCount: number
-  entriesDigest: string
-  cutDigest: string
-}
-```
+Canonical types: `ListMethodV1`, `ListCursorPayloadV1`, `ListReadCutEntryV1` and 1 related definitions.
+Import their complete definitions from
+[RFC 15. Surfaces And Ecosystem Thin Waist](../../rfcs/2026-08-11-durable-verified-run-kernel.md#15-surfaces-and-ecosystem-thin-waist).
+This package enforces that contract without a second schema copy.
 
 `createListReadCut` normalizes exactly the authenticated principal, method, applicable filters, and defaulted limit, then computes `normalizedFilterDigest` from the RFC projection. In one StateOwner-gated SQLite transaction it captures current owner-visible rows, constructs the exact typed summaries, sorts by `(canonical createdAt,bytewise NFC stableId)`, inserts contiguous entries and the cut, and returns the first page. Stable ids are Session id, Run id, grant id, and registration id; MCP materializes only each registration's current registry head. Later status, revision, authorization, registration, or insertion changes cannot alter that cut. More than 100,000 entries or 64 MiB encoded summaries returns `RESOURCE_EXHAUSTED(state_storage)` and commits no partial cache.
 
@@ -3200,782 +3157,10 @@ For every prepared/completed model attempt, recovery decodes the common `ModelRe
 
 Migration persists only the following canonical RFC 8785/JCS authority documents; no implementation-local sentinel, optional property bag, or credential byte is legal:
 
-```ts
-type MigrationFilesystemRootIdentityV1 = {
-  schemaVersion: 1
-  format: 'cliq-migration-filesystem-root-identity-v1'
-  purpose: 'legacy_state' | 'backup'
-  canonicalAbsolutePath: string
-  ownerUid: number
-  deviceId: string
-  directoryFileId: string
-  mode: number
-  openedNoFollow: true
-  identityDigest: string
-}
-
-type WindowsLegacyRootIdentityV1 = {
-  schemaVersion: 1
-  format: 'cliq-windows-legacy-root-identity-v1'
-  canonicalAbsolutePath: string
-  ownerSid: string
-  volumeSerialNumber: string
-  fileId128: string
-  fileAttributes: 'directory'
-  reparseTag: 'none'
-  securityDescriptorDigest: string
-  identityDigest: string
-}
-
-type WindowsOutputDirectoryIdentityV1 = {
-  schemaVersion: 1
-  format: 'cliq-windows-output-directory-identity-v1'
-  canonicalAbsolutePath: string
-  ownerSid: string
-  volumeSerialNumber: string
-  fileId128: string
-  fileAttributes: 'directory'
-  reparseTag: 'none'
-  securityDescriptorDigest: string
-  identityDigest: string
-}
-
-type WindowsExportFileIdentityV1 = {
-  schemaVersion: 1
-  format: 'cliq-windows-export-file-identity-v1'
-  phase: 'temporary' | 'final'
-  outputDirectoryIdentityRef: ArtifactRef
-  outputDirectoryIdentityDigest: string
-  baseName: string
-  ownerSid: string
-  volumeSerialNumber: string
-  fileId128: string
-  fileAttributes: 'regular_file'
-  reparseTag: 'none'
-  securityDescriptorDigest: string
-  byteCount: number
-  contentDigest: string
-  identityDigest: string
-}
-
-type LegacyPortableProjectionSchemaV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-portable-projection-schema-v1'
-  sourceSchemaId:
-    | 'session-v1'
-    | 'session-v2'
-    | 'record-v1'
-    | 'compaction-v1'
-    | 'plan-v1'
-    | 'handoff-v1'
-    | 'bookmark-v1'
-  outputKind: 'session' | 'legacy_record' | 'legacy_compaction' | 'legacy_plan' | 'legacy_handoff' | 'legacy_bookmark'
-  mappings: Array<{
-    sourceJsonPointer: string
-    targetJsonPointer: string
-    transform: 'copy_finite_json' | 'nfc_string' | 'canonical_time_or_omit' | 'safe_integer'
-    required: boolean
-  }>
-  forbiddenSourceJsonPointers: string[]
-  outputJsonSchema: Record<string, unknown>
-  schemaDigest: string
-}
-
-type LegacyPortableSchemaManifestV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-portable-schema-manifest-v1'
-  projectionVersion: 'cliq-legacy-export-projection-v1'
-  schemas: Array<{
-    sourceSchemaId: LegacyPortableProjectionSchemaV1['sourceSchemaId']
-    schemaRef: ArtifactRef
-    schemaDigest: string
-  }>
-  manifestDigest: string
-}
-
-type LegacyPortablePayloadV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-portable-payload-v1'
-  kind: 'legacy_record' | 'legacy_compaction' | 'legacy_plan' | 'legacy_handoff' | 'legacy_bookmark'
-  legacySessionId: string
-  sourceSchemaId: LegacyPortableProjectionSchemaV1['sourceSchemaId']
-  sourceOrdinal: number
-  sourceCanonicalRootRelativePath: string
-  content: null | boolean | number | string | unknown[] | Record<string, unknown>
-  payloadDigest: string
-}
-
-type LegacyPortableSessionV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-portable-session-v1'
-  legacySessionId: string
-  name?: string
-  legacyWorkspacePath?: string
-  payloads: Array<{
-    kind: LegacyPortablePayloadV1['kind']
-    sourceOrdinal: number
-    payloadRef: ArtifactRef
-    payloadDigest: string
-  }>
-  sessionDigest: string
-}
-
-type LegacyPortableHandoffV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-portable-handoff-v1'
-  exportId: string
-  sourcePlatform: 'windows'
-  sourceRootIdentityRef: ArtifactRef
-  sourceRootIdentityDigest: string
-  exporterVersion: string
-  exporterExecutableDigest: string
-  projectionRuntimeBundleRef: ArtifactRef
-  projectionRuntimeBundleManifestDigest: string
-  projectionCatalogEntryId: 'legacy_windows_export_profiles_v1'
-  projectionCatalogEntryVersion: '1'
-  projectionSchemaManifestRef: ArtifactRef
-  projectionSchemaManifestDigest: string
-  sessions: Array<{
-    legacySessionId: string
-    sessionRef: ArtifactRef
-    sessionDigest: string
-  }>
-  objectRefs: ArtifactRef[]
-  excludedAuthorityPaths: ['auth.json']
-  credentialProjection: 'none_reenrollment_required'
-  createdAt: string
-  manifestDigest: string
-}
-
-type LegacyPortableHandoffExportReceiptV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-portable-handoff-export-receipt-v1'
-  exportId: string
-  handoffRef: ArtifactRef
-  handoffDigest: string
-  outputCanonicalAbsolutePath: string
-  outputDirectoryIdentityRef: ArtifactRef
-  outputDirectoryIdentityDigest: string
-  temporaryFileIdentityRef: ArtifactRef
-  temporaryFileIdentityDigest: string
-  finalFileIdentityRef: ArtifactRef
-  finalFileIdentityDigest: string
-  outputVolumeSerialNumber: string
-  outputFileId128: string
-  outputOwnerSid: string
-  outputSecurityDescriptorDigest: string
-  archiveByteCount: number
-  archiveDigest: string
-  completedAt: string
-  receiptDigest: string
-}
-
-type LegacyPortableHandoffVerificationResultV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-portable-handoff-verification-result-v1'
-  exportId: string
-  archiveCanonicalAbsolutePath: string
-  handoff: LegacyPortableHandoffV1
-  outputDirectoryIdentity: WindowsOutputDirectoryIdentityV1
-  finalFileIdentity: WindowsExportFileIdentityV1
-  archiveByteCount: number
-  archiveDigest: string
-  verifiedAt: string
-  verificationDigest: string
-}
-
-type LegacyAuthFileIdentityV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-auth-file-identity-v1'
-  legacyRootIdentityRef: ArtifactRef
-  legacyRootIdentityDigest: string
-  canonicalRootRelativePath: 'auth.json'
-  ownerUid: number
-  deviceId: string
-  fileId: string
-  mode: 384
-  linkCount: 1
-  byteCount: number
-  contentDigest: string
-  identityDigest: string
-}
-
-type LegacyAuthStoreObservationV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-auth-store-observation-v1'
-  migrationId: string
-  legacyRootIdentityRef: ArtifactRef
-  legacyRootIdentityDigest: string
-  canonicalRootRelativePath: 'auth.json'
-  observedAt: string
-  observationDigest: string
-} & (
-  | {
-      presence: 'present'
-      fileIdentityRef: ArtifactRef
-      fileIdentityDigest: string
-      noFollowLookupResult?: never
-    }
-  | {
-      presence: 'absent'
-      noFollowLookupResult: 'ENOENT'
-      fileIdentityRef?: never
-      fileIdentityDigest?: never
-    }
-)
-
-type LegacyAuthNonSecretProjectionV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-auth-nonsecret-projection-v1'
-  migrationId: string
-  sourceObservationRef: ArtifactRef
-  sourceObservationDigest: string
-  activeProvider?: 'openai' | 'anthropic' | 'openrouter' | 'openai-compatible' | 'zhipu'
-  providers: Array<{
-    providerId: 'openai' | 'anthropic' | 'openrouter' | 'openai-compatible' | 'zhipu'
-    model?: string
-    endpointRegistrationRef: ArtifactRef
-    endpointRegistrationDigest: string
-    baseUrlWasExplicit: boolean
-    streaming?: 'auto' | 'on' | 'off'
-    credentialLegacyEntryIdentityDigest?: string
-  }>
-  projectionDigest: string
-}
-
-type KernelSchemaManifestV1 = {
-  schemaVersion: 1
-  format: 'cliq-kernel-schema-manifest-v1'
-  stateSchemaVersion: 1
-  sqliteApplicationId: 0x434c4951
-  sqliteUserVersion: 1
-  ddlStatements: string[]
-  sqliteSchemaObjects: Array<{
-    type: 'table' | 'index' | 'view' | 'trigger'
-    name: string
-    tableName: string
-    sql: string | null
-  }>
-  schemaDigest: string
-  manifestDigest: string
-}
-
-type KernelDatabaseImageIdentityV1 = {
-  schemaVersion: 1
-  format: 'cliq-kernel-database-image-identity-v1'
-  stateRootIdentityRef: ArtifactRef
-  stateRootIdentityDigest: string
-  canonicalRootRelativePath: 'kernel/state.sqlite'
-  ownerUid: number
-  deviceId: string
-  fileId: string
-  mode: 384
-  linkCount: 1
-  byteCount: number
-  sqliteApplicationId: 0x434c4951
-  sqliteUserVersion: 1
-  schemaManifestRef: ArtifactRef
-  schemaManifestDigest: string
-  schemaDigest: string
-  journalClosure: 'connections_closed_after_wal_checkpoint_truncate'
-  walPathAbsent: true
-  shmPathAbsent: true
-  foreignKeyCheck: 'ok'
-  integrityCheck: 'ok'
-  contentDigest: string
-  identityDigest: string
-}
-
-type CasNamespaceManifestV1 = {
-  schemaVersion: 1
-  format: 'cliq-cas-namespace-manifest-v1'
-  snapshotBoundary: 'generation_birth' | 'rollback_final'
-  namespaceId: string
-  stateRootIdentityRef: ArtifactRef
-  stateRootIdentityDigest: string
-  canonicalRootRelativePath: string
-  ownerUid: number
-  deviceId: string
-  directoryFileId: string
-  mode: 448
-  entries: Array<{
-    artifactRef: ArtifactRef
-    byteCount: number
-  }>
-  objectCount: number
-  totalBytes: number
-  rootDigest: string
-  manifestDigest: string
-}
-
-type KernelGenerationIdentityV1 = {
-  schemaVersion: 1
-  format: 'cliq-kernel-generation-identity-v1'
-  generationId: string
-  stateRootIdentityRef: ArtifactRef
-  stateRootIdentityDigest: string
-  databaseImageRef: ArtifactRef
-  databaseImageDigest: string
-  databaseIdentityDigest: string
-  databaseContentDigest: string
-  casNamespaceManifestRef: ArtifactRef
-  casNamespaceManifestDigest: string
-  casNamespaceId: string
-  casRootDigest: string
-  stateSchemaVersion: 1
-  generationDigest: string
-} & (
-  | {
-      origin: 'fresh_empty'
-      pristineSchemaManifestRef: ArtifactRef
-      pristineSchemaManifestDigest: string
-      pristineSchemaDigest: string
-      candidateRef?: never
-      candidateDigest?: never
-      migrationId?: never
-    }
-  | {
-      origin: 'migrated_candidate'
-      candidateRef: ArtifactRef
-      candidateDigest: string
-      migrationId: string
-      pristineSchemaManifestRef?: never
-      pristineSchemaManifestDigest?: never
-      pristineSchemaDigest?: never
-    }
-)
-
-type ArchivedKernelDatabaseImageV1 = {
-  schemaVersion: 1
-  format: 'cliq-archived-kernel-database-image-v1'
-  migrationId: string
-  sourceGenerationIdentityRef: ArtifactRef
-  sourceGenerationIdentityDigest: string
-  sourceDatabaseImageRef: ArtifactRef
-  sourceDatabaseImageDigest: string
-  stateRootIdentityRef: ArtifactRef
-  stateRootIdentityDigest: string
-  canonicalRootRelativePath: string
-  ownerUid: number
-  deviceId: string
-  fileId: string
-  mode: 256
-  linkCount: 1
-  byteCount: number
-  sqliteApplicationId: 0x434c4951
-  sqliteUserVersion: 1
-  schemaManifestRef: ArtifactRef
-  schemaManifestDigest: string
-  schemaDigest: string
-  copyMethod: 'descriptor_copy_of_closed_checkpointed_source'
-  sourceContentDigest: string
-  contentDigest: string
-  copiedAt: string
-  imageDigest: string
-}
-
-type ArchivedKernelGenerationManifestV1 = {
-  schemaVersion: 1
-  format: 'cliq-archived-kernel-generation-v1'
-  migrationId: string
-  sourceGenerationIdentityRef: ArtifactRef
-  sourceGenerationIdentityDigest: string
-  sourceGenerationId: string
-  databaseImageRef: ArtifactRef
-  databaseImageDigest: string
-  databaseContentDigest: string
-  casNamespaceManifestRef: ArtifactRef
-  casNamespaceManifestDigest: string
-  casNamespaceId: string
-  casRootDigest: string
-  snapshotBoundary: 'globally_quiescent_after_rollback_draining_before_rollback_restoring'
-  excludedDatabaseTail: 'rollback_restoring_receipt_and_state_owner_terminalization'
-  archivedAt: string
-  manifestDigest: string
-}
-
-type MigrationInventoryEntryV1 = {
-  canonicalRootRelativePath: string
-  ownerUid: number
-  deviceId: string
-  fileId: string
-  mode: number
-} & (
-  | { kind: 'directory' }
-  | {
-      kind: 'regular_file'
-      linkCount: 1
-      byteCount: number
-      contentDigest: string
-    }
-  | {
-      kind: 'unfollowed_link_metadata'
-      linkTextDigest: string
-    }
-)
-
-type MigrationInventoryManifestV1 = {
-  schemaVersion: 1
-  format: 'cliq-migration-inventory-v1'
-  migrationId: string
-  sourceLegacyGenerationDigest: string
-  legacyRootIdentityRef: ArtifactRef
-  legacyRootIdentityDigest: string
-  legacyAuthObservationRef: ArtifactRef
-  legacyAuthObservationDigest: string
-  entries: MigrationInventoryEntryV1[]
-  entriesDigest: string
-  createdAt: string
-  manifestDigest: string
-}
-
-type CredentialRoundTripEvidenceV1 = {
-  schemaVersion: 1
-  format: 'cliq-credential-round-trip-evidence-v1'
-  migrationId: string
-  legacyEntryIdentityDigest: string
-  ownerPrincipalId: string
-  credentialGrantId: string
-  authorityRecordRevision: number
-  authorityRecordDigest: string
-  credentialGrantRef: ArtifactRef
-  credentialGrantDigest: string
-  endpointRegistrationRef: ArtifactRef
-  endpointRegistrationDigest: string
-  purpose: 'model_endpoint'
-  credentialHandleIdentityDigest: string
-  platformItemIdentityDigest: string
-  observedStore: 'macos_login_keychain' | 'linux_default_secret_service'
-  comparison: 'submitted_secret_equals_immediate_round_trip_bytes'
-  persistedSecretInEvidence: false
-  observedAt: string
-  evidenceDigest: string
-}
-
-type PlaintextLegacyCredentialConsentV1 = {
-  schemaVersion: 1
-  format: 'cliq-plaintext-legacy-credential-consent-v1'
-  migrationId: string
-  principalId: string
-  channelIdentityRef: ArtifactRef
-  channelIdentityDigest: string
-  requestRef: ArtifactRef
-  requestId: string
-  requestDigest: string
-  backupRef: ArtifactRef
-  backupDigest: string
-  acknowledgement: 'render_current_platform_secrets_into_legacy_plaintext_auth_file'
-  createdAt: string
-  consentDigest: string
-}
-
-type RollbackToLegacyRequestBaseV1 = {
-  schemaVersion: 1
-  format: 'cliq-rollback-to-legacy-request-v1'
-  migrationId: string
-  principalId: string
-  channelIdentityRef: ArtifactRef
-  channelIdentityDigest: string
-  requestId: string
-  currentAuthorityMarkerRef: ArtifactRef
-  currentAuthorityMarkerDigest: string
-  currentKernelGenerationIdentityRef: ArtifactRef
-  currentKernelGenerationIdentityDigest: string
-  backupRef: ArtifactRef
-  backupDigest: string
-  requestedAt: string
-  requestDigest: string
-}
-
-type RollbackToLegacyRequestV1 = RollbackToLegacyRequestBaseV1 & (
-  | { allowPlaintextLegacyCredentials: false }
-  | { allowPlaintextLegacyCredentials: true }
-)
-
-type CredentialReadyManifestV1 = {
-  schemaVersion: 1
-  format: 'cliq-credential-ready-v1'
-  migrationId: string
-  legacyAuthObservationRef: ArtifactRef
-  legacyAuthObservationDigest: string
-  nonSecretProjectionRef: ArtifactRef
-  nonSecretProjectionDigest: string
-  records: Array<{
-    legacyEntryIdentityDigest: string
-    providerId: 'openai' | 'anthropic' | 'openrouter' | 'openai-compatible' | 'zhipu'
-    endpointRegistrationRef: ArtifactRef
-    endpointRegistrationDigest: string
-    credentialGrantRef: ArtifactRef
-    credentialGrantDigest: string
-    credentialGrantId: string
-    authorityRecordRevision: number
-    authorityRecordDigest: string
-    platformItemIdentityDigest: string
-    roundTripEvidenceRef: ArtifactRef
-    roundTripEvidenceDigest: string
-  }>
-  recordsDigest: string
-  createdAt: string
-  manifestDigest: string
-}
-
-type MigrationBackupManifestV1 = {
-  schemaVersion: 1
-  format: 'cliq-migration-backup-v1'
-  migrationId: string
-  inventoryRef: ArtifactRef
-  inventoryDigest: string
-  credentialReadyRef: ArtifactRef
-  credentialReadyDigest: string
-  backupRootIdentityRef: ArtifactRef
-  backupRootIdentityDigest: string
-  copiedEntriesDigest: string
-  verifiedAt: string
-  manifestDigest: string
-}
-
-type KernelCandidateManifestV1 = {
-  schemaVersion: 1
-  format: 'cliq-kernel-candidate-v1'
-  migrationId: string
-  candidateGenerationId: string
-  inventoryRef: ArtifactRef
-  inventoryDigest: string
-  credentialReadyRef: ArtifactRef
-  credentialReadyDigest: string
-  backupRef: ArtifactRef
-  backupDigest: string
-  databaseImageRef: ArtifactRef
-  databaseImageDigest: string
-  databaseIdentityDigest: string
-  databaseContentDigest: string
-  casNamespaceManifestRef: ArtifactRef
-  casNamespaceManifestDigest: string
-  casNamespaceId: string
-  casRootDigest: string
-  importedSessionCount: number
-  importedLegacyBookmarkCount: number
-  schemaVersionInstalled: 1
-  importComplete: true
-  verifiedAt: string
-  manifestDigest: string
-}
-
-type LegacyGenerationManifestBaseV1 = {
-  schemaVersion: 1
-  format: 'cliq-legacy-generation-v1'
-  migrationId: string
-  legacyGenerationId: string
-  backupRef: ArtifactRef
-  backupDigest: string
-  restoredEntriesDigest: string
-  verifiedAt: string
-  manifestDigest: string
-}
-
-type LegacyGenerationManifestV1 = LegacyGenerationManifestBaseV1 & (
-  | {
-      authOutcome: 'restored_absent'
-      restoredAuthObservationRef: ArtifactRef
-      restoredAuthObservationDigest: string
-      renderedAuthFileIdentityRef?: never
-      renderedAuthFileIdentityDigest?: never
-      renderedAuthFileContentDigest?: never
-      plaintextCredentialConsentRef?: never
-      plaintextCredentialConsentDigest?: never
-    }
-  | {
-      authOutcome: 'rendered_nonsecret'
-      renderedAuthFileIdentityRef: ArtifactRef
-      renderedAuthFileIdentityDigest: string
-      renderedAuthFileContentDigest: string
-      restoredAuthObservationRef?: never
-      restoredAuthObservationDigest?: never
-      plaintextCredentialConsentRef?: never
-      plaintextCredentialConsentDigest?: never
-    }
-  | {
-      authOutcome: 'rendered_with_credentials'
-      renderedAuthFileIdentityRef: ArtifactRef
-      renderedAuthFileIdentityDigest: string
-      renderedAuthFileContentDigest: string
-      plaintextCredentialConsentRef: ArtifactRef
-      plaintextCredentialConsentDigest: string
-      restoredAuthObservationRef?: never
-      restoredAuthObservationDigest?: never
-    }
-)
-
-type LegacyAuthMigratedMarkerV1 = {
-  schemaVersion: 1
-  format: 'cliq-auth-migrated-v1'
-  migrationId: string
-  sourceObservationRef: ArtifactRef
-  sourceObservationDigest: string
-  credentialReadyRef: ArtifactRef
-  credentialReadyDigest: string
-  records: Array<{
-    endpointRegistrationId: string
-    credentialGrantId: string
-    authorityRecordDigest: string
-  }>
-  markerDigest: string
-}
-
-type MigrationReceiptV1 = {
-  schemaVersion: 1
-  format: 'cliq-migration-receipt-v1'
-  migrationId: string
-  completedAt: string
-  receiptDigest: string
-} & (
-  | {
-      kind: 'kernel_cutover'
-      inventoryRef: ArtifactRef
-      inventoryDigest: string
-      credentialReadyRef: ArtifactRef
-      credentialReadyDigest: string
-      backupRef: ArtifactRef
-      backupDigest: string
-      candidateRef: ArtifactRef
-      candidateDigest: string
-      kernelGenerationIdentityRef: ArtifactRef
-      kernelGenerationIdentityDigest: string
-      authMarkerDigest: string
-      sourceLegacyGenerationDigest: string
-    }
-  | {
-      kind: 'legacy_rollback'
-      rollbackRequestRef: ArtifactRef
-      rollbackRequestDigest: string
-      backupRef: ArtifactRef
-      backupDigest: string
-      legacyGenerationRef: ArtifactRef
-      legacyGenerationDigest: string
-      archivedKernelGenerationRef: ArtifactRef
-      archivedKernelGenerationDigest: string
-    }
-)
-
-type MigrationAuthorityMarkerV1 = {
-  schemaVersion: 1
-  format: 'cliq-state-authority-v1'
-  generationId: string
-  migrationId: string
-  receiptRef: ArtifactRef
-  receiptDigest: string
-  publishedAt: string
-  markerDigest: string
-} & (
-  | {
-      authority: 'kernel'
-      candidateRef: ArtifactRef
-      candidateDigest: string
-      kernelGenerationIdentityRef: ArtifactRef
-      kernelGenerationIdentityDigest: string
-    }
-  | {
-      authority: 'legacy'
-      legacyGenerationRef: ArtifactRef
-      legacyGenerationDigest: string
-    }
-)
-
-type MigrationControlBaseV1 = {
-  schemaVersion: 1
-  format: 'cliq-migration-control-v1'
-  migrationId: string
-  controlRevision: number
-  sourceGenerationDigest: string
-  targetGenerationId: string
-  stateRootIdentityRef: ArtifactRef
-  stateRootIdentityDigest: string
-  createdAt: string
-  updatedAt: string
-  controlDigest: string
-}
-
-type MigrationControlV1 =
-  | (MigrationControlBaseV1 & {
-      phase: 'cutover_preflight'
-      inventoryRef?: never
-      inventoryDigest?: never
-      credentialReadyRef?: never
-      credentialReadyDigest?: never
-      backupRef?: never
-      backupDigest?: never
-      candidateRef?: never
-      candidateDigest?: never
-      legacyGenerationRef?: never
-      legacyGenerationDigest?: never
-    })
-  | (MigrationControlBaseV1 & {
-      phase: 'cutover_candidate_ready'
-      inventoryRef: ArtifactRef
-      inventoryDigest: string
-      credentialReadyRef: ArtifactRef
-      credentialReadyDigest: string
-      backupRef: ArtifactRef
-      backupDigest: string
-      candidateRef: ArtifactRef
-      candidateDigest: string
-      legacyGenerationRef?: never
-      legacyGenerationDigest?: never
-    })
-  | (MigrationControlBaseV1 & {
-      phase: 'credential_cutover'
-      inventoryRef: ArtifactRef
-      inventoryDigest: string
-      credentialReadyRef: ArtifactRef
-      credentialReadyDigest: string
-      backupRef: ArtifactRef
-      backupDigest: string
-      candidateRef: ArtifactRef
-      candidateDigest: string
-      legacyAuthMarkerDigest: string
-      legacyGenerationRef?: never
-      legacyGenerationDigest?: never
-    })
-  | (MigrationControlBaseV1 & {
-      phase: 'rollback_draining'
-      rollbackRequestRef: ArtifactRef
-      rollbackRequestDigest: string
-      backupRef: ArtifactRef
-      backupDigest: string
-      sourceKernelGenerationIdentityRef: ArtifactRef
-      sourceKernelGenerationIdentityDigest: string
-      inventoryRef?: never
-      inventoryDigest?: never
-      credentialReadyRef?: never
-      credentialReadyDigest?: never
-      candidateRef?: never
-      candidateDigest?: never
-      legacyGenerationRef?: never
-      legacyGenerationDigest?: never
-    })
-  | (MigrationControlBaseV1 & {
-      phase: 'rollback_restoring'
-      rollbackRequestRef: ArtifactRef
-      rollbackRequestDigest: string
-      backupRef: ArtifactRef
-      backupDigest: string
-      sourceKernelGenerationIdentityRef: ArtifactRef
-      sourceKernelGenerationIdentityDigest: string
-      archivedKernelGenerationRef: ArtifactRef
-      archivedKernelGenerationDigest: string
-      legacyGenerationRef: ArtifactRef
-      legacyGenerationDigest: string
-      preparedReceiptRef: ArtifactRef
-      preparedReceiptDigest: string
-      preparedLegacyAuthorityMarkerDigest: string
-      inventoryRef?: never
-      inventoryDigest?: never
-      credentialReadyRef?: never
-      credentialReadyDigest?: never
-      candidateRef?: never
-      candidateDigest?: never
-    })
-```
+Canonical types: `MigrationFilesystemRootIdentityV1`, `WindowsLegacyRootIdentityV1`, `WindowsOutputDirectoryIdentityV1` and 33 related definitions.
+Import their complete definitions from
+[RFC 16. Migration And Kernel Cutover](../../rfcs/2026-08-11-durable-verified-run-kernel.md#16-migration-and-kernel-cutover).
+This package enforces that contract without a second schema copy.
 
 The migration decoder applies the canonical omission equations exactly: each container self-digest omits only itself; every ref/digest pair rehashes the named artifact bytes; `entriesDigest` and `recordsDigest` hash their complete arrays; and copied/restored-entry digests hash the byte-sorted reobserved regular-file projections. It enforces canonical path, sort, uniqueness, safe-integer count, descriptor identity, fixed-mode/link-count, source-observation, non-secret projection, credential-authority/binding, and closed auth-outcome rules. `ArchivedKernelDatabaseImageV1.imageDigest` omits itself, while its `sourceContentDigest=contentDigest` equals a full rehash of both the exact closed source image and read-only copied bytes; all source identity, application/user/schema, derived path, ownership, mode, link-count, and byte-count fields cross-match. `ArchivedKernelGenerationManifestV1.manifestDigest` omits itself and its source identity/id, archive-image/content, and final CAS namespace/id/root fields exactly equal their decoded artifacts. `fresh_empty` and `migrated_candidate` generation ids/digests use the RFC formulas; no directory name, timestamp, or free string is generation authority.
 
@@ -4042,7 +3227,64 @@ Preserve / do not touch:
 - The distinction between Session, Run, Checkpoint, RunJournal, RunEvent, WorkerLaunch, ControlRequest, ChildAllocation, registration/grant state, and Artifact.
 - Existing legacy runtime behavior until work package 6 performs the single Kernel Cut; do not advertise it as durable detach.
 
+### Implementation refinement — 2026-09-26
+
+**Build on the real storage module.** `StateStore` owns transactions, recovery
+cuts and all mutable authority. The existing loaded-Run interface is the seam
+for typed continuation. Static assembly decoding belongs to a loaded immutable
+handle; current owner/revision/lease/stop/time/grant checks stay inside the typed
+commit or release operation. A caller supplies intent and exact observations,
+never a selected next status, refund amount or arbitrary patch. Factor common
+private validation only when it removes duplicated checks without moving their
+authority into the caller. Do not expose the private SQLite connection.
+
+**Bound physical work without weakening the recovery cut.** Read the complete
+required relational cut in one consistent transaction, then validate its CAS
+closure. Use a bounded artifact I/O pool/work queue rather than `Promise.all`
+over every reference. Deduplicate refs within that validation and report the
+maximum in-flight reads. A cache may avoid repeated immutable decoding within
+the loaded closure; it cannot turn path existence or old digest metadata into
+fresh byte-integrity evidence. No partial walk is a valid recovery closure.
+
+Startup discovery and list/attach reads must use bounded indexed queries instead
+of loading all terminal history. Keep authenticated `list_read_cuts` semantics;
+do not substitute moving live keyset pagination for a retained read cut. Close
+read transactions before waiting on a client, provider or filesystem copy.
+Measure WAL growth, writer delay and memory under simultaneous attach, heartbeat
+and typed commits. Preserve synchronous transaction callbacks and rollback
+poisoning; an async transaction body is not a batching optimization.
+
+**Treat migration as a first-class operation.** Reuse `MigrationControlV1` and
+its existing phases for restart/progress. Large inventory/copy/verification may
+be internally batched, but the candidate remains non-authoritative until the
+complete locked inventory, credentials, database image and CAS closure validate.
+Estimate required staging/backup space before work; a later disk-full failure
+preserves the authoritative generation. Do not add a startup backfill shortcut,
+second migration marker or indefinite JSON/SQLite dual write.
+
+Shared workloads and measurements are in the
+[scale qualification plan](../../kernel/2026-09-26-design-review.md#7-scale-and-latency-qualification).
+Run integrity and reachability checks on the resulting state, not merely on
+counts emitted by the importer. Separate database-open, discovery, per-Run
+closure validation and safely resumed work in timing reports.
+
 ### Acceptance Criteria
+
+- [ ] `node scripts/kernel/check-design-contracts.mjs` passes; ordinary
+  invocation results and authenticated user-input results retain their exact
+  distinct RFC payloads, including wait/request/revision/channel bindings.
+- [ ] New continuation, verifier and control integration tests use the actual
+  StateStore/CAS. Pure planner tests may use values; fake storage is insufficient
+  for an atomicity, recovery, idempotency or settlement claim.
+- [ ] Artifact fan-out is processed with bounded concurrency and complete
+  closure coverage. Missing/corrupt objects, disk-full and interrupted scans
+  release no execution or GC authority.
+- [ ] The shared development/release workloads record query plans, memory,
+  WAL/write latency and startup/attach timings; unrelated terminal history does
+  not require full hydration for startup/list/attach.
+- [ ] Large import/rollback is restartable through the existing control phases,
+  exposes progress and disk needs, and preserves marker-last authority at every
+  injected I/O failure.
 
 - [ ] `src/kernel/types.ts` exports the RFC definitions field-for-field, including exact discriminators and required/optional/forbidden members for Run objective/endpoint negotiation/normal prompt+request/model/tool/input/repair-diagnostic, exact `ModelRequestV1`/ `WorkspaceInstructionSourceManifestV1`/`WorkspaceInstructionManifestV1`/`BundledSkillClosureV1`/`SkillSourceFileBytesV1`/`DescriptorCapturedSkillSourceFileV1`/`BundledSkillSourceFileV1`/`SkillSourceIdentityBaseV1`/`SkillSourceIdentityV1`/`SkillManifestV1`, Session terminal and Run-context compaction, exact workspace diff/final candidate, exact Git index/object closure and workspace-generation identity/state/snapshot/recovery evidence, root-only dependency plan plus `DependencyReadyItem`, frozen-ignore/projection/include-classification/include-authorization, `RuntimeBundleStructuredArtifactBaseV1`, `RuntimeBundleStructuredArtifactV1`, `RuntimeBundleManifest`, `ListMethodV1`, `ListCursorPayloadV1`, `ListReadCutEntryV1`, `ListReadCutV1`, `RunPolicySnapshotV1`, `PolicyChannelEvidenceBaseV1`, `PolicyChannelEvidenceV1`, `PolicyDecisionItem`, `ApprovalDecisionV1`, `OperationGrantV1`, `AuthorizationGrantV1`, `AuthorizationConsumptionReceiptV1`, `ChildAllocationV1`, `DependencyInstallScriptsAuthorizationTemplateV1`, `KernelIntegrityEvidenceV1`, `RuntimeFailureEvidenceBaseV1`, `RuntimeFailureEvidenceV1`, `VerificationClosureV1`, `InheritedVerificationProvenanceV1`, `ManualAbandonAttestationV1`, `BudgetSettlementV1`, `InvocationAmbiguityEvidenceBaseV1`, `InvocationAmbiguityEvidenceV1`, `PostClaimNoReleaseEvidenceV1`, `BrokerReleaseFenceEvidenceV1`, `InvocationDispatchClosureEvidenceV1`, the complete reconciliation dispatch/wrapper/timeout/subject evidence types, exact MCP/admin artifacts, publication proofs, Interpreter/root image/SandboxProfile/SandboxLaunch/containment types, complete StateOwner identities/evidence/record, and the complete exact Migration/generation/control/request/archive graph including `LegacyPortableHandoffVerificationResultV1`, without local widening. Golden compile/schema fixtures fail on every added, removed, optionalized, or renamed field.
 - [ ] Policy evaluation artifact-first publishes exact `PolicyChannelEvidenceV1` from fixed signed Supervisor code interpreting the retained exact `PolicyEngineProfileV1` before approval/grant/denial/Journal prepare. Snapshot engine entry id/version matches the sole signed non-executable RuntimeBundle `policy_engine` data entry; its signed complete-file `entry.digest` equals `engine.profileRef`, while decoding those bytes and independently recomputing the self-omitting semantic digest yields `engine.profileDigest`. These hash domains are distinct and are never equated. No helper spawn or plugin load exists. Storage reruns the exact interpreter/profile and validates the closed filesystem/Bash/MCP/plan/named-action channel projections, deterministic Bash parse, named verifier/dependency/delivery/MCP-server/child identity key, rule/mode precedence, ask/allow/deny result, and omission digest. `ApprovalSubject`, `ApprovalDecisionV1`, direct/interactive `PolicyDecisionItem`, and policy/user `OperationGrantV1` provenance preserve the exact evidence pair; reparse, mutable engine/parser/profile, host-shell interpretation, coarse mode-only proof, or cross-request/frontier/target evidence is rejected. GC and recovery retain the evidence plus profile/RuntimeBundle/source closure.

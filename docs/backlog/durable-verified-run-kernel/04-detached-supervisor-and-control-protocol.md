@@ -6,6 +6,10 @@
 
 READY WITH RISKS
 
+Reviewed against main `0f2fa146` on 2026-09-26. See the
+[cross-package review](../../kernel/2026-09-26-design-review.md) for source
+evidence, current implementation and the installed integration checkpoints.
+
 This package is implementable without further product decisions. The visible risks are whole-containment death proof, crash-safe preactivation, launchd/systemd lifecycle behavior, event-spool volume, and protocol upgrade handling. None permits process-local Run ownership, productive authority before lease activation, or a second worker while any prior containment is unproven.
 
 ### Source
@@ -87,7 +91,7 @@ Attached and detached clients are views over the same durable Run. Closing a cli
 
 ### Problem
 
-The current headless/runtime ownership model is incompatible with durable delegation:
+The legacy production headless/runtime ownership model is incompatible with durable delegation:
 
 - `runId` is generated in the client/server process but is not backed by a durable authoritative Run row.
 - stdio RPC allows one active Run, holds it in memory, and aborts it when stdin/stdout closes.
@@ -183,431 +187,10 @@ Implementation notes:
 
 8. **Freeze `WaitingSubject` as the canonical immutable typed artifact.** `Run.waitingOnRef` resolves to exactly one of these shapes, `Run.waitingReason` equals `kind`, and its `frontierRef` equals the Run's current immutable frontier:
 
-    ```ts
-    type ApprovalSubject = {
-      policyChannelEvidenceRef: ArtifactRef
-      policyChannelEvidenceDigest: string
-    } & (
-      | ({
-          kind: 'tool_call'
-          batchItemId: string
-          callId: string
-          callIndex: number
-          opId: string
-          target: string
-          toolName: string
-          toolContractDigest: string
-          replayClass: ReplayClass
-        } & (
-          | { policySubjectKind: 'ordinary_tool'; childMode?: never }
-          | { policySubjectKind: 'child_delegate'; childMode: 'read_only' | 'mutating' }
-        ))
-      | {
-          kind: 'verifier_launch'
-          candidateItemId: string
-          resultSourceRef: ArtifactRef
-          verifierPlanRef: ArtifactRef
-          verifierIndex: number
-          verifierId: string
-          verifierSpecDigest: string
-          opId: string
-          target: string
-          required: boolean
-        }
-      | {
-          kind: 'mcp_server_launch'
-          registryRevisionRef: ArtifactRef
-          registryManifestDigest: string
-          lifecycleSeq: number
-          opId: string
-          originatingBatchItemId: string
-          originatingCallId: string
-          originatingCallIndex: number
-        }
-      | {
-          kind: 'delivery_plan'
-          deliveryPlanRef: ArtifactRef
-          deliveryPlanDigest: string
-          operationSetDigest: string
-          opId: string
-        }
-      | {
-          kind: 'dependency_install_scripts'
-          dependencyPlanRef: ArtifactRef
-          lockfileDigest: string
-          resultSourceRef: ArtifactRef
-          installScripts: true
-          opId: string
-        }
-    )
-
-    type ApprovalDecisionV1 = {
-      schemaVersion: 1
-      format: 'cliq-approval-decision-v1'
-      decisionId: string
-      principalId: string
-      channelIdentityRef: ArtifactRef
-      channelIdentityDigest: string
-      runId: string
-      waitingSubjectRef: ArtifactRef
-      waitingSubjectDigest: string
-      frontierRef: ArtifactRef
-      subject: ApprovalSubject
-      subjectDigest: string
-      requestId: string
-      requestDigest: string
-      expectedRunRevision: number
-      decision: 'allow' | 'deny'
-      requestedTtlMs?: number
-      grantExpiresAt?: string
-      createdAt: string
-      decisionDigest: string
-    }
-
-    type McpRecoveryProbeEvidenceV1 = {
-      schemaVersion: 1
-      format: 'cliq-mcp-recovery-probe-evidence-v1'
-      runId: string
-      waitingSubjectRef: ArtifactRef
-      opId: string
-      attempt: number
-      probeKind: 'automatic' | 'user_requested'
-      probeOrdinal: number
-      probeNonceDigest: string
-      probeDispatchDigest: string
-      registryRevisionRef: ArtifactRef
-      registryManifestDigest: string
-      serverToolName: string
-      profileId: string
-      profileDigest: string
-      statusRequestTemplateRef: ArtifactRef
-      statusRequestTemplateDigest: string
-      statusRequestDigest: string
-      brokerDispatchId: string
-      brokerTargetDigest: string
-      statusResponseRef: ArtifactRef
-      statusResponseDigest: string
-      completedPredicateRef: ArtifactRef
-      completedPredicateDigest: string
-      failedPredicateRef: ArtifactRef
-      failedPredicateDigest: string
-      disposition: 'completed' | 'failed' | 'unresolved'
-      observedAt: string
-      evidenceDigest: string
-    }
-
-    type WorkerRecoveryEvidenceBaseV1 = {
-      schemaVersion: 1
-      format: 'cliq-worker-recovery-evidence-v1'
-      runId: string
-      waitingSubjectRef: ArtifactRef
-      oldWorkerLaunchId: string
-      oldLeaseEpoch: number
-      oldWorkerIdentityDigest: string
-      processContainmentRef: ArtifactRef
-      containmentDeathEvidenceRef: ArtifactRef
-      containmentDeathEvidenceDigest: string
-      workspaceGenerationRef: ArtifactRef
-      generationTreeDigest: string
-      inspectorIdentityRef: ArtifactRef
-      inspectorIdentityDigest: string
-      observedAt: string
-      evidenceDigest: string
-    }
-
-    type WorkerRecoveryEvidenceV1 = WorkerRecoveryEvidenceBaseV1 & (
-      | {
-          generationDisposition: 'quarantined'
-          restoredCheckpointId?: never
-          restoredWorkspaceStateRef?: never
-          replacementWorkspaceGenerationRef?: never
-        }
-      | {
-          generationDisposition: 'restored_from_checkpoint'
-          restoredCheckpointId: string
-          restoredWorkspaceStateRef: ArtifactRef
-          replacementWorkspaceGenerationRef: ArtifactRef
-        }
-    )
-
-    type ReconciliationProbeDispatchV1 = {
-      schemaVersion: 1
-      format: 'cliq-reconciliation-probe-dispatch-v1'
-      runId: string
-      reconciliationSubjectDigest: string
-      probeKind: 'automatic' | 'user_requested'
-      probeOrdinal: number
-      probeNonceDigest: string
-      probeStartedAt: string
-      probeDeadlineAt: string
-      owningSupervisorInstanceId: string
-      dispatchDigest: string
-    } & (
-      | {
-          subjectKind: 'mcp_recovery'
-          brokerDispatchId: string
-          brokerRequestDigest: string
-          brokerTargetDigest: string
-          brokerFenceTokenDigest: string
-        }
-      | {
-          subjectKind: 'publication'
-          inspectorTaskId: string
-          inspectionTargetDigest: string
-        }
-      | {
-          subjectKind: 'worker_recovery'
-          inspectorTaskId: string
-          inspectionTargetDigest: string
-        }
-    )
-
-    type ReconciliationInspectorTaskClosureV1 =
-      | {
-          closureKind: 'cancelled_and_joined'
-          inspectorTaskCancelledAndJoined: true
-          ownerDeathAcquisitionEvidenceRef?: never
-          ownerDeathAcquisitionEvidenceDigest?: never
-        }
-      | {
-          closureKind: 'owner_process_dead'
-          ownerDeathAcquisitionEvidenceRef: ArtifactRef
-          ownerDeathAcquisitionEvidenceDigest: string
-          inspectorTaskCancelledAndJoined?: never
-        }
-
-    type ReconciliationProbeTimeoutClosureV1 = {
-      schemaVersion: 1
-      format: 'cliq-reconciliation-probe-timeout-closure-v1'
-      runId: string
-      waitingSubjectRef: ArtifactRef
-      probeKind: 'automatic' | 'user_requested'
-      probeOrdinal: number
-      probeNonceDigest: string
-      probeDispatchDigest: string
-      probeDeadlineAt: string
-      inspectorIdentityRef: ArtifactRef
-      inspectorIdentityDigest: string
-      closedAt: string
-      closureDigest: string
-    } & (
-      | {
-          subjectKind: 'mcp_recovery'
-          brokerDispatchId: string
-          brokerTargetDigest: string
-          brokerFenceTokenDigest: string
-          noActiveReleaseForNonce: true
-        }
-      | {
-          subjectKind: 'publication'
-          deliveryPlanRef: ArtifactRef
-          pathOperationId: string
-          attempt: number
-          inspectorTaskId: string
-          taskClosure: ReconciliationInspectorTaskClosureV1
-        }
-      | {
-          subjectKind: 'worker_recovery'
-          oldWorkerLaunchId: string
-          processContainmentRef: ArtifactRef
-          inspectorTaskId: string
-          taskClosure: ReconciliationInspectorTaskClosureV1
-        }
-    )
-
-    type ReconciliationProbeEvidenceV1 = {
-      schemaVersion: 1
-      format: 'cliq-reconciliation-probe-evidence-v1'
-      runId: string
-      waitingSubjectRef: ArtifactRef
-      waitingSubjectDigest: string
-      probeKind: 'automatic' | 'user_requested'
-      probeOrdinal: number
-      probeNonceDigest: string
-      probeDispatchDigest: string
-      probeStartedAt: string
-      probeDeadlineAt: string
-      inspectorIdentityRef: ArtifactRef
-      inspectorIdentityDigest: string
-      observedAt: string
-      evidenceDigest: string
-    } & (
-      | {
-          outcome: 'subject_observation'
-          subjectEvidenceKind: 'mcp_recovery' | 'publication' | 'worker_recovery'
-          subjectEvidenceRef: ArtifactRef
-          subjectEvidenceDigest: string
-          timeoutClosureRef?: never
-          timeoutClosureDigest?: never
-        }
-      | {
-          outcome: 'probe_timeout'
-          timeoutReason: 'no_authoritative_observation_before_deadline'
-          timeoutClosureRef: ArtifactRef
-          timeoutClosureDigest: string
-          subjectEvidenceKind?: never
-          subjectEvidenceRef?: never
-          subjectEvidenceDigest?: never
-        }
-    )
-
-    type ReconciliationSubject =
-      | {
-          kind: 'invocation'
-          recovery: 'mcp_reconcile'
-          opKind: 'mcp'
-          opId: string
-          attempt: number
-          registryRevisionRef: ArtifactRef
-          registryManifestDigest: string
-          serverToolName: string
-          profileId: string
-          profileDigest: string
-          statusRequestTemplateRef: ArtifactRef
-          statusRequestTemplateDigest: string
-          completedPredicateRef: ArtifactRef
-          completedPredicateDigest: string
-          failedPredicateRef: ArtifactRef
-          failedPredicateDigest: string
-        }
-      | {
-          kind: 'invocation'
-          recovery: 'manual'
-          opKind: 'tool' | 'mcp'
-          opId: string
-          attempt: number
-        }
-      | {
-          kind: 'publication_path'
-          deliveryPlanRef: ArtifactRef
-          pathOperationId: string
-          attempt: number
-        }
-      | {
-          kind: 'worker_death'
-          oldWorkerLaunchId: string
-          oldLeaseEpoch: number
-          oldWorkerIdentity: string
-          processContainmentRef: ArtifactRef
-          workspaceGenerationRef: ArtifactRef
-          openInvocationRefs: ArtifactRef[]
-        }
-
-    type ReconciliationLastProbeEvidenceV1 =
-      | {
-          lastProbeEvidenceRef?: never
-          lastProbeEvidenceDigest?: never
-        }
-      | {
-          lastProbeEvidenceRef: ArtifactRef
-          lastProbeEvidenceDigest: string
-        }
-
-    type ReconciliationProbeStateV1 =
-      | {
-          phase: 'manual_only'
-          automaticProbeCount: 0
-          userProbeCount: 0
-        }
-      | {
-          phase: 'automatic_pending'
-          automaticProbeCount: 0
-          userProbeCount: 0
-          nextProbeAt: string
-          lastProbeEvidenceRef?: never
-          lastProbeEvidenceDigest?: never
-        }
-      | {
-          phase: 'automatic_pending'
-          automaticProbeCount: 1 | 2 | 3 | 4 | 5 | 6 | 7
-          userProbeCount: 0
-          nextProbeAt: string
-          lastProbeEvidenceRef: ArtifactRef
-          lastProbeEvidenceDigest: string
-        }
-      | {
-          phase: 'automatic_in_flight'
-          automaticProbeCount: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
-          userProbeCount: 0
-          dispatch: ReconciliationProbeDispatchV1 & {
-            probeKind: 'automatic'
-            probeOrdinal: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
-          }
-        }
-      | {
-          phase: 'automatic_exhausted'
-          automaticProbeCount: 8
-          userProbeCount: number
-          lastProbeEvidenceRef: ArtifactRef
-          lastProbeEvidenceDigest: string
-        }
-      | {
-          phase: 'user_in_flight'
-          automaticProbeCount: 8
-          userProbeCount: number
-          dispatch: ReconciliationProbeDispatchV1 & {
-            probeKind: 'user_requested'
-            probeOrdinal: number
-            controlRequestId: string
-            controlRequestDigest: string
-          }
-        }
-
-    type WaitingSubject =
-      | {
-          schemaVersion: 1
-          kind: 'approval'
-          runId: string
-          createdFromRevision: number
-          createdAt: string
-          frontierRef: ArtifactRef
-          subject: ApprovalSubject
-        }
-      | {
-          schemaVersion: 1
-          kind: 'input'
-          runId: string
-          createdFromRevision: number
-          createdAt: string
-          frontierRef: ArtifactRef
-          inputRequestItemId: string
-          batchItemId: string
-          callId: string
-        }
-      | {
-          schemaVersion: 1
-          kind: 'child'
-          runId: string
-          createdFromRevision: number
-          createdAt: string
-          frontierRef: ArtifactRef
-          subject:
-            | {
-                kind: 'await_tool'
-                waitSetRef: ArtifactRef
-                awaitBatchItemId: string
-                awaitCallId: string
-                awaitCallIndex: number
-              }
-            | { kind: 'finalize_settlement'; waitSetRef: ArtifactRef; modelTurnItemId: string }
-            | {
-                kind: 'stop_settlement'
-                waitSetRef: ArtifactRef
-                stopIntentRef: ArtifactRef
-                awaitOrigin?: { batchItemId: string; callId: string; callIndex: number }
-              }
-        }
-      | {
-          schemaVersion: 1
-          kind: 'reconciliation'
-          runId: string
-          createdFromRevision: number
-          createdAt: string
-          frontierRef: ArtifactRef
-          subject: ReconciliationSubject
-          probeState: ReconciliationProbeStateV1
-        }
-    ```
+    Canonical types: `ApprovalSubject`, `ApprovalDecisionV1`, `McpRecoveryProbeEvidenceV1` and 10 related definitions.
+    Import their complete definitions from
+    [RFC 6. Authoritative Run State](../../rfcs/2026-08-11-durable-verified-run-kernel.md#6-authoritative-run-state).
+    This package enforces that contract without a second schema copy.
 
    Subjects contain exact identity/proof requirements and no decision, mutable secret, generic effect/workspace shape, or inferred recovery state. An invocation reconciliation is only exact MCP `recovery='mcp_reconcile'` with the complete frozen registry/profile/status-template/predicate closure, or exact `recovery='manual'` for a `tool|mcp` Journal entry whose ReplayClass is manual. Model, verifier, MCP-server lifecycle, ordinary built-in tool, and retry uncertainty cannot enter the MCP-reconcile branch. A normal approval/input/child/invocation wait is entered only after work package 3 `quiesceGeneration` publishes changed context/workspace and ends the worker containment. `worker_death` is the exception: every worker loss, including immediately positive death, first atomically clears active Run ownership, preserves old epoch/identity/containment/generation/open invocations, installs the exact wait, moves the launch to `reconciling/fenced_reconciling`, and moves the authoritative generation from its exact `active|revoking|checkpointing` source phase to `fenced_reconciling` with wait ref/digest, source phase, and phase-valid quiesce id. No replacement may start until exact `WorkerRecoveryEvidenceV1` proves positive all-descendant death; both dispositions then publish exact `worker_recovery` quarantine evidence and quarantine the old row, while only restoration additionally selects a distinct preactivated generation.
 
@@ -858,47 +441,10 @@ Implementation notes:
 
 12. **Use durable powerless preactivation.** The authoritative state service persists the sole launch/generation-write authority before the Supervisor creates a process or VM:
 
-    ```ts
-    type WorkerIdentity = {
-      schemaVersion: 1
-      executableRealpath: string
-      executableDigest: string
-      pid: number
-      processStartToken: string
-      spawnNonceDigest: string
-      activationNonceDigest: string
-      intendedLeaseEpoch: number
-      launchId: string
-      supervisorInstanceId: string
-      processContainmentRef: ArtifactRef
-    }
-
-    type WorkerLaunch = {
-      schemaVersion: 1
-      launchId: string
-      runId: string
-      plannedRunRevision: number
-      supervisorInstanceId: string
-      spawnNonceDigest: string
-      activationNonceDigest: string
-      phase: 'reserved' | 'preactivated' | 'activated' | 'reconciling' | 'retired'
-      workspaceGenerationRef: ArtifactRef
-      containmentPlanRef: ArtifactRef
-      sandboxLaunchSpecRef: ArtifactRef
-      workerIdentityDigest?: string
-      processContainmentRef?: ArtifactRef
-      leaseEpoch?: number
-      leaseVersion: number
-      leaseExpiresAt?: string
-      generationWriteState: 'preactivated_readonly' | 'active' | 'revoking' | 'checkpointing' | 'fenced_reconciling' | 'sealed'
-      quiesceId?: string
-      createdAt: string
-      activationDeadlineAt: string
-      activatedAt?: string
-      retiredAt?: string
-      retirementEvidenceRef?: ArtifactRef
-    }
-    ```
+    Canonical types: `WorkerIdentity`, `WorkerLaunch`.
+    Import their complete definitions from
+    [RFC 9.1 Lease, Activation, And Process Containment](../../rfcs/2026-08-11-durable-verified-run-kernel.md#91-lease-activation-and-process-containment).
+    This package enforces that contract without a second schema copy.
 
    Work package 1 stores this row in `worker_launches` and a separate exact `workspace_generations` row as the sole mutable generation authority; no in-memory lease or directory name is authoritative. `workspaceGenerationRef` closed-decodes exact immutable `WorkspaceGenerationIdentityV1`, while WorkerLaunch `generationWriteState` is only a same-transaction denormalized projection of exact `WorkspaceGenerationStateV1`. `workerIdentityDigest` resolves to one immutable versioned `WorkerIdentity` artifact, and `oldWorkerIdentity` carried by a wait is that exact digest, never a PID-shaped free string. `executableRealpath` is the canonical path inside the admitted execution environment; on macOS strong mode it is the signed `GuestToolchainManifest` guest path/digest, never a host Mach-O identity. Work package 3 creates the identity/state row in `materializing`, materializes/verifies the read-only fresh generation, publishes exact `WorkspaceGenerationSnapshotEvidenceV1`, CASes the row to `preactivated_readonly`, and constructs the deterministic containment plan before any process or VM exists. `reserveWorkerLaunch` inserts the sole unretired launch while the Run is lease-free `queued`, requires that exact generation row, and stores mandatory exact `SandboxLaunchSpecV1.worker_activation`; the spec must byte-match row/plan/generation at creation. `activationDeadlineAt = createdAt + 120s` and is never extended. `recordPreactivated` CASes `reserved -> preactivated`, binds inspected worker/containment identity, and keeps launch projection equal to generation `preactivated_readonly`. Actual containment/no-spawn/death evidence repeats that same spec/plan/owner/nonce/backend identity. Before activation the worker has only a one-purpose handshake channel and zero broker, sandbox-launch, generation-write, network, provider, MCP, credential, or child-spawn authority.
 
@@ -1041,7 +587,62 @@ Preserve / do not touch:
 - No client is allowed to write Run status directly; all mutations are revision-checked application-service operations.
 - Do not add a Task, DAG, scheduler plugin ABI, HTTP server, TCP listener, remote worker, or automatic apply path.
 
+### Implementation refinement — 2026-09-26
+
+**One application-service path.** All generated client commands enter the same
+authenticated handler, retain their original replay identity, load the current
+typed state, and invoke the existing operation-specific reducer. In-process
+tests and UDS clients differ only at authentication/transport. Ordinary-tool
+approval, input, retry, root stop and worker-loss fencing already have real-store
+implementations; transport work must reuse them. The Supervisor schedules
+progress and captures observations; it cannot manufacture a settlement,
+quiescence proof or arbitrary next frontier.
+
+**Durable work precedes wakeup.** Commit admission/control/child settlement before
+emitting an in-memory wake. Coalesce wake notifications and timer work by stable
+Run identity; rebuild eligibility from durable state after restart. A lost wake
+is recovered by the scan, while a duplicate wake cannot claim another dispatch.
+Queued/waiting/unknown/stop cases use their existing RFC reducers. Do not add an
+inbox aggregate, process-local active-Run authority or second owner lock.
+
+Keep startup discovery bounded and indexed. Begin recovery scheduling within
+the existing five-second gate; separately measure when each Run becomes safe
+to resume. Complete the mandatory prior-containment retirement and full required
+closure validation before productive replacement. Global corruption or owner
+uncertainty must be reported as such; a fast scan cannot hide failed recovery.
+
+**Keep observation independent.** Public v1 remains bounded `run.attach` polling
+with a snapshot/event high-water from one read cut. Drain the advertised cut
+before moving forward; process cursor expiry using the inline authoritative
+snapshot. Bound per-connection buffers and outstanding decoded requests using
+the canonical protocol limits. Close the read transaction before sending the
+page. A client that stops reading must not retain a SQLite snapshot, grow an
+unbounded output queue, cancel the Run or block heartbeat/stop processing.
+Disconnect only discards that attachment's work; explicit `run.cancel` remains
+the durable cancellation path. No implicit push subscription is introduced.
+
+**Treat update as recovery.** WP06 installs immutable bundles and decides
+compatibility; WP04 owns service stop/start and retirement/recovery ordering.
+Test update/restart during queued work, active provider I/O, tool publication,
+approval/input wait and reconciliation. Use the same owner acquisition and
+recovery code as a crash. Incompatible candidates stay staged with
+`drain_required`; startup failure follows the existing compatible-selection
+rollback. Never adopt old workers or start an embedded runtime after UDS failure.
+
 ### Acceptance Criteria
+
+- [ ] Drop every in-memory wake/timer hint, restart, and rediscover the same
+  durable eligible work. Duplicate notifications and lost command replies do
+  not duplicate Run admission, dispatch, user input or child settlement.
+- [ ] Slow-client, disconnect and cursor-expiry tests preserve a complete event
+  cut and authoritative snapshot while worker heartbeat/control latency remains
+  bounded. No database read transaction spans transport backpressure.
+- [ ] The shared scale campaign measures startup entry to first recovery
+  scheduling, per-Run safe readiness and attach p95 separately, including failed
+  startup/inspection cases rather than omitting them from the report.
+- [ ] Installed-service update/reboot tests cover every active/waiting state
+  above and show one owner, positively retired predecessors, preserved pinned
+  identities and exact control replay through the generated client.
 
 - [ ] Exactly one per-user Supervisor owns a `$CLIQ_HOME`; launchd/systemd restarts it. Only bootstrap for an exact as-yet-unowned `fresh_empty|migrated_candidate` generation, latest-graceful clean acquisition, or positive-death takeover may establish authority. Migrated bootstrap requires the durable matching Kernel marker/candidate/image/CAS closure and is the first post-cutover repository transaction. These APIs register only named metadata/owner rows under exact descriptors; every other write/release needs active equality, except already-prepared rollback marker rename after graceful finalization. Replacement/loss/mismatch gates authority and full history stays rooted.
 - [ ] The control listener is exact root-relative `runtime/control-v1.sock` below a same-user `0700` StateRoot directory, remains held open, is descriptor-verified mode `0600`, rejects unsafe/symlinked/replaced paths, and exposes no TCP/HTTP listener. Every accepted UDS connection publishes exact `LocalSocketPeerObservationV1` from listener/accepted-socket fstat plus twice-identical Linux `SO_PEERCRED` or macOS `getpeereid`+`LOCAL_PEERPID` samples around exact `PlatformProcessIdentityV1`; root/platform/uid/pid/time/descriptor equality is mandatory. The resulting exact principal/channel artifacts use a fresh 32-byte nonce digest and are injected into requests. Caller-supplied identity, unavailable APIs, reused/exited pid, listener drift, or sample mismatch closes without application dispatch.
