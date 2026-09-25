@@ -6,6 +6,10 @@
 
 READY WITH RISKS
 
+Reviewed against main `0f2fa146` on 2026-09-26. See the
+[cross-package review](../../kernel/2026-09-26-design-review.md) for source
+evidence, current implementation and the installed integration checkpoints.
+
 This package is implementable without further product decisions. The visible risks are whole-containment death proof, crash-safe preactivation, launchd/systemd lifecycle behavior, event-spool volume, and protocol upgrade handling. None permits process-local Run ownership, productive authority before lease activation, or a second worker while any prior containment is unproven.
 
 ### Source
@@ -87,7 +91,7 @@ Attached and detached clients are views over the same durable Run. Closing a cli
 
 ### Problem
 
-The current headless/runtime ownership model is incompatible with durable delegation:
+The legacy production headless/runtime ownership model is incompatible with durable delegation:
 
 - `runId` is generated in the client/server process but is not backed by a durable authoritative Run row.
 - stdio RPC allows one active Run, holds it in memory, and aborts it when stdin/stdout closes.
@@ -583,7 +587,62 @@ Preserve / do not touch:
 - No client is allowed to write Run status directly; all mutations are revision-checked application-service operations.
 - Do not add a Task, DAG, scheduler plugin ABI, HTTP server, TCP listener, remote worker, or automatic apply path.
 
+### Implementation refinement — 2026-09-26
+
+**One application-service path.** All generated client commands enter the same
+authenticated handler, retain their original replay identity, load the current
+typed state, and invoke the existing operation-specific reducer. In-process
+tests and UDS clients differ only at authentication/transport. Ordinary-tool
+approval, input, retry, root stop and worker-loss fencing already have real-store
+implementations; transport work must reuse them. The Supervisor schedules
+progress and captures observations; it cannot manufacture a settlement,
+quiescence proof or arbitrary next frontier.
+
+**Durable work precedes wakeup.** Commit admission/control/child settlement before
+emitting an in-memory wake. Coalesce wake notifications and timer work by stable
+Run identity; rebuild eligibility from durable state after restart. A lost wake
+is recovered by the scan, while a duplicate wake cannot claim another dispatch.
+Queued/waiting/unknown/stop cases use their existing RFC reducers. Do not add an
+inbox aggregate, process-local active-Run authority or second owner lock.
+
+Keep startup discovery bounded and indexed. Begin recovery scheduling within
+the existing five-second gate; separately measure when each Run becomes safe
+to resume. Complete the mandatory prior-containment retirement and full required
+closure validation before productive replacement. Global corruption or owner
+uncertainty must be reported as such; a fast scan cannot hide failed recovery.
+
+**Keep observation independent.** Public v1 remains bounded `run.attach` polling
+with a snapshot/event high-water from one read cut. Drain the advertised cut
+before moving forward; process cursor expiry using the inline authoritative
+snapshot. Bound per-connection buffers and outstanding decoded requests using
+the canonical protocol limits. Close the read transaction before sending the
+page. A client that stops reading must not retain a SQLite snapshot, grow an
+unbounded output queue, cancel the Run or block heartbeat/stop processing.
+Disconnect only discards that attachment's work; explicit `run.cancel` remains
+the durable cancellation path. No implicit push subscription is introduced.
+
+**Treat update as recovery.** WP06 installs immutable bundles and decides
+compatibility; WP04 owns service stop/start and retirement/recovery ordering.
+Test update/restart during queued work, active provider I/O, tool publication,
+approval/input wait and reconciliation. Use the same owner acquisition and
+recovery code as a crash. Incompatible candidates stay staged with
+`drain_required`; startup failure follows the existing compatible-selection
+rollback. Never adopt old workers or start an embedded runtime after UDS failure.
+
 ### Acceptance Criteria
+
+- [ ] Drop every in-memory wake/timer hint, restart, and rediscover the same
+  durable eligible work. Duplicate notifications and lost command replies do
+  not duplicate Run admission, dispatch, user input or child settlement.
+- [ ] Slow-client, disconnect and cursor-expiry tests preserve a complete event
+  cut and authoritative snapshot while worker heartbeat/control latency remains
+  bounded. No database read transaction spans transport backpressure.
+- [ ] The shared scale campaign measures startup entry to first recovery
+  scheduling, per-Run safe readiness and attach p95 separately, including failed
+  startup/inspection cases rather than omitting them from the report.
+- [ ] Installed-service update/reboot tests cover every active/waiting state
+  above and show one owner, positively retired predecessors, preserved pinned
+  identities and exact control replay through the generated client.
 
 - [ ] Exactly one per-user Supervisor owns a `$CLIQ_HOME`; launchd/systemd restarts it. Only bootstrap for an exact as-yet-unowned `fresh_empty|migrated_candidate` generation, latest-graceful clean acquisition, or positive-death takeover may establish authority. Migrated bootstrap requires the durable matching Kernel marker/candidate/image/CAS closure and is the first post-cutover repository transaction. These APIs register only named metadata/owner rows under exact descriptors; every other write/release needs active equality, except already-prepared rollback marker rename after graceful finalization. Replacement/loss/mismatch gates authority and full history stays rooted.
 - [ ] The control listener is exact root-relative `runtime/control-v1.sock` below a same-user `0700` StateRoot directory, remains held open, is descriptor-verified mode `0600`, rejects unsafe/symlinked/replaced paths, and exposes no TCP/HTTP listener. Every accepted UDS connection publishes exact `LocalSocketPeerObservationV1` from listener/accepted-socket fstat plus twice-identical Linux `SO_PEERCRED` or macOS `getpeereid`+`LOCAL_PEERPID` samples around exact `PlatformProcessIdentityV1`; root/platform/uid/pid/time/descriptor equality is mandatory. The resulting exact principal/channel artifacts use a fresh 32-byte nonce digest and are injected into requests. Caller-supplied identity, unavailable APIs, reused/exited pid, listener drift, or sample mismatch closes without application dispatch.

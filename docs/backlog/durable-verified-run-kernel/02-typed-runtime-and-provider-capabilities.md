@@ -6,6 +6,11 @@
 
 READY WITH RISKS
 
+Reviewed against main `0f2fa146` on 2026-09-26. See the
+[cross-package review](../../kernel/2026-09-26-design-review.md) for the current
+Gate A/Gate B boundary and pinned external evidence. This spec is an
+implementation contract, not a claim of live-provider qualification.
+
 WP02 is one program with two review gates: trusted model attempt (A), then
 typed runtime continuation (B). There are no smaller product slices.
 Autonomous execution uses native tools only. Text-only models remain usable
@@ -277,7 +282,55 @@ semantic retry. Estimation can undercount a real context; fail explicitly on
 provider rejection, never silently truncate, guess successful completion or
 restore text-action parsing.
 
+### Implementation refinement — 2026-09-26
+
+Keep the loaded `ModelSession` and StateStore loaded-Run seam as the normal
+implementation entry. Reuse the current model/context, ordinary-tool, approval,
+input, retry and stop reducers. Recovery rebuilds these same planners from the
+retained closure; it does not use a second interpreter, a provider-specific
+continuation loop or a typed-to-legacy adapter.
+
+**Separate wire progress from committed facts.** Keep one bounded incremental
+observer per attempt and one final compiler. Do not repeatedly serialize or
+persist a growing full assistant message for each delta. Coalesce disposable
+display work, bound its queue and discard it when its consumer disconnects;
+never discard the retained bounded response needed for the final artifact or
+an unusable-response proof. A slow display cannot delay lease renewal or
+productive release fencing. Partial names/arguments/reasoning remain inert.
+Public `run.attach` remains the durable page protocol owned by WP04/WP06; this
+change introduces no live push method or replayable partial-output authority.
+
+**Keep one batch policy.** Validate the complete response before the first
+dispatch, then execute calls sequentially in provider order. Pi's durable
+parallel outcome staging is useful prior art for a future concurrency proposal,
+but adding an `outcome_ready` state or hidden concurrent executor here would
+create recovery work without a demonstrated requirement. Child Runs remain the
+only bounded parallel execution primitive in this cut.
+
+**Qualify the actual selected model.** WP02 supplies a machine-readable test
+report keyed by exact endpoint/model/adapter/capability/pricing identities;
+WP06 records release eligibility. Cover native multi-call continuation, opaque
+reasoning, malformed later calls, mid-stream loss, output limits and compaction.
+Fixtures establish adapter behavior; separately obtained endpoint evidence
+establishes live capability and credible billing ceilings. Evidence expiration
+or drift never mutates an admitted assembly or selects a weaker runtime mode.
+Do not treat rate metadata, a passing happy path or a signature over an estimate
+as a hard spend guarantee.
+
 ### Acceptance criteria
+
+- [ ] The installed integration path uses the existing loaded module and actual
+  StateStore commits for live/recovery/cancel entry; no alternate continuation
+  state machine or duplicated provider parsing is introduced.
+- [ ] Slow/disconnected display tests keep pending progress memory bounded while
+  preserving the final retained response and exact terminal/usage observation.
+  Partial native calls cause zero policy grants and zero dispatches.
+- [ ] Conformance covers arbitrary chunk boundaries and response-to-next-request
+  round trips for each advertised model mode, using independently specified
+  expected output; provider-side drift yields the existing closed failure.
+- [ ] Before I2, at least the selected real model has a complete eligibility
+  record. Before Kernel Cut, every advertised provider/model combination does;
+  unsupported combinations fail with the specified typed admission error.
 
 Gate A:
 

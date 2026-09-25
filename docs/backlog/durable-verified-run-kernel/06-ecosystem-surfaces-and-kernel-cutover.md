@@ -6,6 +6,12 @@
 
 READY WITH RISKS
 
+Reviewed against main `0f2fa146` on 2026-09-26. The current package and public
+clients still use legacy composition. The
+[cross-package review](../../kernel/2026-09-26-design-review.md) requires signed
+installation and generated-client integration from I1, with one public Kernel
+Cut only after all six package gates pass.
+
 The ecosystem and cutover decisions are closed. The work is implementable, but it is the final integration package: protocol compatibility, state migration, and removal of the legacy runtime create a high blast radius. It may be built in parallel, but it cannot ship as the default until work packages 01-05 and every RFC release gate pass together.
 
 ### Source
@@ -1265,7 +1271,72 @@ Preserve / do not touch:
 - Preserve historical documents and legacy backups as read-only evidence.
 - Do not allow MCP, skills, `AGENTS.md`, provider adapters, or UI clients to define new control-plane truth.
 
+### Implementation refinement — 2026-09-26
+
+**Ship the integration substrate early.** WP06 owns a minimal real signed bundle,
+stable bootstrap, generated client and install fixture from I1. Consume the
+native StateOwner helper, strong backend and actual Supervisor; do not treat the
+current source tree or universal npm tarball as an already qualified package.
+The first installed path may use a fixture provider for mechanics, clearly
+labelled as such. Only qualified live or managed-local model evidence satisfies
+I2/provider release checks. Features remain internal until the single cut.
+
+**One consumer contract.** Generate protocol types, strict decoders, examples
+and client bindings from the same canonical source. CLI/TUI/JSONL/RPC call the
+same client operations. The example must retain request/admission identity,
+replay a lost submit response, drain one attach high-water, recover expired
+cursors from the inline snapshot, and read result availability from Run state.
+It must not reconstruct mutable authority from event text or open SQLite.
+
+**Qualify the first useful journey.** Use the
+[developer journey and TTHW target](../../kernel/2026-09-26-design-review.md#8-developer-journey-and-release-decisions)
+on clean supported macOS/Linux installations. The user installs, completes
+secure model setup, trusts a repository, submits with one required verifier,
+disconnects and retrieves an inspectable verified result. Document only real
+shipped commands; generate help/example assertions from their actual parser.
+No hand-edited internal files, copied artifact hashes or database repairs may
+be required. Applying the result remains a separate explicit user action.
+
+Diagnostics identify the failing layer (trust, permission, backend, model/budget,
+credential store, protocol version, recovery or result availability), render the
+existing closed error fields, and give one supported next action. Do not invent
+an unversioned error payload, bypass switch or new control method. Noninteractive
+output keeps stdout machine-readable and secrets out of stdout/stderr/detail.
+
+**Own a release evidence matrix.** Each supported OS/architecture row records
+the installed client/bootstrap/runtime/helper/guest identities, credential-store
+availability, service restart/reboot result and migration/rollback result. Each
+advertised provider/model row records exact endpoint/adapter/capability/pricing
+identities, evidence validity and native/text-only conformance. A missing or
+skipped row is not a pass. On Linux, an unavailable Secret Service must produce
+an actionable supported-store diagnostic before a billable admission; it cannot
+fall back to plaintext or ambient credential environment.
+
+Exercise old-client/new-server and new-client/old-server handshakes, compatible
+bundle update with active pinned Runs, incompatible `drain_required`, failed
+candidate startup and reboot. Record installed versus active versus pinned
+versions separately. Retain referenced old bundles until reachability permits
+cleanup; a client reinstall must not overwrite the active runtime. Use the same
+real StateStore and recovery path for fresh install, migration and update tests.
+
 ### Acceptance Criteria
+
+- [ ] I1 runs from the actual installed signed package and generated client on
+  each supported backend; source-only/native-probe fixtures are labelled and
+  cannot satisfy installation or restart evidence.
+- [ ] The first-use journey meets the documented command/file/credential target
+  and records elapsed time and explicit trust/permission decisions. Setup errors
+  expose the failing layer and one supported recovery action through existing
+  schemas, with no secret echo or privileged shortcut.
+- [ ] The generated example covers submit replay, attach paging/cursor expiry,
+  result availability and explicit apply as distinct operations against the
+  real Supervisor, and the same assertions run for all four surfaces.
+- [ ] Release evidence covers every advertised platform and model combination,
+  including native helper ABI, secure-store absence, evidence expiry and exact
+  provider billing eligibility. Missing proof blocks that advertised capability.
+- [ ] Installed upgrade/skew/reboot plus large migration/rollback pass the shared
+  campaign with one authority and no fallback runtime, manual DB edits or lost
+  accepted Runs.
 
 - [ ] CLI, TUI, JSONL, and RPC observe and control the same Run through one versioned local protocol; none executes the Run in-process.
 - [ ] Supervisor, generated client, CLI, TUI, JSONL, and RPC all import the checked-in output of one `src/control/v1/source.ts`; regeneration is byte-stable and CI fails on generated drift or a hand-authored parallel wire type.
@@ -1385,8 +1456,8 @@ Manual:
 Required sequence:
 
 1. Freeze the cross-package storage/broker/Supervisor/result interfaces and canonical v1 error union, then generate protocol v1/schema v3 once; 01-05 implement against those checked-in types rather than adapter-local substitutes.
-2. In parallel, build all control clients/adapters, Session command composition, provider conformance, MCP registry/lifecycle, guest-toolchain consumption, RuntimeBundle publishing/activation, instructions, telemetry, and migration against authoritative fakes and golden fixtures.
-3. Publish the current Kernel build as the first signed RuntimeBundle, install the stable state-root bootstrap, and integrate all six work packages behind the internal test-only toggle. Detached admission remains disabled until bootstrap recovery, pinned-bundle relaunch, and single-Supervisor ownership pass.
+2. Build the generated client, signed RuntimeBundle and stable bootstrap with the I1 path using actual StateStore/CAS. Use fixtures only for pure serialization and unavailable external adapters; no fake establishes process, installation, migration or provider qualification.
+3. Extend that installed integration with all clients, Session composition, provider qualification, MCP, guest toolchains, instructions, telemetry and migration behind the internal test-only toggle. Public detached admission remains disabled until bootstrap recovery, pinned-bundle relaunch, single-Supervisor ownership and the full Kernel-Cut gates pass.
 4. Run generation/build/unit, protocol, fault, sandbox, MCP, bundle-upgrade, retention, migration, end-to-end, 24-hour, and 50-repository gates.
 5. Create validated legacy backups, switch every surface/service selection/document to the new kernel in one release transaction, remove the old runtime/toggle and all dual write, and publish one Kernel Cut.
 

@@ -6,6 +6,11 @@
 
 READY WITH RISKS
 
+Reviewed against main `0f2fa146` on 2026-09-26. The
+[cross-package review](../../kernel/2026-09-26-design-review.md) separates current
+platform probes/native primitives from the complete installed execution path.
+The strong support matrix and three security layers remain unchanged.
+
 This work package is implementable without further product decisions. The visible risks are the signed macOS microVM supply chain, Linux cgroup delegation, Git edge cases, and workspace-image cost; none permits a fallback to host-process detached mutation.
 
 ### Source
@@ -1543,7 +1548,60 @@ Preserve / do not touch:
 - Do not weaken legacy attached behavior before the Kernel Cut, but never count it toward the detach guarantee; work package 6 removes that owner at cutover and native Windows then fails execution admission explicitly.
 - Do not add a `Task`, `EffectPlan`, workflow graph, in-process repository plugin, or weak worktree execution mode.
 
+### Implementation refinement — 2026-09-26
+
+**Make the execution boundary a deep module.** Supervisor callers provide the
+canonical closed launch/request and current typed authority. WP03 owns native
+descriptor handling, environment construction, process creation, I/O fencing,
+quiescence and evidence capture. Native helpers expose purpose-specific held
+handles/observations, not raw file descriptors or a general privileged filesystem
+API. WP01 commits lifecycle changes; WP04 chooses when to schedule/reconcile.
+WP03 must not add its own durable lease, owner database or outcome state machine.
+
+Reuse the native StateOwner lock/takeover and generation-quarantine primitives
+already present. A quarantine rename is not whole-containment death, and an OS
+lock is not proof that old workers stopped. Complete the missing descriptor I/O,
+containment inspection and broker-release integration in the
+[I1 installed path](../../kernel/2026-09-26-design-review.md#5-internal-integration-checkpoints).
+Every observation must name the actual launched bundle/helper and current
+inspector; a test double cannot produce release evidence.
+
+**Qualify the package users will run.** On supported macOS use a controlled
+machine capable of the signed Virtualization.framework guest; on Linux exercise
+the actual namespace/cgroup/subreaper bundle under the intended user-service
+configuration. Record signing/notarization, architecture, guest/toolchain,
+helper ABI and OS/backend probe results. A source build, host-only probe or
+skipped VM test does not qualify the other backend. Probe failures use the
+existing pre-admission error and bounded diagnostic path; no weaker fallback.
+
+**Optimize copies at the physical layer.** Measure source capture, generation
+materialization, guest/process boot, quiescence and Checkpoint publication
+separately for small, large-file and many-small-file repositories. Reflink or
+clonefile is allowed only with proven write independence; writable hardlinks,
+shared `.git`, writable source bind mounts and process pooling remain forbidden.
+Byte-copy fallback must pass the same identity/digest/isolation tests. A changed
+file should not force needless re-copy of immutable CAS bytes, but optimization
+must still enumerate every eligible change and validate the complete cut.
+
+Ambient daemon environment is not per-Run authority. Launch only the frozen
+allowlisted environment and fixed process recipe; changes to shell PATH, HOME,
+loader variables, credential env or the client environment cannot alter a
+pinned worker/verifier/MCP identity. Test child processes and IPC access as well
+as file/network denial. Redaction is not the secret boundary.
+
 ### Acceptance Criteria
+
+- [ ] The I1 package performs actual launch, mutation, quiescence, checkpoint,
+  owner restart and replacement generation on each supported backend. Capture
+  positive predecessor containment death and unchanged effect counts.
+- [ ] Source/guest/helper substitution, root replacement, denied inspection and
+  inherited secret/loader environment fail at the correct boundary before
+  productive authority; no simulated observation counts as platform evidence.
+- [ ] COW and byte-copy paths demonstrate independent source/Git writes and
+  identical manifest semantics; benchmark phase timings and bytes copied are
+  recorded with the shared qualification workloads.
+- [ ] Broker and native helper APIs cannot bypass StateStore claims, release
+  fences or typed lifecycle commits, and expose no generic privileged I/O path.
 
 - [ ] Workspace Trust is decided before any repository config, validator suggestion, instruction, skill, legacy hook/extension diagnostic, permission config, or runtime assembly is loaded; deny-path tests prove no repository-controlled file is read or executed, and allow-path tests prove legacy hooks/extensions are diagnosed but not launched.
 - [ ] Capture, authorization, admission, apply, and publication require exact immutable `WorkspaceIdentityV1.kind='live'` and descriptor-reopen its root no-follow. Principal/platform/NFC absolute path/owner/device/file must match; device/file are canonical unsigned decimal strings never converted through JS number and owner uid is safe integer. Git additionally requires exact `RepositoryIdentityV1` ref+digest and held literal in-root `.git` identity/object format; non-Git forbids them. Every artifact workspace/repository digest is identical. `run.submit.workspacePath` must resolve to it; `run.apply` has no path and derives the live source Session. Root/`.git` replacement returns `ARTIFACT_MISMATCH`; `legacy_unavailable` Sessions/forks create no Run/effect.

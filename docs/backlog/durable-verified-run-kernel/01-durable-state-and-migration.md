@@ -6,6 +6,11 @@
 
 READY WITH RISKS
 
+Reviewed against main `0f2fa146` on 2026-09-26. The
+[cross-package review](../../kernel/2026-09-26-design-review.md) records current
+implementation, source evidence and integration gates. Shared schemas remain
+owned by the RFC; this package owns their storage enforcement.
+
 The canonical RFC and work package 4 close the storage, fencing, migration, and rollback decisions required to implement this package. The remaining risks are SQLite/CAS cross-resource crash windows, legacy-state quiescence proof, schema migration durability, and restoring legacy authority without exposing a half-restored tree. Those are implementation risks covered by artifact-first publication, narrow typed transactions, platform-specific fail-closed import, fault injection, and authority-marker-last rollback; none permits a second state owner or a compatibility dual write.
 
 ### Source
@@ -22,7 +27,15 @@ Related issues:
 - GitHub issue `#46` contributes crash-durability lessons only. Its `Transaction` aggregate, overlay lifecycle, and `activeTxId` are historical import inputs, not the new execution model.
 - The [issue supersession map](issue-supersession-map.md) is normative for duplication and dependency handling.
 
-Related code:
+Legacy production code and current Kernel implementation:
+
+- `src/state/store.ts`, `src/state/reducers/`, `src/state/native-owner.ts`, and
+  `src/state/recovery-closure.ts` already implement the hidden admission/state
+  core and substantial typed continuation. Reuse them; do not start a second
+  repository/reducer hierarchy from the illustrative file list below.
+- [M2 implementation boundaries](../../kernel/m2-state-core.md) distinguish
+  completed owner takeover and quarantine primitives from pending descriptor
+  I/O, containment integration and migration.
 
 - `src/session/store.ts` and `src/session/types.ts` persist whole Session JSON documents and currently mix context, lifecycle, records, checkpoints, plans, and `activeTxId`.
 - `src/session/checkpoints.ts` and `src/session/checkpoints.test.ts` manage bookmark-style checkpoint metadata and expirable Git ghost commits; they do not publish a complete recoverable Run cut.
@@ -32,7 +45,9 @@ Related code:
 - `src/lib/path-lock.ts` is suitable for migration/rollback serialization only; it is not a worker lease or Run revision mechanism.
 - `src/headless/contract.ts`, `events.ts`, and `artifacts.ts` provide versioned envelope/event/artifact seams, but current headless execution remains process-owned.
 - `src/config.ts` currently defines `SESSION_VERSION` and legacy paths but no Kernel schema, authority generation, SQLite, or CAS layout.
-- `package.json` currently has `build` and `test`; the state, migration, and crash-fault suites named below do not yet exist.
+- `package.json` has `test:state`, `test:state-fault`, `test:state-probe`,
+  `test:agent-runtime`, and sandbox-probe commands. The complete migration and
+  aggregate Kernel-Cut suites below are still required, not existing green gates.
 
 ### User Outcome
 
@@ -42,7 +57,7 @@ Users upgrading on supported macOS or Linux retain legacy Sessions, ordered cont
 
 ### Problem
 
-The current persistence layer cannot satisfy the durable delegation contract:
+The legacy production persistence path cannot satisfy the durable delegation contract:
 
 - whole-Session JSON is both context and de facto execution state;
 - writes replace a complete aggregate and coordinate through path locks rather than Run revisions and launch fencing;
@@ -916,12 +931,20 @@ type ToolResultModelContentV1 = {
 type ToolResultPayloadV1 = ToolResultPayloadBaseV1 & (
   | {
       outcome: 'executed'
+      source: 'invocation'
       opId: string
       attempt: number
       journalResultRef: ArtifactRef
       journalResultDigest: string
       outputSchemaRef?: ArtifactRef
       outputSchemaDigest?: string
+    }
+  | {
+      outcome: 'executed'
+      source: 'user_input'
+      inputItemRef: ArtifactRef
+      inputRef: ArtifactRef
+      inputDigest: string
     }
   | {
       outcome: 'denied'
@@ -1013,6 +1036,12 @@ type UserInputPayloadBaseV1 = {
   promptRef: ArtifactRef
   promptDigest: string
   principalId: string
+  waitingSubjectRef: ArtifactRef
+  requestId: string
+  requestDigest: string
+  expectedRunRevision: number
+  channelIdentityRef: ArtifactRef
+  channelIdentityDigest: string
   byteCount: number
   modelContentRef: ArtifactRef
   modelContentDigest: string
@@ -3198,7 +3227,64 @@ Preserve / do not touch:
 - The distinction between Session, Run, Checkpoint, RunJournal, RunEvent, WorkerLaunch, ControlRequest, ChildAllocation, registration/grant state, and Artifact.
 - Existing legacy runtime behavior until work package 6 performs the single Kernel Cut; do not advertise it as durable detach.
 
+### Implementation refinement — 2026-09-26
+
+**Build on the real storage module.** `StateStore` owns transactions, recovery
+cuts and all mutable authority. The existing loaded-Run interface is the seam
+for typed continuation. Static assembly decoding belongs to a loaded immutable
+handle; current owner/revision/lease/stop/time/grant checks stay inside the typed
+commit or release operation. A caller supplies intent and exact observations,
+never a selected next status, refund amount or arbitrary patch. Factor common
+private validation only when it removes duplicated checks without moving their
+authority into the caller. Do not expose the private SQLite connection.
+
+**Bound physical work without weakening the recovery cut.** Read the complete
+required relational cut in one consistent transaction, then validate its CAS
+closure. Use a bounded artifact I/O pool/work queue rather than `Promise.all`
+over every reference. Deduplicate refs within that validation and report the
+maximum in-flight reads. A cache may avoid repeated immutable decoding within
+the loaded closure; it cannot turn path existence or old digest metadata into
+fresh byte-integrity evidence. No partial walk is a valid recovery closure.
+
+Startup discovery and list/attach reads must use bounded indexed queries instead
+of loading all terminal history. Keep authenticated `list_read_cuts` semantics;
+do not substitute moving live keyset pagination for a retained read cut. Close
+read transactions before waiting on a client, provider or filesystem copy.
+Measure WAL growth, writer delay and memory under simultaneous attach, heartbeat
+and typed commits. Preserve synchronous transaction callbacks and rollback
+poisoning; an async transaction body is not a batching optimization.
+
+**Treat migration as a first-class operation.** Reuse `MigrationControlV1` and
+its existing phases for restart/progress. Large inventory/copy/verification may
+be internally batched, but the candidate remains non-authoritative until the
+complete locked inventory, credentials, database image and CAS closure validate.
+Estimate required staging/backup space before work; a later disk-full failure
+preserves the authoritative generation. Do not add a startup backfill shortcut,
+second migration marker or indefinite JSON/SQLite dual write.
+
+Shared workloads and measurements are in the
+[scale qualification plan](../../kernel/2026-09-26-design-review.md#7-scale-and-latency-qualification).
+Run integrity and reachability checks on the resulting state, not merely on
+counts emitted by the importer. Separate database-open, discovery, per-Run
+closure validation and safely resumed work in timing reports.
+
 ### Acceptance Criteria
+
+- [ ] `node scripts/kernel/check-design-contracts.mjs` passes; ordinary
+  invocation results and authenticated user-input results retain their exact
+  distinct RFC payloads, including wait/request/revision/channel bindings.
+- [ ] New continuation, verifier and control integration tests use the actual
+  StateStore/CAS. Pure planner tests may use values; fake storage is insufficient
+  for an atomicity, recovery, idempotency or settlement claim.
+- [ ] Artifact fan-out is processed with bounded concurrency and complete
+  closure coverage. Missing/corrupt objects, disk-full and interrupted scans
+  release no execution or GC authority.
+- [ ] The shared development/release workloads record query plans, memory,
+  WAL/write latency and startup/attach timings; unrelated terminal history does
+  not require full hydration for startup/list/attach.
+- [ ] Large import/rollback is restartable through the existing control phases,
+  exposes progress and disk needs, and preserves marker-last authority at every
+  injected I/O failure.
 
 - [ ] `src/kernel/types.ts` exports the RFC definitions field-for-field, including exact discriminators and required/optional/forbidden members for Run objective/endpoint negotiation/normal prompt+request/model/tool/input/repair-diagnostic, exact `ModelRequestV1`/ `WorkspaceInstructionSourceManifestV1`/`WorkspaceInstructionManifestV1`/`BundledSkillClosureV1`/`SkillSourceFileBytesV1`/`DescriptorCapturedSkillSourceFileV1`/`BundledSkillSourceFileV1`/`SkillSourceIdentityBaseV1`/`SkillSourceIdentityV1`/`SkillManifestV1`, Session terminal and Run-context compaction, exact workspace diff/final candidate, exact Git index/object closure and workspace-generation identity/state/snapshot/recovery evidence, root-only dependency plan plus `DependencyReadyItem`, frozen-ignore/projection/include-classification/include-authorization, `RuntimeBundleStructuredArtifactBaseV1`, `RuntimeBundleStructuredArtifactV1`, `RuntimeBundleManifest`, `ListMethodV1`, `ListCursorPayloadV1`, `ListReadCutEntryV1`, `ListReadCutV1`, `RunPolicySnapshotV1`, `PolicyChannelEvidenceBaseV1`, `PolicyChannelEvidenceV1`, `PolicyDecisionItem`, `ApprovalDecisionV1`, `OperationGrantV1`, `AuthorizationGrantV1`, `AuthorizationConsumptionReceiptV1`, `ChildAllocationV1`, `DependencyInstallScriptsAuthorizationTemplateV1`, `KernelIntegrityEvidenceV1`, `RuntimeFailureEvidenceBaseV1`, `RuntimeFailureEvidenceV1`, `VerificationClosureV1`, `InheritedVerificationProvenanceV1`, `ManualAbandonAttestationV1`, `BudgetSettlementV1`, `InvocationAmbiguityEvidenceBaseV1`, `InvocationAmbiguityEvidenceV1`, `PostClaimNoReleaseEvidenceV1`, `BrokerReleaseFenceEvidenceV1`, `InvocationDispatchClosureEvidenceV1`, the complete reconciliation dispatch/wrapper/timeout/subject evidence types, exact MCP/admin artifacts, publication proofs, Interpreter/root image/SandboxProfile/SandboxLaunch/containment types, complete StateOwner identities/evidence/record, and the complete exact Migration/generation/control/request/archive graph including `LegacyPortableHandoffVerificationResultV1`, without local widening. Golden compile/schema fixtures fail on every added, removed, optionalized, or renamed field.
 - [ ] Policy evaluation artifact-first publishes exact `PolicyChannelEvidenceV1` from fixed signed Supervisor code interpreting the retained exact `PolicyEngineProfileV1` before approval/grant/denial/Journal prepare. Snapshot engine entry id/version matches the sole signed non-executable RuntimeBundle `policy_engine` data entry; its signed complete-file `entry.digest` equals `engine.profileRef`, while decoding those bytes and independently recomputing the self-omitting semantic digest yields `engine.profileDigest`. These hash domains are distinct and are never equated. No helper spawn or plugin load exists. Storage reruns the exact interpreter/profile and validates the closed filesystem/Bash/MCP/plan/named-action channel projections, deterministic Bash parse, named verifier/dependency/delivery/MCP-server/child identity key, rule/mode precedence, ask/allow/deny result, and omission digest. `ApprovalSubject`, `ApprovalDecisionV1`, direct/interactive `PolicyDecisionItem`, and policy/user `OperationGrantV1` provenance preserve the exact evidence pair; reparse, mutable engine/parser/profile, host-shell interpretation, coarse mode-only proof, or cross-request/frontier/target evidence is rejected. GC and recovery retain the evidence plus profile/RuntimeBundle/source closure.
