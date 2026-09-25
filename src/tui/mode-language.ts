@@ -1,4 +1,5 @@
 import type { PolicyMode } from '../policy/types.js';
+import { semanticStyle, type SemanticTone } from './semantic-styles.js';
 
 export type PolicyModeRisk = 'safe' | 'guarded' | 'danger';
 
@@ -8,8 +9,7 @@ export type PolicyModeDescription = {
   shortLabel: string;
   description: string;
   risk: PolicyModeRisk;
-  marker: string;
-  color: string;
+  tone: SemanticTone;
 };
 
 const POLICY_MODE_ORDER: readonly PolicyMode[] = [
@@ -26,8 +26,7 @@ const POLICY_MODE_LANGUAGE: Record<PolicyMode, PolicyModeDescription> = {
     shortLabel: 'Default',
     description: 'Asks before edits, shell commands, transaction apply, and permission requests.',
     risk: 'guarded',
-    marker: '',
-    color: 'yellow'
+    tone: 'warning'
   },
   'accept-edits': {
     mode: 'accept-edits',
@@ -35,8 +34,7 @@ const POLICY_MODE_LANGUAGE: Record<PolicyMode, PolicyModeDescription> = {
     shortLabel: 'Edits',
     description: 'Allows edits and successful transaction apply; asks before shell commands.',
     risk: 'guarded',
-    marker: '+',
-    color: 'green'
+    tone: 'info'
   },
   plan: {
     mode: 'plan',
@@ -44,8 +42,7 @@ const POLICY_MODE_LANGUAGE: Record<PolicyMode, PolicyModeDescription> = {
     shortLabel: 'Plan',
     description: 'Allows inspection and planning; blocks edits, shell commands, and transaction apply.',
     risk: 'safe',
-    marker: '',
-    color: 'cyan'
+    tone: 'safe'
   },
   yolo: {
     mode: 'yolo',
@@ -53,8 +50,7 @@ const POLICY_MODE_LANGUAGE: Record<PolicyMode, PolicyModeDescription> = {
     shortLabel: 'YOLO',
     description: 'Auto-approves normal tool calls and permission requests; deny rules still apply.',
     risk: 'danger',
-    marker: '!',
-    color: 'red'
+    tone: 'danger'
   }
 };
 
@@ -68,13 +64,12 @@ export function listPolicyModeDescriptions(): PolicyModeDescription[] {
 
 export function formatModeForStatus(mode: PolicyMode): string {
   const description = describePolicyMode(mode);
-  return description.marker ? `${description.marker} ${description.label}` : description.label;
+  return `${semanticStyle(description.tone).marker} ${description.label}`;
 }
 
 export function formatModeForComposer(mode: PolicyMode): string {
   const description = describePolicyMode(mode);
-  const label = `${description.label} Mode`;
-  return description.marker ? `${description.marker} ${label}` : label;
+  return `${semanticStyle(description.tone).marker} ${description.label} Mode`;
 }
 
 export function formatModeForHelp(mode: PolicyMode): string {
@@ -84,5 +79,9 @@ export function formatModeForHelp(mode: PolicyMode): string {
 }
 
 export function getModeColor(mode: PolicyMode): string {
-  return describePolicyMode(mode).color;
+  return semanticStyle(describePolicyMode(mode).tone).color;
+}
+
+export function getModeTone(mode: PolicyMode): SemanticTone {
+  return describePolicyMode(mode).tone;
 }

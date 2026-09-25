@@ -380,6 +380,36 @@ test('approval-request sets pendingApproval; approval-resolve clears it by id', 
   assert.equal(resolvedWith, 'allow');
 });
 
+test('tool approval moves the matching active tool through waiting back to running', () => {
+  let s = reduce(baseInit(), {
+    type: 'runtime-event',
+    event: { type: 'tool-start', tool: 'bash', preview: '' }
+  });
+  const pending: PendingApproval = {
+    id: 'pa_wait',
+    subject: {
+      kind: 'tool',
+      toolName: 'bash',
+      access: 'exec',
+      channel: { kind: 'bash', commandHead: 'pwd', unsafeForAllow: false },
+      action: { bash: 'pwd' } as never,
+      display: { title: 'Allow bash command?', command: 'pwd' }
+    },
+    resolve: () => undefined
+  };
+
+  s = reduce(s, { type: 'approval-request', pending });
+  assert.equal(s.transcript[0]?.kind, 'tool');
+  if (s.transcript[0]?.kind !== 'tool') return;
+  assert.equal(s.transcript[0].status, 'waiting');
+
+  s = reduce(s, { type: 'approval-resolve', id: pending.id });
+  s = reduce(s, { type: 'tool-hook-start', action: { bash: 'pwd' } });
+  assert.equal(s.transcript[0]?.kind, 'tool');
+  if (s.transcript[0]?.kind !== 'tool') return;
+  assert.equal(s.transcript[0].status, 'running');
+});
+
 test('approval-resolve with a mismatched id leaves a newer pending intact', () => {
   const newer: PendingApproval = {
     id: 'pa_new',
@@ -483,7 +513,7 @@ test('tool-hook-end finalizes the entry with formatToolResultSummary and bash bo
   assert.equal(entry.body, 'hi\n');
 });
 
-test('tool-hook-end with no prior running entry synthesizes a finalized entry', () => {
+test('tool-hook-end with no prior running entry synthesizes a blocked entry', () => {
   // Covers the deny-then-after-tool path where tool-hook-start never fires.
   let s = baseInit();
   s = reduce(s, {
@@ -499,8 +529,40 @@ test('tool-hook-end with no prior running entry synthesizes a finalized entry', 
   const entry = s.transcript[0]!;
   assert.equal(entry.kind, 'tool');
   if (entry.kind !== 'tool') return;
-  assert.equal(entry.status, 'error');
+  assert.equal(entry.status, 'blocked');
   assert.equal(entry.summary, 'policy=plan blocked');
+});
+
+test('tool-hook-end separates user denial from execution failure', () => {
+  let denied = reduce(baseInit(), {
+    type: 'runtime-event',
+    event: { type: 'tool-start', tool: 'bash', preview: '' }
+  });
+  denied = reduce(denied, {
+    type: 'tool-hook-end',
+    result: {
+      tool: 'bash',
+      status: 'error',
+      content: 'TOOL_RESULT bash ERROR\npolicy=default\nuser denied',
+      meta: { policy: 'default', reason: 'user denied via TUI approval modal' }
+    }
+  });
+  assert.equal(denied.transcript[0]?.kind, 'tool');
+  if (denied.transcript[0]?.kind !== 'tool') return;
+  assert.equal(denied.transcript[0].status, 'denied');
+
+  const failed = reduce(baseInit(), {
+    type: 'tool-hook-end',
+    result: {
+      tool: 'bash',
+      status: 'error',
+      content: 'TOOL_RESULT bash ERROR\nspawn failed',
+      meta: { error: 'spawn failed' }
+    }
+  });
+  assert.equal(failed.transcript[0]?.kind, 'tool');
+  if (failed.transcript[0]?.kind !== 'tool') return;
+  assert.equal(failed.transcript[0].status, 'error');
 });
 
 test('tx-* events update state.tx through the staging → finalized → validated → null lifecycle', () => {
