@@ -152,169 +152,17 @@ Implementation notes:
 
    The exact state-changing request types are:
 
-   ```ts
-   type MutationBase = {
-     protocolVersion: 1
-     requestId: string
-     requestDigest: string
-   }
-
-   type BudgetOptions = Partial<RunSpec['budgets']>
-
-   type NonSecretEnvValueRequest = {
-     kind: 'non_secret_literal'
-     value: string
-   }
-
-   type NonSecretArgumentRequest = {
-     kind: 'non_secret_literal'
-     value: string
-   }
-
-   type SourceSelectorRequest = {
-     path: string
-     scope: 'entry' | 'subtree'
-     readGrantId?: string
-   }
-
-   type VerifierRequest = {
-     id: string
-     version: string
-     required: boolean
-     executable:
-       | { kind: 'toolchain'; toolId: string }
-       | { kind: 'workspace_script'; path: string; expectedDigest?: string }
-     argv: NonSecretArgumentRequest[]
-     cwd: string
-     env: Record<string, NonSecretEnvValueRequest>
-     writableEphemeralPaths: string[]
-     identityReadGrantId: string
-     executionGrantId?: string
-     timeoutMs?: number
-     retries?: number
-     outputLimitBytes?: number
-   }
-
-   type DependencyRequest =
-     | { mode: 'none' }
-     | {
-         mode: 'locked'
-         registryEndpointIds: string[]
-         credentialGrantIds: string[]
-         allowInstallScripts: boolean
-         installScriptsGrantId?: string
-         maxPackages?: number
-         maxDownloadBytes?: number
-       }
-
-   type RunModelRequest =
-     | {
-         provider: 'ollama'
-         model: string
-         endpoint?: never
-         modelCredentialGrantIds?: never
-       }
-     | {
-         provider: 'openai' | 'anthropic' | 'openrouter' | 'openai-compatible' | 'zhipu'
-         model: string
-         endpoint: { kind: 'registered'; endpointRegistrationId: string }
-         modelCredentialGrantIds: string[]
-       }
-
-   type RunSubmitRequest = MutationBase & {
-     method: 'run.submit'
-     admissionKey: string
-     sessionId: string
-     expectedContextRevision: number
-     workspacePath: string
-     objective: string
-     model: RunModelRequest
-     policyMode: 'default' | 'accept-edits' | 'plan' | 'yolo'
-     budgets?: BudgetOptions
-     sandboxResources?: Partial<SandboxResourceSpec>
-     verifiers: VerifierRequest[]
-     dependency: DependencyRequest
-     sourceIncludes: SourceSelectorRequest[]
-     sourceExcludes: Array<Omit<SourceSelectorRequest, 'readGrantId'>>
-     maxChangedPaths?: number
-     maxChangedBytes?: number
-     registeredMcpServerIds: string[]
-     skillIds: string[]
-     allowUnverified: boolean
-   }
-   ```
+   Canonical types: `MutationBase`, `BudgetOptions`, `NonSecretEnvValueRequest` and 6 related definitions.
+   Import their complete definitions from
+   [RFC 15. Surfaces And Ecosystem Thin Waist](../../rfcs/2026-08-11-durable-verified-run-kernel.md#15-surfaces-and-ecosystem-thin-waist).
+   This package enforces that contract without a second schema copy.
 
    `RunModelRequest` rejects forbidden members rather than ignoring them. Ollama carries neither endpoint nor credential ids and resolves only the same-user active signed local-model registration/service. Every remote provider requires an explicit registered endpoint id; a bundled default is an ordinary immutable registration whose id came from `cliq auth`, not a hidden lookup. Every billable branch has 1..32 unique model-purpose credential ids bound to that exact endpoint/owner/TLS through the Run deadline. Any missing/empty/extra/duplicate/cross-target field fails before capability negotiation or I/O and remains in request/admission digest normalization.
 
-   ```ts
-   type RunCancelRequest = MutationBase & {
-     method: 'run.cancel'
-     runId: string
-     expectedRevision: number
-   }
-
-   type RunApproveRequest = MutationBase & {
-     method: 'run.approve'
-     runId: string
-     expectedRevision: number
-     waitingOnRef: ArtifactRef
-     decision: 'allow' | 'deny'
-     ttlMs?: number
-   }
-
-   type RunInputRequest = MutationBase & {
-     method: 'run.input'
-     runId: string
-     expectedRevision: number
-     waitingOnRef: ArtifactRef
-     input: { kind: 'text'; value: string } | { kind: 'json'; value: unknown }
-   }
-
-   type RunReconcileRequest = MutationBase & {
-     method: 'run.reconcile'
-     runId: string
-     expectedRevision: number
-     waitingOnRef: ArtifactRef
-     resolution:
-       | { kind: 'probe_now' }
-       | { kind: 'abandon_run'; acknowledgeExactRisk: true }
-   }
-
-   type RunApplyRequest = MutationBase & {
-     method: 'run.apply'
-     admissionKey: string
-     sourceRunId: string
-     expectedRunResultRef: ArtifactRef
-     budgets?: { wallTimeMs?: number; toolCalls?: number }
-     verifierExecutionGrantIds?: string[]
-   }
-
-   type SessionCreateRequest = MutationBase & {
-     method: 'session.create'
-     admissionKey: string
-     workspacePath: string
-     name?: string
-   }
-
-   type SessionForkRequest = MutationBase & {
-     method: 'session.fork'
-     admissionKey: string
-     sessionId: string
-     expectedContextRevision: number
-     throughItemSeq: number
-     name?: string
-   }
-
-   type SessionCompactRequest = MutationBase & {
-     method: 'session.compact'
-     sessionId: string
-     expectedContextRevision: number
-     fromItemSeq: number
-     throughItemSeq: number
-     summaryMarkdown: string
-     retainedItemIds: string[]
-   }
-   ```
+   Canonical types: `RunCancelRequest`, `RunApproveRequest`, `RunInputRequest` and 5 related definitions.
+   Import their complete definitions from
+   [RFC 15. Surfaces And Ecosystem Thin Waist](../../rfcs/2026-08-11-durable-verified-run-kernel.md#15-surfaces-and-ecosystem-thin-waist).
+   This package enforces that contract without a second schema copy.
 
    The same generated source imports verbatim the RFC's `ControlQueryRequestV1|ControlMutationRequestV1|ControlRequestV1`, discriminated `AuthorizationCreateRequest|AuthorizationRevokeRequest`, `McpRecoveryRequest|McpRegisterRequest|McpRefreshRequest`, and the complete result side: `ArtifactDescriptorV1`, `SessionSnapshotV1`, `SessionSummaryV1`, `RunSnapshotV1`, `RunItemReferenceV1`, `AuthorizationGrantSummaryV1`, `McpRegistrySummaryV1`, `RuntimeBundlePublicSummaryV1`, the method-discriminated `ControlResultV1`, `ControlErrorV1`, and `ControlApplicationResponseV1`. Those unions are the only public request/result/error source: every method maps to exactly one listed variant; query filters/cursors and list/get/attach arrays retain the RFC bounds; authorization/MCP summaries use its redaction; consumed authorization revoke is the exact `already_consumed` no-op variant. It must not expose an ArtifactRef where the public request uses an opaque grant/registration id. `run.get/list/attach`, `session.get/list`, `authorization.list`, `mcp.list`, `artifact.get`, `run.diff/result`, `session.handoff.create`, and `supervisor.status` are read-only and reject `requestId`. Handoff imports exact `SessionHandoffEntryV1|SessionHandoffV1`: omitted cursor means the captured projection cut; explicit cursor is zero or a current segment end; one snapshot walks visible run-terminal/summary entries and excluded ranges. JSON is exact JCS and Markdown uses the fixed LF/indented-entry renderer with no time/random/path option. Both descriptors rehash those bytes, so identical Session/revision/cursor returns identical CAS refs.
 
@@ -1323,37 +1171,10 @@ Implementation notes:
 9. Support only structurally stateless-per-call MCP tools. Every stdio tool call starts a fresh strong containment with empty private HOME/TMP, retained read-only signed executable closure, no persistent writable mount/network/workspace/state/credentials, and no reuse across calls. Stable launch `opId = H(runId,batchItemId,callIndex,callId,registryManifestDigest,lifecycleSeq)`. Every launch has fresh prepared/reservation/claim and one tool charge. After initialize/capability/probed-tools-list validation it publishes exact `McpServerInstanceIdentityV1`, whose omission digest binds the full Run/batch/call/index, registry, lifecycle claim, SandboxLaunch, containment, nonce, and negotiated digests; only it may address `tools/call`. After teardown it publishes exact `McpServerLaunchReceiptV1`, binding that identity, all three Journal sequence facts, settlement, stopped item, and positive containment death. The one transaction commits Journal completed with identity result/launch receipt, the full-identity `McpServerStoppedItem`, ToolResult, settlement, and frontier advance. Unproven teardown waits with no completed launch or visible result; completed early stop increments lifecycle sequence; ambiguous preterminal launch retries only after death proof. HTTP uses a fresh no-cookie/no-session broker request. Grant expiry/exhaustion requires the exact batch/index-bound approval; takeover never adopts an instance.
 10. The signed, content-addressed `GuestToolchainManifest` payload is exact:
 
-    ```ts
-    type GuestExecutableIdentity = {
-      logicalName: string
-      canonicalGuestPath: string
-      digest: string
-      version: string
-    }
-
-    type GuestToolchainManifest = {
-      schemaVersion: 1
-      format: 'cliq-guest-toolchain-v1'
-      guestImageRef: ArtifactRef
-      guestImageDigest: string
-      guestImageByteCount: number
-      guestImageFormat: 'raw-ext4-v1'
-      architecture: 'arm64' | 'x86_64'
-      kernelAbi: string
-      userspaceAbi: string
-      worker: GuestExecutableIdentity
-      shell: GuestExecutableIdentity
-      git: GuestExecutableIdentity
-      node: GuestExecutableIdentity
-      packageManager?: GuestExecutableIdentity
-      searchTools: readonly GuestExecutableIdentity[]
-      verifiers: readonly GuestExecutableIdentity[]
-      admittedExecutables: readonly GuestExecutableIdentity[]
-      publisherKeyId: string
-      manifestDigest: string
-      signatureRef: ArtifactRef
-    }
-    ```
+    Canonical types: `GuestExecutableIdentity`, `GuestToolchainManifest`.
+    Import their complete definitions from
+    [RFC 9.1 Lease, Activation, And Process Containment](../../rfcs/2026-08-11-durable-verified-run-kernel.md#91-lease-activation-and-process-containment).
+    This package enforces that contract without a second schema copy.
 
     `manifestDigest` omits itself and `signatureRef` under JCS; that signature verifies through work package 03's bundled Cliq release trust store, and unknown/user/revoked keys fail closed. `guestImageRef` is the CAS address of the complete immutable `raw-ext4-v1` bytes, its digest equals their SHA-256/ArtifactRef, and byte count is exact. Paths are absolute canonical guest paths, logical names/paths are unique, and all strings/lists are bounded. Work package 03 verifies the signature, retained image bytes, and every executable digest before activation; plan/runtime binding/actual containment and GC repeat the same image ref/digest so reboot never consults a mutable installed-image path. Admission resolves all tools/verifiers against this guest identity and includes the manifest in `assemblyRef` and the environment fingerprint. A host Mach-O-only command, incompatible native dependency, or missing guest executable returns `UNSUPPORTED_EXECUTION_IDENTITY` before Run admission. Host `node_modules` are never assumed usable in the Linux guest. Any dependency acquisition is a separately approved, Journaled broker fetch of a locked digest into the private guest generation; the guest shell has no ambient network.
 11. The signed, content-addressed RuntimeBundle payload makes compatibility a closed manifest decision backed by digest/file probes:
