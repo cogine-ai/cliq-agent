@@ -114,6 +114,16 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   fields. Focused tests cover cursor round trips, later item append, principal
   isolation, and byte-cap truncation; they still use the explicitly labelled
   M2 placeholder assembly for Run admission, not an I1 production Run.
+- Added a byte-exact signed RuntimeBundle manifest decoder and combined
+  manifest/structured-payload gate. It rejects noncanonical JSON/UTF-8,
+  untrusted or changed signatures, and missing/wrong structured root bytes;
+  it returns the complete signed-manifest ArtifactRef separately from the
+  self-omitting manifest digest. The verified graph is frozen in memory.
+  A held descriptor reader, complete remaining kind decoders, CAS import,
+  immutable install directory and active-selection protocol remain open.
+- The [I1 release-trust decision](release-trust-decision.md) records the
+  missing production Ed25519 root/key custody and stable first-install chain.
+  Existing test signatures and the notarized probe do not fill that gap.
 
 ## Next integration order
 
