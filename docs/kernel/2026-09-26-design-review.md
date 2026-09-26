@@ -142,6 +142,28 @@ rechecks the selection after verifying the bundle; the writer and service
 handoff must still provide the atomic/fsynced publication and compatibility
 proof before that selection becomes active authority.
 
+The current StateOwner implementation pins every successor to its predecessor's
+RuntimeBundle. Activation must therefore add an explicit, durable, owner-authored
+handoff; changing only `active.json` cannot work. Under one stable-bootstrap
+service-transition lock, the live owner gates new admission and records the
+old/new signed bundle identities, exact old/new selection bytes, current state
+schema, complete nonterminal Run/pinned worker/guest compatibility closure,
+candidate read-only self-test, and a bounded startup deadline. The old owner
+then gracefully releases its OS lock. A death takeover never changes bundles.
+Only the bootstrap may atomically replace/fsync the selection, and the new
+signed image must prove that its executable matches the selected bundle and
+that the retained handoff matches the terminal prior owner before its successor
+row can commit. The successor must not migrate authoritative state before its
+health verdict. Health commits the handoff; startup failure or deadline restores
+the old selection and restarts the old compatible image under the same service
+lock. Reboot recovery reconciles the durable handoff and literal selection
+bytes, never infers eligibility from a directory scan or npm client version.
+An incompatible candidate returns `drain_required` before admission fencing,
+owner release or selection. The implementation needs crash tests before and
+after handoff commit, owner release, selection fsync, successor acquisition,
+health and rollback; each must preserve one StateOwner and the pinned Run
+bundle graph.
+
 The signed `supervisor` entry must cover the executed JavaScript as well as the
 Node runtime. Hashing a plain Node interpreter while loading replaceable script
 files would not bind the Supervisor implementation. The current packaging

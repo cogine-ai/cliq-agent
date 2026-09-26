@@ -233,6 +233,18 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   release; it still writes `active.json` directly for test setup. The actual
   selection writer, candidate health/compatibility, service transition and
   release qualification remain open.
+- An activation-path audit found a separate StateOwner transition gap:
+  `acquireOrBootstrapStateOwner` presently requires the next signed Supervisor
+  to have the prior owner's exact RuntimeBundle and executable identity, and
+  `acquireSuccessorStateOwner` copies those prior fields into its new row. A
+  correctly published candidate therefore still cannot become authoritative.
+  WP01/WP06 must add a durable, owner-authored handoff intent with exact old/new
+  bundle and selection identities, candidate self-test and compatibility
+  evidence, admission fence, and rollback eligibility. Only a graceful prior
+  release may authorize an image change; death takeover keeps the prior bundle.
+  Selection, successor acquisition/health and rollback must be ordered under
+  the stable bootstrap's single service-transition authority. Until that path
+  exists, this branch does not write `active.json` outside the SEA fixture.
 
 ## Next integration order
 
