@@ -119,8 +119,8 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   untrusted or changed signatures, and missing/wrong structured root bytes;
   it returns the complete signed-manifest ArtifactRef separately from the
   self-omitting manifest digest. The verified graph is frozen in memory.
-  Complete remaining kind decoders, CAS import, immutable install directory
-  and active-selection protocol remain open.
+  Complete remaining kind decoders, installed CAS graph rooting, immutable
+  install directory and active-selection protocol remain open.
 - The [I1 release-trust decision](release-trust-decision.md) records the
   missing production Ed25519 root/key custody. npm can remain the sole required
   public distribution channel; the installed path still needs platform payloads,
@@ -129,7 +129,7 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
 - Signed RuntimeBundle entry paths now reject non-NFC spellings, NUL,
   traversal/empty components, and paths or components too long for the native
   descriptor-relative reader. Re-signed malformed-manifest tests enforce the
-  check independently of signature failure; native package import remains open.
+  check independently of signature failure; runtime activation remains open.
 - Added a native, descriptor-held source-package reader on Linux and macOS.
   Its helper requires a bootstrap-supplied complete-byte digest, and the fixed
   `runtime-bundle.json` entry is read with a native size bound before any signed
@@ -141,6 +141,17 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   verify staged bytes before activation. The test suite injects a fixture
   helper digest and fixture release key, neither of which is a production
   bootstrap authority.
+- Added a descriptor-held CAS writer for signed package entries. It stages
+  bounded chunks in an owner-only 0700 CAS root, seals and fsyncs a 0400 file,
+  rehashes the staged bytes, publishes by same-directory hard link and fsync,
+  and reopens the final object to verify its complete digest. A matching
+  existing object is independently verified; corrupt objects and replaced
+  roots/staging names fail closed. The package importer copies the fixed
+  manifest and every signed entry, then rechecks supported structured roots
+  from the imported CAS bytes. Tests cover multi-chunk import, idempotent
+  reimport, partial failure cleanup and path substitution. These CAS objects
+  are unselected: no immutable bundle directory, active selection, installed
+  bootstrap, service registration or production release key exists yet.
 
 ## Next integration order
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { chmod, link, mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -10,8 +10,10 @@ import { fileURLToPath } from 'node:url';
 import { sha256Bytes } from '../kernel/identity.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { policyProfile, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { ContentAddressedStore } from '../state/cas.js';
 import {
-  PACKAGE_READER_NATIVE_RELATIVE_PATH, loadNativePackageReader, openPackageRoot,
+  PACKAGE_READER_NATIVE_RELATIVE_PATH, importHeldPackageToCas, importVerifiedPackageEntryToCas,
+  loadNativePackageReader, openNativeCasRoot, openPackageRoot,
   readHeldPackageManifest, readVerifiedPackageEntryBytes, streamVerifiedPackageEntry,
   verifyHeldPackage
 } from './native-package-reader.js';
@@ -160,7 +162,10 @@ test('package path capabilities reject symlinked ancestors and forged readers', 
     await symlink(rootPath, aliasPath);
     const binding = await loadNativePackageReader(helperDigest());
     assert.throws(() => openPackageRoot(binding, aliasPath), /unsafe or changed/);
-    assert.throws(() => openPackageRoot({ openRoot: () => { throw new Error('forged'); } }, rootPath),
+    assert.throws(() => openPackageRoot({
+      openRoot: () => { throw new Error('forged'); },
+      openCasRoot: () => { throw new Error('forged'); }
+    }, rootPath),
       /pinned native helper/);
     const root = openPackageRoot(binding, rootPath);
     try {
@@ -175,8 +180,25 @@ test('package path capabilities reject symlinked ancestors and forged readers', 
   }
 });
 
+test('package and CAS roots reject a group-writable ancestor', { skip: !supported }, async () => {
+  const parent = await packageFixture();
+  try {
+    const unsafe = path.join(parent, 'unsafe');
+    const packagePath = path.join(unsafe, 'package');
+    const casPath = path.join(unsafe, 'cas');
+    await mkdir(unsafe, { mode: 0o700 });
+    await mkdir(packagePath, { mode: 0o700 });
+    await mkdir(casPath, { mode: 0o700 });
+    await chmod(unsafe, 0o770);
+    const binding = await loadNativePackageReader(helperDigest());
+    assert.throws(() => openPackageRoot(binding, packagePath), /package root is unsafe or changed/);
+    assert.throws(() => openNativeCasRoot(binding, casPath), /CAS root is unsafe or changed/);
+  } finally { await rm(parent, { recursive: true, force: true }); }
+});
+
 test('signed manifest and all declared package bytes pass one held native package root', { skip: !supported }, async () => {
   const rootPath = await packageFixture();
+  const casPath = await packageFixture();
   try {
     const key = generateKeyPairSync('ed25519');
     const releaseKeys = [{ keyId: 'package-test',
@@ -214,14 +236,143 @@ test('signed manifest and all declared package bytes pass one held native packag
     const manifestBytes = canonicalJsonBytes(manifest);
     await writeFile(path.join(rootPath, 'runtime-bundle.json'), manifestBytes, { mode: 0o400 });
 
-    const root = openPackageRoot(await loadNativePackageReader(helperDigest()), rootPath);
+    const binding = await loadNativePackageReader(helperDigest());
+    const root = openPackageRoot(binding, rootPath);
+    const cas = openNativeCasRoot(binding, casPath);
     try {
       assert.deepEqual(readHeldPackageManifest(root), manifestBytes);
       assert.equal((await verifyHeldPackage(root, releaseKeys)).bundleRef, sha256Bytes(manifestBytes));
+      const imported = await importHeldPackageToCas(root, cas, releaseKeys);
+      assert.equal(imported.bundleRef, sha256Bytes(manifestBytes));
+      assert.deepEqual(await new ContentAddressedStore(casPath).read(imported.bundleRef), manifestBytes);
+      assert.equal((await readdir(casPath)).length, entries.length + 1);
       await chmod(path.join(rootPath, 'payload', 'policy'), 0o600);
       await writeFile(path.join(rootPath, 'payload', 'policy'), Buffer.alloc(entries[2]!.byteCount, 0x61));
       await chmod(path.join(rootPath, 'payload', 'policy'), 0o400);
       await assert.rejects(verifyHeldPackage(root, releaseKeys), /different complete-file digest/);
-    } finally { root.close(); }
-  } finally { await rm(rootPath, { recursive: true, force: true }); }
+      await assert.rejects(importHeldPackageToCas(root, cas, releaseKeys), /different complete-file digest/);
+      assert.equal((await readdir(casPath)).length, entries.length + 1);
+    } finally { cas.close(); root.close(); }
+  } finally {
+    await rm(rootPath, { recursive: true, force: true });
+    await rm(casPath, { recursive: true, force: true });
+  }
 });
+
+test('native CAS import streams signed bytes, publishes once, and verifies an existing object',
+  { skip: !supported }, async () => {
+    const rootPath = await packageFixture();
+    const casPath = await packageFixture();
+    try {
+      const bytes = Buffer.alloc(2 * 1024 * 1024 + 17, 0x62);
+      const entry = signedEntry('large-worker', bytes, true);
+      await writeFile(path.join(rootPath, entry.relativePath), bytes, { mode: 0o500 });
+      const binding = await loadNativePackageReader(helperDigest());
+      const source = openPackageRoot(binding, rootPath);
+      const cas = openNativeCasRoot(binding, casPath);
+      try {
+        await importVerifiedPackageEntryToCas(source, cas, entry);
+        assert.deepEqual(await new ContentAddressedStore(casPath).read(entry.digest), bytes);
+        const published = await stat(path.join(casPath, entry.digest));
+        assert.equal(published.mode & 0o7777, 0o400);
+        assert.equal(published.nlink, 1);
+        await importVerifiedPackageEntryToCas(source, cas, entry);
+        assert.deepEqual(await readdir(casPath), [entry.digest]);
+      } finally { cas.close(); source.close(); }
+    } finally {
+      await rm(rootPath, { recursive: true, force: true });
+      await rm(casPath, { recursive: true, force: true });
+    }
+  });
+
+test('native CAS import removes failed staging and refuses a corrupt existing object',
+  { skip: !supported }, async () => {
+    const rootPath = await packageFixture();
+    const casPath = await packageFixture();
+    try {
+      const bytes = Buffer.from('expected signed bytes');
+      const entry = signedEntry('payload', bytes);
+      await writeFile(path.join(rootPath, 'payload'), bytes, { mode: 0o400 });
+      const binding = await loadNativePackageReader(helperDigest());
+      const source = openPackageRoot(binding, rootPath);
+      const cas = openNativeCasRoot(binding, casPath);
+      try {
+        await assert.rejects(importVerifiedPackageEntryToCas(source, cas,
+          { ...entry, digest: '0'.repeat(64) }), /different complete-file digest/);
+        assert.deepEqual(await readdir(casPath), []);
+        const corrupt = Buffer.alloc(bytes.byteLength, 0x78);
+        await writeFile(path.join(casPath, entry.digest), corrupt, { mode: 0o400 });
+        await assert.rejects(importVerifiedPackageEntryToCas(source, cas, entry),
+          /CAS artifact differs from its signed digest/);
+        assert.deepEqual(await readdir(casPath), [entry.digest]);
+        assert.deepEqual(await readFile(path.join(casPath, entry.digest)), corrupt);
+        await rm(path.join(casPath, entry.digest));
+        await symlink('absent', path.join(casPath, entry.digest));
+        await assert.rejects(importVerifiedPackageEntryToCas(source, cas, entry),
+          /CAS artifact is unsafe or changed/);
+        assert.deepEqual(await readdir(casPath), [entry.digest]);
+      } finally { cas.close(); source.close(); }
+    } finally {
+      await rm(rootPath, { recursive: true, force: true });
+      await rm(casPath, { recursive: true, force: true });
+    }
+  });
+
+test('native CAS import preserves an empty signed object without a temporary residue',
+  { skip: !supported }, async () => {
+    const rootPath = await packageFixture();
+    const casPath = await packageFixture();
+    try {
+      const bytes = Buffer.alloc(0);
+      const entry = signedEntry('empty', bytes);
+      await writeFile(path.join(rootPath, 'empty'), bytes, { mode: 0o400 });
+      const binding = await loadNativePackageReader(helperDigest());
+      const source = openPackageRoot(binding, rootPath);
+      const cas = openNativeCasRoot(binding, casPath);
+      try {
+        await importVerifiedPackageEntryToCas(source, cas, entry);
+        assert.deepEqual(await readdir(casPath), [entry.digest]);
+        assert.deepEqual(await new ContentAddressedStore(casPath).read(entry.digest), bytes);
+      } finally { cas.close(); source.close(); }
+    } finally {
+      await rm(rootPath, { recursive: true, force: true });
+      await rm(casPath, { recursive: true, force: true });
+    }
+  });
+
+test('native CAS root and staged inode reject locator or mode substitution',
+  { skip: !supported }, async () => {
+    const casPath = await packageFixture();
+    const moved = `${casPath}-moved`;
+    const alias = `${casPath}-alias`;
+    try {
+      const binding = await loadNativePackageReader(helperDigest());
+      await symlink(casPath, alias);
+      assert.throws(() => openNativeCasRoot(binding, alias), /CAS root is unsafe or changed/);
+      const cas = openNativeCasRoot(binding, casPath);
+      try {
+        await chmod(casPath, 0o755);
+        assert.throws(() => cas.beginStage('0'.repeat(64), 1, '0'.repeat(32)), /invalid CAS stage request/);
+        await chmod(casPath, 0o700);
+        const bytes = Buffer.from('staged');
+        const ref = sha256Bytes(bytes);
+        const nonce = '0'.repeat(32);
+        const stage = cas.beginStage(ref, bytes.byteLength, nonce);
+        stage.writeChunk(bytes);
+        stage.seal();
+        const stageName = `.tmp-${ref}-${nonce}`;
+        await rename(path.join(casPath, stageName), path.join(casPath, 'displaced-stage'));
+        await writeFile(path.join(casPath, stageName), bytes, { mode: 0o400 });
+        assert.deepEqual(stage.readChunk(bytes.byteLength), bytes);
+        assert.throws(() => stage.assertStable(), /CAS stage is incomplete or changed/);
+        assert.throws(() => stage.abort(), /cleanup is uncertain/);
+        await rename(casPath, moved);
+        await mkdir(casPath, { mode: 0o700 });
+        assert.throws(() => cas.beginStage(ref, bytes.byteLength, '1'.repeat(32)), /invalid CAS stage request/);
+      } finally { cas.close(); }
+    } finally {
+      await rm(alias, { force: true });
+      await rm(casPath, { recursive: true, force: true });
+      await rm(moved, { recursive: true, force: true });
+    }
+  });

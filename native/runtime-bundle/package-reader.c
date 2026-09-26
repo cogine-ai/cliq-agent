@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -37,8 +38,32 @@ typedef struct {
     int executable;
 } package_entry;
 
+typedef struct {
+    int fd;
+    char *path;
+    struct stat identity;
+} cas_root;
+
+typedef struct {
+    int fd, root_fd;
+    char *root_path, *name, *ref;
+    struct stat root_identity, sealed;
+    off_t expected, written, read_offset;
+    int state;
+} cas_stage;
+
+typedef struct {
+    int fd, root_fd;
+    char *root_path, *ref;
+    struct stat root_identity, before;
+    off_t read_offset;
+} cas_artifact;
+
 static const napi_type_tag root_tag = {0x12a0e10b838f440dULL, 0x9459f3ea39bd8ae1ULL};
 static const napi_type_tag entry_tag = {0xc1d86f628b20d4a3ULL, 0x0ed79c3a8f7de527ULL};
+static const napi_type_tag cas_root_tag = {0x02848456d04b4b21ULL, 0x8ce46e8f34443e72ULL};
+static const napi_type_tag cas_stage_tag = {0x88976e33d2f24b6dULL, 0xa21bca928baf7672ULL};
+static const napi_type_tag cas_artifact_tag = {0xd2579527e5db4dc0ULL, 0xb30a60112ab6e73fULL};
 
 static napi_value native_error(napi_env env, const char *message) {
     napi_throw_error(env, "ERR_CLIQ_PACKAGE_READER", message);
@@ -68,12 +93,23 @@ static int safe_file(const struct stat *info, uid_t owner, off_t size, int execu
         (executable ? (info->st_mode & 0100) != 0 : (info->st_mode & 0111) == 0);
 }
 
+static int safe_ancestor(const struct stat *info) {
+    if (!S_ISDIR(info->st_mode) || !(info->st_uid == geteuid() || info->st_uid == 0)) return 0;
+    if ((info->st_mode & 0022) == 0) return 1;
+    /* A root-owned 1777 directory protects another user's named child. */
+    return info->st_uid == 0 && (info->st_mode & 07777) == 01777;
+}
+
 /* Reopen from / so even an ancestor symlink is rejected. The held descriptor,
  * not the reopened locator, remains the authority for entry reads. */
 static int open_absolute_directory(const char *path) {
     if (path[0] != '/' || path[1] == '\0') { errno = EINVAL; return -1; }
     int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (current < 0) return -1;
+    struct stat held;
+    if (fstat(current, &held) < 0 || !safe_ancestor(&held)) {
+        close(current); errno = EINVAL; return -1;
+    }
     const char *part = path + 1;
     while (*part) {
         const char *end = strchr(part, '/');
@@ -84,10 +120,17 @@ static int open_absolute_directory(const char *path) {
         }
         char name[NAME_MAX + 1];
         memcpy(name, part, length); name[length] = '\0';
+        struct stat named;
+        if (fstatat(current, name, &named, AT_SYMLINK_NOFOLLOW) < 0 || !safe_ancestor(&named)) {
+            close(current); errno = EINVAL; return -1;
+        }
         int next = openat(current, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         int saved = errno;
         close(current);
         if (next < 0) { errno = saved; return -1; }
+        if (fstat(next, &held) < 0 || !same_inode(&named, &held) || !safe_ancestor(&held)) {
+            close(next); errno = EINVAL; return -1;
+        }
         current = next;
         if (!end) break;
         part = end + 1;
@@ -359,9 +402,437 @@ fail:
     return native_error(env, "package root is unsafe or changed");
 }
 
+/* CAS roots are mutable 0700 directories. Their locator and authority metadata
+ * stay fixed, while ordinary file publication changes directory timestamps. */
+static int cas_root_is_current(const char *path, const struct stat *identity) {
+    int locator = open_absolute_directory(path);
+    if (locator < 0) return 0;
+    struct stat current;
+    int valid = fstat(locator, &current) == 0 && same_inode(identity, &current) &&
+        current.st_uid == identity->st_uid && current.st_gid == identity->st_gid &&
+        current.st_mode == identity->st_mode &&
+        S_ISDIR(current.st_mode) && (current.st_mode & 07777) == 0700;
+    close(locator);
+    return valid;
+}
+
+static int exact_hex(const char *value, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        if (!((value[i] >= '0' && value[i] <= '9') || (value[i] >= 'a' && value[i] <= 'f'))) return 0;
+    }
+    return value[length] == '\0';
+}
+
+static int read_hex(napi_env env, napi_value value, char *result, size_t digits) {
+    size_t length;
+    return napi_get_value_string_utf8(env, value, NULL, 0, &length) == napi_ok &&
+        length == digits &&
+        napi_get_value_string_utf8(env, value, result, digits + 1, &length) == napi_ok &&
+        length == digits && exact_hex(result, digits);
+}
+
+static int cas_file_safe(const struct stat *info, uid_t owner, off_t size, mode_t mode) {
+    return S_ISREG(info->st_mode) && info->st_uid == owner && info->st_nlink == 1 &&
+        (info->st_mode & 07777) == mode && info->st_size == size;
+}
+
+static void close_cas_root(cas_root *root) {
+    if (root->fd >= 0) close(root->fd);
+    root->fd = -1;
+}
+
+static void finalize_cas_root(napi_env env, void *data, void *hint) {
+    (void)env; (void)hint;
+    cas_root *root = data;
+    close_cas_root(root); free(root->path); free(root);
+}
+
+static cas_root *unwrap_cas_root(napi_env env, napi_callback_info info) {
+    napi_value self;
+    cas_root *root = NULL;
+    bool matches = false;
+    if (napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok ||
+        napi_check_object_type_tag(env, self, &cas_root_tag, &matches) != napi_ok || !matches ||
+        napi_unwrap(env, self, (void **)&root) != napi_ok || !root) {
+        native_error(env, "invalid CAS root handle"); return NULL;
+    }
+    return root;
+}
+
+static napi_value cas_root_close(napi_env env, napi_callback_info info) {
+    cas_root *root = unwrap_cas_root(env, info);
+    if (!root) return NULL;
+    close_cas_root(root);
+    return undefined_value(env);
+}
+
+static napi_value cas_root_begin_stage(napi_env env, napi_callback_info info);
+static napi_value cas_root_open_artifact(napi_env env, napi_callback_info info);
+
+static napi_value open_cas_root(napi_env env, napi_callback_info info) {
+    size_t argc = 1, length;
+    napi_value argv[1];
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 1 ||
+        napi_get_value_string_utf8(env, argv[0], NULL, 0, &length) != napi_ok ||
+        length == 0 || length >= PATH_MAX) return native_error(env, "invalid CAS root path");
+    cas_root *root = calloc(1, sizeof(*root));
+    if (!root) return native_error(env, "CAS root allocation failed");
+    root->fd = -1;
+    root->path = malloc(length + 1);
+    if (!root->path || napi_get_value_string_utf8(env, argv[0], root->path, length + 1, &length) != napi_ok ||
+        strlen(root->path) != length) goto fail;
+    root->fd = open_absolute_directory(root->path);
+    if (root->fd < 0 || fstat(root->fd, &root->identity) < 0 ||
+        root->identity.st_uid != geteuid() || !cas_root_is_current(root->path, &root->identity)) goto fail;
+    napi_value result;
+    const napi_property_descriptor methods[] = {
+        {"beginStage", NULL, cas_root_begin_stage, NULL, NULL, NULL, napi_default, NULL},
+        {"openArtifact", NULL, cas_root_open_artifact, NULL, NULL, NULL, napi_default, NULL},
+        {"close", NULL, cas_root_close, NULL, NULL, NULL, napi_default, NULL}
+    };
+    if (napi_create_object(env, &result) != napi_ok) goto fail;
+    if (napi_wrap(env, result, root, finalize_cas_root, NULL, NULL) != napi_ok) goto fail;
+    if (napi_type_tag_object(env, result, &cas_root_tag) != napi_ok ||
+        napi_define_properties(env, result, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
+        napi_object_freeze(env, result) != napi_ok) return native_error(env, "CAS root handle initialization failed");
+    return result;
+fail:
+    close_cas_root(root); free(root->path); free(root);
+    return native_error(env, "CAS root is unsafe or changed");
+}
+
+static void close_cas_stage(cas_stage *stage) {
+    if (stage->fd >= 0) close(stage->fd);
+    if (stage->root_fd >= 0) close(stage->root_fd);
+    stage->fd = stage->root_fd = -1;
+}
+
+static void finalize_cas_stage(napi_env env, void *data, void *hint) {
+    (void)env; (void)hint;
+    cas_stage *stage = data;
+    close_cas_stage(stage);
+    free(stage->root_path); free(stage->name); free(stage->ref); free(stage);
+}
+
+static cas_stage *unwrap_cas_stage(napi_env env, napi_callback_info info) {
+    napi_value self;
+    cas_stage *stage = NULL;
+    bool matches = false;
+    if (napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok ||
+        napi_check_object_type_tag(env, self, &cas_stage_tag, &matches) != napi_ok || !matches ||
+        napi_unwrap(env, self, (void **)&stage) != napi_ok || !stage) {
+        native_error(env, "invalid CAS stage handle"); return NULL;
+    }
+    return stage;
+}
+
+static napi_value cas_stage_write_chunk(napi_env env, napi_callback_info info) {
+    cas_stage *stage = unwrap_cas_stage(env, info);
+    if (!stage) return NULL;
+    size_t argc = 1, length;
+    napi_value argv[1];
+    void *bytes;
+    if (stage->state != 0 || stage->fd < 0 ||
+        napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 1 ||
+        napi_get_buffer_info(env, argv[0], &bytes, &length) != napi_ok ||
+        length == 0 || length > MAX_CHUNK || (off_t)length > stage->expected - stage->written ||
+        !cas_root_is_current(stage->root_path, &stage->root_identity)) {
+        return native_error(env, "invalid CAS stage write");
+    }
+    size_t offset = 0;
+    while (offset < length) {
+        ssize_t count = write(stage->fd, (char *)bytes + offset, length - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return native_error(env, "CAS stage write failed");
+        offset += (size_t)count;
+        stage->written += count;
+    }
+    return undefined_value(env);
+}
+
+static napi_value cas_stage_seal(napi_env env, napi_callback_info info) {
+    cas_stage *stage = unwrap_cas_stage(env, info);
+    if (!stage) return NULL;
+    struct stat named, before, after;
+    if (stage->state != 0 || stage->fd < 0 || stage->written != stage->expected ||
+        !cas_root_is_current(stage->root_path, &stage->root_identity) ||
+        fstatat(stage->root_fd, stage->name, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+        fstat(stage->fd, &before) < 0 || !same_inode(&named, &before) ||
+        !cas_file_safe(&before, stage->root_identity.st_uid, stage->expected, 0600) ||
+        fchmod(stage->fd, 0400) < 0 || fsync(stage->fd) < 0 || fstat(stage->fd, &after) < 0 ||
+        !cas_file_safe(&after, stage->root_identity.st_uid, stage->expected, 0400) ||
+        !cas_root_is_current(stage->root_path, &stage->root_identity)) {
+        return native_error(env, "CAS stage cannot be sealed");
+    }
+    stage->sealed = after;
+    stage->read_offset = 0;
+    stage->state = 1;
+    return undefined_value(env);
+}
+
+static napi_value cas_stage_read_chunk(napi_env env, napi_callback_info info) {
+    cas_stage *stage = unwrap_cas_stage(env, info);
+    if (!stage) return NULL;
+    size_t argc = 1;
+    napi_value argv[1];
+    double requested;
+    if (stage->state != 1 || stage->fd < 0 ||
+        napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 1 ||
+        napi_get_value_double(env, argv[0], &requested) != napi_ok ||
+        !(requested >= 1 && requested <= MAX_CHUNK) || requested != (double)(uint32_t)requested) {
+        return native_error(env, "invalid CAS stage read");
+    }
+    size_t length = (size_t)requested;
+    if ((off_t)length > stage->expected - stage->read_offset) length = (size_t)(stage->expected - stage->read_offset);
+    char *bytes = malloc(length ? length : 1);
+    if (!bytes) return native_error(env, "CAS stage read allocation failed");
+    ssize_t count;
+    do { count = pread(stage->fd, bytes, length, stage->read_offset); } while (count < 0 && errno == EINTR);
+    if (count < 0) { free(bytes); return native_error(env, "CAS stage read failed"); }
+    stage->read_offset += count;
+    napi_value result;
+    napi_status status = napi_create_buffer_copy(env, (size_t)count, bytes, NULL, &result);
+    free(bytes);
+    return status == napi_ok ? result : NULL;
+}
+
+static int cas_stage_is_stable(cas_stage *stage) {
+    struct stat named, after;
+    return stage->state == 1 && stage->fd >= 0 && stage->read_offset == stage->expected &&
+        cas_root_is_current(stage->root_path, &stage->root_identity) &&
+        fstatat(stage->root_fd, stage->name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+        fstat(stage->fd, &after) == 0 && same_file_metadata(&stage->sealed, &after) &&
+        same_file_metadata(&named, &after);
+}
+
+static napi_value cas_stage_assert_stable(napi_env env, napi_callback_info info) {
+    cas_stage *stage = unwrap_cas_stage(env, info);
+    if (!stage) return NULL;
+    if (!cas_stage_is_stable(stage)) return native_error(env, "CAS stage is incomplete or changed");
+    return undefined_value(env);
+}
+
+static napi_value cas_stage_publish(napi_env env, napi_callback_info info) {
+    cas_stage *stage = unwrap_cas_stage(env, info);
+    if (!stage) return NULL;
+    if (!cas_stage_is_stable(stage)) return native_error(env, "CAS stage is incomplete or changed");
+    int linked = linkat(stage->root_fd, stage->name, stage->root_fd, stage->ref, 0);
+    if (linked < 0 && errno != EEXIST) return native_error(env, "CAS artifact publication failed");
+    if (linked == 0) {
+        if (fsync(stage->root_fd) < 0 || unlinkat(stage->root_fd, stage->name, 0) < 0 ||
+            fsync(stage->root_fd) < 0 ||
+            !cas_root_is_current(stage->root_path, &stage->root_identity)) {
+            return native_error(env, "CAS artifact publication is uncertain");
+        }
+        stage->state = 2;
+    }
+    napi_value result;
+    if (napi_get_boolean(env, linked == 0, &result) != napi_ok) return NULL;
+    return result;
+}
+
+static napi_value cas_stage_abort(napi_env env, napi_callback_info info) {
+    cas_stage *stage = unwrap_cas_stage(env, info);
+    if (!stage) return NULL;
+    if (stage->state == 3) return undefined_value(env);
+    if (stage->root_fd >= 0 && stage->name && stage->state != 2) {
+        struct stat named, held;
+        if (!cas_root_is_current(stage->root_path, &stage->root_identity) ||
+            fstat(stage->fd, &held) < 0) return native_error(env, "CAS stage cleanup cannot prove its root");
+        if (fstatat(stage->root_fd, stage->name, &named, AT_SYMLINK_NOFOLLOW) == 0) {
+            if (!same_inode(&named, &held) || unlinkat(stage->root_fd, stage->name, 0) < 0 ||
+                fsync(stage->root_fd) < 0) return native_error(env, "CAS stage cleanup is uncertain");
+        } else if (errno != ENOENT) {
+            return native_error(env, "CAS stage cleanup cannot inspect its name");
+        }
+    }
+    close_cas_stage(stage);
+    stage->state = 3;
+    return undefined_value(env);
+}
+
+static napi_value cas_root_begin_stage(napi_env env, napi_callback_info info) {
+    cas_root *root = unwrap_cas_root(env, info);
+    if (!root) return NULL;
+    size_t argc = 3;
+    napi_value argv[3];
+    char ref[65], nonce[33];
+    double requested;
+    if (root->fd < 0 || !cas_root_is_current(root->path, &root->identity) ||
+        napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 3 ||
+        !read_hex(env, argv[0], ref, 64) || !read_hex(env, argv[2], nonce, 32) ||
+        napi_get_value_double(env, argv[1], &requested) != napi_ok ||
+        !(requested >= 0 && requested <= 9007199254740991.0) ||
+        requested != (double)(int64_t)requested) return native_error(env, "invalid CAS stage request");
+    cas_stage *stage = calloc(1, sizeof(*stage));
+    if (!stage) return native_error(env, "CAS stage allocation failed");
+    stage->fd = stage->root_fd = -1;
+    stage->expected = (off_t)requested;
+    stage->root_path = strdup(root->path);
+    stage->ref = strdup(ref);
+    stage->name = malloc(5 + 64 + 1 + 32 + 1);
+    if (!stage->root_path || !stage->ref || !stage->name) goto fail;
+    snprintf(stage->name, 5 + 64 + 1 + 32 + 1, ".tmp-%s-%s", ref, nonce);
+    stage->root_fd = fcntl(root->fd, F_DUPFD_CLOEXEC, 0);
+    stage->root_identity = root->identity;
+    if (stage->root_fd < 0) goto fail;
+    stage->fd = openat(stage->root_fd, stage->name,
+        O_CREAT | O_EXCL | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
+    struct stat created;
+    if (stage->fd < 0 || fstat(stage->fd, &created) < 0 ||
+        !cas_file_safe(&created, root->identity.st_uid, 0, 0600) ||
+        !cas_root_is_current(root->path, &root->identity)) goto fail_created;
+    napi_value result;
+    const napi_property_descriptor methods[] = {
+        {"writeChunk", NULL, cas_stage_write_chunk, NULL, NULL, NULL, napi_default, NULL},
+        {"seal", NULL, cas_stage_seal, NULL, NULL, NULL, napi_default, NULL},
+        {"readChunk", NULL, cas_stage_read_chunk, NULL, NULL, NULL, napi_default, NULL},
+        {"assertStable", NULL, cas_stage_assert_stable, NULL, NULL, NULL, napi_default, NULL},
+        {"publish", NULL, cas_stage_publish, NULL, NULL, NULL, napi_default, NULL},
+        {"abort", NULL, cas_stage_abort, NULL, NULL, NULL, napi_default, NULL}
+    };
+    if (napi_create_object(env, &result) != napi_ok) goto fail_created;
+    if (napi_wrap(env, result, stage, finalize_cas_stage, NULL, NULL) != napi_ok) goto fail_created;
+    if (napi_type_tag_object(env, result, &cas_stage_tag) != napi_ok ||
+        napi_define_properties(env, result, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
+        napi_object_freeze(env, result) != napi_ok) return native_error(env, "CAS stage handle initialization failed");
+    return result;
+fail_created:
+    if (stage->fd >= 0) {
+        struct stat named, held;
+        if (fstat(stage->fd, &held) == 0 &&
+            fstatat(stage->root_fd, stage->name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+            same_inode(&named, &held)) unlinkat(stage->root_fd, stage->name, 0);
+    }
+fail:
+    close_cas_stage(stage); free(stage->root_path); free(stage->name); free(stage->ref); free(stage);
+    return native_error(env, "CAS stage creation failed");
+}
+
+static void close_cas_artifact(cas_artifact *artifact) {
+    if (artifact->fd >= 0) close(artifact->fd);
+    if (artifact->root_fd >= 0) close(artifact->root_fd);
+    artifact->fd = artifact->root_fd = -1;
+}
+
+static void finalize_cas_artifact(napi_env env, void *data, void *hint) {
+    (void)env; (void)hint;
+    cas_artifact *artifact = data;
+    close_cas_artifact(artifact); free(artifact->root_path); free(artifact->ref); free(artifact);
+}
+
+static cas_artifact *unwrap_cas_artifact(napi_env env, napi_callback_info info) {
+    napi_value self;
+    cas_artifact *artifact = NULL;
+    bool matches = false;
+    if (napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok ||
+        napi_check_object_type_tag(env, self, &cas_artifact_tag, &matches) != napi_ok || !matches ||
+        napi_unwrap(env, self, (void **)&artifact) != napi_ok || !artifact) {
+        native_error(env, "invalid CAS artifact handle"); return NULL;
+    }
+    return artifact;
+}
+
+static napi_value cas_artifact_read_chunk(napi_env env, napi_callback_info info) {
+    cas_artifact *artifact = unwrap_cas_artifact(env, info);
+    if (!artifact) return NULL;
+    size_t argc = 1;
+    napi_value argv[1];
+    double requested;
+    if (artifact->fd < 0 ||
+        napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 1 ||
+        napi_get_value_double(env, argv[0], &requested) != napi_ok ||
+        !(requested >= 1 && requested <= MAX_CHUNK) || requested != (double)(uint32_t)requested) {
+        return native_error(env, "invalid CAS artifact read");
+    }
+    size_t length = (size_t)requested;
+    if ((off_t)length > artifact->before.st_size - artifact->read_offset) {
+        length = (size_t)(artifact->before.st_size - artifact->read_offset);
+    }
+    char *bytes = malloc(length ? length : 1);
+    if (!bytes) return native_error(env, "CAS artifact read allocation failed");
+    ssize_t count;
+    do { count = pread(artifact->fd, bytes, length, artifact->read_offset); } while (count < 0 && errno == EINTR);
+    if (count < 0) { free(bytes); return native_error(env, "CAS artifact read failed"); }
+    artifact->read_offset += count;
+    napi_value result;
+    napi_status status = napi_create_buffer_copy(env, (size_t)count, bytes, NULL, &result);
+    free(bytes);
+    return status == napi_ok ? result : NULL;
+}
+
+static napi_value cas_artifact_assert_stable(napi_env env, napi_callback_info info) {
+    cas_artifact *artifact = unwrap_cas_artifact(env, info);
+    if (!artifact) return NULL;
+    struct stat named, after;
+    if (artifact->fd < 0 || artifact->read_offset != artifact->before.st_size ||
+        !cas_root_is_current(artifact->root_path, &artifact->root_identity) ||
+        fstat(artifact->fd, &after) < 0 ||
+        fstatat(artifact->root_fd, artifact->ref, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+        !same_file_metadata(&artifact->before, &after) ||
+        !same_file_metadata(&named, &after)) {
+        return native_error(env, "CAS artifact is incomplete or changed");
+    }
+    return undefined_value(env);
+}
+
+static napi_value cas_artifact_close(napi_env env, napi_callback_info info) {
+    cas_artifact *artifact = unwrap_cas_artifact(env, info);
+    if (!artifact) return NULL;
+    close_cas_artifact(artifact);
+    return undefined_value(env);
+}
+
+static napi_value cas_root_open_artifact(napi_env env, napi_callback_info info) {
+    cas_root *root = unwrap_cas_root(env, info);
+    if (!root) return NULL;
+    size_t argc = 2;
+    napi_value argv[2];
+    char ref[65];
+    double requested;
+    if (root->fd < 0 || !cas_root_is_current(root->path, &root->identity) ||
+        napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 2 ||
+        !read_hex(env, argv[0], ref, 64) ||
+        napi_get_value_double(env, argv[1], &requested) != napi_ok ||
+        !(requested >= 0 && requested <= 9007199254740991.0) ||
+        requested != (double)(int64_t)requested) return native_error(env, "invalid CAS artifact request");
+    cas_artifact *artifact = calloc(1, sizeof(*artifact));
+    if (!artifact) return native_error(env, "CAS artifact allocation failed");
+    artifact->fd = artifact->root_fd = -1;
+    artifact->root_path = strdup(root->path);
+    artifact->ref = strdup(ref);
+    if (!artifact->root_path || !artifact->ref) goto fail;
+    artifact->root_fd = fcntl(root->fd, F_DUPFD_CLOEXEC, 0);
+    artifact->root_identity = root->identity;
+    if (artifact->root_fd < 0) goto fail;
+    struct stat named;
+    if (fstatat(artifact->root_fd, ref, &named, AT_SYMLINK_NOFOLLOW) < 0) goto fail;
+    artifact->fd = openat(artifact->root_fd, ref, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (artifact->fd < 0 || fstat(artifact->fd, &artifact->before) < 0 ||
+        !same_inode(&named, &artifact->before) ||
+        !cas_file_safe(&artifact->before, root->identity.st_uid, (off_t)requested, 0400) ||
+        !cas_root_is_current(root->path, &root->identity)) goto fail;
+    napi_value result;
+    const napi_property_descriptor methods[] = {
+        {"readChunk", NULL, cas_artifact_read_chunk, NULL, NULL, NULL, napi_default, NULL},
+        {"assertStable", NULL, cas_artifact_assert_stable, NULL, NULL, NULL, napi_default, NULL},
+        {"close", NULL, cas_artifact_close, NULL, NULL, NULL, napi_default, NULL}
+    };
+    if (napi_create_object(env, &result) != napi_ok) goto fail;
+    if (napi_wrap(env, result, artifact, finalize_cas_artifact, NULL, NULL) != napi_ok) goto fail;
+    if (napi_type_tag_object(env, result, &cas_artifact_tag) != napi_ok ||
+        napi_define_properties(env, result, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
+        napi_object_freeze(env, result) != napi_ok) return native_error(env, "CAS artifact handle initialization failed");
+    return result;
+fail:
+    close_cas_artifact(artifact); free(artifact->root_path); free(artifact->ref); free(artifact);
+    return native_error(env, "CAS artifact is unsafe or changed");
+}
+
 static napi_value initialize(napi_env env, napi_value exports) {
     const napi_property_descriptor methods[] = {
-        {"openRoot", NULL, open_package_root, NULL, NULL, NULL, napi_default, NULL}
+        {"openRoot", NULL, open_package_root, NULL, NULL, NULL, napi_default, NULL},
+        {"openCasRoot", NULL, open_cas_root, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok) return NULL;
     return exports;
