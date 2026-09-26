@@ -13,6 +13,7 @@ import type {
   WorkspaceStateManifest
 } from '../kernel/types.js';
 import type { ArtifactCatalog } from './artifacts.js';
+import { mapArtifactReads } from './bounded-artifact-reads.js';
 import { validateAgentRecovery } from './agent-recovery.js';
 import { validateStopRecovery } from './stop-recovery.js';
 import {
@@ -78,14 +79,14 @@ async function requireRecoveryArtifacts(
     requireRecoveryArtifactRef(ref, label);
     if (!unique.has(ref)) unique.set(ref, label);
   }
-  await Promise.all(
-    [...unique].map(async ([ref, label]) => {
+  await mapArtifactReads(
+    [...unique], async ([ref, label]) => {
       try {
         await artifacts.readBytes(ref);
       } catch (error) {
         recoveryFailure(`${label} is not readable from CAS: ${(error as Error).message}`);
       }
-    })
+    }
   );
 }
 

@@ -1,6 +1,7 @@
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { assertArtifactRef, sha256Bytes } from '../kernel/identity.js';
 import type { ArtifactRef } from '../kernel/types.js';
+import { RECOVERY_ARTIFACT_READ_CONCURRENCY } from './bounded-artifact-reads.js';
 import { ContentAddressedStore } from './cas.js';
 import { KernelStorageError } from './errors.js';
 import type { SqliteConnection } from './sqlite-driver.js';
@@ -13,7 +14,25 @@ export type PublishedArtifact = {
 };
 
 export class ArtifactCatalog {
+  private activeReads = 0;
+  private readonly waitingReads: Array<() => void> = [];
+
   constructor(private readonly cas: ContentAddressedStore) {}
+
+  private async withReadSlot<T>(read: () => Promise<T>): Promise<T> {
+    if (this.activeReads < RECOVERY_ARTIFACT_READ_CONCURRENCY) {
+      this.activeReads += 1;
+    } else {
+      await new Promise<void>((resolve) => { this.waitingReads.push(resolve); });
+    }
+    try {
+      return await read();
+    } finally {
+      const next = this.waitingReads.shift();
+      if (next) next();
+      else this.activeReads -= 1;
+    }
+  }
 
   async publishBytes(
     bytes: Uint8Array,
@@ -30,7 +49,7 @@ export class ArtifactCatalog {
 
   async readBytes(ref: ArtifactRef): Promise<Buffer> {
     assertArtifactRef(ref);
-    return this.cas.read(ref);
+    return this.withReadSlot(() => this.cas.read(ref));
   }
 
   async readCanonical<T>(ref: ArtifactRef): Promise<T> {

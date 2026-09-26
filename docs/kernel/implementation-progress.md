@@ -44,13 +44,27 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   `npm run build`, and the 1,623-test full suite passed on macOS after the
   replay-path refinement. Linux runtime,
   installed I1, complete public methods and six-package qualification remain open.
+- The first branch CI run qualified the existing Linux namespace/cgroup probe.
+  Its four Node/macOS/Linux matrix jobs found an asynchronous `EPIPE` when the
+  native listener exited after endpoint drift, and Linux also produced an
+  expected client `ECONNRESET`. The listener now handles the pipe error on its
+  fail-closed path, and the drift tests accept the connection reset. Cross-
+  platform verification of that fix is pending the next branch CI run.
+- Recovery closure reads now use a fixed eight-worker mapper, and each
+  `ArtifactCatalog` limits actual CAS reads across concurrent callers to eight.
+  Focused tests cover pending-work bounds, result order, failure drain and
+  release of a failed read slot. A second `npm run build` and the 1,626-test full
+  suite pass on macOS with these changes. Scale and latency qualification are
+  still open.
 
 ## Next integration order
 
-1. Implement native control endpoint/connection lifetime and the approved live
-   authentication contract; connect existing admission/replay reducers.
-2. Complete WP03 containment/private-generation evidence and WP06 installed
-   bootstrap for the I1 restart scenario. Use actual StateStore throughout.
+1. Qualify the native control endpoint/connection lifetime and approved live
+   authentication contract on Linux and macOS CI; extend the closed public
+   methods only as their actual admission/recovery paths become ready.
+2. Complete WP02 Supervisor-generated assembly and WP01 source capture, then
+   WP03 containment/private-generation evidence and WP06 installed bootstrap
+   for the I1 restart scenario. Use actual StateStore throughout.
 3. Implement WP05 candidate, verifier receipt, result and delivery transitions
    against the same real store, then complete I2 with a qualified provider.
 4. Finish the I3 behavior and fault matrix across all six owners.

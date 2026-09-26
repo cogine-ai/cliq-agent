@@ -5,6 +5,7 @@ import type {
   Run, RunAssemblyV1, RunFrontier, ContextManifest, ContinuationItem, ToolContractManifestV1, RunContextCompactionPlan, ToolBatchItem
 } from '../../kernel/types.js';
 import { immutableSnapshot } from '../../model/immutable.js';
+import { mapArtifactReads } from '../bounded-artifact-reads.js';
 import type { ModelAttemptResult } from '../../model/model-session.js';
 import type { ModelUnusableResponseV1 } from '../../protocol/agent-ir.js';
 import { loadToolContracts } from '../../tools/input-contract.js';
@@ -78,11 +79,11 @@ const agentCut = stateOperation('RECOVERY_REQUIRED', async (driver: SqliteDriver
 async function readContextItems(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string, through: number): Promise<ContextItem[]> {
   const rows = driver.prepare('SELECT item_seq, item_id, kind, payload_ref FROM items WHERE run_id = ? AND item_seq <= ? ORDER BY item_seq')
     .all<{ item_seq: unknown; item_id: string; kind: string; payload_ref: string }>(runId, BigInt(through));
-  return Promise.all(rows.map(async (row) => {
+  return mapArtifactReads(rows, async (row) => {
     const item = await readCanonicalArtifact<ContinuationItem>(artifacts, row.payload_ref);
     if (item.itemId !== row.item_id || item.kind !== row.kind) throw new TypeError('context item does not match its owner row');
     return { itemSeq: Number(row.item_seq), itemRef: row.payload_ref, item };
-  }));
+  });
 }
 
 export class AgentContextExhaustedError extends KernelStorageError {
@@ -132,7 +133,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       new Set(manifest.entries.map((entry) => entry.name)).size !== manifest.entries.length) {
     throw new TypeError('Run tool manifest does not match its retained assembly');
   }
-  const contracts = immutableSnapshot(await Promise.all(manifest.entries.map(async (entry) => {
+  const contracts = immutableSnapshot(await mapArtifactReads(manifest.entries, async (entry) => {
     const output = entry.outputSchemaRef !== undefined;
     if (!exactKeys(entry, ['name', 'version', 'description', 'access', 'inputSchemaRef', 'inputSchemaDigest', 'replayClass', 'execution',
       ...(output ? ['outputSchemaRef', 'outputSchemaDigest'] : [])]) || typeof entry.version !== 'string' || !entry.version ||
@@ -156,7 +157,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       throw new TypeError('tool output schema digest mismatch');
     }
     return { ...entry, inputSchema: schema };
-  })));
+  }));
   const tools = contracts.map((entry) => ({ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
     inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
   const validated = validateRunAssembly({ assemblyRef: spec.assemblyRef, assembly, admittedAt: admittedRun.createdAt,

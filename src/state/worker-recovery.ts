@@ -3,6 +3,7 @@ import { parseCanonicalTime } from '../kernel/identity.js';
 import type { InvocationJournalEntry, RecoveryClosureV1, WorkerDeathWait } from '../kernel/types.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import type { ArtifactCatalog } from './artifacts.js';
+import { mapArtifactReads } from './bounded-artifact-reads.js';
 import { readCanonicalArtifact } from './agent-context.js';
 
 /** Immutable witnesses of existing Journal facts, not a second invocation state machine. */
@@ -48,10 +49,10 @@ export async function validateWorkerRecoveryWait(artifacts: ArtifactCatalog, cut
   const open = openWorkerInvocations(cut.journal.slice(0, generation.fencedJournalSeq));
   const refs = open.map(canonicalSha256);
   requireEqual(wait.subject?.openInvocationRefs, refs, 'worker recovery open invocation witnesses');
-  await Promise.all(open.map(async entry => {
+  await mapArtifactReads(open, async entry => {
     if (entry.timestamp > generation.updatedAt) throw new TypeError('worker recovery witness is not a prior prepared invocation');
     requireEqual(await readCanonicalArtifact(artifacts, canonicalSha256(entry)), entry, 'open invocation Journal witness');
-  }));
+  });
   const expected: WorkerDeathWait = {
     schemaVersion: 1, kind: 'reconciliation', runId: run.id, createdFromRevision: wait.createdFromRevision,
     createdAt: wait.createdAt, frontierRef: run.frontierRef,

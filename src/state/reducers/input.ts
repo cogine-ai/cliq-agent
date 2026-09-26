@@ -10,6 +10,7 @@ import { inputRequestDigest, planInputReply, planInputWait } from '../../runtime
 import type { ToolInputAuthority } from '../../tools/input-contract.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from '../artifacts.js';
+import { mapArtifactReads } from '../bounded-artifact-reads.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { readRetainedControlChannelClosure, validateControlChannelClosure } from '../control-channel.js';
 import { prepareContinuationCommit } from '../continuation-commit.js';
@@ -48,8 +49,8 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
   const recover = async () => {
     // The public closure also works after the tool batch has advanced to an agent frontier.
     const closure = await readRecoveryClosure(driver, artifacts, runId);
-    const items = new Map(await Promise.all(closure.items.map(async (row) => [row.itemId,
-      await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)] as const)));
+    const items = new Map(await mapArtifactReads(closure.items, async (row) => [row.itemId,
+      await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)] as const));
     const checkpoints = driver.prepare('SELECT id FROM checkpoints WHERE run_id = ? ORDER BY based_on_run_revision, created_at, id')
       .all<{ id: string }>(runId).map(({ id }) => readCheckpoint(driver, id));
     return validateUserInputRecovery({ artifacts, run: closure.run, spec, items, journal: closure.journal, checkpoints });

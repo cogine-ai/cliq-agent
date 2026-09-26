@@ -6,6 +6,7 @@ import { toolOperationId } from '../policy/tool-policy.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
+import { mapArtifactReads } from './bounded-artifact-reads.js';
 import { readHistoricalControlChannel } from './control-channel.js';
 import { decodeAdmittedContext, decodeSessionProjection } from './decoders.js';
 import { isZeroBudget } from './invariants.js';
@@ -92,7 +93,8 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
         (entry.phase !== 'failed' || hasClaim))) throw new TypeError('terminal stop retains unresolved dispatch evidence');
     if (entry.phase === 'failed' && entry.errorRef === run.stopIntentRef && entry.timestamp !== run.updatedAt) throw new TypeError('stop refund has no atomic terminal owner');
   }
-  const items = await Promise.all(closure.items.map((row) => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)));
+  const items = await mapArtifactReads(closure.items,
+    (row) => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef));
   if (openStopBatch(items)) throw new TypeError('terminal stop retains an unclosed tool batch');
   for (const item of items) if (item.kind === 'tool_result' && item.outcome === 'cancelled') {
     const batch = items.find((candidate) => candidate.kind === 'assistant_tool_batch' && candidate.itemId === item.batchItemId);

@@ -10,6 +10,7 @@ import { toolOperationId } from '../../policy/tool-policy.js';
 import { cancelledCall, cancelRequestDigest, agentStopDetail, openStopBatch, selectAgentStop, stopCheckpointId, stopInvocationHistory, type AgentStopIntent } from '../../runtime/stop.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog, type PublishedArtifact } from '../artifacts.js';
+import { mapArtifactReads } from '../bounded-artifact-reads.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { validateControlChannelClosure } from '../control-channel.js';
 import { prepareContinuationCommit } from '../continuation-commit.js';
@@ -214,8 +215,8 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       const intent = await readAgentStop(driver, artifacts, selected);
       const checkpointId = stopCheckpointId(runId, run.stopIntentRef);
       const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
-      const items = await Promise.all(selected.items.map(async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-        item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
+      const items = await mapArtifactReads(selected.items, async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+        item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
       const pending = openStopBatch(items.map(({ item }) => item));
       if (frontier.kind !== run.nextStep || (pending !== undefined) !== (frontier.kind === 'tool')) throw new TypeError('stop frontier differs from its open batch');
       if (frontier.kind === 'tool') await readToolCut(driver, artifacts, runId, authority.resolveToolInput);
