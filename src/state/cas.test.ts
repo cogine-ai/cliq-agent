@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  rename,
   rm,
   stat as fsStat,
   symlink,
@@ -32,6 +33,61 @@ test('publish makes immutable bytes readable by their raw SHA-256 ref', async ()
     assert.equal((await fsStat(path.join(root, ref))).mode & 0o777, 0o400);
     assert.deepEqual(await store.verify(ref), { ref, byteLength: 5 });
   } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('verify checks a multi-chunk artifact without a whole-object read', async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-stream-verify-'));
+  const root = path.join(home, 'objects');
+  try {
+    await mkdir(root, { mode: 0o700 });
+    const store = new ContentAddressedStore(root);
+    const bytes = Buffer.alloc(3 * 1024 * 1024 + 17, 0x61);
+    bytes[1024 * 1024] = 0x62;
+    bytes[2 * 1024 * 1024] = 0x63;
+    const ref = await store.publish(bytes);
+    t.mock.method(store, 'read', async () => {
+      throw new Error('whole-object read must not serve streaming verification');
+    });
+    assert.deepEqual(await store.verify(ref), { ref, byteLength: bytes.byteLength });
+  } finally {
+    t.mock.restoreAll();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('verify rejects a CAS root replaced after its held artifact read', async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-verify-root-race-'));
+  const root = path.join(home, 'objects');
+  try {
+    await mkdir(root, { mode: 0o700 });
+    const store = new ContentAddressedStore(root);
+    const ref = await store.publish(Buffer.from('stable bytes'));
+    const openedFile = fs.open.bind(fs);
+    let swapped = false;
+    t.mock.method(fs, 'open', async (filePath: string, flags: string | number, mode?: number) => {
+      const handle = await openedFile(filePath, flags, mode);
+      if (filePath === path.join(root, ref)) {
+        const read = handle.read.bind(handle);
+        t.mock.method(handle, 'read', async (
+          buffer: Uint8Array, offset: number, length: number, position: number
+        ) => {
+          const result = await read(buffer, offset, length, position);
+          if (!swapped) {
+            await rename(root, path.join(home, 'displaced'));
+            await mkdir(root, { mode: 0o700 });
+            swapped = true;
+          }
+          return result;
+        });
+      }
+      return handle;
+    });
+    await assert.rejects(store.verify(ref), /CAS root changed/);
+    assert.equal(swapped, true);
+  } finally {
+    t.mock.restoreAll();
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -330,6 +386,7 @@ test('lookup rejects symlink, hardlink, and non-regular artifact paths', async (
 
       await assert.rejects(store.stat(ref), /symlink/i);
       await assert.rejects(store.read(ref), /symlink/i);
+      await assert.rejects(store.verify(ref), /symlink/i);
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -347,6 +404,7 @@ test('lookup rejects symlink, hardlink, and non-regular artifact paths', async (
 
       await assert.rejects(store.stat(ref), /link count/i);
       await assert.rejects(store.read(ref), /link count/i);
+      await assert.rejects(store.verify(ref), /link count/i);
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -362,6 +420,7 @@ test('lookup rejects symlink, hardlink, and non-regular artifact paths', async (
 
       await assert.rejects(store.stat(ref), /regular file/i);
       await assert.rejects(store.read(ref), /regular file/i);
+      await assert.rejects(store.verify(ref), /regular file/i);
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -377,6 +436,7 @@ test('lookup rejects symlink, hardlink, and non-regular artifact paths', async (
 
       await assert.rejects(store.stat(ref), /invalid mode/i);
       await assert.rejects(store.read(ref), /invalid mode/i);
+      await assert.rejects(store.verify(ref), /invalid mode/i);
     } finally {
       await rm(home, { recursive: true, force: true });
     }

@@ -21,16 +21,16 @@ export async function validateWorkspaceEntryBlobs(
     if (previous === undefined) files.set(entry.blobRef, { size: entry.size, path: entry.path });
   }
   await mapArtifactReads([...files], async ([ref, file]) => {
-    let bytes: Buffer;
+    let verified: { byteLength: number };
     try {
-      bytes = await artifacts.readBytes(ref);
+      verified = await artifacts.verifyBytes(ref);
     } catch (error) {
       throw new KernelStorageError(
         'ARTIFACT_MISMATCH',
         `workspace file ${file.path} is not readable from CAS: ${(error as Error).message}`
       );
     }
-    if (bytes.byteLength !== file.size) {
+    if (verified.byteLength !== file.size) {
       throw new KernelStorageError(
         'ARTIFACT_MISMATCH',
         `workspace file ${file.path} size does not match its complete CAS bytes`

@@ -412,6 +412,12 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   passed for this source-include slice. The full test run followed recovery
   closure integration; a subsequent test-only fixture cleanup passed its
   focused build and four tests.
+- Complete CAS blob verification now hashes fixed 1 MiB chunks, and
+  WorkspaceEntryManifest file validation uses that bounded verifier rather
+  than allocating an entire retained file. Read, stat, verify and publication
+  also recheck the named CAS root after the held operation; a root-swap test
+  proves verification fails closed. Source-file publication into CAS is still
+  whole-buffer and remains a separate I1 task.
 
 ## Next integration order
 

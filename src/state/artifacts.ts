@@ -52,6 +52,11 @@ export class ArtifactCatalog {
     return this.withReadSlot(() => this.cas.read(ref));
   }
 
+  async verifyBytes(ref: ArtifactRef): Promise<{ ref: ArtifactRef; byteLength: number }> {
+    assertArtifactRef(ref);
+    return this.withReadSlot(() => this.cas.verify(ref));
+  }
+
   async readCanonical<T>(ref: ArtifactRef): Promise<T> {
     const bytes = await this.readBytes(ref);
     if (sha256Bytes(bytes) !== ref) {

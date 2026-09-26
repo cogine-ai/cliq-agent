@@ -189,6 +189,31 @@ async function readAndVerifyOpened(
   return bytes;
 }
 
+/** Verify a potentially large blob without materializing it in one Buffer. */
+async function verifyOpened(ref: ArtifactRef, opened: OpenedArtifact): Promise<ArtifactStat> {
+  const expected = opened.info;
+  if (!Number.isSafeInteger(expected.size) || expected.size < 0) {
+    throw new Error(`artifact ${ref} has an invalid byte length`);
+  }
+  const chunk = Buffer.allocUnsafe(Math.min(expected.size || 1, 1024 * 1024));
+  const hash = crypto.createHash('sha256');
+  let offset = 0;
+  while (offset < expected.size) {
+    const { bytesRead } = await opened.handle.read(chunk, 0,
+      Math.min(chunk.byteLength, expected.size - offset), offset);
+    if (bytesRead === 0) throw new Error(`artifact ${ref} has an inconsistent size`);
+    hash.update(chunk.subarray(0, bytesRead));
+    offset += bytesRead;
+  }
+  const after = await opened.handle.stat();
+  assertPublishedFile(ref, after);
+  if (!sameInode(expected, after) || expected.size !== after.size || offset !== after.size) {
+    throw new Error(`artifact ${ref} changed while it was verified`);
+  }
+  if (hash.digest('hex') !== ref) throw new Error(`artifact ${ref} is corrupt`);
+  return { ref, byteLength: offset };
+}
+
 async function openPublishedFile(
   root: string,
   openedRoot: RootHandle,
@@ -426,6 +451,7 @@ export class ContentAddressedStore {
         if (verified.byteLength !== bytes.byteLength) {
           throw new Error(`artifact ${ref} has unexpected size after publication`);
         }
+        await assertRootPathStable(this.root, openedRoot);
       } finally {
         await published.handle.close();
       }
@@ -438,7 +464,9 @@ export class ContentAddressedStore {
     return this.withRoot(async (openedRoot) => {
       const opened = await openPublishedFile(this.root, openedRoot, ref);
       try {
-        return await readAndVerifyOpened(ref, opened, 1);
+        const bytes = await readAndVerifyOpened(ref, opened, 1);
+        await assertRootPathStable(this.root, openedRoot);
+        return bytes;
       } finally {
         await opened.handle.close();
       }
@@ -450,6 +478,7 @@ export class ContentAddressedStore {
     return this.withRoot(async (openedRoot) => {
       const opened = await openPublishedFile(this.root, openedRoot, ref);
       try {
+        await assertRootPathStable(this.root, openedRoot);
         return { ref, byteLength: opened.info.size };
       } finally {
         await opened.handle.close();
@@ -459,7 +488,15 @@ export class ContentAddressedStore {
 
   async verify(ref: ArtifactRef): Promise<ArtifactStat> {
     assertArtifactRef(ref);
-    const bytes = await this.read(ref);
-    return { ref, byteLength: bytes.byteLength };
+    return this.withRoot(async (openedRoot) => {
+      const opened = await openPublishedFile(this.root, openedRoot, ref);
+      try {
+        const verified = await verifyOpened(ref, opened);
+        await assertRootPathStable(this.root, openedRoot);
+        return verified;
+      } finally {
+        await opened.handle.close();
+      }
+    });
   }
 }
