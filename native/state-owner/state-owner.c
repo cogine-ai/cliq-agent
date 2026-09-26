@@ -47,6 +47,7 @@ static napi_value move_generation(napi_env env, napi_callback_info info);
 static napi_value inspect_workspace_identity(napi_env env, napi_callback_info info);
 static napi_value open_workspace_source_file(napi_env env, napi_callback_info info);
 static napi_value open_workspace_git_index(napi_env env, napi_callback_info info);
+static napi_value read_workspace_git_info_exclude(napi_env env, napi_callback_info info);
 static napi_value list_workspace_source_directory(napi_env env, napi_callback_info info);
 static napi_value read_workspace_source_symlink(napi_env env, napi_callback_info info);
 static int literal_child_present(int parent, const char *literal);
@@ -225,6 +226,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"inspectWorkspaceIdentity", NULL, inspect_workspace_identity, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkspaceSourceFile", NULL, open_workspace_source_file, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkspaceGitIndex", NULL, open_workspace_git_index, NULL, NULL, NULL, napi_default, NULL},
+        {"readWorkspaceGitInfoExclude", NULL, read_workspace_git_info_exclude, NULL, NULL, NULL, napi_default, NULL},
         {"listWorkspaceSourceDirectory", NULL, list_workspace_source_directory, NULL, NULL, NULL, napi_default, NULL},
         {"readWorkspaceSourceSymlink", NULL, read_workspace_source_symlink, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
@@ -525,6 +527,126 @@ done:
     if (root_fd >= 0) close(root_fd);
     free(config_bytes);
     free(path);
+    return error ? native_error(env, error) : result;
+}
+
+/* The fixed Git info/exclude source is optional, but a present file must be
+ * read through the recorded root and Git directory without accepting aliases,
+ * links, unstable bytes or a parent directory replacement. */
+static napi_value read_workspace_git_info_exclude(napi_env env, napi_callback_info info) {
+    state_lock *lock = unwrap_lock(env, info);
+    if (!lock) return NULL;
+    napi_value argv[7], result = NULL;
+    size_t argc = 7, path_length;
+    unsigned long long root_device, root_inode, git_device, git_inode;
+    uint32_t root_owner, git_owner;
+    int root_fd = -1, git_fd = -1, info_fd = -1, exclude_fd = -1, reopened = -1;
+    int has_info = 0, has_exclude = 0;
+    char *workspace_path = NULL, *bytes = NULL;
+    struct stat root, git, info_before, exclude_before, exclude_after, observed;
+    const char *error = "workspace Git info exclude input is invalid";
+    if (!lock_is_held(lock) || napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 7 ||
+        napi_get_value_string_utf8(env, argv[0], NULL, 0, &path_length) != napi_ok ||
+        path_length < 2 || path_length >= PATH_MAX ||
+        !read_unsigned_id(env, argv[1], &root_device) ||
+        !read_unsigned_id(env, argv[2], &root_inode) ||
+        napi_get_value_uint32(env, argv[3], &root_owner) != napi_ok || root_owner != geteuid() ||
+        !read_unsigned_id(env, argv[4], &git_device) ||
+        !read_unsigned_id(env, argv[5], &git_inode) ||
+        napi_get_value_uint32(env, argv[6], &git_owner) != napi_ok || git_owner != root_owner) goto done;
+    workspace_path = malloc(path_length + 1);
+    if (!workspace_path || napi_get_value_string_utf8(env, argv[0], workspace_path,
+            path_length + 1, &path_length) != napi_ok || strlen(workspace_path) != path_length) goto done;
+    error = "workspace or Git info exclude is unsafe or changed";
+    root_fd = open_literal_root(workspace_path);
+    if (root_fd < 0 || fstat(root_fd, &root) < 0 || !S_ISDIR(root.st_mode) ||
+        root.st_uid != root_owner || (unsigned long long)root.st_ino != root_inode ||
+        literal_child_present(root_fd, ".git") != 1) goto done;
+#ifdef __APPLE__
+    if ((unsigned long long)(uint32_t)root.st_dev != root_device) goto done;
+#else
+    if ((unsigned long long)root.st_dev != root_device) goto done;
+#endif
+    git_fd = openat(root_fd, ".git", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (git_fd < 0 || fstat(git_fd, &git) < 0 || !S_ISDIR(git.st_mode) ||
+        git.st_uid != git_owner || git.st_dev != root.st_dev ||
+        (unsigned long long)git.st_ino != git_inode) goto done;
+#ifdef __APPLE__
+    if ((unsigned long long)(uint32_t)git.st_dev != git_device) goto done;
+#else
+    if ((unsigned long long)git.st_dev != git_device) goto done;
+#endif
+    int literal_info = literal_child_present(git_fd, "info");
+    if (literal_info < 0) goto done;
+    info_fd = openat(git_fd, "info", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (info_fd < 0) {
+        if (errno != ENOENT || literal_info != 0) goto done;
+    } else {
+        if (literal_info != 1 || fstat(info_fd, &info_before) < 0 ||
+            !S_ISDIR(info_before.st_mode) || info_before.st_uid != root_owner ||
+            info_before.st_dev != root.st_dev) goto done;
+        has_info = 1;
+        int literal_exclude = literal_child_present(info_fd, "exclude");
+        if (literal_exclude < 0) goto done;
+        exclude_fd = openat(info_fd, "exclude", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        if (exclude_fd < 0) {
+            if (errno != ENOENT || literal_exclude != 0) goto done;
+        } else {
+            if (literal_exclude != 1 || fstat(exclude_fd, &exclude_before) < 0 ||
+                !S_ISREG(exclude_before.st_mode) || exclude_before.st_uid != root_owner ||
+                exclude_before.st_dev != root.st_dev || exclude_before.st_nlink != 1 ||
+                ((exclude_before.st_mode & 07777) != 0600 && (exclude_before.st_mode & 07777) != 0644) ||
+                exclude_before.st_size < 0 || exclude_before.st_size > 4 * 1024 * 1024) goto done;
+            has_exclude = 1;
+            size_t size = (size_t)exclude_before.st_size, consumed = 0;
+            bytes = malloc(size ? size : 1);
+            if (!bytes) goto done;
+            while (consumed < size) {
+                ssize_t count = read(exclude_fd, bytes + consumed, size - consumed);
+                if (count < 0 && errno == EINTR) continue;
+                if (count <= 0) goto done;
+                consumed += (size_t)count;
+            }
+            char extra;
+            ssize_t extra_count;
+            do { extra_count = read(exclude_fd, &extra, 1); } while (extra_count < 0 && errno == EINTR);
+            if (extra_count != 0 || fstat(exclude_fd, &exclude_after) < 0 ||
+                !same_file_observation(&exclude_before, &exclude_after) ||
+                fstatat(info_fd, "exclude", &observed, AT_SYMLINK_NOFOLLOW) < 0 ||
+                !same_file_observation(&exclude_before, &observed)) goto done;
+        }
+    }
+    reopened = open_literal_root(workspace_path);
+    if (reopened < 0 || fstat(reopened, &observed) < 0 ||
+        !same_file_observation(&root, &observed) || fstat(root_fd, &observed) < 0 ||
+        !same_file_observation(&root, &observed) || literal_child_present(root_fd, ".git") != 1 ||
+        fstatat(root_fd, ".git", &observed, AT_SYMLINK_NOFOLLOW) < 0 ||
+        !same_file_observation(&git, &observed) || fstat(git_fd, &observed) < 0 ||
+        !same_file_observation(&git, &observed) ||
+        literal_child_present(git_fd, "info") != has_info || !lock_is_held(lock)) goto done;
+    if (has_info) {
+        if (fstatat(git_fd, "info", &observed, AT_SYMLINK_NOFOLLOW) < 0 ||
+            !same_file_observation(&info_before, &observed) || fstat(info_fd, &observed) < 0 ||
+            !same_file_observation(&info_before, &observed) ||
+            literal_child_present(info_fd, "exclude") != has_exclude) goto done;
+        if (has_exclude) {
+            if (fstatat(info_fd, "exclude", &observed, AT_SYMLINK_NOFOLLOW) < 0 ||
+                !same_file_observation(&exclude_before, &observed) || fstat(exclude_fd, &observed) < 0 ||
+                !same_file_observation(&exclude_before, &observed)) goto done;
+        } else if (fstatat(info_fd, "exclude", &observed, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) goto done;
+    } else if (fstatat(git_fd, "info", &observed, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) goto done;
+    if (has_exclude) {
+        if (napi_create_buffer_copy(env, (size_t)exclude_before.st_size, bytes, NULL, &result) != napi_ok) goto done;
+    } else if (napi_get_null(env, &result) != napi_ok) goto done;
+    error = NULL;
+done:
+    if (reopened >= 0) close(reopened);
+    if (exclude_fd >= 0) close(exclude_fd);
+    if (info_fd >= 0) close(info_fd);
+    if (git_fd >= 0) close(git_fd);
+    if (root_fd >= 0) close(root_fd);
+    free(bytes);
+    free(workspace_path);
     return error ? native_error(env, error) : result;
 }
 

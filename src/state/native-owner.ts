@@ -66,6 +66,10 @@ export type HeldStateOwnerLock = Readonly<{
    * Null is a twice-checked exact absence under those held descriptors. */
   openWorkspaceGitIndex(canonicalAbsolutePath: string, root: DescriptorIdentity,
     git: DescriptorIdentity): HeldWorkspaceSourceFile | null;
+  /** Literal .git/info/exclude under the recorded root and Git descriptors.
+   * Null is an exact, twice-checked absence; present bytes are capped at 4 MiB. */
+  readWorkspaceGitInfoExclude(canonicalAbsolutePath: string, root: DescriptorIdentity,
+    git: DescriptorIdentity): Buffer | null;
   listWorkspaceSourceDirectory(canonicalAbsolutePath: string, root: DescriptorIdentity,
     canonicalRootRelativePath: string): readonly WorkspaceSourceDirectoryEntry[];
   readWorkspaceSourceSymlink(canonicalAbsolutePath: string, root: DescriptorIdentity,
@@ -82,12 +86,16 @@ export type NativeStateOwner = Readonly<{
 }>;
 
 type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'openWorkspaceSourceFile' |
-  'openWorkspaceGitIndex' | 'listWorkspaceSourceDirectory' | 'readWorkspaceSourceSymlink'> & {
+  'openWorkspaceGitIndex' | 'readWorkspaceGitInfoExclude' | 'listWorkspaceSourceDirectory' |
+  'readWorkspaceSourceSymlink'> & {
   openWorkspaceSourceFile(workspacePath: string, relativePath: string,
     deviceId: string, fileId: string, ownerUid: number): HeldWorkspaceSourceFile;
   openWorkspaceGitIndex(workspacePath: string,
     rootDeviceId: string, rootFileId: string, rootOwnerUid: number,
     gitDeviceId: string, gitFileId: string, gitOwnerUid: number): HeldWorkspaceSourceFile | null;
+  readWorkspaceGitInfoExclude(workspacePath: string,
+    rootDeviceId: string, rootFileId: string, rootOwnerUid: number,
+    gitDeviceId: string, gitFileId: string, gitOwnerUid: number): Buffer | null;
   listWorkspaceSourceDirectory(workspacePath: string, relativePath: string,
     deviceId: string, fileId: string, ownerUid: number): readonly WorkspaceSourceDirectoryEntry[];
   readWorkspaceSourceSymlink(workspacePath: string, relativePath: string,
@@ -179,6 +187,27 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock changed during Git index opening');
         }
         throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace Git index changed or is unsafe: ${(error as Error).message}`);
+      }
+    },
+    readWorkspaceGitInfoExclude(workspacePath, sourceRoot, gitRoot) {
+      receiver(this);
+      if (normalizeAbsolutePath(workspacePath) !== workspacePath) {
+        throw new TypeError('workspace path must be canonical');
+      }
+      try {
+        const bytes = held.readWorkspaceGitInfoExclude(workspacePath,
+          sourceRoot.deviceId, sourceRoot.fileId, sourceRoot.ownerUid,
+          gitRoot.deviceId, gitRoot.fileId, gitRoot.ownerUid);
+        if (bytes !== null && (!Buffer.isBuffer(bytes) || bytes.byteLength > 4 * 1024 * 1024)) {
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace Git info exclude returned invalid bytes');
+        }
+        return bytes;
+      } catch (error) {
+        try { held.assertHeld(); } catch {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock changed during Git info exclude reading');
+        }
+        throw new KernelStorageError('ARTIFACT_MISMATCH',
+          `workspace Git info exclude changed or is unsafe: ${(error as Error).message}`);
       }
     },
     listWorkspaceSourceDirectory(workspacePath, sourceRoot, relativePath) {
@@ -303,6 +332,7 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
         if (typeof held.inspectWorkspaceIdentity !== 'function' ||
             typeof held.openWorkspaceSourceFile !== 'function' ||
             typeof held.openWorkspaceGitIndex !== 'function' ||
+            typeof held.readWorkspaceGitInfoExclude !== 'function' ||
             typeof held.listWorkspaceSourceDirectory !== 'function' ||
             typeof held.readWorkspaceSourceSymlink !== 'function') {
           held.close();
