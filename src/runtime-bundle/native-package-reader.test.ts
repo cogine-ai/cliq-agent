@@ -13,9 +13,9 @@ import { policyProfile, type RuntimeBundleManifest } from '../policy/runtime-aut
 import { ContentAddressedStore } from '../state/cas.js';
 import {
   PACKAGE_READER_NATIVE_RELATIVE_PATH, importHeldPackageToCas, importVerifiedPackageEntryToCas,
-  loadNativePackageReader, openNativeCasRoot, openPackageRoot,
-  readHeldPackageManifest, readVerifiedPackageEntryBytes, streamVerifiedPackageEntry,
-  verifyHeldPackage
+  loadNativePackageReader, openCandidateStageRoot, openInstalledBundleRoot, openNativeCasRoot,
+  openPackageRoot, readHeldPackageManifest, readVerifiedPackageEntryBytes,
+  stageHeldPackageCandidate, streamVerifiedPackageEntry, verifyHeldInstalledBundle, verifyHeldPackage
 } from './native-package-reader.js';
 
 const supported = process.platform === 'darwin' || process.platform === 'linux';
@@ -123,6 +123,44 @@ test('native helper requires its separately pinned bootstrap digest', { skip: !s
   await assert.rejects(loadNativePackageReader(helperDigest(), 1), /trusted bootstrap pin/);
 });
 
+test('candidate copy rejects unsafe source and destination paths and a replaced stage',
+  { skip: !supported }, async () => {
+    const sourcePath = await packageFixture();
+    const stagePath = await packageFixture();
+    const moved = `${stagePath}-moved`;
+    try {
+      const bytes = Buffer.from('verified worker bytes');
+      await writeFile(path.join(sourcePath, 'worker'), bytes, { mode: 0o500 });
+      await symlink('worker', path.join(sourcePath, 'linked'));
+      const binding = await loadNativePackageReader(helperDigest());
+      const source = openPackageRoot(binding, sourcePath);
+      const candidate = openCandidateStageRoot(binding, stagePath);
+      try {
+        assert.throws(() => candidate.copyEntry(source, 'linked', bytes.length, true),
+          /candidate entry copy is unsafe or changed/);
+        assert.throws(() => candidate.copyEntry(source, '../worker', bytes.length, true),
+          /candidate entry copy is unsafe or changed/);
+        await symlink('missing', path.join(stagePath, 'blocked'));
+        assert.throws(() => candidate.copyEntry(source, 'blocked/worker', bytes.length, true),
+          /candidate entry copy is unsafe or changed/);
+        await rm(path.join(stagePath, 'blocked'));
+        candidate.copyEntry(source, 'worker', bytes.length, true);
+        assert.deepEqual(await readFile(path.join(stagePath, 'worker')), bytes);
+        assert.equal((await stat(path.join(stagePath, 'worker'))).mode & 0o7777, 0o500);
+        assert.throws(() => candidate.copyEntry(source, 'worker', bytes.length, true),
+          /candidate entry copy is unsafe or changed/);
+        await rename(stagePath, moved);
+        await mkdir(stagePath, { mode: 0o700 });
+        assert.throws(() => candidate.copyEntry(source, 'new-worker', bytes.length, true),
+          /invalid candidate copy request/);
+      } finally { candidate.close(); source.close(); }
+    } finally {
+      await rm(sourcePath, { recursive: true, force: true });
+      await rm(stagePath, { recursive: true, force: true });
+      await rm(moved, { recursive: true, force: true });
+    }
+  });
+
 test('fixed package manifest rejects missing, linked, group-writable, and oversized files',
   { skip: !supported }, async () => {
     const rootPath = await packageFixture();
@@ -167,6 +205,7 @@ test('package path capabilities reject symlinked ancestors and forged readers', 
       openRoot: () => { throw new Error('forged'); },
       openInstalledRoot: () => { throw new Error('forged'); },
       openRuntimeRoot: () => { throw new Error('forged'); },
+      openCandidateRoot: () => { throw new Error('forged'); },
       openCasRoot: () => { throw new Error('forged'); }
     }, rootPath),
       /pinned native helper/);
@@ -203,6 +242,7 @@ test('package and CAS roots reject a group-writable ancestor', { skip: !supporte
 test('signed manifest and all declared package bytes pass one held native package root', { skip: !supported }, async () => {
   const rootPath = await packageFixture();
   const casPath = await packageFixture();
+  const candidatePath = await packageFixture();
   try {
     const key = generateKeyPairSync('ed25519');
     const releaseKeys = [{ keyId: 'package-test',
@@ -246,6 +286,22 @@ test('signed manifest and all declared package bytes pass one held native packag
     try {
       assert.deepEqual(readHeldPackageManifest(root), manifestBytes);
       assert.equal((await verifyHeldPackage(root, releaseKeys)).bundleRef, sha256Bytes(manifestBytes));
+      const candidate = openCandidateStageRoot(binding, candidatePath);
+      try {
+        assert.equal((await stageHeldPackageCandidate(root, candidate, releaseKeys)).bundleRef,
+          sha256Bytes(manifestBytes));
+        assert.equal((await stat(candidatePath)).mode & 0o7777, 0o500);
+        assert.equal((await stat(path.join(candidatePath, 'payload'))).mode & 0o7777, 0o500);
+        assert.deepEqual(await readFile(path.join(candidatePath, 'payload', 'policy')),
+          canonicalJsonBytes(profile));
+        assert.throws(() => candidate.copyEntry(root, 'payload/policy', entries[2]!.byteCount, false),
+          /invalid candidate copy request/);
+      } finally { candidate.close(); }
+      const installed = openInstalledBundleRoot(binding, candidatePath);
+      try {
+        assert.equal((await verifyHeldInstalledBundle(installed, releaseKeys,
+          sha256Bytes(manifestBytes))).bundleRef, sha256Bytes(manifestBytes));
+      } finally { installed.close(); }
       const imported = await importHeldPackageToCas(root, cas, releaseKeys);
       assert.equal(imported.bundleRef, sha256Bytes(manifestBytes));
       assert.deepEqual(await new ContentAddressedStore(casPath).read(imported.bundleRef), manifestBytes);
@@ -260,6 +316,9 @@ test('signed manifest and all declared package bytes pass one held native packag
   } finally {
     await rm(rootPath, { recursive: true, force: true });
     await rm(casPath, { recursive: true, force: true });
+    await chmod(candidatePath, 0o700);
+    await chmod(path.join(candidatePath, 'payload'), 0o700).catch(() => {});
+    await rm(candidatePath, { recursive: true, force: true });
   }
 });
 

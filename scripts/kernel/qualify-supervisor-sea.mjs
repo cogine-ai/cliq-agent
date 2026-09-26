@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,6 +9,9 @@ import { build } from 'esbuild';
 import { inject } from 'postject';
 import { canonicalJsonBytes, canonicalSha256 } from '../../dist/kernel/canonical.js';
 import { policyProfile } from '../../dist/policy/runtime-authority.js';
+import {
+  loadNativePackageReader, openCandidateStageRoot, openPackageRoot, stageHeldPackageCandidate
+} from '../../dist/runtime-bundle/native-package-reader.js';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
 const fixture = fileURLToPath(new URL('./fixtures/supervisor-sea-probe.ts', import.meta.url));
@@ -125,6 +128,15 @@ try {
       key.privateKey).toString('base64') };
   const manifestPath = path.join(packageRoot, 'runtime-bundle.json');
   await writeFile(manifestPath, canonicalJsonBytes(signed), { mode: 0o400 });
+  const bundleRef = canonicalSha256(signed);
+  const candidatePath = path.join(root, 'candidate');
+  await mkdir(candidatePath, { mode: 0o700 });
+  const reader = await loadNativePackageReader(createHash('sha256').update(await readFile(readerSource)).digest('hex'));
+  const source = openPackageRoot(reader, packageRoot);
+  const candidate = openCandidateStageRoot(reader, candidatePath);
+  try {
+    assert.equal((await stageHeldPackageCandidate(source, candidate, releaseKeys)).bundleRef, bundleRef);
+  } finally { candidate.close(); source.close(); }
   const launch = (mode, binary = executable) => {
     const result = spawnSync(binary, [mode, stateRoot], {
       encoding: 'utf8', timeout: 30_000,
@@ -134,28 +146,17 @@ try {
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout.trim());
   };
-  const imported = launch('import');
-  const reopened = launch('reopen');
-  // Construct an immutable installed-tree fixture after the signed StateOwner
-  // has imported its package. Publication/selection here is test setup only.
-  const bundleRef = canonicalSha256(signed);
+  const imported = launch('import', path.join(candidatePath, 'supervisor'));
+  const reopened = launch('reopen', path.join(candidatePath, 'supervisor'));
+  // Test-only publication/selection follows the signed candidate import and
+  // owner release. Darwin requires a writable directory inode while renaming
+  // it, so this fixture re-seals that root after moving it. The native
+  // production publisher and handoff remain open.
   const bundleDir = path.join(stateRoot, 'runtime', 'bundles', bundleRef);
-  await mkdir(bundleDir, { recursive: true, mode: 0o700 });
-  const directories = new Set([bundleDir]);
-  for (const entry of entries) {
-    const target = path.join(bundleDir, entry.relativePath);
-    await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-    for (let dir = path.dirname(target); dir.startsWith(`${bundleDir}/`); dir = path.dirname(dir)) {
-      directories.add(dir);
-    }
-    await copyFile(path.join(packageRoot, entry.relativePath), target);
-    await chmod(target, entry.executable ? 0o500 : 0o400);
-  }
-  await copyFile(manifestPath, path.join(bundleDir, 'runtime-bundle.json'));
-  await chmod(path.join(bundleDir, 'runtime-bundle.json'), 0o400);
-  for (const directory of [...directories].sort((a, b) => b.length - a.length)) {
-    await chmod(directory, 0o500);
-  }
+  await mkdir(path.dirname(bundleDir), { recursive: true, mode: 0o700 });
+  if (process.platform === 'darwin') await chmod(candidatePath, 0o700);
+  await rename(candidatePath, bundleDir);
+  if (process.platform === 'darwin') await chmod(bundleDir, 0o500);
   await writeFile(path.join(stateRoot, 'runtime', 'active.json'), canonicalJsonBytes({
     schemaVersion: 1, format: 'cliq-runtime-active-selection-v1',
     bundleDigest: bundleRef, manifestDigest
@@ -166,7 +167,8 @@ try {
     assert.equal(observed.sea, true);
     assert.equal(observed.executableImageDigest, digest);
     assert.equal(observed.helperPath,
-      observed.mode === 'installed' ? path.join(bundleDir, helperRelativePath) : helperTarget);
+      observed.mode === 'installed' ? path.join(bundleDir, helperRelativePath) :
+        path.join(candidatePath, helperRelativePath));
     assert.match(observed.processStartToken, /^(?:darwin-proc-start-time|linux-proc-start-ticks):/u);
     assert.deepEqual(observed.execArgv, [], 'NODE_OPTIONS must not extend signed Supervisor arguments');
     assert.equal(observed.bundleRef, canonicalSha256(signed));
@@ -194,7 +196,7 @@ try {
   assert.notEqual(rejected.status, 0, 'a manifest signed by another key must be rejected');
   assert.match(rejected.stderr, /RuntimeBundle release signature is invalid/u);
   assert.deepEqual(await readdir(rejectedState), [], 'a rejected signature must leave StateRoot empty');
-  process.stdout.write(`Supervisor SEA fixture: ${platform}, image ${digest}, signed package imported, selected read-only installed tree reopened, authenticated UDS hello, wrong signer rejected, NODE_OPTIONS ignored\n`);
+  process.stdout.write(`Supervisor SEA fixture: ${platform}, image ${digest}, native-staged candidate imported, selected read-only installed tree reopened, authenticated UDS hello, wrong signer rejected, NODE_OPTIONS ignored\n`);
 } finally {
   // Test-only cleanup of the read-only installed directory.
   const bundles = path.join(root, 'state', 'runtime', 'bundles');
@@ -208,5 +210,13 @@ try {
       await chmod(installed, 0o700);
     }
   } catch { /* The fixture may fail before installed-tree setup. */ }
+  const candidate = path.join(root, 'candidate');
+  try {
+    for (const dir of ['native', `native/${platform}`, 'payload']) {
+      const target = path.join(candidate, dir);
+      if (await stat(target).then(() => true, () => false)) await chmod(target, 0o700);
+    }
+    if (await stat(candidate).then(() => true, () => false)) await chmod(candidate, 0o700);
+  } catch { /* The candidate may not exist or may already have moved. */ }
   await rm(root, { recursive: true, force: true });
 }

@@ -4,6 +4,7 @@ import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
 
 import { assertArtifactRef, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
+import { immutableSnapshot } from '../model/immutable.js';
 import type { ReleaseTrustKey, RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { KernelStorageError } from '../state/errors.js';
 import { verifySignedRuntimeBundlePayloads } from './manifest.js';
@@ -41,10 +42,16 @@ export type HeldPackageRoot = {
   listEntries(): string[];
   close(): void;
 };
+export type HeldCandidateRoot = {
+  copyEntry(source: HeldPackageRoot, path: string, byteCount: number, executable: boolean): void;
+  seal(): void;
+  close(): void;
+};
 export type NativePackageReader = {
   openRoot(path: string): HeldPackageRoot;
   openInstalledRoot(path: string): HeldPackageRoot;
   openRuntimeRoot(path: string): HeldPackageRoot;
+  openCandidateRoot(path: string): HeldCandidateRoot;
   openCasRoot(path: string): HeldCasRoot;
 };
 type NativeBinding = NativePackageReader;
@@ -60,6 +67,7 @@ const heldRoots = new WeakSet<object>();
 const heldCasRoots = new WeakSet<object>();
 const installedRoots = new WeakSet<object>();
 const runtimeRoots = new WeakSet<object>();
+const candidateRoots = new WeakMap<object, string>();
 
 /** The expected helper digest must come from the trusted stable bootstrap. Test builds inject a fixture digest. */
 export async function loadNativePackageReader(expectedHelperDigest: string,
@@ -94,7 +102,8 @@ export async function loadNativePackageReader(expectedHelperDigest: string,
     process.dlopen(nativeModule, `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${file.fd}`);
     const binding = nativeModule.exports as NativeBinding;
     if (typeof binding.openRoot !== 'function' || typeof binding.openInstalledRoot !== 'function' ||
-        typeof binding.openRuntimeRoot !== 'function' || typeof binding.openCasRoot !== 'function') {
+        typeof binding.openRuntimeRoot !== 'function' || typeof binding.openCandidateRoot !== 'function' ||
+        typeof binding.openCasRoot !== 'function') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'native package reader has an unsupported interface');
     }
     // Linux dlopen can cache /proc/self/fd/N by pathname. Reusing N for a
@@ -137,6 +146,17 @@ export function openRuntimeSelectionRoot(binding: NativeBinding, absolutePath: s
   const root = binding.openRuntimeRoot(absolutePath);
   runtimeRoots.add(root);
   return root;
+}
+
+/** Open a fresh empty 0700 stage. The installer must place it outside StateRoot. */
+export function openCandidateStageRoot(binding: NativeBinding, absolutePath: string): HeldCandidateRoot {
+  if (binding !== loaded?.binding) throw new TypeError('candidate stage must come from the pinned native helper');
+  if (normalizeAbsolutePath(absolutePath) !== absolutePath) {
+    throw new TypeError('candidate stage must have a canonical absolute path');
+  }
+  const candidate = binding.openCandidateRoot(absolutePath);
+  candidateRoots.set(candidate, absolutePath);
+  return candidate;
 }
 
 export function readHeldActiveSelection(root: HeldPackageRoot): Buffer {
@@ -288,6 +308,27 @@ export async function verifyHeldInstalledBundle(root: HeldPackageRoot,
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed bundle inventory changed during verification');
   }
   return decoded;
+}
+
+/** Copy a fully signed package into a private candidate and independently verify the sealed tree. */
+export async function stageHeldPackageCandidate(source: HeldPackageRoot, candidate: HeldCandidateRoot,
+  releaseKeys: readonly ReleaseTrustKey[]): Promise<{ bundle: RuntimeBundleManifest; bundleRef: string }> {
+  const trustedKeys = immutableSnapshot(releaseKeys);
+  const candidatePath = candidateRoots.get(candidate);
+  if (!heldRoots.has(source) || candidatePath === undefined) {
+    throw new TypeError('source and candidate must come from the pinned native helper');
+  }
+  const manifest = readHeldPackageManifest(source);
+  const decoded = await verifyHeldPackage(source, trustedKeys);
+  candidate.copyEntry(source, PACKAGE_MANIFEST_NAME, manifest.byteLength, false);
+  for (const entry of decoded.bundle.entries) {
+    candidate.copyEntry(source, entry.relativePath, entry.byteCount, entry.executable);
+  }
+  candidate.seal();
+  const installed = openInstalledBundleRoot(loaded!.binding, candidatePath);
+  try {
+    return await verifyHeldInstalledBundle(installed, trustedKeys, decoded.bundleRef);
+  } finally { installed.close(); }
 }
 
 function rehashNativeReader(reader: NativeCasArtifact | NativeStage, byteCount: number): string {

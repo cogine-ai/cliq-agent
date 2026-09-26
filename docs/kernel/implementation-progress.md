@@ -204,8 +204,23 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   reuse the same `/proc/self/fd/N` spelling for StateOwner and return the first
   addon's exports. Both pinned addon loaders now retain their verified file
   descriptors for the process lifetime, keeping those loader identities
-  distinct. A same-process dual-addon test and the macOS SEA gate pass; Linux
-  qualification for this fix awaits the new exact-head CI run.
+  distinct. A same-process dual-addon test and the macOS SEA gate pass. Exact
+  `ab6516e` CI passed the Linux strong probe and all four Node/macOS/Linux
+  matrix jobs, including the prior failing Linux Node 24 installed SEA test.
+- Added a pinned-native candidate stage primitive. It accepts a fresh empty
+  same-owner 0700 directory; the SEA fixture places it outside StateRoot. It
+  copies the manifest and signed entries from held source descriptors through
+  descriptor-relative destination operations, refuses symlinks/path
+  substitution/duplicate files, seals files
+  to 0400/0500, fsyncs them and their directories, and independently verifies
+  the final 0500 tree against the signed inventory and structured graph.
+  The Node 24 SEA fixture now starts its initial StateOwner import from this
+  staged candidate before its test-only publication and selection. macOS
+  requires the root directory to be temporarily writable for the fixture's
+  cross-directory rename; the fixture reseals it. A native no-replace
+  publication protocol, active-selection writer, candidate health,
+  compatibility inspection, service handoff and production release key remain
+  open. This staging primitive alone is not an installed release qualification.
 
 ## Next integration order
 

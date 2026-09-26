@@ -68,11 +68,19 @@ typedef struct {
     off_t read_offset;
 } cas_artifact;
 
+typedef struct {
+    int fd;
+    char *path;
+    struct stat identity;
+    int sealed;
+} candidate_root;
+
 static const napi_type_tag root_tag = {0x12a0e10b838f440dULL, 0x9459f3ea39bd8ae1ULL};
 static const napi_type_tag entry_tag = {0xc1d86f628b20d4a3ULL, 0x0ed79c3a8f7de527ULL};
 static const napi_type_tag cas_root_tag = {0x02848456d04b4b21ULL, 0x8ce46e8f34443e72ULL};
 static const napi_type_tag cas_stage_tag = {0x88976e33d2f24b6dULL, 0xa21bca928baf7672ULL};
 static const napi_type_tag cas_artifact_tag = {0xd2579527e5db4dc0ULL, 0xb30a60112ab6e73fULL};
+static const napi_type_tag candidate_root_tag = {0x7362b9fc8ed294e1ULL, 0xa097dd4418cb6135ULL};
 
 static napi_value native_error(napi_env env, const char *message) {
     napi_throw_error(env, "ERR_CLIQ_PACKAGE_READER", message);
@@ -996,11 +1004,306 @@ fail:
     return native_error(env, "CAS artifact is unsafe or changed");
 }
 
+/* An unselected candidate lives beside StateRoot. Only the held source and
+ * destination descriptors participate in the copy; the pathname is checked
+ * again before every operation and never used for a payload write. */
+static int candidate_is_current(const candidate_root *candidate) {
+    if (candidate->fd < 0) return 0;
+    int locator = open_absolute_directory(candidate->path);
+    if (locator < 0) return 0;
+    struct stat current;
+    int valid = fstat(locator, &current) == 0 &&
+        same_inode(&candidate->identity, &current) &&
+        current.st_uid == candidate->identity.st_uid &&
+        current.st_gid == candidate->identity.st_gid &&
+        current.st_mode == candidate->identity.st_mode &&
+        S_ISDIR(current.st_mode) &&
+        ((current.st_mode & 07777) == 0700 || (current.st_mode & 07777) == 0500);
+    close(locator);
+    return valid;
+}
+
+static void close_candidate(candidate_root *candidate) {
+    if (candidate->fd >= 0) close(candidate->fd);
+    candidate->fd = -1;
+}
+
+static void finalize_candidate(napi_env env, void *data, void *hint) {
+    (void)env; (void)hint;
+    candidate_root *candidate = data;
+    close_candidate(candidate); free(candidate->path); free(candidate);
+}
+
+static candidate_root *unwrap_candidate(napi_env env, napi_callback_info info) {
+    napi_value self;
+    candidate_root *candidate = NULL;
+    bool matches = false;
+    if (napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok ||
+        napi_check_object_type_tag(env, self, &candidate_root_tag, &matches) != napi_ok || !matches ||
+        napi_unwrap(env, self, (void **)&candidate) != napi_ok || !candidate) {
+        native_error(env, "invalid candidate stage handle"); return NULL;
+    }
+    return candidate;
+}
+
+static napi_value candidate_close(napi_env env, napi_callback_info info) {
+    candidate_root *candidate = unwrap_candidate(env, info);
+    if (!candidate) return NULL;
+    close_candidate(candidate);
+    return undefined_value(env);
+}
+
+static int candidate_empty(int fd) {
+    int scan_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (scan_fd < 0) return 0;
+    DIR *stream = fdopendir(scan_fd);
+    if (!stream) { close(scan_fd); return 0; }
+    int empty = 1;
+    for (;;) {
+        errno = 0;
+        struct dirent *item = readdir(stream);
+        if (!item) { if (errno != 0) empty = 0; break; }
+        if (strcmp(item->d_name, ".") != 0 && strcmp(item->d_name, "..") != 0) {
+            empty = 0; break;
+        }
+    }
+    closedir(stream);
+    return empty;
+}
+
+static int candidate_component(const char *part, size_t length) {
+    return length > 0 && length <= NAME_MAX &&
+        !(length == 1 && part[0] == '.') &&
+        !(length == 2 && part[0] == '.' && part[1] == '.') &&
+        memchr(part, '\\', length) == NULL;
+}
+
+/* Return a held descriptor of the immediate parent of the requested file.
+ * New directories are owner-only and existing names must match held inodes. */
+static int candidate_file_parent(candidate_root *candidate, const char *path,
+                                 char name[NAME_MAX + 1]) {
+    if (!path[0] || strlen(path) > MAX_RELATIVE_PATH) { errno = EINVAL; return -1; }
+    int current = fcntl(candidate->fd, F_DUPFD_CLOEXEC, 0);
+    if (current < 0) return -1;
+    const char *part = path;
+    for (;;) {
+        const char *end = strchr(part, '/');
+        size_t length = end ? (size_t)(end - part) : strlen(part);
+        if (!candidate_component(part, length)) { close(current); errno = EINVAL; return -1; }
+        memcpy(name, part, length); name[length] = '\0';
+        if (!end) return current;
+        struct stat named, held;
+        if (fstatat(current, name, &named, AT_SYMLINK_NOFOLLOW) < 0) {
+            if (errno != ENOENT || mkdirat(current, name, 0700) < 0 ||
+                fstatat(current, name, &named, AT_SYMLINK_NOFOLLOW) < 0) {
+                close(current); return -1;
+            }
+        }
+        int next = openat(current, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next < 0 || fstat(next, &held) < 0 || !same_inode(&named, &held) ||
+            held.st_uid != geteuid() || !S_ISDIR(held.st_mode) ||
+            (held.st_mode & 07777) != 0700) {
+            if (next >= 0) close(next);
+            close(current); errno = EINVAL; return -1;
+        }
+        close(current);
+        current = next;
+        part = end + 1;
+    }
+}
+
+static int write_all(int fd, const char *bytes, size_t length) {
+    while (length > 0) {
+        ssize_t count = write(fd, bytes, length);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return -1;
+        bytes += count;
+        length -= (size_t)count;
+    }
+    return 0;
+}
+
+static napi_value candidate_copy_entry(napi_env env, napi_callback_info info) {
+    candidate_root *candidate = unwrap_candidate(env, info);
+    if (!candidate) return NULL;
+    size_t argc = 4, length;
+    napi_value argv[4];
+    package_root *source = NULL;
+    bool matches = false, executable;
+    double requested;
+    if (candidate->sealed || !candidate_is_current(candidate) ||
+        napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 4 ||
+        napi_check_object_type_tag(env, argv[0], &root_tag, &matches) != napi_ok || !matches ||
+        napi_unwrap(env, argv[0], (void **)&source) != napi_ok || !source || source->fd < 0 ||
+        !root_is_current(source->path, &source->identity) ||
+        napi_get_value_string_utf8(env, argv[1], NULL, 0, &length) != napi_ok ||
+        length == 0 || length > MAX_RELATIVE_PATH ||
+        napi_get_value_double(env, argv[2], &requested) != napi_ok ||
+        !(requested >= 0 && requested <= 9007199254740991.0) ||
+        requested != (double)(int64_t)requested ||
+        napi_get_value_bool(env, argv[3], &executable) != napi_ok) {
+        return native_error(env, "invalid candidate copy request");
+    }
+    char *path = malloc(length + 1);
+    if (!path || napi_get_value_string_utf8(env, argv[1], path, length + 1, &length) != napi_ok ||
+        strlen(path) != length) {
+        free(path); return native_error(env, "invalid candidate entry path");
+    }
+    struct stat before, after, located, named, written;
+    int input = open_relative_file(source->fd, path, source->identity.st_uid,
+                                   (off_t)requested, executable, source->immutable,
+                                   source->immutable ? (executable ? 0500 : 0400) : 0, &before);
+    int parent = -1, output = -1, check = -1;
+    char name[NAME_MAX + 1];
+    char *chunk = NULL;
+    if (input < 0 || (parent = candidate_file_parent(candidate, path, name)) < 0 ||
+        (output = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600)) < 0 ||
+        (chunk = malloc(MAX_CHUNK)) == NULL) goto fail;
+    off_t remaining = before.st_size;
+    while (remaining > 0) {
+        size_t want = remaining > MAX_CHUNK ? MAX_CHUNK : (size_t)remaining;
+        ssize_t count = read(input, chunk, want);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0 || write_all(output, chunk, (size_t)count) < 0) goto fail;
+        remaining -= count;
+    }
+    if (fstat(input, &after) < 0 || !same_file_metadata(&before, &after) ||
+        !root_is_current(source->path, &source->identity)) goto fail;
+    check = open_relative_file(source->fd, path, source->identity.st_uid,
+                               before.st_size, executable, source->immutable,
+                               source->immutable ? (executable ? 0500 : 0400) : 0, &located);
+    if (check < 0 || !same_file_metadata(&before, &located) ||
+        fchmod(output, executable ? 0500 : 0400) < 0 || fsync(output) < 0 ||
+        fstat(output, &written) < 0 ||
+        !required_file(&written, geteuid(), before.st_size, executable,
+                       executable ? 0500 : 0400) ||
+        fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+        !same_file_metadata(&named, &written) || fsync(parent) < 0 ||
+        !candidate_is_current(candidate)) goto fail;
+    free(chunk); free(path); close(check); close(input); close(output); close(parent);
+    return undefined_value(env);
+fail:
+    /* A partial candidate is never selectable. Remove only our own held file. */
+    if (output >= 0) {
+        struct stat current, held;
+        if (parent >= 0 && fstat(output, &held) == 0 &&
+            fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+            same_inode(&held, &current)) unlinkat(parent, name, 0);
+    }
+    free(chunk); free(path);
+    if (check >= 0) close(check);
+    if (input >= 0) close(input);
+    if (output >= 0) close(output);
+    if (parent >= 0) close(parent);
+    return native_error(env, "candidate entry copy is unsafe or changed");
+}
+
+static int seal_candidate_directory(int fd, uid_t owner, unsigned depth, uint32_t *count) {
+    if (depth > MAX_BUNDLE_DEPTH) { errno = E2BIG; return -1; }
+    struct stat root;
+    if (fstat(fd, &root) < 0 || root.st_uid != owner ||
+        !S_ISDIR(root.st_mode) || (root.st_mode & 07777) != 0700) return -1;
+    int scan_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (scan_fd < 0) return -1;
+    DIR *stream = fdopendir(scan_fd);
+    if (!stream) { close(scan_fd); return -1; }
+    int ok = 1;
+    for (;;) {
+        errno = 0;
+        struct dirent *item = readdir(stream);
+        if (!item) { if (errno != 0) ok = 0; break; }
+        const char *name = item->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        size_t length = strlen(name);
+        if (!candidate_component(name, length) || ++*count > MAX_BUNDLE_ENTRIES) {
+            ok = 0; break;
+        }
+        struct stat named, held, after;
+        if (fstatat(fd, name, &named, AT_SYMLINK_NOFOLLOW) < 0) { ok = 0; break; }
+        int child = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC |
+            (S_ISDIR(named.st_mode) ? O_DIRECTORY : 0));
+        if (child < 0 || fstat(child, &held) < 0 || !same_file_metadata(&named, &held)) {
+            if (child >= 0) close(child);
+            ok = 0; break;
+        }
+        if (S_ISDIR(held.st_mode)) {
+            if (seal_candidate_directory(child, owner, depth + 1, count) < 0 ||
+                fstat(child, &after) < 0 ||
+                fstatat(fd, name, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+                !same_file_metadata(&named, &after)) ok = 0;
+        } else if (!S_ISREG(held.st_mode) || held.st_uid != owner || held.st_nlink != 1 ||
+                   ((held.st_mode & 07777) != 0400 && (held.st_mode & 07777) != 0500)) ok = 0;
+        close(child);
+        if (!ok) break;
+    }
+    closedir(stream);
+    if (!ok || fchmod(fd, 0500) < 0 || fsync(fd) < 0) return -1;
+    return 0;
+}
+
+static napi_value candidate_seal(napi_env env, napi_callback_info info) {
+    candidate_root *candidate = unwrap_candidate(env, info);
+    if (!candidate) return NULL;
+    uint32_t count = 0;
+    if (candidate->sealed || !candidate_is_current(candidate) ||
+        seal_candidate_directory(candidate->fd, geteuid(), 0, &count) < 0 ||
+        fstat(candidate->fd, &candidate->identity) < 0 ||
+        !candidate_is_current(candidate) ||
+        (candidate->identity.st_mode & 07777) != 0500) {
+        return native_error(env, "candidate stage cannot be sealed");
+    }
+    int parent = openat(candidate->fd, "..", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int durable = parent >= 0 && fsync(parent) == 0;
+    if (parent >= 0) close(parent);
+    if (!durable || !candidate_is_current(candidate)) {
+        return native_error(env, "candidate stage parent cannot be fsynced");
+    }
+    candidate->sealed = 1;
+    return undefined_value(env);
+}
+
+static napi_value open_candidate_root(napi_env env, napi_callback_info info) {
+    size_t argc = 1, length;
+    napi_value argv[1];
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 1 ||
+        napi_get_value_string_utf8(env, argv[0], NULL, 0, &length) != napi_ok ||
+        length == 0 || length >= PATH_MAX) return native_error(env, "invalid candidate stage path");
+    candidate_root *candidate = calloc(1, sizeof(*candidate));
+    if (!candidate) return native_error(env, "candidate stage allocation failed");
+    candidate->fd = -1;
+    candidate->path = malloc(length + 1);
+    if (!candidate->path ||
+        napi_get_value_string_utf8(env, argv[0], candidate->path, length + 1, &length) != napi_ok ||
+        strlen(candidate->path) != length) goto fail;
+    candidate->fd = open_absolute_directory(candidate->path);
+    if (candidate->fd < 0 || fstat(candidate->fd, &candidate->identity) < 0 ||
+        candidate->identity.st_uid != geteuid() ||
+        !S_ISDIR(candidate->identity.st_mode) ||
+        (candidate->identity.st_mode & 07777) != 0700 ||
+        !candidate_is_current(candidate) || !candidate_empty(candidate->fd)) goto fail;
+    napi_value result;
+    const napi_property_descriptor methods[] = {
+        {"copyEntry", NULL, candidate_copy_entry, NULL, NULL, NULL, napi_default, NULL},
+        {"seal", NULL, candidate_seal, NULL, NULL, NULL, napi_default, NULL},
+        {"close", NULL, candidate_close, NULL, NULL, NULL, napi_default, NULL}
+    };
+    if (napi_create_object(env, &result) != napi_ok) goto fail;
+    if (napi_wrap(env, result, candidate, finalize_candidate, NULL, NULL) != napi_ok) goto fail;
+    if (napi_type_tag_object(env, result, &candidate_root_tag) != napi_ok ||
+        napi_define_properties(env, result, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
+        napi_object_freeze(env, result) != napi_ok) return native_error(env, "candidate stage handle initialization failed");
+    return result;
+fail:
+    close_candidate(candidate); free(candidate->path); free(candidate);
+    return native_error(env, "candidate stage is unsafe or changed");
+}
+
 static napi_value initialize(napi_env env, napi_value exports) {
     const napi_property_descriptor methods[] = {
         {"openRoot", NULL, open_package_root, NULL, NULL, NULL, napi_default, NULL},
         {"openInstalledRoot", NULL, open_installed_root, NULL, NULL, NULL, napi_default, NULL},
         {"openRuntimeRoot", NULL, open_runtime_root, NULL, NULL, NULL, napi_default, NULL},
+        {"openCandidateRoot", NULL, open_candidate_root, NULL, NULL, NULL, napi_default, NULL},
         {"openCasRoot", NULL, open_cas_root, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok) return NULL;
