@@ -119,8 +119,8 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   untrusted or changed signatures, and missing/wrong structured root bytes;
   it returns the complete signed-manifest ArtifactRef separately from the
   self-omitting manifest digest. The verified graph is frozen in memory.
-  A held descriptor reader, complete remaining kind decoders, CAS import,
-  immutable install directory and active-selection protocol remain open.
+  Complete remaining kind decoders, CAS import, immutable install directory
+  and active-selection protocol remain open.
 - The [I1 release-trust decision](release-trust-decision.md) records the
   missing production Ed25519 root/key custody. npm can remain the sole required
   public distribution channel; the installed path still needs platform payloads,
@@ -130,6 +130,17 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   traversal/empty components, and paths or components too long for the native
   descriptor-relative reader. Re-signed malformed-manifest tests enforce the
   check independently of signature failure; native package import remains open.
+- Added a native, descriptor-held source-package reader on Linux and macOS.
+  Its helper requires a bootstrap-supplied complete-byte digest, and the fixed
+  `runtime-bundle.json` entry is read with a native size bound before any signed
+  path is selected. Each entry is opened no-follow beneath the held package
+  root, streamed in bounded chunks, rehashed and checked for stable metadata
+  and locator identity. A preflight now checks the signed manifest, supported
+  structured payloads and every declared entry. It does not publish bytes to
+  CAS or make them executable; a real installer must independently copy and
+  verify staged bytes before activation. The test suite injects a fixture
+  helper digest and fixture release key, neither of which is a production
+  bootstrap authority.
 
 ## Next integration order
 
