@@ -224,11 +224,12 @@ export async function admitRun(
   const admissionIntentDigest = admitIntent(input, workspacePath, objectiveText, budgets);
   const requestDigest = admitRequestDigest(input, workspacePath, objectiveText, budgets);
 
-  const replayed = await replayAdmitRun(driver, artifacts, input, admissionIntentDigest, requestDigest);
-  if (replayed !== undefined) return replayed;
-
+  // A retained control response is never a substitute for current caller
+  // authentication. Replay preserves the first committed channel's provenance.
   const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
   const channel = channelClosure.channel;
+  const replayed = await replayAdmitRun(driver, artifacts, input, admissionIntentDigest, requestDigest);
+  if (replayed !== undefined) return replayed;
 
   const session = readSession(driver, input.sessionId);
   if (readSessionPrincipalId(driver, input.sessionId) !== input.principalId) {

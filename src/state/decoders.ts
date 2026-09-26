@@ -13,6 +13,7 @@ import type {
   FrozenIgnoreRulesV1,
   LocalControlChannelIdentityV1,
   LocalPrincipalIdentityV1,
+  LocalSocketPeerObservationV2,
   PlatformProcessIdentityV1,
   RunObjectiveV1,
   RunSpec,
@@ -226,6 +227,58 @@ export function decodeLocalPrincipalIdentity(value: unknown): LocalPrincipalIden
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'local principal identity digest does not rehash');
   }
   return identity;
+}
+
+/** Closed historical evidence decoder. This function never grants live UDS authority. */
+export function decodeLocalSocketPeerObservation(value: unknown): LocalSocketPeerObservationV2 {
+  if (!isRecord(value) || value.format !== 'cliq-local-socket-peer-observation-v2' || value.schemaVersion !== 2) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'socket peer observation has the wrong schema');
+  }
+  rejectUnknownKeys(value, [
+    'schemaVersion', 'format', 'platform', 'stateRootIdentityRef', 'stateRootIdentityDigest',
+    'endpoint', 'listenerSocket', 'acceptedSocket', 'credentialApi', 'peerUid', 'peerGid',
+    'observedAt', 'observationDigest'
+  ], 'LocalSocketPeerObservationV2');
+  const platform = requirePlatform(value.platform, 'LocalSocketPeerObservationV2.platform');
+  requireArtifactRef(value.stateRootIdentityRef, 'LocalSocketPeerObservationV2.stateRootIdentityRef');
+  requireDigest(value.stateRootIdentityDigest, 'LocalSocketPeerObservationV2.stateRootIdentityDigest');
+  if (!isRecord(value.endpoint)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'socket endpoint identity is missing');
+  }
+  rejectUnknownKeys(value.endpoint, [
+    'canonicalRootRelativePath', 'fileType', 'deviceId', 'fileId', 'ownerUid', 'mode'
+  ], 'LocalSocketPeerObservationV2.endpoint');
+  if (value.endpoint.canonicalRootRelativePath !== 'runtime/control-v1.sock' ||
+      value.endpoint.fileType !== 'unix_stream_socket' || value.endpoint.mode !== 384) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'socket endpoint identity is invalid');
+  }
+  requireUnsignedDecimal(value.endpoint.deviceId, 'LocalSocketPeerObservationV2.endpoint.deviceId');
+  requireUnsignedDecimal(value.endpoint.fileId, 'LocalSocketPeerObservationV2.endpoint.fileId');
+  requireSafeInteger(value.endpoint.ownerUid, 'LocalSocketPeerObservationV2.endpoint.ownerUid');
+  for (const member of ['listenerSocket', 'acceptedSocket'] as const) {
+    const socket = value[member];
+    if (!isRecord(socket)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `${member} identity is missing`);
+    }
+    rejectUnknownKeys(socket, ['socketFamily', 'socketType', 'deviceId', 'fileId'], `LocalSocketPeerObservationV2.${member}`);
+    if (socket.socketFamily !== 'AF_UNIX' || socket.socketType !== 'SOCK_STREAM') {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `${member} is not a Unix stream socket`);
+    }
+    requireUnsignedDecimal(socket.deviceId, `LocalSocketPeerObservationV2.${member}.deviceId`);
+    requireUnsignedDecimal(socket.fileId, `LocalSocketPeerObservationV2.${member}.fileId`);
+  }
+  if (value.credentialApi !== (platform === 'macos' ? 'macos_getpeereid' : 'linux_so_peercred')) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'socket peer credential API is invalid');
+  }
+  requireSafeInteger(value.peerUid, 'LocalSocketPeerObservationV2.peerUid');
+  requireSafeInteger(value.peerGid, 'LocalSocketPeerObservationV2.peerGid');
+  requireCanonicalTime(value.observedAt, 'LocalSocketPeerObservationV2.observedAt');
+  requireDigest(value.observationDigest, 'LocalSocketPeerObservationV2.observationDigest');
+  const observation = value as LocalSocketPeerObservationV2;
+  if (digestOmitting(observation, 'observationDigest') !== observation.observationDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'socket peer observation digest does not rehash');
+  }
+  return observation;
 }
 
 export function decodePlatformProcessIdentity(value: unknown): PlatformProcessIdentityV1 {

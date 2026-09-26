@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
+import { normalizeAbsolutePath } from '../kernel/identity.js';
 import { resolveCliqHome, workspaceIdFromRealPath } from './store.js';
 
 export const WORKSPACE_TRUST_RECORD_VERSION = 1 as const;
@@ -141,7 +142,7 @@ export async function readPersistedWorkspaceTrust(
     ) {
       return undefined;
     }
-    if (rec.workspaceId !== ctx.workspaceId) {
+    if (rec.workspaceId !== ctx.workspaceId || rec.workspaceRealPath !== ctx.workspaceRealPath) {
       return undefined;
     }
     return rec.decision;
@@ -151,6 +152,23 @@ export async function readPersistedWorkspaceTrust(
     }
     throw error;
   }
+}
+
+/**
+ * Read a decision for an exact canonical path without reopening the workspace.
+ * The StateStore must be able to replay a committed request after that path
+ * disappears; a new admission still performs no-follow identity capture.
+ */
+export async function readPersistedWorkspaceTrustByCanonicalPath(
+  workspacePath: string,
+  cliqHome = resolveCliqHome()
+): Promise<PersistedWorkspaceTrustDecision | undefined> {
+  const workspaceRealPath = normalizeAbsolutePath(workspacePath);
+  return readPersistedWorkspaceTrust({
+    workspaceRealPath,
+    workspaceId: workspaceIdFromRealPath(workspaceRealPath),
+    cliqHome
+  });
 }
 
 export async function writePersistedWorkspaceTrust(ctx: WorkspaceTrustContext, decision: PersistedWorkspaceTrustDecision) {

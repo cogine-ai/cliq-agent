@@ -385,6 +385,40 @@ export type LocalPrincipalIdentityV1 = {
   identityDigest: string;
 };
 
+/** Durable observation only. Live UDS authority is a held native connection. */
+export type LocalSocketPeerObservationV2 = {
+  schemaVersion: 2;
+  format: 'cliq-local-socket-peer-observation-v2';
+  platform: 'macos' | 'linux';
+  stateRootIdentityRef: ArtifactRef;
+  stateRootIdentityDigest: string;
+  endpoint: {
+    canonicalRootRelativePath: 'runtime/control-v1.sock';
+    fileType: 'unix_stream_socket';
+    deviceId: string;
+    fileId: string;
+    ownerUid: number;
+    mode: 384;
+  };
+  listenerSocket: {
+    socketFamily: 'AF_UNIX';
+    socketType: 'SOCK_STREAM';
+    deviceId: string;
+    fileId: string;
+  };
+  acceptedSocket: {
+    socketFamily: 'AF_UNIX';
+    socketType: 'SOCK_STREAM';
+    deviceId: string;
+    fileId: string;
+  };
+  credentialApi: 'macos_getpeereid' | 'linux_so_peercred';
+  peerUid: number;
+  peerGid: number;
+  observedAt: string;
+  observationDigest: string;
+};
+
 export type LocalControlChannelIdentityV1 = {
   schemaVersion: 1;
   format: 'cliq-local-control-channel-identity-v1';
