@@ -52,7 +52,15 @@ installed-path qualification remain open. This does not qualify a Kernel install
    `postinstall`, which npm users may disable with `--ignore-scripts`.
 5. npm's registry signatures and [trusted publishing with provenance](https://docs.npmjs.com/trusted-publishers/)
    strengthen the npm release path; use OIDC instead of the current long-lived
-   token and verify the published package's attestations. Provenance links a
+   token and verify the published package's attestations. The current
+   `npm-publish.yml` has only `contents: read`, accepts an arbitrary dispatch
+   ref, and passes `NPM_TOKEN`; it is not an OIDC release job. Before switching,
+   configure this package's trusted publisher, restrict the authorized release
+   ref/workflow, grant `id-token: write`, and pin a release toolchain with
+   Node >=22.14.0 and npm >=11.5.1 as required by the current
+   [npm trusted-publishing contract](https://docs.npmjs.com/trusted-publishers/).
+   Do not remove the existing publish credential until a separately approved
+   release qualification proves the new path. Provenance links a
    package to its source/workflow; it does not prove that the source or
    authorized workflow is benign. Under this npm-first choice, the npm release
    path is the **first-install trust anchor** for the bootstrap and its embedded
