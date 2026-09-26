@@ -1,10 +1,13 @@
 import type { LocalControlChannelIdentityV1 } from '../kernel/types.js';
+import { consumeAuthenticatedUdsRequest } from '../control/request-authority.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import {
   decodeControlChannel,
   decodeLocalPrincipalIdentity,
+  decodeLocalSocketPeerObservation,
   decodePlatformProcessIdentity,
-  decodeStateLockIdentity
+  decodeStateLockIdentity,
+  decodeStateRootIdentity
 } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import { readLatestStateOwner, type StateOwnerContext } from './state-owner.js';
@@ -35,7 +38,15 @@ export async function validateControlChannelClosure(
 ): Promise<{ channel: LocalControlChannelIdentityV1; metadata: PublishedArtifact[] }> {
   const closure = await readRetainedControlChannelClosure(artifacts, owner, input);
   const channel = closure.channel;
-  if (channel.transport.kind !== 'in_process') throw new KernelStorageError('ARTIFACT_MISMATCH', 'unsupported live control transport');
+  if (channel.transport.kind === 'uds_peer') {
+    consumeAuthenticatedUdsRequest({
+      ownerEpoch: owner.ownerEpoch,
+      principalId: input.principalId,
+      channelIdentityRef: input.channelIdentityRef,
+      channelIdentityDigest: input.channelIdentityDigest
+    });
+    return closure;
+  }
   const [processIdentity, ownerProcessIdentity] = await Promise.all([
     artifacts.readCanonical(channel.transport.processIdentityRef).then(decodePlatformProcessIdentity),
     artifacts.readCanonical(owner.processIdentityRef).then(decodePlatformProcessIdentity)
@@ -99,10 +110,27 @@ export async function readRetainedControlChannelClosure(
       )
     );
   } else {
-    throw new KernelStorageError(
-      'ARTIFACT_MISMATCH',
-      'UDS control channels require a closed peer-observation decoder and native credential capture'
+    const observation = decodeLocalSocketPeerObservation(
+      await artifacts.readCanonical(channel.transport.peerObservationRef)
     );
+    const root = decodeStateRootIdentity(await artifacts.readCanonical(owner.stateRootIdentityRef));
+    if (
+      root.identityDigest !== owner.stateRootIdentityDigest ||
+      observation.observationDigest !== channel.transport.peerObservationDigest ||
+      observation.stateRootIdentityRef !== owner.stateRootIdentityRef ||
+      observation.stateRootIdentityDigest !== owner.stateRootIdentityDigest ||
+      observation.platform !== principal.platform ||
+      observation.endpoint.ownerUid !== owner.filesystem.root.ownerUid ||
+      observation.peerUid !== owner.filesystem.root.ownerUid ||
+      observation.observedAt > channel.openedAt
+    ) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'UDS peer observation does not close over the retained principal and StateRoot');
+    }
+    metadata.push(await artifacts.describe(
+      channel.transport.peerObservationRef,
+      'application/json',
+      'cliq-local-socket-peer-observation-v2'
+    ));
   }
   return { channel, metadata };
 }

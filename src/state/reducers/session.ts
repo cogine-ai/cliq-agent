@@ -162,11 +162,12 @@ export async function createSession(
     name
   });
 
-  const replayed = await replayCreateSession(driver, artifacts, input, admissionIntentDigest, requestDigest);
-  if (replayed !== undefined) return replayed;
-
+  // Authenticate this call before looking up a retained response. The original
+  // response keeps its first channel provenance when replayed on a new channel.
   const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
   const channel = channelClosure.channel;
+  const replayed = await replayCreateSession(driver, artifacts, input, admissionIntentDigest, requestDigest);
+  if (replayed !== undefined) return replayed;
 
   const captured = await captureLiveWorkspaceIdentity({
     workspacePath,

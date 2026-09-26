@@ -11,12 +11,14 @@ import {
 } from '../kernel/identity.js';
 import type {
   LocalControlChannelIdentityV1,
+  LocalSocketPeerObservationV2,
   PlatformProcessIdentityV1,
   WorkspaceEntryManifest,
   WorkspaceGenerationSnapshotEvidenceV1,
   WorkspaceStateManifest
 } from '../kernel/types.js';
 import { sampleCanonicalNow } from './canonical-time.js';
+import { decodeLocalSocketPeerObservation } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import { applyKernelSchema } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
@@ -387,11 +389,52 @@ test('control channel decoding rejects extension fields even when its digest reh
       }),
       (error) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH'
     );
+
   } finally {
     await store.close();
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test('V2 socket observation is closed historical evidence, not a live capability', async () => {
+  const now = sampleCanonicalNow();
+  const observation: LocalSocketPeerObservationV2 = {
+    schemaVersion: 2,
+    format: 'cliq-local-socket-peer-observation-v2',
+    platform: process.platform === 'linux' ? 'linux' : 'macos',
+    stateRootIdentityRef: digest('state-root-ref'),
+    stateRootIdentityDigest: digest('state-root-identity'),
+    endpoint: {
+      canonicalRootRelativePath: 'runtime/control-v1.sock',
+      fileType: 'unix_stream_socket',
+      deviceId: '1', fileId: '2', ownerUid: process.geteuid!(), mode: 384
+    },
+    listenerSocket: {
+      socketFamily: 'AF_UNIX', socketType: 'SOCK_STREAM', deviceId: '3', fileId: '4'
+    },
+    acceptedSocket: {
+      socketFamily: 'AF_UNIX', socketType: 'SOCK_STREAM', deviceId: '5', fileId: '6'
+    },
+    credentialApi: process.platform === 'linux' ? 'linux_so_peercred' : 'macos_getpeereid',
+    peerUid: process.geteuid!(), peerGid: process.getegid!(),
+    observedAt: now,
+    observationDigest: ''
+  };
+  observation.observationDigest = digestOmitting(observation, 'observationDigest');
+  assert.deepEqual(decodeLocalSocketPeerObservation(observation), observation);
+  assert.throws(
+    () => decodeLocalSocketPeerObservation({ ...observation, peerPid: process.pid }),
+    (error) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH'
+  );
+  assert.throws(
+    () => decodeLocalSocketPeerObservation({ ...observation, endpoint: { ...observation.endpoint, mode: 438 } }),
+    (error) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH'
+  );
+  assert.throws(
+    () => decodeLocalSocketPeerObservation({ ...observation, listenerSocket: { ...observation.listenerSocket, deviceId: '01' } }),
+    (error) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH'
+  );
 });
 
 test('control channel rejects forged process identity and opaque UDS peer evidence', async () => {
@@ -441,6 +484,23 @@ test('control channel rejects forged process identity and opaque UDS peer eviden
         requestId: uuidv7(),
         admissionKey: admissionKey('forged-process-channel'),
         workspacePath: workspace,
+        channelIdentityRef: forgedChannelArtifact.ref,
+        channelIdentityDigest: forgedChannel.channelIdentityDigest
+      }),
+      (error) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH'
+    );
+
+    // A previously committed response cannot authenticate the next caller.
+    const replayRequest = {
+      principalId,
+      requestId: uuidv7(),
+      admissionKey: admissionKey('replay-before-auth'),
+      workspacePath: workspace
+    };
+    await store.createSession({ ...replayRequest, ...published });
+    await assert.rejects(
+      store.createSession({
+        ...replayRequest,
         channelIdentityRef: forgedChannelArtifact.ref,
         channelIdentityDigest: forgedChannel.channelIdentityDigest
       }),

@@ -2,6 +2,7 @@ import type { Stats } from 'node:fs';
 import { lstat, mkdir, readFile, readdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
+import { LocalControlServer } from '../control/server.js';
 
 import {
   KERNEL_CAS_DIRECTORY,
@@ -368,12 +369,15 @@ export class StateStore {
   private closed = false;
   private released = false;
   private closing: Promise<void> | undefined;
+  private controlServer: LocalControlServer | undefined;
+  private startingControl: Promise<LocalControlServer> | undefined;
 
   private constructor(
     readonly stateRoot: string,
     private readonly driver: SqliteDriver,
     readonly artifacts: ArtifactCatalog,
-    private readonly owner: StateOwnerContext
+    private readonly owner: StateOwnerContext,
+    private readonly runtimeBundle?: RuntimeBundleManifest
   ) {}
 
   get ownerEpoch(): number {
@@ -443,7 +447,7 @@ export class StateStore {
       const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
       const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts, native, heldLock, runtimeAuthority?.bundle);
       const ownerContext = await stateOwnerContextFromArtifacts(stateRoot, artifacts, owner, heldLock);
-      return new StateStore(stateRoot, driver, artifacts, ownerContext);
+      return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority?.bundle);
     } catch (error) {
       try {
         driver?.close();
@@ -461,6 +465,21 @@ export class StateStore {
 
   admitRun(input: AdmitRunInput): Promise<AdmitRunResult> {
     return admitRun(this.driver, this.artifacts, this.owner, input);
+  }
+
+  /** Start the owner-scoped native UDS service; close() drains it before owner release. */
+  async serveLocalControl(): Promise<void> {
+    if (this.closed || this.closing) throw new KernelStorageError('RECOVERY_REQUIRED', 'StateStore is closing');
+    if (!this.runtimeBundle) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'local control requires a signed Supervisor RuntimeBundle');
+    }
+    if (this.controlServer) return;
+    this.startingControl ??= LocalControlServer.start(this, this.driver, this.owner, this.runtimeBundle);
+    try {
+      this.controlServer = await this.startingControl;
+    } finally {
+      this.startingControl = undefined;
+    }
   }
 
   registerWorkspaceGeneration(input: RegisterWorkspaceGenerationInput) {
@@ -575,6 +594,8 @@ export class StateStore {
     if (this.closed) return Promise.resolve();
     if (this.closing !== undefined) return this.closing;
     const attempt = (async () => {
+      const starting = await this.startingControl?.catch(() => undefined);
+      await (this.controlServer ?? starting)?.close();
       if (!this.released) {
         await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
         this.released = true;
