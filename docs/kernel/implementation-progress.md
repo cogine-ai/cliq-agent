@@ -167,12 +167,19 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   signed image and native helpers enter a test-key-signed RuntimeBundle. The
   actual SEA process verifies that manifest, takes StateOwner, imports all
   signed package bytes to CAS, exits, and a second SEA process reopens the
-  owner and reads the retained policy object. Its executable digest and owner
-  epoch are checked; a manifest signed by an unrelated key is rejected before
+  owner and reads the retained policy object. Each process starts the signed
+  native UDS listener and completes an authenticated `control.hello` on its
+  owner epoch. The complete executable digest and advancing owner epoch are
+  checked; a manifest signed by an unrelated key is rejected before
   StateRoot mutation. The same fixture has a Linux/macOS Node 24 CI gate.
   Source-mode helpers resolve under `dist`; SEA helpers resolve beside the
   image. This is an ephemeral packaging/integration fixture, not an immutable
   installed bundle, production-signature proof, or I1 completion.
+- A macOS SEA UDS smoke test exposed the `sockaddr_un.sun_path` bound when the
+  temporary StateRoot was too deep. The native listener now rejects an
+  oversized literal path before spawning its child, and the fixture uses a
+  short real temporary root. The eventual stable bootstrap still needs the
+  same check before first StateRoot genesis.
 
 ## Next integration order
 

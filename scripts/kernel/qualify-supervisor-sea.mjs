@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +17,8 @@ const helperRelativePath = `native/${platform}/state-owner.node`;
 const helperSource = path.join(repository, 'dist', helperRelativePath);
 const readerRelativePath = `native/${platform}/package-reader.node`;
 const readerSource = path.join(repository, 'dist', readerRelativePath);
+const listenerRelativePath = `native/${platform}/control-listener`;
+const listenerSource = path.join(repository, 'dist', listenerRelativePath);
 
 if (!['darwin', 'linux'].includes(process.platform)) {
   throw new Error('Supervisor SEA qualification requires macOS or Linux');
@@ -27,7 +28,8 @@ if (major !== 24 || minor < 16) {
   throw new Error('Supervisor SEA qualification requires the pinned Node 24.16+ build line');
 }
 
-const root = await mkdtemp(path.join(await realpath(os.tmpdir()), 'cliq-supervisor-sea-'));
+// Darwin's AF_UNIX sun_path is 104 bytes, including the trailing NUL.
+const root = await mkdtemp(path.join(await realpath('/tmp'), 'cliq-supervisor-sea-'));
 try {
   const packageRoot = path.join(root, 'package');
   const stateRoot = path.join(root, 'state');
@@ -104,6 +106,7 @@ try {
   await add('worker', 'worker', 'payload/worker', Buffer.from('fixture worker'), true);
   await add('state_owner_native', 'platform_helper', helperRelativePath, helperTarget, true);
   await add('runtime_bundle_package_reader', 'platform_helper', readerRelativePath, readerSource, true);
+  await add('control_listener_native', 'platform_helper', listenerRelativePath, listenerSource, true);
   await add('policy', 'policy_engine', 'payload/policy', canonicalJsonBytes(profile), false);
   await add('default_https_trust_store', 'trust_store', 'payload/trust', Buffer.from('fixture trust'), false);
   await add('sandbox-root', 'sandbox_root_profile', 'payload/root', Buffer.from('fixture root'), false);
@@ -141,6 +144,7 @@ try {
     assert.match(observed.processStartToken, /^(?:darwin-proc-start-time|linux-proc-start-ticks):/u);
     assert.deepEqual(observed.execArgv, [], 'NODE_OPTIONS must not extend signed Supervisor arguments');
     assert.equal(observed.bundleRef, canonicalSha256(signed));
+    assert.equal(observed.helloBundleRef, observed.bundleRef);
     assert.equal(observed.policyDigest, entries.find((entry) => entry.entryId === 'policy').digest);
   }
   assert.equal(imported.mode, 'import');
@@ -162,7 +166,7 @@ try {
   assert.notEqual(rejected.status, 0, 'a manifest signed by another key must be rejected');
   assert.match(rejected.stderr, /RuntimeBundle release signature is invalid/u);
   assert.deepEqual(await readdir(rejectedState), [], 'a rejected signature must leave StateRoot empty');
-  process.stdout.write(`Supervisor SEA fixture: ${platform}, image ${digest}, signed package imported, StateOwner reopened, wrong signer rejected, NODE_OPTIONS ignored\n`);
+  process.stdout.write(`Supervisor SEA fixture: ${platform}, image ${digest}, signed package imported, authenticated UDS hello, StateOwner reopened, wrong signer rejected, NODE_OPTIONS ignored\n`);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
