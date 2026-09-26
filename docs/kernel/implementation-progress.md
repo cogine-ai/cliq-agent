@@ -370,9 +370,18 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   `.gitignore` source into the exact ordered `FrozenIgnoreRuleV1` array before
   trusting it. The pinned Git 2.45 line parser handles BOM, CRLF, comments,
   unescaped trailing spaces, negation, directory and slash anchoring, and
-  unterminated final lines; a rehashed but forged rule array fails. Wildmatch
-  path evaluation, descriptor-held ignore-source capture, and complete source
-  projection remain open.
+  unterminated final lines; a rehashed but forged rule array fails. Descriptor-
+  held ignore-source capture and complete source projection remain open.
+- A pure UTF-8 byte NFA now evaluates the fixed case-sensitive Git 2.45
+  wildmatch profile, including component globstars, classes, escaped bytes,
+  ancestor-base rule order and the ignored-parent negation limit. It does not
+  invoke ambient Git or use regex backtracking. During development it matched
+  a compiled Git v2.45.0 helper on 366 [upstream wildmatch test](https://github.com/git/git/blob/v2.45.0/t/t3070-wildmatch.sh) comparisons, 35,918
+  generated pattern/path comparisons and 234 Unicode comparisons; a separate
+  960-case comparison with Git v2.45.0 `check-ignore` agreed on parent and
+  nested-source decisions. Repository tests retain focused regression cases.
+  Descriptor-held ignore-source capture, hard-exclusion and tracked-entry
+  classification, projection publication and public `run.submit` remain open.
 
 ## Next integration order
 
