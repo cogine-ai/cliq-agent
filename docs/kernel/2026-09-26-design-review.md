@@ -135,6 +135,12 @@ select it through `active.json`. A crash before selection leaves no selectable
 candidate; retry must reopen the same signed owner authority, inspect any
 retained genesis and unrooted CAS objects, and finish or fail closed. Update
 candidate self-tests remain read-only against an existing authoritative store.
+The active selection uses the exact canonical `cliq-runtime-active-selection-v1`
+record with the complete signed bundle digest and distinct self-omitting
+manifest digest. Read-only startup inspection rejects extra tree paths and
+rechecks the selection after verifying the bundle; the writer and service
+handoff must still provide the atomic/fsynced publication and compatibility
+proof before that selection becomes active authority.
 
 The signed `supervisor` entry must cover the executed JavaScript as well as the
 Node runtime. Hashing a plain Node interpreter while loading replaceable script

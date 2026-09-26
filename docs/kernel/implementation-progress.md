@@ -173,13 +173,32 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   checked; a manifest signed by an unrelated key is rejected before
   StateRoot mutation. The same fixture has a Linux/macOS Node 24 CI gate.
   Source-mode helpers resolve under `dist`; SEA helpers resolve beside the
-  image. This is an ephemeral packaging/integration fixture, not an immutable
-  installed bundle, production-signature proof, or I1 completion.
+  image. This is an ephemeral packaging/integration fixture, not a production
+  signature or I1 completion.
 - A macOS SEA UDS smoke test exposed the `sockaddr_un.sun_path` bound when the
   temporary StateRoot was too deep. The native listener now rejects an
   oversized literal path before spawning its child, and the fixture uses a
-  short real temporary root. The eventual stable bootstrap still needs the
-  same check before first StateRoot genesis.
+  short real temporary root. Signed StateStore opening now runs the same
+  preflight before native acquisition or first StateRoot genesis. The stable
+  bootstrap must invoke this check before staging a candidate as well.
+- Added read-only installed-selection inspection to WP06. A pinned native
+  reader opens `runtime/active.json` as a same-owner 0400 regular file under a
+  held 0700 runtime descriptor, parses its exact canonical schema, opens the
+  digest-named installed bundle through no-follow descriptors, inventories
+  every file and directory, verifies the release signature, structured graph
+  and all declared bytes, then rereads the selection. Tests reject unsigned
+  files/empty directories, writable contents/root, untrusted signatures,
+  noncanonical selection and a symlinked active file. The tests construct the
+  installed directory fixture directly; no native installer, atomic selection
+  writer, service handoff or production release key exists yet.
+- Extended the Node 24 SEA gate: after owner-scoped CAS import, the fixture
+  constructs a read-only, digest-named installed tree and test selection,
+  launches the copied signed SEA from that tree, verifies its exact selection,
+  reopens StateOwner and completes another authenticated UDS hello. This
+  exercises the selected-image read path on macOS locally; Linux CI remains
+  to be checked for this revision. The fixture's setup does not implement
+  descriptor-safe staging, fsynced publication, update compatibility or a
+  production installer.
 
 ## Next integration order
 

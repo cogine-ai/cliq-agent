@@ -125,8 +125,8 @@ try {
       key.privateKey).toString('base64') };
   const manifestPath = path.join(packageRoot, 'runtime-bundle.json');
   await writeFile(manifestPath, canonicalJsonBytes(signed), { mode: 0o400 });
-  const launch = (mode) => {
-    const result = spawnSync(executable, [mode, stateRoot], {
+  const launch = (mode, binary = executable) => {
+    const result = spawnSync(binary, [mode, stateRoot], {
       encoding: 'utf8', timeout: 30_000,
       env: { ...process.env, NODE_OPTIONS: '--trace-warnings' }
     });
@@ -136,11 +136,37 @@ try {
   };
   const imported = launch('import');
   const reopened = launch('reopen');
+  // Construct an immutable installed-tree fixture after the signed StateOwner
+  // has imported its package. Publication/selection here is test setup only.
+  const bundleRef = canonicalSha256(signed);
+  const bundleDir = path.join(stateRoot, 'runtime', 'bundles', bundleRef);
+  await mkdir(bundleDir, { recursive: true, mode: 0o700 });
+  const directories = new Set([bundleDir]);
+  for (const entry of entries) {
+    const target = path.join(bundleDir, entry.relativePath);
+    await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+    for (let dir = path.dirname(target); dir.startsWith(`${bundleDir}/`); dir = path.dirname(dir)) {
+      directories.add(dir);
+    }
+    await copyFile(path.join(packageRoot, entry.relativePath), target);
+    await chmod(target, entry.executable ? 0o500 : 0o400);
+  }
+  await copyFile(manifestPath, path.join(bundleDir, 'runtime-bundle.json'));
+  await chmod(path.join(bundleDir, 'runtime-bundle.json'), 0o400);
+  for (const directory of [...directories].sort((a, b) => b.length - a.length)) {
+    await chmod(directory, 0o500);
+  }
+  await writeFile(path.join(stateRoot, 'runtime', 'active.json'), canonicalJsonBytes({
+    schemaVersion: 1, format: 'cliq-runtime-active-selection-v1',
+    bundleDigest: bundleRef, manifestDigest
+  }), { mode: 0o400 });
+  const installed = launch('installed', path.join(bundleDir, 'supervisor'));
   const digest = createHash('sha256').update(await readFile(executable)).digest('hex');
-  for (const observed of [imported, reopened]) {
+  for (const observed of [imported, reopened, installed]) {
     assert.equal(observed.sea, true);
     assert.equal(observed.executableImageDigest, digest);
-    assert.equal(observed.helperPath, helperTarget);
+    assert.equal(observed.helperPath,
+      observed.mode === 'installed' ? path.join(bundleDir, helperRelativePath) : helperTarget);
     assert.match(observed.processStartToken, /^(?:darwin-proc-start-time|linux-proc-start-ticks):/u);
     assert.deepEqual(observed.execArgv, [], 'NODE_OPTIONS must not extend signed Supervisor arguments');
     assert.equal(observed.bundleRef, canonicalSha256(signed));
@@ -150,6 +176,8 @@ try {
   assert.equal(imported.mode, 'import');
   assert.equal(reopened.mode, 'reopen');
   assert.equal(reopened.ownerEpoch, imported.ownerEpoch + 1);
+  assert.equal(installed.mode, 'installed');
+  assert.equal(installed.ownerEpoch, reopened.ownerEpoch + 1);
   const untrusted = generateKeyPairSync('ed25519');
   const wrongSignature = sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${manifestDigest}`),
     untrusted.privateKey).toString('base64');
@@ -166,7 +194,19 @@ try {
   assert.notEqual(rejected.status, 0, 'a manifest signed by another key must be rejected');
   assert.match(rejected.stderr, /RuntimeBundle release signature is invalid/u);
   assert.deepEqual(await readdir(rejectedState), [], 'a rejected signature must leave StateRoot empty');
-  process.stdout.write(`Supervisor SEA fixture: ${platform}, image ${digest}, signed package imported, authenticated UDS hello, StateOwner reopened, wrong signer rejected, NODE_OPTIONS ignored\n`);
+  process.stdout.write(`Supervisor SEA fixture: ${platform}, image ${digest}, signed package imported, selected read-only installed tree reopened, authenticated UDS hello, wrong signer rejected, NODE_OPTIONS ignored\n`);
 } finally {
+  // Test-only cleanup of the read-only installed directory.
+  const bundles = path.join(root, 'state', 'runtime', 'bundles');
+  try {
+    for (const name of await readdir(bundles)) {
+      const installed = path.join(bundles, name);
+      for (const dir of ['native', `native/${platform}`, 'payload']) {
+        const target = path.join(installed, dir);
+        if (await stat(target).then(() => true, () => false)) await chmod(target, 0o700);
+      }
+      await chmod(installed, 0o700);
+    }
+  } catch { /* The fixture may fail before installed-tree setup. */ }
   await rm(root, { recursive: true, force: true });
 }

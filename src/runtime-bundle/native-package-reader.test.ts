@@ -165,6 +165,8 @@ test('package path capabilities reject symlinked ancestors and forged readers', 
     assert.throws(() => openPackageRoot(binding, aliasPath), /unsafe or changed/);
     assert.throws(() => openPackageRoot({
       openRoot: () => { throw new Error('forged'); },
+      openInstalledRoot: () => { throw new Error('forged'); },
+      openRuntimeRoot: () => { throw new Error('forged'); },
       openCasRoot: () => { throw new Error('forged'); }
     }, rootPath),
       /pinned native helper/);
@@ -172,7 +174,8 @@ test('package path capabilities reject symlinked ancestors and forged readers', 
     try {
       assert.throws(() => root.openEntry('alias/file', bytes.length, false), /unsafe or changed/);
       await assert.rejects(streamVerifiedPackageEntry({
-        openEntry: () => { throw new Error('forged'); }, manifestByteCount: () => 1, close: () => {}
+        openEntry: () => { throw new Error('forged'); }, manifestByteCount: () => 1,
+        activeByteCount: () => 1, listEntries: () => [], close: () => {}
       }, signedEntry('real/file', bytes), () => {}), /pinned native helper/);
     } finally { root.close(); }
   } finally {

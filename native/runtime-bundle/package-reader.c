@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #define NAPI_VERSION 8
 #include <node_api.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -15,6 +16,11 @@
 #define MAX_CHUNK (1024 * 1024)
 #define MAX_MANIFEST_BYTES (1024 * 1024)
 #define MANIFEST_NAME "runtime-bundle.json"
+#define ACTIVE_NAME "active.json"
+#define MAX_ACTIVE_BYTES 4096
+#define MAX_BUNDLE_ENTRIES 16384
+#define MAX_BUNDLE_DEPTH 64
+#define MAX_BUNDLE_PATH_BYTES (8 * 1024 * 1024)
 
 #ifdef __APPLE__
 #define FILE_MTIME(info) ((info).st_mtimespec)
@@ -28,6 +34,8 @@ typedef struct {
     int fd;
     char *path;
     struct stat identity;
+    int immutable;
+    int runtime;
 } package_root;
 
 typedef struct {
@@ -35,7 +43,8 @@ typedef struct {
     char *root_path, *relative_path;
     struct stat root_identity, before;
     off_t consumed;
-    int executable;
+    int executable, immutable;
+    mode_t required_mode;
 } package_entry;
 
 typedef struct {
@@ -87,10 +96,20 @@ static int safe_directory(const struct stat *info, uid_t owner) {
     return S_ISDIR(info->st_mode) && info->st_uid == owner && (info->st_mode & 07022) == 0;
 }
 
+static int immutable_directory(const struct stat *info, uid_t owner) {
+    return S_ISDIR(info->st_mode) && info->st_uid == owner && (info->st_mode & 07777) == 0500;
+}
+
 static int safe_file(const struct stat *info, uid_t owner, off_t size, int executable) {
     return S_ISREG(info->st_mode) && info->st_uid == owner && info->st_nlink == 1 &&
         (info->st_mode & 07022) == 0 && info->st_size == size &&
         (executable ? (info->st_mode & 0100) != 0 : (info->st_mode & 0111) == 0);
+}
+
+static int required_file(const struct stat *info, uid_t owner, off_t size,
+                         int executable, mode_t required_mode) {
+    return safe_file(info, owner, size, executable) &&
+        (required_mode == 0 || (info->st_mode & 07777) == required_mode);
 }
 
 static int safe_ancestor(const struct stat *info) {
@@ -151,7 +170,7 @@ static int root_is_current(const char *path, const struct stat *identity) {
 /* Open each component relative to a held directory, comparing the name with
  * the new descriptor. O_NONBLOCK prevents a malicious FIFO from hanging us. */
 static int open_relative_file(int root_fd, const char *path, uid_t owner, off_t size,
-                              int executable, struct stat *out) {
+                              int executable, int immutable, mode_t required_mode, struct stat *out) {
     if (!path[0] || strlen(path) > MAX_RELATIVE_PATH || strchr(path, '\\')) {
         errno = EINVAL; return -1;
     }
@@ -177,7 +196,8 @@ static int open_relative_file(int root_fd, const char *path, uid_t owner, off_t 
         close(current);
         if (next < 0) { errno = saved; return -1; }
         if (fstat(next, &held) < 0 || !same_inode(&named, &held) ||
-            (end ? !safe_directory(&held, owner) : !safe_file(&held, owner, size, executable))) {
+            (end ? !(immutable ? immutable_directory(&held, owner) : safe_directory(&held, owner)) :
+             !required_file(&held, owner, size, executable, required_mode))) {
             close(next); errno = EINVAL; return -1;
         }
         if (!end) { *out = held; return next; }
@@ -255,8 +275,24 @@ static napi_value root_manifest_byte_count(napi_env env, napi_callback_info info
     if (root->fd < 0 || !root_is_current(root->path, &root->identity) ||
         fstatat(root->fd, MANIFEST_NAME, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
         named.st_size <= 0 || named.st_size > MAX_MANIFEST_BYTES ||
-        !safe_file(&named, root->identity.st_uid, named.st_size, 0)) {
+        !required_file(&named, root->identity.st_uid, named.st_size, 0,
+                       root->immutable ? 0400 : 0)) {
         return native_error(env, "fixed package manifest is unsafe or missing");
+    }
+    napi_value result;
+    if (napi_create_double(env, (double)named.st_size, &result) != napi_ok) return NULL;
+    return result;
+}
+
+static napi_value root_active_byte_count(napi_env env, napi_callback_info info) {
+    package_root *root = unwrap_root(env, info);
+    if (!root) return NULL;
+    struct stat named;
+    if (!root->runtime || root->fd < 0 || !root_is_current(root->path, &root->identity) ||
+        fstatat(root->fd, ACTIVE_NAME, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+        named.st_size <= 0 || named.st_size > MAX_ACTIVE_BYTES ||
+        !required_file(&named, root->identity.st_uid, named.st_size, 0, 0400)) {
+        return native_error(env, "active runtime selection is unsafe or missing");
     }
     napi_value result;
     if (napi_create_double(env, (double)named.st_size, &result) != napi_ok) return NULL;
@@ -305,7 +341,8 @@ static napi_value entry_assert_stable(napi_env env, napi_callback_info info) {
         return native_error(env, "package entry is incomplete or changed");
     }
     int locator = open_relative_file(entry->root_fd, entry->relative_path,
-        entry->root_identity.st_uid, entry->before.st_size, entry->executable, &located);
+        entry->root_identity.st_uid, entry->before.st_size, entry->executable,
+        entry->immutable, entry->required_mode, &located);
     if (locator < 0) return native_error(env, "package entry path changed");
     close(locator);
     if (!same_file_metadata(&entry->before, &located)) {
@@ -317,12 +354,12 @@ static napi_value entry_assert_stable(napi_env env, napi_callback_info info) {
 static napi_value root_open_entry(napi_env env, napi_callback_info info) {
     package_root *root = unwrap_root(env, info);
     if (!root) return NULL;
-    size_t argc = 3, length;
-    napi_value argv[3];
-    double byte_count;
+    size_t argc = 4, length;
+    napi_value argv[4];
+    double byte_count, requested_mode = 0;
     bool executable;
     if (root->fd < 0 || !root_is_current(root->path, &root->identity) ||
-        napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 3 ||
+        napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || (argc != 3 && argc != 4) ||
         napi_get_value_string_utf8(env, argv[0], NULL, 0, &length) != napi_ok ||
         length == 0 || length > MAX_RELATIVE_PATH ||
         napi_get_value_double(env, argv[1], &byte_count) != napi_ok ||
@@ -331,6 +368,12 @@ static napi_value root_open_entry(napi_env env, napi_callback_info info) {
         napi_get_value_bool(env, argv[2], &executable) != napi_ok) {
         return native_error(env, "invalid package entry request");
     }
+    if (argc == 4 && (napi_get_value_double(env, argv[3], &requested_mode) != napi_ok ||
+        (requested_mode != 0400 && requested_mode != 0500) ||
+        requested_mode != (executable ? 0500 : 0400))) {
+        return native_error(env, "invalid package entry mode");
+    }
+    if (root->immutable) requested_mode = executable ? 0500 : 0400;
     package_entry *entry = calloc(1, sizeof(*entry));
     if (!entry) return native_error(env, "package entry allocation failed");
     entry->fd = entry->root_fd = -1;
@@ -342,9 +385,12 @@ static napi_value root_open_entry(napi_env env, napi_callback_info info) {
     entry->root_fd = fcntl(root->fd, F_DUPFD_CLOEXEC, 0);
     entry->root_identity = root->identity;
     entry->executable = executable;
+    entry->immutable = root->immutable;
+    entry->required_mode = (mode_t)requested_mode;
     if (entry->root_fd < 0) goto fail;
     entry->fd = open_relative_file(entry->root_fd, entry->relative_path,
-        root->identity.st_uid, (off_t)byte_count, executable, &entry->before);
+        root->identity.st_uid, (off_t)byte_count, executable,
+        root->immutable, entry->required_mode, &entry->before);
     if (entry->fd < 0 || !root_is_current(root->path, &root->identity)) goto fail;
     napi_value result;
     const napi_property_descriptor methods[] = {
@@ -366,7 +412,108 @@ fail:
     return native_error(env, "package entry is unsafe or changed");
 }
 
-static napi_value open_package_root(napi_env env, napi_callback_info info) {
+/* Enumerate the all-and-only regular files in an immutable bundle. Every
+ * directory is opened no-follow and rechecked after its children are read. */
+static int inventory_directory(napi_env env, int fd, uid_t owner, char *path,
+                               size_t prefix, unsigned depth, uint32_t *count,
+                               uint32_t *files_count, size_t *path_bytes,
+                               napi_value files) {
+    if (depth > MAX_BUNDLE_DEPTH) { errno = E2BIG; return -1; }
+    struct stat before, after;
+    if (fstat(fd, &before) < 0 || !immutable_directory(&before, owner)) return -1;
+    int scan_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (scan_fd < 0) return -1;
+    DIR *stream = fdopendir(scan_fd);
+    if (!stream) { close(scan_fd); return -1; }
+    int ok = 1;
+    for (;;) {
+        errno = 0;
+        struct dirent *item = readdir(stream);
+        if (!item) { if (errno != 0) ok = 0; break; }
+        const char *name = item->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        size_t length = strlen(name);
+        if (!length || length > NAME_MAX || strchr(name, '\\') ||
+            prefix + (prefix ? 1 : 0) + length > MAX_RELATIVE_PATH ||
+            ++*count > MAX_BUNDLE_ENTRIES) { ok = 0; break; }
+        size_t start = prefix + (prefix ? 1 : 0);
+        if (*path_bytes > MAX_BUNDLE_PATH_BYTES - (start + length + 1)) {
+            ok = 0; break;
+        }
+        *path_bytes += start + length + 1;
+        if (prefix) path[prefix] = '/';
+        memcpy(path + start, name, length + 1);
+        struct stat named, held, renamed;
+        if (fstatat(fd, name, &named, AT_SYMLINK_NOFOLLOW) < 0) { ok = 0; break; }
+        int child = openat(fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC |
+            (S_ISDIR(named.st_mode) ? O_DIRECTORY : 0));
+        if (child < 0 || fstat(child, &held) < 0 || !same_file_metadata(&named, &held)) {
+            if (child >= 0) close(child);
+            ok = 0; break;
+        }
+        if (S_ISDIR(held.st_mode)) {
+            if (!immutable_directory(&held, owner) || start + length >= MAX_RELATIVE_PATH) ok = 0;
+            else {
+                napi_value value;
+                path[start + length] = '/';
+                path[start + length + 1] = '\0';
+                if (napi_create_string_utf8(env, path, NAPI_AUTO_LENGTH, &value) != napi_ok ||
+                    napi_set_element(env, files, (*files_count)++, value) != napi_ok) ok = 0;
+                path[start + length] = '\0';
+                if (ok && inventory_directory(env, child, owner, path, start + length,
+                                              depth + 1, count, files_count, path_bytes, files) < 0) ok = 0;
+            }
+        } else if (S_ISREG(held.st_mode) && held.st_size >= 0 &&
+                   (held.st_mode & 07777) == 0400) {
+            if (!required_file(&held, owner, held.st_size, 0, 0400)) ok = 0;
+            else {
+                napi_value value;
+                if (napi_create_string_utf8(env, path, NAPI_AUTO_LENGTH, &value) != napi_ok ||
+                    napi_set_element(env, files, (*files_count)++, value) != napi_ok) ok = 0;
+            }
+        } else if (S_ISREG(held.st_mode) && held.st_size >= 0 &&
+                   (held.st_mode & 07777) == 0500) {
+            if (!required_file(&held, owner, held.st_size, 1, 0500)) ok = 0;
+            else {
+                napi_value value;
+                if (napi_create_string_utf8(env, path, NAPI_AUTO_LENGTH, &value) != napi_ok ||
+                    napi_set_element(env, files, (*files_count)++, value) != napi_ok) ok = 0;
+            }
+        } else ok = 0;
+        if (fstatat(fd, name, &renamed, AT_SYMLINK_NOFOLLOW) < 0 ||
+            !same_file_metadata(&named, &renamed)) ok = 0;
+        close(child);
+        if (!ok) break;
+    }
+    closedir(stream);
+    path[prefix] = '\0';
+    if (!ok || fstat(fd, &after) < 0 || !same_file_metadata(&before, &after)) {
+        errno = EINVAL; return -1;
+    }
+    return 0;
+}
+
+static napi_value root_list_entries(napi_env env, napi_callback_info info) {
+    package_root *root = unwrap_root(env, info);
+    if (!root) return NULL;
+    if (!root->immutable || root->fd < 0 || !root_is_current(root->path, &root->identity)) {
+        return native_error(env, "installed bundle root is unsafe or changed");
+    }
+    napi_value files;
+    if (napi_create_array(env, &files) != napi_ok) return NULL;
+    char path[MAX_RELATIVE_PATH + 1] = {0};
+    uint32_t count = 0, files_count = 0;
+    size_t path_bytes = 0;
+    if (inventory_directory(env, root->fd, root->identity.st_uid,
+                            path, 0, 0, &count, &files_count, &path_bytes, files) < 0 ||
+        !root_is_current(root->path, &root->identity)) {
+        return native_error(env, "installed bundle inventory is unsafe or changed");
+    }
+    return files;
+}
+
+/* kind 0: source package, 1: immutable installed bundle, 2: mutable owner runtime. */
+static napi_value open_package_root_impl(napi_env env, napi_callback_info info, int kind) {
     size_t argc = 1, length;
     napi_value argv[1];
     if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 1 ||
@@ -379,14 +526,22 @@ static napi_value open_package_root(napi_env env, napi_callback_info info) {
     if (!root->path || napi_get_value_string_utf8(env, argv[0], root->path, length + 1, &length) != napi_ok ||
         strlen(root->path) != length) goto fail;
     root->fd = open_absolute_directory(root->path);
+    root->immutable = kind == 1;
+    root->runtime = kind == 2;
     if (root->fd < 0 || fstat(root->fd, &root->identity) < 0 ||
-        !(root->identity.st_uid == geteuid() || root->identity.st_uid == 0) ||
-        !safe_directory(&root->identity, root->identity.st_uid) ||
+        (kind ? root->identity.st_uid != geteuid() :
+          !(root->identity.st_uid == geteuid() || root->identity.st_uid == 0)) ||
+        !(kind == 1 ? immutable_directory(&root->identity, root->identity.st_uid) :
+          kind == 2 ? S_ISDIR(root->identity.st_mode) &&
+            (root->identity.st_mode & 07777) == 0700 :
+            safe_directory(&root->identity, root->identity.st_uid)) ||
         !root_is_current(root->path, &root->identity)) goto fail;
     napi_value result;
     const napi_property_descriptor methods[] = {
         {"openEntry", NULL, root_open_entry, NULL, NULL, NULL, napi_default, NULL},
         {"manifestByteCount", NULL, root_manifest_byte_count, NULL, NULL, NULL, napi_default, NULL},
+        {"activeByteCount", NULL, root_active_byte_count, NULL, NULL, NULL, napi_default, NULL},
+        {"listEntries", NULL, root_list_entries, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, root_close, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_create_object(env, &result) != napi_ok) goto fail;
@@ -400,6 +555,18 @@ fail_wrapped:
 fail:
     close_root(root); free(root->path); free(root);
     return native_error(env, "package root is unsafe or changed");
+}
+
+static napi_value open_package_root(napi_env env, napi_callback_info info) {
+    return open_package_root_impl(env, info, 0);
+}
+
+static napi_value open_installed_root(napi_env env, napi_callback_info info) {
+    return open_package_root_impl(env, info, 1);
+}
+
+static napi_value open_runtime_root(napi_env env, napi_callback_info info) {
+    return open_package_root_impl(env, info, 2);
 }
 
 /* CAS roots are mutable 0700 directories. Their locator and authority metadata
@@ -832,6 +999,8 @@ fail:
 static napi_value initialize(napi_env env, napi_value exports) {
     const napi_property_descriptor methods[] = {
         {"openRoot", NULL, open_package_root, NULL, NULL, NULL, napi_default, NULL},
+        {"openInstalledRoot", NULL, open_installed_root, NULL, NULL, NULL, napi_default, NULL},
+        {"openRuntimeRoot", NULL, open_runtime_root, NULL, NULL, NULL, napi_default, NULL},
         {"openCasRoot", NULL, open_cas_root, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok) return NULL;

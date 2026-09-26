@@ -35,11 +35,19 @@ export type HeldCasRoot = {
   close(): void;
 };
 export type HeldPackageRoot = {
-  openEntry(path: string, byteCount: number, executable: boolean): NativeEntry;
+  openEntry(path: string, byteCount: number, executable: boolean, exactMode?: number): NativeEntry;
   manifestByteCount(): number;
+  activeByteCount(): number;
+  listEntries(): string[];
   close(): void;
 };
-type NativeBinding = { openRoot(path: string): HeldPackageRoot; openCasRoot(path: string): HeldCasRoot };
+export type NativePackageReader = {
+  openRoot(path: string): HeldPackageRoot;
+  openInstalledRoot(path: string): HeldPackageRoot;
+  openRuntimeRoot(path: string): HeldPackageRoot;
+  openCasRoot(path: string): HeldCasRoot;
+};
+type NativeBinding = NativePackageReader;
 
 function sameStat(before: import('node:fs').BigIntStats, after: import('node:fs').BigIntStats): boolean {
   return before.dev === after.dev && before.ino === after.ino && before.uid === after.uid &&
@@ -50,6 +58,8 @@ function sameStat(before: import('node:fs').BigIntStats, after: import('node:fs'
 let loaded: { digest: string; binding: NativeBinding } | undefined;
 const heldRoots = new WeakSet<object>();
 const heldCasRoots = new WeakSet<object>();
+const installedRoots = new WeakSet<object>();
+const runtimeRoots = new WeakSet<object>();
 
 /** The expected helper digest must come from the trusted stable bootstrap. Test builds inject a fixture digest. */
 export async function loadNativePackageReader(expectedHelperDigest: string,
@@ -82,7 +92,8 @@ export async function loadNativePackageReader(expectedHelperDigest: string,
     const nativeModule = new Module(LOCAL_BINARY);
     process.dlopen(nativeModule, `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${file.fd}`);
     const binding = nativeModule.exports as NativeBinding;
-    if (typeof binding.openRoot !== 'function' || typeof binding.openCasRoot !== 'function') {
+    if (typeof binding.openRoot !== 'function' || typeof binding.openInstalledRoot !== 'function' ||
+        typeof binding.openRuntimeRoot !== 'function' || typeof binding.openCasRoot !== 'function') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'native package reader has an unsupported interface');
     }
     loaded = { digest, binding: Object.freeze(binding) };
@@ -100,6 +111,53 @@ export function openPackageRoot(binding: NativeBinding, absolutePath: string): H
   const root = binding.openRoot(absolutePath);
   heldRoots.add(root);
   return root;
+}
+
+export function openInstalledBundleRoot(binding: NativeBinding, absolutePath: string): HeldPackageRoot {
+  if (binding !== loaded?.binding) throw new TypeError('installed bundle reader must come from the pinned native helper');
+  if (normalizeAbsolutePath(absolutePath) !== absolutePath) {
+    throw new TypeError('installed bundle root must have a canonical absolute path');
+  }
+  const root = binding.openInstalledRoot(absolutePath);
+  heldRoots.add(root);
+  installedRoots.add(root);
+  return root;
+}
+
+export function openRuntimeSelectionRoot(binding: NativeBinding, absolutePath: string): HeldPackageRoot {
+  if (binding !== loaded?.binding) throw new TypeError('runtime selection reader must come from the pinned native helper');
+  if (normalizeAbsolutePath(absolutePath) !== absolutePath) {
+    throw new TypeError('runtime selection root must have a canonical absolute path');
+  }
+  const root = binding.openRuntimeRoot(absolutePath);
+  runtimeRoots.add(root);
+  return root;
+}
+
+export function readHeldActiveSelection(root: HeldPackageRoot): Buffer {
+  if (!runtimeRoots.has(root)) throw new TypeError('active selection root must come from the pinned native helper');
+  const byteCount = root.activeByteCount();
+  if (!Number.isSafeInteger(byteCount) || byteCount <= 0 || byteCount > 4096) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'active selection byte count is invalid');
+  }
+  const file = root.openEntry('active.json', byteCount, false, 0o400);
+  try {
+    const chunks: Buffer[] = [];
+    let remaining = byteCount;
+    while (remaining > 0) {
+      const bytes = file.readChunk(remaining);
+      if (!Buffer.isBuffer(bytes) || bytes.byteLength === 0 || bytes.byteLength > remaining) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'active runtime selection has invalid bytes');
+      }
+      chunks.push(Buffer.from(bytes));
+      remaining -= bytes.byteLength;
+    }
+    if (file.readChunk(1).byteLength !== 0) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'active runtime selection has invalid bytes');
+    }
+    file.assertStable();
+    return Buffer.concat(chunks, byteCount);
+  } finally { file.close(); }
 }
 
 export function openNativeCasRoot(binding: NativeBinding, absolutePath: string): HeldCasRoot {
@@ -192,6 +250,37 @@ export async function verifyHeldPackage(root: HeldPackageRoot,
     (entry) => readVerifiedPackageEntryBytes(root, entry));
   for (const entry of decoded.bundle.entries) {
     await streamVerifiedPackageEntry(root, entry, () => {});
+  }
+  return decoded;
+}
+
+/** Verify the complete read-only installed tree, including absence of unsigned files. */
+export async function verifyHeldInstalledBundle(root: HeldPackageRoot,
+  releaseKeys: readonly ReleaseTrustKey[], expectedBundleRef: string): Promise<{
+    bundle: RuntimeBundleManifest; bundleRef: string;
+  }> {
+  if (!installedRoots.has(root)) throw new TypeError('installed bundle root must come from the pinned native helper');
+  assertArtifactRef(expectedBundleRef);
+  const before = root.listEntries().sort();
+  const decoded = await verifyHeldPackage(root, releaseKeys);
+  if (decoded.bundleRef !== expectedBundleRef) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed bundle directory differs from its selected digest');
+  }
+  const expectedFiles = ['runtime-bundle.json', ...decoded.bundle.entries.map((entry) => entry.relativePath)];
+  const expectedDirs = new Set<string>();
+  for (const entry of expectedFiles) {
+    const components = entry.split('/');
+    for (let index = 1; index < components.length; index += 1) {
+      expectedDirs.add(`${components.slice(0, index).join('/')}/`);
+    }
+  }
+  const expected = [...expectedFiles, ...expectedDirs].sort();
+  if (before.length !== expected.length || before.some((entry, index) => entry !== expected[index])) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed bundle contains missing or unsigned paths');
+  }
+  const after = root.listEntries().sort();
+  if (after.length !== expected.length || after.some((entry, index) => entry !== expected[index])) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed bundle inventory changed during verification');
   }
   return decoded;
 }

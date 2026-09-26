@@ -7,6 +7,8 @@ import { getAsset, isSea } from 'node:sea';
 
 import { KERNEL_CAS_DIRECTORY } from '../../../src/config.js';
 import { decodeSignedRuntimeBundle } from '../../../src/runtime-bundle/manifest.js';
+import { inspectSelectedRuntimeBundle } from '../../../src/runtime-bundle/installed-selection.js';
+import { loadNativePackageReader, PACKAGE_READER_NATIVE_ENTRY_ID } from '../../../src/runtime-bundle/native-package-reader.js';
 import { loadNativeStateOwner, STATE_OWNER_NATIVE_PATH } from '../../../src/state/native-owner.js';
 import { openStateStore } from '../../../src/state/store.js';
 
@@ -23,8 +25,8 @@ async function readControlLine(socket: ReturnType<typeof createConnection>): Pro
 
 async function main(): Promise<void> {
   const [mode, stateRoot] = process.argv.slice(-2);
-  if (!isSea() || !['import', 'reopen'].includes(mode ?? '') || !stateRoot) {
-    throw new Error('signed Supervisor SEA fixture requires import|reopen and a StateRoot');
+  if (!isSea() || !['import', 'reopen', 'installed'].includes(mode ?? '') || !stateRoot) {
+    throw new Error('signed Supervisor SEA fixture requires import|reopen|installed and a StateRoot');
   }
   const packageRoot = path.dirname(process.execPath);
   const releaseKeys = JSON.parse(getAsset('release-keys.json', 'utf8')) as Array<{
@@ -33,6 +35,14 @@ async function main(): Promise<void> {
   const { bundle, bundleRef } = decodeSignedRuntimeBundle(
     readFileSync(path.join(packageRoot, 'runtime-bundle.json')), releaseKeys
   );
+  if (mode === 'installed') {
+    const helper = bundle.entries.find((entry) => entry.entryId === PACKAGE_READER_NATIVE_ENTRY_ID)!;
+    const reader = await loadNativePackageReader(helper.digest, helper.byteCount);
+    const selected = await inspectSelectedRuntimeBundle(reader, stateRoot, releaseKeys);
+    if (selected.selection.bundleDigest !== bundleRef || selected.bundlePath !== packageRoot) {
+      throw new Error('installed SEA was not selected from the exact signed bundle directory');
+    }
+  }
   const native = await loadNativeStateOwner(bundle);
   const store = await openStateStore(stateRoot, { bundle, releaseKeys });
   try {
