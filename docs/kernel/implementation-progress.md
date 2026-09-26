@@ -93,6 +93,12 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   generation or the I1 restart scenario. The probe build's fixed-offset
   extraction now uses byte-offset `tail` rather than `dd bs=1`; the extracted
   kernel rehashed to the pinned SHA-256 before and after the change.
+- RuntimeBundle signature verification now also checks the closed, byte-sorted
+  structured-root index, required role mapping, guest-root refs, and the exact
+  unique signed `bundle_object` entry/path for each distinct member ref. Tests
+  re-sign malformed bundles so failures prove structural validation rather
+  than a rejected signature. Exact structured-root semantic decoding, secure
+  installed-file import, version selection, and rollback remain WP06 work.
 
 ## Next integration order
 

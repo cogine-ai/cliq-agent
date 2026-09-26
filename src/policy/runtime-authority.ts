@@ -1,6 +1,6 @@
 import { createPublicKey, verify } from 'node:crypto';
-import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import { assertArtifactRef } from '../kernel/identity.js';
+import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
+import { assertArtifactRef, identityHash } from '../kernel/identity.js';
 import type { PolicyEngineProfileV1, RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
 import type { RunAssemblyV1, ToolContractManifestV1 } from '../kernel/types.js';
 
@@ -78,6 +78,121 @@ export function verifyRuntimeBundle(bundle: RuntimeBundleManifest, releaseKeys: 
       byRole('trust_store').length !== 1 || byRole('trust_store')[0]!.entryId !== 'default_https_trust_store' ||
       byRole('trust_store')[0]!.executable || byRole('sandbox_root_profile').length < 1 ||
       byRole('sandbox_root_profile').some((entry) => entry.executable)) throw new TypeError('RuntimeBundle required roles are missing or ambiguous');
+  verifyStructuredBundleIndex(bundle);
+}
+
+const STRUCTURED_ROOT_ROLES = {
+  system_prompt: 'system_prompt',
+  compaction_prompt: 'compaction_prompt',
+  mcp_recovery_adapter: 'mcp_recovery_profile',
+  policy_engine_profile: 'policy_engine',
+  bundled_skill: 'skill_bundle',
+  guest_toolchain: 'guest_toolchain',
+  legacy_portable_schema: 'schema'
+} as const;
+
+function boundedCanonicalLabel(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 &&
+    Buffer.byteLength(value, 'utf8') <= 256 && normalizeCanonicalText(value) === value;
+}
+
+/** Check the signed index before an installer opens any referenced path. */
+function verifyStructuredBundleIndex(bundle: RuntimeBundleManifest): void {
+  if (!Array.isArray(bundle.structuredArtifacts) || !Array.isArray(bundle.guestToolchainManifestRefs)) {
+    throw new TypeError('RuntimeBundle structured index is not an array');
+  }
+  const byId = new Map(bundle.entries.map((entry) => [entry.entryId, entry]));
+  const roots = new Set<string>();
+  const rootRefs = new Set<string>();
+  const usedMembers = new Set<string>();
+  const guestRefs: string[] = [];
+  let previousKey: string | undefined;
+  for (const structured of bundle.structuredArtifacts) {
+    if (structured === null || typeof structured !== 'object' || Array.isArray(structured) ||
+        !Object.hasOwn(STRUCTURED_ROOT_ROLES, structured.kind)) {
+      throw new TypeError('RuntimeBundle has an unknown structured artifact kind');
+    }
+    const kind = structured.kind as keyof typeof STRUCTURED_ROOT_ROLES;
+    const prompt = kind === 'system_prompt' || kind === 'compaction_prompt';
+    const recovery = kind === 'mcp_recovery_adapter';
+    const keys = ['kind', 'artifactId', 'rootEntryId', 'artifactRef', 'semanticDigest', 'memberRefs',
+      ...(prompt ? ['provider', 'model'] : []), ...(recovery ? ['executableEntryId'] : [])];
+    if (!exactKeys(structured, keys) ||
+        !boundedCanonicalLabel(structured.artifactId) ||
+        !boundedCanonicalLabel(structured.rootEntryId) ||
+        typeof structured.artifactRef !== 'string' || typeof structured.semanticDigest !== 'string' ||
+        !Array.isArray(structured.memberRefs)) {
+      throw new TypeError('RuntimeBundle structured artifact has an invalid closed shape');
+    }
+    assertArtifactRef(structured.artifactRef);
+    assertArtifactRef(structured.semanticDigest);
+    if (prompt) {
+      if (!['openai', 'anthropic', 'openrouter', 'openai-compatible', 'zhipu', 'ollama'].includes(
+        String(structured.provider)) || !boundedCanonicalLabel(structured.model)) {
+        throw new TypeError('RuntimeBundle prompt identity is invalid');
+      }
+    }
+    if (recovery) {
+      if (!boundedCanonicalLabel(structured.executableEntryId) ||
+          byId.get(structured.executableEntryId)?.role !== 'mcp_recovery_adapter' ||
+          !byId.get(structured.executableEntryId)?.executable) {
+        throw new TypeError('RuntimeBundle recovery adapter executable is invalid');
+      }
+    }
+    if (kind === 'legacy_portable_schema' &&
+        structured.artifactId !== 'legacy_windows_export_profiles_v1') {
+      throw new TypeError('RuntimeBundle legacy schema artifact id is invalid');
+    }
+    const key = [kind, prompt ? structured.provider : '', prompt ? structured.model : '', structured.artifactId].join('\0');
+    if (previousKey !== undefined && Buffer.compare(Buffer.from(previousKey), Buffer.from(key)) >= 0) {
+      throw new TypeError('RuntimeBundle structured artifacts are not unique and byte-sorted');
+    }
+    previousKey = key;
+    const root = byId.get(structured.rootEntryId);
+    if (!root || root.role !== STRUCTURED_ROOT_ROLES[kind] || root.executable ||
+        root.digest !== structured.artifactRef || roots.has(root.entryId)) {
+      throw new TypeError('RuntimeBundle structured root differs from its signed entry');
+    }
+    roots.add(root.entryId);
+    rootRefs.add(structured.artifactRef);
+    let previousMember: string | undefined;
+    for (const member of structured.memberRefs) {
+      if (typeof member !== 'string') throw new TypeError('RuntimeBundle member ref is not a string');
+      assertArtifactRef(member);
+      if (member === structured.artifactRef ||
+          (previousMember !== undefined && previousMember >= member)) {
+        throw new TypeError('RuntimeBundle members are self-referential, duplicated or unsorted');
+      }
+      previousMember = member;
+      usedMembers.add(member);
+    }
+    if (kind === 'guest_toolchain') guestRefs.push(structured.artifactRef);
+  }
+  for (const entry of bundle.entries) {
+    if (Object.values(STRUCTURED_ROOT_ROLES).includes(entry.role as typeof STRUCTURED_ROOT_ROLES[keyof typeof STRUCTURED_ROOT_ROLES]) &&
+        !roots.has(entry.entryId)) {
+      throw new TypeError('RuntimeBundle omits a required structured root');
+    }
+  }
+  if (bundle.guestToolchainManifestRefs.length !== guestRefs.length ||
+      bundle.guestToolchainManifestRefs.some((ref, index) => ref !== guestRefs[index])) {
+    throw new TypeError('RuntimeBundle guest toolchain index differs from structured roots');
+  }
+  if ([...usedMembers].some((ref) => rootRefs.has(ref))) {
+    throw new TypeError('RuntimeBundle structured root cannot be a member object');
+  }
+  const objects = bundle.entries.filter((entry) => entry.role === 'bundle_object');
+  if (objects.length !== usedMembers.size) {
+    throw new TypeError('RuntimeBundle has missing or unused member objects');
+  }
+  for (const member of usedMembers) {
+    const entry = byId.get(identityHash('runtime-bundle-object-v1', member));
+    if (!entry || entry.role !== 'bundle_object' || entry.executable || entry.version !== '1' ||
+        entry.digest !== member ||
+        entry.relativePath !== `objects/sha256/${member.slice(0, 2)}/${member}`) {
+      throw new TypeError('RuntimeBundle member object does not match its signed path and digest');
+    }
+  }
 }
 
 /** Verify the signed manifest and exact selected policy/tool identities, not installation or other structured-root semantics. */
