@@ -7,23 +7,28 @@ import { test } from 'node:test';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, sha256Bytes } from '../kernel/identity.js';
 import type { FrozenIgnoreRulesV1, WorkspaceEntryManifest } from '../kernel/types.js';
+import { ArtifactCatalog } from './artifacts.js';
+import { ContentAddressedStore } from './cas.js';
 import { MAX_FROZEN_IGNORE_SOURCE_BYTES, parseFrozenIgnoreSourceBytes } from './frozen-ignore-sources.js';
 import { loadNativeStateOwner, type HeldStateOwnerLock } from './native-owner.js';
 import { captureLiveWorkspaceIdentity } from './workspace-identity.js';
 import {
-  assertLiveFrozenIgnoreSources, readHeldGitignoreFromDirectory, readHeldSourceGitInfoExclude
+  assertLiveFrozenIgnoreSources, captureHeldFrozenIgnoreRules,
+  readHeldGitignoreFromDirectory, readHeldSourceGitInfoExclude
 } from './workspace-source-ignore.js';
 
 const supported = process.platform === 'darwin' || process.platform === 'linux';
 
 test('held .gitignore reader binds literal source bytes to repeated directory observations',
-  { skip: !supported }, async () => {
+  { skip: !supported }, async (t) => {
     const parent = await mkdtemp(path.join(process.cwd(), '.cliq-gitignore-source-'));
     const stateRoot = path.join(parent, 'state');
     const workspace = path.join(parent, 'workspace');
     const nested = path.join(workspace, 'nested');
     const empty = path.join(workspace, 'empty');
+    const casRoot = path.join(parent, 'cas');
     await mkdir(stateRoot, { mode: 0o700 });
+    await mkdir(casRoot, { mode: 0o700 });
     await mkdir(nested, { recursive: true, mode: 0o700 });
     await mkdir(empty, { mode: 0o700 });
     execFileSync('git', ['init', '-q', workspace]);
@@ -33,6 +38,7 @@ test('held .gitignore reader binds literal source bytes to repeated directory ob
     await writeFile(rootIgnore, '*.log\n', { mode: 0o600 });
     await writeFile(nestedIgnore, '!keep.log\n', { mode: 0o600 });
     const held = (await loadNativeStateOwner()).acquireLock(stateRoot, true);
+    const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
     try {
       const root = held.inspectWorkspaceIdentity(workspace).root;
       assert.deepEqual(readHeldGitignoreFromDirectory(held, workspace, root, ''),
@@ -74,6 +80,28 @@ test('held .gitignore reader binds literal source bytes to repeated directory ob
         entries: entries.entries });
       assert.doesNotThrow(() => assertLiveFrozenIgnoreSources(held, workspace, root,
         repository, rules, entries));
+      const captured = await captureHeldFrozenIgnoreRules(held, workspace, root,
+        repository, entries, artifacts);
+      assert.deepEqual(captured.rules, rules);
+      assert.deepEqual(await artifacts.readCanonical(captured.rulesArtifact.ref), rules);
+      assert.deepEqual(captured.sourceArtifacts.map((artifact) => artifact.ref),
+        sources.map((source) => source.contentRef));
+      const publishCanonical = artifacts.publishCanonical.bind(artifacts);
+      const injected = t.mock.method(artifacts, 'publishCanonical',
+        async (value: unknown, kind: string) => {
+          const artifact = await publishCanonical(value, kind);
+          if (kind === 'cliq-frozen-ignore-rules-v1') {
+            await writeFile(rootIgnore, 'changed-after-publication\n');
+          }
+          return artifact;
+        });
+      try {
+        await assert.rejects(captureHeldFrozenIgnoreRules(held, workspace, root,
+          repository, entries, artifacts), /live frozen ignore source differs.*\.gitignore/);
+      } finally {
+        injected.mock.restore();
+        await writeFile(rootIgnore, '*.log\n');
+      }
       await writeFile(nestedIgnore, '!drop.log\n');
       assert.throws(() => assertLiveFrozenIgnoreSources(held, workspace, root,
         repository, rules, entries), /nested\/\.gitignore/);
@@ -120,6 +148,42 @@ test('held .gitignore reader binds literal source bytes to repeated directory ob
       held.close();
       assert.throws(() => readHeldGitignoreFromDirectory(held, workspace, root, 'nested'),
         /RECOVERY_REQUIRED|changed/);
+    } finally {
+      held.close();
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+test('non-Git capture publishes only the canonical empty ignore graph',
+  { skip: !supported }, async () => {
+    const parent = await mkdtemp(path.join(process.cwd(), '.cliq-nongit-ignore-'));
+    const stateRoot = path.join(parent, 'state');
+    const workspace = path.join(parent, 'workspace');
+    const casRoot = path.join(parent, 'cas');
+    await mkdir(stateRoot, { mode: 0o700 });
+    await mkdir(workspace, { mode: 0o700 });
+    await mkdir(casRoot, { mode: 0o700 });
+    const held = (await loadNativeStateOwner()).acquireLock(stateRoot, true);
+    try {
+      const entries: WorkspaceEntryManifest = {
+        schemaVersion: 1, format: 'cliq-workspace-entries-v1', entries: [],
+        entryCount: 0, byteCount: 0,
+        treeDigest: canonicalSha256({ schemaVersion: 1,
+          format: 'cliq-workspace-entries-v1', entries: [] })
+      };
+      const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
+      const root = held.inspectWorkspaceIdentity(workspace).root;
+      const captured = await captureHeldFrozenIgnoreRules(held, workspace, root,
+        undefined, entries, artifacts);
+      assert.deepEqual(captured.rules.sources, []);
+      assert.deepEqual(captured.rules.rules, []);
+      assert.equal(captured.rules.repositoryIdentityDigest, undefined);
+      assert.deepEqual(captured.sourceArtifacts, []);
+      assert.deepEqual(await artifacts.readCanonical(captured.rulesArtifact.ref), captured.rules);
+
+      execFileSync('git', ['init', '-q', workspace]);
+      await assert.rejects(captureHeldFrozenIgnoreRules(held, workspace, root,
+        undefined, entries, artifacts), /workspace identity changed before frozen ignore capture/);
     } finally {
       held.close();
       await rm(parent, { recursive: true, force: true });

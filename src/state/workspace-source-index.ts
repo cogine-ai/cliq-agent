@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { GitIndexSnapshotV1, RepositoryIdentityV1 } from '../kernel/types.js';
+import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { decodeRepositoryIdentity } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import { MAX_GIT_INDEX_BYTES, parseSourceGitIndex, type ParsedSourceGitIndex } from './git-index.js';
@@ -116,4 +117,37 @@ export function assertLiveSourceGitIndex(
     throw new KernelStorageError('ARTIFACT_MISMATCH',
       'live Git index differs from its retained canonical source snapshot');
   }
+}
+
+export type CapturedGitIndexSnapshot = Readonly<{
+  snapshot: GitIndexSnapshotV1;
+  snapshotArtifact: PublishedArtifact;
+  canonicalBytesArtifact: PublishedArtifact;
+  sourceVersion: HeldSourceGitIndex['sourceVersion'];
+}>;
+
+/** Publish both canonical index bytes and their closed semantic snapshot from
+ * one held source observation. A second held read closes the publication race;
+ * Run admission repeats it at the transaction boundary. */
+export async function captureHeldGitIndexSnapshot(
+  filesystem: HeldStateOwnerLock,
+  workspacePath: string,
+  expectedRoot: DescriptorIdentity,
+  expectedRepository: RepositoryIdentityV1,
+  artifacts: ArtifactCatalog
+): Promise<CapturedGitIndexSnapshot> {
+  const captured = readHeldSourceGitIndex(filesystem, workspacePath,
+    expectedRoot, expectedRepository);
+  const canonicalBytesArtifact = await artifacts.publishBytes(captured.canonicalBytes,
+    'application/octet-stream', 'cliq-git-index-canonical-v2');
+  if (canonicalBytesArtifact.ref !== captured.snapshot.canonicalIndexBytesRef) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      'published canonical Git index bytes have a different digest');
+  }
+  const snapshotArtifact = await artifacts.publishCanonical(captured.snapshot,
+    captured.snapshot.format);
+  assertLiveSourceGitIndex(filesystem, workspacePath, expectedRoot,
+    expectedRepository, captured.snapshot);
+  return { snapshot: captured.snapshot, snapshotArtifact,
+    canonicalBytesArtifact, sourceVersion: captured.sourceVersion };
 }
