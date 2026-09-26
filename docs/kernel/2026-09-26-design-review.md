@@ -124,6 +124,18 @@ It cannot establish capability or spend bounds. Managed Ollama is an eligible
 alternative only when its complete signed local-service/no-egress contract is
 actually qualified, not merely because a loopback server responds.
 
+The first installed bundle has one necessary ordering constraint: fresh-empty
+StateStore genesis rejects a prepopulated CAS. The installer first verifies and
+fsyncs an unselected candidate executable in a private staging directory. That
+exact signed Supervisor runs the initial owner acquisition against the empty
+StateRoot, imports the verified package graph into CAS while it owns the store,
+and releases the owner. Only after a complete import and candidate self-test
+may the installer publish the immutable `bundles/<bundleDigest>` directory and
+select it through `active.json`. A crash before selection leaves no selectable
+candidate; retry must reopen the same signed owner authority, inspect any
+retained genesis and unrooted CAS objects, and finish or fail closed. Update
+candidate self-tests remain read-only against an existing authoritative store.
+
 Next implementation order within I1: finish WP03 containment/descriptor evidence
 and WP04 UDS capture; connect the existing admission/worker-loss reducers; ship
 that composition with WP06's stable bootstrap; then execute the restart scenario.
