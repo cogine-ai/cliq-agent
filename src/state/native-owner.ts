@@ -62,9 +62,10 @@ export type HeldStateOwnerLock = Readonly<{
   inspectWorkspaceIdentity(canonicalAbsolutePath: string): LiveWorkspaceInspection;
   openWorkspaceSourceFile(canonicalAbsolutePath: string, root: DescriptorIdentity,
     canonicalRootRelativePath: string): HeldWorkspaceSourceFile;
-  /** Literal .git/index only, bound to the recorded root and Git directory. */
+  /** Literal .git/index only, bound to the recorded root and Git directory.
+   * Null is a twice-checked exact absence under those held descriptors. */
   openWorkspaceGitIndex(canonicalAbsolutePath: string, root: DescriptorIdentity,
-    git: DescriptorIdentity): HeldWorkspaceSourceFile;
+    git: DescriptorIdentity): HeldWorkspaceSourceFile | null;
   listWorkspaceSourceDirectory(canonicalAbsolutePath: string, root: DescriptorIdentity,
     canonicalRootRelativePath: string): readonly WorkspaceSourceDirectoryEntry[];
   readWorkspaceSourceSymlink(canonicalAbsolutePath: string, root: DescriptorIdentity,
@@ -86,7 +87,7 @@ type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'openWorkspa
     deviceId: string, fileId: string, ownerUid: number): HeldWorkspaceSourceFile;
   openWorkspaceGitIndex(workspacePath: string,
     rootDeviceId: string, rootFileId: string, rootOwnerUid: number,
-    gitDeviceId: string, gitFileId: string, gitOwnerUid: number): HeldWorkspaceSourceFile;
+    gitDeviceId: string, gitFileId: string, gitOwnerUid: number): HeldWorkspaceSourceFile | null;
   listWorkspaceSourceDirectory(workspacePath: string, relativePath: string,
     deviceId: string, fileId: string, ownerUid: number): readonly WorkspaceSourceDirectoryEntry[];
   readWorkspaceSourceSymlink(workspacePath: string, relativePath: string,

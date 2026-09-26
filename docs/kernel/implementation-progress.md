@@ -313,8 +313,12 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   `.git/index` under the recorded workspace and Git directory descriptors. It
   rejects hardlinked or symlinked indexes and changes to the root, Git directory
   or file during reading; a real Git index is read and parsed in a focused test.
-  Bounded source publication, referenced object existence, pack closure and
-  atomic Run integration remain open.
+  A high-level read now checks the repository digest, root/Git/config stability,
+  complete bytes, and a 64 MiB raw and expanded index ceiling before returning
+  the normalized snapshot. A newly initialized repository with a twice-checked,
+  descriptor-proven absent literal index yields the canonical empty v2 index;
+  an alias or a newly appearing index is rejected. CAS publication, referenced
+  object existence, pack closure and atomic Run integration remain open.
 - FrozenIgnoreRules and SourceProjection now reject rehashed extension fields,
   malformed root-relative selectors, duplicate selectors, widened result
   ceilings, non-Git ignore sources, unordered Git ignore sources/rules, and

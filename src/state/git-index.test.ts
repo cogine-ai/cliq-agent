@@ -9,6 +9,7 @@ import { digestOmitting, sha256Bytes } from '../kernel/identity.js';
 import type { GitIndexSnapshotV1, SourceManifest } from '../kernel/types.js';
 import { decodeSourceManifest } from './decoders.js';
 import {
+  MAX_GIT_INDEX_BYTES,
   decodeGitIndexSnapshot,
   encodeCanonicalGitIndex,
   gitIndexTreeObjectId,
@@ -133,6 +134,40 @@ test('source Git index v2/v3 and SHA-256 bytes normalize to the exact retained v
   const parsedEmpty = parseSourceGitIndex(indexWithChecksum(empty, 'sha1'), 'a'.repeat(64), 'sha1');
   assert.deepEqual(parsedEmpty.snapshot.entries, []);
   assert.equal(parsedEmpty.snapshot.indexTreeObjectId, '4b825dc642cb6eb9a060e54bf8d69288fbee4904');
+});
+
+test('source and expanded Git index byte ceilings reject before canonical allocation', () => {
+  assert.throws(() => parseSourceGitIndex(Buffer.alloc(MAX_GIT_INDEX_BYTES + 1),
+    'a'.repeat(64), 'sha1'), /byte ceiling/);
+  const longPath = Array(32).fill('x'.repeat(127)).join('/');
+  const oversized = { ...oneFileSnapshot(), entries: Array(17_000).fill({
+    ...oneFileSnapshot().entries[0]!, canonicalRootRelativePath: longPath
+  }) };
+  assert.throws(() => encodeCanonicalGitIndex(oversized), /byte ceiling/);
+
+  const prefix = `${Array(15).fill('a'.repeat(255)).join('/')}/${'b'.repeat(250)}`;
+  const header = Buffer.alloc(12);
+  header.write('DIRC', 0, 'ascii');
+  header.writeUInt32BE(4, 4);
+  header.writeUInt32BE(17_000, 8);
+  const records: Buffer[] = [header];
+  const oid = Buffer.from(oneFileSnapshot().entries[0]!.objectId, 'hex');
+  let prior = '';
+  for (let i = 0; i < 17_000; i += 1) {
+    const name = `${prefix}${String(i).padStart(5, '0')}`;
+    let shared = 0;
+    while (shared < prior.length && prior[shared] === name[shared]) shared += 1;
+    const fixed = Buffer.alloc(62);
+    fixed.writeUInt32BE(33188, 24);
+    oid.copy(fixed, 40);
+    fixed.writeUInt16BE(0x0fff, 60);
+    records.push(fixed, Buffer.from([prior.length - shared]), Buffer.from(`${name.slice(shared)}\0`));
+    prior = name;
+  }
+  const compressed = indexWithChecksum(Buffer.concat(records), 'sha1');
+  assert.ok(compressed.byteLength < MAX_GIT_INDEX_BYTES);
+  assert.throws(() => parseSourceGitIndex(compressed, 'a'.repeat(64), 'sha1'),
+    /canonical Git index exceeds the byte ceiling/);
 });
 
 test('source Git index rejects bad checksum, stage, gitlink, path, object and mandatory extension', () => {

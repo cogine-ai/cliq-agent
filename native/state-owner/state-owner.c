@@ -603,11 +603,10 @@ static int open_source_parent(int root_fd, const char *relative_path, const stru
     return parent;
 }
 
-static int source_file_stable(source_file *file, int require_complete) {
-    if (file->file_fd < 0 || (require_complete && file->consumed != file->file.st_size) ||
-        !lock_is_held(file->lock)) return 0;
+static int source_parent_stable(source_file *file) {
+    if (!lock_is_held(file->lock)) return 0;
     int reopened = open_literal_root(file->workspace_path);
-    struct stat named_root, current_root, current_parent, current_file, named_file;
+    struct stat named_root, current_root, current_parent;
     int root_valid = reopened >= 0 && fstat(reopened, &named_root) == 0 &&
         fstat(file->root_fd, &current_root) == 0 &&
         same_file_observation(&file->root, &named_root) &&
@@ -619,7 +618,13 @@ static int source_file_stable(source_file *file, int require_complete) {
         same_file_observation(&file->parent, &current_parent) &&
         same_file_observation(&file->parent, &named_root);
     if (parent >= 0) close(parent);
-    if (!parent_valid) return 0;
+    return parent_valid;
+}
+
+static int source_file_stable(source_file *file, int require_complete) {
+    if (file->file_fd < 0 || (require_complete && file->consumed != file->file.st_size) ||
+        !source_parent_stable(file)) return 0;
+    struct stat current_file, named_file;
     const char *leaf = strrchr(file->relative_path, '/');
     leaf = leaf ? leaf + 1 : file->relative_path;
     return literal_child_present(file->parent_fd, leaf) == 1 &&
@@ -736,7 +741,17 @@ static napi_value open_workspace_file(napi_env env, napi_callback_info info, int
     }
     const char *leaf = strrchr(file->relative_path, '/');
     leaf = leaf ? leaf + 1 : file->relative_path;
-    if (literal_child_present(file->parent_fd, leaf) != 1) goto done;
+    int literal_leaf = literal_child_present(file->parent_fd, leaf);
+    if (git_index && literal_leaf == 0) {
+        struct stat absent;
+        if (fstatat(file->parent_fd, leaf, &absent, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT ||
+            !source_parent_stable(file) || literal_child_present(file->parent_fd, leaf) != 0 ||
+            fstatat(file->parent_fd, leaf, &absent, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT ||
+            napi_get_null(env, &result) != napi_ok) goto done;
+        error = NULL;
+        goto done;
+    }
+    if (literal_leaf != 1) goto done;
     file->file_fd = openat(file->parent_fd, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     if (file->file_fd < 0 || fstat(file->file_fd, &file->file) < 0 || !S_ISREG(file->file.st_mode) ||
         file->file.st_uid != owner || file->file.st_dev != file->root.st_dev ||
@@ -764,7 +779,7 @@ static napi_value open_workspace_file(napi_env env, napi_callback_info info, int
     return result;
 done:
     if (file) finalize_source_file(env, file, NULL);
-    return native_error(env, error);
+    return error ? native_error(env, error) : result;
 }
 
 static napi_value open_workspace_source_file(napi_env env, napi_callback_info info) {

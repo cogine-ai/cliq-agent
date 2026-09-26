@@ -9,6 +9,9 @@ import { KernelStorageError } from './errors.js';
 type TreeNode = { kind: 'tree'; children: Map<string, TreeNode | TreeLeaf> };
 type TreeLeaf = { kind: 'leaf'; mode: 33188 | 33261 | 40960; objectId: string };
 
+/** Both the held source bytes and expanded canonical v2 bytes must fit. */
+export const MAX_GIT_INDEX_BYTES = 64 * 1024 * 1024;
+
 function mismatch(message: string): never {
   throw new KernelStorageError('ARTIFACT_MISMATCH', message);
 }
@@ -65,7 +68,8 @@ export function decodeGitIndexSnapshot(value: unknown): GitIndexSnapshotV1 {
     mismatch('Git index canonical bytes ref and digest differ');
   }
   if (!Number.isSafeInteger(value.canonicalIndexByteCount) ||
-      (value.canonicalIndexByteCount as number) <= 0) {
+      (value.canonicalIndexByteCount as number) <= 0 ||
+      (value.canonicalIndexByteCount as number) > MAX_GIT_INDEX_BYTES) {
     mismatch('Git index canonical byte count is invalid');
   }
   requireObjectId(value.indexTreeObjectId, format, 'Git index tree');
@@ -98,6 +102,13 @@ export function decodeGitIndexSnapshot(value: unknown): GitIndexSnapshotV1 {
 export function encodeCanonicalGitIndex(snapshot: GitIndexSnapshotV1): Buffer {
   const hashAlgorithm = snapshot.objectFormat;
   const objectIdBytes = hashAlgorithm === 'sha1' ? 20 : 32;
+  let canonicalByteCount = 12 + objectIdBytes;
+  for (const entry of snapshot.entries) {
+    const entryBytes = Math.ceil((40 + objectIdBytes + 2 +
+      Buffer.byteLength(entry.canonicalRootRelativePath, 'utf8') + 1) / 8) * 8;
+    canonicalByteCount += entryBytes;
+    if (canonicalByteCount > MAX_GIT_INDEX_BYTES) mismatch('canonical Git index exceeds the byte ceiling');
+  }
   const header = Buffer.alloc(12);
   header.write('DIRC', 0, 'ascii');
   header.writeUInt32BE(2, 4);
@@ -134,6 +145,7 @@ export function parseSourceGitIndex(
 ): ParsedSourceGitIndex {
   requireRef(repositoryIdentityDigest, 'source Git index repository identity digest');
   if (objectFormat !== 'sha1' && objectFormat !== 'sha256') mismatch('source Git index object format is unsupported');
+  if (source.byteLength > MAX_GIT_INDEX_BYTES) mismatch('source Git index exceeds the byte ceiling');
   const raw = Buffer.from(source);
   const objectIdBytes = objectFormat === 'sha1' ? 20 : 32;
   const bodyEnd = raw.byteLength - objectIdBytes;
@@ -149,6 +161,7 @@ export function parseSourceGitIndex(
   }
   const entries: GitIndexSnapshotV1['entries'] = [];
   const decoder = new TextDecoder('utf-8', { fatal: true });
+  let canonicalByteCount = 12 + objectIdBytes;
   let offset = 12;
   let priorPath = Buffer.alloc(0);
   for (let index = 0; index < declaredEntries; index += 1) {
@@ -200,6 +213,10 @@ export function parseSourceGitIndex(
     if (Buffer.compare(priorPath, pathBytes) >= 0 ||
         (flags & 0x0fff) !== Math.min(pathBytes.byteLength, 0x0fff)) {
       mismatch(`source Git index entry ${index} is unsorted or has a wrong path length`);
+    }
+    canonicalByteCount += Math.ceil((40 + objectIdBytes + 2 + pathBytes.byteLength + 1) / 8) * 8;
+    if (canonicalByteCount > MAX_GIT_INDEX_BYTES) {
+      mismatch('canonical Git index exceeds the byte ceiling');
     }
     priorPath = pathBytes;
     offset = terminator + 1;

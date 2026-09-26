@@ -4,8 +4,10 @@ import { link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from '
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { parseSourceGitIndex } from './git-index.js';
-import { loadNativeStateOwner } from './native-owner.js';
+import { MAX_GIT_INDEX_BYTES, parseSourceGitIndex } from './git-index.js';
+import { loadNativeStateOwner, type HeldStateOwnerLock } from './native-owner.js';
+import { captureLiveWorkspaceIdentity } from './workspace-identity.js';
+import { readHeldSourceGitIndex } from './workspace-source-index.js';
 
 const supported = process.platform === 'darwin' || process.platform === 'linux';
 
@@ -25,7 +27,23 @@ test('held StateOwner streams only the recorded literal Git index',
       const inspection = held.inspectWorkspaceIdentity(workspace);
       const root = inspection.root;
       const git = inspection.git!.identity;
+      const captured = await captureLiveWorkspaceIdentity({
+        workspacePath: workspace, ownerPrincipalId: 'principal', filesystem: held
+      });
+      const normalized = readHeldSourceGitIndex(held, workspace, root, captured.repository!);
+      assert.deepEqual(normalized.snapshot.entries.map((entry) => entry.canonicalRootRelativePath),
+        ['tracked.txt']);
+      let closed = 0;
+      const oversizedFile = { size: MAX_GIT_INDEX_BYTES + 1, close() { closed += 1; } };
+      const oversizedFilesystem = {
+        inspectWorkspaceIdentity() { return inspection; },
+        openWorkspaceGitIndex() { return oversizedFile; }
+      } as unknown as HeldStateOwnerLock;
+      assert.throws(() => readHeldSourceGitIndex(oversizedFilesystem, workspace,
+        root, captured.repository!), /byte ceiling/);
+      assert.equal(closed, 1);
       const opened = held.openWorkspaceGitIndex(workspace, root, git);
+      assert.ok(opened);
       try {
         const chunks: Buffer[] = [];
         let count = 0;
@@ -54,6 +72,7 @@ test('held StateOwner streams only the recorded literal Git index',
       try { assert.throws(() => held.openWorkspaceGitIndex(workspace, root, git), /unsafe or changed/); }
       finally { await rm(indexPath); await rename(displaced, indexPath); }
       const changing = held.openWorkspaceGitIndex(workspace, root, git);
+      assert.ok(changing);
       try {
         assert.equal(changing.readChunk(1).byteLength, 1);
         await writeFile(indexPath, original);
@@ -61,6 +80,7 @@ test('held StateOwner streams only the recorded literal Git index',
       } finally { changing.close(); }
       const movedGit = path.join(workspace, 'git-displaced');
       const replaced = held.openWorkspaceGitIndex(workspace, root, git);
+      assert.ok(replaced);
       await rename(path.join(workspace, '.git'), movedGit);
       await mkdir(path.join(workspace, '.git'));
       try {
@@ -73,5 +93,57 @@ test('held StateOwner streams only the recorded literal Git index',
       }
       held.close();
       assert.throws(() => held.openWorkspaceGitIndex(workspace, root, git), /RECOVERY_REQUIRED|lock changed/);
+    } finally { held.close(); await rm(parent, { recursive: true, force: true }); }
+  });
+
+test('a descriptor-proven absent Git index normalizes to the empty v2 index',
+  { skip: !supported }, async () => {
+    const parent = await mkdtemp(path.join(process.cwd(), '.cliq-absent-git-index-'));
+    const stateRoot = path.join(parent, 'state');
+    const workspace = path.join(parent, 'workspace');
+    await mkdir(stateRoot, { mode: 0o700 });
+    execFileSync('git', ['init', '-q', workspace]);
+    const held = (await loadNativeStateOwner()).acquireLock(stateRoot, true);
+    try {
+      const captured = await captureLiveWorkspaceIdentity({
+        workspacePath: workspace, ownerPrincipalId: 'principal', filesystem: held
+      });
+      assert.equal(held.openWorkspaceGitIndex(workspace, captured.identity.rootIdentity,
+        captured.repository!.gitDirectoryIdentity), null);
+      const normalized = readHeldSourceGitIndex(held, workspace,
+        captured.identity.rootIdentity, captured.repository!);
+      assert.equal(normalized.sourceVersion, 'absent');
+      assert.deepEqual(normalized.snapshot.entries, []);
+      assert.equal(normalized.snapshot.indexTreeObjectId,
+        '4b825dc642cb6eb9a060e54bf8d69288fbee4904');
+      let closes = 0;
+      let opens = 0;
+      const appearance = {
+        inspectWorkspaceIdentity() { return held.inspectWorkspaceIdentity(workspace); },
+        openWorkspaceGitIndex() {
+          opens += 1;
+          return opens === 1 ? null : { close() { closes += 1; } };
+        }
+      } as unknown as HeldStateOwnerLock;
+      assert.throws(() => readHeldSourceGitIndex(appearance, workspace,
+        captured.identity.rootIdentity, captured.repository!), /appeared/);
+      assert.equal(closes, 1);
+      await symlink('config', path.join(workspace, '.git', 'index'));
+      assert.throws(() => held.openWorkspaceGitIndex(workspace,
+        captured.identity.rootIdentity, captured.repository!.gitDirectoryIdentity), /unsafe or changed/);
+      await rm(path.join(workspace, '.git', 'index'));
+      await writeFile(path.join(workspace, '.git', 'config'),
+        '[core]\nrepositoryformatversion = 1\nfilemode = true\nbare = false\n' +
+        'logallrefupdates = true\n[extensions]\nobjectformat = sha256\n');
+      const sha256 = await captureLiveWorkspaceIdentity({
+        workspacePath: workspace, ownerPrincipalId: 'principal', filesystem: held
+      });
+      const emptySha256 = readHeldSourceGitIndex(held, workspace,
+        sha256.identity.rootIdentity, sha256.repository!);
+      assert.equal(emptySha256.sourceVersion, 'absent');
+      assert.equal(emptySha256.canonicalBytes.byteLength, 44);
+      assert.equal(emptySha256.snapshot.indexTreeObjectId,
+        execFileSync('git', ['-C', workspace, 'hash-object', '-t', 'tree', '--stdin'],
+          { input: '' }).toString('utf8').trim());
     } finally { held.close(); await rm(parent, { recursive: true, force: true }); }
   });
