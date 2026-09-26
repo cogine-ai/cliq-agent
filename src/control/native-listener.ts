@@ -166,6 +166,13 @@ export class NativeControlListener {
 
   static async start(stateRoot: string, expected: NativeControlRoot, handlers: NativeControlHandlers,
                      bundle?: RuntimeBundleManifest): Promise<NativeControlListener> {
+    // Match the native sockaddr_un.sun_path bound, including its terminating NUL.
+    const maxPathBytes = process.platform === 'darwin' ? 103 : 107;
+    const socketPathBytes = Buffer.byteLength(`${stateRoot}/runtime/control-v1.sock`, 'utf8');
+    if (socketPathBytes > maxPathBytes) {
+      throw new KernelStorageError('INVALID_REQUEST',
+        `StateRoot path is too long for the Unix control socket (${socketPathBytes} > ${maxPathBytes} bytes)`);
+    }
     await verifyNativeBinary(bundle);
     for (const id of [expected.root.deviceId, expected.root.fileId,
       expected.runtime.deviceId, expected.runtime.fileId]) {

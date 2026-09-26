@@ -116,6 +116,21 @@ test('native listener refuses a root identity that differs from the held owner d
   }
 });
 
+test('native listener rejects an oversized StateRoot socket path before bind', async () => {
+  const parent = await privateRoot();
+  const root = path.join(parent, 'x'.repeat(120));
+  try {
+    await mkdir(root, { mode: 0o700 });
+    await mkdir(path.join(root, 'runtime'), { mode: 0o700 });
+    await assert.rejects(NativeControlListener.start(root, await expected(root), {
+      onOpen() {}, onFrame() { return Buffer.from('{}'); }, onClosed() {}
+    }), /StateRoot path is too long for the Unix control socket/);
+    await assert.rejects(lstat(endpoint(root)), { code: 'ENOENT' });
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
 test('a fresh connection survives closure and reuse of the prior client slot', async () => {
   const root = await privateRoot();
   const ids: bigint[] = [];

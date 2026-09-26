@@ -147,6 +147,13 @@ fixture gates signed-package import and StateOwner restart with a disposable
 test key; installed and production-signature qualification still require the
 full I1 path.
 
+The literal `${stateRoot}/runtime/control-v1.sock` must fit the platform
+`sockaddr_un.sun_path` byte bound, including its terminator. The stable
+bootstrap must check that bound before first StateRoot genesis; the native
+listener also checks it before `bind`. An overlong configured root fails with a
+clear setup error, never a shortened alias that would weaken the signed
+endpoint identity.
+
 Next implementation order within I1: finish WP03 containment/descriptor evidence
 and WP04 UDS capture; connect the existing admission/worker-loss reducers; ship
 that composition with WP06's stable bootstrap; then execute the restart scenario.
