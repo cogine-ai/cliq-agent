@@ -8,7 +8,9 @@ import type { FrozenIgnoreRulesV1, SourceProjectionSpec } from '../kernel/types.
 import { ArtifactCatalog } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
 import { decodeFrozenIgnoreRules, decodeSourceProjection } from './decoders.js';
-import { parseFrozenIgnoreSourceBytes, validateFrozenIgnoreSourceBytes } from './frozen-ignore-sources.js';
+import {
+  MAX_FROZEN_IGNORE_SOURCE_BYTES, parseFrozenIgnoreSourceBytes, validateFrozenIgnoreSourceBytes
+} from './frozen-ignore-sources.js';
 
 const REF = 'a'.repeat(64);
 
@@ -118,6 +120,9 @@ test('fixed ignore parser preserves Git line, escape, anchor, and directory synt
   assert.equal(parseFrozenIgnoreSourceBytes(Buffer.from('foo/bar\n'), source)[0]?.anchored, true);
   assert.equal(parseFrozenIgnoreSourceBytes(Buffer.from('\uFEFF\uFEFFname'), source)[0]?.pattern,
     '\uFEFFname');
+  assert.throws(() => parseFrozenIgnoreSourceBytes(
+    Buffer.alloc(MAX_FROZEN_IGNORE_SOURCE_BYTES + 1, 0x61), source
+  ), /byte ceiling/);
 });
 
 test('retained ignore source bytes must reparse to the exact rule graph', async (t) => {

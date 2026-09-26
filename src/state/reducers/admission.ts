@@ -63,6 +63,7 @@ import {
 import type { SqliteDriver } from '../sqlite-driver.js';
 import { assertCurrentLiveWorkspaceIdentity, recaptureLiveWorkspaceIdentity } from '../workspace-identity.js';
 import { validateWorkspaceEntryBlobs } from '../workspace-entry-blobs.js';
+import { assertLiveFrozenIgnoreSources } from '../workspace-source-ignore.js';
 
 export type AdmitRunInput = {
   principalId: string;
@@ -314,6 +315,8 @@ export async function admitRun(
   const indexSnapshot = sourceManifest.git && repositoryIdentity
     ? await validateGitSourceIndex(artifacts, sourceManifest.git, repositoryIdentity)
     : undefined;
+  assertLiveFrozenIgnoreSources(owner.filesystem, workspacePath,
+    workspaceIdentity.rootIdentity, repositoryIdentity, frozenIgnore, sourceEntries);
 
   const verifierSpec = decodeVerifierSpec(await artifacts.readCanonical(input.verifierSpecRef));
   const requiredVerifiers = verifierSpec.verifiers.filter((entry) => entry.gate === 'required');
@@ -558,6 +561,8 @@ export async function admitRun(
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch);
     if (fenceOutcome !== 'healthy') return;
     assertCurrentLiveWorkspaceIdentity(workspaceIdentity, workspacePath, owner.filesystem);
+    assertLiveFrozenIgnoreSources(owner.filesystem, workspacePath,
+      workspaceIdentity.rootIdentity, repositoryIdentity, frozenIgnore, sourceEntries);
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
 
     connection

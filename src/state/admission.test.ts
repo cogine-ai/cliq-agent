@@ -636,11 +636,12 @@ test('session.create rejects a symlinked workspace root', async () => {
   }
 });
 
-test('Git workspaces bind their repository and canonical index through admission and recovery', async () => {
+test('Git workspaces bind their repository and canonical index through admission and recovery', async (t) => {
   const stateRoot = await makePrivateDir('.cliq-m1-git-');
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   await mkdir(path.join(workspace, '.git'), { mode: 0o700 });
-  await writeFile(path.join(workspace, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n', {
+  await writeFile(path.join(workspace, '.git', 'config'),
+    '[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n', {
     mode: 0o600
   });
   const store = await openStateStore(stateRoot);
@@ -704,6 +705,45 @@ test('Git workspaces bind their repository and canonical index through admission
       ...source,
       baseWorkspaceManifestRef: wrongSourceRef
     }), /Git index tree does not match/);
+
+    const attempt = (label: string) => store.admitRun({
+      principalId,
+      requestId: uuidv7(),
+      admissionKey: admissionKey(label),
+      sessionId: created.session.id,
+      expectedContextRevision: 1,
+      workspacePath: workspace,
+      objective: 'inspect the empty Git workspace',
+      allowUnverified: true,
+      ...channel,
+      ...source
+    });
+    const infoPath = path.join(workspace, '.git', 'info');
+    await mkdir(infoPath);
+    await writeFile(path.join(infoPath, 'exclude'), '*.secret\n', { mode: 0o600 });
+    await assert.rejects(attempt('run-git-undeclared-exclude'),
+      /live frozen ignore source differs from its retained bytes: \.git\/info\/exclude/);
+    await rm(infoPath, { recursive: true });
+    await writeFile(path.join(workspace, '.gitignore'), '*.log\n', { mode: 0o600 });
+    await assert.rejects(attempt('run-git-undeclared-ignore'),
+      /live frozen ignore source differs from its retained bytes: \.gitignore/);
+    await rm(path.join(workspace, '.gitignore'));
+
+    const publish = store.artifacts.publishCanonical.bind(store.artifacts);
+    const injected = t.mock.method(store.artifacts, 'publishCanonical', async (value: unknown, kind: string) => {
+      const artifact = await publish(value, kind);
+      if (kind === 'cliq-run-spec-v1') {
+        await writeFile(path.join(workspace, '.gitignore'), 'appeared\n', { mode: 0o600 });
+      }
+      return artifact;
+    });
+    try {
+      await assert.rejects(attempt('run-git-ignore-before-commit'),
+        /live frozen ignore source differs from its retained bytes: \.gitignore/);
+    } finally {
+      injected.mock.restore();
+      await rm(path.join(workspace, '.gitignore'));
+    }
   } finally {
     await store.close();
     await rm(stateRoot, { recursive: true, force: true });

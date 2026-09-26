@@ -20,6 +20,7 @@ test('held StateOwner reads only the literal stable Git info exclude source',
     execFileSync('git', ['init', '-q', workspace]);
     const infoPath = path.join(workspace, '.git', 'info');
     const excludePath = path.join(infoPath, 'exclude');
+    await chmod(excludePath, 0o644);
     const held = (await loadNativeStateOwner()).acquireLock(stateRoot, true);
     try {
       const observed = held.inspectWorkspaceIdentity(workspace);
@@ -105,6 +106,8 @@ test('held StateOwner reads only the literal stable Git info exclude source',
       assert.throws(() => held.readWorkspaceGitInfoExclude(workspace, root, git), /unsafe or changed/);
       await rm(excludePath);
       await writeFile(excludePath, '*.secret\n');
+      await chmod(excludePath, 0o664);
+      assert.throws(() => held.readWorkspaceGitInfoExclude(workspace, root, git), /unsafe or changed/);
       await chmod(excludePath, 0o666);
       assert.throws(() => held.readWorkspaceGitInfoExclude(workspace, root, git), /unsafe or changed/);
       await chmod(excludePath, 0o644);

@@ -7,6 +7,8 @@ import { KernelStorageError } from './errors.js';
 
 type IgnoreSource = FrozenIgnoreRulesV1['sources'][number];
 
+export const MAX_FROZEN_IGNORE_SOURCE_BYTES = 4 * 1024 * 1024;
+
 /** Git 2.45's trim_trailing_spaces treats a backslash and its next byte as
  * one literal unit. Only unescaped ASCII spaces at the end are removed. */
 function trimTrailingSpaces(line: string): string {
@@ -34,6 +36,9 @@ export function parseFrozenIgnoreSourceBytes(
   source: IgnoreSource,
   firstOrder = 0
 ): FrozenIgnoreRuleV1[] {
+  if (bytes.byteLength > MAX_FROZEN_IGNORE_SOURCE_BYTES) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore source exceeds the byte ceiling');
+  }
   if (bytes.includes(0)) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore source contains NUL');
   }
