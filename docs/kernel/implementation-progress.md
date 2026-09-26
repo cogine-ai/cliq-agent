@@ -302,9 +302,15 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   recompute its tree object id. Tests compare canonical bytes and tree ids with
   independently produced Git indexes in both object formats, reject a bad
   tree before Run admission, and read a valid Git Run recovery closure. The
-  trusted descriptor-held parser for source index v2/v3/v4, referenced Git
-  object existence and pack closure, and private Git generation are still
-  required for production Git execution.
+  descriptor-held source-index acquisition, referenced Git object existence
+  and pack closure, and private Git generation are still required for
+  production Git execution.
+- A pure source-index parser now checks the full-file v2/v3/v4 checksum,
+  stage/mode/extended flags, canonical paths, v4 prefix compression and
+  extension framing before emitting the exact zero-stat v2
+  index and `GitIndexSnapshotV1`. Tests compare real Git v4 bytes and known
+  SHA-1/SHA-256 images. Descriptor-held `.git/index` capture, referenced object
+  existence, pack closure and atomic Run integration remain open.
 - FrozenIgnoreRules and SourceProjection now reject rehashed extension fields,
   malformed root-relative selectors, duplicate selectors, widened result
   ceilings, non-Git ignore sources, unordered Git ignore sources/rules, and

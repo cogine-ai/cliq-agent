@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { normalizeCanonicalText } from '../kernel/canonical.js';
-import { assertArtifactRef, digestOmitting } from '../kernel/identity.js';
+import { assertArtifactRef, digestOmitting, sha256Bytes } from '../kernel/identity.js';
 import type { GitIndexSnapshotV1, RepositoryIdentityV1, SourceManifest } from '../kernel/types.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { KernelStorageError } from './errors.js';
@@ -116,6 +116,129 @@ export function encodeCanonicalGitIndex(snapshot: GitIndexSnapshotV1): Buffer {
   });
   const content = Buffer.concat([header, ...records]);
   return Buffer.concat([content, createHash(hashAlgorithm).update(content).digest()]);
+}
+
+export type ParsedSourceGitIndex = Readonly<{
+  snapshot: GitIndexSnapshotV1;
+  canonicalBytes: Buffer;
+  sourceVersion: 2 | 3 | 4;
+}>;
+
+/** Parse a complete held source index without asking Git to interpret source
+ * config, filters, extensions or the working tree. Object existence and pack
+ * closure are separate admission gates. */
+export function parseSourceGitIndex(
+  source: Uint8Array,
+  repositoryIdentityDigest: string,
+  objectFormat: 'sha1' | 'sha256'
+): ParsedSourceGitIndex {
+  requireRef(repositoryIdentityDigest, 'source Git index repository identity digest');
+  if (objectFormat !== 'sha1' && objectFormat !== 'sha256') mismatch('source Git index object format is unsupported');
+  const raw = Buffer.from(source);
+  const objectIdBytes = objectFormat === 'sha1' ? 20 : 32;
+  const bodyEnd = raw.byteLength - objectIdBytes;
+  if (bodyEnd < 12 || raw.readUInt32BE(0) !== 0x44495243) mismatch('source Git index header is invalid');
+  const version = raw.readUInt32BE(4);
+  if (version !== 2 && version !== 3 && version !== 4) mismatch('source Git index version is unsupported');
+  const declaredEntries = raw.readUInt32BE(8);
+  const minimumEntryBytes = 40 + objectIdBytes + 2 + 1;
+  if (declaredEntries > Math.floor((bodyEnd - 12) / minimumEntryBytes) ||
+      !createHash(objectFormat).update(raw.subarray(0, bodyEnd)).digest()
+        .equals(raw.subarray(bodyEnd))) {
+    mismatch('source Git index entry count or checksum is invalid');
+  }
+  const entries: GitIndexSnapshotV1['entries'] = [];
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let offset = 12;
+  let priorPath = Buffer.alloc(0);
+  for (let index = 0; index < declaredEntries; index += 1) {
+    const entryStart = offset;
+    const fixedEnd = offset + 40 + objectIdBytes + 2;
+    if (fixedEnd > bodyEnd) mismatch(`source Git index entry ${index} is truncated`);
+    const mode = raw.readUInt32BE(offset + 24);
+    if (mode !== 33188 && mode !== 33261 && mode !== 40960) {
+      mismatch(`source Git index entry ${index} has an unsupported mode`);
+    }
+    const oid = raw.subarray(offset + 40, offset + 40 + objectIdBytes);
+    if (oid.every((byte) => byte === 0)) mismatch(`source Git index entry ${index} has an empty object id`);
+    const flags = raw.readUInt16BE(offset + 40 + objectIdBytes);
+    if ((flags & 0x3000) !== 0 || (version === 2 && (flags & 0x4000) !== 0)) {
+      mismatch(`source Git index entry ${index} has an unsupported stage or v2 flag`);
+    }
+    offset = fixedEnd;
+    if ((flags & 0x4000) !== 0) {
+      if (offset + 2 > bodyEnd || raw.readUInt16BE(offset) !== 0) {
+        mismatch(`source Git index entry ${index} has unsupported extended flags`);
+      }
+      offset += 2;
+    }
+    let prefix = Buffer.alloc(0);
+    if (version === 4) {
+      if (offset >= bodyEnd) mismatch(`source Git index entry ${index} has invalid path compression`);
+      let byte = raw[offset++]!;
+      let removed = byte & 0x7f;
+      while ((byte & 0x80) !== 0) {
+        if (offset >= bodyEnd || removed > priorPath.byteLength) {
+          mismatch(`source Git index entry ${index} has invalid path compression`);
+        }
+        byte = raw[offset++]!;
+        removed = (removed + 1) * 128 + (byte & 0x7f);
+      }
+      if (removed > priorPath.byteLength) {
+        mismatch(`source Git index entry ${index} has invalid path compression`);
+      }
+      prefix = priorPath.subarray(0, priorPath.byteLength - removed);
+    }
+    const terminator = raw.indexOf(0, offset);
+    if (terminator < offset || terminator >= bodyEnd || terminator - offset > 4096) {
+      mismatch(`source Git index entry ${index} has an unterminated or oversized path`);
+    }
+    const pathBytes = Buffer.concat([prefix, raw.subarray(offset, terminator)]);
+    let entryPath: string;
+    try { entryPath = requireIndexPath(decoder.decode(pathBytes)); }
+    catch { mismatch(`source Git index entry ${index} has a noncanonical path`); }
+    if (Buffer.compare(priorPath, pathBytes) >= 0 ||
+        (flags & 0x0fff) !== Math.min(pathBytes.byteLength, 0x0fff)) {
+      mismatch(`source Git index entry ${index} is unsorted or has a wrong path length`);
+    }
+    priorPath = pathBytes;
+    offset = terminator + 1;
+    if (version !== 4) {
+      const paddedEnd = entryStart + Math.ceil((offset - entryStart) / 8) * 8;
+      if (paddedEnd > bodyEnd || !raw.subarray(offset, paddedEnd).every((byte) => byte === 0)) {
+        mismatch(`source Git index entry ${index} has invalid padding`);
+      }
+      offset = paddedEnd;
+    }
+    entries.push({ canonicalRootRelativePath: entryPath, stage: 0,
+      mode, objectId: oid.toString('hex'), assumeValid: (flags & 0x8000) !== 0,
+      skipWorktree: false });
+  }
+  const extensions = new Set<string>();
+  while (offset < bodyEnd) {
+    if (bodyEnd - offset < 8) mismatch('source Git index extension header is truncated');
+    const signature = raw.toString('latin1', offset, offset + 4);
+    const size = raw.readUInt32BE(offset + 4);
+    if (raw[offset]! < 0x41 || raw[offset]! > 0x5a || extensions.has(signature) ||
+        size > bodyEnd - offset - 8) {
+      mismatch(`source Git index has unsupported or invalid extension ${signature}`);
+    }
+    extensions.add(signature);
+    offset += 8 + size;
+  }
+  const snapshot: GitIndexSnapshotV1 = {
+    schemaVersion: 1, format: 'cliq-git-index-snapshot-v1',
+    repositoryIdentityDigest, objectFormat, canonicalIndexVersion: 2, entries,
+    canonicalIndexBytesRef: '', canonicalIndexBytesDigest: '', canonicalIndexByteCount: 0,
+    indexTreeObjectId: '', snapshotDigest: ''
+  };
+  const canonicalBytes = encodeCanonicalGitIndex(snapshot);
+  snapshot.canonicalIndexBytesRef = sha256Bytes(canonicalBytes);
+  snapshot.canonicalIndexBytesDigest = snapshot.canonicalIndexBytesRef;
+  snapshot.canonicalIndexByteCount = canonicalBytes.byteLength;
+  snapshot.indexTreeObjectId = gitIndexTreeObjectId(snapshot);
+  snapshot.snapshotDigest = digestOmitting(snapshot, 'snapshotDigest');
+  return { snapshot: decodeGitIndexSnapshot(snapshot), canonicalBytes, sourceVersion: version };
 }
 
 export function gitIndexTreeObjectId(snapshot: GitIndexSnapshotV1): string {

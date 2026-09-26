@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 
@@ -10,6 +12,7 @@ import {
   decodeGitIndexSnapshot,
   encodeCanonicalGitIndex,
   gitIndexTreeObjectId,
+  parseSourceGitIndex,
   readVerifiedGitIndexSnapshot
 } from './git-index.js';
 import { openStateStore } from './store.js';
@@ -26,6 +29,10 @@ const GIT_SHA256_V2_SINGLE_FILE_HEX =
   '000000000000000000000000eb337bcee2061c5313c9a1392116b6c76039e9e30d71467ae' +
   '359b36277e17dc7000866696c652e747874000000000000ccd436c08461e3b367f3dbb3' +
   'dc4b2dfb06ffde6ee4d7fe417d1718d74a951d3a';
+
+function indexWithChecksum(content: Buffer, format: 'sha1' | 'sha256'): Buffer {
+  return Buffer.concat([content, createHash(format).update(content).digest()]);
+}
 
 function oneFileSnapshot(): GitIndexSnapshotV1 {
   const bytes = Buffer.from(GIT_V2_SINGLE_FILE_HEX, 'hex');
@@ -90,6 +97,95 @@ test('SHA-256 Git index bytes and tree id match Git object-format sha256', () =>
   assert.deepEqual(decodeGitIndexSnapshot(sha256), sha256);
   assert.equal(encodeCanonicalGitIndex(sha256).toString('hex'), GIT_SHA256_V2_SINGLE_FILE_HEX);
   assert.equal(gitIndexTreeObjectId(sha256), sha256.indexTreeObjectId);
+});
+
+test('source Git index v2/v3 and SHA-256 bytes normalize to the exact retained v2 image', () => {
+  const source = Buffer.from(GIT_V2_SINGLE_FILE_HEX, 'hex');
+  const parsed = parseSourceGitIndex(source, 'a'.repeat(64), 'sha1');
+  assert.equal(parsed.sourceVersion, 2);
+  assert.deepEqual(parsed.canonicalBytes, source);
+  assert.equal(parsed.snapshot.indexTreeObjectId, GIT_SINGLE_FILE_TREE_ID);
+  assert.deepEqual(parsed.snapshot.entries, oneFileSnapshot().entries);
+
+  const version3 = Buffer.from(source.subarray(0, -20));
+  version3.writeUInt32BE(3, 4);
+  const parsedV3 = parseSourceGitIndex(indexWithChecksum(version3, 'sha1'), 'a'.repeat(64), 'sha1');
+  assert.equal(parsedV3.sourceVersion, 3);
+  assert.deepEqual(parsedV3.canonicalBytes, source);
+
+  const extendedHeader = Buffer.from(version3.subarray(0, 12));
+  const fixedEntry = Buffer.from(source.subarray(12, 74));
+  fixedEntry.writeUInt16BE(0x4000 | 8, 60);
+  const extendedEntry = Buffer.concat([
+    fixedEntry, Buffer.alloc(2), Buffer.from('file.txt\0'), Buffer.alloc(7)
+  ]);
+  const extendedV3 = indexWithChecksum(Buffer.concat([extendedHeader, extendedEntry]), 'sha1');
+  assert.deepEqual(parseSourceGitIndex(extendedV3, 'a'.repeat(64), 'sha1').canonicalBytes, source);
+
+  const sha256Source = Buffer.from(GIT_SHA256_V2_SINGLE_FILE_HEX, 'hex');
+  const parsedSha256 = parseSourceGitIndex(sha256Source, 'a'.repeat(64), 'sha256');
+  assert.equal(parsedSha256.snapshot.objectFormat, 'sha256');
+  assert.deepEqual(parsedSha256.canonicalBytes, sha256Source);
+
+  const empty = Buffer.alloc(12);
+  empty.write('DIRC', 0, 'ascii');
+  empty.writeUInt32BE(2, 4);
+  const parsedEmpty = parseSourceGitIndex(indexWithChecksum(empty, 'sha1'), 'a'.repeat(64), 'sha1');
+  assert.deepEqual(parsedEmpty.snapshot.entries, []);
+  assert.equal(parsedEmpty.snapshot.indexTreeObjectId, '4b825dc642cb6eb9a060e54bf8d69288fbee4904');
+});
+
+test('source Git index rejects bad checksum, stage, gitlink, path, object and mandatory extension', () => {
+  const source = Buffer.from(GIT_V2_SINGLE_FILE_HEX, 'hex');
+  const mutate = (change: (content: Buffer) => void): Buffer => {
+    const content = Buffer.from(source.subarray(0, -20));
+    change(content);
+    return indexWithChecksum(content, 'sha1');
+  };
+  const corrupt = Buffer.from(source);
+  corrupt[corrupt.length - 1] ^= 1;
+  assert.throws(() => parseSourceGitIndex(corrupt, 'a'.repeat(64), 'sha1'), /checksum/);
+  assert.throws(() => parseSourceGitIndex(mutate((content) => { content[0] |= 0x80; }),
+    'a'.repeat(64), 'sha1'), /header/);
+  assert.throws(() => parseSourceGitIndex(mutate((content) => { content[72] |= 0x10; }),
+    'a'.repeat(64), 'sha1'), /stage/);
+  assert.throws(() => parseSourceGitIndex(mutate((content) => { content.writeUInt32BE(0o160000, 36); }),
+    'a'.repeat(64), 'sha1'), /mode/);
+  assert.throws(() => parseSourceGitIndex(mutate((content) => { content.fill(0, 52, 72); }),
+    'a'.repeat(64), 'sha1'), /empty object id/);
+  assert.throws(() => parseSourceGitIndex(mutate((content) => { content[74] = 0xff; }),
+    'a'.repeat(64), 'sha1'), /noncanonical path/);
+  assert.throws(() => parseSourceGitIndex(mutate((content) => { content[73] = 7; }),
+    'a'.repeat(64), 'sha1'), /wrong path length/);
+  const body = source.subarray(0, -20);
+  const extension = Buffer.alloc(8);
+  extension.write('link', 0, 'ascii');
+  assert.throws(() => parseSourceGitIndex(indexWithChecksum(Buffer.concat([body, extension]), 'sha1'),
+    'a'.repeat(64), 'sha1'), /extension/);
+  extension.write('TREE', 0, 'ascii');
+  assert.equal(parseSourceGitIndex(indexWithChecksum(Buffer.concat([body, extension]), 'sha1'),
+    'a'.repeat(64), 'sha1').snapshot.entries.length, 1);
+});
+
+test('source Git index v4 path compression matches a Git-produced index', async () => {
+  const root = await mkdtemp(path.join(process.cwd(), '.cliq-git-v4-'));
+  try {
+    execFileSync('git', ['init', '-q', root]);
+    await writeFile(path.join(root, 'alpha.txt'), 'alpha');
+    await writeFile(path.join(root, 'alphabet.txt'), 'alphabet');
+    const longA = `${'a'.repeat(180)}.txt`;
+    const longB = `${'b'.repeat(180)}.txt`;
+    await writeFile(path.join(root, longA), 'a');
+    await writeFile(path.join(root, longB), 'b');
+    execFileSync('git', ['-C', root, 'add', '--', longA, longB, 'alpha.txt', 'alphabet.txt']);
+    execFileSync('git', ['-C', root, 'update-index', '--index-version', '4']);
+    const source = await readFile(path.join(root, '.git', 'index'));
+    const parsed = parseSourceGitIndex(source, 'a'.repeat(64), 'sha1');
+    assert.equal(parsed.sourceVersion, 4);
+    assert.deepEqual(parsed.snapshot.entries.map((entry) => entry.canonicalRootRelativePath),
+      [longA, 'alpha.txt', 'alphabet.txt', longB]);
+    assert.equal(parsed.canonicalBytes.readUInt32BE(4), 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('Git index snapshot rejects rehashed unsupported entry semantics', () => {
