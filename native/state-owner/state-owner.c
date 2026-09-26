@@ -47,6 +47,7 @@ static napi_value move_generation(napi_env env, napi_callback_info info);
 static napi_value inspect_workspace_identity(napi_env env, napi_callback_info info);
 static napi_value open_workspace_source_file(napi_env env, napi_callback_info info);
 static napi_value list_workspace_source_directory(napi_env env, napi_callback_info info);
+static napi_value read_workspace_source_symlink(napi_env env, napi_callback_info info);
 static int literal_child_present(int parent, const char *literal);
 
 /* Reopening a path is only a locator check. Authority stays on these held
@@ -223,6 +224,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"inspectWorkspaceIdentity", NULL, inspect_workspace_identity, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkspaceSourceFile", NULL, open_workspace_source_file, NULL, NULL, NULL, napi_default, NULL},
         {"listWorkspaceSourceDirectory", NULL, list_workspace_source_directory, NULL, NULL, NULL, napi_default, NULL},
+        {"readWorkspaceSourceSymlink", NULL, read_workspace_source_symlink, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -870,6 +872,84 @@ done:
     if (scan_fd >= 0) close(scan_fd);
     if (reopened >= 0) close(reopened);
     if (directory_fd >= 0) close(directory_fd);
+    if (root_fd >= 0) close(root_fd);
+    free(workspace_path);
+    free(relative_path);
+    return error ? native_error(env, error) : result;
+}
+
+static napi_value read_workspace_source_symlink(napi_env env, napi_callback_info info) {
+    state_lock *lock = unwrap_lock(env, info);
+    if (!lock) return NULL;
+    napi_value argv[5], result = NULL, target_value, mode;
+    size_t argc = 5, workspace_length, relative_length, roundtrip_length;
+    unsigned long long device, inode;
+    uint32_t owner;
+    int root_fd = -1, parent_fd = -1, reopened = -1;
+    char *workspace_path = NULL, *relative_path = NULL;
+    char target[PATH_MAX + 1], roundtrip[PATH_MAX + 1];
+    struct stat root, parent, link_before, link_after, named;
+    const char *error = "workspace source symlink input is invalid";
+    if (!lock_is_held(lock) || napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 5 ||
+        napi_get_value_string_utf8(env, argv[0], NULL, 0, &workspace_length) != napi_ok ||
+        workspace_length < 2 || workspace_length >= PATH_MAX ||
+        napi_get_value_string_utf8(env, argv[1], NULL, 0, &relative_length) != napi_ok ||
+        relative_length == 0 || relative_length >= PATH_MAX ||
+        !read_unsigned_id(env, argv[2], &device) || !read_unsigned_id(env, argv[3], &inode) ||
+        napi_get_value_uint32(env, argv[4], &owner) != napi_ok || owner != geteuid()) goto done;
+    workspace_path = malloc(workspace_length + 1);
+    relative_path = malloc(relative_length + 1);
+    if (!workspace_path || !relative_path ||
+        napi_get_value_string_utf8(env, argv[0], workspace_path, workspace_length + 1, &workspace_length) != napi_ok ||
+        napi_get_value_string_utf8(env, argv[1], relative_path, relative_length + 1, &relative_length) != napi_ok ||
+        strlen(workspace_path) != workspace_length || strlen(relative_path) != relative_length ||
+        !valid_source_relative_path(relative_path)) goto done;
+    error = "workspace source symlink is unsafe or changed";
+    root_fd = open_literal_root(workspace_path);
+    if (root_fd < 0 || fstat(root_fd, &root) < 0) goto done;
+#ifdef __APPLE__
+    const unsigned long long root_device = (uint32_t)root.st_dev;
+#else
+    const unsigned long long root_device = root.st_dev;
+#endif
+    if (!S_ISDIR(root.st_mode) || root.st_uid != owner || root_device != device ||
+        (unsigned long long)root.st_ino != inode) goto done;
+    parent_fd = open_source_parent(root_fd, relative_path, &root, &parent);
+    if (parent_fd < 0) goto done;
+    const char *leaf = strrchr(relative_path, '/');
+    leaf = leaf ? leaf + 1 : relative_path;
+    if (literal_child_present(parent_fd, leaf) != 1 ||
+        fstatat(parent_fd, leaf, &link_before, AT_SYMLINK_NOFOLLOW) < 0 ||
+        !S_ISLNK(link_before.st_mode) || link_before.st_uid != owner ||
+        link_before.st_dev != root.st_dev || link_before.st_nlink != 1) goto done;
+    ssize_t count = readlinkat(parent_fd, leaf, target, PATH_MAX);
+    if (count <= 0 || count >= PATH_MAX) goto done;
+    target[count] = '\0';
+    if (strlen(target) != (size_t)count ||
+        napi_create_string_utf8(env, target, (size_t)count, &target_value) != napi_ok ||
+        napi_get_value_string_utf8(env, target_value, NULL, 0, &roundtrip_length) != napi_ok ||
+        roundtrip_length != (size_t)count ||
+        napi_get_value_string_utf8(env, target_value, roundtrip, sizeof(roundtrip), &roundtrip_length) != napi_ok ||
+        roundtrip_length != (size_t)count || memcmp(target, roundtrip, (size_t)count) != 0 ||
+        fstatat(parent_fd, leaf, &link_after, AT_SYMLINK_NOFOLLOW) < 0 ||
+        !same_file_observation(&link_before, &link_after) ||
+        fstat(parent_fd, &named) < 0 || !same_file_observation(&parent, &named)) goto done;
+    reopened = open_source_parent(root_fd, relative_path, &root, &named);
+    if (reopened < 0 || !same_file_observation(&parent, &named)) goto done;
+    close(reopened); reopened = -1;
+    reopened = open_literal_root(workspace_path);
+    if (reopened < 0 || fstat(reopened, &named) < 0 ||
+        !same_file_observation(&root, &named) || !lock_is_held(lock) ||
+        napi_create_object(env, &result) != napi_ok ||
+        napi_set_named_property(env, result, "target", target_value) != napi_ok ||
+        napi_create_uint32(env, link_before.st_mode & 07777, &mode) != napi_ok ||
+        napi_set_named_property(env, result, "mode", mode) != napi_ok ||
+        !identity_member(env, result, "identity", &link_before) ||
+        napi_object_freeze(env, result) != napi_ok) goto done;
+    error = NULL;
+done:
+    if (reopened >= 0) close(reopened);
+    if (parent_fd >= 0) close(parent_fd);
     if (root_fd >= 0) close(root_fd);
     free(workspace_path);
     free(relative_path);

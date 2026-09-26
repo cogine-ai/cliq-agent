@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, sha256Bytes } from '../kernel/identity.js';
-import type { WorkspaceEntryManifest } from '../kernel/types.js';
+import type { WorkspaceEntry, WorkspaceEntryManifest } from '../kernel/types.js';
 import { decodeWorkspaceEntries } from './decoders.js';
 
 function entriesManifest(): WorkspaceEntryManifest {
@@ -22,6 +22,16 @@ function entriesManifest(): WorkspaceEntryManifest {
     schemaVersion: 1, format: 'cliq-workspace-entries-v1', entries: entries.entries
   });
   return entries;
+}
+
+function manifestWith(entries: WorkspaceEntry[]): WorkspaceEntryManifest {
+  return {
+    schemaVersion: 1, format: 'cliq-workspace-entries-v1', entries,
+    entryCount: entries.length,
+    byteCount: entries.reduce((total, entry) => total +
+      (entry.kind === 'file' ? entry.size : entry.kind === 'symlink' ? Buffer.byteLength(entry.target) : 0), 0),
+    treeDigest: canonicalSha256({ schemaVersion: 1, format: 'cliq-workspace-entries-v1', entries })
+  };
 }
 
 test('workspace entry digest covers the RFC tree projection while counts are checked independently', () => {
@@ -49,14 +59,41 @@ test('workspace entries reject traversal, Git metadata, noncanonical modes and e
     entries: [{ ...valid.entries[0], path: '.git/config' }, valid.entries[1]]
   }), /invalid path/);
   assert.throws(() => decodeWorkspaceEntries({ ...valid,
+    entries: [{ ...valid.entries[0], path: '.GiT/config' }, valid.entries[1]]
+  }), /invalid path/);
+  assert.throws(() => decodeWorkspaceEntries({ ...valid,
     entries: [{ ...valid.entries[0], mode: 0o600 }, valid.entries[1]]
   }), /noncanonical mode/);
   assert.throws(() => decodeWorkspaceEntries({ ...valid,
     entries: [valid.entries[0], { ...valid.entries[1], target: '../outside' }]
   }), /leaves the admitted root/);
   assert.throws(() => decodeWorkspaceEntries({ ...valid,
+    entries: [valid.entries[0], { ...valid.entries[1], target: '.GiT/../a' }]
+  }), /leaves the admitted root/);
+  assert.throws(() => decodeWorkspaceEntries({ ...valid,
     entries: [valid.entries[0], { ...valid.entries[1], targetDigest: '0'.repeat(64) }]
   }), /target digest does not rehash/);
+});
+
+test('workspace symlink chains cannot escape through another included link or cycle', () => {
+  const directory = (entryPath: string): WorkspaceEntry =>
+    ({ path: entryPath, kind: 'directory', mode: 0o755 });
+  const link = (entryPath: string, target: string): WorkspaceEntry =>
+    ({ path: entryPath, kind: 'symlink', mode: 0o777, target,
+      targetDigest: sha256Bytes(Buffer.from(target)) });
+  const escape = manifestWith([
+    directory('dir'), link('dir/alias', '../sub'), link('dir/link', 'alias/../../outside'), directory('sub')
+  ]);
+  assert.throws(() => decodeWorkspaceEntries(escape), /escapes through a link chain/);
+
+  const cycle = manifestWith([link('a', 'b'), link('b', 'a')]);
+  assert.throws(() => decodeWorkspaceEntries(cycle), /cyclic or excessive link chain/);
+
+  const safe = manifestWith([
+    directory('dir'), link('dir/alias', '../sub/deep'), link('dir/link', 'alias/../../inside'),
+    directory('sub'), directory('sub/deep')
+  ]);
+  assert.deepEqual(decodeWorkspaceEntries(safe), safe);
 });
 
 test('workspace entry trees require each preceding parent to be a directory', () => {

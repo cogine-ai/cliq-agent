@@ -121,7 +121,7 @@ function requireRootRelativePath(value: unknown, label: string): string {
   const components = text.split('/');
   if (normalized !== text || text.includes('\\') || Buffer.byteLength(text, 'utf8') > 4096 ||
       components.some((component) => component === '' || component === '.' || component === '..' ||
-        component === '.git' || Buffer.byteLength(component, 'utf8') > 255)) {
+        component.toLowerCase() === '.git' || Buffer.byteLength(component, 'utf8') > 255)) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} is not a canonical in-root path`);
   }
   return text;
@@ -925,6 +925,7 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
   let priorPath: string | undefined;
   let measuredBytes = 0;
   const directories = new Set<string>();
+  const symlinks = new Map<string, string>();
   for (const [index, candidate] of value.entries.entries()) {
     if (!isRecord(candidate)) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} must be an object`);
@@ -938,7 +939,7 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
     }
     if (normalizedPath !== entryPath || entryPath.startsWith('/') || entryPath.includes('\\') ||
         entryPath.split('/').some((component) => component === '' || component === '.' ||
-          component === '..' || component === '.git')) {
+          component === '..' || component.toLowerCase() === '.git')) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} has an invalid path`);
     }
     if (priorPath !== undefined && Buffer.compare(Buffer.from(priorPath), Buffer.from(entryPath)) >= 0) {
@@ -983,13 +984,16 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
       }
       const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(entryPath), target));
       if (normalizedTarget !== target || target.startsWith('/') || target.includes('\\') ||
-          resolved === '..' || resolved.startsWith('../') || resolved.split('/').includes('.git')) {
+          target.split('/').some((component) => component.toLowerCase() === '.git') ||
+          resolved === '..' || resolved.startsWith('../') ||
+          resolved.split('/').some((component) => component.toLowerCase() === '.git')) {
         throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace symlink ${entryPath} leaves the admitted root`);
       }
       if (requireDigest(candidate.targetDigest, `WorkspaceEntryManifest.entries[${index}].targetDigest`) !==
           sha256Bytes(Buffer.from(target, 'utf8'))) {
         throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace symlink ${entryPath} target digest does not rehash`);
       }
+      symlinks.set(entryPath, target);
       measuredBytes += Buffer.byteLength(target, 'utf8');
     } else {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} has an invalid kind`);
@@ -1000,6 +1004,35 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
   }
   if (measuredBytes !== byteCount) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry byte count does not match the array');
+  }
+  // Lexical normalization alone misses an escape through another link before
+  // "..". Resolve represented links in filesystem component order; the 40-link
+  // bound also rejects cycles and chains the supported hosts cannot follow.
+  for (const [entryPath, target] of symlinks) {
+    const parent = path.posix.dirname(entryPath);
+    const components = parent === '.' ? [] : parent.split('/');
+    const pending = target.split('/');
+    let followed = 0;
+    for (let cursor = 0; cursor < pending.length; cursor += 1) {
+      const component = pending[cursor];
+      if (component === '' || component === '.') continue;
+      if (component === '..') {
+        if (components.length === 0) {
+          throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace symlink ${entryPath} escapes through a link chain`);
+        }
+        components.pop();
+        continue;
+      }
+      components.push(component);
+      const nextTarget = symlinks.get(components.join('/'));
+      if (nextTarget !== undefined) {
+        if (++followed > 40) {
+          throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace symlink ${entryPath} has a cyclic or excessive link chain`);
+        }
+        components.pop();
+        pending.splice(cursor + 1, 0, ...nextTarget.split('/'));
+      }
+    }
   }
   const entries = value as WorkspaceEntryManifest;
   if (canonicalSha256({ schemaVersion: 1, format: 'cliq-workspace-entries-v1', entries: entries.entries }) !== entries.treeDigest) {

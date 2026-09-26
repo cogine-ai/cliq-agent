@@ -336,6 +336,15 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   directory changes during the scan; the TypeScript boundary requires NFC
   names. The caller still has to build the complete bounded tree, apply the
   frozen projection and publish every accepted byte into CAS.
+- The held helper now reads one source symlink's raw UTF-8 target from its
+  literal parent without following it, checking the link, parent, root and
+  owner lock before returning. The TypeScript boundary rejects absolute,
+  noncanonical, lexically escaping and Git-metadata targets. Entry-manifest
+  decoding also rejects represented link chains that escape or cycle. The
+  shared source-selector and Git-index path decoders reject case variants of
+  `.git` as well as raw components hidden by path normalization. These checks
+  do not yet validate links through every excluded or changing source entry;
+  complete tree capture, projection and a second descriptor walk remain open.
 
 ## Next integration order
 

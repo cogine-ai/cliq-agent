@@ -75,7 +75,7 @@ test('frozen ignore rules require a closed repository-bound source and ordered r
 
 test('source projection rejects rehashed selectors outside the root and widened ceilings', () => {
   assert.deepEqual(decodeSourceProjection(rehashProjection(() => {})), rehashProjection(() => {}));
-  for (const badPath of ['../outside', '/absolute', 'a//b', '.git/config', 'a/./b', 'e\u0301']) {
+  for (const badPath of ['../outside', '/absolute', 'a//b', '.git/config', '.GiT/config', 'a/./b', 'e\u0301']) {
     assert.throws(() => decodeSourceProjection(rehashProjection((spec) => {
       spec.explicitIncludes[0]!.path = badPath;
     })), /canonical in-root path/);

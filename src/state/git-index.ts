@@ -41,7 +41,7 @@ function requireIndexPath(value: unknown): string {
   const parts = value.split('/');
   if (normalized !== value || value.startsWith('/') || value.includes('\\') ||
       Buffer.byteLength(value, 'utf8') > 4096 ||
-      parts.some((part) => part === '' || part === '.' || part === '..' || part === '.git' ||
+      parts.some((part) => part === '' || part === '.' || part === '..' || part.toLowerCase() === '.git' ||
         Buffer.byteLength(part, 'utf8') > 255)) {
     mismatch('Git index path is not a canonical in-root path');
   }

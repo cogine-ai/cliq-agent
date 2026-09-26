@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
+import path from 'node:path';
 
 import { canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
@@ -36,6 +37,11 @@ export type WorkspaceSourceDirectoryEntry = Readonly<{
   size?: number;
   identity: DescriptorIdentity;
 }>;
+export type WorkspaceSourceSymlink = Readonly<{
+  target: string;
+  mode: number;
+  identity: DescriptorIdentity;
+}>;
 /** A physical move observation only: no containment death, tree or SQLite authority. */
 export type GenerationQuarantineMove = Readonly<{
   quarantineCanonicalRootRelativePath: string;
@@ -58,6 +64,8 @@ export type HeldStateOwnerLock = Readonly<{
     canonicalRootRelativePath: string): HeldWorkspaceSourceFile;
   listWorkspaceSourceDirectory(canonicalAbsolutePath: string, root: DescriptorIdentity,
     canonicalRootRelativePath: string): readonly WorkspaceSourceDirectoryEntry[];
+  readWorkspaceSourceSymlink(canonicalAbsolutePath: string, root: DescriptorIdentity,
+    canonicalRootRelativePath: string): WorkspaceSourceSymlink;
   /** Trusted Supervisor primitive. The caller must first fence/retire writers;
    * this neither revokes open descriptors/mounts nor commits generation state. */
   quarantineGeneration(generation: WorkspaceGenerationIdentityV1, sourceRowVersion: number): GenerationQuarantineMove;
@@ -70,11 +78,13 @@ export type NativeStateOwner = Readonly<{
 }>;
 
 type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'openWorkspaceSourceFile' |
-  'listWorkspaceSourceDirectory'> & {
+  'listWorkspaceSourceDirectory' | 'readWorkspaceSourceSymlink'> & {
   openWorkspaceSourceFile(workspacePath: string, relativePath: string,
     deviceId: string, fileId: string, ownerUid: number): HeldWorkspaceSourceFile;
   listWorkspaceSourceDirectory(workspacePath: string, relativePath: string,
     deviceId: string, fileId: string, ownerUid: number): readonly WorkspaceSourceDirectoryEntry[];
+  readWorkspaceSourceSymlink(workspacePath: string, relativePath: string,
+    deviceId: string, fileId: string, ownerUid: number): WorkspaceSourceSymlink;
   moveGeneration(runId: string, generationId: string, quarantineId: string, deviceId: string, fileId: string): DescriptorIdentity;
 };
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string };
@@ -169,6 +179,30 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
         throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace source directory changed or is unsafe: ${(error as Error).message}`);
       }
     },
+    readWorkspaceSourceSymlink(workspacePath, sourceRoot, relativePath) {
+      receiver(this);
+      sourcePath(workspacePath, relativePath, false);
+      try {
+        const link = held.readWorkspaceSourceSymlink(workspacePath, relativePath,
+          sourceRoot.deviceId, sourceRoot.fileId, sourceRoot.ownerUid);
+        if (!link.target || normalizeCanonicalText(link.target) !== link.target ||
+            link.target.startsWith('/') || link.target.includes('\\') ||
+            link.target.split('/').some((part) => part.toLowerCase() === '.git')) {
+          throw new Error('workspace source symlink target is noncanonical or absolute');
+        }
+        const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(relativePath), link.target));
+        if (resolved === '..' || resolved.startsWith('../') ||
+            resolved.split('/').some((part) => part.toLowerCase() === '.git')) {
+          throw new Error('workspace source symlink target leaves the root or reaches Git metadata');
+        }
+        return link;
+      } catch (error) {
+        try { held.assertHeld(); } catch {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock changed during source symlink reading');
+        }
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace source symlink changed or is unsafe: ${(error as Error).message}`);
+      }
+    },
     quarantineGeneration(value, sourceRowVersion) {
       receiver(this);
       held.assertHeld();
@@ -245,7 +279,8 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
         const held = binding.acquireLock(stateRoot, createLayout);
         if (typeof held.inspectWorkspaceIdentity !== 'function' ||
             typeof held.openWorkspaceSourceFile !== 'function' ||
-            typeof held.listWorkspaceSourceDirectory !== 'function') {
+            typeof held.listWorkspaceSourceDirectory !== 'function' ||
+            typeof held.readWorkspaceSourceSymlink !== 'function') {
           held.close();
           throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper lacks descriptor-held workspace source inspection');
         }

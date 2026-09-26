@@ -108,6 +108,9 @@ test('Git index snapshot rejects rehashed unsupported entry semantics', () => {
   assert.throws(() => decodeGitIndexSnapshot(rehash([
     { ...snapshot.entries[0]!, canonicalRootRelativePath: '../escape' }
   ])), /in-root path/);
+  assert.throws(() => decodeGitIndexSnapshot(rehash([
+    { ...snapshot.entries[0]!, canonicalRootRelativePath: '.GiT/config' }
+  ])), /in-root path/);
   assert.throws(() => decodeGitIndexSnapshot({ ...snapshot, extra: 'extension' }), /closed shape/);
 });
 
