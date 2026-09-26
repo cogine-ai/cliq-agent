@@ -46,6 +46,7 @@ static napi_value assert_prior_process_dead(napi_env env, napi_callback_info inf
 static napi_value move_generation(napi_env env, napi_callback_info info);
 static napi_value inspect_workspace_identity(napi_env env, napi_callback_info info);
 static napi_value open_workspace_source_file(napi_env env, napi_callback_info info);
+static napi_value list_workspace_source_directory(napi_env env, napi_callback_info info);
 static int literal_child_present(int parent, const char *literal);
 
 /* Reopening a path is only a locator check. Authority stays on these held
@@ -221,6 +222,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"moveGeneration", NULL, move_generation, NULL, NULL, NULL, napi_default, NULL},
         {"inspectWorkspaceIdentity", NULL, inspect_workspace_identity, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkspaceSourceFile", NULL, open_workspace_source_file, NULL, NULL, NULL, napi_default, NULL},
+        {"listWorkspaceSourceDirectory", NULL, list_workspace_source_directory, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -739,6 +741,139 @@ static napi_value open_workspace_source_file(napi_env env, napi_callback_info in
 done:
     if (file) finalize_source_file(env, file, NULL);
     return native_error(env, error);
+}
+
+static int open_source_directory(int root_fd, const char *relative_path, const struct stat *root,
+                                 struct stat *directory_identity) {
+    int directory = fcntl(root_fd, F_DUPFD_CLOEXEC, 0);
+    if (directory < 0) return -1;
+    const char *part = relative_path;
+    while (*part) {
+        const char *end = strchr(part, '/');
+        size_t size = end ? (size_t)(end - part) : strlen(part);
+        char component[NAME_MAX + 1];
+        memcpy(component, part, size); component[size] = '\0';
+        if (literal_child_present(directory, component) != 1) { close(directory); return -1; }
+        int next = openat(directory, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat observed;
+        if (next < 0 || fstat(next, &observed) < 0 || !S_ISDIR(observed.st_mode) ||
+            observed.st_uid != root->st_uid || observed.st_dev != root->st_dev) {
+            if (next >= 0) close(next);
+            close(directory); return -1;
+        }
+        close(directory);
+        directory = next;
+        part = end ? end + 1 : part + size;
+    }
+    if (fstat(directory, directory_identity) < 0) { close(directory); return -1; }
+    return directory;
+}
+
+/* N-API may replace malformed UTF-8. Only a byte-identical round trip can
+ * become an authoritative canonical source path component. */
+static int source_entry_name(napi_env env, const char *raw, napi_value *value) {
+    size_t size = strlen(raw), roundtrip_size;
+    char roundtrip[NAME_MAX + 1];
+    if (size == 0 || size > NAME_MAX ||
+        napi_create_string_utf8(env, raw, size, value) != napi_ok ||
+        napi_get_value_string_utf8(env, *value, NULL, 0, &roundtrip_size) != napi_ok ||
+        roundtrip_size != size ||
+        napi_get_value_string_utf8(env, *value, roundtrip, sizeof(roundtrip), &roundtrip_size) != napi_ok ||
+        roundtrip_size != size) return 0;
+    return memcmp(raw, roundtrip, size) == 0;
+}
+
+static napi_value list_workspace_source_directory(napi_env env, napi_callback_info info) {
+    state_lock *lock = unwrap_lock(env, info);
+    if (!lock) return NULL;
+    napi_value argv[5], result = NULL;
+    size_t argc = 5, workspace_length, relative_length;
+    unsigned long long device, inode;
+    uint32_t owner;
+    int root_fd = -1, directory_fd = -1, scan_fd = -1, reopened = -1;
+    DIR *stream = NULL;
+    char *workspace_path = NULL, *relative_path = NULL;
+    struct stat root, directory_before, directory_after, named;
+    const char *error = "workspace source directory input is invalid";
+    if (!lock_is_held(lock) || napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 5 ||
+        napi_get_value_string_utf8(env, argv[0], NULL, 0, &workspace_length) != napi_ok ||
+        workspace_length < 2 || workspace_length >= PATH_MAX ||
+        napi_get_value_string_utf8(env, argv[1], NULL, 0, &relative_length) != napi_ok ||
+        relative_length >= PATH_MAX || !read_unsigned_id(env, argv[2], &device) ||
+        !read_unsigned_id(env, argv[3], &inode) ||
+        napi_get_value_uint32(env, argv[4], &owner) != napi_ok || owner != geteuid()) goto done;
+    workspace_path = malloc(workspace_length + 1);
+    relative_path = malloc(relative_length + 1);
+    if (!workspace_path || !relative_path ||
+        napi_get_value_string_utf8(env, argv[0], workspace_path, workspace_length + 1, &workspace_length) != napi_ok ||
+        napi_get_value_string_utf8(env, argv[1], relative_path, relative_length + 1, &relative_length) != napi_ok ||
+        strlen(workspace_path) != workspace_length || strlen(relative_path) != relative_length ||
+        (*relative_path && !valid_source_relative_path(relative_path))) goto done;
+    error = "workspace source directory is unsafe or changed";
+    root_fd = open_literal_root(workspace_path);
+    if (root_fd < 0 || fstat(root_fd, &root) < 0) goto done;
+#ifdef __APPLE__
+    const unsigned long long root_device = (uint32_t)root.st_dev;
+#else
+    const unsigned long long root_device = root.st_dev;
+#endif
+    if (!S_ISDIR(root.st_mode) || root.st_uid != owner || root_device != device ||
+        (unsigned long long)root.st_ino != inode) goto done;
+    directory_fd = open_source_directory(root_fd, relative_path, &root, &directory_before);
+    if (directory_fd < 0) goto done;
+    scan_fd = openat(directory_fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (scan_fd < 0 || !(stream = fdopendir(scan_fd))) goto done;
+    scan_fd = -1;
+    if (napi_create_array(env, &result) != napi_ok) goto done;
+    uint32_t count = 0;
+    errno = 0;
+    struct dirent *entry;
+    while ((entry = readdir(stream)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) { errno = 0; continue; }
+        if (count >= 100000) goto done;
+        napi_value name, item, kind, mode, size;
+        if (!source_entry_name(env, entry->d_name, &name) ||
+            fstatat(directory_fd, entry->d_name, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+            named.st_uid != root.st_uid || named.st_dev != root.st_dev ||
+            !(S_ISDIR(named.st_mode) || S_ISREG(named.st_mode) || S_ISLNK(named.st_mode)) ||
+            napi_create_object(env, &item) != napi_ok ||
+            napi_set_named_property(env, item, "name", name) != napi_ok ||
+            napi_create_string_utf8(env, S_ISDIR(named.st_mode) ? "directory" :
+                S_ISREG(named.st_mode) ? "file" : "symlink", NAPI_AUTO_LENGTH, &kind) != napi_ok ||
+            napi_set_named_property(env, item, "kind", kind) != napi_ok ||
+            napi_create_uint32(env, named.st_mode & 07777, &mode) != napi_ok ||
+            napi_set_named_property(env, item, "mode", mode) != napi_ok ||
+            identity_member(env, item, "identity", &named) == 0) goto done;
+        if (S_ISREG(named.st_mode)) {
+            if (named.st_size < 0 || named.st_size > 9007199254740991LL ||
+                napi_create_double(env, (double)named.st_size, &size) != napi_ok ||
+                napi_set_named_property(env, item, "size", size) != napi_ok) goto done;
+        }
+        if (napi_object_freeze(env, item) != napi_ok ||
+            napi_set_element(env, result, count++, item) != napi_ok) goto done;
+        errno = 0;
+    }
+    if (errno != 0) goto done;
+    closedir(stream); stream = NULL;
+    if (fstat(directory_fd, &directory_after) < 0 ||
+        !same_file_observation(&directory_before, &directory_after)) goto done;
+    reopened = open_source_directory(root_fd, relative_path, &root, &named);
+    if (reopened < 0 || !same_file_observation(&directory_before, &named)) goto done;
+    close(reopened); reopened = -1;
+    reopened = open_literal_root(workspace_path);
+    if (reopened < 0 || fstat(reopened, &named) < 0 ||
+        !same_file_observation(&root, &named) || !lock_is_held(lock) ||
+        napi_object_freeze(env, result) != napi_ok) goto done;
+    error = NULL;
+done:
+    if (stream) closedir(stream);
+    if (scan_fd >= 0) close(scan_fd);
+    if (reopened >= 0) close(reopened);
+    if (directory_fd >= 0) close(directory_fd);
+    if (root_fd >= 0) close(root_fd);
+    free(workspace_path);
+    free(relative_path);
+    return error ? native_error(env, error) : result;
 }
 
 /* 1 = observed identity, 0 = positively absent, -1 = unavailable/invalid.

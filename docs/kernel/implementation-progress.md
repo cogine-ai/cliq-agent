@@ -327,9 +327,15 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   stability check over held root, parent and file descriptors; closing or
   replacing the owner/root/file invalidates the handle. Git metadata aliases,
   symlinks and special files are rejected, while source hardlinks remain valid.
-  Directory enumeration, symlink-entry capture, frozen ignore classification,
-  CAS streaming publication and a full second tree walk are still required
-  before this primitive can produce a SourceManifest.
+  Complete directory traversal, symlink-entry capture, frozen ignore
+  classification, CAS streaming publication and a full second tree walk remain
+  required before this primitive can produce a SourceManifest.
+- The same held helper now enumerates one literal source directory at a time
+  under the recorded root. It rejects non-UTF-8 names, symlinked directory
+  components, foreign-owner or cross-device entries, special files and
+  directory changes during the scan; the TypeScript boundary requires NFC
+  names. The caller still has to build the complete bounded tree, apply the
+  frozen projection and publish every accepted byte into CAS.
 
 ## Next integration order
 
