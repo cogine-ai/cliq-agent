@@ -349,6 +349,7 @@ int main(int argc, char **argv) {
     for (;;) {
         struct pollfd fds[2 + MAX_CLIENTS];
         client *mapped[2 + MAX_CLIENTS];
+        uint64_t mapped_id[2 + MAX_CLIENTS];
         nfds_t count = 0;
         fds[count] = (struct pollfd){ .fd = STDIN_FILENO, .events = POLLIN }; mapped[count++] = NULL;
         fds[count] = (struct pollfd){ .fd = listener_fd, .events = POLLIN }; mapped[count++] = NULL;
@@ -357,6 +358,7 @@ int main(int argc, char **argv) {
             if (item->fd < 0) continue;
             fds[count] = (struct pollfd){ .fd = item->fd,
                 .events = item->output ? POLLOUT : (item->awaiting_response ? 0 : POLLIN) };
+            mapped_id[count] = item->id;
             mapped[count++] = item;
         }
         int polled = poll(fds, count, 1000);
@@ -389,7 +391,8 @@ int main(int argc, char **argv) {
         }
         for (nfds_t index = 2; index < count; index++) {
             client *item = mapped[index];
-            if (item->fd < 0 || item->fd != fds[index].fd) continue;
+            // parse_parent() can close this slot before accept() reuses its fd.
+            if (item->fd < 0 || item->fd != fds[index].fd || item->id != mapped_id[index]) continue;
             short ready = fds[index].revents;
             if (ready & (POLLHUP | POLLERR | POLLNVAL)) { close_client(item); continue; }
             if (ready & POLLOUT && item->output) {

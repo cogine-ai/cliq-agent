@@ -116,6 +116,35 @@ test('native listener refuses a root identity that differs from the held owner d
   }
 });
 
+test('a fresh connection survives closure and reuse of the prior client slot', async () => {
+  const root = await privateRoot();
+  const ids: bigint[] = [];
+  let listener: NativeControlListener | undefined;
+  try {
+    listener = await NativeControlListener.start(root, await expected(root), {
+      onOpen(connection) { ids.push(BigInt(connection.id)); },
+      onFrame(_connection, frame) {
+        if (frame.toString('utf8') === 'close') throw new Error('close this client');
+        return Buffer.from('{"ok":true}');
+      },
+      onClosed() {}
+    });
+    for (let round = 0; round < 4; round++) {
+      const old = createConnection(endpoint(root));
+      await once(old, 'connect');
+      const closed = awaitRevokedSocket(old);
+      old.write('close\n');
+      await closed;
+      assert.equal(await connectAndWrite(root, 'fresh'), '{"ok":true}\n');
+    }
+    assert.equal(ids.length, 8);
+    for (let index = 1; index < ids.length; index++) assert.ok(ids[index]! > ids[index - 1]!);
+  } finally {
+    await listener?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('endpoint replacement revokes future frames and shutdown does not unlink the replacement', async () => {
   const root = await privateRoot();
   const received: string[] = [];
