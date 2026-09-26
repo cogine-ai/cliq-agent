@@ -34,6 +34,8 @@ jobs:
       - run: node --test scripts/kernel/check-design-contracts.test.mjs
       - run: node scripts/kernel/check-design-contracts.mjs
       - run: npm run build
+      - if: matrix.node == '24.x'
+        run: npm run test:supervisor-sea
       - run: npm test
 
   linux-strong-probe:

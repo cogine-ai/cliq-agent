@@ -136,6 +136,17 @@ candidate; retry must reopen the same signed owner authority, inspect any
 retained genesis and unrooted CAS objects, and finish or fail closed. Update
 candidate self-tests remain read-only against an existing authoritative store.
 
+The signed `supervisor` entry must cover the executed JavaScript as well as the
+Node runtime. Hashing a plain Node interpreter while loading replaceable script
+files would not bind the Supervisor implementation. The current packaging
+direction is a Node 24 single-executable application with one bundled CommonJS
+entry, no snapshot/code cache, and `execArgvExtension='none'`; native helpers
+remain separate signed entries beside that executable. Sign/notarize the final
+macOS image before recording its complete-file digest in the manifest. The SEA
+fixture gates signed-package import and StateOwner restart with a disposable
+test key; installed and production-signature qualification still require the
+full I1 path.
+
 Next implementation order within I1: finish WP03 containment/descriptor evidence
 and WP04 UDS capture; connect the existing admission/worker-loss reducers; ship
 that composition with WP06's stable bootstrap; then execute the restart scenario.

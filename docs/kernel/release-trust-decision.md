@@ -34,6 +34,16 @@ installed-path qualification remain open. This does not qualify a Kernel install
    Supervisor, worker, guest and data-file digests, and runs the platform
    probes plus installed-path tests. Any macOS code signing and notarization
    finishes **before** complete-file digests enter the RuntimeBundle manifest.
+   The Supervisor image includes its fixed JavaScript implementation; a signed
+   Node interpreter that later reads replaceable JS files is insufficient.
+   [Node's SEA contract](https://nodejs.org/download/release/v24.16.0/docs/api/single-executable-applications.html)
+   supplies the current Node 24 packaging candidate. Its build uses one bundled
+   CommonJS entry, disables snapshot and code cache, and sets
+   `execArgvExtension='none'` so `NODE_OPTIONS` cannot extend the signed
+   process's execution arguments. Native helpers remain separately signed and
+   byte-pinned in the bundle. The macOS release image must be Developer ID
+   signed and notarized after SEA injection, before manifest hashing; an
+   ad-hoc-signed test SEA is not a releasable payload.
 3. A release-only signer, isolated from PR jobs, signs the final canonical
    manifest digest with a Cliq-controlled Ed25519 private key. It never accepts
    a caller-supplied key ID as proof of trust. The release job independently

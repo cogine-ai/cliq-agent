@@ -3,14 +3,14 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { KernelStorageError } from '../state/errors.js';
+import { runtimeNativePath } from '../runtime-bundle/installed-paths.js';
 
 export const CONTROL_LISTENER_ENTRY_ID = 'control_listener_native';
 export const CONTROL_LISTENER_RELATIVE_PATH = `native/${process.platform}-${process.arch}/control-listener`;
-const LOCAL_BINARY = fileURLToPath(new URL(`../../dist/${CONTROL_LISTENER_RELATIVE_PATH}`, import.meta.url));
+const LOCAL_BINARY = runtimeNativePath(CONTROL_LISTENER_RELATIVE_PATH, import.meta.url);
 const MAX_FRAME = 8 * 1024 * 1024;
 const HEADER_SIZE = 13;
 

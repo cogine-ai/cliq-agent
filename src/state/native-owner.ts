@@ -1,7 +1,6 @@
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { Module } from 'node:module';
-import { fileURLToPath } from 'node:url';
 
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
@@ -9,10 +8,11 @@ import type { StateRootIdentityV1, WorkspaceGenerationIdentityV1 } from '../kern
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { KernelStorageError } from './errors.js';
+import { runtimeNativePath } from '../runtime-bundle/installed-paths.js';
 
 export const STATE_OWNER_NATIVE_ENTRY_ID = 'state_owner_native';
 export const STATE_OWNER_NATIVE_RELATIVE_PATH = `native/${process.platform}-${process.arch}/state-owner.node`;
-export const STATE_OWNER_NATIVE_PATH = fileURLToPath(new URL(`../../dist/${STATE_OWNER_NATIVE_RELATIVE_PATH}`, import.meta.url));
+export const STATE_OWNER_NATIVE_PATH = runtimeNativePath(STATE_OWNER_NATIVE_RELATIVE_PATH, import.meta.url);
 
 type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
 /** A physical move observation only: no containment death, tree or SQLite authority. */

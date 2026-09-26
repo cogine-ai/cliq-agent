@@ -161,6 +161,18 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   and proves a second valid signed manifest cannot be imported under the first
   owner's authority. The imported objects remain unselected; no installed
   bootstrap or activation is implied by this test.
+- Proved the proposed Supervisor image shape with a Node 24 SEA fixture on
+  macOS: a bundled entry runs from the executable image, embeds its disposable
+  release public key, and ignores injected `NODE_OPTIONS`. The final ad-hoc
+  signed image and native helpers enter a test-key-signed RuntimeBundle. The
+  actual SEA process verifies that manifest, takes StateOwner, imports all
+  signed package bytes to CAS, exits, and a second SEA process reopens the
+  owner and reads the retained policy object. Its executable digest and owner
+  epoch are checked; a manifest signed by an unrelated key is rejected before
+  StateRoot mutation. The same fixture has a Linux/macOS Node 24 CI gate.
+  Source-mode helpers resolve under `dist`; SEA helpers resolve beside the
+  image. This is an ephemeral packaging/integration fixture, not an immutable
+  installed bundle, production-signature proof, or I1 completion.
 
 ## Next integration order
 

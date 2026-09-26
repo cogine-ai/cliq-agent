@@ -58,6 +58,7 @@
     "test:sandbox-probe": "node --test --test-concurrency=1 --import tsx \"src/sandbox/**/*.test.ts\"",
     "test:sandbox-probe:macos": "tsx scripts/kernel/qualify-execution-backend.ts macos",
     "test:sandbox-probe:linux": "tsx scripts/kernel/qualify-execution-backend.ts linux",
+    "test:supervisor-sea": "npm run build && node scripts/kernel/qualify-supervisor-sea.mjs",
     "catalog:update": "tsx scripts/catalog/update.ts"
   },
   "dependencies": {
@@ -69,7 +70,9 @@
   "devDependencies": {
     "@types/node": "^24.5.2",
     "@types/react": "19.2.14",
+    "esbuild": "0.27.7",
     "ink-testing-library": "4.0.0",
+    "postject": "1.0.0-alpha.6",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   }

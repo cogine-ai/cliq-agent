@@ -2,16 +2,16 @@ import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { Module } from 'node:module';
-import { fileURLToPath } from 'node:url';
 
 import { assertArtifactRef, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
 import type { ReleaseTrustKey, RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { KernelStorageError } from '../state/errors.js';
 import { verifySignedRuntimeBundlePayloads } from './manifest.js';
+import { runtimeNativePath } from './installed-paths.js';
 
 export const PACKAGE_READER_NATIVE_RELATIVE_PATH = `native/${process.platform}-${process.arch}/package-reader.node`;
 export const PACKAGE_READER_NATIVE_ENTRY_ID = 'runtime_bundle_package_reader';
-const LOCAL_BINARY = fileURLToPath(new URL(`../../dist/${PACKAGE_READER_NATIVE_RELATIVE_PATH}`, import.meta.url));
+const LOCAL_BINARY = runtimeNativePath(PACKAGE_READER_NATIVE_RELATIVE_PATH, import.meta.url);
 const MAX_NATIVE_BYTES = 16 * 1024 * 1024;
 const CHUNK_BYTES = 1024 * 1024;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
