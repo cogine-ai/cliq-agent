@@ -298,6 +298,9 @@ export async function admitRun(
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'base SourceManifest is not bound to the admitted Session workspace');
   }
   const sourceEntries = decodeWorkspaceEntries(await artifacts.readCanonical(sourceManifest.entriesRef));
+  if (sourceManifest.treeDigest !== sourceEntries.treeDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'base SourceManifest entries do not match its tree digest');
+  }
   await validateWorkspaceEntryBlobs(artifacts, sourceEntries);
   if ((sourceManifest.git === undefined) !== (workspaceIdentity.repositoryIdentityDigest === undefined)) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest git identity does not match the live workspace');

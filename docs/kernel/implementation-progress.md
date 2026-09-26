@@ -315,6 +315,12 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   schema and raw-byte closure only. The fixed Git wildmatch parser, selector
   authorization/classification evidence, and descriptor-held source capture
   remain prerequisites for public `run.submit` and I1.
+- WP01 source entry decoding now requires every nested entry to have a preceding
+  directory parent. Run admission checks that the rehashed base SourceManifest
+  names the exact decoded entry tree before committing its first Checkpoint;
+  mismatched trees and missing or non-directory parents are rejected even when
+  each artifact has an internally valid digest. This closes an admission-time
+  cross-artifact gap; trusted descriptor-held source capture remains open.
 
 ## Next integration order
 

@@ -58,3 +58,28 @@ test('workspace entries reject traversal, Git metadata, noncanonical modes and e
     entries: [valid.entries[0], { ...valid.entries[1], targetDigest: '0'.repeat(64) }]
   }), /target digest does not rehash/);
 });
+
+test('workspace entry trees require each preceding parent to be a directory', () => {
+  const nested: WorkspaceEntryManifest = {
+    schemaVersion: 1, format: 'cliq-workspace-entries-v1',
+    entries: [
+      { path: 'folder', kind: 'directory', mode: 0o755 },
+      { path: 'folder/empty', kind: 'directory', mode: 0o755 },
+      { path: 'folder/empty/file', kind: 'file', mode: 0o644, size: 2, blobRef: 'a'.repeat(64) }
+    ],
+    entryCount: 3, byteCount: 2, treeDigest: ''
+  };
+  nested.treeDigest = canonicalSha256({ schemaVersion: 1, format: nested.format, entries: nested.entries });
+  assert.deepEqual(decodeWorkspaceEntries(nested), nested);
+
+  const missing = { ...nested, entries: nested.entries.slice(1), entryCount: 2, treeDigest: '' };
+  missing.treeDigest = canonicalSha256({ schemaVersion: 1, format: missing.format, entries: missing.entries });
+  assert.throws(() => decodeWorkspaceEntries(missing), /no preceding directory parent/);
+
+  const fileParent = { ...nested, entries: [
+    { path: 'folder', kind: 'file', mode: 0o644, size: 0, blobRef: 'a'.repeat(64) } as const,
+    ...nested.entries.slice(1)
+  ], treeDigest: '' };
+  fileParent.treeDigest = canonicalSha256({ schemaVersion: 1, format: fileParent.format, entries: fileParent.entries });
+  assert.throws(() => decodeWorkspaceEntries(fileParent), /no preceding directory parent/);
+});

@@ -924,6 +924,7 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
   }
   let priorPath: string | undefined;
   let measuredBytes = 0;
+  const directories = new Set<string>();
   for (const [index, candidate] of value.entries.entries()) {
     if (!isRecord(candidate)) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} must be an object`);
@@ -944,12 +945,17 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry paths must be byte-sorted and unique');
     }
     priorPath = entryPath;
+    const parentEnd = entryPath.lastIndexOf('/');
+    if (parentEnd !== -1 && !directories.has(entryPath.slice(0, parentEnd))) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${entryPath} has no preceding directory parent`);
+    }
     const mode = requireSafeInteger(candidate.mode, `WorkspaceEntryManifest.entries[${index}].mode`);
     if (candidate.kind === 'directory') {
       rejectUnknownKeys(candidate, ['path', 'kind', 'mode'], `WorkspaceEntryManifest.entries[${index}]`);
       if (mode !== 0o755) {
         throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace directory ${entryPath} has a noncanonical mode`);
       }
+      directories.add(entryPath);
     } else if (candidate.kind === 'file') {
       rejectUnknownKeys(
         candidate,

@@ -309,6 +309,19 @@ test('Run admission checks source file bytes before committing its response', as
     const goodSource = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest, {
       file: { bytes: Buffer.from('abc'), declaredSize: 3 }
     });
+    const mismatchedTree = await store.artifacts.readCanonical<SourceManifest>(goodSource.baseWorkspaceManifestRef);
+    mismatchedTree.treeDigest = '0'.repeat(64);
+    mismatchedTree.manifestDigest = digestOmitting(mismatchedTree, 'manifestDigest');
+    const mismatchedManifest = await store.artifacts.publishCanonical(mismatchedTree, mismatchedTree.format);
+    await assert.rejects(
+      () => store.admitRun({ ...request, ...goodSource, baseWorkspaceManifestRef: mismatchedManifest.ref }),
+      (error: unknown) => error instanceof KernelStorageError &&
+        error.code === 'ARTIFACT_MISMATCH' && /entries do not match its tree digest/.test(error.message)
+    );
+    inspectKernel(stateRoot, (driver) => {
+      assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM runs')
+        .get<{ count: unknown }>()?.count), 0);
+    });
     const admitted = await store.admitRun({ ...request, ...goodSource });
     assert.equal(admitted.run.status, 'queued');
     assert.equal((await store.readRecoveryClosure(admitted.run.id)).run.id, admitted.run.id);
