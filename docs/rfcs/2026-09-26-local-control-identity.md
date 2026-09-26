@@ -47,7 +47,7 @@ Observed on macOS arm64, Darwin 25.5.0:
 | Device identity | Real filesystem device | `NODEV`, represented as unsigned `4294967295` |
 | Inode/file identity | Filesystem entry inode | Different kernel socket identity |
 | Descriptor permission change | Not applicable | `fchmod(fd, 0600)` fails with `EINVAL` |
-| Open endpoint through held parent | `openat(..., O_EVTONLY | O_NOFOLLOW)` fails with `EOPNOTSUPP` | Already held socket |
+| Open endpoint through held parent | `openat(..., O_EVTONLY \| O_NOFOLLOW)` fails with `EOPNOTSUPP` | Already held socket |
 
 Replacing the endpoint changes the filesystem identity while the original
 listening descriptor retains its identity. Therefore checking one identity
