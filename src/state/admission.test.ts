@@ -17,6 +17,7 @@ import type {
   WorkspaceIdentityV1
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
+import { encodeCanonicalGitIndex } from './git-index.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
 
@@ -718,6 +719,17 @@ test('Git workspaces bind their repository and canonical index through admission
       ...channel,
       ...source
     });
+    const indexPath = path.join(workspace, '.git', 'index');
+    const changedIndex = encodeCanonicalGitIndex({
+      ...index,
+      entries: [{ canonicalRootRelativePath: 'new.txt', stage: 0,
+        mode: 33188, objectId: '1'.repeat(40), assumeValid: false, skipWorktree: false }]
+    });
+    await writeFile(indexPath, changedIndex, { mode: 0o600 });
+    await assert.rejects(attempt('run-git-live-index-drift'),
+      /live Git index differs from its retained canonical source snapshot/);
+    await rm(indexPath);
+
     const infoPath = path.join(workspace, '.git', 'info');
     await mkdir(infoPath);
     await writeFile(path.join(infoPath, 'exclude'), '*.secret\n', { mode: 0o600 });
@@ -743,6 +755,22 @@ test('Git workspaces bind their repository and canonical index through admission
     } finally {
       injected.mock.restore();
       await rm(path.join(workspace, '.gitignore'));
+    }
+
+    const indexInjected = t.mock.method(store.artifacts, 'publishCanonical',
+      async (value: unknown, kind: string) => {
+        const artifact = await publish(value, kind);
+        if (kind === 'cliq-run-spec-v1') {
+          await writeFile(indexPath, changedIndex, { mode: 0o600 });
+        }
+        return artifact;
+      });
+    try {
+      await assert.rejects(attempt('run-git-index-before-commit'),
+        /live Git index differs from its retained canonical source snapshot/);
+    } finally {
+      indexInjected.mock.restore();
+      await rm(indexPath);
     }
   } finally {
     await store.close();

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { RepositoryIdentityV1 } from '../kernel/types.js';
+import type { GitIndexSnapshotV1, RepositoryIdentityV1 } from '../kernel/types.js';
 import { decodeRepositoryIdentity } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import { MAX_GIT_INDEX_BYTES, parseSourceGitIndex, type ParsedSourceGitIndex } from './git-index.js';
@@ -96,5 +96,24 @@ export function readHeldSourceGitIndex(
     return parsed;
   } finally {
     source.close();
+  }
+}
+
+/** The retained canonical snapshot is source authority, so admission must
+ * re-read the live index at its final write boundary as well as before it
+ * publishes new artifacts. Raw index encodings may differ while describing
+ * the same canonical stage-zero tree. */
+export function assertLiveSourceGitIndex(
+  filesystem: HeldStateOwnerLock,
+  workspacePath: string,
+  expectedRoot: DescriptorIdentity,
+  expectedRepository: RepositoryIdentityV1,
+  retained: GitIndexSnapshotV1
+): void {
+  const live = readHeldSourceGitIndex(filesystem, workspacePath, expectedRoot,
+    expectedRepository);
+  if (live.snapshot.snapshotDigest !== retained.snapshotDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      'live Git index differs from its retained canonical source snapshot');
   }
 }
