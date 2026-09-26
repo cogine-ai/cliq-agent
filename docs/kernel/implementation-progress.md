@@ -199,6 +199,13 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   to be checked for this revision. The fixture's setup does not implement
   descriptor-safe staging, fsynced publication, update compatibility or a
   production installer.
+- The first Linux Node 24 CI run of the selected-tree fixture exposed a native
+  addon loader collision: after package-reader verification, `dlopen` could
+  reuse the same `/proc/self/fd/N` spelling for StateOwner and return the first
+  addon's exports. Both pinned addon loaders now retain their verified file
+  descriptors for the process lifetime, keeping those loader identities
+  distinct. A same-process dual-addon test and the macOS SEA gate pass; Linux
+  qualification for this fix awaits the new exact-head CI run.
 
 ## Next integration order
 

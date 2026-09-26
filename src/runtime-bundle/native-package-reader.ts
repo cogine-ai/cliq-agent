@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
 
 import { assertArtifactRef, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
@@ -55,7 +55,7 @@ function sameStat(before: import('node:fs').BigIntStats, after: import('node:fs'
     before.size === after.size && before.mtimeNs === after.mtimeNs && before.ctimeNs === after.ctimeNs;
 }
 
-let loaded: { digest: string; binding: NativeBinding } | undefined;
+let loaded: { digest: string; binding: NativeBinding; file: FileHandle } | undefined;
 const heldRoots = new WeakSet<object>();
 const heldCasRoots = new WeakSet<object>();
 const installedRoots = new WeakSet<object>();
@@ -72,6 +72,7 @@ export async function loadNativePackageReader(expectedHelperDigest: string,
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'native RuntimeBundle package reading is unavailable');
   }
   const file = await open(LOCAL_BINARY, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let heldForProcess = false;
   try {
     const before = await file.stat({ bigint: true });
     if (!before.isFile() || before.uid !== BigInt(process.geteuid!()) || before.nlink !== 1n ||
@@ -96,10 +97,14 @@ export async function loadNativePackageReader(expectedHelperDigest: string,
         typeof binding.openRuntimeRoot !== 'function' || typeof binding.openCasRoot !== 'function') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'native package reader has an unsupported interface');
     }
-    loaded = { digest, binding: Object.freeze(binding) };
+    // Linux dlopen can cache /proc/self/fd/N by pathname. Reusing N for a
+    // different addon would return the first addon's exports. Keep this verified
+    // descriptor alive while its native code is mapped into the process.
+    loaded = { digest, binding: Object.freeze(binding), file };
+    heldForProcess = true;
     return loaded.binding;
   } finally {
-    await file.close();
+    if (!heldForProcess) await file.close();
   }
 }
 

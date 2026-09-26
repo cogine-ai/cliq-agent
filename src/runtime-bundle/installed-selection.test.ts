@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { sha256Bytes } from '../kernel/identity.js';
 import { policyProfile, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { loadNativeStateOwner } from '../state/native-owner.js';
 import { inspectSelectedRuntimeBundle, type ActiveRuntimeSelectionV1 } from './installed-selection.js';
 import { loadNativePackageReader, PACKAGE_READER_NATIVE_RELATIVE_PATH } from './native-package-reader.js';
 
@@ -138,5 +139,15 @@ test('installed selection rejects writable bytes, a mutable bundle root and syml
       await chmod(f.activePath, 0o400);
       assert.equal((await inspectSelectedRuntimeBundle(f.reader, f.stateRoot, f.releaseKeys))
         .selection.bundleDigest, f.selection.bundleDigest);
+    } finally { await cleanup(f); }
+  });
+
+test('pinned package reader and StateOwner addons keep distinct loaded interfaces',
+  { skip: !supported }, async () => {
+    const f = await fixture();
+    try {
+      assert.equal(typeof f.reader.openInstalledRoot, 'function');
+      const owner = await loadNativeStateOwner();
+      assert.match(owner.processStartToken(), /^(?:darwin-proc-start-time|linux-proc-start-ticks):/u);
     } finally { await cleanup(f); }
   });

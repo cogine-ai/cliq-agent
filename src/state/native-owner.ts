@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
 
 import { canonicalSha256 } from '../kernel/canonical.js';
@@ -100,7 +100,7 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
   return handle;
 }
 
-let loaded: { digest: string; implementation: NativeStateOwner } | undefined;
+let loaded: { digest: string; implementation: NativeStateOwner; file: FileHandle } | undefined;
 
 /** Load only the fixed host helper, through its verified held descriptor.
  * Bundle signature verification belongs to the trusted StateStore bootstrap. */
@@ -109,6 +109,7 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', `StateOwner is unsupported on ${process.platform}`);
   }
   const file = await open(STATE_OWNER_NATIVE_PATH, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let heldForProcess = false;
   try {
     const before = await file.stat({ bigint: true });
     if (!before.isFile() || before.uid !== BigInt(process.geteuid!()) || before.nlink !== 1n ||
@@ -148,10 +149,13 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
       },
       processStartToken: () => binding.processStartToken()
     };
-    loaded = { digest, implementation: Object.freeze(implementation) };
+    // Hold the fd used by dlopen for the mapped addon's lifetime. Reusing its
+    // /proc/self/fd/N locator for another addon can alias the cached exports.
+    loaded = { digest, implementation: Object.freeze(implementation), file };
+    heldForProcess = true;
     return loaded.implementation;
   } finally {
-    await file.close();
+    if (!heldForProcess) await file.close();
   }
 }
 
