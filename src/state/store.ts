@@ -69,6 +69,7 @@ import {
 import { createSession, type CreateSessionInput, type CreateSessionResult } from './reducers/session.js';
 import { getSession, type GetSessionInput, type GetSessionResult } from './queries/session.js';
 import { attachRun, type AttachRunInput, type AttachRunResult } from './queries/run-attach.js';
+import { getRun, type GetRunInput, type GetRunResult } from './queries/run-get.js';
 import {
   activateWorkerLease,
   beginGenerationCheckpoint,
@@ -475,6 +476,10 @@ export class StateStore {
 
   attachRun(input: AttachRunInput): Promise<AttachRunResult> {
     return attachRun(this.driver, this.artifacts, this.owner, input);
+  }
+
+  queryRun(input: GetRunInput): Promise<GetRunResult> {
+    return getRun(this.driver, this.artifacts, this.owner, input);
   }
 
   admitRun(input: AdmitRunInput): Promise<AdmitRunResult> {

@@ -1,4 +1,5 @@
 import type { InvocationJournalEntry } from '../../kernel/types.js';
+import { requiredSafeInteger } from '../../kernel/identity.js';
 import { KernelStorageError } from '../errors.js';
 import { decodeInvocationJournalEntry } from '../invariants.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
@@ -13,7 +14,7 @@ type JournalSqlRow = {
   entry_json: string;
 };
 
-function journalEntryFromRow(row: JournalSqlRow): InvocationJournalEntry {
+export function journalEntryFromRow(row: JournalSqlRow): InvocationJournalEntry {
   let value: unknown;
   try {
     value = JSON.parse(row.entry_json);
@@ -29,14 +30,16 @@ function journalEntryFromRow(row: JournalSqlRow): InvocationJournalEntry {
     }
     throw error;
   }
-  if (
-    entry.runId !== row.run_id ||
-    entry.seq !== Number(row.seq) ||
-    entry.opId !== row.op_id ||
-    entry.opKind !== row.op_kind ||
-    entry.attempt !== Number(row.attempt) ||
-    entry.phase !== row.phase
-  ) {
+  let sequence: number;
+  let attempt: number;
+  try {
+    sequence = requiredSafeInteger(row.seq, 'Run Journal row sequence');
+    attempt = requiredSafeInteger(row.attempt, 'Run Journal row attempt');
+  } catch (error) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'Run Journal numeric columns are invalid', { cause: error });
+  }
+  if (entry.runId !== row.run_id || entry.seq !== sequence || entry.opId !== row.op_id ||
+      entry.opKind !== row.op_kind || entry.attempt !== attempt || entry.phase !== row.phase) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'Run Journal columns do not match entry_json');
   }
   return entry;

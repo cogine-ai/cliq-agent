@@ -63,6 +63,7 @@ test('StateStore UDS authenticates before replay, retains first-channel provenan
     assert.equal((rejectedBeforeHello.error as { message: string }).message, 'INCOMPATIBLE_PROTOCOL');
     const greeting = await call(first, 2, 'control.hello', hello);
     assert.equal((greeting.result as { protocolVersion: number }).protocolVersion, 1);
+    assert.ok((greeting.result as { capabilities: string[] }).capabilities.includes('run.get'));
 
     const request = {
       protocolVersion: 1 as const, requestId: uuidv7(), method: 'session.create' as const,
@@ -147,6 +148,26 @@ test('StateStore UDS authenticates before replay, retains first-channel provenan
     }).result;
     assert.equal(attachedPage.snapshot.run.id, admitted.run.id);
     assert.deepEqual(attachedPage.events.map((event) => event.eventSeq), [1]);
+    const gotten = await call(first, 21, 'run.get', {
+      protocolVersion: 1, method: 'run.get', runId: admitted.run.id
+    });
+    assert.equal((gotten.result as { ok: boolean }).ok, true);
+    const runPage = (gotten.result as { result: {
+      snapshot: { run: { id: string } }; checkpoints: unknown[];
+      highWaterCheckpointCursor: string; nextCheckpointCursor: string
+    } }).result;
+    assert.equal(runPage.snapshot.run.id, admitted.run.id);
+    assert.equal(runPage.checkpoints.length, 1);
+    assert.equal(runPage.nextCheckpointCursor, runPage.highWaterCheckpointCursor);
+    const invalidGet = await call(first, 22, 'run.get', {
+      protocolVersion: 1, method: 'run.get', runId: admitted.run.id, principalId: oldChannel.principalId
+    });
+    assert.equal((invalidGet.error as { message: string }).message, 'INVALID_REQUEST');
+    const getAfterCheckpoint = await call(first, 23, 'run.get', {
+      protocolVersion: 1, method: 'run.get', runId: admitted.run.id,
+      checkpointCursor: runPage.nextCheckpointCursor
+    });
+    assert.deepEqual((getAfterCheckpoint.result as { result: { checkpoints: unknown[] } }).result.checkpoints, []);
     await assert.rejects(
       store.createSession({
         principalId: oldChannel.principalId,

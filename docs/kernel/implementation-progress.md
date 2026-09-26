@@ -106,6 +106,14 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   sets and canonical JSON. Unsupported guest-toolchain, MCP-recovery, and
   portable-schema roots reject until their decoders exist. This is an internal
   decoder, not a descriptor-safe package installer or activation proof.
+- Added owner-gated hidden `run.get`: it captures Run, item/Journal sequence
+  high-waters and the latest Checkpoint in one SQLite read cut, validates exact
+  retained Checkpoint cursors, and pages three independent streams under the
+  combined 1 MiB canonical metadata limit in item/Journal/Checkpoint order.
+  The UDS handler rechecks the held connection and rejects caller authority
+  fields. Focused tests cover cursor round trips, later item append, principal
+  isolation, and byte-cap truncation; they still use the explicitly labelled
+  M2 placeholder assembly for Run admission, not an I1 production Run.
 
 ## Next integration order
 

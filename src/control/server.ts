@@ -176,7 +176,8 @@ export class LocalControlServer {
           !Array.isArray(request.params.requestedFeatureIds) ||
           request.params.requestedFeatureIds.length > 64 ||
           request.params.requestedFeatureIds.some((value) =>
-            value !== 'session.create' && value !== 'session.get' && value !== 'run.attach') ||
+            value !== 'session.create' && value !== 'session.get' &&
+            value !== 'run.get' && value !== 'run.attach') ||
           new Set(request.params.requestedFeatureIds).size !== request.params.requestedFeatureIds.length) {
         return encode({ jsonrpc: '2.0', id, error: {
           code: -32000, message: 'INCOMPATIBLE_PROTOCOL',
@@ -190,13 +191,52 @@ export class LocalControlServer {
         serverBuild: this.bundle.bundleVersion,
         controlSchemaRange: this.bundle.controlProtocolRange,
         headlessSchemaRange: this.bundle.headlessSchemaRange,
-        capabilities: ['session.create', 'session.get', 'run.attach'],
+        capabilities: ['session.create', 'session.get', 'run.get', 'run.attach'],
         supervisorInstanceId: this.owner.supervisorInstanceId,
         runtimeBundleRef: canonicalSha256(this.bundle),
         runtimeBundleManifestDigest: this.bundle.manifestDigest
       } });
     }
     if (request.method === 'control.hello') return errorResult(id, 'INVALID_REQUEST');
+    if (request.method === 'run.get') {
+      const payload = request.params;
+      if (!exactRecord(payload, ['protocolVersion', 'method', 'runId'], [
+        'afterItemSeq', 'afterJournalSeq', 'checkpointCursor',
+        'itemLimit', 'journalLimit', 'checkpointLimit'
+      ]) || payload.protocolVersion !== 1 || payload.method !== 'run.get' ||
+          typeof payload.runId !== 'string' ||
+          (payload.checkpointCursor !== undefined && typeof payload.checkpointCursor !== 'string') ||
+          ['afterItemSeq', 'afterJournalSeq'].some((field) => payload[field] !== undefined &&
+            (!Number.isSafeInteger(payload[field]) || (payload[field] as number) < 0)) ||
+          ['itemLimit', 'journalLimit', 'checkpointLimit'].some((field) => payload[field] !== undefined &&
+            (!Number.isSafeInteger(payload[field]) || (payload[field] as number) < 1 ||
+              (payload[field] as number) > 1000))) {
+        return errorResult(id, 'INVALID_REQUEST');
+      }
+      if (!channel.principalId) throw new Error('control channel identity publication is incomplete');
+      await this.native!.recheck(connection);
+      if (channel.closed || this.closing) throw new Error('control connection closed before query cut');
+      try {
+        const result = await this.store.queryRun({
+          principalId: channel.principalId, runId: payload.runId,
+          ...(payload.afterItemSeq === undefined ? {} : { afterItemSeq: payload.afterItemSeq as number }),
+          ...(payload.afterJournalSeq === undefined ? {} : { afterJournalSeq: payload.afterJournalSeq as number }),
+          ...(payload.checkpointCursor === undefined ? {} : { checkpointCursor: payload.checkpointCursor as string }),
+          ...(payload.itemLimit === undefined ? {} : { itemLimit: payload.itemLimit as number }),
+          ...(payload.journalLimit === undefined ? {} : { journalLimit: payload.journalLimit as number }),
+          ...(payload.checkpointLimit === undefined ? {} : { checkpointLimit: payload.checkpointLimit as number })
+        });
+        return encode({ jsonrpc: '2.0', id, result: { protocolVersion: 1, ok: true, result } });
+      } catch (error) {
+        const code = error instanceof KernelStorageError ? error.code : 'INVALID_REQUEST';
+        const publicCode = ['INVALID_REQUEST', 'NOT_FOUND', 'RECOVERY_REQUIRED'].includes(code)
+          ? code : 'INVALID_REQUEST';
+        return encode({ jsonrpc: '2.0', id, result: {
+          protocolVersion: 1, ok: false, method: 'run.get',
+          error: { code: publicCode, retryable: false }
+        } });
+      }
+    }
     if (request.method === 'run.attach') {
       const payload = request.params;
       if (!exactRecord(payload, ['protocolVersion', 'method', 'runId', 'afterEventSeq'], ['limit']) ||
