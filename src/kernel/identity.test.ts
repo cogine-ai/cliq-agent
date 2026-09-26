@@ -8,7 +8,8 @@ import {
   encodeCanonicalTime,
   identityHash,
   normalizeAbsolutePath,
-  parseCanonicalTime
+  parseCanonicalTime,
+  unsignedDecimalId
 } from './identity.js';
 
 test('identityHash is unpadded base64url of SHA-256(JCS(arguments))', () => {
@@ -34,4 +35,12 @@ test('normalizeAbsolutePath rejects relative, dotted, and overlong paths', () =>
   assert.throws(() => normalizeAbsolutePath('tmp/workspace'), /absolute/);
   assert.throws(() => normalizeAbsolutePath('/tmp/../workspace'), /\.\./);
   assert.throws(() => normalizeAbsolutePath('/tmp/./workspace'), /"\."/);
+});
+
+test('device and inode ids keep full bigint precision and reject unsafe numbers', () => {
+  assert.equal(unsignedDecimalId(18_446_744_073_709_551_615n), '18446744073709551615');
+  assert.equal(unsignedDecimalId(Number.MAX_SAFE_INTEGER), String(Number.MAX_SAFE_INTEGER));
+  assert.throws(() => unsignedDecimalId(Number.MAX_SAFE_INTEGER + 1), /safe integer/);
+  assert.throws(() => unsignedDecimalId(-1), /safe integer/);
+  assert.throws(() => unsignedDecimalId(1.5), /safe integer/);
 });

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
 import { assertControlSocketPath } from '../control/socket-path.js';
@@ -7,7 +8,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import type { ReleaseTrustKey, RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { KernelStorageError } from '../state/errors.js';
 import {
-  openInstalledBundleRoot, openRuntimeSelectionRoot, readHeldActiveSelection,
+  openInitialSelectionWriter, openInstalledBundleRoot, openRuntimeSelectionRoot, readHeldActiveSelection,
   verifyHeldInstalledBundle, type NativePackageReader
 } from './native-package-reader.js';
 
@@ -75,4 +76,34 @@ export async function inspectSelectedRuntimeBundle(reader: NativePackageReader, 
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'active runtime selection changed during verification');
   }
   return { selection: before.selection, bundle, bundlePath };
+}
+
+/** First-install filesystem cut after the initial owner has imported and released the signed bundle.
+ * This does not authorize an update or replace an existing selection. */
+export async function publishInitialRuntimeSelection(reader: NativePackageReader, stateRoot: string,
+  releaseKeys: readonly ReleaseTrustKey[], bundleDigest: string): Promise<ActiveRuntimeSelectionV1> {
+  const trustedKeys = immutableSnapshot(releaseKeys);
+  if (normalizeAbsolutePath(stateRoot) !== stateRoot) throw new TypeError('StateRoot path must be canonical');
+  assertControlSocketPath(stateRoot);
+  assertArtifactRef(bundleDigest);
+  const bundlePath = path.join(stateRoot, 'runtime', 'bundles', bundleDigest);
+  const installed = openInstalledBundleRoot(reader, bundlePath);
+  let manifestDigest: string;
+  try {
+    const verified = await verifyHeldInstalledBundle(installed, trustedKeys, bundleDigest);
+    manifestDigest = verified.bundle.manifestDigest;
+  } finally { installed.close(); }
+  const expected: ActiveRuntimeSelectionV1 = Object.freeze({
+    schemaVersion: 1, format: 'cliq-runtime-active-selection-v1', bundleDigest, manifestDigest
+  });
+  const runtime = openInitialSelectionWriter(reader, path.join(stateRoot, 'runtime'));
+  try {
+    runtime.publishInitialActive(canonicalJsonBytes(expected), randomBytes(16).toString('hex'));
+  } finally { runtime.close(); }
+  const observed = await inspectSelectedRuntimeBundle(reader, stateRoot, trustedKeys);
+  if (observed.selection.bundleDigest !== expected.bundleDigest ||
+      observed.selection.manifestDigest !== expected.manifestDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'initial runtime selection differs from the verified bundle');
+  }
+  return observed.selection;
 }

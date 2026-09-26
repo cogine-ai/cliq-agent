@@ -44,6 +44,10 @@ export type HeldPackageRoot = {
   listEntries(): string[];
   close(): void;
 };
+export type HeldInitialSelectionWriter = {
+  publishInitialActive(bytes: Buffer, nonce: string): void;
+  close(): void;
+};
 export type HeldCandidateRoot = {
   copyEntry(source: HeldPackageRoot, path: string, byteCount: number, executable: boolean): void;
   seal(): void;
@@ -54,6 +58,7 @@ export type NativePackageReader = {
   openRoot(path: string): HeldPackageRoot;
   openInstalledRoot(path: string): HeldPackageRoot;
   openRuntimeRoot(path: string): HeldPackageRoot;
+  openInitialSelectionWriter(path: string): HeldInitialSelectionWriter;
   openCandidateRoot(path: string): HeldCandidateRoot;
   openCasRoot(path: string): HeldCasRoot;
 };
@@ -105,7 +110,9 @@ export async function loadNativePackageReader(expectedHelperDigest: string,
     process.dlopen(nativeModule, `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${file.fd}`);
     const binding = nativeModule.exports as NativeBinding;
     if (typeof binding.openRoot !== 'function' || typeof binding.openInstalledRoot !== 'function' ||
-        typeof binding.openRuntimeRoot !== 'function' || typeof binding.openCandidateRoot !== 'function' ||
+        typeof binding.openRuntimeRoot !== 'function' ||
+        typeof binding.openInitialSelectionWriter !== 'function' ||
+        typeof binding.openCandidateRoot !== 'function' ||
         typeof binding.openCasRoot !== 'function') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'native package reader has an unsupported interface');
     }
@@ -149,6 +156,15 @@ export function openRuntimeSelectionRoot(binding: NativeBinding, absolutePath: s
   const root = binding.openRuntimeRoot(absolutePath);
   runtimeRoots.add(root);
   return root;
+}
+
+/** A distinct native capability for the first-install filesystem cut. */
+export function openInitialSelectionWriter(binding: NativeBinding, absolutePath: string): HeldInitialSelectionWriter {
+  if (binding !== loaded?.binding) throw new TypeError('selection writer must come from the pinned native helper');
+  if (normalizeAbsolutePath(absolutePath) !== absolutePath) {
+    throw new TypeError('runtime selection directory must have a canonical absolute path');
+  }
+  return binding.openInitialSelectionWriter(absolutePath);
 }
 
 /** Open a fresh empty 0700 stage. The installer must place it outside StateRoot. */

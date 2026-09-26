@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -10,13 +10,18 @@ import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { sha256Bytes } from '../kernel/identity.js';
 import { policyProfile, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { loadNativeStateOwner } from '../state/native-owner.js';
-import { inspectSelectedRuntimeBundle, type ActiveRuntimeSelectionV1 } from './installed-selection.js';
-import { loadNativePackageReader, PACKAGE_READER_NATIVE_RELATIVE_PATH } from './native-package-reader.js';
+import {
+  inspectSelectedRuntimeBundle, publishInitialRuntimeSelection, type ActiveRuntimeSelectionV1
+} from './installed-selection.js';
+import {
+  loadNativePackageReader, openInitialSelectionWriter, openRuntimeSelectionRoot,
+  PACKAGE_READER_NATIVE_RELATIVE_PATH
+} from './native-package-reader.js';
 
 const supported = process.platform === 'darwin' || process.platform === 'linux';
 const helper = fileURLToPath(new URL(`../../dist/${PACKAGE_READER_NATIVE_RELATIVE_PATH}`, import.meta.url));
 
-async function fixture() {
+async function fixture(selected = true) {
   const home = await mkdtemp(path.join(await realpath('/tmp'), 'cliq-installed-'));
   await chmod(home, 0o700);
   const stateRoot = path.join(home, 'state');
@@ -66,7 +71,7 @@ async function fixture() {
     schemaVersion: 1, format: 'cliq-runtime-active-selection-v1', bundleDigest, manifestDigest
   };
   const activePath = path.join(runtime, 'active.json');
-  await writeFile(activePath, canonicalJsonBytes(selection), { mode: 0o400 });
+  if (selected) await writeFile(activePath, canonicalJsonBytes(selection), { mode: 0o400 });
   const reader = await loadNativePackageReader(sha256Bytes(readFileSync(helper)));
   return { home, stateRoot, bundlePath, payloadDir, activePath, selection, releaseKeys, reader };
 }
@@ -76,6 +81,78 @@ async function cleanup(f: Awaited<ReturnType<typeof fixture>>): Promise<void> {
   await chmod(f.bundlePath, 0o700);
   await rm(f.home, { recursive: true, force: true });
 }
+
+test('initial selection publishes canonical 0400 bytes only once after complete signed-tree verification',
+  { skip: !supported }, async () => {
+    const f = await fixture(false);
+    try {
+      const policy = path.join(f.payloadDir, 'policy');
+      await chmod(policy, 0o600);
+      await assert.rejects(publishInitialRuntimeSelection(f.reader, f.stateRoot, f.releaseKeys,
+        f.selection.bundleDigest), /installed bundle inventory is unsafe or changed/);
+      await assert.rejects(readFile(f.activePath), { code: 'ENOENT' });
+      await chmod(policy, 0o400);
+      await symlink(f.bundlePath, f.activePath);
+      await assert.rejects(publishInitialRuntimeSelection(f.reader, f.stateRoot, f.releaseKeys,
+        f.selection.bundleDigest), /already present/);
+      assert.equal((await lstat(f.activePath)).isSymbolicLink(), true);
+      await rm(f.activePath);
+      assert.deepEqual(await publishInitialRuntimeSelection(f.reader, f.stateRoot, f.releaseKeys,
+        f.selection.bundleDigest), f.selection);
+      assert.deepEqual(await readFile(f.activePath), canonicalJsonBytes(f.selection));
+      assert.equal((await stat(f.activePath)).mode & 0o7777, 0o400);
+      await assert.rejects(publishInitialRuntimeSelection(f.reader, f.stateRoot, f.releaseKeys,
+        f.selection.bundleDigest), /already present/);
+      assert.deepEqual(await readFile(f.activePath), canonicalJsonBytes(f.selection));
+    } finally { await cleanup(f); }
+  });
+
+test('held initial-selection writer refuses a substituted runtime directory',
+  { skip: !supported }, async () => {
+    const f = await fixture(false);
+    const runtimePath = path.join(f.stateRoot, 'runtime');
+    const displaced = path.join(f.stateRoot, 'runtime-displaced');
+    const held = openInitialSelectionWriter(f.reader, runtimePath);
+    try {
+      await rename(runtimePath, displaced);
+      await mkdir(runtimePath, { mode: 0o700 });
+      assert.throws(() => held.publishInitialActive(canonicalJsonBytes(f.selection), '0'.repeat(32)),
+        /initial runtime selection is unsafe/);
+      await assert.rejects(readFile(f.activePath), { code: 'ENOENT' });
+    } finally {
+      held.close();
+      await rm(runtimePath, { recursive: true, force: true });
+      await rename(displaced, runtimePath);
+      await cleanup(f);
+    }
+  });
+
+test('held initial-selection writer does not replace a preexisting stage name',
+  { skip: !supported }, async () => {
+    const f = await fixture(false);
+    const nonce = '1'.repeat(32);
+    const stagePath = path.join(f.stateRoot, 'runtime', `.active-${nonce}`);
+    const held = openInitialSelectionWriter(f.reader, path.join(f.stateRoot, 'runtime'));
+    try {
+      await symlink(f.bundlePath, stagePath);
+      assert.throws(() => held.publishInitialActive(canonicalJsonBytes(f.selection), nonce),
+        /publication is unsafe or incomplete/);
+      assert.equal((await lstat(stagePath)).isSymbolicLink(), true);
+      await assert.rejects(readFile(f.activePath), { code: 'ENOENT' });
+    } finally {
+      held.close();
+      await cleanup(f);
+    }
+  });
+
+test('runtime inspection handle exposes no initial-selection write capability',
+  { skip: !supported }, async () => {
+    const f = await fixture(false);
+    const held = openRuntimeSelectionRoot(f.reader, path.join(f.stateRoot, 'runtime'));
+    try {
+      assert.equal(Object.hasOwn(held, 'publishInitialActive'), false);
+    } finally { held.close(); await cleanup(f); }
+  });
 
 test('read-only installed selection verifies its signed tree and refuses unsigned paths',
   { skip: !supported }, async () => {

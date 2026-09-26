@@ -1,4 +1,4 @@
-import { constants, type Stats } from 'node:fs';
+import { constants, type BigIntStats } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
@@ -22,20 +22,24 @@ function requireEffectiveUid(): number {
   return process.geteuid();
 }
 
-function sameInode(left: Stats, right: Stats): boolean {
+function sameInode(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-function directoryIdentity(stats: Stats): { deviceId: string; fileId: string; ownerUid: number } {
+function directoryIdentity(stats: BigIntStats): { deviceId: string; fileId: string; ownerUid: number } {
+  const ownerUid = Number(stats.uid);
+  if (!Number.isSafeInteger(ownerUid)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace owner uid exceeds the supported range');
+  }
   return {
     deviceId: unsignedDecimalId(stats.dev),
     fileId: unsignedDecimalId(stats.ino),
-    ownerUid: stats.uid
+    ownerUid
   };
 }
 
-async function openDirectoryNoFollow(absolutePath: string): Promise<{ handle: FileHandle; stats: Stats }> {
-  const pathInfo = await lstat(absolutePath);
+async function openDirectoryNoFollow(absolutePath: string): Promise<{ handle: FileHandle; stats: BigIntStats }> {
+  const pathInfo = await lstat(absolutePath, { bigint: true });
   if (pathInfo.isSymbolicLink()) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', `path component is a symlink: ${absolutePath}`);
   }
@@ -44,7 +48,7 @@ async function openDirectoryNoFollow(absolutePath: string): Promise<{ handle: Fi
   }
   const handle = await open(absolutePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
-    const handleInfo = await handle.stat();
+    const handleInfo = await handle.stat({ bigint: true });
     if (!handleInfo.isDirectory() || !sameInode(pathInfo, handleInfo)) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `directory changed while it was opened: ${absolutePath}`);
     }
@@ -55,7 +59,7 @@ async function openDirectoryNoFollow(absolutePath: string): Promise<{ handle: Fi
   }
 }
 
-async function walkNoFollowDirectory(absolutePath: string): Promise<{ handle: FileHandle; stats: Stats }> {
+async function walkNoFollowDirectory(absolutePath: string): Promise<{ handle: FileHandle; stats: BigIntStats }> {
   const normalized = normalizeAbsolutePath(absolutePath);
   const parts = normalized.split('/').filter((part) => part.length > 0);
   let current = '/';
@@ -86,13 +90,13 @@ function parseGitObjectFormat(configUtf8: string): 'sha1' | 'sha256' {
 
 async function captureRepositoryIdentity(
   workspacePath: string,
-  rootStats: Stats,
+  rootStats: BigIntStats,
   platform: HostPlatform
 ): Promise<RepositoryIdentityV1 | undefined> {
   const gitPath = path.join(workspacePath, '.git');
-  let gitInfo: Stats;
+  let gitInfo: BigIntStats;
   try {
-    gitInfo = await lstat(gitPath);
+    gitInfo = await lstat(gitPath, { bigint: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw error;
@@ -109,7 +113,7 @@ async function captureRepositoryIdentity(
 
   const handle = await open(gitPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
-    const handleInfo = await handle.stat();
+    const handleInfo = await handle.stat({ bigint: true });
     if (!sameInode(gitInfo, handleInfo)) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace .git changed while it was opened');
     }
@@ -159,7 +163,7 @@ export async function captureLiveWorkspaceIdentity(options: {
   const effectiveUid = requireEffectiveUid();
   const opened = await walkNoFollowDirectory(workspacePath);
   try {
-    if (opened.stats.uid !== effectiveUid) {
+    if (opened.stats.uid !== BigInt(effectiveUid)) {
       throw new KernelStorageError(
         'INVALID_REQUEST',
         'workspace root must be owned by the effective uid of the local principal'

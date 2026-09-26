@@ -205,6 +205,7 @@ test('package path capabilities reject symlinked ancestors and forged readers', 
       openRoot: () => { throw new Error('forged'); },
       openInstalledRoot: () => { throw new Error('forged'); },
       openRuntimeRoot: () => { throw new Error('forged'); },
+      openInitialSelectionWriter: () => { throw new Error('forged'); },
       openCandidateRoot: () => { throw new Error('forged'); },
       openCasRoot: () => { throw new Error('forged'); }
     }, rootPath),

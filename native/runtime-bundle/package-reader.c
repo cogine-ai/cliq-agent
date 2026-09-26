@@ -36,6 +36,7 @@ typedef struct {
     struct stat identity;
     int immutable;
     int runtime;
+    int writer;
 } package_root;
 
 typedef struct {
@@ -267,6 +268,10 @@ static napi_value undefined_value(napi_env env) {
     return value;
 }
 
+static int read_hex(napi_env env, napi_value value, char *result, size_t digits);
+static int directory_locator_same(const char *path, const struct stat *identity);
+static int write_all(int fd, const char *bytes, size_t length);
+
 static napi_value root_close(napi_env env, napi_callback_info info) {
     package_root *root = unwrap_root(env, info);
     if (!root) return NULL;
@@ -305,6 +310,70 @@ static napi_value root_active_byte_count(napi_env env, napi_callback_info info) 
     napi_value result;
     if (napi_create_double(env, (double)named.st_size, &result) != napi_ok) return NULL;
     return result;
+}
+
+/* First-install selection only. The caller verifies the signed, published
+ * bundle before this call. A separate owner handoff is required for updates. */
+static napi_value root_publish_initial_active(napi_env env, napi_callback_info info) {
+    package_root *root = unwrap_root(env, info);
+    if (!root) return NULL;
+    size_t argc = 2, length;
+    napi_value argv[2];
+    char nonce[33], temporary[sizeof(".active-") + 32];
+    void *bytes = NULL;
+    int temporary_fd = -1, parent = -1, created = 0, published = 0, ok = 0;
+    struct stat before, after, named;
+    if (!root->writer || root->fd < 0 ||
+        napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 2 ||
+        napi_get_buffer_info(env, argv[0], &bytes, &length) != napi_ok ||
+        length == 0 || length > MAX_ACTIVE_BYTES ||
+        !read_hex(env, argv[1], nonce, 32) ||
+        fstat(root->fd, &before) < 0 ||
+        !directory_locator_same(root->path, &before) ||
+        before.st_uid != geteuid() || (before.st_mode & 07777) != 0700 ||
+        fstatat(root->fd, ACTIVE_NAME, &named, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) {
+        return native_error(env, "initial runtime selection is unsafe or already present");
+    }
+    snprintf(temporary, sizeof(temporary), ".active-%s", nonce);
+    parent = openat(root->fd, "..", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (parent < 0 || fsync(parent) < 0 ||
+        (temporary_fd = openat(root->fd, temporary,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600)) < 0) goto done;
+    created = 1;
+    if (write_all(temporary_fd, (const char *)bytes, length) < 0 || fchmod(temporary_fd, 0400) < 0 ||
+        fsync(temporary_fd) < 0 || fstat(temporary_fd, &after) < 0 ||
+        !required_file(&after, geteuid(), (off_t)length, 0, 0400) ||
+        fstatat(root->fd, temporary, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+        !same_file_metadata(&after, &named) ||
+        !directory_locator_same(root->path, &before) ||
+        fstatat(root->fd, ACTIVE_NAME, &named, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) goto done;
+#ifdef __APPLE__
+    if (renameatx_np(root->fd, temporary, root->fd, ACTIVE_NAME, RENAME_EXCL) < 0) goto done;
+#else
+    if (renameat2(root->fd, temporary, root->fd, ACTIVE_NAME, RENAME_NOREPLACE) < 0) goto done;
+#endif
+    published = 1;
+    if (fstatat(root->fd, ACTIVE_NAME, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+        !same_inode(&after, &named) ||
+        !required_file(&named, geteuid(), (off_t)length, 0, 0400) ||
+        fsync(root->fd) < 0 || fsync(parent) < 0 ||
+        fstat(root->fd, &root->identity) < 0 ||
+        !directory_locator_same(root->path, &root->identity)) goto done;
+    ok = 1;
+done:
+    if (created && !published) {
+        struct stat temporary_named, held;
+        if (fstat(temporary_fd, &held) == 0 &&
+            fstatat(root->fd, temporary, &temporary_named, AT_SYMLINK_NOFOLLOW) == 0 &&
+            same_inode(&held, &temporary_named)) {
+            unlinkat(root->fd, temporary, 0);
+            fsync(root->fd);
+        }
+    }
+    if (temporary_fd >= 0) close(temporary_fd);
+    if (parent >= 0) close(parent);
+    if (!ok) return native_error(env, "initial runtime selection publication is unsafe or incomplete");
+    return undefined_value(env);
 }
 
 static napi_value entry_close(napi_env env, napi_callback_info info) {
@@ -520,7 +589,8 @@ static napi_value root_list_entries(napi_env env, napi_callback_info info) {
     return files;
 }
 
-/* kind 0: source package, 1: immutable installed bundle, 2: mutable owner runtime. */
+/* kind 0: source package, 1: immutable installed bundle, 2: runtime reader,
+ * 3: first-install selection writer. Reading cannot acquire write authority. */
 static napi_value open_package_root_impl(napi_env env, napi_callback_info info, int kind) {
     size_t argc = 1, length;
     napi_value argv[1];
@@ -536,26 +606,34 @@ static napi_value open_package_root_impl(napi_env env, napi_callback_info info, 
     root->fd = open_absolute_directory(root->path);
     root->immutable = kind == 1;
     root->runtime = kind == 2;
+    root->writer = kind == 3;
     if (root->fd < 0 || fstat(root->fd, &root->identity) < 0 ||
         (kind ? root->identity.st_uid != geteuid() :
           !(root->identity.st_uid == geteuid() || root->identity.st_uid == 0)) ||
         !(kind == 1 ? immutable_directory(&root->identity, root->identity.st_uid) :
-          kind == 2 ? S_ISDIR(root->identity.st_mode) &&
+          (kind == 2 || kind == 3) ? S_ISDIR(root->identity.st_mode) &&
             (root->identity.st_mode & 07777) == 0700 :
             safe_directory(&root->identity, root->identity.st_uid)) ||
         !root_is_current(root->path, &root->identity)) goto fail;
     napi_value result;
-    const napi_property_descriptor methods[] = {
+    const napi_property_descriptor read_methods[] = {
         {"openEntry", NULL, root_open_entry, NULL, NULL, NULL, napi_default, NULL},
         {"manifestByteCount", NULL, root_manifest_byte_count, NULL, NULL, NULL, napi_default, NULL},
         {"activeByteCount", NULL, root_active_byte_count, NULL, NULL, NULL, napi_default, NULL},
         {"listEntries", NULL, root_list_entries, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, root_close, NULL, NULL, NULL, napi_default, NULL}
     };
+    const napi_property_descriptor write_methods[] = {
+        {"publishInitialActive", NULL, root_publish_initial_active, NULL, NULL, NULL, napi_default, NULL},
+        {"close", NULL, root_close, NULL, NULL, NULL, napi_default, NULL}
+    };
     if (napi_create_object(env, &result) != napi_ok) goto fail;
     if (napi_wrap(env, result, root, finalize_root, NULL, NULL) != napi_ok) goto fail;
     if (napi_type_tag_object(env, result, &root_tag) != napi_ok ||
-        napi_define_properties(env, result, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
+        napi_define_properties(env, result, kind == 3 ?
+            sizeof(write_methods) / sizeof(write_methods[0]) :
+            sizeof(read_methods) / sizeof(read_methods[0]),
+            kind == 3 ? write_methods : read_methods) != napi_ok ||
         napi_object_freeze(env, result) != napi_ok) goto fail_wrapped;
     return result;
 fail_wrapped:
@@ -575,6 +653,10 @@ static napi_value open_installed_root(napi_env env, napi_callback_info info) {
 
 static napi_value open_runtime_root(napi_env env, napi_callback_info info) {
     return open_package_root_impl(env, info, 2);
+}
+
+static napi_value open_initial_selection_writer(napi_env env, napi_callback_info info) {
+    return open_package_root_impl(env, info, 3);
 }
 
 /* CAS roots are mutable 0700 directories. Their locator and authority metadata
@@ -1404,6 +1486,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
         {"openRoot", NULL, open_package_root, NULL, NULL, NULL, napi_default, NULL},
         {"openInstalledRoot", NULL, open_installed_root, NULL, NULL, NULL, napi_default, NULL},
         {"openRuntimeRoot", NULL, open_runtime_root, NULL, NULL, NULL, napi_default, NULL},
+        {"openInitialSelectionWriter", NULL, open_initial_selection_writer, NULL, NULL, NULL, napi_default, NULL},
         {"openCandidateRoot", NULL, open_candidate_root, NULL, NULL, NULL, napi_default, NULL},
         {"openCasRoot", NULL, open_cas_root, NULL, NULL, NULL, napi_default, NULL}
     };

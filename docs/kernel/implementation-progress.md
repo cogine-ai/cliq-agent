@@ -245,6 +245,24 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   Selection, successor acquisition/health and rollback must be ordered under
   the stable bootstrap's single service-transition authority. Until that path
   exists, this branch does not write `active.json` outside the SEA fixture.
+- The first-install selection filesystem cut now has a pinned-native,
+  no-replace writer. It independently verifies the complete signed published
+  tree, writes exact canonical selection bytes into an owner-only temporary
+  regular file, seals and fsyncs it, atomically publishes `active.json` only
+  when absent, fsyncs the directory, and reopens the selected signed tree.
+  Read-only inspection handles do not expose this write capability.
+  The SEA fixture uses this writer after its initial owner import and release.
+  Duplicate selections and symlink targets fail closed. This is a filesystem
+  primitive: the production installer must still prove that the released
+  StateOwner imported this exact bundle and hold the stable service-transition
+  lock. It cannot update a selected bundle or replace the missing handoff.
+- WP01's existing Session workspace identity capture now obtains device and
+  file ids through BigInt filesystem metadata all the way to their canonical
+  unsigned-decimal strings. The shared formatter rejects unsafe number inputs
+  instead of silently rounding a large inode. This addresses precision only;
+  source-tree capture and a descriptor-relative workspace walk are still
+  required before public `run.submit` can use this identity as execution
+  authority.
 
 ## Next integration order
 

@@ -9,6 +9,7 @@ import { build } from 'esbuild';
 import { inject } from 'postject';
 import { canonicalJsonBytes, canonicalSha256 } from '../../dist/kernel/canonical.js';
 import { policyProfile } from '../../dist/policy/runtime-authority.js';
+import { publishInitialRuntimeSelection } from '../../dist/runtime-bundle/installed-selection.js';
 import {
   loadNativePackageReader, openCandidateStageRoot, openPackageRoot, publishHeldPackageCandidate,
   stageHeldPackageCandidate
@@ -149,18 +150,17 @@ try {
   };
   const imported = launch('import', path.join(candidatePath, 'supervisor'));
   const reopened = launch('reopen', path.join(candidatePath, 'supervisor'));
-  // Native unselected publication follows signed candidate import and owner
-  // release. The active-selection writer and service handoff remain open.
+  // Native unselected publication follows signed candidate import and owner release.
   const bundleDir = path.join(stateRoot, 'runtime', 'bundles', bundleRef);
   await mkdir(path.dirname(bundleDir), { recursive: true, mode: 0o700 });
   try {
     assert.equal((await publishHeldPackageCandidate(candidate, stateRoot, releaseKeys)).bundlePath,
       bundleDir);
   } finally { candidate.close(); }
-  await writeFile(path.join(stateRoot, 'runtime', 'active.json'), canonicalJsonBytes({
+  assert.deepEqual(await publishInitialRuntimeSelection(reader, stateRoot, releaseKeys, bundleRef), {
     schemaVersion: 1, format: 'cliq-runtime-active-selection-v1',
     bundleDigest: bundleRef, manifestDigest
-  }), { mode: 0o400 });
+  });
   const installed = launch('installed', path.join(bundleDir, 'supervisor'));
   const digest = createHash('sha256').update(await readFile(executable)).digest('hex');
   for (const observed of [imported, reopened, installed]) {

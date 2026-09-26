@@ -41,6 +41,9 @@ export function sha256Bytes(bytes: Uint8Array): ArtifactRef {
 }
 
 export function unsignedDecimalId(value: number | bigint): string {
+  if (typeof value === 'number' && (!Number.isSafeInteger(value) || value < 0)) {
+    throw new TypeError('device/file id must be a nonnegative safe integer or bigint');
+  }
   const numeric = typeof value === 'bigint' ? value : BigInt(value);
   if (numeric < 0n) {
     throw new TypeError(`device/file id must be an unsigned decimal, received ${numeric}`);
