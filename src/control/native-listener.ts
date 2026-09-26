@@ -7,6 +7,7 @@ import path from 'node:path';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { KernelStorageError } from '../state/errors.js';
 import { runtimeNativePath } from '../runtime-bundle/installed-paths.js';
+import { assertControlSocketPath } from './socket-path.js';
 
 export const CONTROL_LISTENER_ENTRY_ID = 'control_listener_native';
 export const CONTROL_LISTENER_RELATIVE_PATH = `native/${process.platform}-${process.arch}/control-listener`;
@@ -166,13 +167,7 @@ export class NativeControlListener {
 
   static async start(stateRoot: string, expected: NativeControlRoot, handlers: NativeControlHandlers,
                      bundle?: RuntimeBundleManifest): Promise<NativeControlListener> {
-    // Match the native sockaddr_un.sun_path bound, including its terminating NUL.
-    const maxPathBytes = process.platform === 'darwin' ? 103 : 107;
-    const socketPathBytes = Buffer.byteLength(`${stateRoot}/runtime/control-v1.sock`, 'utf8');
-    if (socketPathBytes > maxPathBytes) {
-      throw new KernelStorageError('INVALID_REQUEST',
-        `StateRoot path is too long for the Unix control socket (${socketPathBytes} > ${maxPathBytes} bytes)`);
-    }
+    assertControlSocketPath(stateRoot);
     await verifyNativeBinary(bundle);
     for (const id of [expected.root.deviceId, expected.root.fileId,
       expected.runtime.deviceId, expected.runtime.fileId]) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { readdir, rename, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, realpath, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
@@ -12,7 +12,7 @@ import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { readLatestStateOwner } from './state-owner.js';
 import { openStateStore, type StateStore, type StateStoreRuntimeAuthority } from './store.js';
-import { makePrivateDir } from './testing/fixtures.js';
+import { makeShortPrivateDir } from './testing/fixtures.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID } from './native-owner.js';
 import { signedToolBundle } from './testing/tool-authority.js';
 
@@ -29,7 +29,7 @@ function ownerAt(stateRoot: string) {
 }
 
 test('signed state-owner bootstrap authenticates the actual process before publishing authority', async () => {
-  const stateRoot = await makePrivateDir('.cliq-runtime-owner-bootstrap-');
+  const stateRoot = await makeShortPrivateDir('.cliq-runtime-owner-bootstrap-');
   let store: StateStore | undefined;
   try {
     const authority = await signedToolBundle(testFixture().assembly, []);
@@ -67,8 +67,20 @@ test('signed state-owner bootstrap authenticates the actual process before publi
   } finally { await store?.close(); await rm(stateRoot, { recursive: true, force: true }); }
 });
 
+test('signed bootstrap rejects an overlong control endpoint before StateRoot genesis', async () => {
+  const prefix = path.join(await realpath('/tmp'), `.cliq-long-control-${'x'.repeat(110)}-`);
+  const stateRoot = await mkdtemp(prefix);
+  try {
+    const authority = await signedToolBundle(testFixture().assembly, []);
+    await assert.rejects(openStateStore(stateRoot, authority), {
+      code: 'INVALID_REQUEST', message: /StateRoot path is too long for the Unix control socket/
+    });
+    assert.deepEqual(await readdir(stateRoot), []);
+  } finally { await rm(stateRoot, { recursive: true, force: true }); }
+});
+
 test('signed-owner reopen requires explicit trusted roots and the same runtime, with a fresh owner nonce', async () => {
-  const stateRoot = await makePrivateDir('.cliq-runtime-owner-reopen-');
+  const stateRoot = await makeShortPrivateDir('.cliq-runtime-owner-reopen-');
   let store: StateStore | undefined;
   try {
     const authority = await signedToolBundle(testFixture().assembly, []);
@@ -110,7 +122,7 @@ test('signed-owner reopen requires explicit trusted roots and the same runtime, 
 });
 
 test('signed-owner reopen refuses a missing retained runtime before committing a successor', async () => {
-  const stateRoot = await makePrivateDir('.cliq-runtime-owner-missing-');
+  const stateRoot = await makeShortPrivateDir('.cliq-runtime-owner-missing-');
   let store: StateStore | undefined;
   try {
     const authority = await signedToolBundle(testFixture().assembly, []);
@@ -130,7 +142,7 @@ test('signed-owner reopen refuses a missing retained runtime before committing a
 });
 
 test('signed bootstrap binds the native helper bytes, path, role and version before touching state', async () => {
-  const stateRoot = await makePrivateDir('.cliq-runtime-owner-native-');
+  const stateRoot = await makeShortPrivateDir('.cliq-runtime-owner-native-');
   try {
     const authority = await signedToolBundle(testFixture().assembly, []);
     const helperMismatch = {

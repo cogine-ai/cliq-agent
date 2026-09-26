@@ -13,14 +13,14 @@ import { loadNativeStateOwner } from './native-owner.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { readStateOwner } from './state-owner.js';
 import { openStateStore, type StateStoreRuntimeAuthority } from './store.js';
-import { makePrivateDir } from './testing/fixtures.js';
+import { makeShortPrivateDir } from './testing/fixtures.js';
 import { childFor, ownerAt } from './testing/state-owner-process.js';
 import { signedToolBundle } from './testing/tool-authority.js';
 
 const native = await loadNativeStateOwner();
 
 async function startOwner(t: TestContext, authority?: StateStoreRuntimeAuthority, mode: 'store' | 'fixture' = 'store') {
-  const container = await makePrivateDir('.cliq-owner-takeover-');
+  const container = await makeShortPrivateDir('.cliq-owner-takeover-');
   const child = await childFor(t, container, mode);
   t.after(() => rm(container, { recursive: true, force: true }));
   const acquired = await child.request('acquire', authority);

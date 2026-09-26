@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, readdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { LocalControlServer } from '../control/server.js';
+import { assertControlSocketPath } from '../control/socket-path.js';
 
 import {
   KERNEL_CAS_DIRECTORY,
@@ -411,6 +412,8 @@ export class StateStore {
     }
     if (runtimeAuthority) {
       verifyRuntimeBundle(runtimeAuthority.bundle, runtimeAuthority.releaseKeys);
+      // Reject an impossible signed endpoint before native acquisition can create StateRoot layout.
+      assertControlSocketPath(stateRoot);
     }
     const native = await loadNativeStateOwner(runtimeAuthority?.bundle);
     if (runtimeAuthority) {

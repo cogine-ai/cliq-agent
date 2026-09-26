@@ -1,5 +1,5 @@
 import { randomFillSync } from 'node:crypto';
-import { chmod, mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, realpath, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../kernel/identity.js';
@@ -33,6 +33,13 @@ export function digest(label: string): string {
 
 export async function makePrivateDir(prefix: string): Promise<string> {
   const directory = await mkdtemp(path.join(process.cwd(), prefix));
+  await chmod(directory, 0o700);
+  return directory;
+}
+
+/** Signed control fixtures need a literal AF_UNIX endpoint within sun_path. */
+export async function makeShortPrivateDir(prefix: string): Promise<string> {
+  const directory = await mkdtemp(path.join(await realpath('/tmp'), prefix));
   await chmod(directory, 0o700);
   return directory;
 }
@@ -142,7 +149,8 @@ export async function createActiveFixture(
   label: string,
   options: ActiveFixtureOptions = {}
 ): Promise<ActiveFixture> {
-  const stateRoot = await makePrivateDir(`.cliq-m2-${label}-state-`);
+  const stateRoot = await (options.runtimeAuthority ? makeShortPrivateDir : makePrivateDir)(
+    `.cliq-m2-${label}-state-`);
   const workspace = await makePrivateDir(`.cliq-m2-${label}-ws-`);
   const store = await openStateStore(stateRoot, options.runtimeAuthority);
   const principalId = 'cliq-m2-principal';

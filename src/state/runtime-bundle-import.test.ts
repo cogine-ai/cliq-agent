@@ -13,7 +13,7 @@ import { policyProfile, type RuntimeBundleManifest } from '../policy/runtime-aut
 import { PACKAGE_READER_NATIVE_ENTRY_ID, PACKAGE_READER_NATIVE_RELATIVE_PATH } from '../runtime-bundle/native-package-reader.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_PATH, STATE_OWNER_NATIVE_RELATIVE_PATH } from './native-owner.js';
 import { openStateStore, type StateStore } from './store.js';
-import { makePrivateDir } from './testing/fixtures.js';
+import { makePrivateDir, makeShortPrivateDir } from './testing/fixtures.js';
 
 const supported = process.platform === 'darwin' || process.platform === 'linux';
 const packageReader = fileURLToPath(new URL(`../../dist/${PACKAGE_READER_NATIVE_RELATIVE_PATH}`, import.meta.url));
@@ -71,7 +71,7 @@ async function signedPackage(rootPath: string) {
 test('signed StateOwner imports its exact package into real CAS and retains bytes after owner restart',
   { skip: !supported }, async () => {
     const packageRoot = await makePrivateDir('.cliq-package-owner-source-');
-    const stateRoot = await makePrivateDir('.cliq-package-owner-state-');
+    const stateRoot = await makeShortPrivateDir('.cliq-package-owner-state-');
     let store: StateStore | undefined;
     try {
       const fixture = await signedPackage(packageRoot);
