@@ -293,6 +293,16 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   trusted descriptor-held parser for source index v2/v3/v4, referenced Git
   object existence and pack closure, and private Git generation are still
   required for production Git execution.
+- FrozenIgnoreRules and SourceProjection now reject rehashed extension fields,
+  malformed root-relative selectors, duplicate selectors, widened result
+  ceilings, non-Git ignore sources, unordered Git ignore sources/rules, and
+  source content refs whose digest differs from the retained CAS ref. Run
+  admission and recovery bind the ignore graph to the exact live/retained
+  repository identity and read every distinct ignore file as valid UTF-8
+  without NUL. This is
+  schema and raw-byte closure only. The fixed Git wildmatch parser, selector
+  authorization/classification evidence, and descriptor-held source capture
+  remain prerequisites for public `run.submit` and I1.
 
 ## Next integration order
 

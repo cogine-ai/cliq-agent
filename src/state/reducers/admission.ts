@@ -45,6 +45,7 @@ import {
   decodeWorkspaceState
 } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
+import { validateFrozenIgnoreSourceBytes } from '../frozen-ignore-sources.js';
 import { validateGitSourceIndex } from '../git-index.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import {
@@ -274,6 +275,10 @@ export async function admitRun(
   }
 
   const frozenIgnore = decodeFrozenIgnoreRules(await artifacts.readCanonical(input.frozenIgnoreRulesRef));
+  if (frozenIgnore.repositoryIdentityDigest !== workspaceIdentity.repositoryIdentityDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules are not bound to the live repository identity');
+  }
+  await validateFrozenIgnoreSourceBytes(artifacts, frozenIgnore);
   const sourceProjection = decodeSourceProjection(await artifacts.readCanonical(input.sourceProjectionRef));
   if (
     sourceProjection.frozenIgnoreRulesRef !== input.frozenIgnoreRulesRef ||

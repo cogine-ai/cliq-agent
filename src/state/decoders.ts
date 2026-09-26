@@ -110,6 +110,23 @@ function requireDigest(value: unknown, label: string): string {
   return requireArtifactRef(value, label);
 }
 
+function requireRootRelativePath(value: unknown, label: string): string {
+  const text = requireString(value, label);
+  let normalized: string;
+  try {
+    normalized = normalizeCanonicalText(text);
+  } catch {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} has invalid Unicode`);
+  }
+  const components = text.split('/');
+  if (normalized !== text || text.includes('\\') || Buffer.byteLength(text, 'utf8') > 4096 ||
+      components.some((component) => component === '' || component === '.' || component === '..' ||
+        component === '.git' || Buffer.byteLength(component, 'utf8') > 255)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} is not a canonical in-root path`);
+  }
+  return text;
+}
+
 function requirePlatform(value: unknown, label: string): 'linux' | 'macos' {
   if (value !== 'linux' && value !== 'macos') {
     throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} must be linux or macos`);
@@ -745,6 +762,90 @@ export function decodeFrozenIgnoreRules(value: unknown): FrozenIgnoreRulesV1 {
   if (!isRecord(value) || value.format !== 'cliq-frozen-ignore-rules-v1' || value.schemaVersion !== 1) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules have the wrong schema');
   }
+  rejectUnknownKeys(value, [
+    'schemaVersion', 'format', 'matcherVersion', 'repositoryIdentityDigest',
+    'sources', 'rules', 'rulesDigest'
+  ], 'FrozenIgnoreRules');
+  if (value.matcherVersion !== 'cliq-git-wildmatch-v1' ||
+      !Array.isArray(value.sources) || !Array.isArray(value.rules)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules have an invalid matcher or arrays');
+  }
+  if (value.repositoryIdentityDigest !== undefined) {
+    requireDigest(value.repositoryIdentityDigest, 'FrozenIgnoreRules.repositoryIdentityDigest');
+  } else if (value.sources.length !== 0 || value.rules.length !== 0) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'non-Git frozen ignore rules must be empty');
+  }
+  let previousGitignore: { depth: number; path: string } | undefined;
+  for (const [index, candidate] of value.sources.entries()) {
+    if (!isRecord(candidate)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `frozen ignore source ${index} is invalid`);
+    }
+    rejectUnknownKeys(candidate, [
+      'index', 'kind', 'canonicalRootRelativePath', 'baseDirectory', 'contentRef', 'contentDigest'
+    ], `FrozenIgnoreRules.sources[${index}]`);
+    if (candidate.index !== index) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore source indices must be contiguous');
+    }
+    const sourcePath = candidate.canonicalRootRelativePath;
+    if (candidate.kind === 'git_info_exclude') {
+      if (index !== 0 || sourcePath !== '.git/info/exclude' || candidate.baseDirectory !== '') {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'Git info exclude must be the first root-bound source');
+      }
+    } else if (candidate.kind === 'gitignore') {
+      const canonicalPath = requireRootRelativePath(sourcePath, `FrozenIgnoreRules.sources[${index}].path`);
+      if (canonicalPath.split('/').at(-1) !== '.gitignore') {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore source must be a .gitignore file');
+      }
+      const base = path.posix.dirname(canonicalPath);
+      if (candidate.baseDirectory !== (base === '.' ? '' : base)) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore source base directory is invalid');
+      }
+      const depth = canonicalPath.split('/').length;
+      if (previousGitignore && (depth < previousGitignore.depth ||
+          (depth === previousGitignore.depth && Buffer.compare(Buffer.from(previousGitignore.path), Buffer.from(canonicalPath)) >= 0))) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen .gitignore sources must be depth/path ordered');
+      }
+      previousGitignore = { depth, path: canonicalPath };
+    } else {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore source kind is invalid');
+    }
+    const contentRef = requireArtifactRef(candidate.contentRef, `FrozenIgnoreRules.sources[${index}].contentRef`);
+    if (requireDigest(candidate.contentDigest, `FrozenIgnoreRules.sources[${index}].contentDigest`) !== contentRef) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore source content digest differs from its CAS ref');
+    }
+  }
+  for (const [index, candidate] of value.rules.entries()) {
+    if (!isRecord(candidate)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `frozen ignore rule ${index} is invalid`);
+    }
+    rejectUnknownKeys(candidate, [
+      'order', 'sourceIndex', 'sourceLine', 'baseDirectory', 'negated',
+      'directoryOnly', 'anchored', 'pattern'
+    ], `FrozenIgnoreRules.rules[${index}]`);
+    const sourceIndex = requireSafeInteger(candidate.sourceIndex, `FrozenIgnoreRules.rules[${index}].sourceIndex`);
+    const sourceLine = requireSafeInteger(candidate.sourceLine, `FrozenIgnoreRules.rules[${index}].sourceLine`, 1);
+    const source = value.sources[sourceIndex] as Record<string, unknown> | undefined;
+    if (candidate.order !== index || source === undefined ||
+        candidate.baseDirectory !== source.baseDirectory ||
+        typeof candidate.negated !== 'boolean' || typeof candidate.directoryOnly !== 'boolean' ||
+        typeof candidate.anchored !== 'boolean') {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rule order, source, or flags are invalid');
+    }
+    const pattern = requireString(candidate.pattern, `FrozenIgnoreRules.rules[${index}].pattern`);
+    try {
+      normalizeCanonicalText(pattern);
+    } catch {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rule pattern is invalid text');
+    }
+    if (index > 0) {
+      const prior = value.rules[index - 1] as Record<string, unknown>;
+      if (sourceIndex < (prior.sourceIndex as number) ||
+          (sourceIndex === prior.sourceIndex && sourceLine <= (prior.sourceLine as number))) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules must follow source and line order');
+      }
+    }
+  }
+  requireDigest(value.rulesDigest, 'FrozenIgnoreRules.rulesDigest');
   const rules = value as FrozenIgnoreRulesV1;
   if (digestOmitting(rules, 'rulesDigest') !== rules.rulesDigest) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules digest does not rehash');
@@ -756,6 +857,46 @@ export function decodeSourceProjection(value: unknown): SourceProjectionSpec {
   if (!isRecord(value) || value.matcherVersion !== 'cliq-exact-path-v1' || value.schemaVersion !== 1) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'source projection has the wrong schema');
   }
+  rejectUnknownKeys(value, [
+    'schemaVersion', 'matcherVersion', 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest',
+    'explicitIncludes', 'explicitExcludes', 'maxChangedPaths', 'maxChangedBytes', 'projectionDigest'
+  ], 'SourceProjection');
+  requireArtifactRef(value.frozenIgnoreRulesRef, 'SourceProjection.frozenIgnoreRulesRef');
+  requireDigest(value.frozenIgnoreRulesDigest, 'SourceProjection.frozenIgnoreRulesDigest');
+  if (!Array.isArray(value.explicitIncludes) || value.explicitIncludes.length > 128 ||
+      !Array.isArray(value.explicitExcludes) || value.explicitExcludes.length > 128) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source selectors exceed the 128-entry bound or are not arrays');
+  }
+  for (const [kind, selectors] of [
+    ['explicitIncludes', value.explicitIncludes],
+    ['explicitExcludes', value.explicitExcludes]
+  ] as const) {
+    const seen = new Set<string>();
+    for (const [index, candidate] of selectors.entries()) {
+      if (!isRecord(candidate)) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `source ${kind}[${index}] is invalid`);
+      }
+      rejectUnknownKeys(candidate, kind === 'explicitIncludes'
+        ? ['path', 'scope', 'authorizationRef'] : ['path', 'scope'], `SourceProjection.${kind}[${index}]`);
+      const selectorPath = requireRootRelativePath(candidate.path, `SourceProjection.${kind}[${index}].path`);
+      if (candidate.scope !== 'entry' && candidate.scope !== 'subtree') {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `source ${kind}[${index}] scope is invalid`);
+      }
+      const key = `${selectorPath}\0${candidate.scope}`;
+      if (seen.has(key)) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `source ${kind} has a duplicate selector`);
+      }
+      seen.add(key);
+      if (kind === 'explicitIncludes') {
+        requireArtifactRef(candidate.authorizationRef, `SourceProjection.${kind}[${index}].authorizationRef`);
+      }
+    }
+  }
+  if (requireSafeInteger(value.maxChangedPaths, 'SourceProjection.maxChangedPaths') > 100_000 ||
+      requireSafeInteger(value.maxChangedBytes, 'SourceProjection.maxChangedBytes') > 4 * 1024 * 1024 * 1024) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source projection result ceilings exceed the Kernel Cut');
+  }
+  requireDigest(value.projectionDigest, 'SourceProjection.projectionDigest');
   const spec = value as SourceProjectionSpec;
   if (digestOmitting(spec, 'projectionDigest') !== spec.projectionDigest) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'source projection digest does not rehash');

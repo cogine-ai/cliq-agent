@@ -63,6 +63,9 @@ async function publishEmptySourceGraph(
     schemaVersion: 1,
     format: 'cliq-frozen-ignore-rules-v1',
     matcherVersion: 'cliq-git-wildmatch-v1',
+    ...(options.repositoryIdentityDigest === undefined ? {} : {
+      repositoryIdentityDigest: options.repositoryIdentityDigest
+    }),
     sources: [],
     rules: [],
     rulesDigest: ''

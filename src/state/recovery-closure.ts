@@ -35,6 +35,7 @@ import {
   decodeWorkspaceState
 } from './decoders.js';
 import { KernelStorageError } from './errors.js';
+import { validateFrozenIgnoreSourceBytes } from './frozen-ignore-sources.js';
 import { validateGitSourceIndex } from './git-index.js';
 import { validateWorkerRecoveryWait } from './worker-recovery.js';
 import { validateWorkspaceEntryBlobs } from './workspace-entry-blobs.js';
@@ -193,12 +194,14 @@ async function validateRunSpecArtifacts(
   const rules = decodeFrozenIgnoreRules(
     await artifacts.readCanonical(source.frozenIgnoreRulesRef)
   );
-  await requireRecoveryArtifacts(
-    artifacts,
-    rules.sources.map((ruleSource, index) =>
-      [`FrozenIgnoreRules.sources[${index}].contentRef`, ruleSource.contentRef] as const
-    )
-  );
+  if (rules.repositoryIdentityDigest !== workspace.repositoryIdentityDigest) {
+    recoveryFailure('RunSpec frozen ignore rules are not bound to the retained repository identity');
+  }
+  try {
+    await validateFrozenIgnoreSourceBytes(artifacts, rules);
+  } catch (error) {
+    recoveryFailure(`RunSpec frozen ignore source closure is invalid: ${(error as Error).message}`);
+  }
   if (
     source.sourceProjectionRef !== runSpec.sourceProjectionRef ||
     source.frozenIgnoreRulesRef !== projection.frozenIgnoreRulesRef ||
