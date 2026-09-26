@@ -62,6 +62,9 @@ export type HeldStateOwnerLock = Readonly<{
   inspectWorkspaceIdentity(canonicalAbsolutePath: string): LiveWorkspaceInspection;
   openWorkspaceSourceFile(canonicalAbsolutePath: string, root: DescriptorIdentity,
     canonicalRootRelativePath: string): HeldWorkspaceSourceFile;
+  /** Literal .git/index only, bound to the recorded root and Git directory. */
+  openWorkspaceGitIndex(canonicalAbsolutePath: string, root: DescriptorIdentity,
+    git: DescriptorIdentity): HeldWorkspaceSourceFile;
   listWorkspaceSourceDirectory(canonicalAbsolutePath: string, root: DescriptorIdentity,
     canonicalRootRelativePath: string): readonly WorkspaceSourceDirectoryEntry[];
   readWorkspaceSourceSymlink(canonicalAbsolutePath: string, root: DescriptorIdentity,
@@ -78,9 +81,12 @@ export type NativeStateOwner = Readonly<{
 }>;
 
 type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'openWorkspaceSourceFile' |
-  'listWorkspaceSourceDirectory' | 'readWorkspaceSourceSymlink'> & {
+  'openWorkspaceGitIndex' | 'listWorkspaceSourceDirectory' | 'readWorkspaceSourceSymlink'> & {
   openWorkspaceSourceFile(workspacePath: string, relativePath: string,
     deviceId: string, fileId: string, ownerUid: number): HeldWorkspaceSourceFile;
+  openWorkspaceGitIndex(workspacePath: string,
+    rootDeviceId: string, rootFileId: string, rootOwnerUid: number,
+    gitDeviceId: string, gitFileId: string, gitOwnerUid: number): HeldWorkspaceSourceFile;
   listWorkspaceSourceDirectory(workspacePath: string, relativePath: string,
     deviceId: string, fileId: string, ownerUid: number): readonly WorkspaceSourceDirectoryEntry[];
   readWorkspaceSourceSymlink(workspacePath: string, relativePath: string,
@@ -156,6 +162,22 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock changed during source file opening');
         }
         throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace source file changed or is unsafe: ${(error as Error).message}`);
+      }
+    },
+    openWorkspaceGitIndex(workspacePath, sourceRoot, gitRoot) {
+      receiver(this);
+      if (normalizeAbsolutePath(workspacePath) !== workspacePath) {
+        throw new TypeError('workspace path must be canonical');
+      }
+      try {
+        return held.openWorkspaceGitIndex(workspacePath,
+          sourceRoot.deviceId, sourceRoot.fileId, sourceRoot.ownerUid,
+          gitRoot.deviceId, gitRoot.fileId, gitRoot.ownerUid);
+      } catch (error) {
+        try { held.assertHeld(); } catch {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock changed during Git index opening');
+        }
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace Git index changed or is unsafe: ${(error as Error).message}`);
       }
     },
     listWorkspaceSourceDirectory(workspacePath, sourceRoot, relativePath) {
@@ -279,6 +301,7 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
         const held = binding.acquireLock(stateRoot, createLayout);
         if (typeof held.inspectWorkspaceIdentity !== 'function' ||
             typeof held.openWorkspaceSourceFile !== 'function' ||
+            typeof held.openWorkspaceGitIndex !== 'function' ||
             typeof held.listWorkspaceSourceDirectory !== 'function' ||
             typeof held.readWorkspaceSourceSymlink !== 'function') {
           held.close();

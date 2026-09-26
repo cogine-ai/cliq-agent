@@ -46,6 +46,7 @@ static napi_value assert_prior_process_dead(napi_env env, napi_callback_info inf
 static napi_value move_generation(napi_env env, napi_callback_info info);
 static napi_value inspect_workspace_identity(napi_env env, napi_callback_info info);
 static napi_value open_workspace_source_file(napi_env env, napi_callback_info info);
+static napi_value open_workspace_git_index(napi_env env, napi_callback_info info);
 static napi_value list_workspace_source_directory(napi_env env, napi_callback_info info);
 static napi_value read_workspace_source_symlink(napi_env env, napi_callback_info info);
 static int literal_child_present(int parent, const char *literal);
@@ -223,6 +224,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"moveGeneration", NULL, move_generation, NULL, NULL, NULL, napi_default, NULL},
         {"inspectWorkspaceIdentity", NULL, inspect_workspace_identity, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkspaceSourceFile", NULL, open_workspace_source_file, NULL, NULL, NULL, napi_default, NULL},
+        {"openWorkspaceGitIndex", NULL, open_workspace_git_index, NULL, NULL, NULL, napi_default, NULL},
         {"listWorkspaceSourceDirectory", NULL, list_workspace_source_directory, NULL, NULL, NULL, napi_default, NULL},
         {"readWorkspaceSourceSymlink", NULL, read_workspace_source_symlink, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
@@ -673,22 +675,29 @@ static napi_value source_file_assert_stable(napi_env env, napi_callback_info inf
     return napi_get_undefined(env, &result) == napi_ok ? result : NULL;
 }
 
-static napi_value open_workspace_source_file(napi_env env, napi_callback_info info) {
+static napi_value open_workspace_file(napi_env env, napi_callback_info info, int git_index) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
-    napi_value self, argv[5], result, value;
-    size_t argc = 5, workspace_length, relative_length;
-    unsigned long long device, inode;
-    uint32_t owner;
+    napi_value self, argv[7], result, value;
+    size_t argc = git_index ? 7 : 5, workspace_length, relative_length = 0;
+    unsigned long long device, inode, git_device = 0, git_inode = 0;
+    uint32_t owner, git_owner = 0;
     source_file *file = NULL;
-    const char *error = "workspace source file input is invalid";
-    if (!lock_is_held(lock) || napi_get_cb_info(env, info, &argc, argv, &self, NULL) != napi_ok || argc != 5 ||
+    const char *error = git_index ? "workspace Git index input is invalid" : "workspace source file input is invalid";
+    if (!lock_is_held(lock) || napi_get_cb_info(env, info, &argc, argv, &self, NULL) != napi_ok ||
+        argc != (size_t)(git_index ? 7 : 5) ||
         napi_get_value_string_utf8(env, argv[0], NULL, 0, &workspace_length) != napi_ok ||
-        workspace_length < 2 || workspace_length >= PATH_MAX ||
-        napi_get_value_string_utf8(env, argv[1], NULL, 0, &relative_length) != napi_ok ||
-        relative_length == 0 || relative_length >= PATH_MAX ||
-        !read_unsigned_id(env, argv[2], &device) || !read_unsigned_id(env, argv[3], &inode) ||
-        napi_get_value_uint32(env, argv[4], &owner) != napi_ok || owner != geteuid()) goto done;
+        workspace_length < 2 || workspace_length >= PATH_MAX) goto done;
+    if (git_index) {
+        if (!read_unsigned_id(env, argv[1], &device) || !read_unsigned_id(env, argv[2], &inode) ||
+            napi_get_value_uint32(env, argv[3], &owner) != napi_ok || owner != geteuid() ||
+            !read_unsigned_id(env, argv[4], &git_device) || !read_unsigned_id(env, argv[5], &git_inode) ||
+            napi_get_value_uint32(env, argv[6], &git_owner) != napi_ok || git_owner != owner) goto done;
+        relative_length = strlen(".git/index");
+    } else if (napi_get_value_string_utf8(env, argv[1], NULL, 0, &relative_length) != napi_ok ||
+               relative_length == 0 || relative_length >= PATH_MAX ||
+               !read_unsigned_id(env, argv[2], &device) || !read_unsigned_id(env, argv[3], &inode) ||
+               napi_get_value_uint32(env, argv[4], &owner) != napi_ok || owner != geteuid()) goto done;
     file = calloc(1, sizeof(*file));
     if (!file) goto done;
     file->root_fd = file->parent_fd = file->file_fd = -1;
@@ -697,9 +706,12 @@ static napi_value open_workspace_source_file(napi_env env, napi_callback_info in
     file->relative_path = malloc(relative_length + 1);
     if (!file->workspace_path || !file->relative_path ||
         napi_get_value_string_utf8(env, argv[0], file->workspace_path, workspace_length + 1, &workspace_length) != napi_ok ||
-        napi_get_value_string_utf8(env, argv[1], file->relative_path, relative_length + 1, &relative_length) != napi_ok ||
-        strlen(file->workspace_path) != workspace_length || strlen(file->relative_path) != relative_length ||
-        !valid_source_relative_path(file->relative_path)) goto done;
+        strlen(file->workspace_path) != workspace_length) goto done;
+    if (git_index) {
+        memcpy(file->relative_path, ".git/index", relative_length + 1);
+    } else if (napi_get_value_string_utf8(env, argv[1], file->relative_path, relative_length + 1, &relative_length) != napi_ok ||
+               strlen(file->relative_path) != relative_length ||
+               !valid_source_relative_path(file->relative_path)) goto done;
     error = "workspace source root or file is unsafe or changed";
     file->root_fd = open_literal_root(file->workspace_path);
     if (file->root_fd < 0 || fstat(file->root_fd, &file->root) < 0) goto done;
@@ -713,12 +725,22 @@ static napi_value open_workspace_source_file(napi_env env, napi_callback_info in
         (unsigned long long)file->root.st_ino != inode) goto done;
     file->parent_fd = open_source_parent(file->root_fd, file->relative_path, &file->root, &file->parent);
     if (file->parent_fd < 0) goto done;
+    if (git_index) {
+#ifdef __APPLE__
+        const unsigned long long observed_git_device = (uint32_t)file->parent.st_dev;
+#else
+        const unsigned long long observed_git_device = file->parent.st_dev;
+#endif
+        if (observed_git_device != git_device || (unsigned long long)file->parent.st_ino != git_inode ||
+            file->parent.st_uid != git_owner) goto done;
+    }
     const char *leaf = strrchr(file->relative_path, '/');
     leaf = leaf ? leaf + 1 : file->relative_path;
     if (literal_child_present(file->parent_fd, leaf) != 1) goto done;
     file->file_fd = openat(file->parent_fd, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     if (file->file_fd < 0 || fstat(file->file_fd, &file->file) < 0 || !S_ISREG(file->file.st_mode) ||
         file->file.st_uid != owner || file->file.st_dev != file->root.st_dev ||
+        (git_index && file->file.st_nlink != 1) ||
         file->file.st_size < 0 || file->file.st_size > 9007199254740991LL ||
         !source_file_stable(file, 0)) goto done;
     if (napi_create_reference(env, self, 1, &file->lock_ref) != napi_ok) goto done;
@@ -743,6 +765,14 @@ static napi_value open_workspace_source_file(napi_env env, napi_callback_info in
 done:
     if (file) finalize_source_file(env, file, NULL);
     return native_error(env, error);
+}
+
+static napi_value open_workspace_source_file(napi_env env, napi_callback_info info) {
+    return open_workspace_file(env, info, 0);
+}
+
+static napi_value open_workspace_git_index(napi_env env, napi_callback_info info) {
+    return open_workspace_file(env, info, 1);
 }
 
 static int open_source_directory(int root_fd, const char *relative_path, const struct stat *root,

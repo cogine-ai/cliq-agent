@@ -309,8 +309,12 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   stage/mode/extended flags, canonical paths, v4 prefix compression and
   extension framing before emitting the exact zero-stat v2
   index and `GitIndexSnapshotV1`. Tests compare real Git v4 bytes and known
-  SHA-1/SHA-256 images. Descriptor-held `.git/index` capture, referenced object
-  existence, pack closure and atomic Run integration remain open.
+  SHA-1/SHA-256 images. A held StateOwner reader now streams only the literal
+  `.git/index` under the recorded workspace and Git directory descriptors. It
+  rejects hardlinked or symlinked indexes and changes to the root, Git directory
+  or file during reading; a real Git index is read and parsed in a focused test.
+  Bounded source publication, referenced object existence, pack closure and
+  atomic Run integration remain open.
 - FrozenIgnoreRules and SourceProjection now reject rehashed extension fields,
   malformed root-relative selectors, duplicate selectors, widened result
   ceilings, non-Git ignore sources, unordered Git ignore sources/rules, and
