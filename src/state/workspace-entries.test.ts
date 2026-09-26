@@ -64,6 +64,9 @@ test('workspace entries reject traversal, Git metadata, noncanonical modes and e
   assert.throws(() => decodeWorkspaceEntries({ ...valid,
     entries: [{ ...valid.entries[0], mode: 0o600 }, valid.entries[1]]
   }), /noncanonical mode/);
+  assert.throws(() => decodeWorkspaceEntries(manifestWith([
+    valid.entries[0]!, { ...valid.entries[1]!, mode: 0o755 }
+  ])), /symlink.*noncanonical mode/);
   assert.throws(() => decodeWorkspaceEntries({ ...valid,
     entries: [valid.entries[0], { ...valid.entries[1], target: '../outside' }]
   }), /leaves the admitted root/);

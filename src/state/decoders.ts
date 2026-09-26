@@ -975,6 +975,9 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
         ['path', 'kind', 'mode', 'target', 'targetDigest'],
         `WorkspaceEntryManifest.entries[${index}]`
       );
+      if (mode !== 0o777) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace symlink ${entryPath} has a noncanonical mode`);
+      }
       const target = requireString(candidate.target, `WorkspaceEntryManifest.entries[${index}].target`);
       let normalizedTarget: string;
       try {
