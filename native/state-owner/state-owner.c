@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #define NAPI_VERSION 8
 #include <node_api.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -33,6 +34,7 @@ static const napi_type_tag lock_tag = {0x3d641bc705864cfbULL, 0xab53499f3ee988c4
 
 static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info);
 static napi_value move_generation(napi_env env, napi_callback_info info);
+static napi_value inspect_workspace_identity(napi_env env, napi_callback_info info);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
@@ -199,6 +201,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"assertHeld", NULL, assert_held, NULL, NULL, NULL, napi_default, NULL},
         {"assertPriorProcessDead", NULL, assert_prior_process_dead, NULL, NULL, NULL, napi_default, NULL},
         {"moveGeneration", NULL, move_generation, NULL, NULL, NULL, napi_default, NULL},
+        {"inspectWorkspaceIdentity", NULL, inspect_workspace_identity, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -367,6 +370,137 @@ done:
     if (napi_create_object(env, &result) != napi_ok || !identity_member(env, result, "identity", &destination) ||
         napi_get_named_property(env, result, "identity", &identity) != napi_ok) return NULL;
     return identity;
+}
+
+static int same_file_observation(const struct stat *left, const struct stat *right) {
+    if (!same_inode(left, right) || left->st_uid != right->st_uid || left->st_gid != right->st_gid ||
+        left->st_mode != right->st_mode || left->st_nlink != right->st_nlink || left->st_size != right->st_size ||
+        left->st_mtime != right->st_mtime || left->st_ctime != right->st_ctime) return 0;
+#ifdef __APPLE__
+    return left->st_mtimespec.tv_nsec == right->st_mtimespec.tv_nsec &&
+           left->st_ctimespec.tv_nsec == right->st_ctimespec.tv_nsec;
+#else
+    return left->st_mtim.tv_nsec == right->st_mtim.tv_nsec &&
+           left->st_ctim.tv_nsec == right->st_ctim.tv_nsec;
+#endif
+}
+
+/* openat on a case-insensitive volume can resolve ".Git" for literal ".git".
+ * Inspect the held parent's actual entry names before accepting that lookup. */
+static int literal_child_present(int parent, const char *literal) {
+    int scan_fd = openat(parent, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (scan_fd < 0) return -1;
+    DIR *stream = fdopendir(scan_fd);
+    if (!stream) { close(scan_fd); return -1; }
+    int found = 0;
+    errno = 0;
+    struct dirent *entry;
+    while ((entry = readdir(stream)) != NULL) {
+        if (strcmp(entry->d_name, literal) == 0) found = 1;
+        errno = 0;
+    }
+    int read_error = errno;
+    closedir(stream);
+    return read_error == 0 ? found : -1;
+}
+
+/* A read-only Session identity observation. The path locates one root; all
+ * Git/config reads then use its held descriptor and reject symlink aliases. */
+static napi_value inspect_workspace_identity(napi_env env, napi_callback_info info) {
+    state_lock *lock = unwrap_lock(env, info);
+    if (!lock) return NULL;
+    if (!lock_is_held(lock)) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
+    size_t argc = 1, length;
+    napi_value argv[1], result = NULL, git_value = NULL, config_value = NULL;
+    int root_fd = -1, git_fd = -1, config_fd = -1, reopened = -1;
+    char *path = NULL, *config_bytes = NULL;
+    struct stat root, git, config_before, config_after, named;
+    int has_git = 0, has_config = 0;
+    int literal_git, literal_config = 0;
+    const char *error = "invalid workspace path for descriptor-held identity inspection";
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 1 ||
+        napi_get_value_string_utf8(env, argv[0], NULL, 0, &length) != napi_ok ||
+        length < 2 || length >= PATH_MAX) goto done;
+    path = malloc(length + 1);
+    if (!path || napi_get_value_string_utf8(env, argv[0], path, length + 1, &length) != napi_ok ||
+        strlen(path) != length) goto done;
+    error = "workspace root must be a same-user no-follow directory";
+    root_fd = open_root(path);
+    if (root_fd < 0 || fstat(root_fd, &root) < 0 || !S_ISDIR(root.st_mode) || root.st_uid != geteuid()) goto done;
+    error = "workspace .git must be a literal same-user directory on the root device";
+    literal_git = literal_child_present(root_fd, ".git");
+    if (literal_git < 0) goto done;
+    git_fd = openat(root_fd, ".git", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (git_fd < 0) {
+        if (errno != ENOENT || literal_git != 0) goto done;
+    } else {
+        if (literal_git != 1) goto done;
+        has_git = 1;
+        if (fstat(git_fd, &git) < 0 || !S_ISDIR(git.st_mode) || git.st_uid != root.st_uid ||
+            git.st_dev != root.st_dev) goto done;
+        error = "workspace .git/config must be a stable same-user regular file of at most 1 MiB";
+        literal_config = literal_child_present(git_fd, "config");
+        if (literal_config < 0) goto done;
+        config_fd = openat(git_fd, "config", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        if (config_fd < 0) {
+            if (errno != ENOENT || literal_config != 0) goto done;
+        } else {
+            if (literal_config != 1) goto done;
+            has_config = 1;
+            if (fstat(config_fd, &config_before) < 0 || !S_ISREG(config_before.st_mode) ||
+                config_before.st_uid != root.st_uid || config_before.st_dev != root.st_dev ||
+                config_before.st_nlink != 1 || config_before.st_size < 0 ||
+                config_before.st_size > 1024 * 1024) goto done;
+            size_t size = (size_t)config_before.st_size, consumed = 0;
+            config_bytes = malloc(size + 1);
+            if (!config_bytes) goto done;
+            while (consumed < size) {
+                ssize_t count = read(config_fd, config_bytes + consumed, size - consumed);
+                if (count < 0 && errno == EINTR) continue;
+                if (count <= 0) goto done;
+                consumed += (size_t)count;
+            }
+            char extra;
+            ssize_t extra_count;
+            do { extra_count = read(config_fd, &extra, 1); } while (extra_count < 0 && errno == EINTR);
+            if (extra_count != 0 || fstat(config_fd, &config_after) < 0 ||
+                !same_file_observation(&config_before, &config_after) ||
+                fstatat(git_fd, "config", &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+                !same_file_observation(&config_before, &named)) goto done;
+        }
+    }
+    error = "workspace root or .git identity changed during descriptor-held inspection";
+    reopened = open_root(path);
+    if (reopened < 0 || fstat(reopened, &named) < 0 || !same_file_observation(&root, &named) ||
+        literal_child_present(root_fd, ".git") != has_git ||
+        !lock_is_held(lock)) goto done;
+    if (has_git) {
+        if (fstatat(root_fd, ".git", &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+            !same_file_observation(&git, &named) ||
+            literal_child_present(git_fd, "config") != has_config) goto done;
+        if (!has_config && (fstatat(git_fd, "config", &named, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT)) goto done;
+    } else if (fstatat(root_fd, ".git", &named, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) goto done;
+    if (napi_create_object(env, &result) != napi_ok || !identity_member(env, result, "root", &root)) {
+        result = NULL; goto done;
+    }
+    if (has_git) {
+        if (napi_create_object(env, &git_value) != napi_ok ||
+            !identity_member(env, git_value, "identity", &git)) { result = NULL; goto done; }
+        if (has_config) {
+            if (napi_create_buffer_copy(env, (size_t)config_before.st_size, config_bytes, NULL, &config_value) != napi_ok ||
+                napi_set_named_property(env, git_value, "configBytes", config_value) != napi_ok) { result = NULL; goto done; }
+        }
+        if (napi_set_named_property(env, result, "git", git_value) != napi_ok) { result = NULL; goto done; }
+    }
+    error = NULL;
+done:
+    if (reopened >= 0) close(reopened);
+    if (config_fd >= 0) close(config_fd);
+    if (git_fd >= 0) close(git_fd);
+    if (root_fd >= 0) close(root_fd);
+    free(config_bytes);
+    free(path);
+    return error ? native_error(env, error) : result;
 }
 
 /* 1 = observed identity, 0 = positively absent, -1 = unavailable/invalid.

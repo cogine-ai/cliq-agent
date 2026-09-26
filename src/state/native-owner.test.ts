@@ -32,6 +32,7 @@ test('native StateOwner lock holds exact descriptor identities until explicit cl
     held.assertHeld();
     assert.throws(() => native.acquireLock(root, false), busy);
     assert.throws(() => held.close.call({}), /invalid StateOwner lock handle/);
+    assert.throws(() => held.inspectWorkspaceIdentity.call({} as never, root), /invalid StateOwner lock handle/);
     held.assertHeld();
   } finally { held.close(); }
   held.close();

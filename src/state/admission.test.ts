@@ -507,6 +507,91 @@ test('replacing the workspace root after Session create is ARTIFACT_MISMATCH', a
   }
 });
 
+test('Session commit rechecks the held workspace root after asynchronous artifact publication', async (t) => {
+  const stateRoot = await makePrivateDir('.cliq-m1-session-swap-');
+  const parent = await makePrivateDir('.cliq-m1-session-swap-parent-');
+  const workspace = path.join(parent, 'workspace');
+  const replacement = path.join(parent, 'replacement');
+  const original = path.join(parent, 'original');
+  await mkdir(workspace, { mode: 0o700 });
+  await mkdir(replacement, { mode: 0o700 });
+  const store = await openStateStore(stateRoot);
+  try {
+    const principalId = 'cliq-test-principal';
+    const channel = await publishInProcessChannel(store, principalId);
+    const input = { principalId, requestId: uuidv7(), admissionKey: admissionKey('session-swap'),
+      workspacePath: workspace, ...channel };
+    const publish = store.artifacts.publishCanonical.bind(store.artifacts);
+    const injected = t.mock.method(store.artifacts, 'publishCanonical', async (value: unknown, kind: string) => {
+      const artifact = await publish(value, kind);
+      if (kind === 'cliq-control-response-v1') {
+        await rename(workspace, original);
+        await rename(replacement, workspace);
+      }
+      return artifact;
+    });
+    await assert.rejects(store.createSession(input),
+      (error: unknown) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
+    injected.mock.restore();
+    inspectKernel(stateRoot, (driver) => {
+      assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM sessions').get<{ count: unknown }>()?.count), 0);
+      assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM control_requests').get<{ count: unknown }>()?.count), 0);
+    });
+    await rename(workspace, replacement);
+    await rename(original, workspace);
+    assert.equal((await store.createSession(input)).replayed, false);
+  } finally {
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test('Run admission rechecks the held workspace root inside its final SQLite transaction', async (t) => {
+  const stateRoot = await makePrivateDir('.cliq-m1-run-swap-');
+  const parent = await makePrivateDir('.cliq-m1-run-swap-parent-');
+  const workspace = path.join(parent, 'workspace');
+  const replacement = path.join(parent, 'replacement');
+  const original = path.join(parent, 'original');
+  await mkdir(workspace, { mode: 0o700 });
+  await mkdir(replacement, { mode: 0o700 });
+  const store = await openStateStore(stateRoot);
+  try {
+    const principalId = 'cliq-test-principal';
+    const channel = await publishInProcessChannel(store, principalId);
+    const session = await store.createSession({ principalId, requestId: uuidv7(),
+      admissionKey: admissionKey('session-run-swap'), workspacePath: workspace, ...channel });
+    const identity = await store.artifacts.readCanonical<WorkspaceIdentityV1>(session.session.workspaceIdentityRef);
+    const source = await publishEmptySourceGraph(store, identity.identityDigest);
+    const input = { principalId, requestId: uuidv7(), admissionKey: admissionKey('run-swap'),
+      sessionId: session.session.id, expectedContextRevision: 1, workspacePath: workspace,
+      objective: 'prove commit identity', allowUnverified: true, ...channel, ...source };
+    const publish = store.artifacts.publishCanonical.bind(store.artifacts);
+    const injected = t.mock.method(store.artifacts, 'publishCanonical', async (value: unknown, kind: string) => {
+      const artifact = await publish(value, kind);
+      if (kind === 'cliq-control-response-v1') {
+        await rename(workspace, original);
+        await rename(replacement, workspace);
+      }
+      return artifact;
+    });
+    await assert.rejects(store.admitRun(input),
+      (error: unknown) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
+    injected.mock.restore();
+    inspectKernel(stateRoot, (driver) => {
+      assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM runs').get<{ count: unknown }>()?.count), 0);
+      assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM checkpoints').get<{ count: unknown }>()?.count), 0);
+    });
+    await rename(workspace, replacement);
+    await rename(original, workspace);
+    assert.equal((await store.admitRun(input)).replayed, false);
+  } finally {
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
 test('session.create rejects a symlinked workspace root', async () => {
   const stateRoot = await makePrivateDir('.cliq-m1-symlink-');
   const realWorkspace = await makePrivateDir('.cliq-m1-ws-');

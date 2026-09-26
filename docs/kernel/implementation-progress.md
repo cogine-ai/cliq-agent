@@ -256,13 +256,25 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   primitive: the production installer must still prove that the released
   StateOwner imported this exact bundle and hold the stable service-transition
   lock. It cannot update a selected bundle or replace the missing handoff.
-- WP01's existing Session workspace identity capture now obtains device and
-  file ids through BigInt filesystem metadata all the way to their canonical
-  unsigned-decimal strings. The shared formatter rejects unsafe number inputs
-  instead of silently rounding a large inode. This addresses precision only;
+- WP01 filesystem identity preserves device and file ids as canonical
+  unsigned-decimal strings. The shared BigInt formatter rejects unsafe number
+  inputs, and the current native reader emits decimal ids directly from
+  `stat`, without routing them through JS numbers. This addresses precision;
   source-tree capture and a descriptor-relative workspace walk are still
   required before public `run.submit` can use this identity as execution
   authority.
+- Session identity capture and Run admission recapture now call the held
+  StateOwner native helper for a component-wise no-follow root open and
+  literal descriptor-relative `.git/config` read. It observes same-user
+  root/Git inode identities without converting 64-bit ids through JS numbers,
+  rejects linked, symlinked, oversized, changed or invalid-UTF-8 Git config,
+  checks the actual `.git`/`config` entry spelling on case-insensitive volumes,
+  and binds `extensions.objectformat` to the RepositoryIdentity. Replaced roots
+  and Git directories fail before Run admission; Session and Run also recheck
+  this identity inside their final SQLite transaction after asynchronous CAS
+  publication, with swap fault tests proving no authority row commits. This is
+  a read-only identity observation. Complete source-tree traversal, the safe
+  Git-config profile, Git object closure and private generation remain open.
 - WP01 Run admission now decodes the persisted live WorkspaceIdentity and its
   referenced RepositoryIdentity as closed, self-rehashed shapes. It checks
   canonical paths and unsigned 64-bit filesystem ids, requires paired Git

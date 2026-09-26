@@ -61,7 +61,7 @@ import {
   ZERO_BUDGET
 } from '../rows.js';
 import type { SqliteDriver } from '../sqlite-driver.js';
-import { recaptureLiveWorkspaceIdentity } from '../workspace-identity.js';
+import { assertCurrentLiveWorkspaceIdentity, recaptureLiveWorkspaceIdentity } from '../workspace-identity.js';
 import { validateWorkspaceEntryBlobs } from '../workspace-entry-blobs.js';
 
 export type AdmitRunInput = {
@@ -263,7 +263,7 @@ export async function admitRun(
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace repository artifact differs from the Session identity');
     }
   }
-  await recaptureLiveWorkspaceIdentity(workspaceIdentity, workspacePath);
+  await recaptureLiveWorkspaceIdentity(workspaceIdentity, workspacePath, owner.filesystem);
 
   const projection = decodeSessionProjection(await artifacts.readCanonical(session.contextProjectionRef));
   if (
@@ -554,6 +554,7 @@ export async function admitRun(
     assertActiveStateOwner(connection, owner);
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch);
     if (fenceOutcome !== 'healthy') return;
+    assertCurrentLiveWorkspaceIdentity(workspaceIdentity, workspacePath, owner.filesystem);
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
 
     connection

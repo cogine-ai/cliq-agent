@@ -15,6 +15,10 @@ export const STATE_OWNER_NATIVE_RELATIVE_PATH = `native/${process.platform}-${pr
 export const STATE_OWNER_NATIVE_PATH = runtimeNativePath(STATE_OWNER_NATIVE_RELATIVE_PATH, import.meta.url);
 
 type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
+export type LiveWorkspaceInspection = Readonly<{
+  root: DescriptorIdentity;
+  git?: Readonly<{ identity: DescriptorIdentity; configBytes?: Buffer }>;
+}>;
 /** A physical move observation only: no containment death, tree or SQLite authority. */
 export type GenerationQuarantineMove = Readonly<{
   quarantineCanonicalRootRelativePath: string;
@@ -30,6 +34,9 @@ export type HeldStateOwnerLock = Readonly<{
   lock: DescriptorIdentity;
   assertHeld(): void;
   assertPriorProcessDead(pid: number, processStartToken: string): void;
+  /** Read-only, component-wise no-follow root/.git/config observation while
+   * this StateOwner lock is held. It is not a complete source-tree capture. */
+  inspectWorkspaceIdentity(canonicalAbsolutePath: string): LiveWorkspaceInspection;
   /** Trusted Supervisor primitive. The caller must first fence/retire writers;
    * this neither revokes open descriptors/mounts nor commits generation state. */
   quarantineGeneration(generation: WorkspaceGenerationIdentityV1, sourceRowVersion: number): GenerationQuarantineMove;
@@ -71,6 +78,28 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
     assertHeld() { receiver(this); held.assertHeld(); },
     assertPriorProcessDead(pid, token) { receiver(this); held.assertPriorProcessDead(pid, token); },
     close() { receiver(this); held.close(); },
+    inspectWorkspaceIdentity(workspacePath) {
+      receiver(this);
+      try { held.assertHeld(); } catch {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock changed before workspace inspection');
+      }
+      if (normalizeAbsolutePath(workspacePath) !== workspacePath) {
+        throw new TypeError('workspace path must be canonical');
+      }
+      let inspected: LiveWorkspaceInspection;
+      try {
+        inspected = held.inspectWorkspaceIdentity(workspacePath);
+      } catch (error) {
+        try { held.assertHeld(); } catch {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock changed during workspace inspection');
+        }
+        throw new KernelStorageError('INVALID_REQUEST', `workspace descriptor inspection failed: ${(error as Error).message}`);
+      }
+      try { held.assertHeld(); } catch {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock changed during workspace inspection');
+      }
+      return inspected;
+    },
     quarantineGeneration(value, sourceRowVersion) {
       receiver(this);
       held.assertHeld();
@@ -145,6 +174,10 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
       acquireLock(stateRoot, createLayout) {
         if (normalizeAbsolutePath(stateRoot) !== stateRoot) throw new TypeError('StateOwner root must be canonical');
         const held = binding.acquireLock(stateRoot, createLayout);
+        if (typeof held.inspectWorkspaceIdentity !== 'function') {
+          held.close();
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper lacks descriptor-held workspace inspection');
+        }
         try { return wrapLock(held, stateRoot); } catch (error) { held.close(); throw error; }
       },
       processStartToken: () => binding.processStartToken()

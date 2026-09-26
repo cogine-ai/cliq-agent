@@ -29,7 +29,7 @@ import {
   readSession
 } from '../rows.js';
 import type { SqliteDriver } from '../sqlite-driver.js';
-import { captureLiveWorkspaceIdentity } from '../workspace-identity.js';
+import { assertCurrentLiveWorkspaceIdentity, captureLiveWorkspaceIdentity } from '../workspace-identity.js';
 
 export type CreateSessionInput = {
   principalId: string;
@@ -171,7 +171,8 @@ export async function createSession(
 
   const captured = await captureLiveWorkspaceIdentity({
     workspacePath,
-    ownerPrincipalId: input.principalId
+    ownerPrincipalId: input.principalId,
+    filesystem: owner.filesystem
   });
   const published: PublishedArtifact[] = [...channelClosure.metadata];
   let workspaceIdentity: Extract<WorkspaceIdentityV1, { kind: 'live' }> = captured.identity;
@@ -260,6 +261,7 @@ export async function createSession(
     assertActiveStateOwner(connection, owner);
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch);
     if (fenceOutcome !== 'healthy') return;
+    assertCurrentLiveWorkspaceIdentity(workspaceIdentity, workspacePath, owner.filesystem);
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
     connection
       .prepare(
