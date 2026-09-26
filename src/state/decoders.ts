@@ -861,9 +861,75 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
   return entries;
 }
 
+function validGitHeadRef(ref: string): boolean {
+  try {
+    if (normalizeCanonicalText(ref) !== ref) return false;
+  } catch {
+    return false;
+  }
+  if (!ref.startsWith('refs/heads/') || ref.includes('..') || ref.includes('@{') ||
+      /[\u0000-\u0020\u007f~^:?*\[\\]/u.test(ref) || ref.endsWith('.')) return false;
+  return !ref.split('/').some((part) => part === '' || part.startsWith('.') || part.endsWith('.lock'));
+}
+
 export function decodeSourceManifest(value: unknown): SourceManifest {
   if (!isRecord(value) || value.format !== 'cliq-source-manifest-v1' || value.schemaVersion !== 1) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'source manifest has the wrong schema');
+  }
+  const hasGit = Object.hasOwn(value, 'git');
+  const keys = ['schemaVersion', 'format', 'role', 'workspaceIdentityDigest', 'entriesRef',
+    'sourceProjectionRef', 'sourceProjectionDigest', 'frozenIgnoreRulesRef',
+    'frozenIgnoreRulesDigest', 'treeDigest', 'manifestDigest', ...(hasGit ? ['git'] : [])];
+  if (Object.keys(value).length !== keys.length || !keys.every((key) => Object.hasOwn(value, key)) ||
+      (value.role !== 'base' && value.role !== 'result')) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source manifest has an invalid closed shape');
+  }
+  requireDigest(value.workspaceIdentityDigest, 'SourceManifest.workspaceIdentityDigest');
+  requireArtifactRef(value.entriesRef, 'SourceManifest.entriesRef');
+  requireArtifactRef(value.sourceProjectionRef, 'SourceManifest.sourceProjectionRef');
+  requireDigest(value.sourceProjectionDigest, 'SourceManifest.sourceProjectionDigest');
+  requireArtifactRef(value.frozenIgnoreRulesRef, 'SourceManifest.frozenIgnoreRulesRef');
+  requireDigest(value.frozenIgnoreRulesDigest, 'SourceManifest.frozenIgnoreRulesDigest');
+  requireDigest(value.treeDigest, 'SourceManifest.treeDigest');
+  requireDigest(value.manifestDigest, 'SourceManifest.manifestDigest');
+  if (hasGit) {
+    const git = value.git;
+    if (!isRecord(git) || Object.keys(git).length !== 4 ||
+        !['repositoryIdentityDigest', 'head', 'indexRef', 'indexTreeObjectId']
+          .every((key) => Object.hasOwn(git, key))) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest.git has an invalid closed shape');
+    }
+    requireDigest(git.repositoryIdentityDigest, 'SourceManifest.git.repositoryIdentityDigest');
+    requireArtifactRef(git.indexRef, 'SourceManifest.git.indexRef');
+    const tree = requireString(git.indexTreeObjectId, 'SourceManifest.git.indexTreeObjectId');
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(tree)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest.git tree object id is invalid');
+    }
+    if (!isRecord(git.head) || typeof git.head.kind !== 'string') {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest.git head is invalid');
+    }
+    const head = git.head;
+    if (head.kind === 'unborn' || head.kind === 'symbolic') {
+      const headKeys = head.kind === 'unborn' ? ['kind', 'branch'] : ['kind', 'ref', 'objectId'];
+      const ref = requireString(head.kind === 'unborn' ? head.branch : head.ref, 'SourceManifest.git.head.ref');
+      if (Object.keys(head).length !== headKeys.length || !headKeys.every((key) => Object.hasOwn(head, key)) ||
+          !validGitHeadRef(ref)) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest.git head ref is invalid');
+      }
+      if (head.kind === 'symbolic' &&
+          (typeof head.objectId !== 'string' ||
+            !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(head.objectId))) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest.git head object id is invalid');
+      }
+    } else if (head.kind === 'detached') {
+      if (Object.keys(head).length !== 2 || !Object.hasOwn(head, 'objectId') ||
+          typeof head.objectId !== 'string' ||
+          !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(head.objectId)) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest.git detached head is invalid');
+      }
+    } else {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest.git head kind is invalid');
+    }
   }
   const manifest = value as SourceManifest;
   if (digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest) {

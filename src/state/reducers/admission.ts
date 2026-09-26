@@ -21,6 +21,7 @@ import type {
   RunObjectiveV1,
   RunSnapshotV1,
   RunSpec,
+  RepositoryIdentityV1,
   WorkspaceIdentityV1
 } from '../../kernel/types.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
@@ -44,6 +45,7 @@ import {
   decodeWorkspaceState
 } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
+import { validateGitSourceIndex } from '../git-index.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import {
   DEFAULT_RUN_BUDGETS,
@@ -249,13 +251,14 @@ export async function admitRun(
   if (workspaceIdentity.ownerPrincipalId !== input.principalId) {
     throw new KernelStorageError('INVALID_REQUEST', 'workspace identity is not owned by the calling principal');
   }
+  let repositoryIdentity: RepositoryIdentityV1 | undefined;
   if (workspaceIdentity.repositoryIdentityRef !== undefined) {
-    const repository = decodeRepositoryIdentity(
+    repositoryIdentity = decodeRepositoryIdentity(
       await artifacts.readCanonical(workspaceIdentity.repositoryIdentityRef)
     );
-    if (repository.repositoryIdentityDigest !== workspaceIdentity.repositoryIdentityDigest ||
-        repository.platform !== workspaceIdentity.platform ||
-        repository.gitDirectoryIdentity.ownerUid !== workspaceIdentity.rootIdentity.ownerUid) {
+    if (repositoryIdentity.repositoryIdentityDigest !== workspaceIdentity.repositoryIdentityDigest ||
+        repositoryIdentity.platform !== workspaceIdentity.platform ||
+        repositoryIdentity.gitDirectoryIdentity.ownerUid !== workspaceIdentity.rootIdentity.ownerUid) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace repository artifact differs from the Session identity');
     }
   }
@@ -300,6 +303,9 @@ export async function admitRun(
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest repository digest does not match the live workspace');
   }
+  const indexSnapshot = sourceManifest.git && repositoryIdentity
+    ? await validateGitSourceIndex(artifacts, sourceManifest.git, repositoryIdentity)
+    : undefined;
 
   const verifierSpec = decodeVerifierSpec(await artifacts.readCanonical(input.verifierSpecRef));
   const requiredVerifiers = verifierSpec.verifiers.filter((entry) => entry.gate === 'required');
@@ -323,6 +329,10 @@ export async function admitRun(
     artifacts.describe(input.frozenIgnoreRulesRef, 'application/json', 'cliq-frozen-ignore-rules-v1'),
     artifacts.describe(input.baseWorkspaceManifestRef, 'application/json', 'cliq-source-manifest-v1'),
     artifacts.describe(sourceManifest.entriesRef, 'application/json', 'cliq-workspace-entries-v1'),
+    ...(sourceManifest.git && indexSnapshot ? [
+      artifacts.describe(sourceManifest.git.indexRef, 'application/json', 'cliq-git-index-snapshot-v1'),
+      artifacts.describe(indexSnapshot.canonicalIndexBytesRef, 'application/octet-stream', 'cliq-git-index-canonical-v2')
+    ] : []),
     ...(input.credentialGrantRefs ?? []).map((ref) =>
       artifacts.describe(ref, 'application/json', 'cliq-endpoint-credential-grant-binding-v1')
     )

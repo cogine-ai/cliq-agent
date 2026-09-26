@@ -21,6 +21,7 @@ import {
   decodeBudgetSettlement,
   decodeContextManifest,
   decodeFrozenIgnoreRules,
+  decodeRepositoryIdentity,
   decodeRunObjective,
   decodeRunSpec,
   decodeSourceManifest,
@@ -30,9 +31,11 @@ import {
   decodeWorkspaceEntries,
   decodeWorkspaceGenerationIdentity,
   decodeWorkspaceGenerationSnapshotEvidence,
+  decodeWorkspaceIdentity,
   decodeWorkspaceState
 } from './decoders.js';
 import { KernelStorageError } from './errors.js';
+import { validateGitSourceIndex } from './git-index.js';
 import { validateWorkerRecoveryWait } from './worker-recovery.js';
 import { validateWorkspaceEntryBlobs } from './workspace-entry-blobs.js';
 import { addBudget, decodeBudgetUsage, isZeroBudget } from './invariants.js';
@@ -40,7 +43,7 @@ import { readChildAllocationsForRun } from './repositories/child-allocations.js'
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
-import { checkpointFromRow, readCheckpoint, readRun } from './rows.js';
+import { checkpointFromRow, readCheckpoint, readRun, readSession } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 
 const ZERO_BUDGET: BudgetUsage = {
@@ -113,8 +116,10 @@ async function validateWorkspaceStateArtifacts(
 }
 
 async function validateRunSpecArtifacts(
+  driver: SqliteDriver,
   artifacts: ArtifactCatalog,
-  runSpec: RunSpec
+  runSpec: RunSpec,
+  sessionId: string
 ): Promise<void> {
   await requireRecoveryArtifacts(artifacts, [
     ['RunSpec.objectiveRef', runSpec.objectiveRef],
@@ -137,6 +142,7 @@ async function validateRunSpecArtifacts(
   const admitted = decodeAdmittedContext(
     await artifacts.readCanonical(runSpec.admittedContextRef)
   );
+  if (admitted.sessionId !== sessionId) recoveryFailure('RunSpec context names another Session');
   await requireRecoveryArtifacts(artifacts, [
     ['AdmittedContext.sessionProjectionRef', admitted.sessionProjectionRef],
     ...admitted.parentContextRefs.map((ref, index) =>
@@ -150,6 +156,28 @@ async function validateRunSpecArtifacts(
   const source = decodeSourceManifest(
     await artifacts.readCanonical(runSpec.baseWorkspaceManifestRef)
   );
+  if (source.role !== 'base') recoveryFailure('RunSpec source is not a base manifest');
+  const session = readSession(driver, sessionId);
+  const workspace = decodeWorkspaceIdentity(await artifacts.readCanonical(session.workspaceIdentityRef));
+  if (workspace.kind !== 'live' || workspace.identityDigest !== source.workspaceIdentityDigest ||
+      (source.git === undefined) !== (workspace.repositoryIdentityRef === undefined)) {
+    recoveryFailure('RunSpec source is not bound to its live Session workspace');
+  }
+  if (source.git !== undefined && workspace.repositoryIdentityRef !== undefined) {
+    try {
+      const repository = decodeRepositoryIdentity(
+        await artifacts.readCanonical(workspace.repositoryIdentityRef)
+      );
+      if (repository.repositoryIdentityDigest !== workspace.repositoryIdentityDigest ||
+          repository.platform !== workspace.platform ||
+          repository.gitDirectoryIdentity.ownerUid !== workspace.rootIdentity.ownerUid) {
+        recoveryFailure('RunSpec repository differs from its retained Session workspace');
+      }
+      await validateGitSourceIndex(artifacts, source.git, repository);
+    } catch (error) {
+      recoveryFailure(`RunSpec Git index closure is invalid: ${(error as Error).message}`);
+    }
+  }
   const projection = decodeSourceProjection(
     await artifacts.readCanonical(runSpec.sourceProjectionRef)
   );
@@ -643,7 +671,7 @@ export async function readRecoveryClosure(
   }
 
   const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
-  await validateRunSpecArtifacts(artifacts, runSpec);
+  await validateRunSpecArtifacts(driver, artifacts, runSpec, run.sessionId);
   const context = decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef));
   if (context.runId !== run.id || context.throughItemSeq !== latestCheckpoint.runItemSeq) {
     recoveryFailure('Checkpoint ContextManifest does not match its Run cut');

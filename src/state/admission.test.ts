@@ -9,6 +9,7 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1,
+  GitIndexSnapshotV1,
   SourceManifest,
   SourceProjectionSpec,
   VerifierSpec,
@@ -534,7 +535,7 @@ test('session.create rejects a symlinked workspace root', async () => {
   }
 });
 
-test('Git workspaces publish a repository identity', async () => {
+test('Git workspaces bind their repository and canonical index through admission and recovery', async () => {
   const stateRoot = await makePrivateDir('.cliq-m1-git-');
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   await mkdir(path.join(workspace, '.git'), { mode: 0o700 });
@@ -575,6 +576,33 @@ test('Git workspaces publish a repository identity', async () => {
       ...source
     });
     assert.equal(admitted.run.status, 'queued');
+    assert.equal((await store.readRecoveryClosure(admitted.run.id)).run.id, admitted.run.id);
+
+    const sourceManifest = await store.artifacts.readCanonical<SourceManifest>(source.baseWorkspaceManifestRef);
+    const index = await store.artifacts.readCanonical<GitIndexSnapshotV1>(sourceManifest.git!.indexRef);
+    const wrongIndex: GitIndexSnapshotV1 = {
+      ...index, indexTreeObjectId: '0'.repeat(40), snapshotDigest: ''
+    };
+    wrongIndex.snapshotDigest = digestOmitting(wrongIndex, 'snapshotDigest');
+    const wrongIndexRef = (await store.artifacts.publishCanonical(wrongIndex, wrongIndex.format)).ref;
+    const wrongSource: SourceManifest = {
+      ...sourceManifest, git: { ...sourceManifest.git!, indexRef: wrongIndexRef }, manifestDigest: ''
+    };
+    wrongSource.manifestDigest = digestOmitting(wrongSource, 'manifestDigest');
+    const wrongSourceRef = (await store.artifacts.publishCanonical(wrongSource, wrongSource.format)).ref;
+    await assert.rejects(() => store.admitRun({
+      principalId,
+      requestId: uuidv7(),
+      admissionKey: admissionKey('run-git-bad-index'),
+      sessionId: created.session.id,
+      expectedContextRevision: 1,
+      workspacePath: workspace,
+      objective: 'inspect the empty Git workspace',
+      allowUnverified: true,
+      ...channel,
+      ...source,
+      baseWorkspaceManifestRef: wrongSourceRef
+    }), /Git index tree does not match/);
   } finally {
     await store.close();
     await rm(stateRoot, { recursive: true, force: true });

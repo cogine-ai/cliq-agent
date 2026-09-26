@@ -676,6 +676,27 @@ export type WorkspaceEntryManifest = {
   treeDigest: string;
 };
 
+export type GitIndexSnapshotV1 = {
+  schemaVersion: 1;
+  format: 'cliq-git-index-snapshot-v1';
+  repositoryIdentityDigest: string;
+  objectFormat: 'sha1' | 'sha256';
+  canonicalIndexVersion: 2;
+  entries: Array<{
+    canonicalRootRelativePath: string;
+    stage: 0;
+    mode: 33188 | 33261 | 40960;
+    objectId: string;
+    assumeValid: boolean;
+    skipWorktree: false;
+  }>;
+  canonicalIndexBytesRef: ArtifactRef;
+  canonicalIndexBytesDigest: string;
+  canonicalIndexByteCount: number;
+  indexTreeObjectId: string;
+  snapshotDigest: string;
+};
+
 export type SourceManifest = {
   schemaVersion: 1;
   format: 'cliq-source-manifest-v1';

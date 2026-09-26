@@ -281,8 +281,18 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   and recovery now also read every distinct complete CAS file blob through a
   bounded mapper and reject a declared size mismatch; a real-store test proves
   a failed size check commits no Run and a corrected source can then admit and
-  recover. Full descriptor-held source capture and Git index/object validation
-  remain separate work.
+  recover. Full descriptor-held source capture and Git object closure remain
+  separate work.
+- Git SourceManifest readback now rejects rehashed extension fields and malformed
+  HEAD forms. Admission and recovery rehash the retained RepositoryIdentity and
+  `GitIndexSnapshotV1`, bind its repository identity and SHA-1/SHA-256 object
+  format, reconstruct the fixed zero-stat/no-extension Git index v2 bytes, and
+  recompute its tree object id. Tests compare canonical bytes and tree ids with
+  independently produced Git indexes in both object formats, reject a bad
+  tree before Run admission, and read a valid Git Run recovery closure. The
+  trusted descriptor-held parser for source index v2/v3/v4, referenced Git
+  object existence and pack closure, and private Git generation are still
+  required for production Git execution.
 
 ## Next integration order
 
