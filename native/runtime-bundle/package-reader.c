@@ -1023,6 +1023,17 @@ static int candidate_is_current(const candidate_root *candidate) {
     return valid;
 }
 
+static int directory_locator_same(const char *path, const struct stat *identity) {
+    int locator = open_absolute_directory(path);
+    if (locator < 0) return 0;
+    struct stat current;
+    int valid = fstat(locator, &current) == 0 &&
+        same_inode(identity, &current) && current.st_uid == identity->st_uid &&
+        current.st_gid == identity->st_gid && current.st_mode == identity->st_mode;
+    close(locator);
+    return valid;
+}
+
 static void close_candidate(candidate_root *candidate) {
     if (candidate->fd >= 0) close(candidate->fd);
     candidate->fd = -1;
@@ -1262,6 +1273,95 @@ static napi_value candidate_seal(napi_env env, napi_callback_info info) {
     return undefined_value(env);
 }
 
+/* Publish only an unselected, sealed candidate. The destination must be a
+ * pre-existing private bundles directory on the same filesystem. A failure
+ * after rename may leave an unselected directory for recovery to inspect. */
+static napi_value candidate_publish(napi_env env, napi_callback_info info) {
+    candidate_root *candidate = unwrap_candidate(env, info);
+    if (!candidate) return NULL;
+    size_t argc = 2, length;
+    napi_value argv[2];
+    char ref[65];
+    if (candidate->sealed != 1 || !candidate_is_current(candidate) ||
+        napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 2 ||
+        napi_get_value_string_utf8(env, argv[0], NULL, 0, &length) != napi_ok ||
+        length == 0 || length >= PATH_MAX || !read_hex(env, argv[1], ref, 64)) {
+        return native_error(env, "invalid candidate publication request");
+    }
+    char *destination = malloc(length + 1);
+    char *source_parent_path = strdup(candidate->path);
+    int source_parent = -1, bundles = -1, bundles_parent = -1;
+    int moved = 0, writable = 0, ok = 0;
+    if (!destination || !source_parent_path ||
+        napi_get_value_string_utf8(env, argv[0], destination, length + 1, &length) != napi_ok ||
+        strlen(destination) != length) goto done;
+    char *source_name = strrchr(source_parent_path, '/');
+    if (!source_name || source_name == source_parent_path || !source_name[1]) goto done;
+    *source_name++ = '\0';
+    source_parent = open_absolute_directory(source_parent_path);
+    bundles = open_absolute_directory(destination);
+    struct stat from_named, from_held, source_parent_identity, to_root, to_named;
+    if (source_parent < 0 || bundles < 0 ||
+        fstat(source_parent, &source_parent_identity) < 0 ||
+        fstatat(source_parent, source_name, &from_named, AT_SYMLINK_NOFOLLOW) < 0 ||
+        fstat(candidate->fd, &from_held) < 0 ||
+        !same_file_metadata(&from_named, &from_held) ||
+        !same_file_metadata(&candidate->identity, &from_held) ||
+        fstat(bundles, &to_root) < 0 || to_root.st_uid != geteuid() ||
+        !S_ISDIR(to_root.st_mode) || (to_root.st_mode & 07777) != 0700 ||
+        to_root.st_dev != from_held.st_dev ||
+        !directory_locator_same(source_parent_path, &source_parent_identity) ||
+        !directory_locator_same(destination, &to_root) ||
+        fstatat(bundles, ref, &to_named, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) goto done;
+    /* The parent that recorded bundles/ must be durable too, including when
+     * bundles/ was freshly created by the installer. */
+    bundles_parent = openat(bundles, "..", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (bundles_parent < 0 || fsync(bundles_parent) < 0 || fsync(source_parent) < 0 ||
+        !candidate_is_current(candidate) ||
+        !directory_locator_same(source_parent_path, &source_parent_identity) ||
+        !directory_locator_same(destination, &to_root)) goto done;
+    /* Both Darwin and Linux can reject cross-parent rename of a 0500
+     * directory. Keep the writable interval inside this native call. */
+    if (fchmod(candidate->fd, 0700) < 0) goto done;
+    writable = 1;
+    if (fstat(candidate->fd, &candidate->identity) < 0 ||
+        !candidate_is_current(candidate)) goto done;
+    if (!directory_locator_same(source_parent_path, &source_parent_identity) ||
+        !directory_locator_same(destination, &to_root) ||
+        fstatat(source_parent, source_name, &from_named, AT_SYMLINK_NOFOLLOW) < 0 ||
+        !same_file_metadata(&from_named, &candidate->identity)) goto done;
+#ifdef __APPLE__
+    if (renameatx_np(source_parent, source_name, bundles, ref, RENAME_EXCL) < 0) goto done;
+#else
+    if (renameat2(source_parent, source_name, bundles, ref, RENAME_NOREPLACE) < 0) goto done;
+#endif
+    moved = 1;
+    candidate->sealed = 2;
+    if (fchmod(candidate->fd, 0500) < 0 ||
+        fstat(candidate->fd, &candidate->identity) < 0 ||
+        fstatat(bundles, ref, &to_named, AT_SYMLINK_NOFOLLOW) < 0 ||
+        !same_file_metadata(&candidate->identity, &to_named) ||
+        fsync(candidate->fd) < 0 || fsync(source_parent) < 0 ||
+        fsync(bundles) < 0 || fsync(bundles_parent) < 0 ||
+        !directory_locator_same(source_parent_path, &source_parent_identity) ||
+        !directory_locator_same(destination, &to_root) ||
+        fstatat(source_parent, source_name, &from_named, AT_SYMLINK_NOFOLLOW) == 0 ||
+        errno != ENOENT) goto done;
+    ok = 1;
+done:
+    if (!ok && writable && fchmod(candidate->fd, 0500) == 0) {
+        fsync(candidate->fd);
+        fstat(candidate->fd, &candidate->identity);
+    }
+    if (moved) candidate->sealed = 2;
+    if (bundles_parent >= 0) close(bundles_parent);
+    if (bundles >= 0) close(bundles);
+    if (source_parent >= 0) close(source_parent);
+    free(destination); free(source_parent_path);
+    if (!ok) return native_error(env, "candidate no-replace publication is unsafe or incomplete");
+    return undefined_value(env);
+}
+
 static napi_value open_candidate_root(napi_env env, napi_callback_info info) {
     size_t argc = 1, length;
     napi_value argv[1];
@@ -1285,6 +1385,7 @@ static napi_value open_candidate_root(napi_env env, napi_callback_info info) {
     const napi_property_descriptor methods[] = {
         {"copyEntry", NULL, candidate_copy_entry, NULL, NULL, NULL, napi_default, NULL},
         {"seal", NULL, candidate_seal, NULL, NULL, NULL, napi_default, NULL},
+        {"publish", NULL, candidate_publish, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, candidate_close, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_create_object(env, &result) != napi_ok) goto fail;

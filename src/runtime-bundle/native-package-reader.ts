@@ -2,7 +2,9 @@ import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
+import path from 'node:path';
 
+import { assertControlSocketPath } from '../control/socket-path.js';
 import { assertArtifactRef, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import type { ReleaseTrustKey, RuntimeBundleManifest } from '../policy/runtime-authority.js';
@@ -45,6 +47,7 @@ export type HeldPackageRoot = {
 export type HeldCandidateRoot = {
   copyEntry(source: HeldPackageRoot, path: string, byteCount: number, executable: boolean): void;
   seal(): void;
+  publish(bundlesPath: string, bundleRef: string): void;
   close(): void;
 };
 export type NativePackageReader = {
@@ -67,7 +70,7 @@ const heldRoots = new WeakSet<object>();
 const heldCasRoots = new WeakSet<object>();
 const installedRoots = new WeakSet<object>();
 const runtimeRoots = new WeakSet<object>();
-const candidateRoots = new WeakMap<object, string>();
+const candidateRoots = new WeakMap<object, { path: string; verifiedRef?: string }>();
 
 /** The expected helper digest must come from the trusted stable bootstrap. Test builds inject a fixture digest. */
 export async function loadNativePackageReader(expectedHelperDigest: string,
@@ -155,7 +158,7 @@ export function openCandidateStageRoot(binding: NativeBinding, absolutePath: str
     throw new TypeError('candidate stage must have a canonical absolute path');
   }
   const candidate = binding.openCandidateRoot(absolutePath);
-  candidateRoots.set(candidate, absolutePath);
+  candidateRoots.set(candidate, { path: absolutePath });
   return candidate;
 }
 
@@ -314,8 +317,8 @@ export async function verifyHeldInstalledBundle(root: HeldPackageRoot,
 export async function stageHeldPackageCandidate(source: HeldPackageRoot, candidate: HeldCandidateRoot,
   releaseKeys: readonly ReleaseTrustKey[]): Promise<{ bundle: RuntimeBundleManifest; bundleRef: string }> {
   const trustedKeys = immutableSnapshot(releaseKeys);
-  const candidatePath = candidateRoots.get(candidate);
-  if (!heldRoots.has(source) || candidatePath === undefined) {
+  const stage = candidateRoots.get(candidate);
+  if (!heldRoots.has(source) || stage === undefined) {
     throw new TypeError('source and candidate must come from the pinned native helper');
   }
   const manifest = readHeldPackageManifest(source);
@@ -325,10 +328,36 @@ export async function stageHeldPackageCandidate(source: HeldPackageRoot, candida
     candidate.copyEntry(source, entry.relativePath, entry.byteCount, entry.executable);
   }
   candidate.seal();
-  const installed = openInstalledBundleRoot(loaded!.binding, candidatePath);
+  const installed = openInstalledBundleRoot(loaded!.binding, stage.path);
   try {
-    return await verifyHeldInstalledBundle(installed, trustedKeys, decoded.bundleRef);
+    const verified = await verifyHeldInstalledBundle(installed, trustedKeys, decoded.bundleRef);
+    stage.verifiedRef = verified.bundleRef;
+    return verified;
   } finally { installed.close(); }
+}
+
+/** Publish an independently reverified candidate as an unselected digest-named bundle. */
+export async function publishHeldPackageCandidate(candidate: HeldCandidateRoot, stateRoot: string,
+  releaseKeys: readonly ReleaseTrustKey[]): Promise<{
+    bundle: RuntimeBundleManifest; bundleRef: string; bundlePath: string;
+  }> {
+  const trustedKeys = immutableSnapshot(releaseKeys);
+  const stage = candidateRoots.get(candidate);
+  if (stage?.verifiedRef === undefined) throw new TypeError('candidate has not passed signed staging verification');
+  if (normalizeAbsolutePath(stateRoot) !== stateRoot) throw new TypeError('StateRoot path must be canonical');
+  assertControlSocketPath(stateRoot);
+  const source = openInstalledBundleRoot(loaded!.binding, stage.path);
+  try {
+    await verifyHeldInstalledBundle(source, trustedKeys, stage.verifiedRef);
+  } finally { source.close(); }
+  const bundlesPath = path.join(stateRoot, 'runtime', 'bundles');
+  const bundlePath = path.join(bundlesPath, stage.verifiedRef);
+  candidate.publish(bundlesPath, stage.verifiedRef);
+  const published = openInstalledBundleRoot(loaded!.binding, bundlePath);
+  try {
+    const verified = await verifyHeldInstalledBundle(published, trustedKeys, stage.verifiedRef);
+    return { ...verified, bundlePath };
+  } finally { published.close(); }
 }
 
 function rehashNativeReader(reader: NativeCasArtifact | NativeStage, byteCount: number): string {

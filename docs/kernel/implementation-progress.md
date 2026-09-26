@@ -221,6 +221,18 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   publication protocol, active-selection writer, candidate health,
   compatibility inspection, service handoff and production release key remain
   open. This staging primitive alone is not an installed release qualification.
+- The next exact-head Linux Node 24 CI run rejected the test fixture's direct
+  cross-parent rename of a sealed 0500 candidate, matching macOS. Publication
+  now uses a pinned-native no-replace rename: it verifies the sealed candidate
+  again, briefly makes its root writable within one native call, checks held
+  source/destination descriptors and same-device identity, moves to the
+  digest-named unselected bundle location, re-seals and fsyncs the tree and
+  parents, then independently rehashes and inventories the published tree.
+  A conflicting destination leaves the candidate and selected runtime
+  untouched. The SEA fixture exercises this path after StateOwner import and
+  release; it still writes `active.json` directly for test setup. The actual
+  selection writer, candidate health/compatibility, service transition and
+  release qualification remain open.
 
 ## Next integration order
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -10,7 +10,8 @@ import { inject } from 'postject';
 import { canonicalJsonBytes, canonicalSha256 } from '../../dist/kernel/canonical.js';
 import { policyProfile } from '../../dist/policy/runtime-authority.js';
 import {
-  loadNativePackageReader, openCandidateStageRoot, openPackageRoot, stageHeldPackageCandidate
+  loadNativePackageReader, openCandidateStageRoot, openPackageRoot, publishHeldPackageCandidate,
+  stageHeldPackageCandidate
 } from '../../dist/runtime-bundle/native-package-reader.js';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
@@ -136,7 +137,7 @@ try {
   const candidate = openCandidateStageRoot(reader, candidatePath);
   try {
     assert.equal((await stageHeldPackageCandidate(source, candidate, releaseKeys)).bundleRef, bundleRef);
-  } finally { candidate.close(); source.close(); }
+  } finally { source.close(); }
   const launch = (mode, binary = executable) => {
     const result = spawnSync(binary, [mode, stateRoot], {
       encoding: 'utf8', timeout: 30_000,
@@ -148,15 +149,14 @@ try {
   };
   const imported = launch('import', path.join(candidatePath, 'supervisor'));
   const reopened = launch('reopen', path.join(candidatePath, 'supervisor'));
-  // Test-only publication/selection follows the signed candidate import and
-  // owner release. Darwin requires a writable directory inode while renaming
-  // it, so this fixture re-seals that root after moving it. The native
-  // production publisher and handoff remain open.
+  // Native unselected publication follows signed candidate import and owner
+  // release. The active-selection writer and service handoff remain open.
   const bundleDir = path.join(stateRoot, 'runtime', 'bundles', bundleRef);
   await mkdir(path.dirname(bundleDir), { recursive: true, mode: 0o700 });
-  if (process.platform === 'darwin') await chmod(candidatePath, 0o700);
-  await rename(candidatePath, bundleDir);
-  if (process.platform === 'darwin') await chmod(bundleDir, 0o500);
+  try {
+    assert.equal((await publishHeldPackageCandidate(candidate, stateRoot, releaseKeys)).bundlePath,
+      bundleDir);
+  } finally { candidate.close(); }
   await writeFile(path.join(stateRoot, 'runtime', 'active.json'), canonicalJsonBytes({
     schemaVersion: 1, format: 'cliq-runtime-active-selection-v1',
     bundleDigest: bundleRef, manifestDigest

@@ -14,7 +14,7 @@ import { ContentAddressedStore } from '../state/cas.js';
 import {
   PACKAGE_READER_NATIVE_RELATIVE_PATH, importHeldPackageToCas, importVerifiedPackageEntryToCas,
   loadNativePackageReader, openCandidateStageRoot, openInstalledBundleRoot, openNativeCasRoot,
-  openPackageRoot, readHeldPackageManifest, readVerifiedPackageEntryBytes,
+  openPackageRoot, publishHeldPackageCandidate, readHeldPackageManifest, readVerifiedPackageEntryBytes,
   stageHeldPackageCandidate, streamVerifiedPackageEntry, verifyHeldInstalledBundle, verifyHeldPackage
 } from './native-package-reader.js';
 
@@ -243,6 +243,8 @@ test('signed manifest and all declared package bytes pass one held native packag
   const rootPath = await packageFixture();
   const casPath = await packageFixture();
   const candidatePath = await packageFixture();
+  const retryPath = await packageFixture();
+  const statePath = await mkdtemp(path.join(await realpath('/tmp'), 'cliq-publish-'));
   try {
     const key = generateKeyPairSync('ed25519');
     const releaseKeys = [{ keyId: 'package-test',
@@ -287,6 +289,8 @@ test('signed manifest and all declared package bytes pass one held native packag
       assert.deepEqual(readHeldPackageManifest(root), manifestBytes);
       assert.equal((await verifyHeldPackage(root, releaseKeys)).bundleRef, sha256Bytes(manifestBytes));
       const candidate = openCandidateStageRoot(binding, candidatePath);
+      const bundleRef = sha256Bytes(manifestBytes);
+      const bundlePath = path.join(statePath, 'runtime', 'bundles', bundleRef);
       try {
         assert.equal((await stageHeldPackageCandidate(root, candidate, releaseKeys)).bundleRef,
           sha256Bytes(manifestBytes));
@@ -296,8 +300,29 @@ test('signed manifest and all declared package bytes pass one held native packag
           canonicalJsonBytes(profile));
         assert.throws(() => candidate.copyEntry(root, 'payload/policy', entries[2]!.byteCount, false),
           /invalid candidate copy request/);
+        await mkdir(path.join(statePath, 'runtime', 'bundles'), { recursive: true, mode: 0o700 });
+        const bundlesPath = path.join(statePath, 'runtime', 'bundles');
+        const displaced = path.join(statePath, 'runtime', 'displaced-bundles');
+        await rename(bundlesPath, displaced);
+        await symlink(displaced, bundlesPath);
+        await assert.rejects(publishHeldPackageCandidate(candidate, statePath, releaseKeys),
+          /no-replace publication is unsafe or incomplete/);
+        await rm(bundlesPath);
+        await rename(displaced, bundlesPath);
+        const published = await publishHeldPackageCandidate(candidate, statePath, releaseKeys);
+        assert.equal(published.bundlePath, bundlePath);
+        assert.equal((await stat(bundlePath)).mode & 0o7777, 0o500);
+        assert.deepEqual(await readdir(path.join(statePath, 'runtime')), ['bundles']);
+        const retry = openCandidateStageRoot(binding, retryPath);
+        try {
+          await stageHeldPackageCandidate(root, retry, releaseKeys);
+          await assert.rejects(publishHeldPackageCandidate(retry, statePath, releaseKeys),
+            /no-replace publication is unsafe or incomplete/);
+          assert.equal((await stat(retryPath)).mode & 0o7777, 0o500);
+          assert.deepEqual(await readdir(path.join(statePath, 'runtime', 'bundles')), [bundleRef]);
+        } finally { retry.close(); }
       } finally { candidate.close(); }
-      const installed = openInstalledBundleRoot(binding, candidatePath);
+      const installed = openInstalledBundleRoot(binding, bundlePath);
       try {
         assert.equal((await verifyHeldInstalledBundle(installed, releaseKeys,
           sha256Bytes(manifestBytes))).bundleRef, sha256Bytes(manifestBytes));
@@ -316,9 +341,18 @@ test('signed manifest and all declared package bytes pass one held native packag
   } finally {
     await rm(rootPath, { recursive: true, force: true });
     await rm(casPath, { recursive: true, force: true });
-    await chmod(candidatePath, 0o700);
+    await chmod(candidatePath, 0o700).catch(() => {});
     await chmod(path.join(candidatePath, 'payload'), 0o700).catch(() => {});
     await rm(candidatePath, { recursive: true, force: true });
+    await chmod(retryPath, 0o700);
+    await chmod(path.join(retryPath, 'payload'), 0o700).catch(() => {});
+    await rm(retryPath, { recursive: true, force: true });
+    for (const ref of await readdir(path.join(statePath, 'runtime', 'bundles')).catch(() => [])) {
+      const installed = path.join(statePath, 'runtime', 'bundles', ref);
+      await chmod(installed, 0o700);
+      await chmod(path.join(installed, 'payload'), 0o700).catch(() => {});
+    }
+    await rm(statePath, { recursive: true, force: true });
   }
 });
 
