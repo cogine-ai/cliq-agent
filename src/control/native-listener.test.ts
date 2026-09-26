@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createConnection } from 'node:net';
+import { createConnection, type Socket } from 'node:net';
 import { chmod, lstat, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import path from 'node:path';
@@ -36,6 +36,20 @@ async function connectAndWrite(root: string, request: string): Promise<string> {
   const [bytes] = await once(socket, 'data') as [Buffer];
   socket.destroy();
   return bytes.toString('utf8');
+}
+
+function awaitRevokedSocket(socket: Socket): Promise<void> {
+  const closed = new Promise<void>((resolve, reject) => {
+    let unexpected: Error | undefined;
+    socket.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EPIPE' && error.code !== 'ECONNRESET') unexpected = error;
+    });
+    socket.once('close', () => unexpected ? reject(unexpected) : resolve());
+  });
+  return Promise.race([
+    closed,
+    setTimeout(3000, undefined, { ref: false }).then(() => { throw new Error('revoked socket did not close'); })
+  ]);
 }
 
 test('native UDS listener derives same-user peer and keeps endpoint distinct from socket descriptors', async () => {
@@ -114,7 +128,7 @@ test('endpoint replacement revokes future frames and shutdown does not unlink th
     });
     const socket = createConnection(endpoint(root));
     await once(socket, 'connect');
-    const closed = once(socket, 'close');
+    const closed = awaitRevokedSocket(socket);
     await rename(endpoint(root), path.join(root, 'runtime', 'original.sock'));
     await writeFile(endpoint(root), 'replacement', { mode: 0o600 });
     socket.write('{"method":"session.create"}\n');
@@ -148,7 +162,7 @@ test('runtime parent replacement revokes an already accepted connection', async 
       accepted,
       setTimeout(3000).then(() => { throw new Error('native listener did not accept the connection'); })
     ]);
-    const closed = once(socket, 'close');
+    const closed = awaitRevokedSocket(socket);
     await rename(path.join(root, 'runtime'), path.join(root, 'runtime-old'));
     await mkdir(path.join(root, 'runtime'), { mode: 0o700 });
     socket.write('{"method":"session.create"}\n');

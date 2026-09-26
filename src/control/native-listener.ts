@@ -142,6 +142,10 @@ export class NativeControlListener {
                       private readonly handlers: NativeControlHandlers) {
     this.ready = new Promise<void>((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
     this.exited = new Promise<void>((resolve) => { this.resolveExit = resolve; });
+    // The native child may revoke the endpoint before shutdown writes reach its
+    // stdin. Node reports that pipe race asynchronously; keep it on this
+    // listener's fail-closed path instead of raising an uncaught EPIPE.
+    child.stdin.on('error', (error) => this.fail(error));
     child.stdout.on('data', (chunk: Buffer) => this.receive(chunk));
     child.stderr.on('data', (chunk: Buffer) => {
       this.stderr = `${this.stderr}${chunk.toString('utf8')}`.slice(-8192);
