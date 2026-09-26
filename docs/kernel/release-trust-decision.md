@@ -1,7 +1,7 @@
-# I1 release trust and first-install decision
+# I1 release trust and npm-first installation decision
 
-**Status:** proposed; production key custody and first-install channel require
-the release owner's decision. This does not qualify a Kernel installation.
+**Status:** proposed npm-first distribution; production key custody and a clean
+installed-path qualification remain open. This does not qualify a Kernel installation.
 
 ## Evidence in this repository
 
@@ -12,6 +12,8 @@ the release owner's decision. This does not qualify a Kernel installation.
 - `npm-publish.yml` builds on Ubuntu and publishes the universal npm package.
   `package.json` includes `dist/**/*.js` but no `dist/native/**`; the required
   StateOwner and local-control helpers are therefore absent from the tarball.
+  The workflow uses a long-lived `NPM_TOKEN` and does not establish npm trusted
+  publishing/provenance. It cannot build, sign, or qualify the macOS runtime.
 - A macOS Developer ID identity and a notarized **probe** app were qualified
   locally. That identity and probe are separate from an installed RuntimeBundle
   release signature or a shippable Supervisor/worker image.
@@ -33,19 +35,46 @@ the release owner's decision. This does not qualify a Kernel installation.
    a caller-supplied key ID as proof of trust. The release job independently
    verifies the signature and all file bytes, then publishes the immutable
    bundle by complete signed-manifest ref. CI test keys cannot pass this gate.
-4. A first-install channel establishes the bootstrap itself. macOS can use a
-   Developer ID signed/notarized installer; Linux needs an explicitly trusted
-   package/signature channel and pinned bootstrap bytes. The current generic
-   npm tarball can remain a thin client, but by itself does not establish this
-   native runtime chain or an owner-only stable state-root bootstrap.
-5. The installed bootstrap holds the package and destination directories,
+4. Keep **npm as the one required public distribution channel**. Publish the
+   CLI and complete, version-matched OS/architecture runtime payloads to npm;
+   they may be separate platform-scoped npm packages or one package if size and
+   install behavior permit. A missing platform payload, including an omitted
+   optional dependency, fails closed. The runtime must not download executable
+   bytes from an unpinned second endpoint during install or first Run.
+   An explicit, idempotent setup/first-run path imports the verified payload
+   from the installed npm package into an owner-only stable state root and
+   registers the user service. Updating/removing the npm client cannot erase a
+   bundle pinned by a nonterminal Run. Do not make correctness depend on
+   `postinstall`, which npm users may disable with `--ignore-scripts`.
+5. npm's registry signatures and [trusted publishing with provenance](https://docs.npmjs.com/trusted-publishers/)
+   strengthen the npm release path; use OIDC instead of the current long-lived
+   token and verify the published package's attestations. Provenance links a
+   package to its source/workflow; it does not prove that the source or
+   authorized workflow is benign. Under this npm-first choice, the npm release
+   path is the **first-install trust anchor** for the bootstrap and its embedded
+   Cliq public keys. The independent Cliq Ed25519 signer protects the runtime
+   bundle after that bootstrap is established, but cannot rescue a malicious
+   first bootstrap that replaces both verifier and key. Surviving compromise of
+   the authorized npm release path requires a separately authenticated bootstrap
+   anchor; that is a stronger, optional threat model, not an I1 distribution
+   prerequisite.
+6. Sign and notarize the macOS executable payload before including its final
+   bytes in the RuntimeBundle manifest. [Apple permits direct distribution of
+   notarized software](https://developer.apple.com/documentation/technologyoverviews/distribution);
+   a separate `.pkg` or `.dmg` channel is not intrinsically required. Qualify
+   the actual `npm pack` → clean install → state-root import → Gatekeeper/
+   `spctl` → restart path on macOS, including preserved signatures and stapled
+   tickets. Linux needs the same clean npm install and executable-identity
+   proof. If those installed-path tests expose a platform distribution
+   constraint, revisit packaging with that evidence.
+7. The installed bootstrap holds the package and destination directories,
    opens every signed component descriptor-relative with no-follow rules,
    checks owner/type/mode/link-count and pre/post metadata, rehashes full
    bytes, decodes every structured root/member, imports their bytes to CAS,
    and fsyncs the immutable bundle directory before `active.json` can select
    it. Startup and update repeat the published identity and compatibility
    checks; an incompatible candidate leaves the current bundle active.
-6. Key rotation requires a new bootstrap trusted by the current distribution
+8. Key rotation requires a new bootstrap trusted by the current distribution
    channel and an overlap window for previously installed, pinned bundles.
    Retirement cannot strand a nonterminal Run or invalidate retained audit
    verification. A compromised-key response needs an explicit release policy;
@@ -53,9 +82,11 @@ the release owner's decision. This does not qualify a Kernel installation.
 
 ## Decision required before production I1
 
-The release owner must identify an existing production Cliq Ed25519 trust
-root and protected signing workflow, or authorize creation and custody of a
-new one. We also need the supported first-install distribution channel for
-Linux and macOS. Until then, implementation can use injected **test** public
-keys to verify mechanics, but may not label a source build, npm tarball, or
-locally signed probe as an installed signed Kernel runtime.
+The release owner must identify an existing production Cliq Ed25519 trust root
+and protected signing workflow, or authorize creation and custody of a new one.
+The recommended first-install channel is npm; no additional channel is required
+by this design. We must still qualify the actual published npm payload on Linux
+and macOS and explicitly accept npm release-path trust for the first bootstrap.
+Until then, implementation can use injected **test** public keys to verify
+mechanics, but may not label a source build, npm tarball, or locally signed
+probe as an installed signed Kernel runtime.
