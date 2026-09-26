@@ -97,8 +97,15 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   structured-root index, required role mapping, guest-root refs, and the exact
   unique signed `bundle_object` entry/path for each distinct member ref. Tests
   re-sign malformed bundles so failures prove structural validation rather
-  than a rejected signature. Exact structured-root semantic decoding, secure
+  than a rejected signature. Complete structured-root decoding, secure
   installed-file import, version selection, and rollback remain WP06 work.
+- Added a fail-closed structured-payload verifier over supplied, rehashed signed
+  entry bytes. It decodes the fixed policy profile, system prompt, compaction
+  envelope and its three ModelText members, and bundled skill closure/files;
+  it independently checks complete-byte refs, semantic digests, exact member
+  sets and canonical JSON. Unsupported guest-toolchain, MCP-recovery, and
+  portable-schema roots reject until their decoders exist. This is an internal
+  decoder, not a descriptor-safe package installer or activation proof.
 
 ## Next integration order
 
