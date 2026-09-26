@@ -25,6 +25,7 @@ test('held StateOwner streams an unchanged source file from its exact root and a
       try {
         assert.equal(file.size, bytes.byteLength);
         assert.equal(file.mode, 0o600);
+        assert.equal(file.linkCount, 2);
         assert.equal(file.identity.ownerUid, process.geteuid!());
         const chunks: Buffer[] = [];
         while (chunks.reduce((size, chunk) => size + chunk.byteLength, 0) < file.size) {

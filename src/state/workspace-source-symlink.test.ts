@@ -29,6 +29,7 @@ test('held StateOwner observes source symlink text without following its target'
       const root = held.inspectWorkspaceIdentity(workspace).root;
       const link = held.readWorkspaceSourceSymlink(workspace, root, 'nested/up');
       assert.equal(link.target, '../source.txt');
+      assert.equal(link.linkCount, 1);
       assert.equal(link.identity.ownerUid, process.geteuid!());
       for (const source of ['external', 'git-alias', 'git-traversal', 'absolute', 'decomposed']) {
         assert.throws(() => held.readWorkspaceSourceSymlink(workspace, root, source),

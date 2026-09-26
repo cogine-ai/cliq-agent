@@ -122,7 +122,8 @@ export function readHeldGitignoreFromDirectory(
   const file = filesystem.openWorkspaceSourceFile(workspacePath, expectedRoot, relativePath);
   try {
     if (!sameIdentity(first.identity, file.identity) ||
-        first.size !== file.size || first.mode !== file.mode) {
+        first.size !== file.size || first.mode !== file.mode ||
+        first.linkCount !== file.linkCount) {
       throw new KernelStorageError('ARTIFACT_MISMATCH',
         'literal .gitignore changed between directory scan and source opening');
     }
@@ -143,6 +144,7 @@ export function readHeldGitignoreFromDirectory(
       filesystem.listWorkspaceSourceDirectory(workspacePath, expectedRoot, directoryPath)
     );
     if (second?.kind !== 'file' || second.size !== first.size || second.mode !== first.mode ||
+        second.linkCount !== first.linkCount ||
         !sameIdentity(second.identity, first.identity)) {
       throw new KernelStorageError('ARTIFACT_MISMATCH',
         'literal .gitignore changed during directory recheck');

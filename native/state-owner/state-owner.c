@@ -181,6 +181,14 @@ static int identity_member(napi_env env, napi_value object, const char *key, con
         napi_object_freeze(env, value) == napi_ok && napi_set_named_property(env, object, key, value) == napi_ok;
 }
 
+static int link_count_member(napi_env env, napi_value object, const struct stat *info) {
+    napi_value value;
+    if (info->st_nlink == 0 || (unsigned long long)info->st_nlink > 9007199254740991ULL ||
+        napi_create_double(env, (double)info->st_nlink, &value) != napi_ok ||
+        napi_set_named_property(env, object, "linkCount", value) != napi_ok) return 0;
+    return 1;
+}
+
 static napi_value acquire_lock(napi_env env, napi_callback_info info) {
     size_t argc = 2, length;
     napi_value argv[2];
@@ -888,6 +896,7 @@ static napi_value open_workspace_file(napi_env env, napi_callback_info info, int
         napi_set_named_property(env, result, "size", value) != napi_ok ||
         napi_create_uint32(env, file->file.st_mode & 07777, &value) != napi_ok ||
         napi_set_named_property(env, result, "mode", value) != napi_ok ||
+        !link_count_member(env, result, &file->file) ||
         identity_member(env, result, "identity", &file->file) == 0) goto done;
     const napi_property_descriptor methods[] = {
         {"readChunk", NULL, source_file_read_chunk, NULL, NULL, NULL, napi_default, NULL},
@@ -1012,6 +1021,7 @@ static napi_value list_workspace_source_directory(napi_env env, napi_callback_in
             napi_set_named_property(env, item, "kind", kind) != napi_ok ||
             napi_create_uint32(env, named.st_mode & 07777, &mode) != napi_ok ||
             napi_set_named_property(env, item, "mode", mode) != napi_ok ||
+            !link_count_member(env, item, &named) ||
             identity_member(env, item, "identity", &named) == 0) goto done;
         if (S_ISREG(named.st_mode)) {
             if (named.st_size < 0 || named.st_size > 9007199254740991LL ||
@@ -1111,6 +1121,7 @@ static napi_value read_workspace_source_symlink(napi_env env, napi_callback_info
         napi_set_named_property(env, result, "target", target_value) != napi_ok ||
         napi_create_uint32(env, link_before.st_mode & 07777, &mode) != napi_ok ||
         napi_set_named_property(env, result, "mode", mode) != napi_ok ||
+        !link_count_member(env, result, &link_before) ||
         !identity_member(env, result, "identity", &link_before) ||
         napi_object_freeze(env, result) != napi_ok) goto done;
     error = NULL;

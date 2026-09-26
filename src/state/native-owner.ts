@@ -25,6 +25,7 @@ export type LiveWorkspaceInspection = Readonly<{
 export type HeldWorkspaceSourceFile = Readonly<{
   size: number;
   mode: number;
+  linkCount: number;
   identity: DescriptorIdentity;
   readChunk(size: number): Buffer;
   assertStable(): void;
@@ -34,12 +35,14 @@ export type WorkspaceSourceDirectoryEntry = Readonly<{
   name: string;
   kind: 'directory' | 'file' | 'symlink';
   mode: number;
+  linkCount: number;
   size?: number;
   identity: DescriptorIdentity;
 }>;
 export type WorkspaceSourceSymlink = Readonly<{
   target: string;
   mode: number;
+  linkCount: number;
   identity: DescriptorIdentity;
 }>;
 /** A physical move observation only: no containment death, tree or SQLite authority. */

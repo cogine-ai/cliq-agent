@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 
@@ -124,6 +124,20 @@ test('held .gitignore reader binds literal source bytes to repeated directory ob
       await rm(rootIgnore);
 
       await writeFile(rootIgnore, 'old\n', { mode: 0o600 });
+      const beforeLink = held.listWorkspaceSourceDirectory(workspace, root, '');
+      const ignoreHardlink = path.join(parent, 'ignore-hardlink');
+      await link(rootIgnore, ignoreHardlink);
+      try {
+        const staleLinkCount = {
+          listWorkspaceSourceDirectory: () => beforeLink,
+          openWorkspaceSourceFile: (...args: Parameters<HeldStateOwnerLock['openWorkspaceSourceFile']>) =>
+            held.openWorkspaceSourceFile(...args)
+        } as unknown as HeldStateOwnerLock;
+        assert.throws(() => readHeldGitignoreFromDirectory(staleLinkCount, workspace, root, ''),
+          /changed between directory scan and source opening/);
+      } finally {
+        await rm(ignoreHardlink);
+      }
       const staleListing = held.listWorkspaceSourceDirectory(workspace, root, '');
       await writeFile(rootIgnore, 'new-longer\n');
       const changedDuringOpen = {

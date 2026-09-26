@@ -28,6 +28,9 @@ test('held StateOwner lists literal source entries and refuses unsafe directory 
         ['alias', 'symlink'], ['nested', 'directory'], ['nested-alias', 'symlink'], ['source.txt', 'file']
       ]);
       assert.equal(entries.find((entry) => entry.name === 'source.txt')?.size, 6);
+      assert.equal(entries.find((entry) => entry.name === 'source.txt')?.linkCount, 1);
+      assert.equal(entries.find((entry) => entry.name === 'alias')?.linkCount, 1);
+      assert.ok(Number.isSafeInteger(entries.find((entry) => entry.name === 'nested')?.linkCount));
       assert.deepEqual(held.listWorkspaceSourceDirectory(workspace, root, 'nested'), []);
       assert.throws(() => held.listWorkspaceSourceDirectory(workspace, root, 'nested-alias'), /unsafe or changed/);
       assert.throws(() => held.listWorkspaceSourceDirectory(workspace, root, 'Nested'), /unsafe or changed/);

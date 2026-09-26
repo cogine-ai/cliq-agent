@@ -77,6 +77,7 @@ test('held StateOwner streams only the recorded literal Git index',
       const opened = held.openWorkspaceGitIndex(workspace, root, git);
       assert.ok(opened);
       try {
+        assert.equal(opened.linkCount, 1);
         const chunks: Buffer[] = [];
         let count = 0;
         while (count < opened.size) {
