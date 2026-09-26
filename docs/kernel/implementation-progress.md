@@ -48,14 +48,24 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   Its four Node/macOS/Linux matrix jobs found an asynchronous `EPIPE` when the
   native listener exited after endpoint drift, and Linux also produced an
   expected client `ECONNRESET`. The listener now handles the pipe error on its
-  fail-closed path, and the drift tests accept the connection reset. Cross-
-  platform verification of that fix is pending the next branch CI run.
+  fail-closed path, and the drift tests accept the connection reset. Branch CI
+  for `115cd8a` passed the Linux strong probe and all four Node/macOS/Linux
+  matrix jobs.
 - Recovery closure reads now use a fixed eight-worker mapper, and each
   `ArtifactCatalog` limits actual CAS reads across concurrent callers to eight.
   Focused tests cover pending-work bounds, result order, failure drain and
   release of a failed read slot. A second `npm run build` and the 1,626-test full
   suite pass on macOS with these changes. Scale and latency qualification are
   still open.
+- The hidden control service now rejects noncanonical `session.create` name and
+  workspace spellings before digest/replay comparison. A same-ID non-NFC then
+  NFC request test proves the rejected spelling did not consume the ID.
+- Added owner-gated `session.get` with one SQLite snapshot, exclusive item
+  cursor, captured high-water, a 1 MiB metadata cap, and a current UDS peer
+  recheck. Focused tests cover empty pages, pagination across a later append,
+  foreign principal, future cursors, unknown/forged wire fields, and a missing
+  item before high-water. This remains a hidden service; public protocol/error
+  generation and the rest of the Session methods are still open.
 
 ## Next integration order
 

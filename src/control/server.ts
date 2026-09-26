@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting, identityHash, sha256Bytes } from '../kernel/identity.js';
+import { assertAdmissionKey, assertRequestId, digestOmitting, identityHash,
+  normalizeAbsolutePath, normalizeBoundedText, sha256Bytes } from '../kernel/identity.js';
 import type { LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, LocalSocketPeerObservationV2 } from '../kernel/types.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readPersistedWorkspaceTrustByCanonicalPath } from '../session/trust.js';
@@ -173,7 +174,8 @@ export class LocalControlServer {
           !supportsVersion(request.params.headlessSchemaRange, 1) ||
           !Array.isArray(request.params.requestedFeatureIds) ||
           request.params.requestedFeatureIds.length > 64 ||
-          request.params.requestedFeatureIds.some((value) => value !== 'session.create') ||
+          request.params.requestedFeatureIds.some((value) =>
+            value !== 'session.create' && value !== 'session.get') ||
           new Set(request.params.requestedFeatureIds).size !== request.params.requestedFeatureIds.length) {
         return encode({ jsonrpc: '2.0', id, error: {
           code: -32000, message: 'INCOMPATIBLE_PROTOCOL',
@@ -187,13 +189,46 @@ export class LocalControlServer {
         serverBuild: this.bundle.bundleVersion,
         controlSchemaRange: this.bundle.controlProtocolRange,
         headlessSchemaRange: this.bundle.headlessSchemaRange,
-        capabilities: ['session.create'],
+        capabilities: ['session.create', 'session.get'],
         supervisorInstanceId: this.owner.supervisorInstanceId,
         runtimeBundleRef: canonicalSha256(this.bundle),
         runtimeBundleManifestDigest: this.bundle.manifestDigest
       } });
     }
     if (request.method === 'control.hello') return errorResult(id, 'INVALID_REQUEST');
+    if (request.method === 'session.get') {
+      const payload = request.params;
+      if (!exactRecord(payload, ['protocolVersion', 'method', 'sessionId'], ['afterItemSeq', 'limit']) ||
+          payload.protocolVersion !== 1 || payload.method !== 'session.get' ||
+          typeof payload.sessionId !== 'string' ||
+          (payload.afterItemSeq !== undefined &&
+            (!Number.isSafeInteger(payload.afterItemSeq) || (payload.afterItemSeq as number) < 0)) ||
+          (payload.limit !== undefined &&
+            (!Number.isSafeInteger(payload.limit) || (payload.limit as number) < 1 ||
+              (payload.limit as number) > 1000))) {
+        return errorResult(id, 'INVALID_REQUEST');
+      }
+      if (!channel.principalId) throw new Error('control channel identity publication is incomplete');
+      await this.native!.recheck(connection);
+      if (channel.closed || this.closing) throw new Error('control connection closed before query cut');
+      try {
+        const result = this.store.querySession({
+          principalId: channel.principalId,
+          sessionId: payload.sessionId,
+          ...(payload.afterItemSeq === undefined ? {} : { afterItemSeq: payload.afterItemSeq as number }),
+          ...(payload.limit === undefined ? {} : { limit: payload.limit as number })
+        });
+        return encode({ jsonrpc: '2.0', id, result: { protocolVersion: 1, ok: true, result } });
+      } catch (error) {
+        const code = error instanceof KernelStorageError ? error.code : 'INVALID_REQUEST';
+        const publicCode = ['INVALID_REQUEST', 'NOT_FOUND', 'RECOVERY_REQUIRED'].includes(code)
+          ? code : 'INVALID_REQUEST';
+        return encode({ jsonrpc: '2.0', id, result: {
+          protocolVersion: 1, ok: false, method: 'session.get',
+          error: { code: publicCode, retryable: false }
+        } });
+      }
+    }
     if (request.method !== 'session.create') return errorResult(id, 'METHOD_NOT_FOUND');
     const payload = request.params;
     if (!exactRecord(payload, ['protocolVersion', 'requestId', 'requestDigest', 'method',
@@ -204,8 +239,25 @@ export class LocalControlServer {
         (payload.name !== undefined && typeof payload.name !== 'string')) {
       return errorResult(id, 'INVALID_REQUEST');
     }
+    // The reducer hashes normalized fields. Reject alternate spellings before
+    // comparing the wire digest so one requestId cannot replay different bytes.
+    try {
+      assertRequestId(payload.requestId as string);
+      assertAdmissionKey(payload.admissionKey as string);
+      if (normalizeAbsolutePath(payload.workspacePath as string) !== payload.workspacePath ||
+          (payload.name !== undefined &&
+            normalizeBoundedText(payload.name as string, 1, 256) !== payload.name)) {
+        return errorResult(id, 'INVALID_REQUEST');
+      }
+    } catch {
+      return errorResult(id, 'INVALID_REQUEST');
+    }
     const { requestDigest, ...requestBody } = payload;
-    if (canonicalSha256(requestBody) !== requestDigest) return errorResult(id, 'INVALID_REQUEST');
+    try {
+      if (canonicalSha256(requestBody) !== requestDigest) return errorResult(id, 'INVALID_REQUEST');
+    } catch {
+      return errorResult(id, 'INVALID_REQUEST');
+    }
     // This read-only trust gate precedes any .git/config or workspace-context
     // capture. A service environment override cannot grant trust to requests.
     try {

@@ -74,9 +74,35 @@ test('StateStore UDS authenticates before replay, retains first-channel provenan
     const untrusted = await call(first, 9, 'session.create', params);
     assert.equal((untrusted.error as { message: string }).message, 'WORKSPACE_TRUST_REQUIRED');
     await writePersistedWorkspaceTrust(await createWorkspaceTrustContext(workspace, trustHome), 'trusted');
+    const namedRequest = { ...request, requestId: uuidv7(), admissionKey: admissionKey('uds-name'), name: 'e\u0301' };
+    const noncanonicalName = await call(first, 12, 'session.create', {
+      ...namedRequest, requestDigest: canonicalSha256(namedRequest)
+    });
+    assert.equal((noncanonicalName.error as { message: string }).message, 'INVALID_REQUEST');
+    const canonicalNameRequest = { ...namedRequest, name: 'é' };
+    const canonicalName = await call(first, 13, 'session.create', {
+      ...canonicalNameRequest, requestDigest: canonicalSha256(canonicalNameRequest)
+    });
+    assert.equal((canonicalName.result as { ok: boolean }).ok, true);
     const created = await call(first, 4, 'session.create', params);
     assert.equal((created.result as { ok: boolean }).ok, true);
     const response = created.result;
+    const createdSessionId = ((response as {
+      result: { snapshot: { session: { id: string } } }
+    }).result.snapshot.session.id);
+    const query = { protocolVersion: 1, method: 'session.get', sessionId: createdSessionId };
+    const page = await call(first, 14, 'session.get', query);
+    assert.equal((page.result as { ok: boolean }).ok, true);
+    assert.deepEqual((page.result as { result: { items: unknown[] } }).result.items, []);
+    assert.equal((page.result as { result: { highWaterItemSeq: number } }).result.highWaterItemSeq, 0);
+    const queryWithAuthority = await call(first, 15, 'session.get', { ...query, principalId: 'forged' });
+    assert.equal((queryWithAuthority.error as { message: string }).message, 'INVALID_REQUEST');
+    const futureCursor = await call(first, 16, 'session.get', { ...query, afterItemSeq: 1 });
+    assert.equal((futureCursor.result as { error: { code: string } }).error.code, 'INVALID_REQUEST');
+    const unknownSession = await call(first, 17, 'session.get', {
+      ...query, sessionId: 'A'.repeat(43)
+    });
+    assert.equal((unknownSession.result as { error: { code: string } }).error.code, 'NOT_FOUND');
     const inspector = openSqliteDriver(path.join(root, KERNEL_DATABASE_FILENAME));
     let originalChannel: string;
     try {
@@ -139,7 +165,7 @@ test('StateStore UDS authenticates before replay, retains first-channel provenan
       assert.equal(rows.length, 1);
       assert.equal(rows[0]!.channel_identity_ref, originalChannel);
       const sessions = after.prepare('SELECT count(*) AS count FROM sessions').get<{ count: number }>();
-      assert.equal(Number(sessions?.count), 2);
+      assert.equal(Number(sessions?.count), 3);
     } finally {
       after.close();
     }

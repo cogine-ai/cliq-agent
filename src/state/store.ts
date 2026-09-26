@@ -67,6 +67,7 @@ import {
   type SettleInvocationInput
 } from './reducers/invocation.js';
 import { createSession, type CreateSessionInput, type CreateSessionResult } from './reducers/session.js';
+import { getSession, type GetSessionInput, type GetSessionResult } from './queries/session.js';
 import {
   activateWorkerLease,
   beginGenerationCheckpoint,
@@ -124,6 +125,8 @@ export type {
   ClaimInvocationDispatchInput,
   CreateSessionInput,
   CreateSessionResult,
+  GetSessionInput,
+  GetSessionResult,
   PrepareInvocationInput,
   RecordWorkerPreactivatedInput,
   RecordWorkspaceGenerationPreactivatedInput,
@@ -461,6 +464,10 @@ export class StateStore {
 
   createSession(input: CreateSessionInput): Promise<CreateSessionResult> {
     return createSession(this.driver, this.artifacts, this.owner, input);
+  }
+
+  querySession(input: GetSessionInput): GetSessionResult {
+    return getSession(this.driver, this.owner, input);
   }
 
   admitRun(input: AdmitRunInput): Promise<AdmitRunResult> {
