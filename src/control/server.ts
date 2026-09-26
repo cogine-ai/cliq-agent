@@ -8,6 +8,7 @@ import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readPersistedWorkspaceTrustByCanonicalPath } from '../session/trust.js';
 import { sampleCanonicalNow } from '../state/canonical-time.js';
 import { KernelStorageError } from '../state/errors.js';
+import { EventCursorExpiredError } from '../state/queries/run-attach.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state/state-owner.js';
 import type { SqliteDriver } from '../state/sqlite-driver.js';
 import type { StateStore } from '../state/store.js';
@@ -175,7 +176,7 @@ export class LocalControlServer {
           !Array.isArray(request.params.requestedFeatureIds) ||
           request.params.requestedFeatureIds.length > 64 ||
           request.params.requestedFeatureIds.some((value) =>
-            value !== 'session.create' && value !== 'session.get') ||
+            value !== 'session.create' && value !== 'session.get' && value !== 'run.attach') ||
           new Set(request.params.requestedFeatureIds).size !== request.params.requestedFeatureIds.length) {
         return encode({ jsonrpc: '2.0', id, error: {
           code: -32000, message: 'INCOMPATIBLE_PROTOCOL',
@@ -189,13 +190,54 @@ export class LocalControlServer {
         serverBuild: this.bundle.bundleVersion,
         controlSchemaRange: this.bundle.controlProtocolRange,
         headlessSchemaRange: this.bundle.headlessSchemaRange,
-        capabilities: ['session.create', 'session.get'],
+        capabilities: ['session.create', 'session.get', 'run.attach'],
         supervisorInstanceId: this.owner.supervisorInstanceId,
         runtimeBundleRef: canonicalSha256(this.bundle),
         runtimeBundleManifestDigest: this.bundle.manifestDigest
       } });
     }
     if (request.method === 'control.hello') return errorResult(id, 'INVALID_REQUEST');
+    if (request.method === 'run.attach') {
+      const payload = request.params;
+      if (!exactRecord(payload, ['protocolVersion', 'method', 'runId', 'afterEventSeq'], ['limit']) ||
+          payload.protocolVersion !== 1 || payload.method !== 'run.attach' ||
+          typeof payload.runId !== 'string' ||
+          !Number.isSafeInteger(payload.afterEventSeq) || (payload.afterEventSeq as number) < 0 ||
+          (payload.limit !== undefined &&
+            (!Number.isSafeInteger(payload.limit) || (payload.limit as number) < 1 ||
+              (payload.limit as number) > 1000))) {
+        return errorResult(id, 'INVALID_REQUEST');
+      }
+      if (!channel.principalId) throw new Error('control channel identity publication is incomplete');
+      await this.native!.recheck(connection);
+      if (channel.closed || this.closing) throw new Error('control connection closed before attach cut');
+      try {
+        const result = await this.store.attachRun({
+          principalId: channel.principalId,
+          runId: payload.runId,
+          afterEventSeq: payload.afterEventSeq as number,
+          ...(payload.limit === undefined ? {} : { limit: payload.limit as number })
+        });
+        return encode({ jsonrpc: '2.0', id, result: { protocolVersion: 1, ok: true, result } });
+      } catch (error) {
+        if (error instanceof EventCursorExpiredError) {
+          return encode({ jsonrpc: '2.0', id, result: {
+            protocolVersion: 1, ok: false, method: 'run.attach', error: {
+              schemaVersion: 1, code: 'EVENT_CURSOR_EXPIRED', messageCode: 'event_cursor_expired',
+              retryable: false, earliestEventSeq: error.earliestEventSeq,
+              latestEventSeq: error.latestEventSeq, snapshot: error.snapshot
+            }
+          } });
+        }
+        const code = error instanceof KernelStorageError ? error.code : 'INVALID_REQUEST';
+        const publicCode = ['INVALID_REQUEST', 'NOT_FOUND', 'RECOVERY_REQUIRED'].includes(code)
+          ? code : 'INVALID_REQUEST';
+        return encode({ jsonrpc: '2.0', id, result: {
+          protocolVersion: 1, ok: false, method: 'run.attach',
+          error: { code: publicCode, retryable: false }
+        } });
+      }
+    }
     if (request.method === 'session.get') {
       const payload = request.params;
       if (!exactRecord(payload, ['protocolVersion', 'method', 'sessionId'], ['afterItemSeq', 'limit']) ||

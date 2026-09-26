@@ -9,15 +9,15 @@ import { setTimeout } from 'node:timers/promises';
 
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
-import type { LocalControlChannelIdentityV1 } from '../kernel/types.js';
+import type { LocalControlChannelIdentityV1, WorkspaceIdentityV1 } from '../kernel/types.js';
 import { KernelStorageError } from '../state/errors.js';
 import { openSqliteDriver } from '../state/sqlite-driver.js';
-import { openStateStore, type StateStore } from '../state/store.js';
+import { openStateStore, publishInProcessChannel, type StateStore } from '../state/store.js';
 import { testFixture } from '../model/testing/fixtures.js';
 import { signedToolBundle } from '../state/testing/tool-authority.js';
 import { createWorkspaceTrustContext, writePersistedWorkspaceTrust } from '../session/trust.js';
 import { CONTROL_LISTENER_ENTRY_ID } from './native-listener.js';
-import { admissionKey, uuidv7 } from '../state/testing/fixtures.js';
+import { admissionKey, publishEmptySourceGraph, uuidv7 } from '../state/testing/fixtures.js';
 
 async function privateDirectory(prefix: string): Promise<string> {
   const dir = await mkdtemp(path.join(await realpath('/tmp'), prefix));
@@ -103,6 +103,15 @@ test('StateStore UDS authenticates before replay, retains first-channel provenan
       ...query, sessionId: 'A'.repeat(43)
     });
     assert.equal((unknownSession.result as { error: { code: string } }).error.code, 'NOT_FOUND');
+    const forgedAttach = await call(first, 18, 'run.attach', {
+      protocolVersion: 1, method: 'run.attach', runId: 'A'.repeat(43),
+      afterEventSeq: 0, principalId: 'forged'
+    });
+    assert.equal((forgedAttach.error as { message: string }).message, 'INVALID_REQUEST');
+    const unknownRun = await call(first, 19, 'run.attach', {
+      protocolVersion: 1, method: 'run.attach', runId: 'A'.repeat(43), afterEventSeq: 0
+    });
+    assert.equal((unknownRun.result as { error: { code: string } }).error.code, 'NOT_FOUND');
     const inspector = openSqliteDriver(path.join(root, KERNEL_DATABASE_FILENAME));
     let originalChannel: string;
     try {
@@ -115,6 +124,29 @@ test('StateStore UDS authenticates before replay, retains first-channel provenan
     }
 
     const oldChannel = await store.artifacts.readCanonical<LocalControlChannelIdentityV1>(originalChannel);
+    const workspaceIdentity = await store.artifacts.readCanonical<WorkspaceIdentityV1>(
+      store.getSession(createdSessionId).workspaceIdentityRef
+    );
+    const source = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest);
+    const internalChannel = await publishInProcessChannel(store, oldChannel.principalId);
+    const admitted = await store.admitRun({
+      principalId: oldChannel.principalId,
+      channelIdentityRef: internalChannel.channelIdentityRef,
+      channelIdentityDigest: internalChannel.channelIdentityDigest,
+      requestId: uuidv7(), admissionKey: admissionKey('uds-query-run'),
+      sessionId: createdSessionId, expectedContextRevision: 1,
+      workspacePath: workspace, objective: 'inspect the captured state',
+      allowUnverified: true, ...source
+    });
+    const attached = await call(first, 20, 'run.attach', {
+      protocolVersion: 1, method: 'run.attach', runId: admitted.run.id, afterEventSeq: 0
+    });
+    assert.equal((attached.result as { ok: boolean }).ok, true);
+    const attachedPage = (attached.result as {
+      result: { snapshot: { run: { id: string } }; events: Array<{ eventSeq: number }> }
+    }).result;
+    assert.equal(attachedPage.snapshot.run.id, admitted.run.id);
+    assert.deepEqual(attachedPage.events.map((event) => event.eventSeq), [1]);
     await assert.rejects(
       store.createSession({
         principalId: oldChannel.principalId,

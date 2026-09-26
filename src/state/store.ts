@@ -68,6 +68,7 @@ import {
 } from './reducers/invocation.js';
 import { createSession, type CreateSessionInput, type CreateSessionResult } from './reducers/session.js';
 import { getSession, type GetSessionInput, type GetSessionResult } from './queries/session.js';
+import { attachRun, type AttachRunInput, type AttachRunResult } from './queries/run-attach.js';
 import {
   activateWorkerLease,
   beginGenerationCheckpoint,
@@ -115,6 +116,8 @@ import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest }
 export type StateStoreRuntimeAuthority = { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[] };
 
 export type {
+  AttachRunInput,
+  AttachRunResult,
   LoadAgentRunInput,
   ActivateWorkerLeaseInput,
   AdmitRunInput,
@@ -468,6 +471,10 @@ export class StateStore {
 
   querySession(input: GetSessionInput): GetSessionResult {
     return getSession(this.driver, this.owner, input);
+  }
+
+  attachRun(input: AttachRunInput): Promise<AttachRunResult> {
+    return attachRun(this.driver, this.artifacts, this.owner, input);
   }
 
   admitRun(input: AdmitRunInput): Promise<AdmitRunResult> {

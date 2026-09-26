@@ -37,7 +37,8 @@ export async function makePrivateDir(prefix: string): Promise<string> {
   return directory;
 }
 
-async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDigest: string) {
+/** M2-only placeholder closure for reducer/control integration tests; never public admission. */
+export async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDigest: string) {
   const rules: FrozenIgnoreRulesV1 = {
     schemaVersion: 1,
     format: 'cliq-frozen-ignore-rules-v1',
