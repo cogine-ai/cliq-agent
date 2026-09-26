@@ -93,3 +93,19 @@ test('signed RuntimeBundle structured index binds roots, members, roles and orde
     assert.throws(() => verifyRuntimeBundle(signBundle(mutated), releaseKeys));
   }
 });
+
+test('signed RuntimeBundle paths reject alternate Unicode and unsafe native components', () => {
+  const paths = [
+    'test/e\u0301',
+    `test/${'a'.repeat(256)}`,
+    Array.from({ length: 21 }, () => 'a'.repeat(200)).join('/'),
+    'test//supervisor', 'test/../supervisor', '/test/supervisor',
+    'test/with\\backslash', 'test/with\0nul'
+  ];
+  for (const relativePath of paths) {
+    const bundle = fixture();
+    bundle.entries[0]!.relativePath = relativePath;
+    assert.throws(() => verifyRuntimeBundle(signBundle(bundle), releaseKeys),
+      /invalid signed RuntimeBundle entry/, JSON.stringify(relativePath));
+  }
+});

@@ -14,6 +14,10 @@ installed-path qualification remain open. This does not qualify a Kernel install
   StateOwner and local-control helpers are therefore absent from the tarball.
   The workflow uses a long-lived `NPM_TOKEN` and does not establish npm trusted
   publishing/provenance. It cannot build, sign, or qualify the macOS runtime.
+- A local npm publish token authenticates the publisher to the npm registry.
+  It is not an Ed25519 private key and cannot produce the RuntimeBundle
+  `signature` verified against Cliq's embedded release public key. Keep these
+  two authorities distinct; neither secret belongs in the source repository.
 - A macOS Developer ID identity and a notarized **probe** app were qualified
   locally. That identity and probe are separate from an installed RuntimeBundle
   release signature or a shippable Supervisor/worker image.
@@ -89,4 +93,5 @@ by this design. We must still qualify the actual published npm payload on Linux
 and macOS and explicitly accept npm release-path trust for the first bootstrap.
 Until then, implementation can use injected **test** public keys to verify
 mechanics, but may not label a source build, npm tarball, or locally signed
-probe as an installed signed Kernel runtime.
+probe as an installed signed Kernel runtime. Production key provisioning is a
+release-qualification gate, not a reason to stop independent implementation.

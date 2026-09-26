@@ -36,6 +36,19 @@ export function policyProfile(): PolicyEngineProfileV1 {
   return { ...core, profileDigest: canonicalSha256(core) };
 }
 
+/** Signed paths have one byte spelling and fit native openat components. */
+function canonicalBundleRelativePath(value: unknown): value is string {
+  if (typeof value !== 'string' || !value || value.includes('\\') ||
+      Buffer.byteLength(value, 'utf8') > 4096) return false;
+  try {
+    if (normalizeCanonicalText(value) !== value) return false;
+  } catch {
+    return false;
+  }
+  return value.split('/').every((part) => part !== '' && part !== '.' && part !== '..' &&
+    Buffer.byteLength(part, 'utf8') <= 255);
+}
+
 /** Signed manifest structure and role identities only; consumers still verify their selected bytes and semantics. */
 export function verifyRuntimeBundle(bundle: RuntimeBundleManifest, releaseKeys: readonly ReleaseTrustKey[]): void {
   const { signature: _signature, manifestDigest: _digest, ...bundleCore } = bundle;
@@ -65,9 +78,8 @@ export function verifyRuntimeBundle(bundle: RuntimeBundleManifest, releaseKeys: 
   for (const entry of bundle.entries) {
     if (!exactKeys(entry, ['entryId', 'role', 'version', 'relativePath', 'digest', 'byteCount', 'executable']) ||
         !roles.includes(entry.role) || typeof entry.entryId !== 'string' || !entry.entryId || typeof entry.version !== 'string' || !entry.version || typeof entry.executable !== 'boolean' ||
-        !Number.isSafeInteger(entry.byteCount) || entry.byteCount < 0 || typeof entry.relativePath !== 'string' ||
-        !entry.relativePath || entry.relativePath.includes('\\') || entry.relativePath.includes('\0') ||
-        entry.relativePath.split('/').some((part) => ['', '.', '..'].includes(part))) throw new TypeError('invalid signed RuntimeBundle entry');
+        !Number.isSafeInteger(entry.byteCount) || entry.byteCount < 0 ||
+        !canonicalBundleRelativePath(entry.relativePath)) throw new TypeError('invalid signed RuntimeBundle entry');
     assertArtifactRef(entry.digest);
   }
   for (const field of ['entryId', 'relativePath', 'digest'] as const) {

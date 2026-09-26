@@ -122,8 +122,14 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   A held descriptor reader, complete remaining kind decoders, CAS import,
   immutable install directory and active-selection protocol remain open.
 - The [I1 release-trust decision](release-trust-decision.md) records the
-  missing production Ed25519 root/key custody and stable first-install chain.
-  Existing test signatures and the notarized probe do not fill that gap.
+  missing production Ed25519 root/key custody. npm can remain the sole required
+  public distribution channel; the installed path still needs platform payloads,
+  protected signing and clean-install qualification. The existing npm publish
+  token, test signatures and notarized probe do not fill that gap.
+- Signed RuntimeBundle entry paths now reject non-NFC spellings, NUL,
+  traversal/empty components, and paths or components too long for the native
+  descriptor-relative reader. Re-signed malformed-manifest tests enforce the
+  check independently of signature failure; native package import remains open.
 
 ## Next integration order
 
