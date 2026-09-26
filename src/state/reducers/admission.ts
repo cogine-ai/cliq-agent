@@ -33,6 +33,7 @@ import {
   decodeFrozenIgnoreRules,
   decodeRunObjective,
   decodeRunSpec,
+  decodeRepositoryIdentity,
   decodeSessionProjection,
   decodeSourceManifest,
   decodeSourceProjection,
@@ -246,6 +247,16 @@ export async function admitRun(
   }
   if (workspaceIdentity.ownerPrincipalId !== input.principalId) {
     throw new KernelStorageError('INVALID_REQUEST', 'workspace identity is not owned by the calling principal');
+  }
+  if (workspaceIdentity.repositoryIdentityRef !== undefined) {
+    const repository = decodeRepositoryIdentity(
+      await artifacts.readCanonical(workspaceIdentity.repositoryIdentityRef)
+    );
+    if (repository.repositoryIdentityDigest !== workspaceIdentity.repositoryIdentityDigest ||
+        repository.platform !== workspaceIdentity.platform ||
+        repository.gitDirectoryIdentity.ownerUid !== workspaceIdentity.rootIdentity.ownerUid) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace repository artifact differs from the Session identity');
+    }
   }
   await recaptureLiveWorkspaceIdentity(workspaceIdentity, workspacePath);
 

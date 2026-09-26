@@ -77,7 +77,7 @@ export async function publishEmptySourceGraph(store: StateStore, workspaceIdenti
     byteCount: 0,
     treeDigest: ''
   };
-  entries.treeDigest = digestOmitting(entries, 'treeDigest');
+  entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries });
   const entriesArtifact = await store.artifacts.publishCanonical(entries, entries.format);
   const source: SourceManifest = {
     schemaVersion: 1,

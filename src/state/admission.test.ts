@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { randomFillSync } from 'node:crypto';
+import { createHash, randomFillSync } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1,
@@ -49,7 +50,11 @@ function inspectKernel<T>(stateRoot: string, read: (driver: ReturnType<typeof op
   }
 }
 
-async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDigest: string) {
+async function publishEmptySourceGraph(
+  store: StateStore,
+  workspaceIdentityDigest: string,
+  repositoryIdentityDigest?: string
+) {
   const rules: FrozenIgnoreRulesV1 = {
     schemaVersion: 1,
     format: 'cliq-frozen-ignore-rules-v1',
@@ -83,7 +88,7 @@ async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDiges
     byteCount: 0,
     treeDigest: ''
   };
-  entries.treeDigest = digestOmitting(entries, 'treeDigest');
+  entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries });
   const entriesArtifact = await store.artifacts.publishCanonical(entries, 'cliq-workspace-entries-v1');
 
   const source: SourceManifest = {
@@ -99,6 +104,40 @@ async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDiges
     treeDigest: entries.treeDigest,
     manifestDigest: ''
   };
+  if (repositoryIdentityDigest !== undefined) {
+    const indexHeader = Buffer.alloc(12);
+    indexHeader.write('DIRC', 0, 'ascii');
+    indexHeader.writeUInt32BE(2, 4);
+    const canonicalIndexBytes = Buffer.concat([
+      indexHeader,
+      createHash('sha1').update(indexHeader).digest()
+    ]);
+    const indexBytes = await store.artifacts.publishBytes(
+      canonicalIndexBytes, 'application/octet-stream', 'cliq-git-index-canonical-v2'
+    );
+    const emptyTreeObjectId = createHash('sha1').update(Buffer.from('tree 0\0', 'utf8')).digest('hex');
+    const indexSnapshot = {
+      schemaVersion: 1 as const,
+      format: 'cliq-git-index-snapshot-v1' as const,
+      repositoryIdentityDigest,
+      objectFormat: 'sha1' as const,
+      canonicalIndexVersion: 2 as const,
+      entries: [],
+      canonicalIndexBytesRef: indexBytes.ref,
+      canonicalIndexBytesDigest: indexBytes.ref,
+      canonicalIndexByteCount: canonicalIndexBytes.byteLength,
+      indexTreeObjectId: emptyTreeObjectId,
+      snapshotDigest: ''
+    };
+    indexSnapshot.snapshotDigest = digestOmitting(indexSnapshot, 'snapshotDigest');
+    const indexArtifact = await store.artifacts.publishCanonical(indexSnapshot, indexSnapshot.format);
+    source.git = {
+      repositoryIdentityDigest,
+      head: { kind: 'unborn', branch: 'refs/heads/main' },
+      indexRef: indexArtifact.ref,
+      indexTreeObjectId: emptyTreeObjectId
+    };
+  }
   source.manifestDigest = digestOmitting(source, 'manifestDigest');
   const sourceArtifact = await store.artifacts.publishCanonical(source, 'cliq-source-manifest-v1');
 
@@ -455,6 +494,22 @@ test('Git workspaces publish a repository identity', async () => {
     assert.equal(workspaceIdentity.kind, 'live');
     assert.equal(typeof workspaceIdentity.repositoryIdentityRef, 'string');
     assert.equal(typeof workspaceIdentity.repositoryIdentityDigest, 'string');
+    const source = await publishEmptySourceGraph(
+      store, workspaceIdentity.identityDigest, workspaceIdentity.repositoryIdentityDigest
+    );
+    const admitted = await store.admitRun({
+      principalId,
+      requestId: uuidv7(),
+      admissionKey: admissionKey('run-git'),
+      sessionId: created.session.id,
+      expectedContextRevision: 1,
+      workspacePath: workspace,
+      objective: 'inspect the empty Git workspace',
+      allowUnverified: true,
+      ...channel,
+      ...source
+    });
+    assert.equal(admitted.run.status, 'queued');
   } finally {
     await store.close();
     await rm(stateRoot, { recursive: true, force: true });

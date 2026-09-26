@@ -1,8 +1,13 @@
+import path from 'node:path';
+
+import { canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
 import {
   assertArtifactRef,
   digestOmitting,
+  normalizeAbsolutePath,
   parseCanonicalTime,
-  requiredSafeInteger
+  requiredSafeInteger,
+  sha256Bytes
 } from '../kernel/identity.js';
 import type {
   AdmittedContextManifest,
@@ -15,6 +20,7 @@ import type {
   LocalPrincipalIdentityV1,
   LocalSocketPeerObservationV2,
   PlatformProcessIdentityV1,
+  RepositoryIdentityV1,
   RunObjectiveV1,
   RunSpec,
   SessionContextProjection,
@@ -111,16 +117,77 @@ function requirePlatform(value: unknown, label: string): 'linux' | 'macos' {
   return value;
 }
 
+function requireFilesystemIdentity(value: unknown, label: string): void {
+  if (!isRecord(value) || Object.keys(value).length !== 3 ||
+      !['deviceId', 'fileId', 'ownerUid'].every((key) => Object.hasOwn(value, key))) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} has an invalid closed shape`);
+  }
+  for (const key of ['deviceId', 'fileId'] as const) {
+    const id = requireUnsignedDecimal(value[key], `${label}.${key}`);
+    if (id.length > 20 || BigInt(id) > 18_446_744_073_709_551_615n) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `${label}.${key} exceeds an unsigned 64-bit id`);
+    }
+  }
+  requireSafeInteger(value.ownerUid, `${label}.ownerUid`);
+}
+
+export function decodeRepositoryIdentity(value: unknown): RepositoryIdentityV1 {
+  if (!isRecord(value) || value.format !== 'cliq-repository-identity-v1' || value.schemaVersion !== 1 ||
+      Object.keys(value).length !== 7 || !['schemaVersion', 'format', 'platform',
+        'gitDirectoryRelativePath', 'gitDirectoryIdentity', 'objectFormat',
+        'repositoryIdentityDigest'].every((key) => Object.hasOwn(value, key))) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'repository identity has an invalid closed shape');
+  }
+  requirePlatform(value.platform, 'RepositoryIdentity.platform');
+  if (value.gitDirectoryRelativePath !== '.git' ||
+      (value.objectFormat !== 'sha1' && value.objectFormat !== 'sha256')) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'repository identity has an invalid Git identity');
+  }
+  requireFilesystemIdentity(value.gitDirectoryIdentity, 'RepositoryIdentity.gitDirectoryIdentity');
+  requireDigest(value.repositoryIdentityDigest, 'RepositoryIdentity.repositoryIdentityDigest');
+  const identity = value as RepositoryIdentityV1;
+  if (digestOmitting(identity, 'repositoryIdentityDigest') !== identity.repositoryIdentityDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'repository identity digest does not rehash');
+  }
+  return identity;
+}
+
 export function decodeWorkspaceIdentity(value: unknown): WorkspaceIdentityV1 {
   if (!isRecord(value) || value.format !== 'cliq-workspace-identity-v1' || value.schemaVersion !== 1) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace identity has the wrong schema');
   }
+  if (value.kind === 'legacy_unavailable') {
+    throw new KernelStorageError('INVALID_REQUEST', 'legacy_unavailable Sessions cannot admit a Run');
+  }
+  if (value.kind !== 'live') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace identity kind is invalid');
+  }
+  const git = Object.hasOwn(value, 'repositoryIdentityRef') || Object.hasOwn(value, 'repositoryIdentityDigest');
+  const keys = ['schemaVersion', 'format', 'ownerPrincipalId', 'platform', 'kind',
+    'canonicalRootPath', 'rootIdentity', 'identityDigest',
+    ...(git ? ['repositoryIdentityRef', 'repositoryIdentityDigest'] : [])];
+  if (Object.keys(value).length !== keys.length || !keys.every((key) => Object.hasOwn(value, key))) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace identity has an invalid closed shape');
+  }
+  requireString(value.ownerPrincipalId, 'WorkspaceIdentity.ownerPrincipalId');
+  requirePlatform(value.platform, 'WorkspaceIdentity.platform');
+  requireFilesystemIdentity(value.rootIdentity, 'WorkspaceIdentity.rootIdentity');
+  if (typeof value.canonicalRootPath !== 'string') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace path is not canonical');
+  }
+  try {
+    if (normalizeAbsolutePath(value.canonicalRootPath) !== value.canonicalRootPath) throw new Error('noncanonical');
+  } catch {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace path is not canonical');
+  }
+  if (git) {
+    requireArtifactRef(value.repositoryIdentityRef, 'WorkspaceIdentity.repositoryIdentityRef');
+    requireDigest(value.repositoryIdentityDigest, 'WorkspaceIdentity.repositoryIdentityDigest');
+  }
+  requireDigest(value.identityDigest, 'WorkspaceIdentity.identityDigest');
   const identity = value as WorkspaceIdentityV1;
   if (digestOmitting(identity, 'identityDigest') !== identity.identityDigest) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace identity digest does not rehash');
-  }
-  if (identity.kind === 'legacy_unavailable') {
-    throw new KernelStorageError('INVALID_REQUEST', 'legacy_unavailable Sessions cannot admit a Run');
   }
   return identity;
 }
@@ -709,46 +776,86 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entries must be an array');
   }
   const entryCount = requireSafeInteger(value.entryCount, 'WorkspaceEntryManifest.entryCount');
-  requireSafeInteger(value.byteCount, 'WorkspaceEntryManifest.byteCount');
+  const byteCount = requireSafeInteger(value.byteCount, 'WorkspaceEntryManifest.byteCount');
   requireDigest(value.treeDigest, 'WorkspaceEntryManifest.treeDigest');
   if (entryCount !== value.entries.length) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry count does not match the array');
   }
   let priorPath: string | undefined;
+  let measuredBytes = 0;
   for (const [index, candidate] of value.entries.entries()) {
     if (!isRecord(candidate)) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} must be an object`);
     }
     const entryPath = requireString(candidate.path, `WorkspaceEntryManifest.entries[${index}].path`);
+    let normalizedPath: string;
+    try {
+      normalizedPath = normalizeCanonicalText(entryPath);
+    } catch {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} has an invalid path`);
+    }
+    if (normalizedPath !== entryPath || entryPath.startsWith('/') || entryPath.includes('\\') ||
+        entryPath.split('/').some((component) => component === '' || component === '.' ||
+          component === '..' || component === '.git')) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} has an invalid path`);
+    }
     if (priorPath !== undefined && Buffer.compare(Buffer.from(priorPath), Buffer.from(entryPath)) >= 0) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry paths must be byte-sorted and unique');
     }
     priorPath = entryPath;
-    requireSafeInteger(candidate.mode, `WorkspaceEntryManifest.entries[${index}].mode`);
+    const mode = requireSafeInteger(candidate.mode, `WorkspaceEntryManifest.entries[${index}].mode`);
     if (candidate.kind === 'directory') {
       rejectUnknownKeys(candidate, ['path', 'kind', 'mode'], `WorkspaceEntryManifest.entries[${index}]`);
+      if (mode !== 0o755) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace directory ${entryPath} has a noncanonical mode`);
+      }
     } else if (candidate.kind === 'file') {
       rejectUnknownKeys(
         candidate,
         ['path', 'kind', 'mode', 'size', 'blobRef'],
         `WorkspaceEntryManifest.entries[${index}]`
       );
-      requireSafeInteger(candidate.size, `WorkspaceEntryManifest.entries[${index}].size`);
+      if (mode !== 0o644 && mode !== 0o755) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace file ${entryPath} has a noncanonical mode`);
+      }
+      const size = requireSafeInteger(candidate.size, `WorkspaceEntryManifest.entries[${index}].size`);
       requireArtifactRef(candidate.blobRef, `WorkspaceEntryManifest.entries[${index}].blobRef`);
+      measuredBytes += size;
     } else if (candidate.kind === 'symlink') {
       rejectUnknownKeys(
         candidate,
         ['path', 'kind', 'mode', 'target', 'targetDigest'],
         `WorkspaceEntryManifest.entries[${index}]`
       );
-      requireString(candidate.target, `WorkspaceEntryManifest.entries[${index}].target`);
-      requireDigest(candidate.targetDigest, `WorkspaceEntryManifest.entries[${index}].targetDigest`);
+      const target = requireString(candidate.target, `WorkspaceEntryManifest.entries[${index}].target`);
+      let normalizedTarget: string;
+      try {
+        normalizedTarget = normalizeCanonicalText(target);
+      } catch {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace symlink ${entryPath} has an invalid target`);
+      }
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(entryPath), target));
+      if (normalizedTarget !== target || target.startsWith('/') || target.includes('\\') ||
+          resolved === '..' || resolved.startsWith('../') || resolved.split('/').includes('.git')) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace symlink ${entryPath} leaves the admitted root`);
+      }
+      if (requireDigest(candidate.targetDigest, `WorkspaceEntryManifest.entries[${index}].targetDigest`) !==
+          sha256Bytes(Buffer.from(target, 'utf8'))) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace symlink ${entryPath} target digest does not rehash`);
+      }
+      measuredBytes += Buffer.byteLength(target, 'utf8');
     } else {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} has an invalid kind`);
     }
+    if (!Number.isSafeInteger(measuredBytes)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry byte count exceeds the safe-integer range');
+    }
+  }
+  if (measuredBytes !== byteCount) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry byte count does not match the array');
   }
   const entries = value as WorkspaceEntryManifest;
-  if (digestOmitting(entries, 'treeDigest') !== entries.treeDigest) {
+  if (canonicalSha256({ schemaVersion: 1, format: 'cliq-workspace-entries-v1', entries: entries.entries }) !== entries.treeDigest) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entries digest does not rehash');
   }
   return entries;

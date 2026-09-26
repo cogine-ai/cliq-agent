@@ -263,6 +263,23 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   source-tree capture and a descriptor-relative workspace walk are still
   required before public `run.submit` can use this identity as execution
   authority.
+- WP01 Run admission now decodes the persisted live WorkspaceIdentity and its
+  referenced RepositoryIdentity as closed, self-rehashed shapes. It checks
+  canonical paths and unsigned 64-bit filesystem ids, requires paired Git
+  reference/digest fields, and binds repository platform, owner and digest to
+  the Session before recapturing the live root. Focused tests include a Git
+  Session-to-queued-Run admission with an explicitly synthesized empty Git
+  source fixture and rehashed malformed identity cases. This does not supply
+  the descriptor-held source/index capture or full GitIndexSnapshot decoder
+  required for production `run.submit`.
+- The shared WorkspaceEntryManifest decoder now follows the RFC's exact tree
+  projection: the digest covers schema, format and entries; entry and byte
+  counts are independently checked, including symlink UTF-8 bytes. It also
+  rejects noncanonical root-relative paths, `.git` entries, escaped symlinks,
+  invalid file/directory modes and mismatched symlink target digests. Existing
+  M1/M2 fixtures were regenerated with the corrected tree digest. Source file
+  blob-size verification, full source capture and Git index/object validation
+  remain separate admission and recovery work.
 
 ## Next integration order
 
