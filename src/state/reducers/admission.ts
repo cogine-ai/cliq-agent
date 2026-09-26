@@ -59,6 +59,7 @@ import {
 } from '../rows.js';
 import type { SqliteDriver } from '../sqlite-driver.js';
 import { recaptureLiveWorkspaceIdentity } from '../workspace-identity.js';
+import { validateWorkspaceEntryBlobs } from '../workspace-entry-blobs.js';
 
 export type AdmitRunInput = {
   principalId: string;
@@ -288,7 +289,8 @@ export async function admitRun(
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'base SourceManifest is not bound to the admitted Session workspace');
   }
-  decodeWorkspaceEntries(await artifacts.readCanonical(sourceManifest.entriesRef));
+  const sourceEntries = decodeWorkspaceEntries(await artifacts.readCanonical(sourceManifest.entriesRef));
+  await validateWorkspaceEntryBlobs(artifacts, sourceEntries);
   if ((sourceManifest.git === undefined) !== (workspaceIdentity.repositoryIdentityDigest === undefined)) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'SourceManifest git identity does not match the live workspace');
   }

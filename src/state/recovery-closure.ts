@@ -34,6 +34,7 @@ import {
 } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import { validateWorkerRecoveryWait } from './worker-recovery.js';
+import { validateWorkspaceEntryBlobs } from './workspace-entry-blobs.js';
 import { addBudget, decodeBudgetUsage, isZeroBudget } from './invariants.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
 import { readInvocationJournal } from './repositories/journal.js';
@@ -103,12 +104,11 @@ async function validateWorkspaceStateArtifacts(
     [`${label}.privateGitStateRef`, state.privateGitStateRef]
   ]);
   const entries = decodeWorkspaceEntries(await artifacts.readCanonical(state.entriesRef));
-  await requireRecoveryArtifacts(
-    artifacts,
-    entries.entries
-      .filter((entry) => entry.kind === 'file')
-      .map((entry, index) => [`${label}.entries[${index}].blobRef`, entry.blobRef] as const)
-  );
+  try {
+    await validateWorkspaceEntryBlobs(artifacts, entries);
+  } catch (error) {
+    recoveryFailure(`${label} file closure is invalid: ${(error as Error).message}`);
+  }
   return { state, entries };
 }
 
@@ -181,12 +181,11 @@ async function validateRunSpecArtifacts(
   if (sourceEntries.treeDigest !== source.treeDigest) {
     recoveryFailure('SourceManifest entries do not match its tree digest');
   }
-  await requireRecoveryArtifacts(
-    artifacts,
-    sourceEntries.entries
-      .filter((entry) => entry.kind === 'file')
-      .map((entry, index) => [`SourceManifest.entries[${index}].blobRef`, entry.blobRef] as const)
-  );
+  try {
+    await validateWorkspaceEntryBlobs(artifacts, sourceEntries);
+  } catch (error) {
+    recoveryFailure(`SourceManifest file closure is invalid: ${(error as Error).message}`);
+  }
 }
 
 async function validateContextArtifacts(

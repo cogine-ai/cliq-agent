@@ -53,7 +53,10 @@ function inspectKernel<T>(stateRoot: string, read: (driver: ReturnType<typeof op
 async function publishEmptySourceGraph(
   store: StateStore,
   workspaceIdentityDigest: string,
-  repositoryIdentityDigest?: string
+  options: {
+    repositoryIdentityDigest?: string;
+    file?: { bytes: Buffer; declaredSize: number };
+  } = {}
 ) {
   const rules: FrozenIgnoreRulesV1 = {
     schemaVersion: 1,
@@ -88,6 +91,17 @@ async function publishEmptySourceGraph(
     byteCount: 0,
     treeDigest: ''
   };
+  if (options.file !== undefined) {
+    const blob = await store.artifacts.publishBytes(
+      options.file.bytes, 'application/octet-stream', 'cliq-workspace-file-v1'
+    );
+    entries.entries = [{
+      path: 'file.txt', kind: 'file', mode: 0o644,
+      size: options.file.declaredSize, blobRef: blob.ref
+    }];
+    entries.entryCount = 1;
+    entries.byteCount = options.file.declaredSize;
+  }
   entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries });
   const entriesArtifact = await store.artifacts.publishCanonical(entries, 'cliq-workspace-entries-v1');
 
@@ -104,7 +118,7 @@ async function publishEmptySourceGraph(
     treeDigest: entries.treeDigest,
     manifestDigest: ''
   };
-  if (repositoryIdentityDigest !== undefined) {
+  if (options.repositoryIdentityDigest !== undefined) {
     const indexHeader = Buffer.alloc(12);
     indexHeader.write('DIRC', 0, 'ascii');
     indexHeader.writeUInt32BE(2, 4);
@@ -119,7 +133,7 @@ async function publishEmptySourceGraph(
     const indexSnapshot = {
       schemaVersion: 1 as const,
       format: 'cliq-git-index-snapshot-v1' as const,
-      repositoryIdentityDigest,
+      repositoryIdentityDigest: options.repositoryIdentityDigest,
       objectFormat: 'sha1' as const,
       canonicalIndexVersion: 2 as const,
       entries: [],
@@ -132,7 +146,7 @@ async function publishEmptySourceGraph(
     indexSnapshot.snapshotDigest = digestOmitting(indexSnapshot, 'snapshotDigest');
     const indexArtifact = await store.artifacts.publishCanonical(indexSnapshot, indexSnapshot.format);
     source.git = {
-      repositoryIdentityDigest,
+      repositoryIdentityDigest: options.repositoryIdentityDigest,
       head: { kind: 'unborn', branch: 'refs/heads/main' },
       indexRef: indexArtifact.ref,
       indexTreeObjectId: emptyTreeObjectId
@@ -244,6 +258,56 @@ test('M1 store admits a queued Run with an initial Checkpoint and recovers it', 
         1
       );
     });
+  } finally {
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('Run admission checks source file bytes before committing its response', async () => {
+  const stateRoot = await makePrivateDir('.cliq-m1-file-state-');
+  const workspace = await makePrivateDir('.cliq-m1-file-ws-');
+  const store = await openStateStore(stateRoot);
+  try {
+    const principalId = 'cliq-test-principal';
+    const channel = await publishInProcessChannel(store, principalId);
+    const created = await store.createSession({
+      principalId,
+      requestId: uuidv7(),
+      admissionKey: admissionKey('session-file-size'),
+      workspacePath: workspace,
+      ...channel
+    });
+    const workspaceIdentity = (await store.artifacts.readCanonical(
+      created.session.workspaceIdentityRef
+    )) as WorkspaceIdentityV1;
+    const requestId = uuidv7();
+    const runKey = admissionKey('run-file-size');
+    const request = {
+      principalId, requestId, admissionKey: runKey,
+      sessionId: created.session.id, expectedContextRevision: 1,
+      workspacePath: workspace, objective: 'read file bytes', allowUnverified: true,
+      ...channel
+    };
+    const badSource = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest, {
+      file: { bytes: Buffer.from('abc'), declaredSize: 2 }
+    });
+    await assert.rejects(
+      () => store.admitRun({ ...request, ...badSource }),
+      (error: unknown) => error instanceof KernelStorageError &&
+        error.code === 'ARTIFACT_MISMATCH' && /size does not match/.test(error.message)
+    );
+    inspectKernel(stateRoot, (driver) => {
+      assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM runs')
+        .get<{ count: unknown }>()?.count), 0);
+    });
+    const goodSource = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest, {
+      file: { bytes: Buffer.from('abc'), declaredSize: 3 }
+    });
+    const admitted = await store.admitRun({ ...request, ...goodSource });
+    assert.equal(admitted.run.status, 'queued');
+    assert.equal((await store.readRecoveryClosure(admitted.run.id)).run.id, admitted.run.id);
   } finally {
     await store.close();
     await rm(stateRoot, { recursive: true, force: true });
@@ -495,7 +559,8 @@ test('Git workspaces publish a repository identity', async () => {
     assert.equal(typeof workspaceIdentity.repositoryIdentityRef, 'string');
     assert.equal(typeof workspaceIdentity.repositoryIdentityDigest, 'string');
     const source = await publishEmptySourceGraph(
-      store, workspaceIdentity.identityDigest, workspaceIdentity.repositoryIdentityDigest
+      store, workspaceIdentity.identityDigest,
+      { repositoryIdentityDigest: workspaceIdentity.repositoryIdentityDigest }
     );
     const admitted = await store.admitRun({
       principalId,

@@ -277,9 +277,12 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   counts are independently checked, including symlink UTF-8 bytes. It also
   rejects noncanonical root-relative paths, `.git` entries, escaped symlinks,
   invalid file/directory modes and mismatched symlink target digests. Existing
-  M1/M2 fixtures were regenerated with the corrected tree digest. Source file
-  blob-size verification, full source capture and Git index/object validation
-  remain separate admission and recovery work.
+  M1/M2 fixtures were regenerated with the corrected tree digest. Admission
+  and recovery now also read every distinct complete CAS file blob through a
+  bounded mapper and reject a declared size mismatch; a real-store test proves
+  a failed size check commits no Run and a corrected source can then admit and
+  recover. Full descriptor-held source capture and Git index/object validation
+  remain separate work.
 
 ## Next integration order
 
