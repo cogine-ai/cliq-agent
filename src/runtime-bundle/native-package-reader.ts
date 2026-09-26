@@ -10,6 +10,7 @@ import { KernelStorageError } from '../state/errors.js';
 import { verifySignedRuntimeBundlePayloads } from './manifest.js';
 
 export const PACKAGE_READER_NATIVE_RELATIVE_PATH = `native/${process.platform}-${process.arch}/package-reader.node`;
+export const PACKAGE_READER_NATIVE_ENTRY_ID = 'runtime_bundle_package_reader';
 const LOCAL_BINARY = fileURLToPath(new URL(`../../dist/${PACKAGE_READER_NATIVE_RELATIVE_PATH}`, import.meta.url));
 const MAX_NATIVE_BYTES = 16 * 1024 * 1024;
 const CHUNK_BYTES = 1024 * 1024;
@@ -51,8 +52,12 @@ const heldRoots = new WeakSet<object>();
 const heldCasRoots = new WeakSet<object>();
 
 /** The expected helper digest must come from the trusted stable bootstrap. Test builds inject a fixture digest. */
-export async function loadNativePackageReader(expectedHelperDigest: string): Promise<NativeBinding> {
+export async function loadNativePackageReader(expectedHelperDigest: string,
+  expectedByteCount?: number): Promise<NativeBinding> {
   assertArtifactRef(expectedHelperDigest);
+  if (expectedByteCount !== undefined && (!Number.isSafeInteger(expectedByteCount) || expectedByteCount <= 0)) {
+    throw new TypeError('native package reader signed byte count is invalid');
+  }
   if (process.platform !== 'darwin' && process.platform !== 'linux') {
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'native RuntimeBundle package reading is unavailable');
   }
@@ -66,7 +71,8 @@ export async function loadNativePackageReader(expectedHelperDigest: string): Pro
     const bytes = await file.readFile();
     const after = await file.stat({ bigint: true });
     const digest = sha256Bytes(bytes);
-    if (!sameStat(before, after) || BigInt(bytes.byteLength) !== after.size || digest !== expectedHelperDigest) {
+    if (!sameStat(before, after) || BigInt(bytes.byteLength) !== after.size || digest !== expectedHelperDigest ||
+        (expectedByteCount !== undefined && after.size !== BigInt(expectedByteCount))) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'native package reader differs from its trusted bootstrap pin');
     }
     if (loaded) {
@@ -291,10 +297,16 @@ export function readVerifiedNativeCasArtifactBytes(cas: HeldCasRoot,
 
 /** Import a complete verified package into unselected CAS objects. Activation is a separate gate. */
 export async function importHeldPackageToCas(source: HeldPackageRoot, cas: HeldCasRoot,
-  releaseKeys: readonly ReleaseTrustKey[]): Promise<{ bundle: RuntimeBundleManifest; bundleRef: string }> {
+  releaseKeys: readonly ReleaseTrustKey[], expectedBundleRef?: string): Promise<{
+    bundle: RuntimeBundleManifest; bundleRef: string;
+  }> {
+  if (expectedBundleRef !== undefined) assertArtifactRef(expectedBundleRef);
   const manifest = readHeldPackageManifest(source);
   const decoded = await verifySignedRuntimeBundlePayloads(manifest, releaseKeys,
     (entry) => readVerifiedPackageEntryBytes(source, entry));
+  if (expectedBundleRef !== undefined && decoded.bundleRef !== expectedBundleRef) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'package manifest differs from the active signed StateOwner bundle');
+  }
   for (const entry of decoded.bundle.entries) {
     await streamVerifiedPackageEntry(source, entry, () => {});
   }

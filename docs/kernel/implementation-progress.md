@@ -152,6 +152,15 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   reimport, partial failure cleanup and path substitution. These CAS objects
   are unselected: no immutable bundle directory, active selection, installed
   bootstrap, service registration or production release key exists yet.
+- Bound complete package import to the actual signed StateStore owner. Its
+  package-reader helper must match the owner's signed entry digest and byte
+  count, and the held package manifest must equal the owner's complete signed
+  bundle ref before any CAS write. The owner waits for an in-flight import
+  before releasing its OS lock. A real-store test imports a signed fixture,
+  reopens the owner and reads the imported object, rejects concurrent imports,
+  and proves a second valid signed manifest cannot be imported under the first
+  owner's authority. The imported objects remain unselected; no installed
+  bootstrap or activation is implied by this test.
 
 ## Next integration order
 

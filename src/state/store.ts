@@ -12,6 +12,10 @@ import {
 } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import {
+  PACKAGE_READER_NATIVE_ENTRY_ID, PACKAGE_READER_NATIVE_RELATIVE_PATH,
+  importHeldPackageToCas, loadNativePackageReader, openNativeCasRoot, openPackageRoot
+} from '../runtime-bundle/native-package-reader.js';
+import {
   digestOmitting,
   identityHash,
   normalizeAbsolutePath,
@@ -378,13 +382,15 @@ export class StateStore {
   private closing: Promise<void> | undefined;
   private controlServer: LocalControlServer | undefined;
   private startingControl: Promise<LocalControlServer> | undefined;
+  private importingRuntimeBundle: Promise<string> | undefined;
 
   private constructor(
     readonly stateRoot: string,
     private readonly driver: SqliteDriver,
     readonly artifacts: ArtifactCatalog,
     private readonly owner: StateOwnerContext,
-    private readonly runtimeBundle?: RuntimeBundleManifest
+    private readonly runtimeBundle?: RuntimeBundleManifest,
+    private readonly releaseKeys?: readonly ReleaseTrustKey[]
   ) {}
 
   get ownerEpoch(): number {
@@ -454,7 +460,8 @@ export class StateStore {
       const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
       const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts, native, heldLock, runtimeAuthority?.bundle);
       const ownerContext = await stateOwnerContextFromArtifacts(stateRoot, artifacts, owner, heldLock);
-      return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority?.bundle);
+      return new StateStore(stateRoot, driver, artifacts, ownerContext,
+        runtimeAuthority?.bundle, runtimeAuthority?.releaseKeys);
     } catch (error) {
       try {
         driver?.close();
@@ -484,6 +491,54 @@ export class StateStore {
 
   admitRun(input: AdmitRunInput): Promise<AdmitRunResult> {
     return admitRun(this.driver, this.artifacts, this.owner, input);
+  }
+
+  /** Import the owner's exact signed package into unselected CAS objects while holding StateOwner. */
+  importRuntimeBundlePackage(packageRoot: string): Promise<string> {
+    if (this.closed || this.closing || this.released) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'StateStore is closing');
+    }
+    if (this.importingRuntimeBundle) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'RuntimeBundle import is already in progress');
+    }
+    if (!this.runtimeBundle || !this.releaseKeys) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'RuntimeBundle import requires a signed StateOwner');
+    }
+    const bundle = this.runtimeBundle;
+    const releaseKeys = this.releaseKeys;
+    const expectedRef = canonicalSha256(bundle);
+    const helper = bundle.entries.find((entry) => entry.entryId === PACKAGE_READER_NATIVE_ENTRY_ID);
+    if (!helper || helper.role !== 'platform_helper' || helper.version !== '1' || !helper.executable ||
+        helper.relativePath !== PACKAGE_READER_NATIVE_RELATIVE_PATH) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'signed RuntimeBundle has no matching package reader helper');
+    }
+    const operation = (async () => {
+      const before = assertActiveStateOwner(this.driver, this.owner);
+      if (before.runtimeBundleRef !== expectedRef) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner does not own the selected RuntimeBundle');
+      }
+      const binding = await loadNativePackageReader(helper.digest, helper.byteCount);
+      const current = assertActiveStateOwner(this.driver, this.owner);
+      if (current.runtimeBundleRef !== expectedRef) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner changed before RuntimeBundle import');
+      }
+      const source = openPackageRoot(binding, packageRoot);
+      try {
+        const cas = openNativeCasRoot(binding, path.join(this.stateRoot, KERNEL_CAS_DIRECTORY));
+        try {
+          await importHeldPackageToCas(source, cas, releaseKeys, expectedRef);
+          const after = assertActiveStateOwner(this.driver, this.owner);
+          if (after.runtimeBundleRef !== expectedRef) {
+            throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner changed during RuntimeBundle import');
+          }
+          return expectedRef;
+        } finally { cas.close(); }
+      } finally { source.close(); }
+    })();
+    this.importingRuntimeBundle = operation;
+    return operation.finally(() => {
+      if (this.importingRuntimeBundle === operation) this.importingRuntimeBundle = undefined;
+    });
   }
 
   /** Start the owner-scoped native UDS service; close() drains it before owner release. */
@@ -613,6 +668,7 @@ export class StateStore {
     if (this.closed) return Promise.resolve();
     if (this.closing !== undefined) return this.closing;
     const attempt = (async () => {
+      await this.importingRuntimeBundle?.catch(() => undefined);
       const starting = await this.startingControl?.catch(() => undefined);
       await (this.controlServer ?? starting)?.close();
       if (!this.released) {

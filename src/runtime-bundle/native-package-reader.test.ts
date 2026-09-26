@@ -120,6 +120,7 @@ test('held entry refuses changed bytes, path substitution, and incomplete reads'
 
 test('native helper requires its separately pinned bootstrap digest', { skip: !supported }, async () => {
   await assert.rejects(loadNativePackageReader('0'.repeat(64)), /trusted bootstrap pin/);
+  await assert.rejects(loadNativePackageReader(helperDigest(), 1), /trusted bootstrap pin/);
 });
 
 test('fixed package manifest rejects missing, linked, group-writable, and oversized files',
