@@ -60,8 +60,9 @@ verify_sha256 "$vmlinuz" f270bfa4324e37f0a28662909b0450c802c8279143f353cbc7fe250
 verify_sha256 "$upstream_initramfs" 508de7f561b94aac0b569611574502e4528eb21230318badac9626b7f1791bf4
 
 # Alpine's arm64 vmlinuz is a self-extracting EFI image. The pinned zimg
-# header places its gzip-compressed raw Linux Image at byte 52152.
-dd if="$vmlinuz" of="$build_root/kernel-payload.gz" bs=1 skip=52152 status=none
+# header places its gzip-compressed raw Linux Image at byte 52152. macOS dd
+# with bs=1 copies the whole image one byte at a time; tail uses byte offsets.
+tail -c +52153 "$vmlinuz" > "$build_root/kernel-payload.gz"
 gzip -dc "$build_root/kernel-payload.gz" > "$build_root/Image" || true
 verify_sha256 "$build_root/Image" 377d3480f52e7407bf635ea8a3322b7eb0b3c59eb051e977fb465bef706757b1
 

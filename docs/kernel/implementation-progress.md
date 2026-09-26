@@ -64,8 +64,35 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   cursor, captured high-water, a 1 MiB metadata cap, and a current UDS peer
   recheck. Focused tests cover empty pages, pagination across a later append,
   foreign principal, future cursors, unknown/forged wire fields, and a missing
-  item before high-water. This remains a hidden service; public protocol/error
-  generation and the rest of the Session methods are still open.
+  item before high-water. The 1,627-test full suite and build pass on macOS;
+  four-platform CI for that commit is in progress.
+- Added an owner-gated hidden `run.attach` read cut with retained event bounds,
+  strict typed event parsing, and a snapshot-bearing expired-cursor result.
+  Focused tests cover a later appended progress event, a caught-up empty page,
+  principal isolation, malformed retained event and expiry reset. A same-UID
+  UDS test reads a real queued StateStore Run admitted with the explicitly
+  labeled M2 placeholder source/assembly fixture; that is query integration,
+  not strong execution or real Run-admission qualification. The 1,628-test
+  full suite and build pass on macOS. Public
+  protocol/error generation and the remaining Run methods are still open.
+- `npm pack --dry-run` lists 243 files and no `dist/native` helper; installed
+  native delivery remains a WP06 gate. A local macOS Developer ID Application
+  identity for the expected team signed the pinned probe successfully after a
+  transient timestamp-service failure. The unnotarized local build was rejected
+  by `spctl` and `test:sandbox-probe:macos` with
+  `UNSUPPORTED_EXECUTION_IDENTITY`, as required. A second, timestamped build was
+  accepted by Apple notarization, stapled, and accepted by `spctl`. On macOS
+  26.5.2/arm64, the actual VM probe returned `authorityReady=true`, including
+  source/state/home denial, direct-network denial, authenticated guest boot,
+  descendant enumeration, empty forced termination, and no writable host share.
+  The probe manifest digest was
+  `fa04dd9e4ab39481794797d21ac3d9e62be6ad13de8a9b8b33353a6873efa9a3`;
+  the signed helper digest was
+  `4246949b17a335e8be3d3b4736ac060db71bb2505d96d74d5554481b83f69957`.
+  This qualifies that local probe asset, not an installed worker/private
+  generation or the I1 restart scenario. The probe build's fixed-offset
+  extraction now uses byte-offset `tail` rather than `dd bs=1`; the extracted
+  kernel rehashed to the pinned SHA-256 before and after the change.
 
 ## Next integration order
 
