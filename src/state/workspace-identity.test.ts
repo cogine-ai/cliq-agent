@@ -108,6 +108,8 @@ test('held workspace observation rejects symlinked ancestors and a replaced lite
       await symlink(workspacePath, alias);
       await assert.rejects(captureLiveWorkspaceIdentity({ workspacePath: alias,
         ownerPrincipalId: 'principal', filesystem: held }), /no-follow directory/);
+      await assert.rejects(captureLiveWorkspaceIdentity({ workspacePath: path.join(parent, 'Workspace'),
+        ownerPrincipalId: 'principal', filesystem: held }), /no-follow directory/);
       const captured = await captureLiveWorkspaceIdentity({ workspacePath, ownerPrincipalId: 'principal',
         filesystem: held });
       await rename(path.join(workspacePath, '.git'), path.join(workspacePath, '.git-old'));

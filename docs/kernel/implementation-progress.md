@@ -321,6 +321,15 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   mismatched trees and missing or non-directory parents are rejected even when
   each artifact has an internally valid digest. This closes an admission-time
   cross-artifact gap; trusted descriptor-held source capture remains open.
+- The held StateOwner native helper now opens ordinary regular source files
+  through literal, no-follow workspace components anchored to the recorded
+  root device/inode/owner. It exposes bounded chunk reads and a complete-read
+  stability check over held root, parent and file descriptors; closing or
+  replacing the owner/root/file invalidates the handle. Git metadata aliases,
+  symlinks and special files are rejected, while source hardlinks remain valid.
+  Directory enumeration, symlink-entry capture, frozen ignore classification,
+  CAS streaming publication and a full second tree walk are still required
+  before this primitive can produce a SourceManifest.
 
 ## Next integration order
 

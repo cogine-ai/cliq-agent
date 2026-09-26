@@ -30,11 +30,23 @@ typedef struct {
     char *path;
 } state_lock;
 
+typedef struct {
+    int root_fd, parent_fd, file_fd;
+    state_lock *lock;
+    napi_ref lock_ref;
+    char *workspace_path, *relative_path;
+    struct stat root, parent, file;
+    off_t consumed;
+} source_file;
+
 static const napi_type_tag lock_tag = {0x3d641bc705864cfbULL, 0xab53499f3ee988c4ULL};
+static const napi_type_tag source_file_tag = {0x61a27c90123f446eULL, 0xb5d23e4704a5917cULL};
 
 static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info);
 static napi_value move_generation(napi_env env, napi_callback_info info);
 static napi_value inspect_workspace_identity(napi_env env, napi_callback_info info);
+static napi_value open_workspace_source_file(napi_env env, napi_callback_info info);
+static int literal_child_present(int parent, const char *literal);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
@@ -67,7 +79,7 @@ static int private_lock_file(const struct stat *info) {
 }
 
 /* No pathname component may be a symlink, including ancestors of StateRoot. */
-static int open_root(const char *path) {
+static int open_root_impl(const char *path, int require_literal) {
     if (path[0] != '/' || path[1] == '\0') { errno = EINVAL; return -1; }
     int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (current < 0) return -1;
@@ -81,6 +93,9 @@ static int open_root(const char *path) {
         }
         char name[NAME_MAX + 1];
         memcpy(name, part, size); name[size] = '\0';
+        if (require_literal && literal_child_present(current, name) != 1) {
+            close(current); errno = ENOENT; return -1;
+        }
         int next = openat(current, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         int failure = errno;
         close(current);
@@ -92,6 +107,9 @@ static int open_root(const char *path) {
     }
     return current;
 }
+
+static int open_root(const char *path) { return open_root_impl(path, 0); }
+static int open_literal_root(const char *path) { return open_root_impl(path, 1); }
 
 static int lock_is_held(state_lock *lock) {
     if (lock->lock_fd < 0) return 0;
@@ -202,6 +220,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"assertPriorProcessDead", NULL, assert_prior_process_dead, NULL, NULL, NULL, napi_default, NULL},
         {"moveGeneration", NULL, move_generation, NULL, NULL, NULL, napi_default, NULL},
         {"inspectWorkspaceIdentity", NULL, inspect_workspace_identity, NULL, NULL, NULL, napi_default, NULL},
+        {"openWorkspaceSourceFile", NULL, open_workspace_source_file, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -425,7 +444,7 @@ static napi_value inspect_workspace_identity(napi_env env, napi_callback_info in
     if (!path || napi_get_value_string_utf8(env, argv[0], path, length + 1, &length) != napi_ok ||
         strlen(path) != length) goto done;
     error = "workspace root must be a same-user no-follow directory";
-    root_fd = open_root(path);
+    root_fd = open_literal_root(path);
     if (root_fd < 0 || fstat(root_fd, &root) < 0 || !S_ISDIR(root.st_mode) || root.st_uid != geteuid()) goto done;
     error = "workspace .git must be a literal same-user directory on the root device";
     literal_git = literal_child_present(root_fd, ".git");
@@ -470,7 +489,7 @@ static napi_value inspect_workspace_identity(napi_env env, napi_callback_info in
         }
     }
     error = "workspace root or .git identity changed during descriptor-held inspection";
-    reopened = open_root(path);
+    reopened = open_literal_root(path);
     if (reopened < 0 || fstat(reopened, &named) < 0 || !same_file_observation(&root, &named) ||
         literal_child_present(root_fd, ".git") != has_git ||
         !lock_is_held(lock)) goto done;
@@ -501,6 +520,225 @@ done:
     free(config_bytes);
     free(path);
     return error ? native_error(env, error) : result;
+}
+
+static void close_source_file(source_file *file) {
+    if (file->file_fd >= 0) close(file->file_fd);
+    if (file->parent_fd >= 0) close(file->parent_fd);
+    if (file->root_fd >= 0) close(file->root_fd);
+    file->file_fd = file->parent_fd = file->root_fd = -1;
+}
+
+static void finalize_source_file(napi_env env, void *data, void *hint) {
+    (void)hint;
+    source_file *file = data;
+    close_source_file(file);
+    if (file->lock_ref) napi_delete_reference(env, file->lock_ref);
+    free(file->workspace_path);
+    free(file->relative_path);
+    free(file);
+}
+
+static source_file *unwrap_source_file(napi_env env, napi_callback_info info) {
+    napi_value self;
+    bool matches = false;
+    source_file *file = NULL;
+    if (napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok ||
+        napi_check_object_type_tag(env, self, &source_file_tag, &matches) != napi_ok || !matches ||
+        napi_unwrap(env, self, (void **)&file) != napi_ok || !file) {
+        native_error(env, "invalid workspace source file handle");
+        return NULL;
+    }
+    return file;
+}
+
+/* The caller may name only a literal, root-relative source leaf. Git metadata
+ * is deliberately excluded from this ordinary-source reader. */
+static int valid_source_relative_path(const char *path) {
+    if (!*path || *path == '/' || strlen(path) >= PATH_MAX || strchr(path, '\\')) return 0;
+    const char *part = path;
+    while (*part) {
+        const char *end = strchr(part, '/');
+        size_t size = end ? (size_t)(end - part) : strlen(part);
+        if (size == 0 || size > NAME_MAX || (size == 1 && part[0] == '.') ||
+            (size == 2 && part[0] == '.' && part[1] == '.') ||
+            (size == 4 && part[0] == '.' && (part[1] == 'g' || part[1] == 'G') &&
+             (part[2] == 'i' || part[2] == 'I') && (part[3] == 't' || part[3] == 'T'))) return 0;
+        if (!end) return 1;
+        part = end + 1;
+    }
+    return 0;
+}
+
+/* Open every parent from the held root. An alias on a case-insensitive volume
+ * never satisfies the literal component check. */
+static int open_source_parent(int root_fd, const char *relative_path, const struct stat *root,
+                              struct stat *parent_identity) {
+    int parent = fcntl(root_fd, F_DUPFD_CLOEXEC, 0);
+    if (parent < 0) return -1;
+    const char *part = relative_path, *end;
+    while ((end = strchr(part, '/')) != NULL) {
+        size_t size = (size_t)(end - part);
+        char component[NAME_MAX + 1];
+        memcpy(component, part, size); component[size] = '\0';
+        if (literal_child_present(parent, component) != 1) { close(parent); return -1; }
+        int next = openat(parent, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat observed;
+        if (next < 0 || fstat(next, &observed) < 0 || !S_ISDIR(observed.st_mode) ||
+            observed.st_uid != root->st_uid || observed.st_dev != root->st_dev) {
+            if (next >= 0) close(next);
+            close(parent); return -1;
+        }
+        close(parent);
+        parent = next;
+        part = end + 1;
+    }
+    if (fstat(parent, parent_identity) < 0) { close(parent); return -1; }
+    return parent;
+}
+
+static int source_file_stable(source_file *file, int require_complete) {
+    if (file->file_fd < 0 || (require_complete && file->consumed != file->file.st_size) ||
+        !lock_is_held(file->lock)) return 0;
+    int reopened = open_literal_root(file->workspace_path);
+    struct stat named_root, current_root, current_parent, current_file, named_file;
+    int root_valid = reopened >= 0 && fstat(reopened, &named_root) == 0 &&
+        fstat(file->root_fd, &current_root) == 0 &&
+        same_file_observation(&file->root, &named_root) &&
+        same_file_observation(&file->root, &current_root);
+    if (reopened >= 0) close(reopened);
+    if (!root_valid) return 0;
+    int parent = open_source_parent(file->root_fd, file->relative_path, &file->root, &current_parent);
+    int parent_valid = parent >= 0 && fstat(file->parent_fd, &named_root) == 0 &&
+        same_file_observation(&file->parent, &current_parent) &&
+        same_file_observation(&file->parent, &named_root);
+    if (parent >= 0) close(parent);
+    if (!parent_valid) return 0;
+    const char *leaf = strrchr(file->relative_path, '/');
+    leaf = leaf ? leaf + 1 : file->relative_path;
+    return literal_child_present(file->parent_fd, leaf) == 1 &&
+        fstat(file->file_fd, &current_file) == 0 &&
+        fstatat(file->parent_fd, leaf, &named_file, AT_SYMLINK_NOFOLLOW) == 0 &&
+        same_file_observation(&file->file, &current_file) &&
+        same_file_observation(&file->file, &named_file) &&
+        lock_is_held(file->lock);
+}
+
+static napi_value source_file_close(napi_env env, napi_callback_info info) {
+    source_file *file = unwrap_source_file(env, info);
+    if (!file) return NULL;
+    close_source_file(file);
+    if (file->lock_ref) {
+        napi_delete_reference(env, file->lock_ref);
+        file->lock_ref = NULL;
+        file->lock = NULL;
+    }
+    napi_value result;
+    return napi_get_undefined(env, &result) == napi_ok ? result : NULL;
+}
+
+static napi_value source_file_read_chunk(napi_env env, napi_callback_info info) {
+    source_file *file = unwrap_source_file(env, info);
+    if (!file) return NULL;
+    size_t argc = 1;
+    napi_value argv[1];
+    double requested;
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 1 ||
+        napi_get_value_double(env, argv[0], &requested) != napi_ok ||
+        requested < 1 || requested > 1024 * 1024 || requested != (double)(uint32_t)requested ||
+        !source_file_stable(file, 0)) return native_error(env, "workspace source file changed or read request is invalid");
+    size_t size = (size_t)requested;
+    if ((off_t)size > file->file.st_size - file->consumed) size = (size_t)(file->file.st_size - file->consumed);
+    char *bytes = malloc(size ? size : 1);
+    if (!bytes) return native_error(env, "workspace source read allocation failed");
+    ssize_t count;
+    do { count = read(file->file_fd, bytes, size); } while (count < 0 && errno == EINTR);
+    if (count < 0 || (size > 0 && count == 0)) { free(bytes); return native_error(env, "workspace source file changed during read"); }
+    file->consumed += count;
+    napi_value result;
+    napi_status status = napi_create_buffer_copy(env, (size_t)count, bytes, NULL, &result);
+    free(bytes);
+    return status == napi_ok ? result : NULL;
+}
+
+static napi_value source_file_assert_stable(napi_env env, napi_callback_info info) {
+    source_file *file = unwrap_source_file(env, info);
+    if (!file) return NULL;
+    if (!source_file_stable(file, 1)) return native_error(env, "workspace source file is incomplete or changed");
+    napi_value result;
+    return napi_get_undefined(env, &result) == napi_ok ? result : NULL;
+}
+
+static napi_value open_workspace_source_file(napi_env env, napi_callback_info info) {
+    state_lock *lock = unwrap_lock(env, info);
+    if (!lock) return NULL;
+    napi_value self, argv[5], result, value;
+    size_t argc = 5, workspace_length, relative_length;
+    unsigned long long device, inode;
+    uint32_t owner;
+    source_file *file = NULL;
+    const char *error = "workspace source file input is invalid";
+    if (!lock_is_held(lock) || napi_get_cb_info(env, info, &argc, argv, &self, NULL) != napi_ok || argc != 5 ||
+        napi_get_value_string_utf8(env, argv[0], NULL, 0, &workspace_length) != napi_ok ||
+        workspace_length < 2 || workspace_length >= PATH_MAX ||
+        napi_get_value_string_utf8(env, argv[1], NULL, 0, &relative_length) != napi_ok ||
+        relative_length == 0 || relative_length >= PATH_MAX ||
+        !read_unsigned_id(env, argv[2], &device) || !read_unsigned_id(env, argv[3], &inode) ||
+        napi_get_value_uint32(env, argv[4], &owner) != napi_ok || owner != geteuid()) goto done;
+    file = calloc(1, sizeof(*file));
+    if (!file) goto done;
+    file->root_fd = file->parent_fd = file->file_fd = -1;
+    file->lock = lock;
+    file->workspace_path = malloc(workspace_length + 1);
+    file->relative_path = malloc(relative_length + 1);
+    if (!file->workspace_path || !file->relative_path ||
+        napi_get_value_string_utf8(env, argv[0], file->workspace_path, workspace_length + 1, &workspace_length) != napi_ok ||
+        napi_get_value_string_utf8(env, argv[1], file->relative_path, relative_length + 1, &relative_length) != napi_ok ||
+        strlen(file->workspace_path) != workspace_length || strlen(file->relative_path) != relative_length ||
+        !valid_source_relative_path(file->relative_path)) goto done;
+    error = "workspace source root or file is unsafe or changed";
+    file->root_fd = open_literal_root(file->workspace_path);
+    if (file->root_fd < 0 || fstat(file->root_fd, &file->root) < 0) goto done;
+#ifdef __APPLE__
+    /* Workspace identity exposes Darwin's unsigned 32-bit dev_t spelling. */
+    const unsigned long long root_device = (uint32_t)file->root.st_dev;
+#else
+    const unsigned long long root_device = file->root.st_dev;
+#endif
+    if (!S_ISDIR(file->root.st_mode) || file->root.st_uid != owner || root_device != device ||
+        (unsigned long long)file->root.st_ino != inode) goto done;
+    file->parent_fd = open_source_parent(file->root_fd, file->relative_path, &file->root, &file->parent);
+    if (file->parent_fd < 0) goto done;
+    const char *leaf = strrchr(file->relative_path, '/');
+    leaf = leaf ? leaf + 1 : file->relative_path;
+    if (literal_child_present(file->parent_fd, leaf) != 1) goto done;
+    file->file_fd = openat(file->parent_fd, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (file->file_fd < 0 || fstat(file->file_fd, &file->file) < 0 || !S_ISREG(file->file.st_mode) ||
+        file->file.st_uid != owner || file->file.st_dev != file->root.st_dev ||
+        file->file.st_size < 0 || file->file.st_size > 9007199254740991LL ||
+        !source_file_stable(file, 0)) goto done;
+    if (napi_create_reference(env, self, 1, &file->lock_ref) != napi_ok) goto done;
+    /* The reference keeps the native StateOwner allocation alive after this
+     * call; every later source read independently checks the live lock. */
+    if (napi_create_object(env, &result) != napi_ok ||
+        napi_create_double(env, (double)file->file.st_size, &value) != napi_ok ||
+        napi_set_named_property(env, result, "size", value) != napi_ok ||
+        napi_create_uint32(env, file->file.st_mode & 07777, &value) != napi_ok ||
+        napi_set_named_property(env, result, "mode", value) != napi_ok ||
+        identity_member(env, result, "identity", &file->file) == 0) goto done;
+    const napi_property_descriptor methods[] = {
+        {"readChunk", NULL, source_file_read_chunk, NULL, NULL, NULL, napi_default, NULL},
+        {"assertStable", NULL, source_file_assert_stable, NULL, NULL, NULL, napi_default, NULL},
+        {"close", NULL, source_file_close, NULL, NULL, NULL, napi_default, NULL}
+    };
+    if (napi_wrap(env, result, file, finalize_source_file, NULL, NULL) != napi_ok) goto done;
+    if (napi_type_tag_object(env, result, &source_file_tag) != napi_ok ||
+        napi_define_properties(env, result, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
+        napi_object_freeze(env, result) != napi_ok) return native_error(env, "workspace source handle initialization failed");
+    return result;
+done:
+    if (file) finalize_source_file(env, file, NULL);
+    return native_error(env, error);
 }
 
 /* 1 = observed identity, 0 = positively absent, -1 = unavailable/invalid.

@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
 
-import { canonicalSha256 } from '../kernel/canonical.js';
+import { canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
 import type { StateRootIdentityV1, WorkspaceGenerationIdentityV1 } from '../kernel/types.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
@@ -14,10 +14,20 @@ export const STATE_OWNER_NATIVE_ENTRY_ID = 'state_owner_native';
 export const STATE_OWNER_NATIVE_RELATIVE_PATH = `native/${process.platform}-${process.arch}/state-owner.node`;
 export const STATE_OWNER_NATIVE_PATH = runtimeNativePath(STATE_OWNER_NATIVE_RELATIVE_PATH, import.meta.url);
 
-type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
+export type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
 export type LiveWorkspaceInspection = Readonly<{
   root: DescriptorIdentity;
   git?: Readonly<{ identity: DescriptorIdentity; configBytes?: Buffer }>;
+}>;
+/** Exact, descriptor-held regular-file bytes. The caller must consume the
+ * complete stream and assert stability before publishing them as source. */
+export type HeldWorkspaceSourceFile = Readonly<{
+  size: number;
+  mode: number;
+  identity: DescriptorIdentity;
+  readChunk(size: number): Buffer;
+  assertStable(): void;
+  close(): void;
 }>;
 /** A physical move observation only: no containment death, tree or SQLite authority. */
 export type GenerationQuarantineMove = Readonly<{
@@ -37,6 +47,8 @@ export type HeldStateOwnerLock = Readonly<{
   /** Read-only, component-wise no-follow root/.git/config observation while
    * this StateOwner lock is held. It is not a complete source-tree capture. */
   inspectWorkspaceIdentity(canonicalAbsolutePath: string): LiveWorkspaceInspection;
+  openWorkspaceSourceFile(canonicalAbsolutePath: string, root: DescriptorIdentity,
+    canonicalRootRelativePath: string): HeldWorkspaceSourceFile;
   /** Trusted Supervisor primitive. The caller must first fence/retire writers;
    * this neither revokes open descriptors/mounts nor commits generation state. */
   quarantineGeneration(generation: WorkspaceGenerationIdentityV1, sourceRowVersion: number): GenerationQuarantineMove;
@@ -48,7 +60,9 @@ export type NativeStateOwner = Readonly<{
   processStartToken(): string;
 }>;
 
-type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration'> & {
+type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'openWorkspaceSourceFile'> & {
+  openWorkspaceSourceFile(workspacePath: string, relativePath: string,
+    deviceId: string, fileId: string, ownerUid: number): HeldWorkspaceSourceFile;
   moveGeneration(runId: string, generationId: string, quarantineId: string, deviceId: string, fileId: string): DescriptorIdentity;
 };
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string };
@@ -99,6 +113,25 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
         throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock changed during workspace inspection');
       }
       return inspected;
+    },
+    openWorkspaceSourceFile(workspacePath, sourceRoot, relativePath) {
+      receiver(this);
+      if (normalizeAbsolutePath(workspacePath) !== workspacePath ||
+          normalizeCanonicalText(relativePath) !== relativePath ||
+          !relativePath || relativePath.startsWith('/') || relativePath.includes('\\') ||
+          relativePath.split('/').some((part) => !part || part === '.' || part === '..' ||
+            part.toLowerCase() === '.git')) {
+        throw new TypeError('workspace source path must be canonical and root-relative');
+      }
+      try {
+        return held.openWorkspaceSourceFile(workspacePath, relativePath,
+          sourceRoot.deviceId, sourceRoot.fileId, sourceRoot.ownerUid);
+      } catch (error) {
+        try { held.assertHeld(); } catch {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner lock changed during source file opening');
+        }
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace source file changed or is unsafe: ${(error as Error).message}`);
+      }
     },
     quarantineGeneration(value, sourceRowVersion) {
       receiver(this);
@@ -174,9 +207,10 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
       acquireLock(stateRoot, createLayout) {
         if (normalizeAbsolutePath(stateRoot) !== stateRoot) throw new TypeError('StateOwner root must be canonical');
         const held = binding.acquireLock(stateRoot, createLayout);
-        if (typeof held.inspectWorkspaceIdentity !== 'function') {
+        if (typeof held.inspectWorkspaceIdentity !== 'function' ||
+            typeof held.openWorkspaceSourceFile !== 'function') {
           held.close();
-          throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper lacks descriptor-held workspace inspection');
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper lacks descriptor-held workspace source inspection');
         }
         try { return wrapLock(held, stateRoot); } catch (error) { held.close(); throw error; }
       },
