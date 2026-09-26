@@ -8,12 +8,21 @@ import type { InvocationJournalEntry, WorkerDeathWait, WorkerIdentity } from '..
 import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
+import { openWorkerInvocations } from './worker-recovery.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, createActiveFixture, digest, disposeFixture, makePrivateDir, uuidv7, type ActiveFixture } from './testing/fixtures.js';
 import { childFor } from './testing/state-owner-process.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
 
 const ZERO = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+const JOURNAL_TS = '2026-09-08T00:00:00.000Z';
+const REQUEST_REF = digest('worker-recovery-journal-request');
+function journalEntry(overrides: Partial<InvocationJournalEntry> & Pick<InvocationJournalEntry, 'seq' | 'opId' | 'phase'>): InvocationJournalEntry {
+  return {
+    runId: 'run-1', opKind: 'tool', attempt: 0, leaseEpoch: 1, target: 'test.read', requestRef: REQUEST_REF,
+    replayClass: 'manual', budgetDelta: ZERO, timestamp: JOURNAL_TS, ...overrides
+  };
+}
 const revision = (fixture: ActiveFixture) => fixture.store.getRun(fixture.runId).revision;
 const begin = (fixture: ActiveFixture) => fixture.store.beginWorkerRecovery({ runId: fixture.runId, expectedRunRevision: revision(fixture) });
 function withDb<T>(root: string, operation: (driver: SqliteDriver) => T): T {
@@ -30,6 +39,27 @@ async function fixtureFor(t: TestContext, label: string) {
   t.after(() => disposeFixture(fixture));
   return fixture;
 }
+
+test('openWorkerInvocations keeps only prepared rows whose latest phase is still unresolved', () => {
+  const prepared = journalEntry({ seq: 1, opId: 'open', phase: 'prepared' });
+  const claimed = journalEntry({ seq: 2, opId: 'open', phase: 'dispatch_claimed', dispatchId: 'dispatch-open',
+    supervisorInstanceId: 'supervisor', stateOwnerEpoch: 1, budgetSettlementRef: REQUEST_REF });
+  const unknown = journalEntry({ seq: 3, opId: 'ambiguous', phase: 'prepared' });
+  const unknownLatest = journalEntry({ seq: 4, opId: 'ambiguous', phase: 'unknown', dispatchId: 'dispatch-ambiguous',
+    supervisorInstanceId: 'supervisor', stateOwnerEpoch: 1, evidenceRef: REQUEST_REF, evidenceDigest: REQUEST_REF,
+    budgetSettlementRef: REQUEST_REF });
+  const settled = journalEntry({ seq: 5, opId: 'done', phase: 'prepared' });
+  const settledLatest = journalEntry({ seq: 6, opId: 'done', phase: 'completed', dispatchId: 'dispatch-done',
+    supervisorInstanceId: 'supervisor', stateOwnerEpoch: 1, resultRef: REQUEST_REF, budgetSettlementRef: REQUEST_REF });
+  const retry = journalEntry({ seq: 7, opId: 'retry', attempt: 1, phase: 'prepared' });
+  const retryPrior = journalEntry({ seq: 8, opId: 'retry', attempt: 0, phase: 'failed', errorRef: REQUEST_REF,
+    budgetSettlementRef: REQUEST_REF });
+  const journal = [prepared, claimed, unknown, unknownLatest, settled, settledLatest, retry, retryPrior];
+  assert.deepEqual(openWorkerInvocations(journal), [prepared, unknown, retry]);
+  assert.deepEqual(openWorkerInvocations(journal.slice(0, 4)), [prepared, unknown]);
+  assert.deepEqual(openWorkerInvocations([settled, settledLatest]), []);
+});
+
 async function prepare(fixture: ActiveFixture, opId: string, claimed = false) {
   const request = await fixture.store.artifacts.publishCanonical({ input: opId }, 'cliq-test-request-v1');
   const prepared = await fixture.store.prepareInvocation({ runId: fixture.runId, expectedRunRevision: revision(fixture),
