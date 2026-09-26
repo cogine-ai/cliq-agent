@@ -697,6 +697,21 @@ export type GitIndexSnapshotV1 = {
   snapshotDigest: string;
 };
 
+export type SanitizedGitConfigV1 = {
+  schemaVersion: 1;
+  format: 'cliq-sanitized-git-config-v1';
+  core: {
+    repositoryFormatVersion: 0 | 1;
+    fileMode: boolean;
+    bare: false;
+    logAllRefUpdates?: boolean;
+    ignoreCase?: boolean;
+    precomposeUnicode?: boolean;
+  };
+  extensions?: { objectFormat: 'sha1' | 'sha256' };
+  configDigest: string;
+};
+
 export type SourceManifest = {
   schemaVersion: 1;
   format: 'cliq-source-manifest-v1';

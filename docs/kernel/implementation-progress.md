@@ -345,6 +345,13 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   `.git` as well as raw components hidden by path normalization. These checks
   do not yet validate links through every excluded or changing source entry;
   complete tree capture, projection and a second descriptor walk remain open.
+- The strict `SanitizedGitConfigV1` parser/decoder accepts only the RFC's
+  non-executable core fields and object-format extension from held UTF-8 bytes
+  of at most 1 MiB. It rejects includes, hooks, helpers, remote/config paths,
+  duplicate keys and ambiguous Git syntax, and rehashes a closed artifact. A
+  held-workspace reader binds those bytes to the Session's root and Git
+  descriptor identities and object format. It is not yet connected to Run
+  source publication, private Git materialization or the recovery closure.
 
 ## Next integration order
 
