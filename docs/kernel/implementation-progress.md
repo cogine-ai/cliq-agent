@@ -326,7 +326,7 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   admission and recovery bind the ignore graph to the exact live/retained
   repository identity and read every distinct ignore file as valid UTF-8
   without NUL. This is
-  schema and raw-byte closure only. The fixed Git wildmatch parser, selector
+  schema and raw-byte closure only. The fixed Git wildmatch matcher, selector
   authorization/classification evidence, and descriptor-held source capture
   remain prerequisites for public `run.submit` and I1.
 - WP01 source entry decoding now requires every nested entry to have a preceding
@@ -366,6 +366,13 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   held-workspace reader binds those bytes to the Session's root and Git
   descriptor identities and object format. It is not yet connected to Run
   source publication, private Git materialization or the recovery closure.
+- Admission and recovery now reparse each retained `.git/info/exclude` and
+  `.gitignore` source into the exact ordered `FrozenIgnoreRuleV1` array before
+  trusting it. The pinned Git 2.45 line parser handles BOM, CRLF, comments,
+  unescaped trailing spaces, negation, directory and slash anchoring, and
+  unterminated final lines; a rehashed but forged rule array fails. Wildmatch
+  path evaluation, descriptor-held ignore-source capture, and complete source
+  projection remain open.
 
 ## Next integration order
 

@@ -8,7 +8,7 @@ import type { FrozenIgnoreRulesV1, SourceProjectionSpec } from '../kernel/types.
 import { ArtifactCatalog } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
 import { decodeFrozenIgnoreRules, decodeSourceProjection } from './decoders.js';
-import { validateFrozenIgnoreSourceBytes } from './frozen-ignore-sources.js';
+import { parseFrozenIgnoreSourceBytes, validateFrozenIgnoreSourceBytes } from './frozen-ignore-sources.js';
 
 const REF = 'a'.repeat(64);
 
@@ -91,7 +91,36 @@ test('source projection rejects rehashed selectors outside the root and widened 
   })), /closed schema/);
 });
 
-test('retained ignore source bytes must be present, valid UTF-8, and NUL-free', async (t) => {
+test('fixed ignore parser preserves Git line, escape, anchor, and directory syntax', () => {
+  const source: FrozenIgnoreRulesV1['sources'][number] = {
+    index: 2, kind: 'gitignore', canonicalRootRelativePath: 'src/.gitignore',
+    baseDirectory: 'src', contentRef: REF, contentDigest: REF
+  };
+  const bytes = Buffer.from('\uFEFF# comment\r\n\nfoo  \r\n\\#literal\n\\!bang\n!*.tmp\nbuild/\n/src/**/test?.[ch]\nends\\ \n!\nonly-no-lf');
+  assert.deepEqual(parseFrozenIgnoreSourceBytes(bytes, source, 3), [
+    { order: 3, sourceIndex: 2, sourceLine: 3, baseDirectory: 'src', negated: false,
+      directoryOnly: false, anchored: false, pattern: 'foo' },
+    { order: 4, sourceIndex: 2, sourceLine: 4, baseDirectory: 'src', negated: false,
+      directoryOnly: false, anchored: false, pattern: '\\#literal' },
+    { order: 5, sourceIndex: 2, sourceLine: 5, baseDirectory: 'src', negated: false,
+      directoryOnly: false, anchored: false, pattern: '\\!bang' },
+    { order: 6, sourceIndex: 2, sourceLine: 6, baseDirectory: 'src', negated: true,
+      directoryOnly: false, anchored: false, pattern: '*.tmp' },
+    { order: 7, sourceIndex: 2, sourceLine: 7, baseDirectory: 'src', negated: false,
+      directoryOnly: true, anchored: false, pattern: 'build' },
+    { order: 8, sourceIndex: 2, sourceLine: 8, baseDirectory: 'src', negated: false,
+      directoryOnly: false, anchored: true, pattern: 'src/**/test?.[ch]' },
+    { order: 9, sourceIndex: 2, sourceLine: 9, baseDirectory: 'src', negated: false,
+      directoryOnly: false, anchored: false, pattern: 'ends\\ ' },
+    { order: 10, sourceIndex: 2, sourceLine: 11, baseDirectory: 'src', negated: false,
+      directoryOnly: false, anchored: false, pattern: 'only-no-lf' }
+  ]);
+  assert.equal(parseFrozenIgnoreSourceBytes(Buffer.from('foo/bar\n'), source)[0]?.anchored, true);
+  assert.equal(parseFrozenIgnoreSourceBytes(Buffer.from('\uFEFF\uFEFFname'), source)[0]?.pattern,
+    '\uFEFFname');
+});
+
+test('retained ignore source bytes must reparse to the exact rule graph', async (t) => {
   const directory = await mkdtemp(path.join(process.cwd(), '.cliq-ignore-sources-'));
   t.after(async () => { await rm(directory, { recursive: true, force: true }); });
   const casRoot = path.join(directory, 'cas');
@@ -101,9 +130,25 @@ test('retained ignore source bytes must be present, valid UTF-8, and NUL-free', 
   const rules = rehashRules((value) => {
     value.sources = [{ index: 0, kind: 'gitignore', canonicalRootRelativePath: '.gitignore',
       baseDirectory: '', contentRef: valid.ref, contentDigest: valid.ref }];
-    value.rules = [];
+    value.rules = [{ order: 0, sourceIndex: 0, sourceLine: 1, baseDirectory: '',
+      negated: false, directoryOnly: false, anchored: false, pattern: '*.log' }];
   });
   await validateFrozenIgnoreSourceBytes(artifacts, decodeFrozenIgnoreRules(rules));
+  const repeatedSource = rehashRules((value) => {
+    value.sources = [rules.sources[0]!, {
+      ...rules.sources[0]!, index: 1, canonicalRootRelativePath: 'src/.gitignore', baseDirectory: 'src'
+    }];
+    value.rules = [rules.rules[0]!, {
+      ...rules.rules[0]!, order: 1, sourceIndex: 1, baseDirectory: 'src'
+    }];
+  });
+  await validateFrozenIgnoreSourceBytes(artifacts, decodeFrozenIgnoreRules(repeatedSource));
+  const forged = rehashRules((value) => {
+    value.sources = rules.sources;
+    value.rules = [{ ...rules.rules[0]!, pattern: '*.secret' }];
+  });
+  await assert.rejects(validateFrozenIgnoreSourceBytes(artifacts, decodeFrozenIgnoreRules(forged)),
+    /differ from retained source bytes/);
 
   for (const bytes of [Buffer.from([0xff]), Buffer.from('a\0b')]) {
     const bad = await artifacts.publishBytes(bytes, 'text/plain; charset=utf-8', 'cliq-frozen-ignore-source-v1');
