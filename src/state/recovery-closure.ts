@@ -3,6 +3,7 @@ import type {
   BudgetUsage,
   ChildAllocationV1,
   ContextManifest,
+  GitIndexSnapshotV1,
   InvocationJournalEntry,
   RecoveryClosureV1,
   RunItemReferenceV1,
@@ -37,6 +38,7 @@ import {
 import { KernelStorageError } from './errors.js';
 import { validateFrozenIgnoreSourceBytes } from './frozen-ignore-sources.js';
 import { validateGitSourceIndex } from './git-index.js';
+import { validateBuiltinSourceIncludes } from './source-includes.js';
 import { validateWorkerRecoveryWait } from './worker-recovery.js';
 import { validateWorkspaceEntryBlobs } from './workspace-entry-blobs.js';
 import { addBudget, decodeBudgetUsage, isZeroBudget } from './invariants.js';
@@ -120,6 +122,7 @@ async function validateRunSpecArtifacts(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   runSpec: RunSpec,
+  runId: string,
   sessionId: string
 ): Promise<void> {
   await requireRecoveryArtifacts(artifacts, [
@@ -164,6 +167,7 @@ async function validateRunSpecArtifacts(
       (source.git === undefined) !== (workspace.repositoryIdentityRef === undefined)) {
     recoveryFailure('RunSpec source is not bound to its live Session workspace');
   }
+  let indexSnapshot: GitIndexSnapshotV1 | undefined;
   if (source.git !== undefined && workspace.repositoryIdentityRef !== undefined) {
     try {
       const repository = decodeRepositoryIdentity(
@@ -174,7 +178,7 @@ async function validateRunSpecArtifacts(
           repository.gitDirectoryIdentity.ownerUid !== workspace.rootIdentity.ownerUid) {
         recoveryFailure('RunSpec repository differs from its retained Session workspace');
       }
-      await validateGitSourceIndex(artifacts, source.git, repository);
+      indexSnapshot = await validateGitSourceIndex(artifacts, source.git, repository);
     } catch (error) {
       recoveryFailure(`RunSpec Git index closure is invalid: ${(error as Error).message}`);
     }
@@ -216,6 +220,33 @@ async function validateRunSpecArtifacts(
     await validateWorkspaceEntryBlobs(artifacts, sourceEntries);
   } catch (error) {
     recoveryFailure(`SourceManifest file closure is invalid: ${(error as Error).message}`);
+  }
+  const admission = driver.prepare(
+    'SELECT principal_id, admission_method, admission_intent_digest FROM runs WHERE id = ?'
+  ).get<{ principal_id: string; admission_method: string | null;
+    admission_intent_digest: string | null }>(runId);
+  if (admission === undefined || admission.principal_id !== workspace.ownerPrincipalId) {
+    recoveryFailure('Run admission owner differs from the retained workspace');
+  }
+  if (admission.admission_method === 'run.submit') {
+    if (admission.admission_intent_digest === null) {
+      recoveryFailure('run.submit is missing its admitted intent digest');
+    }
+    try {
+      await validateBuiltinSourceIncludes(artifacts, {
+        principalId: admission.principal_id, runId, sessionId,
+        workspaceIdentityRef: session.workspaceIdentityRef,
+        workspaceIdentityDigest: workspace.identityDigest,
+        admissionIntentDigest: admission.admission_intent_digest,
+        projection, entries: sourceEntries,
+        frozenIgnoreRulesRef: source.frozenIgnoreRulesRef, frozenIgnoreRules: rules,
+        ...(source.git && indexSnapshot ? {
+          git: { indexRef: source.git.indexRef, snapshot: indexSnapshot }
+        } : {})
+      });
+    } catch (error) {
+      recoveryFailure(`source include closure is invalid: ${(error as Error).message}`);
+    }
   }
 }
 
@@ -674,7 +705,7 @@ export async function readRecoveryClosure(
   }
 
   const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
-  await validateRunSpecArtifacts(driver, artifacts, runSpec, run.sessionId);
+  await validateRunSpecArtifacts(driver, artifacts, runSpec, run.id, run.sessionId);
   const context = decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef));
   if (context.runId !== run.id || context.throughItemSeq !== latestCheckpoint.runItemSeq) {
     recoveryFailure('Checkpoint ContextManifest does not match its Run cut');

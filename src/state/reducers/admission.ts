@@ -1,4 +1,4 @@
-import { canonicalSha256 } from '../../kernel/canonical.js';
+import { canonicalSha256, normalizeCanonicalText } from '../../kernel/canonical.js';
 import {
   addCanonicalDuration,
   assertAdmissionKey,
@@ -22,6 +22,7 @@ import type {
   RunSnapshotV1,
   RunSpec,
   RepositoryIdentityV1,
+  SourceProjectionSpec,
   WorkspaceIdentityV1
 } from '../../kernel/types.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
@@ -47,6 +48,7 @@ import {
 import { KernelStorageError } from '../errors.js';
 import { validateFrozenIgnoreSourceBytes } from '../frozen-ignore-sources.js';
 import { validateGitSourceIndex } from '../git-index.js';
+import { assertLiveSourceIncludeEvidence, validateBuiltinSourceIncludes } from '../source-includes.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import {
   DEFAULT_RUN_BUDGETS,
@@ -83,6 +85,10 @@ export type AdmitRunInput = {
   credentialGrantRefs?: string[];
   budgets?: Partial<typeof DEFAULT_RUN_BUDGETS>;
   allowUnverified: boolean;
+  /** Normalized caller intent. The refs below are Supervisor-resolved output
+   * and must not feed the include authorization's admission-intent digest. */
+  sourceIncludes?: Array<{ path: string; scope: 'entry' | 'subtree' }>;
+  sourceExcludes?: Array<{ path: string; scope: 'entry' | 'subtree' }>;
   sourceProjectionRef: string;
   frozenIgnoreRulesRef: string;
   baseWorkspaceManifestRef: string;
@@ -94,6 +100,59 @@ type RunSubmitResponse = {
   result: Extract<ControlResultV1, { method: 'run.submit' }>;
 };
 
+type SourceSelector = { path: string; scope: 'entry' | 'subtree' };
+
+function normalizeRequestedSelectors(
+  value: readonly SourceSelector[] | undefined,
+  label: string
+): SourceSelector[] {
+  if (value !== undefined && !Array.isArray(value)) {
+    throw new KernelStorageError('INVALID_REQUEST', `${label} must be an array`);
+  }
+  const selectors: readonly SourceSelector[] = value ?? [];
+  if (selectors.length > 128) {
+    throw new KernelStorageError('INVALID_REQUEST', `${label} exceeds the 128-selector bound`);
+  }
+  const seen = new Set<string>();
+  return selectors.map((selector) => {
+    if (selector === null || typeof selector !== 'object' || Array.isArray(selector) ||
+        Object.keys(selector).length !== 2 || !Object.hasOwn(selector, 'path') ||
+        !Object.hasOwn(selector, 'scope') || typeof selector.path !== 'string' ||
+        (selector.scope !== 'entry' && selector.scope !== 'subtree')) {
+      throw new KernelStorageError('INVALID_REQUEST', `${label} has an invalid selector`);
+    }
+    let canonical: string;
+    try { canonical = normalizeCanonicalText(selector.path); }
+    catch { throw new KernelStorageError('INVALID_REQUEST', `${label} has invalid Unicode`); }
+    const parts = selector.path.split('/');
+    if (canonical !== selector.path || selector.path.includes('\\') ||
+        Buffer.byteLength(selector.path, 'utf8') > 4096 ||
+        parts.some((part) => part === '' || part === '.' || part === '..' ||
+          part.toLowerCase() === '.git' || Buffer.byteLength(part, 'utf8') > 255)) {
+      throw new KernelStorageError('INVALID_REQUEST', `${label} is not canonical and in-root`);
+    }
+    const key = `${selector.path}\0${selector.scope}`;
+    if (seen.has(key)) {
+      throw new KernelStorageError('INVALID_REQUEST', `${label} has a duplicate selector`);
+    }
+    seen.add(key);
+    return { path: selector.path, scope: selector.scope };
+  });
+}
+
+function assertResolvedSelectorsMatchIntent(
+  resolved: SourceProjectionSpec,
+  includes: readonly SourceSelector[],
+  excludes: readonly SourceSelector[]
+): void {
+  const actualIncludes = resolved.explicitIncludes.map(({ path, scope }) => ({ path, scope }));
+  if (canonicalSha256(actualIncludes) !== canonicalSha256(includes) ||
+      canonicalSha256(resolved.explicitExcludes) !== canonicalSha256(excludes)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      'resolved source selectors differ from the normalized Run request');
+  }
+}
+
 export type AdmitRunResult = {
   replayed: boolean;
   run: Run;
@@ -104,7 +163,9 @@ function admitIntent(
   input: AdmitRunInput,
   workspacePath: string,
   objective: string,
-  budgets: typeof DEFAULT_RUN_BUDGETS
+  budgets: typeof DEFAULT_RUN_BUDGETS,
+  sourceIncludes: readonly SourceSelector[],
+  sourceExcludes: readonly SourceSelector[]
 ): string {
   return canonicalSha256({
     principalId: input.principalId,
@@ -122,9 +183,8 @@ function admitIntent(
       credentialGrantRefs: input.credentialGrantRefs ?? [],
       budgets,
       allowUnverified: input.allowUnverified,
-      sourceProjectionRef: input.sourceProjectionRef,
-      frozenIgnoreRulesRef: input.frozenIgnoreRulesRef,
-      baseWorkspaceManifestRef: input.baseWorkspaceManifestRef
+      sourceIncludes,
+      sourceExcludes
     }
   });
 }
@@ -133,7 +193,9 @@ function admitRequestDigest(
   input: AdmitRunInput,
   workspacePath: string,
   objective: string,
-  budgets: typeof DEFAULT_RUN_BUDGETS
+  budgets: typeof DEFAULT_RUN_BUDGETS,
+  sourceIncludes: readonly SourceSelector[],
+  sourceExcludes: readonly SourceSelector[]
 ): string {
   return canonicalSha256({
     protocolVersion: 1,
@@ -151,9 +213,8 @@ function admitRequestDigest(
     credentialGrantRefs: input.credentialGrantRefs ?? [],
     budgets,
     allowUnverified: input.allowUnverified,
-    sourceProjectionRef: input.sourceProjectionRef,
-    frozenIgnoreRulesRef: input.frozenIgnoreRulesRef,
-    baseWorkspaceManifestRef: input.baseWorkspaceManifestRef
+    sourceIncludes,
+    sourceExcludes
   });
 }
 
@@ -228,8 +289,13 @@ export async function admitRun(
   const workspacePath = normalizeAbsolutePath(input.workspacePath);
   const objectiveText = normalizeBoundedText(input.objective, 1, 262_144);
   const budgets = mergeBudgets(input.budgets);
-  const admissionIntentDigest = admitIntent(input, workspacePath, objectiveText, budgets);
-  const requestDigest = admitRequestDigest(input, workspacePath, objectiveText, budgets);
+  const sourceIncludes = normalizeRequestedSelectors(input.sourceIncludes, 'sourceIncludes');
+  const sourceExcludes = normalizeRequestedSelectors(input.sourceExcludes, 'sourceExcludes');
+  const admissionIntentDigest = admitIntent(input, workspacePath, objectiveText, budgets,
+    sourceIncludes, sourceExcludes);
+  const requestDigest = admitRequestDigest(input, workspacePath, objectiveText, budgets,
+    sourceIncludes, sourceExcludes);
+  const runId = identityHash('cliq-run-id-v1', input.principalId, 'run.submit', input.admissionKey);
 
   // A retained control response is never a substitute for current caller
   // authentication. Replay preserves the first committed channel's provenance.
@@ -282,6 +348,7 @@ export async function admitRun(
   }
   await validateFrozenIgnoreSourceBytes(artifacts, frozenIgnore);
   const sourceProjection = decodeSourceProjection(await artifacts.readCanonical(input.sourceProjectionRef));
+  assertResolvedSelectorsMatchIntent(sourceProjection, sourceIncludes, sourceExcludes);
   if (
     sourceProjection.frozenIgnoreRulesRef !== input.frozenIgnoreRulesRef ||
     sourceProjection.frozenIgnoreRulesDigest !== frozenIgnore.rulesDigest
@@ -322,6 +389,18 @@ export async function admitRun(
   }
   assertLiveFrozenIgnoreSources(owner.filesystem, workspacePath,
     workspaceIdentity.rootIdentity, repositoryIdentity, frozenIgnore, sourceEntries);
+  const sourceIncludesClosure = await validateBuiltinSourceIncludes(artifacts, {
+    principalId: input.principalId, runId, sessionId: session.id,
+    workspaceIdentityRef: session.workspaceIdentityRef,
+    workspaceIdentityDigest: workspaceIdentity.identityDigest,
+    admissionIntentDigest, projection: sourceProjection, entries: sourceEntries,
+    frozenIgnoreRulesRef: input.frozenIgnoreRulesRef, frozenIgnoreRules: frozenIgnore,
+    ...(sourceManifest.git && indexSnapshot ? {
+      git: { indexRef: sourceManifest.git.indexRef, snapshot: indexSnapshot }
+    } : {})
+  });
+  assertLiveSourceIncludeEvidence(owner.filesystem, workspacePath,
+    workspaceIdentity.rootIdentity, sourceEntries, sourceIncludesClosure.evidences);
 
   const verifierSpec = decodeVerifierSpec(await artifacts.readCanonical(input.verifierSpecRef));
   const requiredVerifiers = verifierSpec.verifiers.filter((entry) => entry.gate === 'required');
@@ -355,7 +434,6 @@ export async function admitRun(
   ]);
 
   const now = sampleCanonicalNow();
-  const runId = identityHash('cliq-run-id-v1', input.principalId, 'run.submit', input.admissionKey);
   const checkpointId = identityHash('cliq-checkpoint-id-v1', runId, 'initial', 0);
   const turnId = identityHash('cliq-turn-id-v1', runId, 'initial');
 
@@ -367,7 +445,8 @@ export async function admitRun(
     objectiveDigest: ''
   };
   objective.objectiveDigest = digestOmitting(objective, 'objectiveDigest');
-  const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata];
+  const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata,
+    ...sourceIncludesClosure.metadata];
   const objectiveArtifact = await artifacts.publishCanonical(objective, 'cliq-run-objective-v1');
   published.push(objectiveArtifact);
   decodeRunObjective(objective);
@@ -572,6 +651,8 @@ export async function admitRun(
     }
     assertLiveFrozenIgnoreSources(owner.filesystem, workspacePath,
       workspaceIdentity.rootIdentity, repositoryIdentity, frozenIgnore, sourceEntries);
+    assertLiveSourceIncludeEvidence(owner.filesystem, workspacePath,
+      workspaceIdentity.rootIdentity, sourceEntries, sourceIncludesClosure.evidences);
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
 
     connection

@@ -383,6 +383,36 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   Descriptor-held ignore-source capture, hard-exclusion and tracked-entry
   classification, projection publication and public `run.submit` remain open.
 
+## 2026-09-27: held source metadata and include admission
+
+- The trusted source readers now publish the canonical Git index snapshot and
+  frozen `.git/info/exclude`/`.gitignore` rule graph from held no-follow
+  descriptors, then recheck their live sources. Native file, directory and
+  symlink observations expose link counts from the same descriptor/stat cut;
+  an inserted hardlink between `.gitignore` scans is rejected. Branch CI for
+  `5781efb` passed the Linux namespace/cgroup job and all four macOS/Linux
+  Node 22/24 jobs.
+- Added closed `SourceIncludeClassificationEvidenceV1` and
+  `SourceIncludeAuthorizationV1` decoders. Builtin include admission now checks
+  the selector, principal/Run/Session/workspace/intent bindings, exact captured
+  entry digests, frozen ignore classification, and canonical Git-index tracking.
+  It opens each included path again under held no-follow descriptors, rehashes
+  file bytes or verifies symlink targets, and repeats the live check inside the
+  final SQLite transaction. A mutation after CAS publication leaves no Run.
+- The internal admission intent now binds requested include/exclude selectors
+  instead of the Supervisor-generated source projection and manifest refs;
+  this removes the include-authorization digest cycle and lets identical
+  requests replay the original Run after the live source changes. The
+  recovered root Run revalidates the retained builtin include graph. An
+  ignored include's consumed read grant remains deliberately unsupported
+  until grant consumption and the Run transaction are one atomic operation.
+  Tests use an explicitly synthesized source graph; there is still no
+  production complete-tree capture or public `run.submit` path.
+- Local `npm run build`, all 1,711 tests, and the design-copy contract check
+  passed for this source-include slice. The full test run followed recovery
+  closure integration; a subsequent test-only fixture cleanup passed its
+  focused build and four tests.
+
 ## Next integration order
 
 1. Qualify the native control endpoint/connection lifetime and approved live

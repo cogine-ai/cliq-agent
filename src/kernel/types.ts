@@ -643,6 +643,64 @@ export type FrozenIgnoreRulesV1 = {
   rulesDigest: string;
 };
 
+export type SourceIncludeClassificationEvidenceV1 = {
+  schemaVersion: 1;
+  format: 'cliq-source-include-classification-v1';
+  principalId: string;
+  runId: string;
+  sessionId: string;
+  workspaceIdentityRef: ArtifactRef;
+  workspaceIdentityDigest: string;
+  selector: { path: string; scope: 'entry' | 'subtree' };
+  selectorDigest: string;
+  admissionIntentDigest: string;
+  frozenIgnoreRulesRef: ArtifactRef;
+  frozenIgnoreRulesDigest: string;
+  gitIndexRef?: ArtifactRef;
+  gitIndexTreeObjectId?: string;
+  entries: Array<{
+    path: string;
+    workspaceEntryDigest: string;
+    deviceId: string;
+    fileId: string;
+    linkCount: number;
+    classification: 'tracked_in_git_index' | 'nonignored_in_root';
+  }>;
+  observedAt: string;
+  evidenceDigest: string;
+};
+
+export type SourceIncludeAuthorizationV1 = {
+  schemaVersion: 1;
+  format: 'cliq-source-include-authorization-v1';
+  principalId: string;
+  runId: string;
+  sessionId: string;
+  workspaceIdentityRef: ArtifactRef;
+  workspaceIdentityDigest: string;
+  selector: { path: string; scope: 'entry' | 'subtree' };
+  selectorDigest: string;
+  admissionIntentDigest: string;
+  createdAt: string;
+  authorizationDigest: string;
+} & (
+  | {
+      kind: 'builtin_nonignored';
+      frozenIgnoreRulesRef: ArtifactRef;
+      frozenIgnoreRulesDigest: string;
+      classification: 'tracked_or_nonignored_in_root';
+      classificationEvidenceRef: ArtifactRef;
+      classificationEvidenceDigest: string;
+    }
+  | {
+      kind: 'consumed_user_read_grant';
+      authorizationGrantId: string;
+      authorizationGrantTargetDigest: string;
+      consumptionReceiptRef: ArtifactRef;
+      consumptionReceiptDigest: string;
+    }
+);
+
 export type SourceProjectionSpec = {
   schemaVersion: 1;
   matcherVersion: 'cliq-exact-path-v1';

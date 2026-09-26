@@ -24,6 +24,8 @@ import type {
   RunObjectiveV1,
   RunSpec,
   SessionContextProjection,
+  SourceIncludeAuthorizationV1,
+  SourceIncludeClassificationEvidenceV1,
   SourceManifest,
   SourceProjectionSpec,
   StateLockIdentityV1,
@@ -851,6 +853,161 @@ export function decodeFrozenIgnoreRules(value: unknown): FrozenIgnoreRulesV1 {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules digest does not rehash');
   }
   return rules;
+}
+
+function decodeSourceIncludeSelector(value: unknown, label: string):
+  { path: string; scope: 'entry' | 'subtree' } {
+  if (!isRecord(value) || Object.keys(value).length !== 2 ||
+      !Object.hasOwn(value, 'path') || !Object.hasOwn(value, 'scope')) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label} has an invalid closed shape`);
+  }
+  const selectorPath = requireRootRelativePath(value.path, `${label}.path`);
+  if (value.scope !== 'entry' && value.scope !== 'subtree') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label}.scope is invalid`);
+  }
+  return { path: selectorPath, scope: value.scope };
+}
+
+function decodeSourceIncludeIdentity(value: Record<string, unknown>, label: string): void {
+  for (const key of ['principalId', 'runId', 'sessionId'] as const) {
+    const id = requireString(value[key], `${label}.${key}`);
+    let normalized: string;
+    try { normalized = normalizeCanonicalText(id); }
+    catch { throw new KernelStorageError('ARTIFACT_MISMATCH', `${label}.${key} is not a canonical id`); }
+    if (normalized !== id || Buffer.byteLength(id, 'utf8') > 128) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `${label}.${key} is not a canonical id`);
+    }
+  }
+  requireArtifactRef(value.workspaceIdentityRef, `${label}.workspaceIdentityRef`);
+  requireDigest(value.workspaceIdentityDigest, `${label}.workspaceIdentityDigest`);
+  const selector = decodeSourceIncludeSelector(value.selector, `${label}.selector`);
+  if (requireDigest(value.selectorDigest, `${label}.selectorDigest`) !== canonicalSha256(selector)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', `${label}.selectorDigest does not rehash`);
+  }
+  requireDigest(value.admissionIntentDigest, `${label}.admissionIntentDigest`);
+}
+
+export function decodeSourceIncludeClassificationEvidence(value: unknown):
+  SourceIncludeClassificationEvidenceV1 {
+  if (!isRecord(value) || value.schemaVersion !== 1 ||
+      value.format !== 'cliq-source-include-classification-v1') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include evidence has the wrong schema');
+  }
+  rejectUnknownKeys(value, [
+    'schemaVersion', 'format', 'principalId', 'runId', 'sessionId',
+    'workspaceIdentityRef', 'workspaceIdentityDigest', 'selector', 'selectorDigest',
+    'admissionIntentDigest', 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest',
+    'gitIndexRef', 'gitIndexTreeObjectId', 'entries', 'observedAt', 'evidenceDigest'
+  ], 'SourceIncludeClassificationEvidence');
+  decodeSourceIncludeIdentity(value, 'SourceIncludeClassificationEvidence');
+  requireArtifactRef(value.frozenIgnoreRulesRef, 'SourceIncludeClassificationEvidence.frozenIgnoreRulesRef');
+  requireDigest(value.frozenIgnoreRulesDigest, 'SourceIncludeClassificationEvidence.frozenIgnoreRulesDigest');
+  const hasIndexRef = Object.hasOwn(value, 'gitIndexRef');
+  const hasIndexTree = Object.hasOwn(value, 'gitIndexTreeObjectId');
+  if (hasIndexRef !== hasIndexTree) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include evidence Git index fields must be paired');
+  }
+  if (hasIndexRef) {
+    requireArtifactRef(value.gitIndexRef, 'SourceIncludeClassificationEvidence.gitIndexRef');
+    const tree = requireString(value.gitIndexTreeObjectId,
+      'SourceIncludeClassificationEvidence.gitIndexTreeObjectId');
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(tree)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include evidence Git tree id is invalid');
+    }
+  }
+  if (!Array.isArray(value.entries) || value.entries.length === 0) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include evidence needs captured entries');
+  }
+  const selector = value.selector as SourceIncludeClassificationEvidenceV1['selector'];
+  let previousPath: string | undefined;
+  let hasTracked = false;
+  for (const [index, entry] of value.entries.entries()) {
+    if (!isRecord(entry) || Object.keys(entry).length !== 6 ||
+        !['path', 'workspaceEntryDigest', 'deviceId', 'fileId', 'linkCount', 'classification']
+          .every((key) => Object.hasOwn(entry, key))) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH',
+        `source include evidence entry ${index} has an invalid closed shape`);
+    }
+    const entryPath = requireRootRelativePath(entry.path, `SourceIncludeClassificationEvidence.entries[${index}].path`);
+    if (previousPath !== undefined && Buffer.compare(Buffer.from(previousPath), Buffer.from(entryPath)) >= 0) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include evidence entries must be unique and byte-sorted');
+    }
+    if (entryPath !== selector.path &&
+        !(selector.scope === 'subtree' && entryPath.startsWith(`${selector.path}/`))) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include evidence entry is outside its selector');
+    }
+    previousPath = entryPath;
+    requireDigest(entry.workspaceEntryDigest,
+      `SourceIncludeClassificationEvidence.entries[${index}].workspaceEntryDigest`);
+    for (const key of ['deviceId', 'fileId'] as const) {
+      const id = requireUnsignedDecimal(entry[key],
+        `SourceIncludeClassificationEvidence.entries[${index}].${key}`);
+      if (id.length > 20 || BigInt(id) > 18_446_744_073_709_551_615n) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH',
+          `source include evidence entry ${index} has an out-of-range ${key}`);
+      }
+    }
+    requireSafeInteger(entry.linkCount, `SourceIncludeClassificationEvidence.entries[${index}].linkCount`, 1);
+    if (entry.classification !== 'tracked_in_git_index' && entry.classification !== 'nonignored_in_root') {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include evidence classification is invalid');
+    }
+    if (entry.classification === 'tracked_in_git_index') hasTracked = true;
+  }
+  if (hasTracked && !hasIndexRef) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'tracked source include needs a Git index');
+  }
+  requireCanonicalTime(value.observedAt, 'SourceIncludeClassificationEvidence.observedAt');
+  requireDigest(value.evidenceDigest, 'SourceIncludeClassificationEvidence.evidenceDigest');
+  const evidence = value as SourceIncludeClassificationEvidenceV1;
+  if (digestOmitting(evidence, 'evidenceDigest') !== evidence.evidenceDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include evidence digest does not rehash');
+  }
+  return evidence;
+}
+
+export function decodeSourceIncludeAuthorization(value: unknown): SourceIncludeAuthorizationV1 {
+  if (!isRecord(value) || value.schemaVersion !== 1 ||
+      value.format !== 'cliq-source-include-authorization-v1') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include authorization has the wrong schema');
+  }
+  const commonKeys = [
+    'schemaVersion', 'format', 'principalId', 'runId', 'sessionId',
+    'workspaceIdentityRef', 'workspaceIdentityDigest', 'selector', 'selectorDigest',
+    'admissionIntentDigest', 'createdAt', 'authorizationDigest', 'kind'
+  ];
+  if (value.kind === 'builtin_nonignored') {
+    rejectUnknownKeys(value, [...commonKeys, 'frozenIgnoreRulesRef', 'frozenIgnoreRulesDigest',
+      'classification', 'classificationEvidenceRef', 'classificationEvidenceDigest'],
+    'SourceIncludeAuthorization');
+    requireArtifactRef(value.frozenIgnoreRulesRef, 'SourceIncludeAuthorization.frozenIgnoreRulesRef');
+    requireDigest(value.frozenIgnoreRulesDigest, 'SourceIncludeAuthorization.frozenIgnoreRulesDigest');
+    if (value.classification !== 'tracked_or_nonignored_in_root') {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include authorization classification is invalid');
+    }
+    requireArtifactRef(value.classificationEvidenceRef,
+      'SourceIncludeAuthorization.classificationEvidenceRef');
+    requireDigest(value.classificationEvidenceDigest,
+      'SourceIncludeAuthorization.classificationEvidenceDigest');
+  } else if (value.kind === 'consumed_user_read_grant') {
+    rejectUnknownKeys(value, [...commonKeys, 'authorizationGrantId',
+      'authorizationGrantTargetDigest', 'consumptionReceiptRef', 'consumptionReceiptDigest'],
+    'SourceIncludeAuthorization');
+    requireString(value.authorizationGrantId, 'SourceIncludeAuthorization.authorizationGrantId');
+    requireDigest(value.authorizationGrantTargetDigest,
+      'SourceIncludeAuthorization.authorizationGrantTargetDigest');
+    requireArtifactRef(value.consumptionReceiptRef, 'SourceIncludeAuthorization.consumptionReceiptRef');
+    requireDigest(value.consumptionReceiptDigest, 'SourceIncludeAuthorization.consumptionReceiptDigest');
+  } else {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include authorization kind is invalid');
+  }
+  decodeSourceIncludeIdentity(value, 'SourceIncludeAuthorization');
+  requireCanonicalTime(value.createdAt, 'SourceIncludeAuthorization.createdAt');
+  requireDigest(value.authorizationDigest, 'SourceIncludeAuthorization.authorizationDigest');
+  const authorization = value as SourceIncludeAuthorizationV1;
+  if (digestOmitting(authorization, 'authorizationDigest') !== authorization.authorizationDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source include authorization digest does not rehash');
+  }
+  return authorization;
 }
 
 export function decodeSourceProjection(value: unknown): SourceProjectionSpec {

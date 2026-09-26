@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict';
 import { createHash, randomFillSync } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting } from '../kernel/identity.js';
+import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1,
   GitIndexSnapshotV1,
+  SourceIncludeAuthorizationV1,
+  SourceIncludeClassificationEvidenceV1,
   SourceManifest,
   SourceProjectionSpec,
   VerifierSpec,
@@ -18,6 +20,7 @@ import type {
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
 import { encodeCanonicalGitIndex } from './git-index.js';
+import { mergeBudgets } from './rows.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
 
@@ -263,6 +266,131 @@ test('M1 store admits a queued Run with an initial Checkpoint and recovers it', 
         1
       );
     });
+  } finally {
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('Run admission binds builtin include evidence to caller intent without an artifact-ref cycle', async (t) => {
+  const stateRoot = await makePrivateDir('.cliq-m1-include-state-');
+  const workspace = await makePrivateDir('.cliq-m1-include-ws-');
+  const bytes = Buffer.from('admitted source');
+  await writeFile(path.join(workspace, 'file.txt'), bytes);
+  const store = await openStateStore(stateRoot);
+  try {
+    const principalId = 'cliq-test-principal';
+    const channel = await publishInProcessChannel(store, principalId);
+    const created = await store.createSession({
+      principalId, requestId: uuidv7(), admissionKey: admissionKey('session-include'),
+      workspacePath: workspace, ...channel
+    });
+    const workspaceIdentity = await store.artifacts.readCanonical<WorkspaceIdentityV1>(
+      created.session.workspaceIdentityRef
+    );
+    const source = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest,
+      { file: { bytes, declaredSize: bytes.byteLength } });
+    const sourceManifest = await store.artifacts.readCanonical<SourceManifest>(source.baseWorkspaceManifestRef);
+    const entries = await store.artifacts.readCanonical<WorkspaceEntryManifest>(sourceManifest.entriesRef);
+    const entry = entries.entries[0]!;
+    const rules = await store.artifacts.readCanonical<FrozenIgnoreRulesV1>(source.frozenIgnoreRulesRef);
+    const projection = await store.artifacts.readCanonical<SourceProjectionSpec>(source.sourceProjectionRef);
+    const selector = { path: 'file.txt', scope: 'entry' as const };
+    const runKey = admissionKey('run-include');
+    const runId = identityHash('cliq-run-id-v1', principalId, 'run.submit', runKey);
+    const objective = 'inspect included source';
+    const admissionIntentDigest = canonicalSha256({
+      principalId, method: 'run.submit', request: {
+        method: 'run.submit', sessionId: created.session.id, expectedContextRevision: 1,
+        workspacePath: workspace, objective, assemblyRef: source.assemblyRef,
+        policyRef: source.policyRef, sandboxProfileRef: source.sandboxProfileRef,
+        verifierSpecRef: source.verifierSpecRef, credentialGrantRefs: [],
+        budgets: mergeBudgets(undefined), allowUnverified: true,
+        sourceIncludes: [selector], sourceExcludes: []
+      }
+    });
+    const stat = await lstat(path.join(workspace, 'file.txt'));
+    const evidence: SourceIncludeClassificationEvidenceV1 = {
+      schemaVersion: 1, format: 'cliq-source-include-classification-v1',
+      principalId, runId, sessionId: created.session.id,
+      workspaceIdentityRef: created.session.workspaceIdentityRef,
+      workspaceIdentityDigest: workspaceIdentity.identityDigest,
+      selector, selectorDigest: canonicalSha256(selector), admissionIntentDigest,
+      frozenIgnoreRulesRef: source.frozenIgnoreRulesRef,
+      frozenIgnoreRulesDigest: rules.rulesDigest,
+      entries: [{ path: entry.path, workspaceEntryDigest: canonicalSha256(entry),
+        deviceId: String(stat.dev), fileId: String(stat.ino), linkCount: stat.nlink,
+        classification: 'nonignored_in_root' }],
+      observedAt: '2026-09-27T00:00:00.000Z', evidenceDigest: ''
+    };
+    evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
+    const evidenceRef = (await store.artifacts.publishCanonical(evidence, evidence.format)).ref;
+    const authorization: SourceIncludeAuthorizationV1 = {
+      schemaVersion: 1, format: 'cliq-source-include-authorization-v1',
+      principalId, runId, sessionId: created.session.id,
+      workspaceIdentityRef: created.session.workspaceIdentityRef,
+      workspaceIdentityDigest: workspaceIdentity.identityDigest,
+      selector, selectorDigest: canonicalSha256(selector), admissionIntentDigest,
+      createdAt: '2026-09-27T00:00:00.000Z', kind: 'builtin_nonignored',
+      frozenIgnoreRulesRef: source.frozenIgnoreRulesRef,
+      frozenIgnoreRulesDigest: rules.rulesDigest,
+      classification: 'tracked_or_nonignored_in_root',
+      classificationEvidenceRef: evidenceRef, classificationEvidenceDigest: evidence.evidenceDigest,
+      authorizationDigest: ''
+    };
+    authorization.authorizationDigest = digestOmitting(authorization, 'authorizationDigest');
+    const authorizationRef = (await store.artifacts.publishCanonical(authorization, authorization.format)).ref;
+    projection.explicitIncludes = [{ ...selector, authorizationRef }];
+    projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
+    const sourceProjectionRef = (await store.artifacts.publishCanonical(projection,
+      'cliq-source-projection-v1')).ref;
+    sourceManifest.sourceProjectionRef = sourceProjectionRef;
+    sourceManifest.sourceProjectionDigest = projection.projectionDigest;
+    sourceManifest.manifestDigest = digestOmitting(sourceManifest, 'manifestDigest');
+    const baseWorkspaceManifestRef = (await store.artifacts.publishCanonical(sourceManifest,
+      sourceManifest.format)).ref;
+    const request = {
+      principalId, requestId: uuidv7(), admissionKey: runKey,
+      sessionId: created.session.id, expectedContextRevision: 1,
+      workspacePath: workspace, objective, allowUnverified: true,
+      sourceIncludes: [selector], ...channel, ...source,
+      sourceProjectionRef, baseWorkspaceManifestRef
+    };
+    const publish = store.artifacts.publishCanonical.bind(store.artifacts);
+    const injected = t.mock.method(store.artifacts, 'publishCanonical', async (value: unknown, kind: string) => {
+      const artifact = await publish(value, kind);
+      if (kind === 'cliq-control-response-v1') {
+        await writeFile(path.join(workspace, 'file.txt'), 'changed after source validation');
+      }
+      return artifact;
+    });
+    await assert.rejects(store.admitRun(request),
+      /live bytes differ from the admitted CAS blob|descriptor evidence/);
+    injected.mock.restore();
+    inspectKernel(stateRoot, (driver) => {
+      assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM runs')
+        .get<{ count: unknown }>()?.count), 0);
+    });
+    await writeFile(path.join(workspace, 'file.txt'), bytes);
+    const admitted = await store.admitRun(request);
+    assert.equal(admitted.run.id, runId);
+    assert.equal(admitted.run.status, 'queued');
+    assert.equal((await store.readRecoveryClosure(runId)).run.id, runId);
+    inspectKernel(stateRoot, (driver) => {
+      const rows = driver.prepare(`SELECT schema_kind FROM artifacts WHERE ref IN (?, ?)`)
+        .all<{ schema_kind: string }>(authorizationRef, evidenceRef);
+      assert.deepEqual(new Set(rows.map((row) => row.schema_kind)), new Set([
+        authorization.format, evidence.format
+      ]));
+    });
+    const replayed = await store.admitRun({ ...request, requestId: uuidv7(),
+      sourceProjectionRef: 'b'.repeat(64), baseWorkspaceManifestRef: 'c'.repeat(64) });
+    assert.equal(replayed.replayed, true);
+    assert.equal(replayed.run.id, runId);
+    await assert.rejects(store.admitRun({ ...request, requestId: uuidv7(),
+      sourceIncludes: [{ path: 'another.txt', scope: 'entry' }] }),
+    (error: unknown) => error instanceof KernelStorageError && error.code === 'ADMISSION_KEY_CONFLICT');
   } finally {
     await store.close();
     await rm(stateRoot, { recursive: true, force: true });
