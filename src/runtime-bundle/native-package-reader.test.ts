@@ -401,7 +401,7 @@ test('native CAS import removes failed staging and refuses a corrupt existing ob
         const corrupt = Buffer.alloc(bytes.byteLength, 0x78);
         await writeFile(path.join(casPath, entry.digest), corrupt, { mode: 0o400 });
         await assert.rejects(importVerifiedPackageEntryToCas(source, cas, entry),
-          /CAS artifact differs from its signed digest/);
+          /CAS artifact differs from its expected digest/);
         assert.deepEqual(await readdir(casPath), [entry.digest]);
         assert.deepEqual(await readFile(path.join(casPath, entry.digest)), corrupt);
         await rm(path.join(casPath, entry.digest));

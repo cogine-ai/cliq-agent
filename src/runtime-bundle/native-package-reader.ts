@@ -395,34 +395,39 @@ function rehashNativeReader(reader: NativeCasArtifact | NativeStage, byteCount: 
 }
 
 /** Recheck the published object through a held CAS descriptor, including an existing object. */
-export function verifyNativeCasArtifact(cas: HeldCasRoot, entry: Readonly<PackageFile>): void {
+export function verifyNativeCasArtifact(cas: HeldCasRoot,
+  entry: Readonly<Pick<PackageFile, 'digest' | 'byteCount'>>): void {
   if (!heldCasRoots.has(cas)) throw new TypeError('CAS root must come from the pinned native helper');
   assertArtifactRef(entry.digest);
   if (!Number.isSafeInteger(entry.byteCount) || entry.byteCount < 0) throw new TypeError('invalid CAS entry');
   const artifact = cas.openArtifact(entry.digest, entry.byteCount);
   try {
     if (rehashNativeReader(artifact, entry.byteCount) !== entry.digest) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'CAS artifact differs from its signed digest');
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'CAS artifact differs from its expected digest');
     }
   } finally {
     artifact.close();
   }
 }
 
-/** Copy a signed source entry into CAS; no installer authority is published by this operation. */
-export async function importVerifiedPackageEntryToCas(source: HeldPackageRoot, cas: HeldCasRoot,
-  entry: Readonly<PackageFile>): Promise<void> {
+/** Stage a complete verified stream under the held CAS root. Publication alone
+ * grants no installer or Run authority; the caller owns source validation. */
+export async function publishVerifiedChunkStreamToCas(cas: HeldCasRoot,
+  entry: Readonly<Pick<PackageFile, 'digest' | 'byteCount'>>,
+  stream: (writeChunk: (chunk: Buffer) => void) => Promise<void> | void,
+  assertBeforePublish?: () => Promise<void> | void): Promise<void> {
   if (!heldCasRoots.has(cas)) throw new TypeError('CAS root must come from the pinned native helper');
   assertArtifactRef(entry.digest);
   if (!Number.isSafeInteger(entry.byteCount) || entry.byteCount < 0) throw new TypeError('invalid CAS entry');
   const stage = cas.beginStage(entry.digest, entry.byteCount, randomBytes(16).toString('hex'));
   let primaryError: unknown;
   try {
-    await streamVerifiedPackageEntry(source, entry, (chunk) => { stage.writeChunk(chunk); });
+    await stream((chunk) => { stage.writeChunk(chunk); });
     stage.seal();
     if (rehashNativeReader(stage, entry.byteCount) !== entry.digest) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'CAS stage differs from its signed digest');
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'CAS stage differs from its expected digest');
     }
+    await assertBeforePublish?.();
     stage.publish();
     verifyNativeCasArtifact(cas, entry);
   } catch (error) {
@@ -438,6 +443,13 @@ export async function importVerifiedPackageEntryToCas(source: HeldPackageRoot, c
       throw cleanupError;
     }
   }
+}
+
+/** Copy a signed source entry into CAS; no installer authority is published by this operation. */
+export async function importVerifiedPackageEntryToCas(source: HeldPackageRoot, cas: HeldCasRoot,
+  entry: Readonly<PackageFile>): Promise<void> {
+  await publishVerifiedChunkStreamToCas(cas, entry,
+    (writeChunk) => streamVerifiedPackageEntry(source, entry, writeChunk));
 }
 
 /** Materialize only bounded structured objects; large images stay on the streaming path. */

@@ -417,7 +417,15 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   than allocating an entire retained file. Read, stat, verify and publication
   also recheck the named CAS root after the held operation; a root-swap test
   proves verification fails closed. Source-file publication into CAS is still
-  whole-buffer and remains a separate I1 task.
+  not wired to a complete source-tree capture.
+- The native StateOwner source-file handle now permits rewind only after a
+  complete stable read. One held descriptor can hash a source file, rewind,
+  and stream the same file into the pinned native CAS writer in 1 MiB chunks.
+  The writer rehashes the sealed stage and final artifact, and checks source
+  stability again before and after publication. A staged-publication race test
+  proves that changed source bytes leave no CAS temporary object. The source
+  tree walk, Git object closure, and admission integration remain open. The
+  local build, 17 focused native/source tests, and full 1715-test suite pass.
 
 ## Next integration order
 

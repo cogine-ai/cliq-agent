@@ -29,6 +29,8 @@ export type HeldWorkspaceSourceFile = Readonly<{
   identity: DescriptorIdentity;
   readChunk(size: number): Buffer;
   assertStable(): void;
+  /** Restart only after a complete stable pass, on the same held descriptor. */
+  rewind(): void;
   close(): void;
 }>;
 export type WorkspaceSourceDirectoryEntry = Readonly<{

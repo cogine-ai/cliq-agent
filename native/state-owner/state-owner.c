@@ -810,6 +810,20 @@ static napi_value source_file_assert_stable(napi_env env, napi_callback_info inf
     return napi_get_undefined(env, &result) == napi_ok ? result : NULL;
 }
 
+/* A second pass must use the same held descriptor. Only a complete, stable
+ * first pass may reset its offset; the next read rechecks the live pathname. */
+static napi_value source_file_rewind(napi_env env, napi_callback_info info) {
+    source_file *file = unwrap_source_file(env, info);
+    if (!file) return NULL;
+    if (!source_file_stable(file, 1) || lseek(file->file_fd, 0, SEEK_SET) != 0 ||
+        !source_file_stable(file, 1)) {
+        return native_error(env, "workspace source file cannot be rewound after an incomplete or changed read");
+    }
+    file->consumed = 0;
+    napi_value result;
+    return napi_get_undefined(env, &result) == napi_ok ? result : NULL;
+}
+
 static napi_value open_workspace_file(napi_env env, napi_callback_info info, int git_index) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
@@ -901,6 +915,7 @@ static napi_value open_workspace_file(napi_env env, napi_callback_info info, int
     const napi_property_descriptor methods[] = {
         {"readChunk", NULL, source_file_read_chunk, NULL, NULL, NULL, napi_default, NULL},
         {"assertStable", NULL, source_file_assert_stable, NULL, NULL, NULL, napi_default, NULL},
+        {"rewind", NULL, source_file_rewind, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, source_file_close, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_wrap(env, result, file, finalize_source_file, NULL, NULL) != napi_ok) goto done;
