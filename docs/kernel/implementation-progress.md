@@ -426,6 +426,14 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   proves that changed source bytes leave no CAS temporary object. The source
   tree walk, Git object closure, and admission integration remain open. The
   local build, 17 focused native/source tests, and full 1715-test suite pass.
+- A higher-level source-file capture now binds that CAS blob to the exact
+  literal directory entry observed before opening and after publication. It
+  checks descriptor identity, mode, size and link count at both cuts, returns
+  normalized WorkspaceEntry metadata plus the retained source observation,
+  and refuses a replacement before opening or after CAS publication. This is
+  one file's capture primitive; source selection, complete tree traversal and
+  the final admission-transaction live recheck remain open. The local build,
+  focused source-file suite, and 1716-test full suite pass on macOS.
 
 ## Next integration order
 

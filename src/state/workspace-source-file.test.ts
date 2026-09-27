@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { link, mkdir, mkdtemp, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -10,8 +10,8 @@ import {
   loadNativePackageReader, openNativeCasRoot, PACKAGE_READER_NATIVE_RELATIVE_PATH
 } from '../runtime-bundle/native-package-reader.js';
 import { ContentAddressedStore } from './cas.js';
-import { loadNativeStateOwner, type HeldWorkspaceSourceFile } from './native-owner.js';
-import { publishHeldWorkspaceSourceBlob } from './workspace-source-blob.js';
+import { loadNativeStateOwner, type HeldStateOwnerLock, type HeldWorkspaceSourceFile } from './native-owner.js';
+import { captureHeldWorkspaceSourceFile, publishHeldWorkspaceSourceBlob } from './workspace-source-blob.js';
 
 const supported = process.platform === 'darwin' || process.platform === 'linux';
 
@@ -106,13 +106,20 @@ test('held source publishes a multi-chunk CAS blob through the same descriptor',
     const bytes = Buffer.alloc(3 * 1024 * 1024 + 17, 0x61);
     bytes[1024 * 1024] = 0x62;
     bytes[2 * 1024 * 1024] = 0x63;
-    await writeFile(path.join(workspace, 'source.bin'), bytes, { mode: 0o600 });
+    await writeFile(path.join(workspace, 'source.bin'), bytes, { mode: 0o700 });
+    await link(path.join(workspace, 'source.bin'), path.join(parent, 'source-hardlink'));
     const helperPath = fileURLToPath(new URL(`../../dist/${PACKAGE_READER_NATIVE_RELATIVE_PATH}`, import.meta.url));
     const binding = await loadNativePackageReader(sha256Bytes(readFileSync(helperPath)));
     const cas = openNativeCasRoot(binding, casPath);
     const held = (await loadNativeStateOwner()).acquireLock(stateRoot, true);
     try {
       const root = held.inspectWorkspaceIdentity(workspace).root;
+      const captured = await captureHeldWorkspaceSourceFile(held, workspace, root,
+        'source.bin', cas);
+      assert.deepEqual(captured.entry, { path: 'source.bin', kind: 'file',
+        mode: 0o755, size: bytes.byteLength, blobRef: sha256Bytes(bytes) });
+      assert.equal(captured.linkCount, 2);
+      assert.equal(captured.identity.ownerUid, process.geteuid!());
       const file = held.openWorkspaceSourceFile(workspace, root, 'source.bin');
       try {
         const artifact = await publishHeldWorkspaceSourceBlob(file, cas);
@@ -130,6 +137,60 @@ test('held source publishes a multi-chunk CAS blob through the same descriptor',
         assert.equal(artifact.byteLength, 0);
         assert.deepEqual(await new ContentAddressedStore(casPath).read(artifact.ref), Buffer.alloc(0));
       } finally { empty.close(); }
+    } finally {
+      held.close();
+      cas.close();
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+test('captured source blob must still belong to the same literal directory entry',
+  { skip: !supported }, async () => {
+    const parent = await mkdtemp(path.join(process.cwd(), '.cliq-source-entry-race-'));
+    const stateRoot = path.join(parent, 'state');
+    const workspace = path.join(parent, 'workspace');
+    const casPath = path.join(stateRoot, 'cas');
+    await mkdir(stateRoot, { mode: 0o700 });
+    await mkdir(casPath, { mode: 0o700 });
+    await mkdir(workspace, { mode: 0o700 });
+    const sourcePath = path.join(workspace, 'source.bin');
+    await writeFile(sourcePath, 'original', { mode: 0o700 });
+    const helperPath = fileURLToPath(new URL(`../../dist/${PACKAGE_READER_NATIVE_RELATIVE_PATH}`, import.meta.url));
+    const binding = await loadNativePackageReader(sha256Bytes(readFileSync(helperPath)));
+    const cas = openNativeCasRoot(binding, casPath);
+    const held = (await loadNativeStateOwner()).acquireLock(stateRoot, true);
+    try {
+      const root = held.inspectWorkspaceIdentity(workspace).root;
+      let listings = 0;
+      const replacedAfterPublication = {
+        listWorkspaceSourceDirectory: (...args: Parameters<HeldStateOwnerLock['listWorkspaceSourceDirectory']>) => {
+          if (++listings === 2) {
+            renameSync(sourcePath, path.join(workspace, 'displaced.bin'));
+            writeFileSync(sourcePath, 'replacement');
+          }
+          return held.listWorkspaceSourceDirectory(...args);
+        },
+        openWorkspaceSourceFile: (...args: Parameters<HeldStateOwnerLock['openWorkspaceSourceFile']>) =>
+          held.openWorkspaceSourceFile(...args)
+      } as HeldStateOwnerLock;
+      await assert.rejects(captureHeldWorkspaceSourceFile(replacedAfterPublication,
+        workspace, root, 'source.bin', cas), /changed during capture/);
+      assert.equal(listings, 2);
+
+      const oldListing = held.listWorkspaceSourceDirectory(workspace, root, '');
+      let reads = 0;
+      const replacedBeforeOpening = {
+        listWorkspaceSourceDirectory: (...args: Parameters<HeldStateOwnerLock['listWorkspaceSourceDirectory']>) =>
+          ++reads === 1 ? oldListing : held.listWorkspaceSourceDirectory(...args),
+        openWorkspaceSourceFile: (...args: Parameters<HeldStateOwnerLock['openWorkspaceSourceFile']>) => {
+          renameSync(sourcePath, path.join(workspace, 'second-displaced.bin'));
+          writeFileSync(sourcePath, 'second replacement');
+          return held.openWorkspaceSourceFile(...args);
+        }
+      } as HeldStateOwnerLock;
+      await assert.rejects(captureHeldWorkspaceSourceFile(replacedBeforeOpening,
+        workspace, root, 'source.bin', cas), /changed before its held read/);
+      assert.equal(reads, 1);
     } finally {
       held.close();
       cas.close();

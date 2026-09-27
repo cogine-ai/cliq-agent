@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto';
 
+import type { WorkspaceEntry } from '../kernel/types.js';
 import type { HeldCasRoot } from '../runtime-bundle/native-package-reader.js';
 import { publishVerifiedChunkStreamToCas } from '../runtime-bundle/native-package-reader.js';
 import type { PublishedArtifact } from './artifacts.js';
 import { KernelStorageError } from './errors.js';
-import type { HeldWorkspaceSourceFile } from './native-owner.js';
+import type {
+  DescriptorIdentity, HeldStateOwnerLock, HeldWorkspaceSourceFile, WorkspaceSourceDirectoryEntry
+} from './native-owner.js';
 
 const CHUNK_BYTES = 1024 * 1024;
 
@@ -48,4 +51,80 @@ export async function publishHeldWorkspaceSourceBlob(file: HeldWorkspaceSourceFi
   file.assertStable();
   return { ref, byteLength: file.size, mediaType: 'application/octet-stream',
     schemaKind: 'cliq-workspace-file-v1' };
+}
+
+export type CapturedWorkspaceSourceFile = Readonly<{
+  entry: Extract<WorkspaceEntry, { kind: 'file' }>;
+  artifact: PublishedArtifact;
+  identity: DescriptorIdentity;
+  linkCount: number;
+}>;
+
+function sameIdentity(left: DescriptorIdentity, right: DescriptorIdentity): boolean {
+  return left.deviceId === right.deviceId && left.fileId === right.fileId &&
+    left.ownerUid === right.ownerUid;
+}
+
+function listedFile(
+  filesystem: HeldStateOwnerLock,
+  workspacePath: string,
+  root: DescriptorIdentity,
+  relativePath: string
+): WorkspaceSourceDirectoryEntry {
+  const separator = relativePath.lastIndexOf('/');
+  const parent = separator === -1 ? '' : relativePath.slice(0, separator);
+  const name = relativePath.slice(separator + 1);
+  const matches = filesystem.listWorkspaceSourceDirectory(workspacePath, root, parent)
+    .filter((item) => item.name === name);
+  if (matches.length !== 1 || matches[0]?.kind !== 'file' ||
+      !Number.isSafeInteger(matches[0].size) || matches[0].size! < 0) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      `workspace source file ${relativePath} is absent, ambiguous or not regular`);
+  }
+  return matches[0];
+}
+
+function assertSameObservation(
+  observed: WorkspaceSourceDirectoryEntry,
+  expected: WorkspaceSourceDirectoryEntry,
+  relativePath: string
+): void {
+  if (observed.kind !== 'file' || observed.mode !== expected.mode ||
+      observed.size !== expected.size || observed.linkCount !== expected.linkCount ||
+      !sameIdentity(observed.identity, expected.identity)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      `workspace source file ${relativePath} changed during capture`);
+  }
+}
+
+/** Bind a CAS blob to the literal directory entry that will appear in the
+ * captured tree. The caller must repeat a live tree check inside Run admission;
+ * CAS publication by itself does not authorize or commit a source path. */
+export async function captureHeldWorkspaceSourceFile(
+  filesystem: HeldStateOwnerLock,
+  workspacePath: string,
+  root: DescriptorIdentity,
+  relativePath: string,
+  cas: HeldCasRoot
+): Promise<CapturedWorkspaceSourceFile> {
+  const before = listedFile(filesystem, workspacePath, root, relativePath);
+  const file = filesystem.openWorkspaceSourceFile(workspacePath, root, relativePath);
+  try {
+    if (!sameIdentity(before.identity, file.identity) || before.mode !== file.mode ||
+        before.size !== file.size || before.linkCount !== file.linkCount) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH',
+        `workspace source file ${relativePath} changed before its held read`);
+    }
+    const artifact = await publishHeldWorkspaceSourceBlob(file, cas);
+    const after = listedFile(filesystem, workspacePath, root, relativePath);
+    assertSameObservation(after, before, relativePath);
+    file.assertStable();
+    return {
+      entry: { path: relativePath, kind: 'file', mode: file.mode & 0o111 ? 0o755 : 0o644,
+        size: file.size, blobRef: artifact.ref },
+      artifact, identity: file.identity, linkCount: file.linkCount
+    };
+  } finally {
+    file.close();
+  }
 }
