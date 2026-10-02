@@ -5,11 +5,13 @@ import { sha256Bytes } from '../../kernel/identity.js';
 import type { RunAssemblyV1, ToolContractManifestV1 } from '../../kernel/types.js';
 import { policyProfile, type RuntimeBundleManifest } from '../../policy/runtime-authority.js';
 import { CONTROL_LISTENER_ENTRY_ID, CONTROL_LISTENER_RELATIVE_PATH } from '../../control/native-listener.js';
+import { PACKAGE_READER_NATIVE_ENTRY_ID, PACKAGE_READER_NATIVE_RELATIVE_PATH } from '../../runtime-bundle/native-package-reader.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_PATH, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../native-owner.js';
 
 let supervisorImage: Promise<{ digest: string; byteCount: number }> | undefined;
 let nativeImage: Promise<{ digest: string; byteCount: number }> | undefined;
 let controlImage: Promise<{ digest: string; byteCount: number }> | undefined;
+let packageReaderImage: Promise<{ digest: string; byteCount: number }> | undefined;
 
 /** A real Ed25519 signature under an explicitly injected test root. Not a Cliq release/installation qualification. */
 export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContractManifestV1['entries']) {
@@ -17,9 +19,12 @@ export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContr
   nativeImage ??= readFile(STATE_OWNER_NATIVE_PATH).then((bytes) => ({ digest: sha256Bytes(bytes), byteCount: bytes.byteLength }));
   controlImage ??= readFile(new URL(`../../../dist/${CONTROL_LISTENER_RELATIVE_PATH}`, import.meta.url))
     .then((bytes) => ({ digest: sha256Bytes(bytes), byteCount: bytes.byteLength }));
+  packageReaderImage ??= readFile(new URL(`../../../dist/${PACKAGE_READER_NATIVE_RELATIVE_PATH}`, import.meta.url))
+    .then((bytes) => ({ digest: sha256Bytes(bytes), byteCount: bytes.byteLength }));
   const image = await supervisorImage;
   const helper = await nativeImage;
   const control = await controlImage;
+  const packageReader = await packageReaderImage;
   const keys = generateKeyPairSync('ed25519');
   const profile = policyProfile();
   const profileRef = canonicalSha256(profile);
@@ -31,6 +36,7 @@ export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContr
     entries: [entry('supervisor-test', 'supervisor', true, image.digest, '1', image.byteCount), entry(assembly.runtime.workerExecutableId, 'worker', true, assembly.runtime.workerExecutableDigest),
       { ...entry(STATE_OWNER_NATIVE_ENTRY_ID, 'platform_helper', true, helper.digest, '1', helper.byteCount), relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH },
       { ...entry(CONTROL_LISTENER_ENTRY_ID, 'platform_helper', true, control.digest, '1', control.byteCount), relativePath: CONTROL_LISTENER_RELATIVE_PATH },
+      { ...entry(PACKAGE_READER_NATIVE_ENTRY_ID, 'platform_helper', true, packageReader.digest, '1', packageReader.byteCount), relativePath: PACKAGE_READER_NATIVE_RELATIVE_PATH },
       entry(assembly.provider.adapter.adapterId, 'provider_adapter', true, assembly.provider.adapter.codeDigest, assembly.provider.adapter.version),
       entry('policy-v1', 'policy_engine', false, profileRef, '1', canonicalJsonBytes(profile).byteLength),
       entry('default_https_trust_store', 'trust_store', false), entry('root-profile-test', 'sandbox_root_profile', false),

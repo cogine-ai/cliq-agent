@@ -435,12 +435,79 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
   the final admission-transaction live recheck remain open. The local build,
   focused source-file suite, and 1716-test full suite pass on macOS.
 
+## 2026-10-03: complete non-Git source capture and transaction recheck
+
+I1 is still **not passed**. This increment connects a real complete source tree
+to the existing StateStore reducer; its admission tests still use explicit M2
+assembly/policy/sandbox fixtures, not qualified worker execution.
+
+- `StateStore.captureNonGitRunSource` requires a signed StateOwner and the exact
+  selected package-reader helper. It binds the live Session, principal, context
+  cursor and admission key, snapshots trusted policy before asynchronous work,
+  and freezes admission request bytes. Capture and already-started admissions
+  drain before StateOwner release. No ambient helper fallback or public control
+  method was added.
+- The producer enumerates a complete, bounded source inventory before reading
+  ordinary file bytes. It retains binary contents, empty directories, safe
+  in-root links, source hardlinks and normalized executable modes. Non-Git
+  captures retain the canonical empty ignore graph and create no Git metadata.
+  Tree entries and every graph artifact publish through the held native CAS
+  helper; inventory listings are per tree pass rather than twice per file.
+  Native literal-path/stability checks still run per held read and need the I4
+  large-directory/latency qualification.
+- Cliq state, Supervisor-supplied known credential roots, declared ephemeral
+  subtrees and requested exact exclusions are pruned before content reads.
+  Credential/state boundary matching conservatively catches case aliases;
+  request selectors remain byte-exact. Link chains reaching a hard-excluded
+  root, unsafe links, special files and case collisions fail before file
+  publication. Retained-tree decoders now reject rehashed case aliases too.
+- Native source observations expose an exact mtime/ctime token only in memory;
+  a helper omitting this evidence fails closed instead of comparing two absent
+  tokens as equal. This token is not a persisted identity or authorization.
+  A process-local capture
+  handle cannot be reconstructed from JSON, transferred to another StateOwner
+  or reused for a different admission. `admitCapturedRun` requires this handle;
+  the old artifact-only reducer remains an internal M2 fixture seam.
+- The final owner-gated SQLite transaction enumerates the selected path set,
+  completely rehashes each ordinary file, verifies links and enumerates again.
+  Additions, deletions, same-size rewrites (including restored mtime), mode
+  changes and descriptor replacements fail the admission. A write to an
+  earlier file while a later file is read is caught by the final observation
+  pass. No Run, initial Checkpoint or event is committed on drift.
+- Successful admission retains immutable source bytes across workspace edits
+  and signed-owner restart. Authenticated idempotent replay returns the first
+  committed Run before consulting live capture evidence, including after a
+  new StateOwner takes over.
+- Linux source descendants now use `openat2` with `RESOLVE_NO_XDEV` and
+  no-symlink resolution. `st_dev` alone cannot identify same-filesystem bind
+  mounts; the [Linux syscall contract](https://man7.org/linux/man-pages/man2/openat2.2.html)
+  explicitly covers bind mounts. Missing/denied syscall support fails closed.
+  CI additionally executes real directory and same-inode file bind-mount tests
+  in a disposable private mount namespace. Local macOS cannot establish that
+  Linux qualification.
+
+Capture's required Supervisor-selected `maxEntries`/`maxBytes` inspection
+limits are separate from the RFC changed-result ceilings. Exceeding either
+rejects capture without truncation. The producer currently supports default
+non-Git source and exclusions; explicit include authorization and Git
+HEAD/object/config closure still need integration. A requested directory
+`entry` exclusion is rejected pending its structural-parent design, rather
+than being silently widened to `subtree` or retained in the manifest.
+
+Local verification: `npm run build` passed; the 43-test focused source/admission
+suite passed 40 and skipped 3 Linux-specific tests; the final `npm test` suite
+passed 1,743 of 1,746 with those same 3 skips and no failures. All 9 design-guard
+tests and the six-package/RFC copy contract check passed. The native Linux
+bind-mount qualification and four OS/Node matrix jobs are required on the
+exact pushed commit; these macOS results do not establish those gates.
+
 ## Next integration order
 
 1. Qualify the native control endpoint/connection lifetime and approved live
    authentication contract on Linux and macOS CI; extend the closed public
    methods only as their actual admission/recovery paths become ready.
-2. Complete WP02 Supervisor-generated assembly and WP01 source capture, then
+2. Complete WP02 Supervisor-generated assembly and WP01 Git/source-selector
+   capture integration, then
    WP03 containment/private-generation evidence and WP06 installed bootstrap
    for the I1 restart scenario. Use actual StateStore throughout.
 3. Implement WP05 candidate, verifier receipt, result and delivery transitions
@@ -450,5 +517,6 @@ source presence, a test fixture, or an unsigned/uninstalled build alone.
    and release campaigns. Cut over only after every mandatory gate passes.
 
 The early `cliq/durable-kernel-foundation` branch in the main repository remains
-untouched. No signing/notarization submission, paid model call, production
-migration, public release or remote merge has been performed by this work.
+untouched. The earlier macOS signing/notarization evidence above qualifies the
+execution probe. Production migration and public release await the mandatory
+I1–I4 integration gates.

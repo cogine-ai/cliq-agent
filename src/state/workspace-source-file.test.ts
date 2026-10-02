@@ -218,7 +218,8 @@ test('source mutation before CAS publication aborts its verified stage without a
       const file = held.openWorkspaceSourceFile(workspace, root, 'source.bin');
       let stableChecks = 0;
       const changing: HeldWorkspaceSourceFile = {
-        size: file.size, mode: file.mode, linkCount: file.linkCount, identity: file.identity,
+        size: file.size, mode: file.mode, linkCount: file.linkCount,
+        changeToken: file.changeToken, identity: file.identity,
         readChunk: (size) => file.readChunk(size),
         rewind: () => file.rewind(),
         assertStable: () => {

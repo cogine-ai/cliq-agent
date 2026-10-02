@@ -42,6 +42,7 @@ import type {
   WorkspaceStateManifest
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
+import { sourcePathCollisionKey } from './source-path-collision.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -1082,6 +1083,7 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
   let priorPath: string | undefined;
   let measuredBytes = 0;
   const directories = new Set<string>();
+  const spellings = new Set<string>();
   const symlinks = new Map<string, string>();
   for (const [index, candidate] of value.entries.entries()) {
     if (!isRecord(candidate)) {
@@ -1095,14 +1097,20 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} has an invalid path`);
     }
     if (normalizedPath !== entryPath || entryPath.startsWith('/') || entryPath.includes('\\') ||
+        Buffer.byteLength(entryPath, 'utf8') > 4096 ||
         entryPath.split('/').some((component) => component === '' || component === '.' ||
-          component === '..' || component.toLowerCase() === '.git')) {
+          component === '..' || component.toLowerCase() === '.git' || Buffer.byteLength(component, 'utf8') > 255)) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} has an invalid path`);
     }
     if (priorPath !== undefined && Buffer.compare(Buffer.from(priorPath), Buffer.from(entryPath)) >= 0) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry paths must be byte-sorted and unique');
     }
     priorPath = entryPath;
+    const spelling = sourcePathCollisionKey(entryPath);
+    if (spellings.has(spelling)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry paths have a case collision');
+    }
+    spellings.add(spelling);
     const parentEnd = entryPath.lastIndexOf('/');
     if (parentEnd !== -1 && !directories.has(entryPath.slice(0, parentEnd))) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${entryPath} has no preceding directory parent`);

@@ -32,6 +32,7 @@ import type {
   RecoveryClosureV1,
   Run,
   Session,
+  WorkspaceIdentityV1,
   StateLockIdentityV1,
   StateOwnerAcquisitionEvidenceV1,
   StateOwnerRecordV1,
@@ -55,7 +56,8 @@ import {
   decodeStateLockIdentity,
   decodeStateOwnerAcquisitionEvidence,
   decodeStateOwnerTransitionEvidence,
-  decodeStateRootIdentity
+  decodeStateRootIdentity,
+  decodeWorkspaceIdentity
 } from './decoders.js';
 import { admitRun, type AdmitRunInput, type AdmitRunResult } from './reducers/admission.js';
 import { loadAgentRun, type LoadAgentRunInput } from './reducers/agent.js';
@@ -99,7 +101,7 @@ import {
 } from './reducers/workspace-transition.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { beginWorkerRecovery, type BeginWorkerRecoveryInput } from './reducers/worker-recovery.js';
-import { readRun, readSession } from './rows.js';
+import { readRun, readSession, readSessionPrincipalId } from './rows.js';
 import { applyKernelSchema, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
 import { openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import {
@@ -116,6 +118,10 @@ import {
 } from './state-owner.js';
 import { hostPlatform } from './workspace-identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
+import {
+  captureHeldNonGitWorkspaceSourceTree, type CapturedWorkspaceSourceTree,
+  type NonGitSourceCapturePolicy, type SourceCaptureBinding
+} from './workspace-source-tree.js';
 import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 
 /** Trusted Supervisor bootstrap input, never loaded from Run/workspace configuration. Required again on signed-owner reopen. */
@@ -384,6 +390,8 @@ export class StateStore {
   private controlServer: LocalControlServer | undefined;
   private startingControl: Promise<LocalControlServer> | undefined;
   private importingRuntimeBundle: Promise<string> | undefined;
+  private capturingSource: Promise<CapturedWorkspaceSourceTree> | undefined;
+  private readonly sourceAdmissions = new Set<Promise<AdmitRunResult>>();
 
   private constructor(
     readonly stateRoot: string,
@@ -494,6 +502,77 @@ export class StateStore {
 
   admitRun(input: AdmitRunInput): Promise<AdmitRunResult> {
     return admitRun(this.driver, this.artifacts, this.owner, input);
+  }
+
+  /** Trusted Supervisor seam. Artifact-only M2 fixtures continue to use
+   * admitRun; this path always requires the owner's live capture provenance. */
+  admitCapturedRun(input: AdmitRunInput, capture: CapturedWorkspaceSourceTree): Promise<AdmitRunResult> {
+    if (this.closed || this.closing || this.released) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'StateStore is closing');
+    }
+    if (!capture) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'live source capture is required');
+    }
+    const operation = admitRun(this.driver, this.artifacts, this.owner, immutableSnapshot(input), capture);
+    this.sourceAdmissions.add(operation);
+    return operation.finally(() => { this.sourceAdmissions.delete(operation); });
+  }
+
+  /** Inspection only; no RuntimeBundle import, worker or Run is created. The
+   * eventual run.submit coordinator supplies its trusted capture policy after
+   * workspace/tool authorization and before strong-backend admission. */
+  captureNonGitRunSource(input: SourceCaptureBinding & {
+    workspacePath: string; policy: NonGitSourceCapturePolicy;
+  }): Promise<CapturedWorkspaceSourceTree> {
+    if (this.closed || this.closing || this.released) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'StateStore is closing');
+    }
+    if (this.capturingSource) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'source capture is already in progress');
+    }
+    if (!this.runtimeBundle) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'source capture requires a signed StateOwner');
+    }
+    input = immutableSnapshot(input);
+    const bundleRef = canonicalSha256(this.runtimeBundle);
+    const helper = this.runtimeBundle.entries.find((entry) => entry.entryId === PACKAGE_READER_NATIVE_ENTRY_ID);
+    if (!helper || helper.role !== 'platform_helper' || helper.version !== '1' || !helper.executable ||
+        helper.relativePath !== PACKAGE_READER_NATIVE_RELATIVE_PATH) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'signed RuntimeBundle has no matching source CAS helper');
+    }
+    const operation = (async () => {
+      const owner = assertActiveStateOwner(this.driver, this.owner);
+      if (owner.runtimeBundleRef !== bundleRef) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner does not own the selected RuntimeBundle');
+      }
+      const session = readSession(this.driver, input.sessionId);
+      if (readSessionPrincipalId(this.driver, session.id) !== input.principalId ||
+          session.contextRevision !== input.expectedContextRevision) {
+        throw new KernelStorageError('INVALID_REQUEST', 'source capture caller or Session cursor differs');
+      }
+      const workspace = decodeWorkspaceIdentity(await this.artifacts.readCanonical(session.workspaceIdentityRef));
+      if (workspace.kind !== 'live' || workspace.canonicalRootPath !== input.workspacePath) {
+        throw new KernelStorageError('INVALID_REQUEST', 'source capture requires the exact live Session root');
+      }
+      const binding = await loadNativePackageReader(helper.digest, helper.byteCount);
+      if (assertActiveStateOwner(this.driver, this.owner).runtimeBundleRef !== bundleRef) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner changed before source capture');
+      }
+      const cas = openNativeCasRoot(binding, path.join(this.stateRoot, KERNEL_CAS_DIRECTORY));
+      try {
+        const capture = await captureHeldNonGitWorkspaceSourceTree({ filesystem: this.owner.filesystem,
+          cas, workspace: workspace as Extract<WorkspaceIdentityV1, { kind: 'live' }>, stateRoot: this.stateRoot,
+          binding: { principalId: input.principalId, sessionId: input.sessionId,
+            expectedContextRevision: input.expectedContextRevision, admissionKey: input.admissionKey },
+          policy: input.policy });
+        assertActiveStateOwner(this.driver, this.owner);
+        return capture;
+      } finally { cas.close(); }
+    })();
+    this.capturingSource = operation;
+    return operation.finally(() => {
+      if (this.capturingSource === operation) this.capturingSource = undefined;
+    });
   }
 
   /** Import the owner's exact signed package into unselected CAS objects while holding StateOwner. */
@@ -672,8 +751,10 @@ export class StateStore {
     if (this.closing !== undefined) return this.closing;
     const attempt = (async () => {
       await this.importingRuntimeBundle?.catch(() => undefined);
+      await this.capturingSource?.catch(() => undefined);
       const starting = await this.startingControl?.catch(() => undefined);
       await (this.controlServer ?? starting)?.close();
+      await Promise.all([...this.sourceAdmissions].map((operation) => operation.catch(() => undefined)));
       if (!this.released) {
         await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
         this.released = true;

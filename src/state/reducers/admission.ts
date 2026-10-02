@@ -67,6 +67,9 @@ import { assertCurrentLiveWorkspaceIdentity, recaptureLiveWorkspaceIdentity } fr
 import { validateWorkspaceEntryBlobs } from '../workspace-entry-blobs.js';
 import { assertLiveFrozenIgnoreSources } from '../workspace-source-ignore.js';
 import { assertLiveSourceGitIndex } from '../workspace-source-index.js';
+import {
+  assertCapturedWorkspaceSourceTree, validateCapturedWorkspaceSourceTreeBinding, type CapturedWorkspaceSourceTree
+} from '../workspace-source-tree.js';
 
 export type AdmitRunInput = {
   principalId: string;
@@ -268,7 +271,8 @@ export async function admitRun(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
-  input: AdmitRunInput
+  input: AdmitRunInput,
+  sourceCapture?: CapturedWorkspaceSourceTree
 ): Promise<AdmitRunResult> {
   assertRequestId(input.requestId);
   assertAdmissionKey(input.admissionKey);
@@ -401,6 +405,13 @@ export async function admitRun(
   });
   assertLiveSourceIncludeEvidence(owner.filesystem, workspacePath,
     workspaceIdentity.rootIdentity, sourceEntries, sourceIncludesClosure.evidences);
+  const captureBinding = { principalId: input.principalId, sessionId: input.sessionId,
+    expectedContextRevision: input.expectedContextRevision, admissionKey: input.admissionKey,
+    workspacePath, workspaceIdentityDigest: workspaceIdentity.identityDigest,
+    sourceProjectionRef: input.sourceProjectionRef, frozenIgnoreRulesRef: input.frozenIgnoreRulesRef,
+    baseWorkspaceManifestRef: input.baseWorkspaceManifestRef };
+  const sourceCaptureMetadata = sourceCapture === undefined ? [] :
+    validateCapturedWorkspaceSourceTreeBinding(sourceCapture, owner.filesystem, captureBinding);
 
   const verifierSpec = decodeVerifierSpec(await artifacts.readCanonical(input.verifierSpecRef));
   const requiredVerifiers = verifierSpec.verifiers.filter((entry) => entry.gate === 'required');
@@ -446,7 +457,7 @@ export async function admitRun(
   };
   objective.objectiveDigest = digestOmitting(objective, 'objectiveDigest');
   const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata,
-    ...sourceIncludesClosure.metadata];
+    ...sourceIncludesClosure.metadata, ...sourceCaptureMetadata];
   const objectiveArtifact = await artifacts.publishCanonical(objective, 'cliq-run-objective-v1');
   published.push(objectiveArtifact);
   decodeRunObjective(objective);
@@ -653,6 +664,9 @@ export async function admitRun(
       workspaceIdentity.rootIdentity, repositoryIdentity, frozenIgnore, sourceEntries);
     assertLiveSourceIncludeEvidence(owner.filesystem, workspacePath,
       workspaceIdentity.rootIdentity, sourceEntries, sourceIncludesClosure.evidences);
+    if (sourceCapture !== undefined) {
+      assertCapturedWorkspaceSourceTree(sourceCapture, owner.filesystem, captureBinding);
+    }
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
 
     connection

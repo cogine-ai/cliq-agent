@@ -26,6 +26,8 @@ export type HeldWorkspaceSourceFile = Readonly<{
   size: number;
   mode: number;
   linkCount: number;
+  /** Exact native mtime/ctime tuple. Live drift evidence only, never a CAS identity. */
+  changeToken: string;
   identity: DescriptorIdentity;
   readChunk(size: number): Buffer;
   assertStable(): void;
@@ -38,6 +40,7 @@ export type WorkspaceSourceDirectoryEntry = Readonly<{
   kind: 'directory' | 'file' | 'symlink';
   mode: number;
   linkCount: number;
+  changeToken: string;
   size?: number;
   identity: DescriptorIdentity;
 }>;
@@ -45,6 +48,7 @@ export type WorkspaceSourceSymlink = Readonly<{
   target: string;
   mode: number;
   linkCount: number;
+  changeToken: string;
   identity: DescriptorIdentity;
 }>;
 /** A physical move observation only: no containment death, tree or SQLite authority. */

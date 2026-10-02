@@ -10,6 +10,7 @@ import type {
 } from './native-owner.js';
 
 const CHUNK_BYTES = 1024 * 1024;
+const SOURCE_CHANGE_TOKEN = /^-?(?:0|[1-9][0-9]{0,18}):[0-9]{9}:-?(?:0|[1-9][0-9]{0,18}):[0-9]{9}$/;
 
 function streamCompletePass(file: HeldWorkspaceSourceFile, consume: (chunk: Buffer) => void): string {
   const hash = createHash('sha256');
@@ -60,7 +61,7 @@ export type CapturedWorkspaceSourceFile = Readonly<{
   linkCount: number;
 }>;
 
-function sameIdentity(left: DescriptorIdentity, right: DescriptorIdentity): boolean {
+export function sameSourceIdentity(left: DescriptorIdentity, right: DescriptorIdentity): boolean {
   return left.deviceId === right.deviceId && left.fileId === right.fileId &&
     left.ownerUid === right.ownerUid;
 }
@@ -84,14 +85,20 @@ function listedFile(
   return matches[0];
 }
 
-function assertSameObservation(
-  observed: WorkspaceSourceDirectoryEntry,
+export function assertSameSourceObservation(
+  observed: Pick<WorkspaceSourceDirectoryEntry, 'mode' | 'size' | 'linkCount' | 'changeToken' | 'identity'>,
   expected: WorkspaceSourceDirectoryEntry,
   relativePath: string
 ): void {
-  if (observed.kind !== 'file' || observed.mode !== expected.mode ||
+  if (typeof observed.changeToken !== 'string' || typeof expected.changeToken !== 'string' ||
+      !SOURCE_CHANGE_TOKEN.test(observed.changeToken) || !SOURCE_CHANGE_TOKEN.test(expected.changeToken)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      `workspace source entry ${relativePath} has no valid native change observation`);
+  }
+  if (observed.mode !== expected.mode ||
       observed.size !== expected.size || observed.linkCount !== expected.linkCount ||
-      !sameIdentity(observed.identity, expected.identity)) {
+      observed.changeToken !== expected.changeToken ||
+      !sameSourceIdentity(observed.identity, expected.identity)) {
     throw new KernelStorageError('ARTIFACT_MISMATCH',
       `workspace source file ${relativePath} changed during capture`);
   }
@@ -108,23 +115,72 @@ export async function captureHeldWorkspaceSourceFile(
   cas: HeldCasRoot
 ): Promise<CapturedWorkspaceSourceFile> {
   const before = listedFile(filesystem, workspacePath, root, relativePath);
+  const captured = await captureObservedWorkspaceSourceFile(filesystem, workspacePath,
+    root, relativePath, before, cas);
+  const after = listedFile(filesystem, workspacePath, root, relativePath);
+  assertSameSourceObservation(after, before, relativePath);
+  return captured;
+}
+
+/** Tree capture already enumerated the parent. Avoid rescanning a wide
+ * directory twice per file; the tree producer rechecks its complete inventory. */
+export async function captureObservedWorkspaceSourceFile(
+  filesystem: HeldStateOwnerLock,
+  workspacePath: string,
+  root: DescriptorIdentity,
+  relativePath: string,
+  before: WorkspaceSourceDirectoryEntry,
+  cas: HeldCasRoot
+): Promise<CapturedWorkspaceSourceFile> {
+  if (before.kind !== 'file') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'source observation is not a regular file');
+  }
   const file = filesystem.openWorkspaceSourceFile(workspacePath, root, relativePath);
   try {
-    if (!sameIdentity(before.identity, file.identity) || before.mode !== file.mode ||
-        before.size !== file.size || before.linkCount !== file.linkCount) {
+    try { assertSameSourceObservation(file, before, relativePath); } catch {
       throw new KernelStorageError('ARTIFACT_MISMATCH',
         `workspace source file ${relativePath} changed before its held read`);
     }
     const artifact = await publishHeldWorkspaceSourceBlob(file, cas);
-    const after = listedFile(filesystem, workspacePath, root, relativePath);
-    assertSameObservation(after, before, relativePath);
     file.assertStable();
     return {
       entry: { path: relativePath, kind: 'file', mode: file.mode & 0o111 ? 0o755 : 0o644,
         size: file.size, blobRef: artifact.ref },
       artifact, identity: file.identity, linkCount: file.linkCount
     };
+  } catch (error) {
+    if (error instanceof KernelStorageError) throw error;
+    try { filesystem.assertHeld(); } catch {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner changed during source capture', { cause: error });
+    }
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      `workspace source file ${relativePath} capture failed: ${(error as Error).message}`, { cause: error });
   } finally {
     file.close();
   }
+}
+
+/** Synchronous, complete content rehash for the final admission transaction. */
+export function assertLiveWorkspaceSourceFile(
+  filesystem: HeldStateOwnerLock,
+  workspacePath: string,
+  root: DescriptorIdentity,
+  entry: Extract<WorkspaceEntry, { kind: 'file' }>,
+  observation: WorkspaceSourceDirectoryEntry
+): void {
+  const file = filesystem.openWorkspaceSourceFile(workspacePath, root, entry.path);
+  try {
+    assertSameSourceObservation(file, observation, entry.path);
+    if (streamCompletePass(file, () => {}) !== entry.blobRef) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace source file ${entry.path} bytes changed`);
+    }
+    file.assertStable();
+  } catch (error) {
+    if (error instanceof KernelStorageError) throw error;
+    try { filesystem.assertHeld(); } catch {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner changed during source validation', { cause: error });
+    }
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      `workspace source file ${entry.path} validation failed: ${(error as Error).message}`, { cause: error });
+  } finally { file.close(); }
 }

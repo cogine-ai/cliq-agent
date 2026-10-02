@@ -16,6 +16,8 @@
 #include <libproc.h>
 #elif defined(__linux__)
 #include <linux/magic.h>
+#include <linux/openat2.h>
+#include <sys/syscall.h>
 #include <sys/vfs.h>
 #endif
 
@@ -51,6 +53,35 @@ static napi_value read_workspace_git_info_exclude(napi_env env, napi_callback_in
 static napi_value list_workspace_source_directory(napi_env env, napi_callback_info info);
 static napi_value read_workspace_source_symlink(napi_env env, napi_callback_info info);
 static int literal_child_present(int parent, const char *literal);
+
+/* st_dev does not distinguish a same-filesystem bind mount. Every source
+ * descendant on Linux is resolved with an OS-enforced mount boundary; an old
+ * kernel or denied syscall fails closed rather than falling back to openat. */
+static int open_source_child(int parent, const char *name, int flags) {
+#ifdef __linux__
+    const struct open_how how = { .flags = (unsigned long long)flags,
+        .resolve = RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH };
+    int result;
+    do { result = (int)syscall(SYS_openat2, parent, name, &how, sizeof(how)); } while (result < 0 && errno == EINTR);
+    return result;
+#else
+    return openat(parent, name, flags);
+#endif
+}
+
+static int source_child_observation(int parent, const char *name, struct stat *observed) {
+#ifdef __linux__
+    /* O_PATH|O_NOFOLLOW observes a symlink itself, with no target read. */
+    int fd = open_source_child(parent, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    int result = fstat(fd, observed), failure = errno;
+    close(fd);
+    errno = failure;
+    return result;
+#else
+    return fstatat(parent, name, observed, AT_SYMLINK_NOFOLLOW);
+#endif
+}
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
@@ -187,6 +218,23 @@ static int link_count_member(napi_env env, napi_value object, const struct stat 
         napi_create_double(env, (double)info->st_nlink, &value) != napi_ok ||
         napi_set_named_property(env, object, "linkCount", value) != napi_ok) return 0;
     return 1;
+}
+
+/* Keep nanosecond observations out of JS numbers and out of source manifests.
+ * This token detects live drift after a file descriptor has been closed. */
+static int change_token_member(napi_env env, napi_value object, const struct stat *info) {
+    char text[96];
+#ifdef __APPLE__
+    const struct timespec modified = info->st_mtimespec, changed = info->st_ctimespec;
+#else
+    const struct timespec modified = info->st_mtim, changed = info->st_ctim;
+#endif
+    int length = snprintf(text, sizeof(text), "%lld:%09ld:%lld:%09ld",
+        (long long)modified.tv_sec, modified.tv_nsec, (long long)changed.tv_sec, changed.tv_nsec);
+    napi_value value;
+    return length > 0 && (size_t)length < sizeof(text) &&
+        napi_create_string_utf8(env, text, (size_t)length, &value) == napi_ok &&
+        napi_set_named_property(env, object, "changeToken", value) == napi_ok;
 }
 
 static napi_value acquire_lock(napi_env env, napi_callback_info info) {
@@ -465,7 +513,7 @@ static napi_value inspect_workspace_identity(napi_env env, napi_callback_info in
     error = "workspace .git must be a literal same-user directory on the root device";
     literal_git = literal_child_present(root_fd, ".git");
     if (literal_git < 0) goto done;
-    git_fd = openat(root_fd, ".git", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    git_fd = open_source_child(root_fd, ".git", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (git_fd < 0) {
         if (errno != ENOENT || literal_git != 0) goto done;
     } else {
@@ -476,7 +524,7 @@ static napi_value inspect_workspace_identity(napi_env env, napi_callback_info in
         error = "workspace .git/config must be a stable same-user regular file of at most 1 MiB";
         literal_config = literal_child_present(git_fd, "config");
         if (literal_config < 0) goto done;
-        config_fd = openat(git_fd, "config", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        config_fd = open_source_child(git_fd, "config", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
         if (config_fd < 0) {
             if (errno != ENOENT || literal_config != 0) goto done;
         } else {
@@ -500,7 +548,7 @@ static napi_value inspect_workspace_identity(napi_env env, napi_callback_info in
             do { extra_count = read(config_fd, &extra, 1); } while (extra_count < 0 && errno == EINTR);
             if (extra_count != 0 || fstat(config_fd, &config_after) < 0 ||
                 !same_file_observation(&config_before, &config_after) ||
-                fstatat(git_fd, "config", &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+                source_child_observation(git_fd, "config", &named) < 0 ||
                 !same_file_observation(&config_before, &named)) goto done;
         }
     }
@@ -510,11 +558,11 @@ static napi_value inspect_workspace_identity(napi_env env, napi_callback_info in
         literal_child_present(root_fd, ".git") != has_git ||
         !lock_is_held(lock)) goto done;
     if (has_git) {
-        if (fstatat(root_fd, ".git", &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+        if (source_child_observation(root_fd, ".git", &named) < 0 ||
             !same_file_observation(&git, &named) ||
             literal_child_present(git_fd, "config") != has_config) goto done;
-        if (!has_config && (fstatat(git_fd, "config", &named, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT)) goto done;
-    } else if (fstatat(root_fd, ".git", &named, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) goto done;
+        if (!has_config && (source_child_observation(git_fd, "config", &named) == 0 || errno != ENOENT)) goto done;
+    } else if (source_child_observation(root_fd, ".git", &named) == 0 || errno != ENOENT) goto done;
     if (napi_create_object(env, &result) != napi_ok || !identity_member(env, result, "root", &root)) {
         result = NULL; goto done;
     }
@@ -575,7 +623,7 @@ static napi_value read_workspace_git_info_exclude(napi_env env, napi_callback_in
 #else
     if ((unsigned long long)root.st_dev != root_device) goto done;
 #endif
-    git_fd = openat(root_fd, ".git", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    git_fd = open_source_child(root_fd, ".git", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (git_fd < 0 || fstat(git_fd, &git) < 0 || !S_ISDIR(git.st_mode) ||
         git.st_uid != git_owner || git.st_dev != root.st_dev ||
         (unsigned long long)git.st_ino != git_inode) goto done;
@@ -586,7 +634,7 @@ static napi_value read_workspace_git_info_exclude(napi_env env, napi_callback_in
 #endif
     int literal_info = literal_child_present(git_fd, "info");
     if (literal_info < 0) goto done;
-    info_fd = openat(git_fd, "info", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    info_fd = open_source_child(git_fd, "info", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (info_fd < 0) {
         if (errno != ENOENT || literal_info != 0) goto done;
     } else {
@@ -596,7 +644,7 @@ static napi_value read_workspace_git_info_exclude(napi_env env, napi_callback_in
         has_info = 1;
         int literal_exclude = literal_child_present(info_fd, "exclude");
         if (literal_exclude < 0) goto done;
-        exclude_fd = openat(info_fd, "exclude", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+        exclude_fd = open_source_child(info_fd, "exclude", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
         if (exclude_fd < 0) {
             if (errno != ENOENT || literal_exclude != 0) goto done;
         } else {
@@ -620,7 +668,7 @@ static napi_value read_workspace_git_info_exclude(napi_env env, napi_callback_in
             do { extra_count = read(exclude_fd, &extra, 1); } while (extra_count < 0 && errno == EINTR);
             if (extra_count != 0 || fstat(exclude_fd, &exclude_after) < 0 ||
                 !same_file_observation(&exclude_before, &exclude_after) ||
-                fstatat(info_fd, "exclude", &observed, AT_SYMLINK_NOFOLLOW) < 0 ||
+                source_child_observation(info_fd, "exclude", &observed) < 0 ||
                 !same_file_observation(&exclude_before, &observed)) goto done;
         }
     }
@@ -628,21 +676,21 @@ static napi_value read_workspace_git_info_exclude(napi_env env, napi_callback_in
     if (reopened < 0 || fstat(reopened, &observed) < 0 ||
         !same_file_observation(&root, &observed) || fstat(root_fd, &observed) < 0 ||
         !same_file_observation(&root, &observed) || literal_child_present(root_fd, ".git") != 1 ||
-        fstatat(root_fd, ".git", &observed, AT_SYMLINK_NOFOLLOW) < 0 ||
+        source_child_observation(root_fd, ".git", &observed) < 0 ||
         !same_file_observation(&git, &observed) || fstat(git_fd, &observed) < 0 ||
         !same_file_observation(&git, &observed) ||
         literal_child_present(git_fd, "info") != has_info || !lock_is_held(lock)) goto done;
     if (has_info) {
-        if (fstatat(git_fd, "info", &observed, AT_SYMLINK_NOFOLLOW) < 0 ||
+        if (source_child_observation(git_fd, "info", &observed) < 0 ||
             !same_file_observation(&info_before, &observed) || fstat(info_fd, &observed) < 0 ||
             !same_file_observation(&info_before, &observed) ||
             literal_child_present(info_fd, "exclude") != has_exclude) goto done;
         if (has_exclude) {
-            if (fstatat(info_fd, "exclude", &observed, AT_SYMLINK_NOFOLLOW) < 0 ||
+            if (source_child_observation(info_fd, "exclude", &observed) < 0 ||
                 !same_file_observation(&exclude_before, &observed) || fstat(exclude_fd, &observed) < 0 ||
                 !same_file_observation(&exclude_before, &observed)) goto done;
-        } else if (fstatat(info_fd, "exclude", &observed, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) goto done;
-    } else if (fstatat(git_fd, "info", &observed, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) goto done;
+        } else if (source_child_observation(info_fd, "exclude", &observed) == 0 || errno != ENOENT) goto done;
+    } else if (source_child_observation(git_fd, "info", &observed) == 0 || errno != ENOENT) goto done;
     if (has_exclude) {
         if (napi_create_buffer_copy(env, (size_t)exclude_before.st_size, bytes, NULL, &result) != napi_ok) goto done;
     } else if (napi_get_null(env, &result) != napi_ok) goto done;
@@ -718,7 +766,7 @@ static int open_source_parent(int root_fd, const char *relative_path, const stru
         char component[NAME_MAX + 1];
         memcpy(component, part, size); component[size] = '\0';
         if (literal_child_present(parent, component) != 1) { close(parent); return -1; }
-        int next = openat(parent, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int next = open_source_child(parent, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         struct stat observed;
         if (next < 0 || fstat(next, &observed) < 0 || !S_ISDIR(observed.st_mode) ||
             observed.st_uid != root->st_uid || observed.st_dev != root->st_dev) {
@@ -759,7 +807,7 @@ static int source_file_stable(source_file *file, int require_complete) {
     leaf = leaf ? leaf + 1 : file->relative_path;
     return literal_child_present(file->parent_fd, leaf) == 1 &&
         fstat(file->file_fd, &current_file) == 0 &&
-        fstatat(file->parent_fd, leaf, &named_file, AT_SYMLINK_NOFOLLOW) == 0 &&
+        source_child_observation(file->parent_fd, leaf, &named_file) == 0 &&
         same_file_observation(&file->file, &current_file) &&
         same_file_observation(&file->file, &named_file) &&
         lock_is_held(file->lock);
@@ -896,7 +944,7 @@ static napi_value open_workspace_file(napi_env env, napi_callback_info info, int
         goto done;
     }
     if (literal_leaf != 1) goto done;
-    file->file_fd = openat(file->parent_fd, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    file->file_fd = open_source_child(file->parent_fd, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     if (file->file_fd < 0 || fstat(file->file_fd, &file->file) < 0 || !S_ISREG(file->file.st_mode) ||
         file->file.st_uid != owner || file->file.st_dev != file->root.st_dev ||
         (git_index && file->file.st_nlink != 1) ||
@@ -911,6 +959,7 @@ static napi_value open_workspace_file(napi_env env, napi_callback_info info, int
         napi_create_uint32(env, file->file.st_mode & 07777, &value) != napi_ok ||
         napi_set_named_property(env, result, "mode", value) != napi_ok ||
         !link_count_member(env, result, &file->file) ||
+        !change_token_member(env, result, &file->file) ||
         identity_member(env, result, "identity", &file->file) == 0) goto done;
     const napi_property_descriptor methods[] = {
         {"readChunk", NULL, source_file_read_chunk, NULL, NULL, NULL, napi_default, NULL},
@@ -947,7 +996,7 @@ static int open_source_directory(int root_fd, const char *relative_path, const s
         char component[NAME_MAX + 1];
         memcpy(component, part, size); component[size] = '\0';
         if (literal_child_present(directory, component) != 1) { close(directory); return -1; }
-        int next = openat(directory, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int next = open_source_child(directory, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         struct stat observed;
         if (next < 0 || fstat(next, &observed) < 0 || !S_ISDIR(observed.st_mode) ||
             observed.st_uid != root->st_uid || observed.st_dev != root->st_dev) {
@@ -1026,7 +1075,7 @@ static napi_value list_workspace_source_directory(napi_env env, napi_callback_in
         if (count >= 100000) goto done;
         napi_value name, item, kind, mode, size;
         if (!source_entry_name(env, entry->d_name, &name) ||
-            fstatat(directory_fd, entry->d_name, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
+            source_child_observation(directory_fd, entry->d_name, &named) < 0 ||
             named.st_uid != root.st_uid || named.st_dev != root.st_dev ||
             !(S_ISDIR(named.st_mode) || S_ISREG(named.st_mode) || S_ISLNK(named.st_mode)) ||
             napi_create_object(env, &item) != napi_ok ||
@@ -1037,6 +1086,7 @@ static napi_value list_workspace_source_directory(napi_env env, napi_callback_in
             napi_create_uint32(env, named.st_mode & 07777, &mode) != napi_ok ||
             napi_set_named_property(env, item, "mode", mode) != napi_ok ||
             !link_count_member(env, item, &named) ||
+            !change_token_member(env, item, &named) ||
             identity_member(env, item, "identity", &named) == 0) goto done;
         if (S_ISREG(named.st_mode)) {
             if (named.st_size < 0 || named.st_size > 9007199254740991LL ||
@@ -1111,7 +1161,7 @@ static napi_value read_workspace_source_symlink(napi_env env, napi_callback_info
     const char *leaf = strrchr(relative_path, '/');
     leaf = leaf ? leaf + 1 : relative_path;
     if (literal_child_present(parent_fd, leaf) != 1 ||
-        fstatat(parent_fd, leaf, &link_before, AT_SYMLINK_NOFOLLOW) < 0 ||
+        source_child_observation(parent_fd, leaf, &link_before) < 0 ||
         !S_ISLNK(link_before.st_mode) || link_before.st_uid != owner ||
         link_before.st_dev != root.st_dev || link_before.st_nlink != 1) goto done;
     ssize_t count = readlinkat(parent_fd, leaf, target, PATH_MAX);
@@ -1123,7 +1173,7 @@ static napi_value read_workspace_source_symlink(napi_env env, napi_callback_info
         roundtrip_length != (size_t)count ||
         napi_get_value_string_utf8(env, target_value, roundtrip, sizeof(roundtrip), &roundtrip_length) != napi_ok ||
         roundtrip_length != (size_t)count || memcmp(target, roundtrip, (size_t)count) != 0 ||
-        fstatat(parent_fd, leaf, &link_after, AT_SYMLINK_NOFOLLOW) < 0 ||
+        source_child_observation(parent_fd, leaf, &link_after) < 0 ||
         !same_file_observation(&link_before, &link_after) ||
         fstat(parent_fd, &named) < 0 || !same_file_observation(&parent, &named)) goto done;
     reopened = open_source_parent(root_fd, relative_path, &root, &named);
@@ -1137,6 +1187,7 @@ static napi_value read_workspace_source_symlink(napi_env env, napi_callback_info
         napi_create_uint32(env, link_before.st_mode & 07777, &mode) != napi_ok ||
         napi_set_named_property(env, result, "mode", mode) != napi_ok ||
         !link_count_member(env, result, &link_before) ||
+        !change_token_member(env, result, &link_before) ||
         !identity_member(env, result, "identity", &link_before) ||
         napi_object_freeze(env, result) != napi_ok) goto done;
     error = NULL;

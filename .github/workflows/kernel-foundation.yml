@@ -66,6 +66,22 @@ jobs:
           bwrap --version
           musl-gcc --version
 
+      - name: Qualify source mount boundaries in a disposable mount namespace
+        shell: bash
+        run: |
+          node scripts/kernel/build-state-owner-native.mjs
+          node scripts/kernel/build-package-reader-native.mjs
+          runner_uid=$(id -u)
+          runner_gid=$(id -g)
+          runner_home=$HOME
+          runner_path=$PATH
+          runner_node=$(command -v node)
+          sudo unshare --mount --propagation private \
+            /usr/bin/setpriv --reuid="$runner_uid" --regid="$runner_gid" --clear-groups \
+            /usr/bin/env HOME="$runner_home" PATH="$runner_path" CLIQ_TEST_SOURCE_BIND_MOUNTS=1 \
+            "$runner_node" --test --test-concurrency=1 --test-name-pattern='Linux source' \
+              --import tsx src/state/workspace-source-tree.test.ts
+
       - name: Build pinned Linux probe
         id: build
         shell: bash
