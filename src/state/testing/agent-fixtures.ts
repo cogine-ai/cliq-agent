@@ -1,6 +1,6 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { digestOmitting } from '../../kernel/identity.js';
-import type { ToolContractManifestV1, RunSpec } from '../../kernel/types.js';
+import type { ToolContractManifestV1, RunSpec, WorkspaceInstructionManifestV1, WorkspaceInstructionSourceManifestV1 } from '../../kernel/types.js';
 import type { ModelTextV1 } from '../../protocol/agent-ir.js';
 import { reseal, testFixture } from '../../model/testing/fixtures.js';
 import { priceTableDigest } from '../../model/pricing.js';
@@ -34,7 +34,7 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
   manifest.manifestDigest = digestOmitting(manifest, 'manifestDigest');
   const signed = options.mode === undefined ? undefined : await signedToolBundle(authority.assembly, manifest.entries);
   const credentials: string[] = [];
-  const fixture = await createActiveFixture(label, { budgets, runtimeAuthority: signed, credentialGrantRefs: credentials, assembly: async (store) => {
+  const fixture = await createActiveFixture(label, { budgets, runtimeAuthority: signed, credentialGrantRefs: credentials, assembly: async (store, identity, identityRef) => {
     const grant = await store.artifacts.publishCanonical({ format: 'cliq-offline-credential-fixture-v1' }, 'cliq-offline-credential-fixture-v1');
     credentials.push(grant.ref);
     authority.assembly.provider.credentialGrantRefs = credentials;
@@ -48,7 +48,15 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
     const text: ModelTextV1 = { schemaVersion: 1, format: 'cliq-model-text-v1', utf8: 'Use tools carefully.', byteCount: 20, textDigest: '' };
     text.textDigest = digestOmitting(text, 'textDigest');
     const system = await store.artifacts.publishCanonical(text, text.format);
-    const workspace = { schemaVersion: 1, format: 'cliq-workspace-instructions-v1', entries: [], manifestDigest: '' };
+    const instructionSource: WorkspaceInstructionSourceManifestV1 = { schemaVersion: 1,
+      format: 'cliq-workspace-instruction-source-v1', workspaceIdentityRef: identityRef,
+      workspaceIdentityDigest: identity.identityDigest, entries: [], capturedAt: sampleCanonicalNow(), sourceDigest: '' };
+    instructionSource.sourceDigest = digestOmitting(instructionSource, 'sourceDigest');
+    const sourceRoot = await store.artifacts.publishCanonical(instructionSource, instructionSource.format);
+    const workspace: WorkspaceInstructionManifestV1 = { schemaVersion: 1, format: 'cliq-workspace-instructions-v1',
+      workspaceIdentityDigest: identity.identityDigest, instructionSourceRef: sourceRoot.ref,
+      instructionSourceDigest: instructionSource.sourceDigest, rendering: 'cliq-all-scopes-labeled-instructions-v1',
+      entries: [], manifestDigest: '' };
     workspace.manifestDigest = digestOmitting(workspace, 'manifestDigest');
     const instructions = await store.artifacts.publishCanonical(workspace, workspace.format);
     Object.assign(authority.assembly.instructions, { systemPromptRef: system.ref, systemPromptDigest: text.textDigest,

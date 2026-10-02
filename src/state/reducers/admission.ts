@@ -16,6 +16,7 @@ import type {
   ControlResultV1,
   DirectUnverifiedConsentV1,
   Run,
+  RunAssemblyV1,
   RunEvent,
   RunFrontier,
   RunObjectiveV1,
@@ -46,6 +47,7 @@ import {
   decodeWorkspaceState
 } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
+import { readWorkspaceInstructionClosure } from '../workspace-instructions.js';
 import { validateFrozenIgnoreSourceBytes } from '../frozen-ignore-sources.js';
 import { validateGitSourceIndex } from '../git-index.js';
 import { assertLiveSourceIncludeEvidence, validateBuiltinSourceIncludes } from '../source-includes.js';
@@ -422,7 +424,22 @@ export async function admitRun(
     throw new KernelStorageError('INVALID_REQUEST', 'an empty required verifier set needs allowUnverified=true');
   }
 
-  await artifacts.readBytes(input.assemblyRef);
+  const assembly = await artifacts.readCanonical<RunAssemblyV1>(input.assemblyRef);
+  // M2 artifact-only fixtures are an internal seam; actual typed assemblies
+  // must retain the complete, independently captured declarative context.
+  let instructionClosure: Awaited<ReturnType<typeof readWorkspaceInstructionClosure>> | undefined;
+  if (assembly.format === 'cliq-run-assembly-v1') {
+    try {
+      instructionClosure = await readWorkspaceInstructionClosure(artifacts, {
+        manifestRef: assembly.instructions.workspaceInstructionsRef,
+        manifestDigest: assembly.instructions.workspaceInstructionsDigest
+      }, { workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentity, admittedAt: sampleCanonicalNow() });
+    } catch (error) {
+      if (error instanceof KernelStorageError) throw error;
+      throw new KernelStorageError('ARTIFACT_MISMATCH',
+        `Run workspace instruction closure is invalid: ${(error as Error).message}`, { cause: error });
+    }
+  }
   await artifacts.readBytes(input.policyRef);
   await artifacts.readBytes(input.sandboxProfileRef);
 
@@ -441,7 +458,8 @@ export async function admitRun(
     ] : []),
     ...(input.credentialGrantRefs ?? []).map((ref) =>
       artifacts.describe(ref, 'application/json', 'cliq-endpoint-credential-grant-binding-v1')
-    )
+    ),
+    ...(instructionClosure?.metadata ?? [])
   ]);
 
   const now = sampleCanonicalNow();

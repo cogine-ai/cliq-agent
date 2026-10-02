@@ -16,12 +16,12 @@ import { assertSameModelOperation, modelRetryState, type ModelRetryState } from 
 import { contextSourceDigest, planContextCompaction, replaceCompactedPrefix, validateContextItems, type ContextItem } from '../../runtime/context-compaction.js';
 import { loadInstructionText, projectNormalContext, readCanonicalArtifact, readModelContext, readModelTurnMaterial } from '../agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
-import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
+import { decodeContextManifest, decodeRunSpec, decodeWorkspaceIdentity } from '../decoders.js';
 import { KernelStorageError, ModelRetryPendingError, stateOperation } from '../errors.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from '../repositories/journal.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
-import { readCheckpoint, readRun, ZERO_BUDGET } from '../rows.js';
+import { readCheckpoint, readRun, readSession, ZERO_BUDGET } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import type { StateOwnerContext } from '../state-owner.js';
 import { prepareValidatedInvocation, readModelRetryHistory, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
@@ -168,7 +168,11 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     } } });
   if (!validated.ok) throw new TypeError(`${validated.code}: ${validated.reason}`);
   const { model } = validated;
-  const systemInstruction = await loadInstructionText(artifacts, assembly);
+  const session = readSession(driver, admittedRun.sessionId);
+  const workspaceIdentity = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
+  const systemInstruction = await loadInstructionText(artifacts, assembly, {
+    workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentity, admittedAt: admittedRun.createdAt
+  });
   const toolContracts = loadToolContracts(contracts);
   const { resolveToolInput } = toolContracts;
   const project = (run: Run, context: ContextManifest, contextRef: string) => projectNormalContext({

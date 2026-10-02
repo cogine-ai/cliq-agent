@@ -8,6 +8,7 @@ import type {
   RecoveryClosureV1,
   RunItemReferenceV1,
   RunSpec,
+  RunAssemblyV1,
   WorkerLaunch,
   WorkspaceEntryManifest,
   WorkspaceGenerationStateV1,
@@ -41,6 +42,7 @@ import { validateGitSourceIndex } from './git-index.js';
 import { validateBuiltinSourceIncludes } from './source-includes.js';
 import { validateWorkerRecoveryWait } from './worker-recovery.js';
 import { validateWorkspaceEntryBlobs } from './workspace-entry-blobs.js';
+import { readWorkspaceInstructionClosure } from './workspace-instructions.js';
 import { addBudget, decodeBudgetUsage, isZeroBudget } from './invariants.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
 import { readInvocationJournal } from './repositories/journal.js';
@@ -166,6 +168,18 @@ async function validateRunSpecArtifacts(
   if (workspace.kind !== 'live' || workspace.identityDigest !== source.workspaceIdentityDigest ||
       (source.git === undefined) !== (workspace.repositoryIdentityRef === undefined)) {
     recoveryFailure('RunSpec source is not bound to its live Session workspace');
+  }
+  const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+  if (assembly.format === 'cliq-run-assembly-v1') {
+    try {
+      await readWorkspaceInstructionClosure(artifacts, {
+        manifestRef: assembly.instructions.workspaceInstructionsRef,
+        manifestDigest: assembly.instructions.workspaceInstructionsDigest
+      }, { workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentity: workspace,
+        admittedAt: readRun(driver, runId).createdAt });
+    } catch (error) {
+      recoveryFailure(`RunSpec workspace instruction closure is invalid: ${(error as Error).message}`);
+    }
   }
   let indexSnapshot: GitIndexSnapshotV1 | undefined;
   if (source.git !== undefined && workspace.repositoryIdentityRef !== undefined) {

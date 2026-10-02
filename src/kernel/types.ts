@@ -1,5 +1,7 @@
 export type ArtifactRef = string;
 
+export type { WorkspaceInstructionManifestV1, WorkspaceInstructionSourceManifestV1 } from './instructions.js';
+
 export type {
   ToolContractManifestV1, ModelTurnItem, ToolBatchItem, ToolResultItem,
   ToolResultPayloadV1, ToolResultModelContentV1, RunContextCompactionPlan,

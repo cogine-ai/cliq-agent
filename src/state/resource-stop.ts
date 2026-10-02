@@ -89,7 +89,11 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
   }
   if (items.length !== allItems.length) throw new TypeError('resource model stop has an unexpected cancelled call');
   const context = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));
-  const systemInstruction = await loadInstructionText(artifacts, assembly);
+  const session = readSession(driver, run.sessionId);
+  const workspaceIdentity = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
+  const systemInstruction = await loadInstructionText(artifacts, assembly, {
+    workspaceIdentityRef: session.workspaceIdentityRef, workspaceIdentity, admittedAt: run.createdAt
+  });
   const tools = contracts.map((entry) => ({ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
     inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
   const project = (value: ContextManifest) => readModelContext({ artifacts, run, spec, assembly, context: value, systemInstruction, tools });

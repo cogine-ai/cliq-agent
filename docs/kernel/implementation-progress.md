@@ -493,6 +493,11 @@ non-Git source and exclusions; explicit include authorization and Git
 HEAD/object/config closure still need integration. A requested directory
 `entry` exclusion is rejected pending its structural-parent design, rather
 than being silently widened to `subtree` or retained in the manifest.
+Native directory enumeration currently validates every immediate child's
+owner/device/type before the TypeScript selector prunes it. A directly excluded
+special, foreign-owned or mounted entry can therefore reject capture too;
+filtered native enumeration still needs integration before public selectors
+are qualified. Excluding a safe parent subtree avoids traversing its contents.
 
 Local verification: `npm run build` passed; the 43-test focused source/admission
 suite passed 40 and skipped 3 Linux-specific tests; the final `npm test` suite
@@ -500,6 +505,73 @@ passed 1,743 of 1,746 with those same 3 skips and no failures. All 9 design-guar
 tests and the six-package/RFC copy contract check passed. The native Linux
 bind-mount qualification and four OS/Node matrix jobs are required on the
 exact pushed commit; these macOS results do not establish those gates.
+
+The exact `a41ef882f1b5efefb9bdc0a2394b55838d2bfc48` commit subsequently passed
+[all five CI jobs](https://github.com/cogine-ai/cliq-agent/actions/runs/37069357659).
+The Linux mount-namespace job executed both directory and same-inode file
+bind-mount tests: 2 passed, 0 failed and 0 skipped. The four Linux/macOS,
+Node 22.13/24 matrix jobs also passed; Node 24 additionally qualified the SEA
+fixture. These establish this increment's platform gates, not I1.
+
+## 2026-10-03: retained workspace instruction closure
+
+I1 is still **not passed**. The existing post-Trust model-context reader checked
+the instruction manifest digest and ordered texts but did not validate the
+RFC's separate raw source/descriptor history or bind that history to its actual
+Session. This increment closes that retained-data validation gap:
+
+- Added the exact RFC-owned `WorkspaceInstructionSourceManifestV1` and
+  `WorkspaceInstructionManifestV1` types. The common retained reader requires
+  the exact Session workspace ref/digest, closed source/manifest/entry shapes,
+  literal `AGENTS.md` paths, native identity bounds, same-owner/same-device
+  descriptor history, literal `0600|0644` mode and one link. It rejects more
+  than 64 files or 1 MiB of complete source bytes without truncation.
+- Source entries must be unique and byte-sorted. Rendering retains every
+  source entry exactly once in root-to-deep `(depth,path)` order, with the
+  exact source-entry digest and `appliesToSubtree=true`. Complete raw bytes
+  must already be NFC/LF UTF-8 without NUL; the retained `ModelTextV1` must be
+  byte-identical. Neither invalid text nor a rehashed graph is repaired.
+- CAS size verification precedes allocating raw/text bytes; graph reads have
+  bounds large enough for every legal path, including JSON escaping. The
+  loaded closure and projected entries are immutable snapshots.
+- Typed Run admission validates the closure before committing any Run or
+  control-request row and inserts its graph/text metadata in the same SQLite
+  transaction. Model loading, resource-stop prompt reproduction and recovery
+  all bind it to the same Session. Recovery reads only CAS and rejects a
+  missing transitive raw object after StateOwner restart.
+
+The focused seven-test suite includes 26 independently rehashed source or
+rendering substitutions, invalid raw text, exact limits, bounded reads,
+immutable all-scope projection, invalid-admission rollback and real store
+close/reopen. Descriptor records are explicitly offline test fixtures: this
+reader does not prove a native declarative-context scan or issue read/tool
+grants. The descriptor-held `AGENTS.md` producer, skill source/closure capture,
+complete trusted provider/assembly resolution, and final admission live checks
+remain integration work. Workspace instructions are separate from source
+selection; no source include or publication authority is inferred from them.
+
+### Dependency verification
+
+The resumed push exposed default-branch dependency alerts, and a fresh local
+audit also identified a transitive `fast-uri` advisory. The implementation
+branch now retains `ws@8.22.0`, `fast-uri@3.1.8`, `esbuild@0.28.1`, and
+`tsx@4.23.15` under compatible dependency ranges without overrides. The
+[ws advisory](https://github.com/websockets/ws/security/advisories/GHSA-96hv-2xvq-fx4p),
+[esbuild advisory](https://github.com/evanw/esbuild/security/advisories/GHSA-g7r4-m6w7-qqqr),
+and [fast-uri advisory](https://github.com/fastify/fast-uri/security/advisories/GHSA-hrr3-gc8f-f4qj)
+identify the patched versions. `npm audit --json` returned zero known
+vulnerabilities for this dependency tree. This is not a default-branch repair
+or a general security certification.
+
+The build, focused instruction suite, 48 model/admission/resource tests, all
+nine design-guard tests and the six-package/RFC copy check passed locally.
+`npm run test:supervisor-sea` also passed using the upgraded bundler on
+macOS arm64: staged import, selected read-only install reopening,
+authenticated UDS hello, wrong-signer rejection and `NODE_OPTIONS` isolation.
+The final `npm test` run passed 1,750 of 1,753 tests, with the same three
+Linux-only skips and zero failures. Exact-head CI is required for the final
+commit; the earlier source-capture run does not establish this increment's
+platform results.
 
 ## Next integration order
 

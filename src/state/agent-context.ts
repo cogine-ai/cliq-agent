@@ -13,6 +13,7 @@ import type { ModelTurnMaterial } from '../runtime/continuation.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeAdmittedContext, decodeRunObjective, decodeSessionProjection } from './decoders.js';
 import { KernelStorageError } from './errors.js';
+import { readWorkspaceInstructionClosure, type WorkspaceInstructionBinding } from './workspace-instructions.js';
 
 export async function readCanonicalArtifact<T>(artifacts: ArtifactCatalog, ref: string): Promise<T> {
   const value = await artifacts.readCanonical<T>(ref);
@@ -38,26 +39,17 @@ export async function readModelTurnMaterial(artifacts: ArtifactCatalog, ref: str
 }
 
 /** Static, post-Trust instruction projection. Reads retained CAS only, never live repository files. */
-export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: RunAssemblyV1): Promise<string> {
+export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: RunAssemblyV1,
+  binding: WorkspaceInstructionBinding): Promise<string> {
   const instructions = assembly.instructions;
   const system = await readText(artifacts, instructions.systemPromptRef, instructions.systemPromptDigest);
   if (!system.utf8.trim()) throw new TypeError('system instruction is empty');
   const pieces = [system.utf8];
-  const workspace = await readCanonicalArtifact<{
-    schemaVersion: 1; format: string; manifestDigest: string;
-    entries: Array<{ order: number; canonicalRootRelativePath: string; appliesToSubtree: true;
-      contentRef: string; contentDigest: string }>;
-  }>(artifacts, instructions.workspaceInstructionsRef);
-  if (workspace.schemaVersion !== 1 || workspace.format !== 'cliq-workspace-instructions-v1' ||
-      workspace.manifestDigest !== instructions.workspaceInstructionsDigest ||
-      digestOmitting(workspace, 'manifestDigest') !== workspace.manifestDigest) throw new TypeError('workspace instructions mismatch');
+  const workspace = await readWorkspaceInstructionClosure(artifacts, {
+    manifestRef: instructions.workspaceInstructionsRef, manifestDigest: instructions.workspaceInstructionsDigest
+  }, binding);
   if (workspace.entries.length > 0) {
-    const entries = await Promise.all(workspace.entries.map(async (entry, index) => {
-      if (entry.order !== index || entry.appliesToSubtree !== true) throw new TypeError('workspace instruction scope mismatch');
-      return { order: entry.order, canonicalRootRelativePath: entry.canonicalRootRelativePath, appliesToSubtree: true,
-        instructionUtf8: (await readText(artifacts, entry.contentRef, entry.contentDigest)).utf8 };
-    }));
-    pieces.push(canonicalJsonBytes({ format: 'cliq-workspace-instruction-prompt-v1', entries }).toString('utf8'));
+    pieces.push(canonicalJsonBytes({ format: 'cliq-workspace-instruction-prompt-v1', entries: workspace.entries }).toString('utf8'));
   }
   for (const selected of instructions.skills) {
     const skill = await readCanonicalArtifact<{

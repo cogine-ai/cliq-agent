@@ -139,7 +139,7 @@ export type ActiveFixtureOptions = {
   runtimeAuthority?: StateStoreRuntimeAuthority;
   runWallTimeMs?: number;
   leaseDurationMs?: number;
-  assembly?: (store: StateStore) => Promise<string>;
+  assembly?: (store: StateStore, identity: WorkspaceIdentityV1, workspaceIdentityRef: string) => Promise<string>;
   policy?: (store: StateStore, identity: WorkspaceIdentityV1) => Promise<string>;
   budgets?: Partial<RunSpec['budgets']>;
   credentialGrantRefs?: string[];
@@ -166,7 +166,7 @@ export async function createActiveFixture(
     session.session.workspaceIdentityRef
   )) as WorkspaceIdentityV1;
   const source = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest);
-  if (options.assembly) source.assemblyRef = await options.assembly(store);
+  if (options.assembly) source.assemblyRef = await options.assembly(store, workspaceIdentity, session.session.workspaceIdentityRef);
   if (options.policy) source.policyRef = await options.policy(store, workspaceIdentity);
   const admitted = await store.admitRun({
     principalId,
