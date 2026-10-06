@@ -373,6 +373,36 @@ test('terminal event retention accepts earliest minus one and expiry carries the
   } finally { driver.close(); await disposeFixture(fixture); }
 });
 
+test('attach refuses a missing event inside its retained interval instead of advancing a reconnect cursor past it', async () => {
+  const fixture = await createActiveFixture('control-read-event-gap');
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const identity = await publishInProcessChannel(fixture.store);
+    const artifact = await fixture.store.artifacts.publishCanonical({ fixture: 'retained-event-gap' }, 'cliq-tool-request-v1');
+    await fixture.store.prepareInvocation({ runId: fixture.runId, expectedRunRevision: fixture.runRevision,
+      leaseEpoch: fixture.leaseEpoch, opId: 'retained-event-gap', opKind: 'tool', target: 'fixture.read', requestRef: artifact.ref,
+      replayClass: 'retry', idempotencyKey: 'retained-event-gap-0',
+      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 } });
+    const request = { protocolVersion: 1 as const, method: 'run.attach' as const, runId: fixture.runId, afterEventSeq: 0 };
+    const intact = await fixture.store.readControl(request, identity);
+    assert.ok(intact.method === 'run.attach');
+    assert.deepEqual(intact.events.map(event => event.eventSeq), [1, 2, 3]);
+    const authoritative = fixture.store.getRun(fixture.runId);
+    // Corruption inside the retained range is not legal prefix retention. Bounds stay 1..3.
+    driver.prepare('DELETE FROM run_events WHERE run_id = ? AND event_seq = 2').run(fixture.runId);
+    await assert.rejects(fixture.store.readControl(request, identity), isCode('RECOVERY_REQUIRED'));
+    const firstPage = await fixture.store.readControl({ ...request, limit: 1 }, identity);
+    assert.ok(firstPage.method === 'run.attach');
+    assert.deepEqual(firstPage.events.map(event => event.eventSeq), [1]);
+    assert.equal(firstPage.earliestRetainedEventSeq, 1);
+    assert.equal(firstPage.highWaterEventSeq, 3);
+    assert.equal(firstPage.nextEventSeq, 1);
+    await assert.rejects(fixture.store.readControl({ ...request, afterEventSeq: firstPage.nextEventSeq, limit: 1 }, identity),
+      isCode('RECOVERY_REQUIRED'));
+    assert.deepEqual(fixture.store.getRun(fixture.runId), authoritative, 'display corruption cannot rewrite authoritative Run state');
+  } finally { driver.close(); await disposeFixture(fixture); }
+});
+
 test('retained event metadata rejects coercible arrays and malformed scalar bounds instead of echoing them', async () => {
   const fixture = await createActiveFixture('control-read-bad-events');
   const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));

@@ -95,15 +95,21 @@ rules; `run.attach` now explicitly defaults its omitted limit to 100, matching
 the get methods, while preserving the `1..1000` range.
 
 Local validation on 2026-10-07 (macOS, Node 26.0.0): `npm run build` passed;
-`env PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" npm test` passed all 1,662 tests
+`env PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" npm test` passed all 1,669 tests
 with zero failures or skips; the design-contract guard and its nine regressions
-passed. That suite includes 20 real native-control regressions and six
+passed. That suite includes 20 real native-control regressions and eight
 StateStore/SQLite/CAS authenticated-dispatch integrations, including live Socket
 IPC transfer after original-peer exit, actual StateOwner SIGKILL/stale-socket
 recovery, blocked-worker teardown and 32-worker concurrent permission-bracket
-checks. Eleven read-cut regressions cover frozen multi-level Session lineage,
+checks. Twelve read-cut regressions cover frozen multi-level Session lineage,
 strict Run-bound Checkpoint cursors, exact inclusive 1 MiB metadata pages and
-terminal-event retention/expiry. Independently malformed minimum/maximum
+terminal-event retention/expiry and rejection of gaps inside retained event
+intervals. Four callback regressions cover invalid arguments and per-connection
+failure containment, including a throwing error reporter. Executable hashing
+retains image-integrity checks while yielding before each synchronous batch of
+at most 1 MiB; the two hashing regressions also passed on Node 24.19.0 against
+its 121,306,800-byte executable, covering between-batch yields and closure.
+Independently malformed minimum/maximum
 Checkpoint keys fail closed without bounded SQL projections changing ordering.
 The real native integration also commits a
 reducer while an earlier cut awaits immutable CAS data: the earlier snapshot

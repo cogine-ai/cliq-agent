@@ -355,6 +355,7 @@ function runAttachCut(connection: SqliteConnection, request: Extract<ReadControl
       const row = statement.get<{ event_seq: unknown; payload_json: string | null; occurred_at: string }>(run.id, BigInt(next), BigInt(latest));
       if (!row) corrupt('retained Run event bounds contain no next row');
       const event = checkedEvent(row, run, itemHigh);
+      if (event.eventSeq !== next + 1) corrupt('retained Run event stream has a sequence gap');
       events.push(event); next = event.eventSeq;
     }
   }

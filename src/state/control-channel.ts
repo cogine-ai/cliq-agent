@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, fstatSync, readSync } from 'node:fs';
 import { Socket } from 'node:net';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { setImmediate } from 'node:timers/promises';
 import type { LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, LocalSocketPeerObservationV1, PlatformProcessIdentityV1 } from '../kernel/types.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import {
@@ -40,15 +41,19 @@ const liveChannels = new WeakMap<StateOwnerContext, Map<string, LiveChannel>>();
 type AuthenticatedFrame = { owner: StateOwnerContext; identity: AuthenticatedControlIdentity; channel: LiveChannel; active: boolean };
 const authenticatedFrames = new AsyncLocalStorage<AuthenticatedFrame>();
 
-function hashNativeImage(peer: HeldControlPeer, observation: NativePeerObservation): string {
+async function hashNativeImage(peer: HeldControlPeer, observation: NativePeerObservation): Promise<string> {
   const before = fstatSync(observation.imageFd, { bigint: true });
   if (!before.isFile() || before.size !== BigInt(observation.imageByteCount) ||
       observation.imageByteCount <= 0 || observation.imageByteCount > 256 * 1024 * 1024) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control peer executable image is unavailable or unbounded');
   }
   const hash = createHash('sha256');
-  const buffer = Buffer.allocUnsafe(Math.min(observation.imageByteCount, 64 * 1024));
+  const buffer = Buffer.allocUnsafe(Math.min(observation.imageByteCount, 1024 * 1024));
   for (let offset = 0; offset < observation.imageByteCount;) {
+    // Bound synchronous work per turn. Never queue an asynchronous read on a
+    // borrowed fd: native close may invalidate or reuse it while we yield.
+    await setImmediate();
+    peer.assertObservation(observation);
     const count = readSync(observation.imageFd, buffer, 0, Math.min(buffer.length, observation.imageByteCount - offset), offset);
     if (count === 0) throw new KernelStorageError('ARTIFACT_MISMATCH', 'control peer executable image ended early');
     hash.update(buffer.subarray(0, count));
@@ -66,6 +71,7 @@ function hashNativeImage(peer: HeldControlPeer, observation: NativePeerObservati
 /** Owner-bound native listener. Historical JSON never populates this registry. */
 export function openLocalControlListener(artifacts: ArtifactCatalog, owner: StateOwnerContext,
   onConnection: (connection: LocalControlConnection) => void, onError: (error: Error) => void): LocalControlListener {
+  if (typeof onConnection !== 'function' || typeof onError !== 'function') throw new TypeError('control listener requires callbacks');
   const channels = new Map<string, LiveChannel>();
   if (liveChannels.has(owner)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'the owner already has a control listener');
   let closing = false;
@@ -73,7 +79,11 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
   const connections = new Set<LocalControlConnection>();
   const pending = new Set<Promise<unknown>>();
   let native: HeldControlListener;
-  const accept = (peer: HeldControlPeer) => {
+  const reportError = (error: unknown) => {
+    try { onError(error instanceof Error ? error : new Error('control callback failed', { cause: error })); }
+    catch { /* A consumer's error reporter must not escape a native callback. */ }
+  };
+  const acceptPeer = (peer: HeldControlPeer) => {
     if (closing || connections.size >= 64) { peer.close(); return; }
     let socket: Socket;
     const fd = peer.takeSocketFd();
@@ -94,7 +104,7 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
       const processIdentity: PlatformProcessIdentityV1 = {
         schemaVersion: 1, format: 'cliq-platform-process-identity-v1', platform: process.platform === 'linux' ? 'linux' : 'macos',
         pid: capture.pid, ownerUid: capture.uid, processStartToken: capture.processStartToken,
-        executableImageDigest: hashNativeImage(peer, capture), observedAt, identityDigest: ''
+        executableImageDigest: await hashNativeImage(peer, capture), observedAt, identityDigest: ''
       };
       processIdentity.identityDigest = digestOmitting(processIdentity, 'identityDigest');
       const processArtifact = await artifacts.publishCanonical(processIdentity, processIdentity.format);
@@ -169,7 +179,14 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
     connections.add(connection);
     try { onConnection(connection); } catch (error) { connection.close(); throw error; }
   };
-  native = owner.filesystem.openControlListener(accept, onError);
+  const accept = (peer: HeldControlPeer) => {
+    try { acceptPeer(peer); }
+    catch (error) {
+      try { peer.close(); } catch { /* Preserve the original connection failure. */ }
+      reportError(error);
+    }
+  };
+  native = owner.filesystem.openControlListener(accept, reportError);
   liveChannels.set(owner, channels);
   const listener: LocalControlListener = Object.freeze({
     close() {

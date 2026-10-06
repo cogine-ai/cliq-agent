@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { rm } from 'node:fs/promises';
+import fs from 'node:fs';
+import { readFile, rm } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
@@ -95,6 +98,114 @@ test('native connection derives principal before real Session admission and pres
   await assert.rejects(f.store.createSession({ ...identity, workspacePath: f.workspace, requestId: uuidv7(), admissionKey: admissionKey('outside-native-frame') }),
     { code: 'ARTIFACT_MISMATCH' });
   assert.deepEqual(f.errors, []);
+});
+
+test('native authentication yields before and between bounded executable-image batches without changing the digest', async t => {
+  const batchBytes = 1024 * 1024;
+  const executable = fs.statSync(process.execPath, { bigint: true });
+  const expectedDigest = createHash('sha256').update(await readFile(process.execPath)).digest('hex');
+  const f = await fixture(t);
+  const { connection } = await f.connect();
+  const originalRead = fs.readSync;
+  let initialProbeRan = false;
+  const initialProbe = setImmediate(() => { initialProbeRan = true; });
+  let probe: ReturnType<typeof setImmediate> | undefined;
+  let probeCount = 0;
+  let uninterruptedBytes = 0;
+  let imageBytes = 0;
+  // Observe only the OS boundary. The descriptor, peer observation, transport,
+  // authentication closure and eventual dispatch remain real production paths.
+  const reading = t.mock.method(fs, 'readSync', (...args: unknown[]) => {
+    const image = fs.fstatSync(args[0] as number, { bigint: true });
+    const matches = image.dev === executable.dev && image.ino === executable.ino;
+    if (matches) {
+      assert.equal(initialProbeRan, true, 'authentication yields before the first executable-image read');
+      if (!probe) probe = setImmediate(() => {
+        uninterruptedBytes = 0;
+        probeCount++;
+        probe = undefined;
+      });
+    }
+    const count: number = Reflect.apply(originalRead, fs, args);
+    if (matches) {
+      imageBytes += count;
+      uninterruptedBytes += count;
+      assert.ok(uninterruptedBytes <= batchBytes,
+        'one uninterrupted executable-image batch must not exceed 1 MiB');
+    }
+    return count;
+  });
+  syncBuiltinESMExports();
+  try {
+    const identity = await bounded(connection.dispatch(async authenticated => authenticated));
+    assert.equal(initialProbeRan, true);
+    if (executable.size > BigInt(batchBytes)) assert.ok(probeCount > 0);
+    assert.equal(BigInt(imageBytes), executable.size, 'the digest covers every actual executable byte');
+    const closure = await readHistoricalControlChannel(f.reader, f.store.artifacts, identity);
+    if (closure.channel.transport.kind !== 'uds_peer') throw new Error('expected native transport');
+    const peer = await f.store.artifacts.readCanonical<LocalSocketPeerObservationV1>(closure.channel.transport.peerObservationRef);
+    const processIdentity = await f.store.artifacts.readCanonical<PlatformProcessIdentityV1>(peer.peerProcessIdentityRef);
+    assert.equal(processIdentity.executableImageDigest, expectedDigest,
+      'yielding preserves the independently computed SHA-256 of the actual peer executable');
+    assert.deepEqual(f.errors, []);
+  } finally {
+    reading.mock.restore();
+    syncBuiltinESMExports();
+    clearImmediate(initialProbe);
+    if (probe) clearImmediate(probe);
+  }
+});
+
+test('closing a native connection while authentication yields stops image reads and never dispatches the operation', async t => {
+  const batchBytes = 1024 * 1024;
+  const executable = fs.statSync(process.execPath, { bigint: true });
+  const f = await fixture(t);
+  const { connection } = await f.connect();
+  const originalRead = fs.readSync;
+  const closed = deferred<void>();
+  let probe: ReturnType<typeof setImmediate> | undefined;
+  let closedAtProbe = false;
+  let imageBytes = 0;
+  let readsAfterClose = 0;
+  let reachedOperation = false;
+  const closeAtProbe = () => {
+    closedAtProbe = true;
+    connection.close();
+    closed.resolve();
+  };
+  // Large real executables exercise close between batches. A small host Node
+  // still proves cancellation at the initial yield, without inventing an image
+  // size or claiming cross-batch coverage where the executable fits one batch.
+  if (executable.size <= BigInt(batchBytes)) probe = setImmediate(closeAtProbe);
+  const reading = t.mock.method(fs, 'readSync', (...args: unknown[]) => {
+    if (closedAtProbe) readsAfterClose++;
+    const image = fs.fstatSync(args[0] as number, { bigint: true });
+    const matches = image.dev === executable.dev && image.ino === executable.ino;
+    if (matches) {
+      if (!probe) probe = setImmediate(closeAtProbe);
+    }
+    const count: number = Reflect.apply(originalRead, fs, args);
+    if (matches) imageBytes += count;
+    return count;
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(bounded(connection.dispatch(async () => { reachedOperation = true; })));
+    await bounded(closed.promise);
+    assert.equal(readsAfterClose, 0, 'the closed native observation is never read again');
+    assert.equal(reachedOperation, false, 'closed authentication cannot create an authenticated request frame');
+    if (executable.size <= BigInt(batchBytes)) {
+      assert.equal(imageBytes, 0, 'initial-yield close prevents even the first native image read');
+    } else {
+      assert.ok(imageBytes > 0 && imageBytes <= batchBytes,
+        'between-batch close stops after at most the first real 1 MiB image batch');
+    }
+    assert.deepEqual(f.errors, []);
+  } finally {
+    reading.mock.restore();
+    syncBuiltinESMExports();
+    if (probe) clearImmediate(probe);
+  }
 });
 
 test('new native connections and owner restart replay one committed admission without rewriting original channel provenance', async t => {
