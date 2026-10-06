@@ -42,6 +42,8 @@ import {
   type TimeFenceAdvance
 } from './canonical-time.js';
 import { ContentAddressedStore } from './cas.js';
+import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
+import { readControl, type ReadControlRequest } from './control-read.js';
 import { KernelStorageError } from './errors.js';
 import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
@@ -368,6 +370,7 @@ export class StateStore {
   private closed = false;
   private released = false;
   private closing: Promise<void> | undefined;
+  private readonly controlListeners = new Set<LocalControlListener>();
 
   private constructor(
     readonly stateRoot: string,
@@ -385,6 +388,20 @@ export class StateStore {
       ref: this.owner.stateRootIdentityRef,
       digest: this.owner.stateRootIdentityDigest
     };
+  }
+
+  /** Internal authenticated transport, not an installed public protocol server. */
+  openLocalControl(onConnection: (connection: LocalControlConnection) => void, onError: (error: Error) => void): LocalControlListener {
+    if (this.closed || this.closing || this.released) throw new KernelStorageError('RECOVERY_REQUIRED', 'StateStore is closing or closed');
+    assertActiveStateOwner(this.driver, this.owner);
+    const nativeListener = openLocalControlListener(this.artifacts, this.owner, onConnection, onError);
+    const listener: LocalControlListener = Object.freeze({ close: () => {
+      const closing = nativeListener.close();
+      void closing.then(() => this.controlListeners.delete(listener), () => {});
+      return closing;
+    } });
+    this.controlListeners.add(listener);
+    return listener;
   }
 
   static async open(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority): Promise<StateStore> {
@@ -550,6 +567,11 @@ export class StateStore {
     return readSession(this.driver, sessionId);
   }
 
+  /** Canonical bounded queries shared by clients; identity comes from the control channel, never the request. */
+  readControl(request: ReadControlRequest, identity: AuthenticatedControlIdentity) {
+    return readControl(this.driver, this.artifacts, this.owner, request, identity);
+  }
+
   getRun(runId: string): Run {
     return readRun(this.driver, runId);
   }
@@ -575,6 +597,7 @@ export class StateStore {
     if (this.closed) return Promise.resolve();
     if (this.closing !== undefined) return this.closing;
     const attempt = (async () => {
+      await Promise.all([...this.controlListeners].map(listener => listener.close()));
       if (!this.released) {
         await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
         this.released = true;
@@ -1018,9 +1041,8 @@ async function acquireSuccessorStateOwner(
 
 export async function publishInProcessChannel(
   store: StateStore,
-  principalId: string,
   client: LocalControlChannelIdentityV1['client'] = 'cli'
-): Promise<{ channelIdentityRef: string; channelIdentityDigest: string }> {
+): Promise<{ principalId: string; channelIdentityRef: string; channelIdentityDigest: string }> {
   const now = sampleCanonicalNow();
   const processIdentity = await currentProcessIdentity(await loadNativeStateOwner(), now);
   const processArtifact = await store.artifacts.publishCanonical(
@@ -1034,7 +1056,8 @@ export async function publishInProcessChannel(
     stateRootIdentityDigest: store.stateRootIdentity.digest,
     platform: hostPlatform(),
     effectiveUid: requireEffectiveUid(),
-    principalId,
+    principalId: identityHash('cliq-local-principal-v1', store.stateRootIdentity.digest,
+      processIdentity.platform, processIdentity.ownerUid),
     identityDigest: ''
   };
   principal.identityDigest = digestOmitting(principal, 'identityDigest');
@@ -1047,7 +1070,7 @@ export async function publishInProcessChannel(
     format: 'cliq-local-control-channel-identity-v1',
     principalIdentityRef: principalArtifact.ref,
     principalIdentityDigest: principal.identityDigest,
-    principalId,
+    principalId: principal.principalId,
     client,
     transport: {
       kind: 'in_process',
@@ -1060,5 +1083,6 @@ export async function publishInProcessChannel(
   };
   channel.channelIdentityDigest = digestOmitting(channel, 'channelIdentityDigest');
   const channelArtifact = await store.artifacts.publishCanonical(channel, 'cliq-local-control-channel-identity-v1');
-  return { channelIdentityRef: channelArtifact.ref, channelIdentityDigest: channel.channelIdentityDigest };
+  return { principalId: principal.principalId, channelIdentityRef: channelArtifact.ref,
+    channelIdentityDigest: channel.channelIdentityDigest };
 }

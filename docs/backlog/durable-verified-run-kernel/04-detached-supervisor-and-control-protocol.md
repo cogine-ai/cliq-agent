@@ -48,8 +48,8 @@ and closes only after durable graceful release. Startup now proves prior-owner
 process absence/start-token mismatch while holding that lock and atomically
 terminalizes the predecessor, acquires the next epoch and transfers the time
 fence. Owner takeover never adopts workers, replays effects or changes Run
-state. UDS credentials, whole-containment retirement, worker-loss reconciliation
-and signed installation qualification are still open.
+state. Installed UDS routing, whole-containment retirement, worker-loss
+reconciliation and signed installation qualification are still open.
 The [worker-loss fence](../../kernel/m2-state-core.md#worker-loss-fence-after-ownership-acquisition)
 now exposes `beginWorkerRecovery` separately from owner acquisition: one CAS
 installs the initial exact `worker_death` wait and fences the Run/launch/generation
@@ -61,9 +61,56 @@ remain open; the fence does not prove death or complete WP04.
 Neither path stops unresolved external attempts or grants
 tool permission. Reuse this stop core;
 do not build another control-state machine. Child/MCP/ambiguous-effect closure,
-other stop origins/wait subjects, UDS capture/server routing, scheduling and
+other stop origins/wait subjects, public UDS server routing, scheduling and
 worker-loss reconciliation remain in this package. This partial integration
 does not complete WP04; see the [exact scope](../../kernel/wp02-typed-runtime.md#durable-root-agent-cancellation-and-deadline-stop).
+
+The I1 control-identity foundation now derives the local principal from the
+retained StateRoot digest, platform and effective uid; callers cannot select a
+principal. Reconnect and StateOwner reopen preserve that principal while each
+channel gets a fresh nonce. Historical control reads close the exact retained
+StateRoot/principal/process graph, including `uds_peer` observations, without
+requiring an old process to remain alive. These CAS bytes are audit provenance,
+not native connection authentication. The owner-held native listener now samples
+actual credentials and process/image identity, and internal dispatch authenticates
+each asynchronous frame before StateStore, including admission replay. Fresh
+admission accepts `uds_peer` only inside that exact live owner/connection/frame
+scope; copied audit bytes and expired asynchronous scopes fail closed. Real
+child-process connections exercise Session admission, reconnect replay, owner
+reopen and teardown. Admission replay deliberately precedes closure traversal
+inside StateStore. No public JSON-RPC endpoint is exposed here. The
+[accepted platform clarification](../../rfcs/2026-10-06-control-peer-identity.md)
+separates the named socket entry from the listening descriptor and records the
+approved StateRoot host-tampering boundary. Automatic socket cleanup and stale
+recovery remain enabled with exact held-parent/no-follow entry checks, without
+claiming inode-conditional atomic unlink. Linux native qualification, installed
+Linux/macOS integration and socket-to-process PID-ABA qualification remain open;
+macOS development tests do not close those acceptance conditions or complete I1.
+
+The bounded `session.get`, `run.get` and `run.attach` observation scope is an
+internal StateStore read-cut integration under the same native dispatch seam.
+It is not a public wire endpoint, generated client routing, `control.hello` or
+installed qualification. The three cuts keep their canonical metadata/cursor
+rules; `run.attach` now explicitly defaults its omitted limit to 100, matching
+the get methods, while preserving the `1..1000` range.
+
+Local validation on 2026-10-07 (macOS, Node 26.0.0): `npm run build` passed;
+`env PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" npm test` passed all 1,662 tests
+with zero failures or skips; the design-contract guard and its nine regressions
+passed. That suite includes 20 real native-control regressions and six
+StateStore/SQLite/CAS authenticated-dispatch integrations, including live Socket
+IPC transfer after original-peer exit, actual StateOwner SIGKILL/stale-socket
+recovery, blocked-worker teardown and 32-worker concurrent permission-bracket
+checks. Eleven read-cut regressions cover frozen multi-level Session lineage,
+strict Run-bound Checkpoint cursors, exact inclusive 1 MiB metadata pages and
+terminal-event retention/expiry. Independently malformed minimum/maximum
+Checkpoint keys fail closed without bounded SQL projections changing ordering.
+The real native integration also commits a
+reducer while an earlier cut awaits immutable CAS data: the earlier snapshot
+and high-waters remain unchanged, and reconnect/reopen observes the new fact.
+Read-snapshot driver regressions prove concurrent WAL commits, write refusal,
+scope expiry and fail-closed settings restoration. These are source/regression
+checks, not installed or Linux qualification.
 
 Related issues:
 
@@ -159,7 +206,9 @@ Implementation notes:
 
    Exactly three WP01 entrypoints may establish authority while holding/revalidating those descriptors. `bootstrapStateOwner` requires an empty owner table, exact epoch-one genesis evidence, and one selected as-yet-unowned `KernelGenerationIdentityV1`: `fresh_empty` proves fixed empty database/CAS; `migrated_candidate` proves the matching durable Kernel authority marker plus exact candidate/image/CAS/migration closure and runs as the first post-cutover repository transaction before control/admission release. It registers only staged identity/acquisition metadata and epoch one. Clean acquisition and death takeover retain their exact predecessor/successor rules. None may mutate Run/Session/Journal or release capability. Every other repository write/release needs the active owner; only already-prepared rollback marker rename may follow graceful terminalization without DB/CAS mutation.
 
-2. **Use a private, identity-bound UDS only.** Bind only literal `runtime/control-v1.sock` below the exact StateRoot, keeping the no-follow listener descriptor open; its directory is same-user `0700`, and the listener is a same-user `0600` Unix stream socket. For every accepted descriptor the Supervisor publishes exact `LocalSocketPeerObservationV1`: listener and accepted-socket `fstat` identities use canonical unsigned-decimal device/file strings; Linux samples atomic `SO_PEERCRED`, while macOS samples `getpeereid` plus `LOCAL_PEERPID`; it captures exact `PlatformProcessIdentityV1` for that pid and repeats the platform credential calls before publication. Both samples, pid/uid, process observation time, StateRoot, listener, and still-open accepted descriptor must match. Any missing API, symlink/replacement/drift, exited/reused pid, uid mismatch, non-stream socket, or caller-supplied pid/path/hash rejects and closes the connection. The accepted transport then publishes exact `LocalPrincipalIdentityV1` and `LocalControlChannelIdentityV1`; the UDS branch rehashes that peer observation, `openedAt` is canonical and not before observation, and `channelNonceDigest` hashes 32 fresh Supervisor bytes. In-process CLI/TUI/JSONL instead binds the signed current process. Caller JSON/environment can never supply or override principal/channel fields; handlers inject them. Do not open TCP or HTTP. Stale socket removal is allowed only after proving no live compatible Supervisor owns it.
+2. **Use a private, identity-bound UDS only.** Bind only literal `runtime/control-v1.sock` below the exact StateRoot. Keep the same-user `0700` runtime directory and the listening transport descriptor held open. The `LocalSocketPeerObservationV1.listener` fields identify the exact same-user `0600` Unix socket filesystem entry established by that native listener, captured by `fstatat(...,AT_SYMLINK_NOFOLLOW)` relative to the held runtime directory; its device/file strings are canonical unsigned decimals. Separately retain the transport descriptor's own `fstat` identity and verify `AF_UNIX`, `SOCK_STREAM`, listening state and the exact bound name. Named-entry and transport identities are distinct and never substituted or required to equal. Recheck root, runtime, named entry and transport before and after peer observation. Automatic cleanup/stale recovery holds the StateOwner lock and immediately rechecks the held private parent plus exact no-follow socket type/mode/uid/device/file identity before unlink; a replacement or drift already present at that check is retained. The RFC excludes malicious or uncooperative unsandboxed same-uid host processes directly tampering with StateRoot outside the ownership/lock protocol, not workers/descendants, different-uid actors, or socket-to-process identity/PID-ABA checks. This does not weaken Workspace Trust, Tool Permission or worker Sandbox. POSIX check-then-unlink is not inode-conditional atomic unlink, and no atomic exclusion of an out-of-boundary host's concurrent replacement is claimed.
+
+   For every accepted descriptor the Supervisor publishes exact `LocalSocketPeerObservationV1`; its accepted-socket identity is that descriptor's own `fstat`, with canonical unsigned-decimal device/file strings. Linux samples atomic `SO_PEERCRED`, while macOS samples `getpeereid` plus `LOCAL_PEERPID`; it captures exact `PlatformProcessIdentityV1` for that pid and its independently observed client executable image, then repeats the platform credential calls before publication. Both samples, pid/uid, process observation time, StateRoot, listener and still-open accepted descriptor must match. Any missing API, symlink/replacement/drift, exited/reused pid, process start/image drift, uid mismatch, non-stream socket, or caller-supplied pid/descriptor/path/hash rejects and closes the connection. The accepted transport then publishes exact `LocalPrincipalIdentityV1` and `LocalControlChannelIdentityV1`; the UDS branch rehashes that peer observation, remains bound to the held accepted descriptor through frame authentication, `openedAt` is canonical and not before observation, and `channelNonceDigest` hashes 32 fresh Supervisor bytes. In-process CLI/TUI/JSONL instead binds the signed current process; StateOwner and Supervisor-inspector consumers retain the exact signed Supervisor executable requirement. Caller JSON/environment can never supply or override principal/channel fields; handlers inject them. Retained artifacts are historical provenance only, not fresh request authentication. Every frame, including admission replay, requires an opaque native live connection under the current StateOwner before calling StateStore; historical audit need not keep the old peer alive, and replay retains the first committed channel provenance. Do not open TCP or HTTP. Stale socket removal is allowed only after proving no live compatible Supervisor owns it.
 
 3. **Version the protocol explicitly.** Use JSON-RPC 2.0 with newline-delimited frames capped at 8 MiB. The first request is `control.hello` with protocol/schema/client versions and desired features; the server returns its build/protocol range and capabilities. Incompatible clients receive `INCOMPATIBLE_PROTOCOL` before any mutating request. JSON is transport encoding, not a model control envelope.
 
@@ -508,6 +557,8 @@ Implementation notes:
 
 19. **Define cursor semantics as pure pagination.** `run.attach {runId, afterEventSeq, limit}` accepts a batch limit in `1..1000`. One SQLite snapshot captures the authoritative Run snapshot plus `earliestRetainedEventSeq`, `latestRetainedEventSeq`, and `highWaterEventSeq`, then returns at most `limit` committed events in sequence order from `(afterEventSeq, highWaterEventSeq]`. The earliest valid cursor is `max(0,earliestRetainedEventSeq-1)`: initial zero and exact earliest-minus-one are valid, a smaller cursor returns `EVENT_CURSOR_EXPIRED` with retained bounds/current snapshot, and `afterEventSeq>highWaterEventSeq` returns `INVALID_REQUEST`. `afterEventSeq=highWaterEventSeq` returns an empty page whose `nextEventSeq` is that same cursor. Otherwise `nextEventSeq` is the last returned sequence, or the supplied cursor when the page is empty. If `nextEventSeq < highWaterEventSeq`, the client must call `run.attach` again with `afterEventSeq=nextEventSeq`; equality means it is caught up only through that captured cut. A later call from the equal cursor captures a new high-water and returns events committed afterward. Public v1 defines no implicit push, subscription, follow stream, or out-of-band event envelope; a transport optimization is legal only if it preserves this exact request/result page sequence. Never fabricate missing history or accept a future cursor.
 
+    Omitted `run.attach.limit` defaults to 100; an explicit value is a safe integer in `1..1000`. `afterEventSeq` remains required and exclusive.
+
 20. **Retain enough to return without deleting Runs.** Keep all Run events while nonterminal and terminal spools at least 30 days, always retaining the terminal anchor. There is no `run.delete` or automatic deletion of authoritative facts. Cursor pruning removes only display rows and cannot change truth. CAS/generation GC roots every approval/manual/settlement/dispatch closure including exact broker-fence or containment-death edge, inherited verification/source graph, complete MCP/admin graph, every reconciliation state with persisted in-flight dispatch plus wrapper/subject-or-timeout/inspector-task-owner-death closure, activation participants/failures, complete StateOwner identity/evidence chain, SandboxLaunch/local-service/model/provenance/boundary/containment graph, and every retained event ref under the RFC death/age/complete-reachability rules.
 
 21. **Freeze one Run and Session method surface.** The initial control methods are exactly:
@@ -645,7 +696,7 @@ rollback. Never adopt old workers or start an embedded runtime after UDS failure
   identities and exact control replay through the generated client.
 
 - [ ] Exactly one per-user Supervisor owns a `$CLIQ_HOME`; launchd/systemd restarts it. Only bootstrap for an exact as-yet-unowned `fresh_empty|migrated_candidate` generation, latest-graceful clean acquisition, or positive-death takeover may establish authority. Migrated bootstrap requires the durable matching Kernel marker/candidate/image/CAS closure and is the first post-cutover repository transaction. These APIs register only named metadata/owner rows under exact descriptors; every other write/release needs active equality, except already-prepared rollback marker rename after graceful finalization. Replacement/loss/mismatch gates authority and full history stays rooted.
-- [ ] The control listener is exact root-relative `runtime/control-v1.sock` below a same-user `0700` StateRoot directory, remains held open, is descriptor-verified mode `0600`, rejects unsafe/symlinked/replaced paths, and exposes no TCP/HTTP listener. Every accepted UDS connection publishes exact `LocalSocketPeerObservationV1` from listener/accepted-socket fstat plus twice-identical Linux `SO_PEERCRED` or macOS `getpeereid`+`LOCAL_PEERPID` samples around exact `PlatformProcessIdentityV1`; root/platform/uid/pid/time/descriptor equality is mandatory. The resulting exact principal/channel artifacts use a fresh 32-byte nonce digest and are injected into requests. Caller-supplied identity, unavailable APIs, reused/exited pid, listener drift, or sample mismatch closes without application dispatch.
+- [ ] The control listener binds only root-relative `runtime/control-v1.sock` below the held same-user `0700` runtime directory. Its named Unix socket entry is no-follow `fstatat`-verified same-user mode `0600`; the separately held transport descriptor is verified `AF_UNIX`/`SOCK_STREAM`, listening and bound to the exact name. These distinct identities are rechecked independently, never equated; unsafe/symlinked/replaced paths refuse connections. Automatic cleanup/stale recovery holds the StateOwner lock, immediately rechecks the held private parent and exact no-follow socket type/mode/uid/device/file identity before unlink, and retains any replacement/drift already present at that check. The approved StateRoot host-tampering exclusion applies only to malicious/uncooperative unsandboxed same-uid host processes outside the ownership/lock protocol; no inode-conditional atomic unlink or exemption for workers/descendants, different-uid actors, or socket-to-process identity/PID-ABA is claimed. No TCP/HTTP listener exists. Every accepted UDS connection publishes exact `LocalSocketPeerObservationV1` from that named entry and the accepted descriptor's own fstat plus twice-identical Linux `SO_PEERCRED` or macOS `getpeereid`+`LOCAL_PEERPID` samples around exact native peer `PlatformProcessIdentityV1`; root/platform/uid/pid/time/descriptor equality and independently observed client image are mandatory. The resulting exact principal/channel artifacts use a fresh 32-byte nonce digest and are injected into requests. Every fresh frame, including admission replay, authenticates an opaque live native connection under the current StateOwner; retained artifacts cannot mint one, historical audit permits a dead old peer, and replay preserves first-commit provenance. Caller-supplied identity, unavailable APIs, reused/exited pid, process start/image drift, listener drift or sample mismatch closes without application dispatch.
 - [ ] Every durable timestamp uses the fixed canonical UTC-millisecond grammar and checked safe-integer arithmetic. Every authoritative transaction uses and advances the one StateOwner-gated `CanonicalTimeFenceV1` sample. Wall-clock regression persists `clock_regressed`, blocks admission/lease/grant/capability/dispatch/retry/expiry extension and revokes/quiesces release gates until the current owner observes the retained high-water. Reboot, wall rollback, or adapter time cannot extend authority; fake-clock tests cover regression before heartbeat, claim, second release gate, approval, retry, and recovery-to-healthy.
 - [ ] An incompatible client fails during `control.hello` before any submission or mutation.
 - [ ] `session.create|fork` and `run.submit|apply` compute the exact admission-intent formula and key replay by `(principalId,method,admissionKey)`. Equal intent returns the first Session/Run/control result before Session/source/workspace validation, descriptor capture, or artifact publication; unequal intent returns `ADMISSION_KEY_CONFLICT` with no state/filesystem read beyond replay. A lost submit response returns the same `runId`; concurrent first execution is rechecked under the admission write transaction.

@@ -3,7 +3,7 @@ import { KernelStorageError } from '../errors.js';
 import { decodeInvocationJournalEntry } from '../invariants.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 
-type JournalSqlRow = {
+export type JournalSqlRow = {
   run_id: string;
   seq: unknown;
   op_id: string;
@@ -13,7 +13,8 @@ type JournalSqlRow = {
   entry_json: string;
 };
 
-function journalEntryFromRow(row: JournalSqlRow): InvocationJournalEntry {
+/** Decode one retained row; bounded readers share the same authoritative column checks. */
+export function journalEntryFromRow(row: JournalSqlRow): InvocationJournalEntry {
   let value: unknown;
   try {
     value = JSON.parse(row.entry_json);

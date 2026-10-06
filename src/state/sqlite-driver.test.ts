@@ -64,6 +64,110 @@ test('BEGIN IMMEDIATE transaction rolls back every write when the callback fails
   }
 });
 
+test('read snapshots keep one WAL cut without blocking a concurrent writer', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-read-cut-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+  const reader = openSqliteDriver(databasePath);
+  let writer: SqliteDriver | undefined;
+  try {
+    reader.exec('PRAGMA journal_mode=WAL; CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT');
+    reader.prepare('INSERT INTO records (id) VALUES (?)').run(1n);
+    writer = openSqliteDriver(databasePath);
+    const cut = reader.readSnapshot(connection => {
+      const count = () => connection.prepare('SELECT count(*) AS n FROM records').get<{ n: bigint }>()!.n;
+      assert.equal(count(), 1n);
+      writer!.transaction(other => other.prepare('INSERT INTO records (id) VALUES (?)').run(2n));
+      assert.equal(count(), 1n, 'all reads stay on the captured cut despite the committed writer');
+      return count();
+    });
+    assert.equal(cut, 1n);
+    assert.equal(reader.readSnapshot(connection => connection.prepare('SELECT count(*) AS n FROM records').get<{ n: bigint }>()!.n), 2n);
+  } finally {
+    writer?.close(); reader.close();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('read snapshots forbid writes and setting escapes, then restore the writer connection', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-read-only-'));
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  try {
+    driver.exec('CREATE TABLE records (id INTEGER PRIMARY KEY) STRICT');
+    let escapedConnection!: SqliteConnection;
+    let escapedStatement!: SqliteStatement;
+    driver.readSnapshot(connection => {
+      escapedConnection = connection;
+      escapedStatement = connection.prepare('SELECT count(*) AS n FROM records');
+      assert.throws(() => driver.prepare('SELECT 1'), /outer SQLite connection is unavailable/);
+      assert.throws(() => driver.transaction(() => undefined), /outer SQLite connection is unavailable/);
+      assert.throws(() => driver.readSnapshot(() => undefined), /outer SQLite connection is unavailable/);
+      assert.throws(() => connection.exec('INSERT INTO records (id) VALUES (1)'), /readonly database/);
+      assert.throws(() => connection.prepare('INSERT INTO records (id) VALUES (2) RETURNING id').get(), /readonly database/);
+      for (const sql of ['/* comment */ PRAGMA query_only=OFF', '-- comment\n ATTACH DATABASE \'anything\' AS extra',
+        'SELECT 1; PRAGMA query_only=OFF', 'DETACH DATABASE extra']) {
+        assert.throws(() => connection.prepare(sql), /connection settings are reserved/);
+      }
+      assert.equal(connection.prepare("SELECT 'PRAGMA query_only=OFF' AS value").get<{ value: string }>()!.value, 'PRAGMA query_only=OFF');
+    });
+    assert.throws(() => escapedConnection.prepare('SELECT 1'), /scope is no longer active/);
+    assert.throws(() => escapedStatement.all(), /scope is no longer active/);
+    const abort = new Error('abort read cut');
+    assert.throws(() => driver.readSnapshot(() => { throw abort; }), error => error === abort);
+    driver.transaction(connection => connection.prepare('INSERT INTO records (id) VALUES (3)').run());
+    assert.equal(driver.prepare('SELECT count(*) AS n FROM records').get<{ n: bigint }>()!.n, 1n);
+    driver.exec('PRAGMA query_only=ON');
+    driver.readSnapshot(connection => connection.prepare('SELECT 1').get());
+    assert.equal(driver.prepare('PRAGMA query_only').get<{ query_only: bigint }>()!.query_only, 1n, 'preexisting read-only setting is preserved');
+    driver.exec('PRAGMA query_only=OFF');
+  } finally {
+    driver.close();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('read snapshot async callbacks and thenables cannot outlive their SQL cut', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-read-async-'));
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  try {
+    let late!: Promise<unknown>;
+    assert.throws(() => {
+      // @ts-expect-error Read snapshot callbacks must be synchronous.
+      driver.readSnapshot(async connection => {
+        late = Promise.resolve().then(() => connection.prepare('SELECT 1').get());
+        await late;
+      });
+    }, /read snapshot callback must be synchronous/);
+    await assert.rejects(late, /scope is no longer active/);
+    assert.throws(() => driver.readSnapshot(() => ({ then() {} }) as unknown as number), /read snapshot callback must be synchronous/);
+    assert.equal(driver.prepare('PRAGMA query_only').get<{ query_only: bigint }>()!.query_only, 0n);
+  } finally {
+    driver.close();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('failure restoring read-snapshot settings permanently abandons the connection', async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-read-restore-'));
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  try {
+    const internals = driver as unknown as { database: { exec(sql: string): void } };
+    const originalExec = internals.database.exec.bind(internals.database);
+    const restoreError = new Error('injected settings restoration failure');
+    internals.database.exec = sql => {
+      if (sql === 'PRAGMA query_only=OFF') throw restoreError;
+      originalExec(sql);
+    };
+    assert.throws(() => driver.readSnapshot(connection => connection.prepare('SELECT 1').get()),
+      error => error instanceof AggregateError && error.errors[0] === restoreError);
+    assert.throws(() => driver.prepare('SELECT 1'), /abandoned/);
+    assert.throws(() => driver.transaction(() => undefined), /abandoned/);
+    assert.throws(() => driver.readSnapshot(() => undefined), /abandoned/);
+  } finally {
+    // The failed restoration already closed the native database.
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test('transaction callbacks cannot commit through the outer driver and leave partial writes', async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-transaction-owner-'));
   const databasePath = path.join(stateRoot, 'kernel.sqlite3');

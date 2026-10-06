@@ -1,6 +1,7 @@
 import {
   assertArtifactRef,
   digestOmitting,
+  identityHash,
   parseCanonicalTime,
   requiredSafeInteger
 } from '../kernel/identity.js';
@@ -13,6 +14,7 @@ import type {
   FrozenIgnoreRulesV1,
   LocalControlChannelIdentityV1,
   LocalPrincipalIdentityV1,
+  LocalSocketPeerObservationV1,
   PlatformProcessIdentityV1,
   RunObjectiveV1,
   RunSpec,
@@ -222,8 +224,9 @@ export function decodeLocalPrincipalIdentity(value: unknown): LocalPrincipalIden
   requireString(value.principalId, 'LocalPrincipalIdentity.principalId');
   requireDigest(value.identityDigest, 'LocalPrincipalIdentity.identityDigest');
   const identity = value as LocalPrincipalIdentityV1;
-  if (digestOmitting(identity, 'identityDigest') !== identity.identityDigest) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'local principal identity digest does not rehash');
+  if (identity.principalId !== identityHash('cliq-local-principal-v1', identity.stateRootIdentityDigest,
+      identity.platform, identity.effectiveUid) || digestOmitting(identity, 'identityDigest') !== identity.identityDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'local principal identity or digest does not rehash');
   }
   return identity;
 }
@@ -263,6 +266,53 @@ export function decodePlatformProcessIdentity(value: unknown): PlatformProcessId
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'platform process identity digest does not rehash');
   }
   return identity;
+}
+
+/** Retained provenance only; decoding bytes never authenticates a live socket. */
+export function decodeLocalSocketPeerObservation(value: unknown): LocalSocketPeerObservationV1 {
+  if (!isRecord(value) || value.format !== 'cliq-local-socket-peer-observation-v1' || value.schemaVersion !== 1) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'local socket peer observation has the wrong schema');
+  }
+  rejectUnknownKeys(value, ['schemaVersion', 'format', 'platform', 'stateRootIdentityRef', 'stateRootIdentityDigest',
+    'listener', 'acceptedSocket', 'credentialApi', 'peerUid', 'peerGid', 'peerPid', 'peerProcessIdentityRef',
+    'peerProcessIdentityDigest', 'observedAt', 'observationDigest'], 'LocalSocketPeerObservation');
+  requirePlatform(value.platform, 'LocalSocketPeerObservation.platform');
+  requireArtifactRef(value.stateRootIdentityRef, 'LocalSocketPeerObservation.stateRootIdentityRef');
+  requireDigest(value.stateRootIdentityDigest, 'LocalSocketPeerObservation.stateRootIdentityDigest');
+  if (!isRecord(value.listener) || !isRecord(value.acceptedSocket)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'socket peer observation requires both descriptor identities');
+  }
+  rejectUnknownKeys(value.listener, ['canonicalRootRelativePath', 'fileType', 'deviceId', 'fileId', 'ownerUid', 'mode'],
+    'LocalSocketPeerObservation.listener');
+  if (value.listener.canonicalRootRelativePath !== 'runtime/control-v1.sock' ||
+      value.listener.fileType !== 'unix_stream_socket' || value.listener.mode !== 384) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control listener protection or locator is invalid');
+  }
+  requireUnsignedDecimal(value.listener.deviceId, 'LocalSocketPeerObservation.listener.deviceId');
+  requireUnsignedDecimal(value.listener.fileId, 'LocalSocketPeerObservation.listener.fileId');
+  requireSafeInteger(value.listener.ownerUid, 'LocalSocketPeerObservation.listener.ownerUid');
+  rejectUnknownKeys(value.acceptedSocket, ['socketType', 'deviceId', 'fileId'], 'LocalSocketPeerObservation.acceptedSocket');
+  if (value.acceptedSocket.socketType !== 'SOCK_STREAM') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control accepted socket must be SOCK_STREAM');
+  }
+  requireUnsignedDecimal(value.acceptedSocket.deviceId, 'LocalSocketPeerObservation.acceptedSocket.deviceId');
+  requireUnsignedDecimal(value.acceptedSocket.fileId, 'LocalSocketPeerObservation.acceptedSocket.fileId');
+  requireSafeInteger(value.peerUid, 'LocalSocketPeerObservation.peerUid');
+  requireSafeInteger(value.peerGid, 'LocalSocketPeerObservation.peerGid');
+  requireSafeInteger(value.peerPid, 'LocalSocketPeerObservation.peerPid', 1);
+  const api = value.platform === 'linux' ? 'linux_so_peercred' : 'macos_getpeereid_local_peerpid';
+  if (value.credentialApi !== api || value.listener.ownerUid !== value.peerUid) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control peer credentials do not match the listener or platform');
+  }
+  requireArtifactRef(value.peerProcessIdentityRef, 'LocalSocketPeerObservation.peerProcessIdentityRef');
+  requireDigest(value.peerProcessIdentityDigest, 'LocalSocketPeerObservation.peerProcessIdentityDigest');
+  requireCanonicalTime(value.observedAt, 'LocalSocketPeerObservation.observedAt');
+  requireDigest(value.observationDigest, 'LocalSocketPeerObservation.observationDigest');
+  const observation = value as LocalSocketPeerObservationV1;
+  if (digestOmitting(observation, 'observationDigest') !== observation.observationDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'local socket peer observation digest does not rehash');
+  }
+  return observation;
 }
 
 export function decodeStateRootIdentity(value: unknown): StateRootIdentityV1 {

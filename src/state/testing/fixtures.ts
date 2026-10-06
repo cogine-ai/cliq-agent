@@ -115,6 +115,7 @@ export type ActiveFixture = {
   stateRoot: string;
   workspace: string;
   store: StateStore;
+  principalId: string;
   channelIdentityRef: string;
   runId: string;
   runRevision: number;
@@ -144,8 +145,7 @@ export async function createActiveFixture(
   const stateRoot = await makePrivateDir(`.cliq-m2-${label}-state-`);
   const workspace = await makePrivateDir(`.cliq-m2-${label}-ws-`);
   const store = await openStateStore(stateRoot, options.runtimeAuthority);
-  const principalId = 'cliq-m2-principal';
-  const channel = await publishInProcessChannel(store, principalId);
+  const { principalId, ...channel } = await publishInProcessChannel(store);
   const session = await store.createSession({
     principalId,
     requestId: uuidv7(),
@@ -177,7 +177,7 @@ export async function createActiveFixture(
     ...source
   });
   try {
-    return { stateRoot, workspace, store, channelIdentityRef: channel.channelIdentityRef,
+    return { stateRoot, workspace, store, principalId, channelIdentityRef: channel.channelIdentityRef,
       ...await activateFixtureWorker({ store, stateRoot, runId: admitted.run.id }, label, options.leaseDurationMs) };
   } catch (error) {
     await store.close();

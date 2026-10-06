@@ -15,6 +15,26 @@ export const STATE_OWNER_NATIVE_RELATIVE_PATH = `native/${process.platform}-${pr
 export const STATE_OWNER_NATIVE_PATH = fileURLToPath(new URL(`../../dist/${STATE_OWNER_NATIVE_RELATIVE_PATH}`, import.meta.url));
 
 type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
+/** Native-minted process/image observation, never a caller attestation. */
+export type NativePeerObservation = Readonly<{
+  pid: number;
+  uid: number;
+  gid: number;
+  processStartToken: string;
+  listener: DescriptorIdentity;
+  acceptedSocket: DescriptorIdentity;
+  imageFd: number;
+  imageByteCount: number;
+  close(): void;
+}>;
+export type HeldControlPeer = Readonly<{
+  /** Transfer one duplicate to Node's Socket; the native original stays held. */
+  takeSocketFd(): number;
+  capture(): NativePeerObservation;
+  assertObservation(observation: NativePeerObservation): void;
+  close(): void;
+}>;
+export type HeldControlListener = Readonly<{ assertHeld(): void; close(): void }>;
 /** A physical move observation only: no containment death, tree or SQLite authority. */
 export type GenerationQuarantineMove = Readonly<{
   quarantineCanonicalRootRelativePath: string;
@@ -30,6 +50,7 @@ export type HeldStateOwnerLock = Readonly<{
   lock: DescriptorIdentity;
   assertHeld(): void;
   assertPriorProcessDead(pid: number, processStartToken: string): void;
+  openControlListener(onAccept: (peer: HeldControlPeer) => void, onError: (error: Error) => void): HeldControlListener;
   /** Trusted Supervisor primitive. The caller must first fence/retire writers;
    * this neither revokes open descriptors/mounts nor commits generation state. */
   quarantineGeneration(generation: WorkspaceGenerationIdentityV1, sourceRowVersion: number): GenerationQuarantineMove;
@@ -70,6 +91,12 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
     root: held.root, runtime: held.runtime, lock: held.lock,
     assertHeld() { receiver(this); held.assertHeld(); },
     assertPriorProcessDead(pid, token) { receiver(this); held.assertPriorProcessDead(pid, token); },
+    openControlListener(onAccept, onError) {
+      receiver(this);
+      held.assertHeld();
+      if (typeof onAccept !== 'function' || typeof onError !== 'function') throw new TypeError('control listener requires callbacks');
+      return held.openControlListener(onAccept, onError);
+    },
     close() { receiver(this); held.close(); },
     quarantineGeneration(value, sourceRowVersion) {
       receiver(this);

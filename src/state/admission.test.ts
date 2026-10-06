@@ -8,6 +8,8 @@ import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1,
+  LocalControlChannelIdentityV1,
+  LocalPrincipalIdentityV1,
   SourceManifest,
   SourceProjectionSpec,
   VerifierSpec,
@@ -139,8 +141,7 @@ test('M1 store admits a queued Run with an initial Checkpoint and recovers it', 
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     const created = await store.createSession({
       principalId,
       requestId: uuidv7(),
@@ -217,8 +218,7 @@ test('admission-key replay returns the original Session and Run without a second
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     const key = admissionKey('session-replay');
     const first = await store.createSession({
       principalId,
@@ -288,8 +288,7 @@ test('same admission key with a different intent is ADMISSION_KEY_CONFLICT', asy
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     const key = admissionKey('session-conflict');
     await store.createSession({
       principalId,
@@ -323,8 +322,7 @@ test('reused requestId with different bytes is REQUEST_ID_CONFLICT', async () =>
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     const requestId = uuidv7();
     await store.createSession({
       principalId,
@@ -358,8 +356,7 @@ test('replacing the workspace root after Session create is ARTIFACT_MISMATCH', a
   await mkdir(workspace, { mode: 0o700 });
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     const created = await store.createSession({
       principalId,
       requestId: uuidv7(),
@@ -408,8 +405,7 @@ test('session.create rejects a symlinked workspace root', async () => {
   await symlink(realWorkspace, linked);
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     await assert.rejects(
       () =>
         store.createSession({
@@ -440,8 +436,7 @@ test('Git workspaces publish a repository identity', async () => {
   });
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     const created = await store.createSession({
       principalId,
       requestId: uuidv7(),
@@ -467,8 +462,7 @@ test('concurrent same-key Session and Run admission returns the committed row', 
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     const sessionKey = admissionKey('session-race');
     const [firstSession, secondSession] = await Promise.all([
       store.createSession({
@@ -544,8 +538,7 @@ test('concurrent different-key Sessions do not mark the time fence clock_regress
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     const [left, right] = await Promise.all([
       store.createSession({
         principalId,
@@ -587,15 +580,27 @@ test('concurrent different-key Sessions do not mark the time fence clock_regress
   }
 });
 
-test('admitRun rejects a Session owned by another principal', async () => {
+test('admitRun rejects a foreign-StateRoot channel and accepts the Session owner on a fresh channel', async () => {
   const stateRoot = await makePrivateDir('.cliq-m1-owner-');
+  const foreignStateRoot = await makePrivateDir('.cliq-m1-foreign-owner-');
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const store = await openStateStore(stateRoot);
+  const foreignStore = await openStateStore(foreignStateRoot);
   try {
-    const owner = await publishInProcessChannel(store, 'principal-owner');
-    const stranger = await publishInProcessChannel(store, 'principal-stranger');
+    const owner = await publishInProcessChannel(store);
+    const stranger = await publishInProcessChannel(foreignStore);
+    assert.notEqual(stranger.principalId, owner.principalId);
+    const foreignChannel = await foreignStore.artifacts.readCanonical<LocalControlChannelIdentityV1>(stranger.channelIdentityRef);
+    const foreignPrincipal = await foreignStore.artifacts.readCanonical<LocalPrincipalIdentityV1>(foreignChannel.principalIdentityRef);
+    assert.equal(foreignChannel.transport.kind, 'in_process');
+    if (foreignChannel.transport.kind !== 'in_process') throw new Error('expected in-process channel');
+    // Copy the complete authentic closure, so rejection proves StateRoot binding rather than missing CAS bytes.
+    for (const ref of [stranger.channelIdentityRef, foreignChannel.principalIdentityRef,
+      foreignPrincipal.stateRootIdentityRef, foreignChannel.transport.processIdentityRef]) {
+      const value = await foreignStore.artifacts.readCanonical<{ format: string }>(ref);
+      assert.equal((await store.artifacts.publishCanonical(value, value.format)).ref, ref);
+    }
     const created = await store.createSession({
-      principalId: 'principal-owner',
       requestId: uuidv7(),
       admissionKey: admissionKey('session-owner'),
       workspacePath: workspace,
@@ -608,7 +613,6 @@ test('admitRun rejects a Session owned by another principal', async () => {
     await assert.rejects(
       () =>
         store.admitRun({
-          principalId: 'principal-stranger',
           requestId: uuidv7(),
           admissionKey: admissionKey('run-stranger'),
           sessionId: created.session.id,
@@ -619,10 +623,26 @@ test('admitRun rejects a Session owned by another principal', async () => {
           ...stranger,
           ...source
         }),
-      (error: unknown) => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST'
+      (error: unknown) => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH'
     );
+    const reconnected = await publishInProcessChannel(store);
+    assert.equal(reconnected.principalId, owner.principalId);
+    const admitted = await store.admitRun({
+      requestId: uuidv7(),
+      admissionKey: admissionKey('run-owner'),
+      sessionId: created.session.id,
+      expectedContextRevision: 1,
+      workspacePath: workspace,
+      objective: 'attach as the authenticated owner',
+      allowUnverified: true,
+      ...reconnected,
+      ...source
+    });
+    assert.equal(admitted.run.sessionId, created.session.id);
   } finally {
+    await foreignStore.close();
     await store.close();
+    await rm(foreignStateRoot, { recursive: true, force: true });
     await rm(stateRoot, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
   }
@@ -635,8 +655,7 @@ test('reopening the store recovers the admitted Run from SQLite and CAS', async 
   let runId = '';
   let sessionId = '';
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(first, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(first);
     const created = await first.createSession({
       principalId,
       requestId: uuidv7(),
@@ -699,8 +718,7 @@ test('same admission key with different budgets is ADMISSION_KEY_CONFLICT', asyn
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     const created = await store.createSession({
       principalId,
       requestId: uuidv7(),
@@ -759,8 +777,7 @@ test('session.create rejects a symlinked .git/config', async () => {
   await symlink(path.join(outside, 'config'), path.join(workspace, '.git', 'config'));
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     await assert.rejects(
       () =>
         store.createSession({
@@ -785,8 +802,7 @@ test('an empty required verifier set without allowUnverified is INVALID_REQUEST'
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-test-principal';
-    const channel = await publishInProcessChannel(store, principalId);
+    const { principalId, ...channel } = await publishInProcessChannel(store);
     const created = await store.createSession({
       principalId,
       requestId: uuidv7(),

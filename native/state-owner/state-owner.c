@@ -11,6 +11,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <uv.h>
 #ifdef __APPLE__
 #include <libproc.h>
 #elif defined(__linux__)
@@ -23,20 +24,26 @@ static napi_value native_error(napi_env env, const char *message) {
     return NULL;
 }
 
+typedef struct control_listener control_listener;
+
 typedef struct {
     int root_fd, runtime_fd, lock_fd;
     struct stat root, runtime, lock;
     char *path;
+    control_listener *listeners;
 } state_lock;
 
 static const napi_type_tag lock_tag = {0x3d641bc705864cfbULL, 0xab53499f3ee988c4ULL};
 
 static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info);
 static napi_value move_generation(napi_env env, napi_callback_info info);
+static napi_value open_control_listener(napi_env env, napi_callback_info info);
+static void close_lock_listeners(state_lock *lock);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
 static void close_lock(state_lock *lock) {
+    close_lock_listeners(lock);
     if (lock->lock_fd >= 0) close(lock->lock_fd);
     if (lock->runtime_fd >= 0) close(lock->runtime_fd);
     if (lock->root_fd >= 0) close(lock->root_fd);
@@ -199,6 +206,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"assertHeld", NULL, assert_held, NULL, NULL, NULL, napi_default, NULL},
         {"assertPriorProcessDead", NULL, assert_prior_process_dead, NULL, NULL, NULL, napi_default, NULL},
         {"moveGeneration", NULL, move_generation, NULL, NULL, NULL, napi_default, NULL},
+        {"openControlListener", NULL, open_control_listener, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -425,6 +433,8 @@ static int observe_process(pid_t pid, char token[128]) {
 #endif
     return 1;
 }
+
+#include "control-socket.c"
 
 static napi_value process_start_token(napi_env env, napi_callback_info info) {
     (void)info;

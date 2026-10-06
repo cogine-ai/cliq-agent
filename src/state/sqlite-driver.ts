@@ -34,6 +34,10 @@ export interface SqliteDriver extends SqliteConnection {
   transaction<Operation extends SqliteTransactionOperation>(
     operation: SynchronousOperation<Operation>
   ): ReturnType<Operation>;
+  /** One synchronous, read-only cut. No writer reservation or async scope escape. */
+  readSnapshot<Operation extends SqliteTransactionOperation>(
+    operation: SynchronousOperation<Operation>
+  ): ReturnType<Operation>;
   close(): void;
 }
 
@@ -92,7 +96,7 @@ const TRANSACTION_CONTROL_KEYWORDS = new Set([
   'SAVEPOINT'
 ]);
 
-function assertNoTransactionControl(sql: string): void {
+function assertNoTransactionControl(sql: string, readOnly = false): void {
   let index = 0;
   let statementStart = true;
   let triggerBody = false;
@@ -152,6 +156,9 @@ function assertNoTransactionControl(sql: string): void {
       if (statementStart && TRANSACTION_CONTROL_KEYWORDS.has(keyword)) {
         throw new TypeError('SQLite transaction control SQL is reserved for the driver');
       }
+      if (readOnly && statementStart && ['PRAGMA', 'ATTACH', 'DETACH'].includes(keyword)) {
+        throw new TypeError('SQLite connection settings are reserved during a read snapshot');
+      }
       if (!triggerBody) {
         statementKeywords.push(keyword);
         const prefix = statementKeywords.filter((entry) => entry !== 'TEMP' && entry !== 'TEMPORARY');
@@ -170,7 +177,7 @@ function assertNoTransactionControl(sql: string): void {
 class TransactionScopedConnection implements SqliteConnection {
   private active = true;
 
-  constructor(private readonly database: DatabaseSync) {}
+  constructor(private readonly database: DatabaseSync, private readonly readOnly = false) {}
 
   deactivate(): void {
     this.active = false;
@@ -178,13 +185,13 @@ class TransactionScopedConnection implements SqliteConnection {
 
   exec(sql: string): void {
     this.requireActive();
-    assertNoTransactionControl(sql);
+    assertNoTransactionControl(sql, this.readOnly);
     this.database.exec(sql);
   }
 
   prepare(sql: string): SqliteStatement {
     this.requireActive();
-    assertNoTransactionControl(sql);
+    assertNoTransactionControl(sql, this.readOnly);
     return new TransactionScopedStatement(
       new NodeSqliteStatement(this.database.prepare(sql)),
       this.requireActive
@@ -235,20 +242,40 @@ class NodeSqliteDriver implements SqliteDriver {
   transaction<Operation extends SqliteTransactionOperation>(
     operation: SynchronousOperation<Operation>
   ): ReturnType<Operation> {
+    return this.scopedTransaction(operation, false);
+  }
+
+  readSnapshot<Operation extends SqliteTransactionOperation>(
+    operation: SynchronousOperation<Operation>
+  ): ReturnType<Operation> {
+    return this.scopedTransaction(operation, true);
+  }
+
+  private scopedTransaction<Operation extends SqliteTransactionOperation>(
+    operation: SynchronousOperation<Operation>, readOnly: boolean
+  ): ReturnType<Operation> {
     this.requireNoActiveTransaction();
-    this.database.exec('BEGIN IMMEDIATE');
+    const restoreQueryOnly = readOnly && this.database.prepare('PRAGMA query_only').get()?.query_only === 0;
+    if (restoreQueryOnly) this.database.exec('PRAGMA query_only=ON');
+    try { this.database.exec(readOnly ? 'BEGIN' : 'BEGIN IMMEDIATE'); }
+    catch (error) {
+      if (restoreQueryOnly) this.restoreWritableConnection(error);
+      throw error;
+    }
     this.transactionActive = true;
-    const scopedConnection = new TransactionScopedConnection(this.database);
+    const scopedConnection = new TransactionScopedConnection(this.database, readOnly);
+    let primaryError: unknown;
     try {
       const result = operation(scopedConnection) as ReturnType<Operation>;
       scopedConnection.deactivate();
       if (isThenable(result)) {
         observeRejectedThenable(result);
-        throw new TypeError('SQLite transaction callback must be synchronous');
+        throw new TypeError(`SQLite ${readOnly ? 'read snapshot' : 'transaction'} callback must be synchronous`);
       }
       this.database.exec('COMMIT');
       return result;
     } catch (error) {
+      primaryError = error;
       scopedConnection.deactivate();
       try {
         this.database.exec('ROLLBACK');
@@ -266,6 +293,17 @@ class NodeSqliteDriver implements SqliteDriver {
     } finally {
       scopedConnection.deactivate();
       this.transactionActive = false;
+      if (restoreQueryOnly && !this.poisoned) this.restoreWritableConnection(primaryError);
+    }
+  }
+
+  private restoreWritableConnection(primaryError?: unknown): void {
+    try { this.database.exec('PRAGMA query_only=OFF'); }
+    catch (error) {
+      this.poisoned = true;
+      try { this.database.close(); } catch { /* Permanently refuse the uncertain connection. */ }
+      throw new AggregateError(primaryError === undefined ? [error] : [primaryError, error],
+        'SQLite read snapshot could not restore connection settings');
     }
   }
 
