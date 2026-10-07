@@ -3,8 +3,10 @@ import { execFileSync } from 'node:child_process';
 import { chmod, link, lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
-import type { PlatformProcessIdentityV1 } from '../kernel/types.js';
-import { loadNativeStateOwner } from './native-owner.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
+import { digestOmitting } from '../kernel/identity.js';
+import type { PlatformProcessIdentityV1, StateRootIdentityV1 } from '../kernel/types.js';
+import { loadNativeStateOwner, stateRootIdentityFromDescriptor } from './native-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { openStateStore } from './store.js';
 import { makePrivateDir } from './testing/fixtures.js';
@@ -18,6 +20,43 @@ async function rootFor(t: TestContext) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
+
+test('stateRootIdentityFromDescriptor matches the held native lock and store bootstrap artifact', async (t) => {
+  const root = await rootFor(t);
+  const held = native.acquireLock(root, true);
+  try {
+    const projected = stateRootIdentityFromDescriptor(root, held.root);
+    assert.ok(Object.isFrozen(projected));
+    assert.equal(projected.platform, process.platform === 'linux' ? 'linux' : 'macos');
+    assert.equal(projected.canonicalAbsolutePath, root);
+    assert.equal(projected.ownerUid, held.root.ownerUid);
+    assert.equal(projected.deviceId, held.root.deviceId);
+    assert.equal(projected.directoryFileId, held.root.fileId);
+    assert.equal(projected.mode, 448);
+    assert.equal(projected.openedNoFollow, true);
+    assert.equal(projected.layoutVersion, 1);
+    assert.equal(projected.identityDigest, digestOmitting(projected, 'identityDigest'));
+    assert.equal(canonicalSha256(projected), canonicalSha256(structuredClone(projected) as StateRootIdentityV1));
+  } finally { held.close(); }
+
+  const store = await openStateStore(root);
+  const published = await store.artifacts.readCanonical<StateRootIdentityV1>(store.stateRootIdentity.ref);
+  assert.equal(published.identityDigest, store.stateRootIdentity.digest);
+  await store.close();
+  const successor = native.acquireLock(root, false);
+  try {
+    assert.deepEqual(stateRootIdentityFromDescriptor(root, successor.root), published);
+  } finally { successor.close(); }
+});
+
+test('stateRootIdentityFromDescriptor changes digest when descriptor identity drifts', () => {
+  const root = '/tmp/example-state-root';
+  const base = { deviceId: '1', fileId: '2', ownerUid: process.geteuid!() };
+  const first = stateRootIdentityFromDescriptor(root, base);
+  for (const drift of [{ fileId: '3' }, { deviceId: '9' }, { ownerUid: base.ownerUid + 1 }]) {
+    assert.notEqual(stateRootIdentityFromDescriptor(root, { ...base, ...drift }).identityDigest, first.identityDigest);
+  }
+});
 
 test('native StateOwner lock holds exact descriptor identities until explicit close', async (t) => {
   const root = await rootFor(t);
