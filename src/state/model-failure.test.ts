@@ -303,8 +303,8 @@ test('deadline and user cancellation supersede model failure without changing th
     const expired = await stop(fixture);
     assert.notEqual(expired.run.stopIntentRef, failed.run.stopIntentRef);
     assert.equal((await fixture.store.artifacts.readCanonical<{ origin: string }>(expired.run.stopIntentRef!)).origin, 'deadline');
-    const cancelled = await fixture.agent.cancelRun({ principalId: 'cliq-m2-principal', requestId: uuidv7(),
-      expectedRunRevision: revision(fixture), ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') });
+    const cancelled = await fixture.agent.cancelRun({ requestId: uuidv7(),
+      expectedRunRevision: revision(fixture), ...await publishInProcessChannel(fixture.store) });
     assert.deepEqual((await stop(fixture)).run, cancelled.run);
     const proof = await quiescedToolCheckpoint(fixture, cancelled.checkpointId);
     const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture), checkpoint: proof.checkpoint });

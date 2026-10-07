@@ -17,8 +17,8 @@ type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const revision = (fixture: Fixture) => fixture.store.getRun(fixture.runId).revision;
 const stop = (fixture: Fixture) => fixture.agent.stopForResourceFailure({ expectedRunRevision: revision(fixture) });
 async function cancel(fixture: Fixture) {
-  return fixture.agent.cancelRun({ principalId: 'cliq-m2-principal', requestId: uuidv7(), expectedRunRevision: revision(fixture),
-    ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') });
+  return fixture.agent.cancelRun({ requestId: uuidv7(), expectedRunRevision: revision(fixture),
+    ...await publishInProcessChannel(fixture.store) });
 }
 async function reopen(fixture: Fixture) {
   await fixture.store.close();
@@ -161,8 +161,8 @@ for (const expired of [false, true]) test(`tool budget stopping respects ${expir
     const proof = await quiescedToolCheckpoint(fixture, pending.checkpointId);
     await fixture.agent.waitForToolApproval({ expectedRunRevision: revision(fixture), waitingOnRef: pending.waitingOnRef, checkpoint: proof.checkpoint });
     await assert.rejects(stop(fixture), { code: 'STATE_TRANSITION_INVALID' });
-    const command = { principalId: 'cliq-m2-principal', requestId: uuidv7(), expectedRunRevision: revision(fixture),
-      waitingOnRef: pending.waitingOnRef, decision: 'allow' as const, ttlMs: 1000, ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') };
+    const command = { requestId: uuidv7(), expectedRunRevision: revision(fixture),
+      waitingOnRef: pending.waitingOnRef, decision: 'allow' as const, ttlMs: 1000, ...await publishInProcessChannel(fixture.store) };
     await fixture.agent.approveTool(command);
     await reopen(fixture);
     if (expired) {

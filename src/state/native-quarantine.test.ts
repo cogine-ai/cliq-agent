@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { chmod, link, lstat, mkdir, open, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { Module } from 'node:module';
 import { constants } from 'node:os';
@@ -240,9 +240,12 @@ test('native syscall faults never authorize an incomplete move and exact retries
   const staging = await makePrivateDir('.cliq-quarantine-fault-build-');
   t.after(() => rm(staging, { recursive: true, force: true }));
   const binary = path.join(staging, 'fault.node');
-  const compiled = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+  const includes = JSON.parse(execFileSync(process.execPath, [
+    fileURLToPath(new URL('../../scripts/kernel/build-state-owner-native.mjs', import.meta.url)), '--print-includes'
+  ], { encoding: 'utf8' })) as string[];
+  const compiled = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread',
     ...(linux ? ['-shared', '-fPIC'] : ['-bundle', '-undefined', 'dynamic_lookup']),
-    '-I', path.resolve(path.dirname(realpathSync(process.execPath)), '../include/node'),
+    ...includes.flatMap(include => ['-I', include]),
     fileURLToPath(new URL('./testing/quarantine-fault-native.c', import.meta.url)), '-o', binary], { encoding: 'utf8' });
   assert.equal(compiled.status, 0, compiled.stderr);
   const module = new Module(binary);

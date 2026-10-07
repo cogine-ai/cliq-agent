@@ -27,8 +27,8 @@ async function wait(fixture: Fixture) {
 }
 async function control(fixture: Fixture, decision: 'allow' | 'deny', ttlMs?: number) {
   const run = fixture.store.getRun(fixture.runId);
-  return { principalId: 'cliq-m2-principal', requestId: uuidv7(), expectedRunRevision: run.revision, waitingOnRef: run.waitingOnRef!,
-    decision, ...(ttlMs === undefined ? {} : { ttlMs }), ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') };
+  return { requestId: uuidv7(), expectedRunRevision: run.revision, waitingOnRef: run.waitingOnRef!,
+    decision, ...(ttlMs === undefined ? {} : { ttlMs }), ...await publishInProcessChannel(fixture.store) };
 }
 async function reopen(fixture: Fixture) {
   await fixture.store.close();
@@ -65,7 +65,7 @@ test('approval survives restart, concurrent control replay and fresh worker acti
     assert.throws(() => { approved.run.revision = 1; }, TypeError);
     await assert.rejects(fixture.agent.approveTool({ ...input, decision: 'deny' }), { code: 'REQUEST_ID_CONFLICT' });
     await reopen(fixture);
-    assert.deepEqual((await fixture.agent.approveTool({ ...input, ...await publishInProcessChannel(fixture.store, input.principalId) })).response, approved.response);
+    assert.deepEqual((await fixture.agent.approveTool({ ...input, ...await publishInProcessChannel(fixture.store) })).response, approved.response);
     const oldEpoch = fixture.leaseEpoch;
     Object.assign(fixture, await activateFixtureWorker(fixture, 'approved-first-worker'));
     const prepared = await prepareTool(fixture);

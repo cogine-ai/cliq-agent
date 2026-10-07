@@ -366,7 +366,7 @@ test('control channel decoding rejects extension fields even when its digest reh
   const workspace = await makePrivateDir('.cliq-m2-channel-closed-ws-');
   const store = await openStateStore(stateRoot);
   try {
-    const channel = await publishInProcessChannel(store, 'cliq-m2-principal');
+    const channel = await publishInProcessChannel(store);
     const extended = await store.artifacts.readCanonical<Record<string, unknown>>(
       channel.channelIdentityRef
     );
@@ -378,7 +378,7 @@ test('control channel decoding rejects extension fields even when its digest reh
     );
     await assert.rejects(
       store.createSession({
-        principalId: 'cliq-m2-principal',
+        principalId: channel.principalId,
         requestId: uuidv7(),
         admissionKey: admissionKey('closed-channel'),
         workspacePath: workspace,
@@ -399,8 +399,7 @@ test('control channel rejects forged process identity and opaque UDS peer eviden
   const workspace = await makePrivateDir('.cliq-m2-channel-binding-ws-');
   const store = await openStateStore(stateRoot);
   try {
-    const principalId = 'cliq-m2-principal';
-    const published = await publishInProcessChannel(store, principalId);
+    const { principalId, ...published } = await publishInProcessChannel(store);
     const channel = await store.artifacts.readCanonical<LocalControlChannelIdentityV1>(
       published.channelIdentityRef
     );
@@ -679,12 +678,11 @@ test('ordinary writes fail closed if the StateOwner lock inode is replaced', asy
   const lockPath = path.join(stateRoot, 'runtime', 'state-owner.lock');
   const displacedPath = path.join(stateRoot, 'runtime', 'state-owner.displaced');
   try {
-    const channel = await publishInProcessChannel(store, 'cliq-m2-principal');
+    const channel = await publishInProcessChannel(store);
     await rename(lockPath, displacedPath);
     await writeFile(lockPath, '', { mode: 0o600 });
     await assert.rejects(
       store.createSession({
-        principalId: 'cliq-m2-principal',
         requestId: uuidv7(),
         admissionKey: admissionKey('lock-swap'),
         workspacePath: workspace,

@@ -300,8 +300,8 @@ test('a typed tool frontier survives worker fencing and restart but cannot consu
   fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
   fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
   await assert.rejects(prepareTool(fixture), { code: 'LEASE_FENCED' });
-  const cancelled = await fixture.agent.cancelRun({ principalId: 'cliq-m2-principal', requestId: uuidv7(),
-    expectedRunRevision: revision(fixture), ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') });
+  const cancelled = await fixture.agent.cancelRun({ requestId: uuidv7(),
+    expectedRunRevision: revision(fixture), ...await publishInProcessChannel(fixture.store) });
   assert.equal(cancelled.run.waitingOnRef, waiting.waitingOnRef);
   assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).run.status, 'waiting');
 });
@@ -311,8 +311,8 @@ for (const order of ['before', 'after'] as const) {
     const fixture = await createAgentFixture(`worker-fence-cancel-${order}`, undefined, { mode: 'plan' });
     t.after(() => disposeFixture(fixture));
     await fixture.agent.prepareModel({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
-    const cancel = async () => fixture.agent.cancelRun({ principalId: 'cliq-m2-principal', requestId: uuidv7(),
-      expectedRunRevision: revision(fixture), ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') });
+    const cancel = async () => fixture.agent.cancelRun({ requestId: uuidv7(),
+      expectedRunRevision: revision(fixture), ...await publishInProcessChannel(fixture.store) });
     if (order === 'before') await cancel();
     const waiting = await begin(fixture);
     if (order === 'after') await cancel();

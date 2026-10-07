@@ -5,6 +5,7 @@ export type KernelStorageErrorCode =
   | 'AGENT_HANDOFF_PENDING'
   | 'MODEL_RETRY_PENDING'
   | 'BUDGET_EXHAUSTED'
+  | 'EVENT_CURSOR_EXPIRED'
   | 'INVALID_REQUEST'
   | 'LEASE_FENCED'
   | 'NOT_FOUND'

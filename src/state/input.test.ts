@@ -31,8 +31,8 @@ async function waitForInput(fixture: Fixture) {
 }
 async function command(fixture: Fixture, input: UserInputValue): Promise<RunInput> {
   const run = fixture.store.getRun(fixture.runId);
-  return { principalId: 'cliq-m2-principal', requestId: uuidv7(), expectedRunRevision: run.revision,
-    waitingOnRef: run.waitingOnRef!, input, ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') };
+  return { requestId: uuidv7(), expectedRunRevision: run.revision,
+    waitingOnRef: run.waitingOnRef!, input, ...await publishInProcessChannel(fixture.store) };
 }
 async function reopen(fixture: Fixture) {
   await fixture.store.close();
@@ -88,7 +88,7 @@ test('input survives restart and idempotent reply, then continues the same nativ
     assert.equal(payload.value, 'Alice');
     const wire = Buffer.from(model.prepared.outbound.bodyBytes).toString('utf8');
     for (const value of [user.principalId, user.promptRef, user.inputRef, payload.channelIdentityRef, waiting.waitingOnRef]) assert.ok(!wire.includes(value));
-    const replay = await fixture.agent.submitInput({ ...input, ...await publishInProcessChannel(fixture.store, input.principalId) });
+    const replay = await fixture.agent.submitInput({ ...input, ...await publishInProcessChannel(fixture.store) });
     assert.deepEqual(replay.response, reply.response);
     assert.equal(fixture.store.getRun(fixture.runId).budgetConsumed.toolCalls, 1);
   } finally { await disposeFixture(fixture); }
@@ -226,7 +226,7 @@ test('input wait and reply commit faults roll back worker retirement, request, r
     fault.exec('DROP TRIGGER fail_input_control');
     assert.equal((await fixture.agent.submitInput(input)).replayed, false);
     await reopen(fixture);
-    assert.equal((await fixture.agent.submitInput({ ...input, ...await publishInProcessChannel(fixture.store, input.principalId) })).replayed, true);
+    assert.equal((await fixture.agent.submitInput({ ...input, ...await publishInProcessChannel(fixture.store) })).replayed, true);
   } finally { fault.close(); await disposeFixture(fixture); }
 });
 

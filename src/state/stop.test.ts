@@ -16,8 +16,8 @@ import { quiescedToolCheckpoint } from './testing/tool-effects.js';
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const revision = (fixture: Fixture) => fixture.store.getRun(fixture.runId).revision;
 async function cancelCommand(fixture: Fixture): Promise<RunCancel> {
-  return { principalId: 'cliq-m2-principal', requestId: uuidv7(), expectedRunRevision: revision(fixture),
-    ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') };
+  return { requestId: uuidv7(), expectedRunRevision: revision(fixture),
+    ...await publishInProcessChannel(fixture.store) };
 }
 async function finish(fixture: Fixture, checkpointId: string) {
   const run = fixture.store.getRun(fixture.runId);
@@ -68,7 +68,7 @@ test('cancel fences a prepared model, replays authenticated requests, and atomic
     assert.deepEqual(detail.reasonDetail, { kind: 'cancelled', stopIntentRef: stopped.run.stopIntentRef });
     await reopen(fixture);
     assert.deepEqual(fixture.store.getRun(fixture.runId), terminal.run);
-    const replay = await fixture.agent.cancelRun({ ...command, ...await publishInProcessChannel(fixture.store, command.principalId) });
+    const replay = await fixture.agent.cancelRun({ ...command, ...await publishInProcessChannel(fixture.store) });
     assert.deepEqual(replay.response, stopped.response);
     assert.deepEqual(fixture.store.getSession(session.id), session);
     await assert.rejects(fixture.agent.readModelAttempt(), { code: 'STATE_TRANSITION_INVALID' });
@@ -314,7 +314,7 @@ test('stop and recovery reject substituted retirement, terminal reason and contr
   } finally { writer.close(); await disposeFixture(fixture); }
 });
 
-test('cancellation recovery and live replay reject a self-consistent foreign-root channel with the same principal and UID', async () => {
+test('cancellation recovery and live replay reject a rehashed foreign-root channel with the retained principal and UID', async () => {
   const fixture = await createAgentFixture('stop-foreign-root', undefined, { mode: 'plan' });
   const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
   try {
@@ -343,7 +343,7 @@ test('cancellation recovery and live replay reject a self-consistent foreign-roo
     writer.prepare("UPDATE control_requests SET channel_identity_ref = ?, channel_identity_digest = ? WHERE method = 'run.cancel' AND request_id = ?")
       .run(command.channelIdentityRef, command.channelIdentityDigest, command.requestId);
     await reopen(fixture);
-    const replay = await fixture.agent.cancelRun({ ...command, ...await publishInProcessChannel(fixture.store, command.principalId) });
+    const replay = await fixture.agent.cancelRun({ ...command, ...await publishInProcessChannel(fixture.store) });
     assert.deepEqual(replay.response, stopped.response);
   } finally { writer.close(); await disposeFixture(fixture); }
 });
@@ -353,12 +353,12 @@ test('concurrent root stops append separate Session segments in commit order wit
   try {
     const { run, runSpec: spec } = await fixture.store.readRecoveryClosure(fixture.runId);
     const source = await fixture.store.artifacts.readCanonical<{ frozenIgnoreRulesRef: string }>(spec.sourceProjectionRef);
-    const second = await fixture.store.admitRun({ principalId: 'cliq-m2-principal', requestId: uuidv7(), admissionKey: admissionKey('stop-second-root'),
+    const second = await fixture.store.admitRun({ requestId: uuidv7(), admissionKey: admissionKey('stop-second-root'),
       sessionId: run.sessionId, expectedContextRevision: 1, workspacePath: fixture.workspace, objective: 'second stopped root', allowUnverified: true,
       assemblyRef: spec.assemblyRef, policyRef: spec.policyRef, sandboxProfileRef: spec.sandboxProfileRef, verifierSpecRef: spec.verifierSpecRef,
       sourceProjectionRef: spec.sourceProjectionRef, baseWorkspaceManifestRef: spec.baseWorkspaceManifestRef,
       frozenIgnoreRulesRef: source.frozenIgnoreRulesRef,
-      credentialGrantRefs: spec.credentialGrantRefs, budgets: spec.budgets, ...await publishInProcessChannel(fixture.store, 'cliq-m2-principal') });
+      credentialGrantRefs: spec.credentialGrantRefs, budgets: spec.budgets, ...await publishInProcessChannel(fixture.store) });
     const agent = await fixture.store.loadAgentRun({ runId: second.run.id, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
     const firstStop = await fixture.agent.cancelRun(await cancelCommand(fixture));
     const secondStop = await agent.cancelRun({ ...await cancelCommand(fixture), expectedRunRevision: second.run.revision });

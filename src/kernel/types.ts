@@ -385,6 +385,35 @@ export type LocalPrincipalIdentityV1 = {
   identityDigest: string;
 };
 
+export type LocalSocketPeerObservationV1 = {
+  schemaVersion: 1;
+  format: 'cliq-local-socket-peer-observation-v1';
+  platform: 'macos' | 'linux';
+  stateRootIdentityRef: ArtifactRef;
+  stateRootIdentityDigest: string;
+  listener: {
+    canonicalRootRelativePath: 'runtime/control-v1.sock';
+    fileType: 'unix_stream_socket';
+    deviceId: string;
+    fileId: string;
+    ownerUid: number;
+    mode: 384;
+  };
+  acceptedSocket: {
+    socketType: 'SOCK_STREAM';
+    deviceId: string;
+    fileId: string;
+  };
+  credentialApi: 'macos_getpeereid_local_peerpid' | 'linux_so_peercred';
+  peerUid: number;
+  peerGid: number;
+  peerPid: number;
+  peerProcessIdentityRef: ArtifactRef;
+  peerProcessIdentityDigest: string;
+  observedAt: string;
+  observationDigest: string;
+};
+
 export type LocalControlChannelIdentityV1 = {
   schemaVersion: 1;
   format: 'cliq-local-control-channel-identity-v1';
@@ -1478,10 +1507,39 @@ export type RecoveryClosureV1 = {
 
 export type ControlResultV1 =
   | { method: 'session.create'; snapshot: SessionSnapshotV1 }
+  | {
+      method: 'session.get';
+      snapshot: SessionSnapshotV1;
+      items: SessionItem[];
+      highWaterItemSeq: number;
+      nextItemSeq: number;
+    }
   | { method: 'run.submit'; snapshot: RunSnapshotV1 }
   | { method: 'run.approve'; snapshot: RunSnapshotV1; decisionRef: ArtifactRef }
   | { method: 'run.input'; snapshot: RunSnapshotV1; inputItemRef: ArtifactRef }
-  | { method: 'run.cancel'; snapshot: RunSnapshotV1 };
+  | { method: 'run.cancel'; snapshot: RunSnapshotV1 }
+  | {
+      method: 'run.get';
+      snapshot: RunSnapshotV1;
+      items: RunItemReferenceV1[];
+      journal: InvocationJournalEntry[];
+      checkpoints: Checkpoint[];
+      highWaterItemSeq: number;
+      highWaterJournalSeq: number;
+      highWaterCheckpointCursor?: string;
+      nextItemSeq: number;
+      nextJournalSeq: number;
+      nextCheckpointCursor?: string;
+    }
+  | {
+      method: 'run.attach';
+      snapshot: RunSnapshotV1;
+      earliestRetainedEventSeq: number;
+      latestRetainedEventSeq: number;
+      highWaterEventSeq: number;
+      events: RunEvent[];
+      nextEventSeq: number;
+    };
 
 export type { StopIntent, TerminalReasonDetail, TerminalDetail, SessionRunTerminalItem, RunCancel } from './stop.js';
 
