@@ -160,10 +160,12 @@ async function editedCheckpoint() {
     assert.match(workerPlan.backend.cgroupNameReservationDigest, /^[0-9a-f]{64}$/u);
     assert.equal(workerPlan.backend.cgroupNameReservationDigest,
       canonicalSha256(['cliq-worker-cgroup-v1', fixture.runId, workerPlan.owner.workerLaunchId]));
+    assert.equal(path.posix.basename(workerPlan.backend.cgroupPath), `cliq-${workerPlan.backend.cgroupNameReservationDigest}`);
     assert.equal(workerPlan.backend.pidNamespaceReservationId,
       identityHash('cliq-worker-namespace-v1', fixture.runId, workerPlan.owner.workerLaunchId));
     assert.match(invocationPlan.backend.cgroupNameReservationDigest, /^[0-9a-f]{64}$/u);
     assert.equal(invocationPlan.backend.cgroupNameReservationDigest, canonicalSha256(['cliq-edit-cgroup-v1', claim.dispatchId]));
+    assert.equal(path.posix.basename(invocationPlan.backend.cgroupPath), `cliq-${invocationPlan.backend.cgroupNameReservationDigest}`);
     assert.equal(invocationPlan.backend.pidNamespaceReservationId, identityHash('cliq-edit-namespace-v1', claim.dispatchId));
     assert.equal(death.backend.cgroupPopulated, 0); assert.equal(death.backend.namespaceInitDeadAndReaped, true);
     assert.equal(death.backend.remainingTrackedDescendants, 0);

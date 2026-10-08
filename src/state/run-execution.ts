@@ -56,10 +56,11 @@ async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: Linux
   const launchId = identityHash('cliq-worker-launch-v1', run.id, String(run.leaseEpoch + 1), nonce());
   const spawnNonceDigest = nonce(), activationNonceDigest = nonce();
   const owner = { kind: 'worker_activation' as const, runId: run.id, intendedLeaseEpoch: run.leaseEpoch + 1, workerLaunchId: launchId };
+  const cgroupNameReservationDigest = canonicalSha256(['cliq-worker-cgroup-v1', run.id, launchId]);
   const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
     filesystemBinding: { kind: 'run-generation', generationRef }, launchNonceDigest: spawnNonceDigest,
-    backend: { kind: 'linux', cgroupPath: path.posix.join(installation.cgroupParent, `cliq-${launchId}`),
-      cgroupNameReservationDigest: canonicalSha256(['cliq-worker-cgroup-v1', run.id, launchId]),
+    backend: { kind: 'linux', cgroupPath: path.posix.join(installation.cgroupParent, `cliq-${cgroupNameReservationDigest}`),
+      cgroupNameReservationDigest,
       pidNamespaceReservationId: identityHash('cliq-worker-namespace-v1', run.id, launchId), subreaperStartToken: controller.subreaperStartToken },
     createdAt: sampleCanonicalNow(), planDigest: '' };
   plan.planDigest = digestOmitting(plan, 'planDigest');
@@ -96,10 +97,11 @@ async function publishEditRecipe(artifacts: ArtifactCatalog, workerSpec: WorkerS
   const owner = { kind: 'run_invocation' as const, runId: prepared.run.id, intendedLeaseEpoch: prepared.run.leaseEpoch,
     workerLaunchId: workerSpec.owner.workerLaunchId, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId };
   if (workerSpec.containmentPlanRef === parentContainmentRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'actual parent containment is required');
+  const cgroupNameReservationDigest = canonicalSha256(['cliq-edit-cgroup-v1', dispatchId]);
   const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
     filesystemBinding: { kind: 'run-generation', generationRef: workerSpec.filesystem.generationRef }, parentContainmentRef,
-    launchNonceDigest: nonce(), backend: { kind: 'linux', cgroupPath: path.posix.join(parentCgroup, `cliq-${identityHash('cliq-edit-invocation-v1', dispatchId)}`),
-      cgroupNameReservationDigest: canonicalSha256(['cliq-edit-cgroup-v1', dispatchId]), pidNamespaceReservationId: identityHash('cliq-edit-namespace-v1', dispatchId),
+    launchNonceDigest: nonce(), backend: { kind: 'linux', cgroupPath: path.posix.join(parentCgroup, `cliq-${cgroupNameReservationDigest}`),
+      cgroupNameReservationDigest, pidNamespaceReservationId: identityHash('cliq-edit-namespace-v1', dispatchId),
       subreaperStartToken: '' }, createdAt: sampleCanonicalNow(), planDigest: '' };
   const parentPlan = await artifacts.readCanonical<ProcessContainmentPlanV1>(workerSpec.containmentPlanRef);
   if (parentPlan.backend.kind !== 'linux' || plan.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'edit requires the exact Linux parent');
