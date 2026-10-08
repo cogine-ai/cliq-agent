@@ -886,7 +886,7 @@ for (const [scenario, run] of [
   console.log(JSON.stringify({ scenario, phase: 'start' }));
   try { await run(); }
   catch (error) {
-    console.error(`[DEBUG-i1-lifecycle] ${scenario}: ${inspect(error, { depth: 8 })}`);
+    console.error(`[cliq-linux-worker-campaign] ${scenario}: ${inspect(error, { depth: 8 }).slice(0, 8192)}`);
     throw error;
   }
   // PASS includes the complete scenario, reopen assertions and cleanup.

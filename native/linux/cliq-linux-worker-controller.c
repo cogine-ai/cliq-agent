@@ -31,8 +31,7 @@ enum spawn_rejection {
     CLIQ_SPAWN_READY_WAIT = 1011,
     CLIQ_SPAWN_READY_RECEIVE = 1012,
     CLIQ_SPAWN_PROCESS_INSPECTION = 1013,
-    CLIQ_SPAWN_IDENTITY_TOKEN = 1014,
-    CLIQ_SPAWN_READY_RECEIVE_IMAGE_EOF = 1015
+    CLIQ_SPAWN_IDENTITY_TOKEN = 1014
 };
 
 struct scope {
@@ -150,6 +149,28 @@ static bool configure_limits(const struct cliq_worker_packet *request) {
         setrlimit(RLIMIT_CORE, &core) == 0 && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0;
 }
 
+/* dup/SCM_RIGHTS share the image's cursor. Each --ro-bind-data reader needs
+ * its own open-file-description, without copying bytes or rewinding peers. */
+static int independent_image_fd(int source, int minimum) {
+    struct stat original, reopened;
+    const int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    int seals = fcntl(source, F_GET_SEALS);
+    if (fstat(source, &original) != 0 || !S_ISREG(original.st_mode) || original.st_size <= 0 ||
+        seals < 0 || (seals & required) != required) return -1;
+    char filename[64];
+    int length = snprintf(filename, sizeof(filename), "/proc/self/fd/%d", source);
+    if (length < 0 || (size_t)length >= sizeof(filename)) return -1;
+    int reader = open(filename, O_RDONLY | O_CLOEXEC);
+    if (reader < 0) return -1;
+    bool same = fstat(reader, &reopened) == 0 && original.st_dev == reopened.st_dev &&
+        original.st_ino == reopened.st_ino && original.st_size == reopened.st_size &&
+        original.st_mode == reopened.st_mode && original.st_uid == reopened.st_uid &&
+        fcntl(reader, F_GET_SEALS) == seals;
+    int inherited = same ? fcntl(reader, F_DUPFD, minimum) : -1;
+    if (close(reader) != 0) { if (inherited >= 0) close(inherited); return -1; }
+    return inherited;
+}
+
 static bool close_above_channel(void) { return cliq_close_range(4, UINT_MAX); }
 
 /* Same installed controller image, executed as PID 1 by --as-pid-1. No user
@@ -250,11 +271,6 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     int cgroup_parent = invocation && parent_ok ? scopes[request->parent].cgroup : passed[1];
     int helper_image = passed[invocation ? 1 : 2], executable_image = passed[invocation ? 2 : 3],
         bwrap_image = passed[invocation ? 3 : 4], input = invocation ? passed[4] : -1;
-    /* [DEBUG-i1-image-offset] Observe, never rewind, the reused helper before
-     * this spawn. A failed READY is distinct when its input already was EOF. */
-    struct stat helper_metadata;
-    bool helper_at_eof = fstat(helper_image, &helper_metadata) == 0 && helper_metadata.st_size > 0 &&
-        lseek(helper_image, 0, SEEK_CUR) == helper_metadata.st_size;
     if (count != 5 || request->scope == 0 || request->scope >= CLIQ_WORKER_MAX_SCOPES || !parent_ok ||
         !valid_cgroup_name(request->cgroup_name) || !cliq_hex_digest(request->nonce) ||
         !cliq_hex_digest(request->activation_nonce) || scopes[request->scope].created ||
@@ -303,9 +319,14 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
             dup2(scope->stdout_fd, 1) < 0 || dup2(scope->stderr_fd, 2) < 0 || !configure_limits(request)) _exit(70);
         close(barrier[0]);
         if (dup2(channel[1], 3) < 0) _exit(70);
-        int generation = fcntl(passed[0], F_DUPFD, 20), helper = fcntl(helper_image, F_DUPFD, 20),
-            worker = fcntl(executable_image, F_DUPFD, 20), bwrap = fcntl(bwrap_image, F_DUPFD_CLOEXEC, 20);
-        if (generation < 0 || helper < 0 || worker < 0 || bwrap < 0) _exit(70);
+        int generation = fcntl(passed[0], F_DUPFD, 20);
+        if (generation < 0 || generation == INT_MAX) _exit(70);
+        int helper = independent_image_fd(helper_image, generation + 1);
+        if (helper < 0 || helper == INT_MAX) _exit(70);
+        int worker = independent_image_fd(executable_image, helper + 1);
+        if (worker < 0 || worker == INT_MAX) _exit(70);
+        int bwrap = fcntl(bwrap_image, F_DUPFD_CLOEXEC, worker + 1);
+        if (bwrap < 0) _exit(70);
         char source[64], helper_fd[24], worker_fd[24];
         snprintf(source, sizeof(source), "/proc/self/fd/%d", generation);
         snprintf(helper_fd, sizeof(helper_fd), "%d", helper);
@@ -345,10 +366,7 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     if (!readable(scope->channel, OBSERVATION_TIMEOUT_MS)) return false;
     struct cliq_worker_packet ready; int extra[5]; size_t extras;
     response->status = CLIQ_SPAWN_READY_RECEIVE;
-    if (!cliq_receive(scope->channel, &ready, extra, &extras) || extras != 0 || ready.command != CLIQ_WORKER_READY) {
-        if (helper_at_eof) response->status = CLIQ_SPAWN_READY_RECEIVE_IMAGE_EOF;
-        return false;
-    }
+    if (!cliq_receive(scope->channel, &ready, extra, &extras) || extras != 0 || ready.command != CLIQ_WORKER_READY) return false;
     response->status = CLIQ_SPAWN_PROCESS_INSPECTION;
     if (!inspect_processes(scope, &ready)) return false;
     scope->identity = ready;
