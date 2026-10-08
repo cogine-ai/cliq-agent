@@ -1,4 +1,5 @@
 import { assertArtifactRef } from '../../kernel/identity.js';
+import { canonicalSha256 } from '../../kernel/canonical.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import type {
   WorkspaceGenerationStateV1,
@@ -15,7 +16,6 @@ import {
 } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
-import { requireEqual } from '../../policy/runtime-authority.js';
 import { readRequiredWorkerLaunch } from '../repositories/worker-launches.js';
 import {
   insertWorkspaceGeneration,
@@ -37,6 +37,12 @@ export type RegisterWorkspaceGenerationInput = {
 function requireHealthyFence(outcome: TimeFenceAdvance | undefined): void {
   if (outcome === 'clock_regressed' || outcome === 'still_regressed') {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical clock is not healthy');
+  }
+}
+
+function requireUnchangedRecoveryRow(current: unknown, retained: unknown, label: string): void {
+  if (canonicalSha256(current) !== canonicalSha256(retained)) {
+    throw new KernelStorageError('REVISION_CONFLICT', `${label} changed during replacement preparation`);
   }
 }
 
@@ -103,12 +109,12 @@ export async function registerWorkspaceGeneration(
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'workspace generation requires a lease-free queued Run');
     }
     if (recovery) {
-      requireEqual(run, recovery.run, 'replacement worker recovery Run');
+      requireUnchangedRecoveryRow(run, recovery.run, 'replacement worker recovery Run');
       for (const launch of recovery.workerLaunches) {
-        requireEqual(readRequiredWorkerLaunch(connection, launch.launchId), launch, 'replacement predecessor launch');
+        requireUnchangedRecoveryRow(readRequiredWorkerLaunch(connection, launch.launchId), launch, 'replacement predecessor launch');
       }
       for (const generation of recovery.workspaceGenerations) {
-        requireEqual(readRequiredWorkspaceGenerationByRef(connection, generation.generationRef), generation, 'replacement retained generation');
+        requireUnchangedRecoveryRow(readRequiredWorkspaceGenerationByRef(connection, generation.generationRef), generation, 'replacement retained generation');
       }
       if (readWorkspaceGenerationsForRun(connection, run.id).some(row =>
         row.phase === 'materializing' || row.phase === 'preactivated_readonly')) {

@@ -584,6 +584,55 @@ failures/cancellations/skips (496,809 ms). Project/strict-script typechecking,
 the design contract guard and portable edit contract also pass; these cannot
 substitute for the next actual Linux lifecycle result.
 
+At `932d9c0`, the next real Linux campaign rejected the worker recipe's
+cgroup basename: both the launcher and native controller require
+`cliq-<64 lowercase hex characters>`, but the producer embedded an opaque
+base64url launch/invocation identity. Worker and edit names now derive from
+their existing canonical reservation digests. Both exact retained-path
+assertions run in the actual completed-edit scenario; the native/launcher
+gates and opaque namespace identities are unchanged. All four supported
+Node 22/24 build/full-test matrix jobs and the separate Linux namespace/cgroup
+probe passed on that commit, but the lifecycle failure remains unqualified
+until the corrected recipe passes the actual campaign.
+The local basename-fix sweep passed **1,803/1,803**, with zero failures,
+cancellations or skips (571,329 ms); project build, strict checking of the
+three campaign scripts, the design contract and its 9 tests, and the portable
+edit contract also pass. This fix has not yet supplied actual Linux GREEN.
+
+The subsequent seven inline and one documentation review comments were checked
+against current code. Bounded shipping fixes add fail-closed seccomp ABI/x32
+checks to the fixed signed worker, classify only retained recovery-row changes
+as `REVISION_CONFLICT`, and correct WP03's remaining four-owner prose to include
+source inspection. The concurrency regression first reproduced the original
+`TypeError`, then passed through public Store registration and authenticated
+cancel after a real CAS-read barrier. Reads, corruption and resource-retirement
+failures are not broadly converted to revision conflicts. The seccomp checks
+require the actual Linux kernel, not macOS or an interpreted BPF substitute;
+current fixed worker code has no identified alternate-ABI execution path.
+The final combined local sweep passed **1,804/1,804**, with zero failures,
+cancellations or skips (485,557 ms). Project build, standalone strict campaign
+typechecking, the 9 design-guard tests and portable edit contract pass. The
+new seccomp syscall regression remains an actual Linux CI gate, not locally
+executed evidence. The tested native StateOwner image digest is unchanged.
+
+Review also confirmed unfinished preactivation recovery: a failed
+`reserved|preactivated` launch can retain an unretired row and block later
+reservation. This requires the RFC's actual planned-containment/no-spawn or
+all-descendant death observation, exact durable retirement and successor reaping;
+the activated-worker recovery path cannot be reused without those facts.
+There is no automatic queued-launch fault recovery at this pause point. New
+native observation/recovery capabilities remain paused, and I1 is not complete.
+
+A real SIGKILL during streaming CAS publication may also retain an unlinked
+`.tmp-stream-*` file. Ordinary joined abort cleans its exact temporary, but
+crash-orphan GC is not implemented. The review's immediate startup deletion
+is not adopted in place of bounded, identity-checked cleanup and the RFC's
+reachability/retention policy. These disk-availability risks remain explicit.
+The two campaign cleanup paths can mask a primary assertion with a cleanup
+error, but still fail the job; their diagnostic improvement is not a false-GREEN
+fix. Legacy-artifact compatibility is not added to the approved breaking
+reconstruction; unsupported historical identities remain fail-closed.
+
 There is also an unqualified availability risk: the current worker death
 observation precedes the complete generation walk and checkpoint validation.
 Slow trees or storage can exceed the five-second retirement freshness window

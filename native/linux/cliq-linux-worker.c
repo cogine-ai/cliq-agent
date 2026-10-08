@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "worker-common.h"
+#include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <sys/prctl.h>
@@ -8,8 +9,23 @@
 /* This signed entrypoint owns only the authenticated activation channel and a
  * permanently read-only generation. Tools are separate run_invocations. */
 static bool deny_child_and_network_creation(void) {
+#if (defined(__x86_64__) || defined(__aarch64__)) && defined(__LP64__) && \
+    defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#if defined(__x86_64__)
+    const uint32_t native_arch = AUDIT_ARCH_X86_64;
+#else
+    const uint32_t native_arch = AUDIT_ARCH_AARCH64;
+#endif
     struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (unsigned int)offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, native_arch, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (unsigned int)offsetof(struct seccomp_data, nr)),
+#if defined(__x86_64__)
+        /* x32 shares AUDIT_ARCH_X86_64 but has a different syscall ABI. */
+        BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, UINT32_C(0x40000000), 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+#endif
 #ifdef __NR_clone
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
@@ -41,6 +57,10 @@ static bool deny_child_and_network_creation(void) {
     struct sock_fprog program = { .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])), .filter = filter };
     return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
         prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) == 0;
+#else
+    errno = ENOTSUP;
+    return false;
+#endif
 }
 
 int main(int argc, char **argv) {

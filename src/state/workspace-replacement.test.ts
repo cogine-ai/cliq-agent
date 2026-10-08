@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { test } from 'node:test';
+import { KERNEL_CAS_DIRECTORY } from '../config.js';
 import { createActiveFixture, disposeFixture, prepareFixtureGeneration } from './testing/fixtures.js';
 import { publishFixtureWorkerLaunch } from './testing/worker-launch.js';
-import { digest, createQueuedFixture } from './testing/fixtures.js';
+import { digest, createQueuedFixture, uuidv7 } from './testing/fixtures.js';
+import { createAgentFixture } from './testing/agent-fixtures.js';
+import { publishInProcessChannel } from './store.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { WorkspaceGenerationIdentityV1, WorkspaceGenerationSnapshotEvidenceV1 } from '../kernel/types.js';
 
@@ -24,6 +29,58 @@ test('worker recovery can materialize one distinct read-only replacement without
     await assert.rejects(fixture.store.reserveWorkerLaunch(intent.input), { code: 'STATE_TRANSITION_INVALID' });
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), after);
   } finally { await disposeFixture(fixture); }
+});
+
+test('replacement registration reports a concurrent authenticated Run revision change as REVISION_CONFLICT', async () => {
+  const fixture = await createAgentFixture('replacement-revision-conflict', undefined, { mode: 'plan' });
+  const originalOpen = fs.open;
+  let release!: () => void, entered!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  let registering: Promise<unknown> | undefined, selected = false;
+  try {
+    const waiting = await fixture.store.beginWorkerRecovery({ runId: fixture.runId, expectedRunRevision: fixture.runRevision });
+    const identity = await fixture.store.artifacts.readCanonical<WorkspaceGenerationIdentityV1>(fixture.generationRef);
+    if (identity.locator.kind !== 'linux_directory') throw new Error('fixture must retain a Linux identity');
+    // This retained artifact fixture proves the StateStore CAS cut, not native materialization or containment.
+    const creationNonceDigest = digest('replacement-revision-conflict:replacement');
+    const generationId = identityHash(identity.runId, identity.sourceCheckpointId, identity.sourceWorkspaceStateRef, creationNonceDigest);
+    const replacement: WorkspaceGenerationIdentityV1 = { ...identity, generationId, creationNonceDigest,
+      locator: { ...identity.locator, canonicalRootRelativePath: `runs/${identity.runId}/generations/${generationId}` } };
+    replacement.identityDigest = digestOmitting(replacement, 'identityDigest');
+    const artifact = await fixture.store.artifacts.publishCanonical(replacement, replacement.format);
+    const specPath = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, waiting.specRef);
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (args[0] === specPath) {
+        const read = handle.readFile.bind(handle);
+        handle.readFile = (async (...readArgs: Parameters<typeof handle.readFile>) => {
+          const bytes = await read(...readArgs);
+          if (!selected) { selected = true; entered(); await barrier; }
+          return bytes;
+        }) as typeof handle.readFile;
+      }
+      return handle;
+    }) as typeof fs.open;
+    registering = fixture.store.registerWorkspaceGeneration({ runId: fixture.runId, generationRef: artifact.ref,
+      generationIdentityDigest: replacement.identityDigest });
+    void registering.catch(() => {});
+    await paused;
+    const cancelled = await fixture.agent.cancelRun({ requestId: uuidv7(), expectedRunRevision: waiting.revision,
+      ...await publishInProcessChannel(fixture.store) });
+    assert.equal(cancelled.run.revision, waiting.revision + 1);
+    assert.equal(cancelled.run.waitingOnRef, waiting.waitingOnRef);
+    const afterCancellation = await fixture.store.readRecoveryClosure(fixture.runId);
+    release();
+    await assert.rejects(registering, { code: 'REVISION_CONFLICT' });
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), afterCancellation,
+      'a stale replacement cannot change the winning cancellation or publish generation authority');
+  } finally {
+    release();
+    await registering?.catch(() => {});
+    fs.open = originalOpen;
+    await disposeFixture(fixture);
+  }
 });
 
 test('generation transitions retain the exact inputs checked before asynchronous artifact reads', async t => {

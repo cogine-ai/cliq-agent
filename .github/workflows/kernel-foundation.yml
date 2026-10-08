@@ -170,6 +170,14 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools e2fsprogs
+      - name: Verify real worker seccomp ABI and syscall denials
+        shell: bash
+        run: |
+          regression="$RUNNER_TEMP/cliq-worker-seccomp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -static \
+            -idirafter /usr/include -idirafter "/usr/include/$(musl-gcc -dumpmachine)" \
+            native/linux/worker-seccomp.test.c -o "$regression"
+          "$regression"
       - name: Build real execution images
         id: images
         shell: bash
