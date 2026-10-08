@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { open, type FileHandle } from 'node:fs/promises';
+import fsPromises, { open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { inspect } from 'node:util';
@@ -84,8 +84,8 @@ async function run(input: CrashChildInput) {
   const metadata = openSqliteDriver(path.join(input.stateRoot, KERNEL_DATABASE_FILENAME));
   const sample = await open(path.join(input.stateRoot, KERNEL_CAS_DIRECTORY, before.runSpec.policyRef), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   const policy = await sample.stat({ bigint: true });
-  const prototype = Object.getPrototypeOf(sample) as Pick<FileHandle, 'readFile' | 'writeFile' | 'close'>;
-  const originalRead = prototype.readFile, originalWrite = prototype.writeFile, originalClose = prototype.close;
+  const prototype = Object.getPrototypeOf(sample) as Pick<FileHandle, 'readFile' | 'writeFile'>;
+  const originalRead = prototype.readFile, originalWrite = prototype.writeFile, originalOpen = fsPromises.open;
   await sample.close();
   let processLossInjected = false, paused = false;
   let controllerLoss: { pid: number; processStartToken: string } | undefined;
@@ -172,19 +172,28 @@ async function run(input: CrashChildInput) {
       const failure = Object.assign(new Error('campaign uncertainty after the actual CAS FileHandle.close'), { code: 'EIO' });
       let closeFaults = 0, closeSelected = false;
       const injectClose = () => {
-        prototype.close = (async function(this: FileHandle) {
-          const held = this.fd >= 0 ? fs.fstatSync(this.fd, { bigint: true }) : undefined;
-          const selected = !closeSelected && held?.dev === policy.dev && held.ino === policy.ino;
-          if (selected) closeSelected = true;
-          await Reflect.apply(originalClose, this, []);
-          if (selected) { closeFaults++; throw failure; }
-        }) as FileHandle['close'];
+        // close is an own FileHandle field, not a prototype method. Wrap the
+        // exact actual policy handle, and inject only after its real close.
+        fsPromises.open = (async (...args: Parameters<typeof open>) => {
+          const handle = await originalOpen(...args);
+          const held = fs.fstatSync(handle.fd, { bigint: true });
+          if (held.dev === policy.dev && held.ino === policy.ino) {
+            const actualClose = handle.close.bind(handle);
+            handle.close = async () => {
+              const selected = !closeSelected;
+              if (selected) closeSelected = true;
+              await actualClose();
+              if (selected) { closeFaults++; throw failure; }
+            };
+          }
+          return handle;
+        }) as typeof open;
       };
       const isRetirement = (error: unknown) => error instanceof ResourceRetirementError && error.cause === failure;
       if (input.retirementFault === 'pre_probe') {
         injectClose();
         await assert.rejects(execution.recoverWorker({ expectedRunRevision: waiting.run.revision }), isRetirement);
-        prototype.close = originalClose;
+        fsPromises.open = originalOpen;
         assert.equal(store.getRun(input.runId).waitingOnRef, waiting.run.waitingOnRef,
           'the real CAS retirement failure happened before a probe dispatch was registered');
       } else {
@@ -217,7 +226,7 @@ async function run(input: CrashChildInput) {
         }
         injectClose();
         await assert.rejects(store.closeWorkerRecoveryProbe({ runId: input.runId, expectedRunRevision: current.revision }), isRetirement);
-        prototype.close = originalClose;
+        fsPromises.open = originalOpen;
         assert.equal(store.getRun(input.runId).waitingOnRef, current.waitingOnRef,
           'the failed timeout read must not commit a successful cancellation closure');
       }
@@ -292,7 +301,7 @@ async function run(input: CrashChildInput) {
     operationFailure = { error };
     throw error;
   } finally {
-    prototype.readFile = originalRead; prototype.writeFile = originalWrite; prototype.close = originalClose;
+    prototype.readFile = originalRead; prototype.writeFile = originalWrite; fsPromises.open = originalOpen;
     const cleanupFailures: unknown[] = [];
     try { metadata.close(); } catch (error) { cleanupFailures.push(error); }
     try { await store.close(); } catch (error) { cleanupFailures.push(error); }

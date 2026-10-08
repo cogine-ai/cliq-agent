@@ -742,3 +742,21 @@ The assertion-fix full local sweep passes **1,804/1,804**, with no failures,
 cancellations or skips (664,634 ms); build, strict campaign typechecking and the
 real Node abort-boundary diagnostic pass. Actual Linux verification of the
 complete interrupted-controller scene and remaining scenes is pending.
+
+At `fd431c7`, both actual Linux jobs pass all first eight complete scenes,
+including the interrupted controller's real SIGSTOP, deadline join, exact
+descriptor baseline and responsive control/timers. The next pre-probe
+retirement-failure scene stops before the shutdown assertions: its expected
+CAS close fault never fires, so recovery completes rather than rejecting.
+Node's `FileHandle.close` is an instance-owned field; overriding its prototype
+cannot intercept a real handle. The fault now uses the existing real `open`
+seam to wrap only a returned handle with the exact policy device/inode,
+executes its original close and then throws the same EIO once. The open hook
+is removed before both shutdown attempts and restored in finally.
+Exact retirement cause, unchanged wait, one fault, repeated shutdown refusal
+and actual live-flock assertions remain unchanged; production code is not
+changed on the basis of a fault that never occurred. Focused CAS/recovery/
+execution checks pass **14/14**; the corrected-injection full sweep passes
+**1,804/1,804**, with no failures, cancellations or skips (607,084 ms).
+Build, strict campaign typechecking and the real instance-close diagnostic
+pass. Actual Linux verification of this injection fix is pending.
