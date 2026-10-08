@@ -723,3 +723,22 @@ sweep passes **1,804/1,804**, with no failures, cancellations or skips
 (712,746 ms); project build, strict campaign typechecking, all 9 design-guard
 tests and the portable edit contract pass. Actual Linux verification of this
 completion fix is pending; latest results remain on PR #514 and its CI checks.
+
+At `cb33df5`, both actual Linux jobs pass the first seven complete scenes:
+controller loss, real edit, parent loss before release, no-open-invocation
+recovery, cancelled-and-joined recovery, actual Supervisor SIGKILL after the
+physical move but before the database commit, and close during factory open.
+The three recovery scenes preserve the exact ready checkpoint and old archive
+identity, then complete one real edit. The fixed quarantine intent also survives
+the real post-move crash and successor owner/probe changes.
+The next interrupted-controller-close scene rejects Node's legitimate
+`timers/promises` abort wrapper: its exact `AbortError` / `ABORT_ERR` has the
+injected readiness reason as its `cause`, rather than being that reason object.
+The campaign now accepts only that exact wrapper or the original reason;
+pre-spawn reason identity, actual descriptor join, stopped-controller deadline,
+control responsiveness and process exit assertions are unchanged. Independent
+retirement errors still fail. Production cancellation behavior is unchanged.
+The assertion-fix full local sweep passes **1,804/1,804**, with no failures,
+cancellations or skips (664,634 ms); build, strict campaign typechecking and the
+real Node abort-boundary diagnostic pass. Actual Linux verification of the
+complete interrupted-controller scene and remaining scenes is pending.

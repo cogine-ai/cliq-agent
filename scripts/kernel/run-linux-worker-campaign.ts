@@ -234,7 +234,10 @@ async function interruptedControllerClose() {
     const startingAbort = new AbortController(), startingReason = new Error('campaign cancelled controller readiness');
     const starting = launcher.startController({ signal: startingAbort.signal });
     startingAbort.abort(startingReason);
-    await assert.rejects(bounded(starting), error => error === startingReason);
+    // timers/promises wraps an in-flight abort; throwIfAborted returns the reason itself.
+    await assert.rejects(bounded(starting), error => error === startingReason ||
+      (error instanceof Error && error.name === 'AbortError' &&
+        (error as NodeJS.ErrnoException).code === 'ABORT_ERR' && error.cause === startingReason));
     assert.deepEqual(heldDescriptorTargets(), installedDescriptors, 'cancelled actual readiness must await descriptor join');
     const controller = await launcher.startController();
     assert.ok(heldDescriptorTargets().size > installedDescriptors.size, 'the actual controller holds channel and captured output descriptors');
