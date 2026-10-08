@@ -685,3 +685,22 @@ cancellations or skips (613,345 ms); project build, strict campaign checks,
 all 9 design-guard tests and the portable edit contract pass.
 Actual Linux verification of this selector and the remaining scenarios is
 pending; the PR is not yet green and I1 remains incomplete.
+
+At `1865ce6`, both actual Linux jobs inject the parent SIGKILL and pass the
+native pre-release identity rejection and worker-death wait checks. The next
+assertion incorrectly compares against the earlier fixture checkpoint:
+`prepareTool` has already committed the authorization decision checkpoint,
+reusing its unchanged ready workspace state. The parent-loss regression now
+requires that exact grant-derived checkpoint, its corresponding prepared
+Journal sequence before the permanent claim, and the original workspace ref
+and bytes. It cannot accept a completed-effect checkpoint or dirty generation
+promotion. The regression additionally reads the exact fenced private generation
+through a held directory descriptor, verifies its device/inode and no-follow
+file type/size, and requires the original bytes there as well: checkpoint and
+source preservation alone cannot prove that a blocked edit did not run.
+Production checkpoint/lifecycle logic is unchanged.
+The local pre-effect/effect-oracle sweep passed **1,804/1,804**, with no
+failures, cancellations or skips (526,727 ms); build and strict campaign
+typechecking pass.
+The complete scene and subsequent scenarios still require actual Linux GREEN;
+latest results are recorded on PR #514 and its linked CI checks.

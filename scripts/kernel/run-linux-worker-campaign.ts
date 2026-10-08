@@ -332,7 +332,7 @@ async function parentLossBeforeRelease() {
   const metadata = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
   const originalRead = fs.readSync;
   let probing = false;
-  let fault: { workerPid: number; processStartToken: string; scope: string; survivingBeforeStop: number[] } | undefined;
+  let fault: { workerPid: number; processStartToken: string; generationRef: string; scope: string; survivingBeforeStop: number[] } | undefined;
   // Agreed native lifecycle seam, instrumented only at the OS read boundary.
   // Hashing still consumes real bytes from the actual native-opened executable.
   // No native handle, closure, PID credential or death receipt is mocked.
@@ -381,7 +381,7 @@ async function parentLossBeforeRelease() {
             // Killing the worker does not retire its frozen init/monitor.
             fs.statSync(`/proc/${init}`); fs.statSync(`/proc/${monitor}`);
             fault = { workerPid: worker.pid, processStartToken: worker.processStartToken,
-              scope: parent.cgroupPath, survivingBeforeStop: [init, monitor] };
+              generationRef: retained.launch.workspaceGenerationRef, scope: parent.cgroupPath, survivingBeforeStop: [init, monitor] };
           }
         }
       } finally { probing = false; }
@@ -398,10 +398,40 @@ async function parentLossBeforeRelease() {
     assert.equal(failed.run.activeWorkerLaunchId, undefined); assert.equal(failed.run.cancelRequested, false);
     const wait = await fixture.store.artifacts.readCanonical<WorkerDeathWait>(failed.run.waitingOnRef!);
     assert.equal(wait.subject.kind, 'worker_death');
-    assert.equal(failed.latestCheckpoint.id, before.latestCheckpoint.id, 'dirty generation is never promoted to a checkpoint');
-    assert.deepEqual((await checkpointBytes(fixture.store, fixture.runId)).bytes, fixture.original);
     const claims = failed.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed');
-    assert.equal(claims.length, 1); assert.equal(failed.run.budgetReserved.toolCalls, 1);
+    assert.equal(claims.length, 1);
+    const claim = claims[0]!;
+    const prepared = failed.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'prepared' &&
+      entry.opId === claim.opId && entry.attempt === claim.attempt);
+    assert.equal(prepared.length, 1); assert.ok(claim.grantRef);
+    assert.equal(prepared[0]!.grantRef, claim.grantRef);
+    // Preparation publishes the authorization decision using the previous ready
+    // workspace. Parent loss must retain that exact pre-effect cut, never seal
+    // the active generation or publish a completed-effect checkpoint.
+    assert.equal(failed.latestCheckpoint.id, identityHash('cliq-tool-admission-checkpoint-v1', claim.grantRef));
+    assert.equal(failed.latestCheckpoint.journalSeq, prepared[0]!.seq);
+    assert.ok(failed.latestCheckpoint.journalSeq < claim.seq);
+    assert.equal(failed.latestCheckpoint.workspaceStateRef, before.latestCheckpoint.workspaceStateRef);
+    assert.deepEqual((await checkpointBytes(fixture.store, fixture.runId)).bytes, fixture.original);
+    assert.match(await readFile(path.join(fault.scope, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
+    const generationRef = fault.generationRef;
+    assert.equal(wait.subject.workspaceGenerationRef, generationRef);
+    assert.equal(failed.workspaceGenerations.find(row => row.generationRef === generationRef)?.phase, 'fenced_reconciling');
+    const generation = frozenArtifact<WorkspaceGenerationIdentityV1>(fixture.stateRoot, generationRef);
+    if (generation.locator.kind !== 'linux_directory') throw new Error('parent loss did not retain its actual Linux generation');
+    const root = fs.openSync(path.join(fixture.stateRoot, generation.locator.canonicalRootRelativePath),
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try {
+      const identity = fs.fstatSync(root, { bigint: true });
+      assert.equal(String(identity.dev), generation.locator.deviceId); assert.equal(String(identity.ino), generation.locator.directoryFileId);
+      const file = fs.openSync(`/proc/self/fd/${root}/a`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      try {
+        const actual = fs.fstatSync(file, { bigint: true });
+        assert.ok(actual.isFile()); assert.equal(actual.size, BigInt(fixture.original.length));
+        assert.deepEqual(fs.readFileSync(file), fixture.original, 'blocked native edit must not change even its private generation');
+      } finally { fs.closeSync(file); }
+    } finally { fs.closeSync(root); }
+    assert.equal(failed.run.budgetReserved.toolCalls, 1);
     assert.equal(failed.run.budgetConsumed.toolCalls, 0);
     assert.equal(failed.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'completed').length, 0);
     await assert.rejects(execution.executeCurrentTool({ expectedRunRevision: failed.run.revision }));
@@ -409,7 +439,6 @@ async function parentLossBeforeRelease() {
     assert.equal(replay.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed').length, 1);
     assert.equal(replay.run.budgetReserved.toolCalls, 1, 'unknown claim keeps its conservative reservation');
     assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
-    assert.match(await readFile(path.join(fault.scope, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
     console.log(JSON.stringify({ scenario: 'actual-parent-loss-before-release', ...fault,
       waitingSubjectRef: failed.run.waitingOnRef, permanentToolClaims: 1, nativeEffectCount: 0,
       remainingBudgetReservation: 1, note: 'worker_death wait preserved; manual/unknown settlement is not qualified' }));
