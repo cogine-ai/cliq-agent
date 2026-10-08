@@ -542,8 +542,8 @@ async function noOpenInvocationRecovery(cancelInspection = false) {
           const row = connection.prepare('SELECT active_worker_launch_id FROM runs WHERE id = ?')
             .get<{ active_worker_launch_id: string | null }>(fixture.runId);
           const attempts = connection.prepare("SELECT COUNT(*) AS count FROM run_journal WHERE run_id = ? AND op_kind = 'tool'")
-            .get<{ count: number }>(fixture.runId)!.count;
-          if (!row?.active_worker_launch_id || attempts !== 0) return undefined;
+            .get<{ count: bigint }>(fixture.runId)!.count;
+          if (!row?.active_worker_launch_id || attempts !== 0n) return undefined;
           return readRequiredWorkerLaunch(connection, row.active_worker_launch_id);
         });
         if (launch?.phase === 'activated') {
@@ -687,7 +687,7 @@ async function supervisorCrashAfterMove() {
       assert.equal(generation.rowVersion, anchor.rowVersion + 1, 'physical move must not have committed the row CAS');
       assert.equal(anchor.generationRef, boundary.generationRef); assert.equal(anchor.rowVersion + 1, boundary.sourceRowVersion);
       assert.equal(connection.prepare("SELECT COUNT(*) AS count FROM run_journal WHERE run_id=? AND op_kind='tool'")
-        .get<{ count: number }>(fixture.runId)!.count, 0);
+        .get<{ count: bigint }>(fixture.runId)!.count, 0n);
       return { run, wait, anchor, owner };
     }); } finally { metadata.close(); } })();
     const oldDispatch = held.wait.probeState;
@@ -830,7 +830,7 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
       assert.equal(run.waitingOnRef, refusal.waitingOnRef); assert.equal(run.latestCheckpointId, before.latestCheckpoint.id);
       assert.equal(run.status, 'waiting'); assert.equal(run.activeWorkerLaunchId, undefined);
       assert.equal(connection.prepare("SELECT COUNT(*) AS count FROM run_journal WHERE run_id=? AND op_kind='tool'")
-        .get<{ count: number }>(fixture.runId)!.count, 0, 'neither retirement fault can create or repeat a tool attempt');
+        .get<{ count: bigint }>(fixture.runId)!.count, 0n, 'neither retirement fault can create or repeat a tool attempt');
       const wait = frozenArtifact<WorkerDeathWait>(fixture.stateRoot, run.waitingOnRef!);
       assert.equal(wait.probeState.phase, refusal.probePhase); assert.deepEqual(wait.subject.openInvocationRefs, []);
       const processIdentity = frozenArtifact<PlatformProcessIdentityV1>(fixture.stateRoot, owner.processIdentityRef);

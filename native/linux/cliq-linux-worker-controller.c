@@ -31,7 +31,8 @@ enum spawn_rejection {
     CLIQ_SPAWN_READY_WAIT = 1011,
     CLIQ_SPAWN_READY_RECEIVE = 1012,
     CLIQ_SPAWN_PROCESS_INSPECTION = 1013,
-    CLIQ_SPAWN_IDENTITY_TOKEN = 1014
+    CLIQ_SPAWN_IDENTITY_TOKEN = 1014,
+    CLIQ_SPAWN_READY_RECEIVE_IMAGE_EOF = 1015
 };
 
 struct scope {
@@ -249,6 +250,11 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     int cgroup_parent = invocation && parent_ok ? scopes[request->parent].cgroup : passed[1];
     int helper_image = passed[invocation ? 1 : 2], executable_image = passed[invocation ? 2 : 3],
         bwrap_image = passed[invocation ? 3 : 4], input = invocation ? passed[4] : -1;
+    /* [DEBUG-i1-image-offset] Observe, never rewind, the reused helper before
+     * this spawn. A failed READY is distinct when its input already was EOF. */
+    struct stat helper_metadata;
+    bool helper_at_eof = fstat(helper_image, &helper_metadata) == 0 && helper_metadata.st_size > 0 &&
+        lseek(helper_image, 0, SEEK_CUR) == helper_metadata.st_size;
     if (count != 5 || request->scope == 0 || request->scope >= CLIQ_WORKER_MAX_SCOPES || !parent_ok ||
         !valid_cgroup_name(request->cgroup_name) || !cliq_hex_digest(request->nonce) ||
         !cliq_hex_digest(request->activation_nonce) || scopes[request->scope].created ||
@@ -339,7 +345,10 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     if (!readable(scope->channel, OBSERVATION_TIMEOUT_MS)) return false;
     struct cliq_worker_packet ready; int extra[5]; size_t extras;
     response->status = CLIQ_SPAWN_READY_RECEIVE;
-    if (!cliq_receive(scope->channel, &ready, extra, &extras) || extras != 0 || ready.command != CLIQ_WORKER_READY) return false;
+    if (!cliq_receive(scope->channel, &ready, extra, &extras) || extras != 0 || ready.command != CLIQ_WORKER_READY) {
+        if (helper_at_eof) response->status = CLIQ_SPAWN_READY_RECEIVE_IMAGE_EOF;
+        return false;
+    }
     response->status = CLIQ_SPAWN_PROCESS_INSPECTION;
     if (!inspect_processes(scope, &ready)) return false;
     scope->identity = ready;

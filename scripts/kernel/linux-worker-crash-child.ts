@@ -102,8 +102,8 @@ async function run(input: CrashChildInput) {
             const active = connection.prepare('SELECT active_worker_launch_id FROM runs WHERE id=?')
               .get<{ active_worker_launch_id: string | null }>(input.runId);
             const count = connection.prepare("SELECT COUNT(*) AS count FROM run_journal WHERE run_id=? AND op_kind='tool'")
-              .get<{ count: number }>(input.runId)!.count;
-            return active?.active_worker_launch_id && count === 0 ? readRequiredWorkerLaunch(connection, active.active_worker_launch_id) : undefined;
+              .get<{ count: bigint }>(input.runId)!.count;
+            return active?.active_worker_launch_id && count === 0n ? readRequiredWorkerLaunch(connection, active.active_worker_launch_id) : undefined;
           });
           if (launch?.phase === 'activated') {
             assert.equal(canonicalSha256(JSON.parse(bytes.toString('utf8'))), before.runSpec.policyRef);
