@@ -8,6 +8,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { inspect } from 'node:util';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { identityHash } from '../../src/kernel/identity.js';
@@ -852,13 +853,24 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
   }
 }
 
-await editedCheckpoint();
-await parentLossBeforeRelease();
-await noOpenInvocationRecovery();
-await noOpenInvocationRecovery(true);
-await supervisorCrashAfterMove();
-await closeDuringFactoryOpen();
-await interruptedControllerClose();
-await retirementFailureKeepsOwner('pre_probe');
-await retirementFailureKeepsOwner('timeout_closure');
+for (const [scenario, run] of [
+  ['edit-ready-checkpoint', editedCheckpoint],
+  ['parent-loss-before-release', parentLossBeforeRelease],
+  ['no-open-invocation-recovery', () => noOpenInvocationRecovery()],
+  ['cancelled-recovery', () => noOpenInvocationRecovery(true)],
+  ['supervisor-crash-after-move', supervisorCrashAfterMove],
+  ['close-during-factory-open', closeDuringFactoryOpen],
+  ['interrupted-controller-close', interruptedControllerClose],
+  ['pre-probe-retirement-failure', () => retirementFailureKeepsOwner('pre_probe')],
+  ['timeout-retirement-failure', () => retirementFailureKeepsOwner('timeout_closure')]
+] as const) {
+  console.log(JSON.stringify({ scenario, phase: 'start' }));
+  try { await run(); }
+  catch (error) {
+    console.error(`[DEBUG-i1-lifecycle] ${scenario}: ${inspect(error, { depth: 8 })}`);
+    throw error;
+  }
+  // PASS includes the complete scenario, reopen assertions and cleanup.
+  console.log(JSON.stringify({ scenario, phase: 'passed' }));
+}
 console.log('real Linux worker campaign passed');

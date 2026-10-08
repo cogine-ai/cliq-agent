@@ -400,7 +400,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         await agent.completeTool({ opId: claimed.entry.opId, attempt: claimed.entry.attempt, expectedRunRevision: prepared.run.revision, observationRef });
         return readRun(driver, runId);
       })();
+      let operationFailure: { error: unknown } | undefined;
       const operation = work.catch(async error => {
+        operationFailure = { error };
         if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
         try {
           const run = readRun(driver, runId);
@@ -417,10 +419,20 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             catch (failure) { cleanupFailure ??= failure; }
           }
         }
-        if (cleanupFailure !== undefined) throw cleanupFailure;
         throw error;
       }).finally(async () => {
         try { await retireResources(); }
+        catch (failure) {
+          // Retirement still fences this resource owner, but must not erase
+          // the operation that made retirement necessary. Retain both for
+          // this rejection and subsequent Store.close attempts.
+          if (operationFailure && operationFailure.error !== failure) {
+            cleanupFailure = new ResourceRetirementError('Run execution failed and its resources did not retire',
+              new AggregateError([operationFailure.error, failure], 'execution and retirement failures'));
+            throw cleanupFailure;
+          }
+          throw failure;
+        }
         finally { pending = undefined; if (operationAbort === abort) operationAbort = undefined; }
       });
       pending = operation;

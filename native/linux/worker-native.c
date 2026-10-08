@@ -31,7 +31,12 @@ struct native_scope { struct controller *controller; struct native_scope *next, 
     bool ready, released, activated, stopped, invocation, result_received; int image_fd;
     struct cliq_worker_packet identity, result; };
 
-static napi_value failure(napi_env env, const char *message) { napi_throw_error(env, "RECOVERY_REQUIRED", message); return NULL; }
+static napi_value failure(napi_env env, const char *message) {
+    bool pending = false;
+    if (napi_is_exception_pending(env, &pending) != napi_ok || !pending)
+        napi_throw_error(env, "RECOVERY_REQUIRED", message);
+    return NULL;
+}
 static napi_value undefined(napi_env env) { napi_value result; napi_get_undefined(env, &result); return result; }
 
 static bool tagged(napi_env env, napi_value value, const napi_type_tag *tag, void **result) {
@@ -171,18 +176,41 @@ static bool begin_request(struct controller *controller, struct native_scope *sc
     (void)close_controller(controller); return false;
 }
 
-/* 0 = not ready, 1 = exact authenticated reply, -1 = fail closed. */
+/* Diagnostics contain only fixed numeric protocol metadata, never tokens,
+ * paths, payloads or stderr. boundary: 1=request state, 2=receive, 3=reply.
+ * An absent/unvalidated reply is represented by zeros, not decoded bytes. */
+static int poll_failure(struct controller *controller, struct native_scope *scope, uint32_t expected,
+                        const struct cliq_worker_packet *response, size_t descriptors, int receive_errno,
+                        unsigned int boundary) {
+    char message[384];
+    int length = snprintf(message, sizeof(message),
+        "native controller reply failed: request=%u requestScope=%u expected=%u expectedScope=%u "
+        "received=%u receivedScope=%u status=%u fds=%zu receiveErrno=%d boundary=%u",
+        (unsigned int)controller->pending, scope && controller->pending_scope == scope ? scope->id : 0,
+        (unsigned int)expected, scope ? scope->id : 0,
+        response ? (unsigned int)response->command : 0, response ? (unsigned int)response->scope : 0,
+        response ? (unsigned int)response->status : 0, descriptors, receive_errno, boundary);
+    (void)failure(controller->env, length >= 0 && (size_t)length < sizeof(message) ? message :
+        "native controller reply failed; diagnostic formatting unavailable");
+    return -1;
+}
+
+/* 0 = not ready, 1 = exact authenticated reply, -1 = fail closed with a pending exception. */
 static int poll_response(struct controller *controller, struct native_scope *scope, uint32_t expected,
                          struct cliq_worker_packet *response) {
-    if (controller->closed || controller->pending_scope != scope || controller->pending == 0) return -1;
+    if (controller->closed || controller->pending_scope != scope || controller->pending == 0)
+        return poll_failure(controller, scope, expected, NULL, 0, 0, 1);
     int fds[5]; size_t count;
     if (!cliq_receive_flags(controller->socket, response, fds, &count, MSG_DONTWAIT)) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
-        (void)close_controller(controller); return -1;
+        int receive_errno = errno;
+        if (receive_errno == EAGAIN || receive_errno == EWOULDBLOCK) return 0;
+        (void)close_controller(controller);
+        return poll_failure(controller, scope, expected, NULL, 0, receive_errno, 2);
     }
     for (size_t i = 0; i < count; i++) close(fds[i]);
     if (count != 0 || response->status != 0 || response->command != expected || response->scope != (scope ? scope->id : 0)) {
-        (void)close_controller(controller); return -1;
+        (void)close_controller(controller);
+        return poll_failure(controller, scope, expected, response, count, 0, 3);
     }
     controller->pending = 0; controller->pending_scope = NULL; return 1;
 }
