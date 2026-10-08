@@ -556,6 +556,21 @@ scripts also pass. The nine real Linux lifecycle scenarios and the actual
 foreign-owner installation check have not run on this macOS host; their
 pending CI result must not be substituted with those portable successes.
 
+The first free `ubuntu-22.04` execution job reached the real GCC/musl build
+and rejected a potential `snprintf` overlap inside the controller's retained
+scope object (`-Werror=restrict`). Formatting into an independent bounded
+local buffer before copying preserves the exact token/length contract and
+strict compiler flags. The real namespace/cgroup probe job passed, but that
+separate probe does not qualify this worker recipe; its complete compilation
+and lifecycle campaign still need their own successful evidence. At the
+first shipped commit `e5f0d8a`, the free `ubuntu-24.04` Node 22.13.0 and 24.x
+build/full-test jobs also passed, followed by both corresponding `macos-15`
+jobs. This is broader platform evidence, not a successful execution campaign
+or evidence for later commits. The local full sweep after the compile fix
+again passed **1,803/1,803**, with no failures/cancellations/skips (526,626 ms);
+design guards, the portable edit contract and all three strict script checks
+also pass. The actual Linux compile remains a separate CI gate.
+
 There is also an unqualified availability risk: the current worker death
 observation precedes the complete generation walk and checkpoint validation.
 Slow trees or storage can exceed the five-second retirement freshness window

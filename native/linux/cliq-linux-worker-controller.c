@@ -318,11 +318,13 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     scope->identity.monitor_pid = scope->monitor;
     memcpy(scope->identity.monitor_start_token, scope->monitor_start_token, sizeof(scope->monitor_start_token));
     memcpy(scope->identity.init_native_start_token, ready.init_start_token, sizeof(ready.init_start_token));
-    int token_length = snprintf(scope->identity.init_start_token, sizeof(scope->identity.init_start_token),
+    char init_start_token[CLIQ_WORKER_TOKEN_BYTES] = {0};
+    int token_length = snprintf(init_start_token, sizeof(init_start_token),
         "linux-namespace-init:%ld:%s:monitor:%ld:%s", (long)scope->init,
         ready.init_start_token + strlen("linux-proc-start-ticks:"), (long)scope->monitor,
         scope->monitor_start_token + strlen("linux-proc-start-ticks:"));
-    if (token_length < 0 || (size_t)token_length >= sizeof(scope->identity.init_start_token)) return false;
+    if (token_length < 0 || (size_t)token_length >= sizeof(init_start_token)) return false;
+    memcpy(scope->identity.init_start_token, init_start_token, sizeof(init_start_token));
     scope->identity.generation_device = request->generation_device;
     scope->identity.generation_inode = request->generation_inode;
     memcpy(scope->identity.nonce, request->nonce, sizeof(request->nonce));
