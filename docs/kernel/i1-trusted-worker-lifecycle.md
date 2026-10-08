@@ -645,3 +645,43 @@ explicitly selected Linux environment; do not turn the contract supplement
 into a type-only delivery or claim that I1 is complete.
 Update this record when subsequent verification and the real Linux campaign
 finish; prior test counts do not qualify subsequent changes.
+
+### Resumed actual Linux diagnosis
+
+The user subsequently authorized necessary fixes using the existing free
+standard GitHub-hosted Linux runner. This lifts the diagnosis pause, not the
+pause on unrelated capabilities or the missing I1 production qualifications.
+
+The first execution rejection had been hidden by an independent retirement
+failure. Run execution now preserves both failures through repeated public
+Store shutdown; the crash child also retains its assertion/cleanup chain.
+Four raw SQL COUNT selectors use the driver's real `bigint` contract (`0n`),
+so their zero-attempt fault predicates actually execute.
+At `f082019`, actual controller SIGKILL, exact primary CAS EIO, independent
+native cleanup failure, repeated shutdown refusal, and live flock retention
+until Supervisor SIGKILL pass. No PID/death/ownership fact is simulated.
+
+The completed edit then exposed a reused sealed helper image at EOF before
+bootstrap. Bubblewrap's data bind consumes its input with ordinary reads.
+At `39fb367`, each bootstrap opens an independent reader of the same verified
+sealed inode; it neither rewinds a shared cursor nor copies the whole image.
+The temporary EOF probe is removed. The actual completed edit now passes:
+one permanent claim, one native effect, ready checkpoint publication, unchanged
+original workspace, and responsive control reads. The preceding controller-loss
+regression passes again in the same job:
+https://github.com/cogine-ai/cliq-agent/actions/runs/37851170943/job/113564146572.
+The local sealed-reader sweep passed **1,804/1,804**, with no failures,
+cancellations or skips (644,197 ms); build and strict campaign checks pass.
+
+That job next fails in the parent-loss test's selector, not at the intended
+native identity gate: the permanent claim already exists during the initial
+sealed adapter-image hash, before native invocation/cgroup creation. The
+selector now skips only ENOENT for that exact planned `cgroup.procs` path.
+It still requires a real matching executable inode, retained parent identity,
+actual SIGKILL before release, rejection, conservative claim reservation and
+zero effects. Missing injection remains a failed campaign, never a skip.
+The local selector-fix sweep passed **1,804/1,804**, with no failures,
+cancellations or skips (613,345 ms); project build, strict campaign checks,
+all 9 design-guard tests and the portable edit contract pass.
+Actual Linux verification of this selector and the remaining scenarios is
+pending; the PR is not yet green and I1 remains incomplete.

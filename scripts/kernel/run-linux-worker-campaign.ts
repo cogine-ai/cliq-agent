@@ -282,7 +282,17 @@ function namespacePid(pid: number): number {
 }
 
 function imageProcess(directory: string, filename: string) {
-  for (const pid of pids(directory)) {
+  let candidates: number[];
+  try { candidates = pids(directory); }
+  catch (error) {
+    const failure = error as NodeJS.ErrnoException;
+    // The permanent claim precedes invocation creation. The first sealed-image
+    // hash therefore has no process yet; wait for the actual process-image read.
+    // Absence can never pass the campaign: it still requires a real injected kill.
+    if (failure.code === 'ENOENT' && failure.path === path.join(directory, 'cgroup.procs')) return undefined;
+    throw error;
+  }
+  for (const pid of candidates) {
     try {
       if (namespacePid(pid) !== 2) continue;
       const image = fs.statSync(`/proc/${pid}/exe`, { bigint: true });
