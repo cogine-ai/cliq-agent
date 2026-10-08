@@ -704,3 +704,22 @@ failures, cancellations or skips (526,727 ms); build and strict campaign
 typechecking pass.
 The complete scene and subsequent scenarios still require actual Linux GREEN;
 latest results are recorded on PR #514 and its linked CI checks.
+
+At `9a63bdd`, both actual Linux jobs pass the complete parent-loss scene,
+including the descriptor-held private-file zero-effect oracle. The next
+no-open-invocation recovery performs actual native death observation, workspace
+inspection and quarantine, then fails its final SQLite transaction because
+`requireCurrentCut` reads the outer driver inside a scoped transaction.
+The helper now explicitly accepts the current connection: the pre-move check
+uses the driver, and the final transaction check uses its scoped connection.
+All owner, Run/launch/generation/replacement/Journal, abort and deadline gates
+remain intact; the SQLite transaction guard is not weakened.
+The existing real Linux recovery scene is the regression: it must preserve the
+ready checkpoint, archive the exact old generation, install one read-only
+replacement and then perform one actual edit. macOS cannot supply its genuine
+Linux death observation, so no fabricated proof or new test API is added.
+Local SQLite/probe/execution checks pass **43/43**. The completion-fix full
+sweep passes **1,804/1,804**, with no failures, cancellations or skips
+(712,746 ms); project build, strict campaign typechecking, all 9 design-guard
+tests and the portable edit contract pass. Actual Linux verification of this
+completion fix is pending; latest results remain on PR #514 and its CI checks.

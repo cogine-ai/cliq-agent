@@ -16,7 +16,7 @@ import { nextJournalSequence } from '../repositories/journal.js';
 import { readRequiredWorkerLaunch, updateWorkerLaunch } from '../repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef, updateWorkspaceGeneration } from '../repositories/workspace-generations.js';
 import { readRun } from '../rows.js';
-import type { SqliteDriver } from '../sqlite-driver.js';
+import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import { openWorkerInvocations, readWorkerProbeOwnerDeath, readWorkerRecoveryAnchor, WORKER_PROBE_BACKOFF_MS } from '../worker-recovery.js';
 import { assertWorkerRecoveryTaskReceipt, type WorkerRecoveryTaskReceipt } from '../worker-recovery-task.js';
@@ -307,14 +307,14 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   const replacement = replacements[0];
   const probeDeadlineAt = wait.probeState.dispatch.probeDeadlineAt;
   // No await between the final cut/owner check and the descriptor-relative no-replace move.
-  function requireCurrentCut() {
+  function requireCurrentCut(connection: SqliteConnection) {
     signal?.throwIfAborted();
-    assertActiveStateOwner(driver, owner);
-    if (canonicalSha256(readRun(driver, run.id)) !== canonicalSha256(run) ||
-        canonicalSha256(readRequiredWorkerLaunch(driver, launch.launchId)) !== canonicalSha256(launch) ||
-        canonicalSha256(readRequiredWorkspaceGenerationByRef(driver, generation.generationRef)) !== canonicalSha256(generation) ||
-        (replacement && canonicalSha256(readRequiredWorkspaceGenerationByRef(driver, replacement.generationRef)) !== canonicalSha256(replacement)) ||
-        nextJournalSequence(driver, run.id) !== cut.journal.length + 1) {
+    assertActiveStateOwner(connection, owner);
+    if (canonicalSha256(readRun(connection, run.id)) !== canonicalSha256(run) ||
+        canonicalSha256(readRequiredWorkerLaunch(connection, launch.launchId)) !== canonicalSha256(launch) ||
+        canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, generation.generationRef)) !== canonicalSha256(generation) ||
+        (replacement && canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, replacement.generationRef)) !== canonicalSha256(replacement)) ||
+        nextJournalSequence(connection, run.id) !== cut.journal.length + 1) {
       throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery completion cut changed');
     }
     const now = sampleCanonicalNow();
@@ -356,7 +356,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   recovery.evidenceDigest = digestOmitting(recovery, 'evidenceDigest');
   const recoveryArtifact = await artifacts.publishCanonical(recovery, recovery.format);
   signal?.throwIfAborted();
-  requireCurrentCut();
+  requireCurrentCut(driver);
   const move = owner.filesystem.quarantineGeneration(closure.generation, intent.sourceRowVersion);
   const quarantineObservedAt = sampleCanonicalNow();
   const quarantine: WorkspaceGenerationQuarantineEvidenceV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-quarantine-evidence-v1',
@@ -380,7 +380,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   const metadata = [inspectorArtifact, deathArtifact, recoveryArtifact, quarantineArtifact, wrapperArtifact];
   let outcome: TimeFenceAdvance | undefined, updated!: Run;
   driver.transaction(connection => {
-    const now = requireCurrentCut();
+    const now = requireCurrentCut(connection);
     if (now < quarantineObservedAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker recovery commit precedes its physical quarantine observation');
     outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (outcome !== 'healthy') return;
