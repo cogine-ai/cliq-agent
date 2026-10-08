@@ -5,6 +5,7 @@ import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { ArtifactRef } from '../kernel/types.js';
+import { ResourceRetirementError } from './errors.js';
 
 export type { ArtifactRef } from '../kernel/types.js';
 
@@ -27,6 +28,7 @@ const FILE_MODE = 0o400;
 const ROOT_MODE = 0o700;
 const PERMISSION_AND_SPECIAL_BITS = 0o7777;
 const TEMPORARY_SUFFIX_LENGTH = 32;
+export const ARTIFACT_CHUNK_BYTES = 64 * 1024;
 
 function digest(bytes: Uint8Array): ArtifactRef {
   return crypto.createHash('sha256').update(bytes).digest('hex');
@@ -92,6 +94,11 @@ function isErrno(error: unknown, code: string): boolean {
   return (error as NodeJS.ErrnoException).code === code;
 }
 
+async function closeCasHandle(handle: FileHandle): Promise<void> {
+  try { await handle.close(); }
+  catch (cause) { throw new ResourceRetirementError('CAS file descriptor retirement failed', cause); }
+}
+
 async function lstatRoot(root: string): Promise<Stats> {
   try {
     return await fs.lstat(root);
@@ -119,7 +126,7 @@ async function openRoot(root: string): Promise<RootHandle> {
     if (!sameInode(pathInfo, handleInfo)) throw new Error('CAS root changed while it was opened');
     return { handle, info: handleInfo };
   } catch (error) {
-    await handle.close();
+    await closeCasHandle(handle);
     throw error;
   }
 }
@@ -162,7 +169,7 @@ async function openOwnedImmutablePath(
     await assertRootPathStable(root, openedRoot);
     return { handle, info: handleInfo };
   } catch (error) {
-    await handle.close();
+    await closeCasHandle(handle);
     throw error;
   }
 }
@@ -189,6 +196,37 @@ async function readAndVerifyOpened(
   return bytes;
 }
 
+async function* verifiedChunks(ref: ArtifactRef, opened: OpenedArtifact, expectedByteLength: number,
+  expectedLinkCount: number | null = 1): AsyncGenerator<Buffer> {
+  assertOwnedImmutableFile(`artifact ${ref}`, opened.info);
+  if (expectedLinkCount !== null && opened.info.nlink !== expectedLinkCount) throw new Error(`artifact ${ref} has an invalid link count`);
+  if (opened.info.size !== expectedByteLength) throw new Error(`artifact ${ref} has an unexpected byte count`);
+  const hash = crypto.createHash('sha256');
+  let offset = 0;
+  while (offset < expectedByteLength) {
+    const chunk = Buffer.allocUnsafe(Math.min(ARTIFACT_CHUNK_BYTES, expectedByteLength - offset));
+    const { bytesRead } = await opened.handle.read(chunk, 0, chunk.length, offset);
+    if (bytesRead === 0) throw new Error(`artifact ${ref} ended before its declared byte count`);
+    const bytes = chunk.subarray(0, bytesRead);
+    hash.update(bytes);
+    offset += bytesRead;
+    yield bytes;
+  }
+  const after = await opened.handle.stat();
+  assertOwnedImmutableFile(`artifact ${ref}`, after);
+  if (expectedLinkCount !== null && after.nlink !== expectedLinkCount) throw new Error(`artifact ${ref} changed link count while it was streamed`);
+  if (!sameInode(opened.info, after) || after.size !== expectedByteLength ||
+      opened.info.mtimeMs !== after.mtimeMs || (expectedLinkCount !== null && opened.info.ctimeMs !== after.ctimeMs)) {
+    throw new Error(`artifact ${ref} changed while it was streamed`);
+  }
+  if (hash.digest('hex') !== ref) throw new Error(`artifact ${ref} is corrupt`);
+}
+
+async function verifyOpened(ref: ArtifactRef, opened: OpenedArtifact): Promise<ArtifactStat> {
+  for await (const _chunk of verifiedChunks(ref, opened, opened.info.size)) { /* Exhaustion verifies the whole digest. */ }
+  return { ref, byteLength: opened.info.size };
+}
+
 async function openPublishedFile(
   root: string,
   openedRoot: RootHandle,
@@ -199,7 +237,7 @@ async function openPublishedFile(
     assertPublishedFile(ref, opened.info);
     return opened;
   } catch (error) {
-    await opened.handle.close();
+    await closeCasHandle(opened.handle);
     throw error;
   }
 }
@@ -250,7 +288,9 @@ async function recoverLinkedTemporary(
     }
 
     try {
-      await readAndVerifyOpened(ref, opened);
+      // Recovery may temporarily have multiple exact links; verify bytes without
+      // demanding the final single-link state until residues have been removed.
+      for await (const _chunk of verifiedChunks(ref, opened, opened.info.size, null)) { /* Rehash the held crash residue. */ }
       const before = await opened.handle.stat();
       if (before.nlink === 1) return 'ready';
       if (before.nlink < 1) throw new Error(`artifact ${ref} has invalid link count ${before.nlink}`);
@@ -294,18 +334,17 @@ async function recoverLinkedTemporary(
         }
 
         try {
-          await fs.unlink(residuePath);
-        } catch (error) {
-          if (!isErrno(error, 'ENOENT')) throw error;
-        }
-        await syncRoot(root, openedRoot);
+          try { await fs.unlink(residuePath); }
+          catch (error) { if (!isErrno(error, 'ENOENT')) throw error; }
+          await syncRoot(root, openedRoot);
+        } catch (cause) { throw new ResourceRetirementError('CAS crash temporary retirement failed', cause); }
       }
 
       const recovered = await opened.handle.stat();
       assertOwnedImmutableFile(`artifact ${ref}`, recovered);
       if (recovered.nlink === 1) return 'ready';
     } finally {
-      await opened.handle.close();
+      await closeCasHandle(opened.handle);
     }
   }
 
@@ -354,23 +393,34 @@ export class ContentAddressedStore {
     try {
       return await operation(opened);
     } finally {
-      await opened.handle.close();
+      await closeCasHandle(opened.handle);
     }
   }
 
   async publish(source: Uint8Array): Promise<ArtifactRef> {
     const bytes = Buffer.from(source);
-    const ref = digest(bytes);
+    const result = await this.publishChunks((async function* () {
+      for (let offset = 0; offset < bytes.length; offset += ARTIFACT_CHUNK_BYTES) {
+        yield bytes.subarray(offset, offset + ARTIFACT_CHUNK_BYTES);
+      }
+    })(), bytes.length);
+    return result.ref;
+  }
+
+  /** The producer supplies observed chunks, not a caller-selected final digest.
+   * Only a fully consumed, bounded, fsynced stream can publish an immutable ref. */
+  async publishChunks(source: AsyncIterable<Uint8Array>, maxByteLength: number): Promise<ArtifactStat> {
+    if (!Number.isSafeInteger(maxByteLength) || maxByteLength < 0) throw new TypeError('artifact stream requires a nonnegative safe byte ceiling');
 
     return this.withRoot(async (openedRoot) => {
-      await recoverLinkedTemporary(this.root, openedRoot, ref);
-
-      const name = temporaryName(ref);
-      const temporaryPath = path.join(this.root, name);
-      const finalPath = path.join(this.root, ref);
+      let name = `.tmp-stream-${crypto.randomBytes(TEMPORARY_SUFFIX_LENGTH / 2).toString('hex')}`;
+      let temporaryPath = path.join(this.root, name);
       let temporaryInfo: Stats | undefined;
       let linked = false;
       let publicationError: unknown;
+      let ref!: ArtifactRef;
+      let byteLength = 0;
+      const hash = crypto.createHash('sha256');
 
       try {
         await assertRootPathStable(this.root, openedRoot);
@@ -380,7 +430,18 @@ export class ContentAddressedStore {
           0o600
         );
         try {
-          await handle.writeFile(bytes);
+          for await (const chunk of source) {
+            if (!(chunk instanceof Uint8Array) || chunk.byteLength > ARTIFACT_CHUNK_BYTES ||
+                chunk.byteLength > maxByteLength - byteLength) {
+              throw new Error('artifact stream exceeds its chunk or total byte ceiling');
+            }
+            const bytes = Buffer.from(chunk);
+            hash.update(bytes);
+            await handle.writeFile(bytes);
+            byteLength += bytes.length;
+            await assertRootPathStable(this.root, openedRoot);
+          }
+          ref = hash.digest('hex');
           await handle.chmod(FILE_MODE);
           await handle.sync();
           temporaryInfo = await handle.stat();
@@ -388,13 +449,30 @@ export class ContentAddressedStore {
           if (temporaryInfo.nlink !== 1) {
             throw new Error(`artifact temporary ${name} has invalid link count ${temporaryInfo.nlink}`);
           }
+          if (temporaryInfo.size !== byteLength) throw new Error('artifact temporary has an inconsistent streamed size');
         } finally {
-          await handle.close();
+          // Even an interrupted stream owns this one exact temporary. Give cleanup
+          // its immutable metadata, never unlink a replaced path or unknown inode.
+          try {
+            if (temporaryInfo === undefined) {
+              await handle.chmod(FILE_MODE);
+              temporaryInfo = await handle.stat();
+            }
+          } catch (cause) {
+            throw new ResourceRetirementError('CAS interrupted temporary retirement could not establish its exact metadata', cause);
+          } finally { await closeCasHandle(handle); }
         }
         await syncRoot(this.root, openedRoot);
 
+        await recoverLinkedTemporary(this.root, openedRoot, ref);
+        const finalName = temporaryName(ref);
+        await fs.rename(temporaryPath, path.join(this.root, finalName));
+        name = finalName;
+        temporaryPath = path.join(this.root, name);
+        await syncRoot(this.root, openedRoot);
+
         try {
-          await fs.link(temporaryPath, finalPath);
+          await fs.link(temporaryPath, path.join(this.root, ref));
           linked = true;
           await syncRoot(this.root, openedRoot);
         } catch (error) {
@@ -415,22 +493,41 @@ export class ContentAddressedStore {
       }
 
       if (publicationError !== undefined && cleanupError !== undefined) {
-        throw new AggregateError([publicationError, cleanupError], 'artifact publication and cleanup both failed');
+        throw new ResourceRetirementError('CAS publication and temporary retirement both failed',
+          new AggregateError([publicationError, cleanupError], 'artifact publication and cleanup both failed'));
       }
       if (publicationError !== undefined) throw publicationError;
-      if (cleanupError !== undefined) throw cleanupError;
+      if (cleanupError !== undefined) throw new ResourceRetirementError('CAS temporary retirement failed', cleanupError);
 
       const published = await openPublishedFile(this.root, openedRoot, ref);
       try {
-        const verified = await readAndVerifyOpened(ref, published, 1);
-        if (verified.byteLength !== bytes.byteLength) {
+        const verified = await verifyOpened(ref, published);
+        if (verified.byteLength !== byteLength) {
           throw new Error(`artifact ${ref} has unexpected size after publication`);
         }
       } finally {
-        await published.handle.close();
+        await closeCasHandle(published.handle);
       }
-      return ref;
+      return { ref, byteLength };
     });
+  }
+
+  /** Chunks are staging bytes until the iterator is exhausted and its hash,
+   * byte count and held-file metadata pass. Early return closes both handles. */
+  async *readChunks(ref: ArtifactRef, expectedByteLength: number): AsyncGenerator<Buffer> {
+    assertArtifactRef(ref);
+    if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0) throw new TypeError('artifact stream requires an exact nonnegative safe byte count');
+    const root = await openRoot(this.root);
+    try {
+      const opened = await openPublishedFile(this.root, root, ref);
+      try {
+        for await (const chunk of verifiedChunks(ref, opened, expectedByteLength)) {
+          await assertRootPathStable(this.root, root);
+          yield chunk;
+        }
+        await assertRootPathStable(this.root, root);
+      } finally { await closeCasHandle(opened.handle); }
+    } finally { await closeCasHandle(root.handle); }
   }
 
   async read(ref: ArtifactRef): Promise<Buffer> {
@@ -440,7 +537,7 @@ export class ContentAddressedStore {
       try {
         return await readAndVerifyOpened(ref, opened, 1);
       } finally {
-        await opened.handle.close();
+        await closeCasHandle(opened.handle);
       }
     });
   }
@@ -452,14 +549,17 @@ export class ContentAddressedStore {
       try {
         return { ref, byteLength: opened.info.size };
       } finally {
-        await opened.handle.close();
+        await closeCasHandle(opened.handle);
       }
     });
   }
 
   async verify(ref: ArtifactRef): Promise<ArtifactStat> {
     assertArtifactRef(ref);
-    const bytes = await this.read(ref);
-    return { ref, byteLength: bytes.byteLength };
+    return this.withRoot(async root => {
+      const opened = await openPublishedFile(this.root, root, ref);
+      try { return await verifyOpened(ref, opened); }
+      finally { await closeCasHandle(opened.handle); }
+    });
   }
 }

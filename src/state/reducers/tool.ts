@@ -13,13 +13,15 @@ import { compileOutputSchema } from '../../tools/input-schema.js';
 import { loadToolPolicy, planToolRequest } from '../../policy/tool-policy.js';
 import { toolApprovalCheckpointId, toolApprovalDecision, toolApprovalRequestDigest, type ToolApprovalInput } from '../../policy/tool-approval.js';
 import { exactKeys, requireEqual, verifyToolRuntimeAuthority, type ReleaseTrustKey, type RuntimeBundleManifest } from '../../policy/runtime-authority.js';
+import { releaseLinuxInvocation } from '../../sandbox/linux-worker.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from '../artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { validateControlChannelClosure } from '../control-channel.js';
 import { prepareContinuationCommit } from '../continuation-commit.js';
 import { decodeWorkspaceIdentity } from '../decoders.js';
-import { KernelStorageError, stateOperation } from '../errors.js';
+import { joinResourceOperations, KernelStorageError, stateOperation } from '../errors.js';
+import { readBuiltinEditLaunchClosure } from '../execution-closure.js';
 import { nextJournalSequence, readHighestPreparedAttempt, readInvocationAttempt } from '../repositories/journal.js';
 import { insertControlRequest, readCheckpoint, readControlRequest, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
@@ -108,7 +110,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     return policy;
   };
   const compiled = loadToolContracts(contracts);
-  const outputSchemas = new Map(await Promise.all(contracts.filter((entry) => entry.outputSchemaRef !== undefined).map(async (entry) =>
+  const outputSchemas = new Map(await joinResourceOperations(contracts.filter((entry) => entry.outputSchemaRef !== undefined).map(async (entry) =>
     [entry.name, compileOutputSchema(await readCanonicalArtifact(artifacts, entry.outputSchemaRef!))] as const)));
   const cut = async (revision?: number) => {
     const selected = await readToolCut(driver, artifacts, runId, resolveToolInput);
@@ -142,6 +144,25 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       : evaluator.grant(request, target, call, evidence, grant.issuedAt, grant.expiresAt), 'operation grant');
     if (grant.runId !== runId || grant.expiresAt > admittedRun.deadlineAt || grant.issuedAt < admittedRun.createdAt) throw new TypeError('tool grant exceeds Run authority lifetime');
     return { grant, request, target, call, evidence };
+  }
+
+  async function editLaunch(selected: ToolCut, prepared: ToolCut['journal'][number],
+    proof: Awaited<ReturnType<typeof verifyGrant>>, claim: Omit<ClaimInvocationDispatchInput, 'runId'>) {
+    if (proof.request.toolName !== 'edit') {
+      if (claim.sandboxLaunchSpecRef !== undefined) {
+        throw new KernelStorageError('INVALID_REQUEST', 'this tool has no supported native launch recipe');
+      }
+      return undefined;
+    }
+    if (claim.sandboxLaunchSpecRef === undefined || claim.brokerFenceTokenDigest !== undefined) {
+      throw new KernelStorageError('INVALID_REQUEST', 'builtin edit requires its exact contained launch');
+    }
+    const activeOwner = assertActiveStateOwner(driver, owner);
+    const live = assertLiveDispatchState(driver, owner, runId, claim.expectedRunRevision, claim.leaseEpoch, sampleCanonicalNow());
+    requireEqual(live.run, selected.run, 'edit launch Run cut');
+    const closure = await readBuiltinEditLaunchClosure(artifacts, activeOwner, { ...live, prepared, ...proof,
+      dispatchId: claim.dispatchId, sandboxLaunchSpecRef: claim.sandboxLaunchSpecRef });
+    return Object.freeze({ closure, generationState: immutableSnapshot(live.generation) });
   }
 
   const waitProof = (ref: string) => readToolApprovalWait(artifacts, admittedRun, requirePolicy(), ref);
@@ -313,7 +334,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       }
       const plan = await prepareContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items, items: [],
         frontier: selected.frontier, checkpointId, workspaceStateRef: selected.checkpoint.workspaceStateRef });
-      const metadata = [...plan.metadata, ...(seal?.metadata ?? []), ...await Promise.all([
+      const metadata = [...plan.metadata, ...(seal?.metadata ?? []), ...await joinResourceOperations([
         [input.waitingOnRef, 'cliq-waiting-subject-v1'], [canonicalSha256(proof.evidence), proof.evidence.format],
         [canonicalSha256(proof.request), proof.request.format], [canonicalSha256(proof.target), proof.target.format]
       ].map(([ref, format]) => artifacts.describe(ref!, 'application/json', format!)))];
@@ -435,17 +456,87 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       }
       const proof = await verifyGrant(prepared.grantRef);
       requireEqual(proof.request, expected.request, 'current tool request');
+      const execution = await editLaunch(selected, prepared, proof, input);
+      const planMetadata = execution && await artifacts.describe(execution.closure.spec.containmentPlanRef,
+        'application/json', 'cliq-process-containment-plan-v1');
       const claimed = await claimValidatedInvocation(driver, artifacts, owner, { ...input, runId }, (connection, run, current, now) => {
         assertCut(connection, run, selected);
         requireEqual(current, prepared, 'prepared tool claim');
+        if (execution) {
+          const live = assertLiveDispatchState(connection, owner, runId, input.expectedRunRevision, input.leaseEpoch, now);
+          requireEqual(live.launch, execution.closure.launch, 'claimed edit activation');
+          requireEqual(live.generation, execution.generationState, 'claimed edit generation');
+          insertArtifactMetadata(connection, planMetadata!, now);
+        }
         const uses = Number(connection.prepare("SELECT count(*) AS count FROM run_journal WHERE run_id = ? AND op_id = ? AND phase = 'dispatch_claimed'")
           .get<{ count: unknown }>(runId, input.opId)?.count);
         if (now < proof.grant.issuedAt || now >= proof.grant.expiresAt || uses >= proof.grant.maxDispatchedAttempts) {
           throw new KernelStorageError('LEASE_FENCED', 'tool grant is expired, not yet valid or exhausted');
         }
       });
-      return immutableSnapshot({ entry: claimed, request: proof.request, target: proof.target,
+      const dispatch = immutableSnapshot({ entry: claimed, request: proof.request, target: proof.target,
         ...compiled.projectInvocation({ callId: selected.call.callId, index: selected.call.index, toolName: selected.call.toolName, input: selected.call.value! }) });
+      let consumed = false;
+      return Object.freeze({ ...dispatch,
+        // Only the just-created claim has this one-use capability. Loading retained Journal bytes
+        // cannot recreate it. The native bridge rejects structural or differently bound handles.
+        release: stateOperation('RECOVERY_REQUIRED', async (target: unknown): Promise<void> => {
+          if (consumed) throw new KernelStorageError('LEASE_FENCED', 'tool release was already consumed');
+          consumed = true;
+          for (const ref of policyArtifactRefs) await artifacts.readBytes(ref);
+          const currentCut = await cut(input.expectedRunRevision);
+          const currentProof = await verifyGrant(prepared.grantRef!);
+          requireEqual(currentProof.request, expected.request, 'released current tool request');
+          const releasedExecution = await editLaunch(currentCut, prepared, currentProof, input);
+          let outcome: TimeFenceAdvance | undefined;
+          let workerLaunchId!: string;
+          let parentWorkerContainmentRef!: string;
+          driver.transaction(connection => {
+            assertActiveStateOwner(connection, owner);
+            const now = sampleCanonicalNow();
+            outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
+            if (outcome !== 'healthy') return;
+            const { run, launch, generation } = assertLiveDispatchState(connection, owner, runId,
+              input.expectedRunRevision, input.leaseEpoch, now);
+            if (releasedExecution) {
+              requireEqual(launch, releasedExecution.closure.launch, 'released edit activation');
+              requireEqual(generation, releasedExecution.generationState, 'released edit generation');
+            }
+            assertCut(connection, run, currentCut);
+            requireEqual(run.budgetReserved, currentCut.run.budgetReserved, 'released tool reservation');
+            const highest = readHighestPreparedAttempt(connection, runId, input.opId);
+            const entries = readInvocationAttempt(connection, runId, input.opId, input.attempt);
+            requireEqual(highest, prepared, 'released highest prepared tool');
+            if (entries.length !== 2 || entries[0]?.phase !== 'prepared' || entries[1]?.phase !== 'dispatch_claimed') {
+              throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool release requires an unsettled permanent claim');
+            }
+            requireEqual(entries[1], claimed, 'released permanent tool claim');
+            if (claimed.supervisorInstanceId !== owner.supervisorInstanceId || claimed.stateOwnerEpoch !== owner.ownerEpoch ||
+                claimed.leaseEpoch !== run.leaseEpoch || claimed.timestamp > now) {
+              throw new KernelStorageError('LEASE_FENCED', 'tool release belongs to another owner or lease');
+            }
+            const uses = Number(connection.prepare("SELECT count(*) AS count FROM run_journal WHERE run_id = ? AND op_id = ? AND phase = 'dispatch_claimed'")
+              .get<{ count: unknown }>(runId, input.opId)?.count);
+            if (now < currentProof.grant.issuedAt || now >= currentProof.grant.expiresAt ||
+                uses < 1 || uses > currentProof.grant.maxDispatchedAttempts) {
+              throw new KernelStorageError('LEASE_FENCED', 'tool release grant is expired, not yet valid or exhausted');
+            }
+            if (!claimed.sandboxLaunchSpecRef) {
+              throw new KernelStorageError('STATE_TRANSITION_INVALID', 'native tool release requires its claimed launch specification');
+            }
+            workerLaunchId = launch.launchId;
+            parentWorkerContainmentRef = launch.processContainmentRef!;
+          });
+          requireHealthyFence(outcome);
+          // No async boundary after the committed second check, and no target I/O before commit.
+          releaseLinuxInvocation(target, { runId, leaseEpoch: claimed.leaseEpoch, workerLaunchId,
+            opId: claimed.opId, attempt: claimed.attempt, dispatchId: claimed.dispatchId!,
+            requestRef: claimed.requestRef, requestDigest: currentProof.request.requestDigest,
+            targetRef: claimed.target, targetDigest: currentProof.target.targetDigest,
+            operationGrantRef: claimed.grantRef!, parentWorkerContainmentRef,
+            sandboxLaunchSpecRef: claimed.sandboxLaunchSpecRef! });
+        })
+      });
     }),
     completeTool: stateOperation('INVALID_REQUEST', async (input: {
       opId: string; attempt: number; expectedRunRevision: number; observationRef: string;

@@ -67,10 +67,11 @@ In:
 - Freeze a signed content-addressed `GuestToolchainManifest` into `assemblyRef` for macOS strong mode so the guest image/ABI and every worker/tool/verifier executable path, digest, and version—not host Mach-O identity—are authoritative.
 - Freeze the Node-only `DependencyPolicy` in `RunSpec`, derive an exact `DependencyAcquisitionPlan` from every FinalCandidate into its `VerifierPlan`, and require one integrity-complete supported candidate lockfile, pinned guest package manager, registered broker endpoints/credential handles, bounded content-addressed downloads, networkless install, and install scripts off unless admission consumed the exact authorization into `DependencyInstallScriptsAuthorizationTemplateV1` and the candidate has an exact unused-ordinal `OperationGrantV1`. Keep the candidate source projection read-only with only declared dependency/cache/temp write roots, revalidate `resultSourceRef` before completion, quarantine integrity violations, and publish a post-effect Checkpoint only for unchanged source.
 - Add a Linux strong backend that combines bubblewrap user/mount/network isolation, a PID namespace, a non-delegated per-lease cgroup v2 subtree, and a trusted PID-namespace init/subreaper. All four controls must pass startup probes.
-- Freeze every strong process/VM creation into exact `SandboxLaunchSpecV1`, a digest-bound four-owner union that closes runtime/executable identity, purpose-specific `SandboxProcessInvocationV1` source/recipe/argv/cwd/stdio derivation, sanitized environment, filesystem/mount plan, resource/profile equality, containment plan, and owner-specific forbidden fields before the launcher acts.
+- Freeze every strong process/VM creation into exact `SandboxLaunchSpecV1`, a digest-bound five-owner union that closes runtime/executable identity, purpose-specific `SandboxProcessInvocationV1` source/recipe/argv/cwd/stdio derivation, sanitized environment, filesystem/mount plan, resource/profile equality, containment plan, and owner-specific forbidden fields before the launcher acts.
 - Freeze and enforce the canonical `SandboxResourceSpec` for process, memory, CPU, file, generation, output, and IPC ceilings on both strong backends; resource trips never manufacture no-effect evidence before whole-containment death and generation quiescence.
 - Require every `run.submit|run.apply`, including read-only and text-only requests, to resolve `RunAssemblyV1.sandboxBackend` as exactly `macos_vm|linux_namespace` and pass the corresponding strong-backend, worker identity, and pinned-executable probes before Run creation. Reject native Windows and any supported host without a complete working backend. Non-Git roots use the same strong private-generation path rather than a weak read mode.
 - Capture a content-addressed base workspace manifest without mutating the user's index or working tree.
+- Own pre-admission capture through the RFC's `source_inspection_attempts` reservation and fixed read-only Git recipe. A process plan must reserve the exact backend before `prepared`; cancellation and successor cleanup require joined local resources, exact staging removal/parent fsync, and no-spawn or whole-containment death as applicable. Source inspection creates no accepted Run and cannot relax strong Run admission.
 - Consume only work package 1's exact immutable `WorkspaceIdentityV1.kind='live'` plus its exact `RepositoryIdentityV1` iff Git: descriptor-reopen the NFC absolute root and literal in-root `.git` no-follow for every capture/apply/publication, validate principal/platform/owner/device/file/object-format identities, keep 64-bit device/file ids as canonical unsigned decimal strings, fail root/`.git` replacement with `ARTIFACT_MISMATCH`, and reject `legacy_unavailable` Sessions/forks from execution.
 - Freeze the RFC `SourceProjectionSpec` into `RunSpec.sourceProjectionRef`, including `cliq-exact-path-v1` selectors, frozen admission-time ignore rules, hard exclusions, authorization refs for ignored in-root includes, rejection of every outside-root selector, and result size/count ceilings.
 - Materialize a unique private workspace generation for every mutating worker lease, with an independent `.git` directory and no writable alias to the real repository.
@@ -214,6 +215,17 @@ SQLite recovery reducer, and does not advance this work package's completion.
           }
         }
       | {
+          kind: 'source_inspection'
+          purpose: 'source_inspection'
+          recipe: 'cliq-source-git-inspection-v1'
+          targetRef: ArtifactRef
+          targetDigest: string
+          inputRef: ArtifactRef
+          inputDigest: string
+          argvCwdSource: 'trusted_recipe_decode_of_frozen_source_input'
+          stdio: SandboxCapturedStdioV1
+        }
+      | {
           kind: 'local_inference_entrypoint'
           purpose: 'local_inference_service'
           recipe: 'cliq-local-inference-entrypoint-v1'
@@ -270,7 +282,6 @@ SQLite recovery reducer, and does not advance this work package's completion.
               stdio: SandboxCapturedStdioV1
             }
         ))
-
     type SanitizedSandboxEnvironmentV1 = {
       schemaVersion: 1
       format: 'cliq-sanitized-sandbox-environment-v1'
@@ -311,6 +322,14 @@ SQLite recovery reducer, and does not advance this work package's completion.
           purpose: 'runtime' | 'input' | 'executable'
         }
       | {
+          kind: 'source_inspection_input'
+          inputRef: ArtifactRef
+          inputDigest: string
+          targetPath: '/input'
+          access: 'read_only'
+          purpose: 'input'
+        }
+      | {
           kind: 'run_generation'
           generationRef: ArtifactRef
           canonicalRootRelativePath: string
@@ -325,7 +344,6 @@ SQLite recovery reducer, and does not advance this work package's completion.
           access: 'read_write'
           purpose: 'home' | 'tmp' | 'dependency' | 'cache' | 'output'
         }
-
     type SandboxLaunchBaseV1 = {
       schemaVersion: 1
       format: 'cliq-sandbox-launch-v1'
@@ -387,6 +405,26 @@ SQLite recovery reducer, and does not advance this work package's completion.
           targetRef?: never
           targetDigest?: never
           parentWorkerContainmentRef?: never
+        })
+      | (SandboxLaunchBaseV1 & {
+          owner: Extract<ProcessContainmentOwner, { kind: 'source_inspection' }>
+          purpose: 'source_inspection'
+          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'source_inspection' }>
+          sourceInspectionTargetRef: ArtifactRef
+          sourceInspectionTargetDigest: string
+          sourceInspectionInputRef: ArtifactRef
+          sourceInspectionInputDigest: string
+          operationGrantRef?: never
+          requestRef?: never
+          requestDigest?: never
+          targetRef?: never
+          targetDigest?: never
+          parentWorkerContainmentRef?: never
+          adminTargetRef?: never
+          adminTargetDigest?: never
+          probePayloadCoreRef?: never
+          serviceSpecRef?: never
+          serviceSpecDigest?: never
         })
       | (SandboxLaunchBaseV1 & {
           owner: Extract<ProcessContainmentOwner, { kind: 'local_inference_service' }>
@@ -737,7 +775,14 @@ SQLite recovery reducer, and does not advance this work package's completion.
           serviceSpecRef: ArtifactRef
           supervisorInstanceId: string
         }
-
+      | {
+          kind: 'source_inspection'
+          inspectionId: string
+          attempt: 1
+          principalId: string
+          targetRef: ArtifactRef
+          supervisorInstanceId: string
+        }
     type SandboxRootImageV1 = {
       schemaVersion: 1
       format: 'cliq-sandbox-root-image-v1'
@@ -1667,7 +1712,7 @@ Automated:
 
 - `npm run build`
 - `npm test`
-- `npm run test:sandbox` (added by this package; runs backend probes, exact `SandboxLaunchSpecV1` digest/four-owner/forbidden-field/runtime/process-recipe/argv-cwd-stdio/env/filesystem/mount/profile negative matrix, `SandboxRootImageV1` signed-role/fresh-tmpfs/ref-digest/no-persistence matrix, exact mandatory `InterpreterIdentityV1`/workspace-script/grant/command binding, out-of-band process-parameter/fd rejection, exact resource-limit trips, guest-manifest/image/executable identity checks, exact `PlatformProcessIdentityV1`/`StateRootIdentityV1`/`StateLockIdentityV1` ref-digest/no-follow/root-and-lock-replacement matrix, `StateOwnerAcquisitionEvidenceV1` genesis/clean-acquire/takeover and three-entrypoint matrix, `StateOwnerTransitionEvidenceV1` graceful/takeover/lock/successor matrix, `StateOwnerRecordV1` epoch/OS-lock/old-process transition, and `SupervisorInspectorIdentityV1` signed-bundle/executable/active-owner/digest/freshness validation, verifier-versus-MCP authorization-target/RuntimeBundle-role rejection, `cliq-permission-grammar-v0` golden decisions, exact `OperationGrantV1` broker rejection, locked dependency fetch/install/template/ordinal authorization, call-scoped stdio MCP process isolation/teardown, four-branch containment-owner/XOR validation, local-service phase/retirement/stable-projection/replacement fencing, exact admin terminal result/closure/error isolation and credential-broker tests, escape cases, secret-environment checks, generation isolation, broker fencing, and supported-platform integration tests)
+- `npm run test:sandbox` (added by this package; runs backend probes, exact `SandboxLaunchSpecV1` digest/five-owner/forbidden-field/runtime/process-recipe/argv-cwd-stdio/env/filesystem/mount/profile negative matrix, `SandboxRootImageV1` signed-role/fresh-tmpfs/ref-digest/no-persistence matrix, exact mandatory `InterpreterIdentityV1`/workspace-script/grant/command binding, out-of-band process-parameter/fd rejection, exact resource-limit trips, guest-manifest/image/executable identity checks, exact `PlatformProcessIdentityV1`/`StateRootIdentityV1`/`StateLockIdentityV1` ref-digest/no-follow/root-and-lock-replacement matrix, `StateOwnerAcquisitionEvidenceV1` genesis/clean-acquire/takeover and three-entrypoint matrix, `StateOwnerTransitionEvidenceV1` graceful/takeover/lock/successor matrix, `StateOwnerRecordV1` epoch/OS-lock/old-process transition, and `SupervisorInspectorIdentityV1` signed-bundle/executable/active-owner/digest/freshness validation, verifier-versus-MCP authorization-target/RuntimeBundle-role rejection, `cliq-permission-grammar-v0` golden decisions, exact `OperationGrantV1` broker rejection, locked dependency fetch/install/template/ordinal authorization, call-scoped stdio MCP process isolation/teardown, five-branch containment-owner/XOR validation, local-service phase/retirement/stable-projection/replacement fencing, exact admin terminal result/closure/error isolation and credential-broker tests, escape cases, secret-environment checks, generation isolation, broker fencing, and supported-platform integration tests)
 - `npm run test:fault` scenarios for kill-before/after broker dispatch, lease takeover, workspace snapshot publication, and generation quarantine
 - On macOS CI, verify helper/guest signatures and execute the real `Virtualization.framework` microVM integration suite against temporary dirty Git and non-Git workspaces; separately prove a Seatbelt-only host cannot admit even read-only/text-only/workerless Runs and that Seatbelt inspection helpers create no Kernel truth.
 - On Linux CI, execute the bubblewrap + PID namespace + cgroup v2 + subreaper integration suite against a real temporary Git repository; a missing control is a failed strong-mode job, not a skipped pass.
@@ -1720,7 +1765,7 @@ Rollback (only for hard-to-reverse changes):
 
 ### Open Questions
 
-- None. Platform support, mandatory strong backend for every Git/non-Git Run, signed guest identity, locked dependency acquisition, call-scoped stdio MCP, tools-disabled durable compaction brokering, canonical four-owner containment, non-adoptable worker/admin/local-service preactivation, local no-spawn/death retirement and stable replacement identity, Run and embedded-admin dual authority gates, admin HTTP secret placement, all-descendant/no-live-I/O proof, quiescent Checkpoint publication, workspace/result separation, durable dispatch singleflight, grant expiry, and fail-closed behavior are closed by this Kernel Cut. Changing one requires a new RFC.
+- None. Platform support, mandatory strong backend for every Git/non-Git Run, signed guest identity, locked dependency acquisition, call-scoped stdio MCP, tools-disabled durable compaction brokering, canonical five-owner containment, non-adoptable worker/admin/local-service preactivation, local no-spawn/death retirement and stable replacement identity, Run and embedded-admin dual authority gates, admin HTTP secret placement, all-descendant/no-live-I/O proof, quiescent Checkpoint publication, workspace/result separation, durable dispatch singleflight, grant expiry, and fail-closed behavior are closed by this Kernel Cut. Changing one requires a new RFC.
 
 ### GitHub Issue Body
 
@@ -1728,7 +1773,7 @@ Rollback (only for hard-to-reverse changes):
 
 Implement work package 3 from `docs/backlog/durable-verified-run-kernel/03-trusted-execution-and-workspaces.md` and the canonical Durable Verified Run Kernel RFC.
 
-Deliver mandatory signed macOS `Virtualization.framework` microVM and Linux bubblewrap/PID-namespace/cgroup-v2/subreaper execution for every Run, with no Seatbelt/read-only/text-only/workerless fallback; frozen `GuestToolchainManifest`/`SandboxResourceSpec`; exact four-owner `SandboxLaunchSpecV1` with closed `SandboxProcessInvocationV1` source/recipe/argv/cwd/stdio derivation; source-read-only locked Node dependency acquisition with exact authorization-template/operation-grant ordinals and integrity quarantine; fresh call-scoped stdio MCP isolation; tools-disabled durable compaction brokering; powerless non-adoptable worker/admin/local-service preactivation; canonical field-for-field four-owner whole-descendant `ProcessContainmentRef`; signed RuntimeBundle/state-owner-bound `SupervisorInspectorIdentityV1` on every no-spawn/death proof; exact local no-spawn/death retirement and stable-service replacement identity; quiescent atomic workspace Checkpoints; strong Git generations with independent `.git` and equally strong non-Git generations without synthetic Git state; distinct recovery/deliverable manifests; root-relative-only source inputs with fail-closed external Git/config/input/mount rejection; sanitized workers; exact-`OperationGrantV1` Run `claimDispatch`/`releaseClaimedDispatch`; exact embedded-`AdminOperation` `claimAdminProbe`/`releaseAdminProbe`; HTTP credentials confined to the trusted broker; and separate evidence authority. Enforce exact `RunPolicySnapshotV1.decisionRules` under `cliq-permission-grammar-v0`; reject RuntimeBundle verifier identity and permit RuntimeBundle stdio MCP only for signed role `mcp_server`. Absorb `#63`; integrate—not collapse—the permission work from `#62`.
+Deliver mandatory signed macOS `Virtualization.framework` microVM and Linux bubblewrap/PID-namespace/cgroup-v2/subreaper execution for every Run, with no Seatbelt/read-only/text-only/workerless fallback; frozen `GuestToolchainManifest`/`SandboxResourceSpec`; exact five-owner `SandboxLaunchSpecV1` with closed `SandboxProcessInvocationV1` source/recipe/argv/cwd/stdio derivation; source-read-only locked Node dependency acquisition with exact authorization-template/operation-grant ordinals and integrity quarantine; fresh call-scoped stdio MCP isolation; tools-disabled durable compaction brokering; powerless non-adoptable worker/admin/local-service preactivation; canonical field-for-field five-owner whole-descendant `ProcessContainmentRef`; signed RuntimeBundle/state-owner-bound `SupervisorInspectorIdentityV1` on every no-spawn/death proof; exact local no-spawn/death retirement and stable-service replacement identity; quiescent atomic workspace Checkpoints; strong Git generations with independent `.git` and equally strong non-Git generations without synthetic Git state; distinct recovery/deliverable manifests; root-relative-only source inputs with fail-closed external Git/config/input/mount rejection; sanitized workers; exact-`OperationGrantV1` Run `claimDispatch`/`releaseClaimedDispatch`; exact embedded-`AdminOperation` `claimAdminProbe`/`releaseAdminProbe`; HTTP credentials confined to the trusted broker; and separate evidence authority. Enforce exact `RunPolicySnapshotV1.decisionRules` under `cliq-permission-grammar-v0`; reject RuntimeBundle verifier identity and permit RuntimeBundle stdio MCP only for signed role `mcp_server`. Absorb `#63`; integrate—not collapse—the permission work from `#62`.
 
 Every source operation must require the Session's exact live no-follow descriptor-derived `WorkspaceIdentityV1` plus exact `RepositoryIdentityV1` iff Git; keep root/`.git` device/file ids as unsigned decimal strings, require every workspace/repository ref/digest match, make `run.submit` path equal that identity, derive pathless `run.apply` from the live source Session, reject `legacy_unavailable`, and fail same-path root/`.git` replacement as `ARTIFACT_MISMATCH`.
 

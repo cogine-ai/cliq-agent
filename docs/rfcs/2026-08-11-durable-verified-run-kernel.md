@@ -4131,7 +4131,9 @@ Every `workspaceGenerationRef|generationRef` in a WorkerLaunch, wait, recovery/i
 
 `workspace_generations` stores one exact `WorkspaceGenerationStateV1` mutable pointer row per immutable identity. `rowVersion` is a positive safe integer incremented by one on every CAS; all base identity/source fields are immutable. The success spine is exactly `materializing -> preactivated_readonly -> active -> revoking -> checkpointing -> sealed -> retired`; entering `revoking` only closes new worker writes/releases, and the same quiesce id then advances to `checkpointing` before any snapshot can seal. Every non-success edge goes through `quarantined`: `materializing|preactivated_readonly` may transition directly after their closed failure/no-spawn/death evidence; a checkpoint/quiesce failure with already-positive death evidence may transition from `revoking|checkpointing` using `checkpoint_failed`; every worker-loss/takeover path from `active|revoking|checkpointing` first atomically becomes `fenced_reconciling` and installs its exact wait even when death proof is already immediately available; and `fenced_reconciling` may only become `quarantined` through `worker_recovery`. Only `sealed|quarantined` may transition to `retired`. Direct `active -> checkpointing`, `revoking -> sealed`, worker recovery directly from a pointer-bound phase, `fenced_reconciling -> active`, or any other edge, phase skip, or reuse of a retired/quarantined generation is illegal. The branch XOR is storage-enforced. `preactivated_readonly|active|revoking|checkpointing|fenced_reconciling|sealed` snapshot evidence rehashes exact `WorkspaceGenerationSnapshotEvidenceV1`; its identity/checkpoint/state/entries/private-Git/tree fields re-walk the generation and Checkpoint, and all three fsync literals must be true. Materialization evidence uses the source Checkpoint. Sealing evidence is artifact-first and commits with the new ready Checkpoint/state row; it names that intended Checkpoint id without pointing back from an immutable artifact, so no hash cycle exists. An active/revoking/checkpointing row's launch/epoch equals the sole matching WorkerLaunch and Run active pointer. A `fenced_reconciling` row instead requires that Run pointer absent, the Run waiting on its exact `worker_death` WaitingSubject, and its launch/epoch/wait ref/digest/fenced source phase/quiesce id equal that subject and the sole matching `WorkerLaunch(phase='reconciling',generationWriteState='fenced_reconciling')`. It is read-only and cannot dispatch, checkpoint, seal, or be selected by another launch. Only `lastVerifiedTreeDigest` is authoritative while writes were active. No directory rescan becomes a current state without the sealed evidence/Checkpoint transaction.
 
-Every quarantine operation derives its sole target before touching the filesystem: `sourceRowVersion` equals the current row and `quarantineCanonicalRootRelativePath = 'quarantine/workspace-generations/' + H(generationId,base-10 sourceRowVersion)`. It then publishes or reconstructibly stages exact `WorkspaceGenerationQuarantineEvidenceV1`, rehashes its current inspector, moves the held generation descriptor by no-replace rename into that path, fsyncs the parent, proves the original locator absent, and CASes the row while repeating `observedState`. A complete descriptor rewalk records `complete_tree` with its exact tree digest; a partial, corrupt, or unreadable generation records only the corresponding closed `unreadable_partial.failureCode` and must not invent a tree digest. A crash with the original locator present and target absent retries the move; original absent plus that one exact target present may only reobserve/rebuild the same evidence and finish the CAS; both present, both absent, identity drift, or any other target blocks recovery. No directory scan chooses authority. `WorkspaceGenerationFailureDetailV1.detailDigest`, `WorkspaceGenerationQuarantineEvidenceV1.evidenceDigest`, and `WorkspaceGenerationRetirementEvidenceV1.evidenceDigest` each equal SHA-256 of their JCS artifact with only that artifact's own digest member omitted. A quarantined row's ref/digest rehashes that exact quarantine artifact and repeats its complete observed-state union; a retired row does the same for exact retirement evidence. The reason/from-phase matrix is closed: `materialization_failed` is only from `materializing` and its failure detail has `phase='materializing'`; `preactivation_failed` is only from `preactivated_readonly` and its failure detail has that phase; both details repeat the row's Run/generation/source Checkpoint and one closed failure code. `launch_aborted` is only from `preactivated_readonly` and requires exact no-spawn evidence; `launch_died_before_activation` is only from that phase and requires the exact created containment's all-descendant death evidence. `worker_recovery` is only from `fenced_reconciling` and rehashes exact `WorkerRecoveryEvidenceV1` for that installed wait; `checkpoint_failed` is only from `revoking|checkpointing` and requires the same launch/quiesce plus exact containment-death evidence. All refs, run/generation/launch/epoch/last-verified-tree/inspector identities must match the row and owning Run/wait. No future launch may select the quarantined identity. `restored_from_checkpoint` never rewinds or reuses that mutable directory: it requires a distinct `replacementWorkspaceGenerationRef` derived from the named ready Checkpoint and proven `preactivated_readonly` by its own materialization evidence.
+Every quarantine operation derives its sole target before touching the filesystem: `quarantineCanonicalRootRelativePath = 'quarantine/workspace-generations/' + H(generationId,base-10 sourceRowVersion)`. For every reason except `worker_recovery`, `sourceRowVersion` equals the current row. Worker recovery reserves one immutable intent with its first probe: before publishing that dispatch, retain the exact current `fenced_reconciling` `WorkspaceGenerationStateV1` row as canonical CAS bytes and set `inspectionTargetDigest` to its SHA-256. That first probe's metadata CAS reserves `sourceRowVersion = retainedAnchor.rowVersion + 1`; subsequent probes for the same frozen worker-death subject must reuse the same anchor and target, even as their wait-metadata CASes increment the actual row version. The anchor's identity, source Checkpoint/state, launch/epoch, fenced Journal cutoff, source phase/quiesce and last-verified tree must equal the current frozen generation and owning wait. Its initial wait and the retained completed-probe lineage must establish the first reservation, rather than a guessed version or an arbitrary CAS row. The final transaction still compares the actual current Run revision, generation row/version, installed wait and current probe nonce, and increments the actual row version; it never rewinds to the reservation version. This worker-only rule adds no row type, table or separate lifecycle.
+
+The operation then publishes or reconstructibly stages exact `WorkspaceGenerationQuarantineEvidenceV1`, rehashes its current inspector, moves the held generation descriptor by no-replace rename into that path, fsyncs the parent, proves the original locator absent, and CASes the row while repeating `observedState`. A complete descriptor rewalk records `complete_tree` with its exact tree digest; a partial, corrupt, or unreadable generation records only the corresponding closed `unreadable_partial.failureCode` and must not invent a tree digest. A crash with the original locator present and target absent retries the move; original absent plus that one exact target present may only reopen the same descriptor identity, reobserve/rebuild current evidence and finish the CAS. Worker recovery never renames that reserved target to a later probe's target. Both present, both absent, identity drift, or any other target blocks recovery. No directory scan chooses authority. Retaining a target does not retain a dead inspector's authority: the successor must fence-close the predecessor probe and use its own fresh dispatch/nonce/deadline and native observations under the reconciliation rules below. `WorkspaceGenerationFailureDetailV1.detailDigest`, `WorkspaceGenerationQuarantineEvidenceV1.evidenceDigest`, and `WorkspaceGenerationRetirementEvidenceV1.evidenceDigest` each equal SHA-256 of their JCS artifact with only that artifact's own digest member omitted. A quarantined row's ref/digest rehashes that exact quarantine artifact and repeats its complete observed-state union; a retired row does the same for exact retirement evidence. The reason/from-phase matrix is closed: `materialization_failed` is only from `materializing` and its failure detail has `phase='materializing'`; `preactivation_failed` is only from `preactivated_readonly` and its failure detail has that phase; both details repeat the row's Run/generation/source Checkpoint and one closed failure code. `launch_aborted` is only from `preactivated_readonly` and requires exact no-spawn evidence; `launch_died_before_activation` is only from that phase and requires the exact created containment's all-descendant death evidence. `worker_recovery` is only from `fenced_reconciling` and rehashes exact `WorkerRecoveryEvidenceV1` for that installed wait; `checkpoint_failed` is only from `revoking|checkpointing` and requires the same launch/quiesce plus exact containment-death evidence. All refs, run/generation/launch/epoch/last-verified-tree/inspector identities must match the row and owning Run/wait. No future launch may select the quarantined identity. `restored_from_checkpoint` never rewinds or reuses that mutable directory: it requires a distinct `replacementWorkspaceGenerationRef` derived from the named ready Checkpoint and proven `preactivated_readonly` by its own materialization evidence.
 
 Retirement first publishes exact `WorkspaceGenerationRetirementEvidenceV1` and then CASes the row. A sealed retirement rehashes the sealing snapshot and exact death evidence for its last worker launch. A quarantined retirement rehashes the quarantine evidence, sets `sourceQuarantinedRowVersion` to the current row, and in the same state-owner transaction recomputes literal zero for active Run pointers, nonretired WorkerLaunch rows, live containments, active mounts, and releasable broker claims naming this generation. A free boolean or stale count cannot retire it. Evidence/run/generation/inspector/digest fields are byte-equal and neither branch accepts a generic ArtifactRef. WorkerLaunch `generationWriteState` is a denormalized index that must equal the generation row phase (`preactivated_readonly`, `active`, `revoking`, `checkpointing`, `fenced_reconciling`, or `sealed`) in the same transaction. The generation row, not a directory name or worker assertion, is the sole mutable generation authority.
 
@@ -4258,7 +4260,7 @@ Reconciliation probing has no hidden infinite loop. The wait stores the exact `R
 
 At `automatic_exhausted`, authenticated `run.reconcile(probe_now)` is an enqueue mutation, not a synchronous inspection result. One CAS increments positive safe-integer `userProbeCount`, enters `user_in_flight`, and persists a complete dispatch whose `probeOrdinal` equals that count, nonce/deadline are fresh, and `controlRequestId/controlRequestDigest` equal the public mutation. In that same transaction it publishes/stores the deterministic `ControlResultV1.resolution={kind:'probe_enqueued',dispatchDigest,userProbeCount}` plus the post-enqueue snapshot and commits `control_requests`; only afterward may the no-new-effect probe perform I/O. Same request bytes replay that response and join the same dispatch without probing twice; different bytes conflict. Completion later stores evidence and advances the wait through the ordinary internal reducer, producing Run events/snapshot changes but no second public response. An unresolved response returns to `automatic_exhausted` with the evidence pair and unchanged automatic count. `probe_now` before automatic exhaustion or for `manual_only` is `INVALID_REQUEST`; manual permits only exact-risk abandonment, whose synchronous result instead uses `resolution={kind:'abandoned',evidenceRef}`.
 
-`ReconciliationProbeDispatchV1.dispatchDigest = SHA-256(JCS(dispatch with dispatchDigest omitted))`, and `reconciliationSubjectDigest = SHA-256(JCS(the frozen ReconciliationSubject))`. The MCP branch persists `brokerDispatchId = H(runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)`, the exact no-new-effect request/target digests, and an unguessable broker fence-token digest; the broker release gate accepts only that still-current in-flight row and token. Publication/worker branches persist `inspectorTaskId = H(runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)` and the exact descriptor-only target digest. Those fixed in-process tasks have no broker, child-process, mutation, or credential capability. A dispatch id/task id/fence token created only in memory is invalid.
+`ReconciliationProbeDispatchV1.dispatchDigest = SHA-256(JCS(dispatch with dispatchDigest omitted))`, and `reconciliationSubjectDigest = SHA-256(JCS(the frozen ReconciliationSubject))`. The MCP branch persists `brokerDispatchId = H(runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)`, the exact no-new-effect request/target digests, and an unguessable broker fence-token digest; the broker release gate accepts only that still-current in-flight row and token. Publication/worker branches persist `inspectorTaskId = H(runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)` and the exact descriptor-only target digest. For worker recovery, that target digest names the first retained fenced generation row and its fixed quarantine reservation described above; later dispatches retain this same immutable target but have fresh task/nonce/owner/time identities. It grants no authority to dispatch or mutate the generation. Those fixed in-process tasks have no broker, child-process, mutation, or credential capability. A dispatch id/task id/fence token created only in memory is invalid.
 
 Every automatic/user result first publishes exactly one `ReconciliationProbeEvidenceV1`; its omission digest, Run/wait digest, dispatch digest, kind/ordinal/nonce/start/deadline, current inspector, and observation time equal the persisted in-flight dispatch. `subject_observation` wraps exactly one subject-allowed artifact and rehashes its ref/digest: `McpRecoveryProbeEvidenceV1`, `PublicationProofV1`, or `WorkerRecoveryEvidenceV1`; MCP evidence additionally repeats the same probe-dispatch digest and broker identities. `probe_timeout` is legal only at or after the stored deadline and its ref/digest decodes exact `ReconciliationProbeTimeoutClosureV1`; `closureDigest` omits itself under JCS and all common probe/inspector/dispatch fields equal the wrapper/in-flight state. MCP closure first atomically revokes the exact persisted fence token, waits for the broker's matching active-release count to become zero, and records the same dispatch/target/token plus `noActiveReleaseForNonce=true`. Publication/worker closure repeats the persisted task id and either proves synchronous cancellation-and-join by its owning live Supervisor or names exact `StateOwnerAcquisitionEvidenceV1(takeover_after_owner_death)` proving that task's owning process died before the successor observed closure. Timeout authorizes no claim that the underlying effect completed or failed. It follows the same unresolved edge and schedule as an unresolved response. A late response for a closed nonce is audit-only and cannot clear a newer nonce or advance the Run. Each completed probe installs the wrapper's ref/digest or atomically applies the subject reducer. There is no public evidence payload, counter reset, automatic ninth probe, invalid ref-without-digest combination, or claim that repeated user inspection must eventually resolve. A global Supervisor ceiling bounds all probes.
 
@@ -4349,6 +4351,349 @@ It does not own a workflow graph, role scheduler, distributed queue, or cloud wo
 
 ### 9.1 Lease, Activation, And Process Containment
 
+#### Pre-admission Source Inspection
+
+`run.submit` may need trusted Git inspection before a Run or its initial
+Checkpoint exists. This work has the closed `source_inspection` owner below,
+not a fictional Run, an MCP admin probe, or a general process executor. The
+public request/response schemas and admission-key semantics are unchanged.
+One internal `source_inspection_attempts` table owns the whole capture,
+including partial input, the Git process if needed, and final worktree capture:
+
+Its immutable `original_request_id` and `original_request_digest` columns are
+derived from the exact target's retained `originalRequestRef` bytes, not a
+second public artifact field. A unique `(principal_id,method,original_request_id)`
+index refuses another admission key before opening source bytes. Replay first
+checks that bounded index and the admission-key row, then rehashes/decodes the
+target and original request before trusting their association. The normal
+`control_requests` table still stores only the first terminal public response;
+a fresh request id replaying the same retired intent binds its own digest and
+current authenticated channel to that same retained response. No failed or
+partial freeze silently replaces the original request.
+
+```ts
+type SourceInspectionTargetV1 = {
+  schemaVersion: 1
+  format: 'cliq-source-inspection-target-v1'
+  principalId: string
+  method: 'run.submit'
+  admissionKey: string
+  admissionIntentDigest: string
+  originalRequestRef: ArtifactRef
+  originalRequestDigest: string
+  sessionId: string
+  expectedContextRevision: number
+  workspaceIdentityRef: ArtifactRef
+  workspaceIdentityDigest: string
+  sourceReadGrantRefs: ArtifactRef[]
+  runtimeBundleRef: ArtifactRef
+  runtimeBundleManifestDigest: string
+  sandboxProfileRef: ArtifactRef
+  sandboxProfileDigest: string
+  targetDigest: string
+}
+
+type SourceInspectionInputV1 = {
+  schemaVersion: 1
+  format: 'cliq-source-inspection-input-v1'
+  inspectionId: string
+  targetRef: ArtifactRef
+  targetDigest: string
+  repositoryIdentityDigest: string
+  objectFormat: 'sha1' | 'sha256'
+  entriesRef: ArtifactRef
+  treeDigest: string
+  inputDigest: string
+}
+
+type SourceInspectionPlanV1 = {
+  launchNonceDigest: string
+  containmentPlanRef: ArtifactRef
+  containmentPlanDigest: string
+  sandboxLaunchSpecRef: ArtifactRef
+  sandboxLaunchSpecDigest: string
+  reservedBackendIdentity:
+    | {
+        kind: 'linux'
+        cgroupPath: string
+        cgroupId: string
+        deviceId: string
+        fileId: string
+        ownerUid: number
+        pidNamespaceReservationId: string
+        subreaperStartToken: string
+      }
+    | {
+        kind: 'macos-vm'
+        vmReservationId: string
+        guestImageRef: ArtifactRef
+        guestImageDigest: string
+        guestBootNonceDigest: string
+        privateDisk: { deviceId: string; fileId: string; ownerUid: number; mode: 384; linkCount: 1; byteCount: number }
+      }
+}
+
+type SourceInspectionRetirementEvidenceV1 = {
+  schemaVersion: 1
+  format: 'cliq-source-inspection-retirement-v1'
+  inspectionId: string
+  targetRef: ArtifactRef
+  stagingNonceDigest: string
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  captureOwnerClosure:
+    | { kind: 'local_resources_joined'; stateOwnerEpoch: number; supervisorInstanceId: string }
+    | { kind: 'owning_process_dead'; stateOwnerAcquisitionEvidenceRef: ArtifactRef }
+  stagingObservation: 'exact_reserved_root_absent'
+  processClosure:
+    | { kind: 'not_planned' }
+    | { kind: 'plan_quiescent'; noSpawnEvidenceRef: ArtifactRef }
+    | { kind: 'all_descendants_dead'; processContainmentRef: ArtifactRef; deathEvidenceRef: ArtifactRef }
+  observedAt: string
+  evidenceDigest: string
+}
+
+type SourceInspectionAttemptBaseV1 = {
+  schemaVersion: 1
+  inspectionId: string
+  attempt: 1
+  principalId: string
+  method: 'run.submit'
+  admissionKey: string
+  admissionIntentDigest: string
+  targetRef: ArtifactRef
+  targetDigest: string
+  workspaceIdentityDigest: string
+  stateOwnerEpoch: number
+  supervisorInstanceId: string
+  stagingNonceDigest: string
+  stagingIdentity: { deviceId: string; fileId: string; ownerUid: number; mode: 448 }
+  cancelRequested: boolean
+  rowVersion: number
+  createdAt: string
+  deadlineAt: string
+  updatedAt: string
+  rowDigest: string
+}
+
+type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
+  | {
+      phase: 'capturing'
+      inputRef?: never
+      inputDigest?: never
+      plan?: never
+      processContainmentRef?: never
+      retirementEvidenceRef?: never
+      retiredAt?: never
+      outcome?: never
+    }
+  | {
+      phase: 'prepared'
+      inputRef: ArtifactRef
+      inputDigest: string
+      plan: SourceInspectionPlanV1
+      processContainmentRef?: never
+      retirementEvidenceRef?: never
+      retiredAt?: never
+      outcome?: never
+    }
+  | {
+      phase: 'active'
+      inputRef: ArtifactRef
+      inputDigest: string
+      plan: SourceInspectionPlanV1
+      processContainmentRef: ArtifactRef
+      retirementEvidenceRef?: never
+      retiredAt?: never
+      outcome?: never
+    }
+  | ({
+      phase: 'retired'
+      retirementEvidenceRef: ArtifactRef
+      retiredAt: string
+      outcome:
+        | { kind: 'captured'; sourceManifestRef: ArtifactRef; sourceManifestDigest: string; privateGitStateRef?: ArtifactRef }
+        | { kind: 'failed' | 'cancelled'; errorResponseRef: ArtifactRef }
+    } & (
+      | { inputRef?: never; inputDigest?: never; plan?: never; processContainmentRef?: never }
+      | { inputRef: ArtifactRef; inputDigest: string; plan: SourceInspectionPlanV1; processContainmentRef?: never }
+      | { inputRef: ArtifactRef; inputDigest: string; plan: SourceInspectionPlanV1; processContainmentRef: ArtifactRef }
+    ))
+)
+```
+
+The table contains one exact row of this union per
+`(principalId,method='run.submit',admissionKey)`: `inspection_id` is its primary
+key; `principal_id`, `method`, `admission_key`, `admission_intent_digest`,
+`original_request_id`, `original_request_digest`, `workspace_identity_digest`,
+`phase`, `row_version`, and canonical `row_json` are the other ten columns. It
+has unique admission-key and original-request tuples and at most one
+non-retired row per workspace identity. Indexed columns equal the decoded row,
+including the target's workspace identity; the two immutable original-request
+columns instead equal the target's canonical retained original-request bytes,
+which replay must verify before adoption. No second lifecycle table exists.
+`inspectionId = H('cliq-source-inspection-v1',principalId,'run.submit',admissionKey,admissionIntentDigest)`.
+`attempt` is literally one: there is no automatic retry, new nonce, backoff,
+attempt counter, or reset after failure. Row CAS increments `rowVersion` by
+one; identity/target, original owner, staging reservation, creation/deadline,
+and every published input/plan/actual containment remain immutable. Only phase,
+monotonic `cancelRequested`, update/version/digest, and the terminal fields may
+advance. `targetDigest`, `inputDigest`, `evidenceDigest`, and `rowDigest` each
+omit only their own member under SHA-256/JCS. Normal id/ref/time/count bounds
+apply; every unknown or phase-forbidden field is rejected.
+
+Replay checks both committed admission/control responses and this attempt
+**before** workspace/Session/source rereads. A different intent under the key
+is `ADMISSION_KEY_CONFLICT`. A same-intent in-flight replay joins that one
+owning task and cannot freeze, spawn, or release again. A retired captured row
+may finish the original admission using only its retained source closure; it
+never rereads live source. A retired failure/cancellation replays its original
+closed, redacted control error byte-for-byte, including for a new transport
+`requestId` using the same admission key. A live request commits the original
+response association with the existing control/admission replay records, not a
+second inspection response format. Successor startup is internal retirement,
+not a client mutation: with no authenticated live request it commits the exact
+retired outcome/error ref and immutable original-request index as the first
+result, without inventing a client or channel for `control_requests`. The next
+actual authenticated original/new request associates its own digest and current
+channel to those same frozen error bytes in the ordinary replay transaction;
+it cannot replace that first result or recapture source. An incomplete/failed freeze cannot be continued
+from live bytes under the old key: exact cleanup yields a terminal error. Only
+an explicit new submission with a new admission key starts fresh capture,
+and it cannot begin while an older possibly live inspection for that exact
+workspace remains unretired. No accepted Run exists before the ordinary
+initial-Checkpoint/admission transaction.
+
+The Supervisor authenticates the principal, decides Workspace Trust, validates
+the original normalized request and exact Session/workspace identity, then
+checks the existing source-read authorization before reserving this row. The
+target retains the original request bytes/digest and the exact source read
+grant row snapshots (unique, byte-sorted, at most 128); decoding them must prove
+the same principal/workspace/scope/expiry. Trust and this owner grant no extra
+read, tool, write, execution, network, or credential capability. Requested
+excludes remain excluded; ignored bytes still require the exact read-scope
+grant; hard exclusions cannot be re-enabled. A read grant is internally
+reserved against competing admissions while this attempt is live, remains
+revocable, and is consumed only by the existing final `run_admission` receipt
+transaction, never by Git inspection itself. Ordinary projection reads have
+the same descriptor-proven tracked/nonignored rule as section 15.
+`deadlineAt` is the earlier of `createdAt + normalized Run budgets.wallTimeMs`
+and every read grant expiry used by this attempt; it is finite and never
+extended. The later admitted Run still uses its ordinary admission clock.
+
+An empty, same-user `0700` staging directory is natively reserved under the
+held StateRoot at the sole derived locator
+`runtime/source-inspections/H(inspectionId,stagingNonceDigest)`. Its actual
+device/file/owner/mode identity is frozen in `capturing` before any source
+bytes are copied; an orphan before this row commits has no source or process
+authority. Native no-follow descriptor walks forbid replacement, source/home
+links, shared Git metadata, and cross-device escapes. Bounded streaming,
+per-entry/chunk cooperative cancellation, content hash/count verification,
+and file/tree/parent fsync are mandatory. No callback, numeric caller FD,
+handcrafted manifest, boolean, or schema-valid artifact substitutes for these
+observations.
+
+For Git, capture first freezes only the authorized raw Git metadata/object
+bytes and ignore-source bytes into `SourceInspectionInputV1.entriesRef`, an
+exact `WorkspaceEntryManifest`. Its tree digest uses the existing entries
+formula, with complete byte/count closure. Paths form only the fixed input
+projection needed by the recipe; config includes, hooks, helpers, alternates,
+shared directories, reflogs, credentials, and unrelated worktree payload are
+not interpreter input. Safe synthesized config is only the existing
+`SanitizedGitConfigV1` allowlist. Do not copy the whole worktree first and
+authorize it retrospectively: the verified canonical index and frozen ignore
+classification determine which exact worktree bytes may then be captured.
+The final native capture rechecks the held live workspace/repository and
+input/source identities; drift, expiry, revoked authority, partial reads, or
+unsupported Git forms fail this single attempt without silently restarting.
+Non-Git uses the same authorized native capture/resource lifecycle but spawns
+no Git process, has no input/plan/actual-containment fields, and advances
+`capturing -> retired` directly.
+
+Git's process path is exactly `capturing -> prepared -> active -> retired`;
+failure/cancellation may retire any prefix only with its corresponding proof.
+Before `prepared` commits, native code creates and observes the **actual empty
+reserved backend** and retains that identity together with the frozen input,
+exact containment plan, launch spec, nonce, and signed runtime/profile. On
+Linux this is the held exact cgroup directory/id and namespace reservation
+under the observed original subreaper token; on macOS it is the exact reserved
+VM/private-disk identity and retained signed guest image. A generated name or
+planned path alone is not reservation. No inspector process can spawn before
+that owning transaction commits. Every descendant is contained from creation
+(atomic membership/blocked trusted namespace init), with no fork-before-attach
+escape. The actual containment identity commits as `active` while the
+inspector remains blocked and cannot read its input or execute Git. Immediately
+before one-use native release, the Supervisor rechecks current StateOwner,
+exact row/nonce/plan/input/target, Trust/read authority, deadline and no cancel;
+release exposes only this fixed read-only inspection, never a broker or Run
+effect. Replay and successor startup cannot release an old attempt.
+
+The fixed `cliq-source-git-inspection-v1` launch has `isolated_empty_root`, no
+parent containment, and exactly one `source_inspection_input` mount at
+`/input`. Only digest-verified signed runtime/toolchain executable closures
+are additional read-only mounts. `/output`, `/tmp`, and `/home/cliq` are new
+quota-bounded private ephemeral writable mounts; source, shared `.git`, host
+home, StateRoot, ambient PATH/environment, secrets, sockets, and network are
+unreachable. Input is immutable and descriptor-held; output is never read as
+authoritative before complete descendant death. The selected RuntimeBundle
+contains the fixed signed `platform_helper` inspector, Git executable and
+complete dependency closure, or the exact retained signed guest toolchain
+does; presence of manifest metadata alone is not an executable recipe. There
+is no caller argv/cwd/config/program selection or host Git fallback. The
+bounded, fixed plumbing reconstructs a canonical index and the exact reachable
+object set into new self-contained packs, verifies them with trusted Git
+against a fresh output object database, and publishes only existing
+`GitIndexSnapshotV1`, `GitObjectPackV1`, `GitObjectClosureV1`,
+`SanitizedGitConfigV1`, and `PrivateGitStateManifest` artifacts. Source pack
+bytes are never accepted as final closure merely because Git could read them;
+no handwritten partial pack parser or full-pack in-memory buffer is allowed.
+The final `captured` result additionally requires the complete authorized
+worktree `SourceManifest`; successful Git inspection alone is not capture
+success. Its private-Git ref is required exactly when that SourceManifest has
+Git metadata, and the entire existing source/projection/ignore/index/object
+closure is re-walked before the ordinary Run admission transaction.
+Bulk pack/index/source bytes use bounded streaming and the profile's exact
+file/total-storage ceilings, not an unbounded metadata/control frame or a
+truncated stdout result. Inspector control/diagnostic output uses the existing
+IPC/invocation-output ceilings. Input, target, plan, actual containment,
+retirement, errors and captured result closures are GC roots while the attempt
+or its retained response/audit exists; an accepted Run retains its ordinary
+source roots independently.
+
+Retirement is the only point that permits result/error publication and frees
+the source reservation. Local completion/cancellation first revokes release,
+aborts cooperative capture, joins every matching CAS/native/file task and
+closes every descriptor/output writer, then proves whole descendant death
+where a containment exists, verifies/publishes immutable result bytes, removes
+only the exact reserved staging descriptor and fsyncs its parent. Every failed
+close/join/remove/fsync is an unproven retirement, not a normal operation error
+that can mint a joined receipt. `captureOwnerClosure='local_resources_joined'`
+is produced only by the same live owning task after that join; a successor
+instead uses exact `takeover_after_owner_death` acquisition evidence matching
+the attempt's original owner. Current inspector identity/freshness always
+follows the canonical five-second owner rule. `not_planned` is legal only
+without input/plan/actual fields, `plan_quiescent` requires the same retained
+plan and canonical no-spawn evidence, and `all_descendants_dead` requires the
+same actual ref and canonical death evidence. Retired rows retain the exact
+input/plan/actual prefix, evidence, and immutable outcome; they cannot be reset.
+
+Startup, expiry and graceful shutdown retire every unretired inspection before
+releasing StateOwner or admitting new capture for that workspace. A successor
+uses only the retained exact reservations/nonces/identities to revoke and kill
+all descendants, close prior-owner resources by positive process-death proof,
+and perform exact staging cleanup; it never adopts an input-release token or
+reopens live source to resume partial capture. In the spawn-to-actual-identity
+commit crash gap, absence of `processContainmentRef` does **not** prove that
+spawn never happened. Native recovery must recover the original matching
+identity from that fixed reserved scope and prove death, or produce the exact
+canonical plan-quiescent proof including namespace/VM observations. Empty
+cgroup, numeric PID, timeout, parent loss, or a guessed `never_created` token
+is insufficient. Missing/replaced scope, unknown descendant death, mismatched
+original token, ambiguous disk/staging identity or failed resource retirement
+leaves the attempt nonterminal and fail-closed, with no retry/new capture or
+fictional success. Pure native non-Git capture also requires owner-death/join
+and exact staging closure; absence of a Git child is not a cleanup shortcut.
+
 `leaseEpoch` increases monotonically per Run. Workers cannot access SQLite directly. A PID or process group is a signal target, never the proof boundary: shell children may reparent or create a new session. The authoritative launch record is:
 
 ```ts
@@ -4384,6 +4729,14 @@ type ProcessContainmentOwner =
       serviceLaunchId: string
       ownerPrincipalId: string
       serviceSpecRef: ArtifactRef
+      supervisorInstanceId: string
+    }
+  | {
+      kind: 'source_inspection'
+      inspectionId: string
+      attempt: 1
+      principalId: string
+      targetRef: ArtifactRef
       supervisorInstanceId: string
     }
 
@@ -4535,6 +4888,17 @@ type SandboxProcessInvocationV1 =
       }
     }
   | {
+      kind: 'source_inspection'
+      purpose: 'source_inspection'
+      recipe: 'cliq-source-git-inspection-v1'
+      targetRef: ArtifactRef
+      targetDigest: string
+      inputRef: ArtifactRef
+      inputDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_frozen_source_input'
+      stdio: SandboxCapturedStdioV1
+    }
+  | {
       kind: 'local_inference_entrypoint'
       purpose: 'local_inference_service'
       recipe: 'cliq-local-inference-entrypoint-v1'
@@ -4632,6 +4996,14 @@ type SandboxMountV1 =
       purpose: 'runtime' | 'input' | 'executable'
     }
   | {
+      kind: 'source_inspection_input'
+      inputRef: ArtifactRef
+      inputDigest: string
+      targetPath: '/input'
+      access: 'read_only'
+      purpose: 'input'
+    }
+  | {
       kind: 'run_generation'
       generationRef: ArtifactRef
       canonicalRootRelativePath: string
@@ -4708,6 +5080,26 @@ type SandboxLaunchSpecV1 =
       targetRef?: never
       targetDigest?: never
       parentWorkerContainmentRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'source_inspection' }>
+      purpose: 'source_inspection'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'source_inspection' }>
+      sourceInspectionTargetRef: ArtifactRef
+      sourceInspectionTargetDigest: string
+      sourceInspectionInputRef: ArtifactRef
+      sourceInspectionInputDigest: string
+      operationGrantRef?: never
+      requestRef?: never
+      requestDigest?: never
+      targetRef?: never
+      targetDigest?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+      serviceSpecRef?: never
+      serviceSpecDigest?: never
     })
   | (SandboxLaunchBaseV1 & {
       owner: Extract<ProcessContainmentOwner, { kind: 'local_inference_service' }>
@@ -5056,13 +5448,22 @@ type WorkerLaunch = {
 }
 ```
 
-The immutable identity binds PID/start token/spawn/activation nonce **and** an immutable `ProcessContainmentRef` whose backend identity covers every descendant for the lifetime of the activation. The containment owner is a closed union: a worker identity must reference `worker_activation` matching its Run/epoch/launch; an invocation containment must reference `run_invocation` matching the exact durable claim and a parent containment in the same Run activation; an admin row must reference `admin_probe` matching its operation/attempt/principal/method/request/target/Supervisor and may not contain Run/lease/worker fields; a local-inference launch must reference `local_inference_service` matching the exact service/launch/principal/spec/Supervisor row and may not contain Run, Journal, or admin fields. Worker activations use `run-generation`; admin probes and local inference use `isolated-empty-root`; invocation bindings follow the frozen tool contract. A top-level worker, admin, or local-inference containment has no parent, while a run invocation's parent chain must terminate at its exact worker activation.
+The immutable identity binds PID/start token/spawn/activation nonce **and** an immutable `ProcessContainmentRef` whose backend identity covers every descendant for the lifetime of the activation. The containment owner is a closed union: a worker identity must reference `worker_activation` matching its Run/epoch/launch; an invocation containment must reference `run_invocation` matching the exact durable claim and a parent containment in the same Run activation; an admin row must reference `admin_probe` matching its operation/attempt/principal/method/request/target/Supervisor and may not contain Run/lease/worker fields; a local-inference launch must reference `local_inference_service` matching the exact service/launch/principal/spec/Supervisor row and may not contain Run, Journal, or admin fields; a source inspection must reference `source_inspection` matching its sole attempt/principal/target/original Supervisor and has no Run, worker, Journal, admin or service fields. Worker activations use `run-generation`; admin probes, local inference and source inspection use `isolated-empty-root`; invocation bindings follow the frozen tool contract. A top-level worker, admin, local-inference or source-inspection containment has no parent, while a run invocation's parent chain must terminate at its exact worker activation.
 
-Every spawn additionally resolves the exact `SandboxLaunchSpecV1`; no caller constructs an untyped process, argv, cwd, stdio, environment, mount, or backend bag. `runtimeDigest`, `environmentDigest`, `mountsDigest`, `resourcesDigest`, and `launchSpecDigest` are SHA-256 over RFC 8785/JCS with only the named digest member omitted where it is a member of that object. `containmentPlanDigest` and `sandboxProfileDigest` equal their decoded artifacts. `SandboxRootImageV1.imageDigest` likewise omits itself; its ref/digest resolves one non-executable signed RuntimeBundle `sandbox_root_profile` entry by id/version/digest. Fixed Supervisor code materializes a new empty tmpfs root with exactly the three listed owner-only directories, no device/socket/network state, and no persistent bytes. Plan, launch filesystem, and actual containment repeat the same ref/digest. A host directory, mutable base image, caller-selected root, reused writable layer, or merely empty-looking path is invalid. Mount targets are unique, byte-sorted, nonoverlapping canonical sandbox paths sourced only from verified CAS, the exact generation, or a Supervisor-created private ephemeral root; writable runtime/CAS, host paths, symlink sources, persistent admin/MCP mounts, ambient credential roots, devices, sockets, and untyped mounts are forbidden. Environment variables are unique/byte-sorted and cannot override the dedicated PATH/HOME/TMP/locale/broker/credential/activation/Supervisor channels; host environment and secret material are always absent at spawn.
+Every spawn additionally resolves the exact `SandboxLaunchSpecV1`; no caller constructs an untyped process, argv, cwd, stdio, environment, mount, or backend bag. `runtimeDigest`, `environmentDigest`, `mountsDigest`, `resourcesDigest`, and `launchSpecDigest` are SHA-256 over RFC 8785/JCS with only the named digest member omitted where it is a member of that object. `containmentPlanDigest` and `sandboxProfileDigest` equal their decoded artifacts. `SandboxRootImageV1.imageDigest` likewise omits itself; its ref/digest resolves one non-executable signed RuntimeBundle `sandbox_root_profile` entry by id/version/digest. Fixed Supervisor code materializes a new empty tmpfs root with exactly the three listed owner-only directories, no device/socket/network state, and no persistent bytes. Plan, launch filesystem, and actual containment repeat the same ref/digest. A host directory, mutable base image, caller-selected root, reused writable layer, or merely empty-looking path is invalid. Mount targets are unique, byte-sorted, nonoverlapping canonical sandbox paths sourced only from verified CAS, the exact generation, the owner's frozen source-inspection input, or a Supervisor-created private ephemeral root; writable runtime/CAS/input, host paths, symlink sources, persistent admin/MCP mounts, ambient credential roots, devices, sockets, and untyped mounts are forbidden. Environment variables are unique/byte-sorted and cannot override the dedicated PATH/HOME/TMP/locale/broker/credential/activation/Supervisor channels; host environment and secret material are always absent at spawn.
 
 A `local_inference_service` launch has one all-and-only model mount projection. Its registration's exact object closure is copied and rehashed into WP01 CAS before the launch artifact is published. The launch uses `isolated_empty_root`; every mount is `cas_artifact/read_only/input`; and, byte-sorted by target path, the set is exactly the signed model manifest at `/models/model-manifest.json`, its tokenizer at `/models/tokenizer`, and one entry per byte-sorted manifest file at `/models/files/<canonicalRelativePath>`. Paths are normalized absolute guest paths, remain under those literal roots, and cannot collide, escape, alias, or add an unlisted object. Ref/digest/size values equal the closure and decoded manifest; no state-root/source-package/host mount or writable model layer is legal. The fixed `cliq-local-inference-entrypoint-v1` recipe supplies exactly `['serve','--manifest','/models/model-manifest.json','--model-root','/models/files','--tokenizer','/models/tokenizer','--host','127.0.0.1','--port',<base-10 service port>]`, uses `/` as cwd, and resolves the executable only from the service spec's signed RuntimeBundle entry. This projection, its JCS `mountsDigest`, and argv are reproduced on recovery; an implementation-local cache path or model-server default is never launch authority.
 
 Owner and recipe equality are exhaustive. A worker spec matches the exact WorkerLaunch/plan/Run/epoch/generation, is `preactivated_readonly`, has no parent or operation/admin fields, uses only the signed worker entrypoint recipe, and exposes only its activation-blocked authenticated worker channel. A run-invocation spec matches the exact permanent Journal claim and `OperationGrantV1`, request/target refs/digests, active parent worker containment, generation/mount envelope, and one fixed `tool|verifier|mcp_stdio|dependency|publication` recipe; verifier source is read-only with declared ephemeral writes, stdio MCP is an isolated empty root, and mutation writes only the active generation. An admin spec matches the exact AdminOperation/MCP target/static probe core, has no Run/lease/frontier/operation grant fields, and uses only the fixed stdio or HTTP probe recipe in an isolated empty root. A local-inference spec matches the exact service launch/spec, signed `local_inference` executable and model-manifest read-only mounts, has no Run/Journal/admin/grant fields or parent, and uses only `cliq-local-inference-entrypoint-v1` in a no-egress isolated root. Runtime/toolchain/executable/profile/resources resolve byte-for-byte from retained signed manifests and the exact Run assembly/admin/service target; verifier cannot select RuntimeBundle, RuntimeBundle MCP must have role `mcp_server`, and local inference must have role `local_inference`. Any process source, recipe, equality, forbidden field, role, digest, mount, environment, resource, or out-of-band IPC override fails before containment creation.
+
+A source-inspection spec additionally equals its `SourceInspectionAttemptV1`
+target/input/plan/reserved identity and only its fixed recipe above; it forbids
+all Run request/operation-grant/parent-worker, admin-probe, and service fields.
+Every other owner forbids source-inspection target/input fields and mounts.
+Its executable resolves the signed inspector identity, and all Git/dependency
+bytes resolve the same retained signed runtime/toolchain, never host lookup.
+The source-specific physical reservation and pre-spawn commit rule applies
+before its powerless preactivation, not after a Git subprocess has been made.
 
 `WorkerLaunch.sandboxLaunchSpecRef` and `AdminOperation.sandboxLaunchSpecRef` are mandatory before their powerless preactivation. A Run invocation is different because its owner contains the permanent `dispatchId`: its `prepared` Journal row forbids `sandboxLaunchSpecRef`; `claimDispatch` chooses the unguessable dispatch id, publishes/validates the exact launch artifact, and atomically records that ref only on `dispatch_claimed`. Every later terminal/unknown/abandoned phase repeats the same ref, while a non-spawning operation forbids it on every phase. `ProcessContainment`, no-spawn evidence, and death evidence repeat that exact launch ref/digest plus plan/owner/nonce/backend closure. Thus no content-addressed cycle or pre-claim fictional dispatch id exists, and storage can prove which exact launch contract was—or was not—executed.
 
@@ -5277,7 +5678,7 @@ type SandboxProfileV1 = {
   format: 'cliq-sandbox-profile-v1'
   backend: 'macos_vm' | 'linux_namespace'
   allowedOwners: Array<
-    'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service'
+    'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service' | 'source_inspection'
   >
   filesystemPolicy: 'typed_launch_spec_only'
   hostFilesystemReachability: 'none'

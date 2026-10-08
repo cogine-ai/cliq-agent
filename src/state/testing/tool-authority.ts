@@ -1,5 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { KERNEL_STATE_SCHEMA_VERSION } from '../../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../kernel/canonical.js';
 import { sha256Bytes } from '../../kernel/identity.js';
 import type { RunAssemblyV1, ToolContractManifestV1 } from '../../kernel/types.js';
@@ -22,7 +23,7 @@ export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContr
     ({ entryId, role, version, relativePath: `test/${entryId}`, digest, byteCount, executable });
   const bundle: RuntimeBundleManifest = { schemaVersion: 1, bundleVersion: 'offline-tool-authority-test-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
-    stateSchemaRange: { min: 1, max: 2 }, workerProtocolRange: { min: 1, max: 1 },
+    stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
     entries: [entry('supervisor-test', 'supervisor', true, image.digest, '1', image.byteCount), entry(assembly.runtime.workerExecutableId, 'worker', true, assembly.runtime.workerExecutableDigest),
       { ...entry(STATE_OWNER_NATIVE_ENTRY_ID, 'platform_helper', true, helper.digest, '1', helper.byteCount), relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH },
       entry(assembly.provider.adapter.adapterId, 'provider_adapter', true, assembly.provider.adapter.codeDigest, assembly.provider.adapter.version),

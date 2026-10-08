@@ -4,12 +4,14 @@ import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { digestOmitting } from '../kernel/identity.js';
+import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
 import type { InvocationJournalEntry, WorkerDeathWait, WorkerIdentity } from '../kernel/types.js';
 import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
-import { activateFixtureWorker, createActiveFixture, digest, disposeFixture, makePrivateDir, uuidv7, type ActiveFixture } from './testing/fixtures.js';
+import { activateFixtureWorker, digest, disposeFixture, makePrivateDir, uuidv7, type ActiveFixture } from './testing/fixtures.js';
 import { childFor } from './testing/state-owner-process.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
 
@@ -26,34 +28,42 @@ function snapshot(root: string) {
     .map(table => [table, driver.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()])));
 }
 async function fixtureFor(t: TestContext, label: string) {
-  const fixture = await createActiveFixture(`worker-fence-${label}`);
+  const fixture = await createAgentFixture(`worker-fence-${label}`, undefined, { tools: ['read', 'plan'], mode: 'plan' });
   t.after(() => disposeFixture(fixture));
   return fixture;
 }
-async function prepare(fixture: ActiveFixture, opId: string, claimed = false) {
-  const request = await fixture.store.artifacts.publishCanonical({ input: opId }, 'cliq-test-request-v1');
-  const prepared = await fixture.store.prepareInvocation({ runId: fixture.runId, expectedRunRevision: revision(fixture),
-    leaseEpoch: fixture.leaseEpoch, opId, opKind: 'tool', target: 'test.read', requestRef: request.ref,
-    replayClass: 'manual', reservation: { ...ZERO, toolCalls: 1 } });
-  if (claimed) await fixture.store.claimInvocationDispatch({ runId: fixture.runId, expectedRunRevision: revision(fixture),
-    leaseEpoch: fixture.leaseEpoch, opId, attempt: prepared.entry.attempt, dispatchId: `${opId}-dispatch`,
-    brokerFenceTokenDigest: digest(`${opId}-fence`) });
+async function prepare(fixture: Awaited<ReturnType<typeof fixtureFor>>, label: string, claimed = false, manual = false) {
+  await batch(fixture, [{ name: manual ? 'plan' : 'read', input: manual
+    ? { op: 'draft', title: label, content: label } : { path: label } }]);
+  const prepared = await prepareTool(fixture);
+  if (claimed) await claimTool(fixture, prepared);
   return prepared.entry;
 }
 
+async function completeRead(fixture: Awaited<ReturnType<typeof fixtureFor>>, prepared: InvocationJournalEntry) {
+  const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+  const claim = cut.journal.find(entry => entry.opId === prepared.opId && entry.attempt === prepared.attempt && entry.phase === 'dispatch_claimed')!;
+  const value: ToolObservationV1 = { schemaVersion: 1, format: 'cliq-tool-observation-v1', runId: fixture.runId,
+    opId: prepared.opId, attempt: prepared.attempt, requestRef: prepared.requestRef, targetRef: prepared.target,
+    grantRef: prepared.grantRef!, dispatchId: claim.dispatchId!, outcome: 'executed', content: { text: 'retained fixture bytes' },
+    observedAt: sampleCanonicalNow(), observationDigest: '' };
+  value.observationDigest = digestOmitting(value, 'observationDigest');
+  const artifact = await fixture.store.artifacts.publishCanonical(value, value.format);
+  await fixture.agent.completeTool({ expectedRunRevision: revision(fixture), opId: prepared.opId, attempt: prepared.attempt, observationRef: artifact.ref });
+}
+
 for (const phase of ['active', 'revoking', 'checkpointing'] as const) {
-  test(`worker loss atomically fences ${phase}, preserves its exact history and denies replacement`, async t => {
+  for (const pendingPhase of ['prepared', 'claimed', 'unknown'] as const) {
+  test(`worker loss atomically fences ${phase} with one ${pendingPhase} call, preserves history and denies replacement`, async t => {
     const fixture = await fixtureFor(t, phase);
-    const unclaimed = await prepare(fixture, 'unclaimed');
-    const claimed = await prepare(fixture, 'claimed', true);
-    const unknown = await prepare(fixture, 'unknown', true);
-    const evidence = await fixture.store.artifacts.publishCanonical({ uncertain: true }, 'cliq-test-ambiguity-v1');
-    await fixture.store.markInvocationUnknown({ runId: fixture.runId, expectedRunRevision: revision(fixture),
-      opId: unknown.opId, attempt: unknown.attempt, evidenceRef: evidence.ref, evidenceDigest: evidence.ref });
     const completed = await prepare(fixture, 'completed', true);
-    const result = await fixture.store.artifacts.publishCanonical({ done: true }, 'cliq-test-result-v1');
-    await fixture.store.completeInvocation({ runId: fixture.runId, expectedRunRevision: revision(fixture),
-      opId: completed.opId, attempt: completed.attempt, resultRef: result.ref, consumed: { ...ZERO, toolCalls: 1 } });
+    await completeRead(fixture, completed);
+    const pending = await prepare(fixture, pendingPhase, pendingPhase !== 'prepared');
+    if (pendingPhase === 'unknown') {
+      const evidence = await fixture.store.artifacts.publishCanonical({ uncertain: true }, 'cliq-test-ambiguity-v1');
+      await fixture.store.markInvocationUnknown({ runId: fixture.runId, expectedRunRevision: revision(fixture),
+        opId: pending.opId, attempt: pending.attempt, evidenceRef: evidence.ref, evidenceDigest: evidence.ref });
+    }
     if (phase !== 'active') {
       const revoking = fixture.store.beginGenerationRevocation({ launchId: fixture.launchId, expectedLeaseVersion: fixture.leaseVersion,
         expectedGenerationRowVersion: fixture.generationRowVersion, quiesceId: 'retained-barrier' });
@@ -78,7 +88,7 @@ for (const phase of ['active', 'revoking', 'checkpointing'] as const) {
       createdAt: wait.createdAt, frontierRef: before.run.frontierRef,
       subject: { kind: 'worker_death', oldWorkerLaunchId: fixture.launchId, oldLeaseEpoch: fixture.leaseEpoch,
         oldWorkerIdentity: fixture.workerIdentityDigest, processContainmentRef: before.workerLaunches[0]!.processContainmentRef,
-        workspaceGenerationRef: fixture.generationRef, openInvocationRefs: [unclaimed, claimed, unknown].map(canonicalSha256) },
+        workspaceGenerationRef: fixture.generationRef, openInvocationRefs: [canonicalSha256(pending)] },
       probeState: { phase: 'automatic_pending', automaticProbeCount: 0, userProbeCount: 0, nextProbeAt: wait.createdAt }
     });
     assert.deepEqual(after.workerLaunches[0], { ...before.workerLaunches[0], phase: 'reconciling', generationWriteState: 'fenced_reconciling' });
@@ -86,7 +96,7 @@ for (const phase of ['active', 'revoking', 'checkpointing'] as const) {
       rowVersion: before.workspaceGenerations[0]!.rowVersion + 1, updatedAt: waiting.updatedAt,
       waitingSubjectRef: waiting.waitingOnRef, waitingSubjectDigest: waiting.waitingOnRef, fencedFromPhase: phase,
       fencedJournalSeq: before.journal.length });
-    for (const entry of [unclaimed, claimed, unknown]) {
+    for (const entry of [pending]) {
       assert.deepEqual(await fixture.store.artifacts.readCanonical(canonicalSha256(entry)), entry);
       assert.equal(withDb(fixture.stateRoot, driver => driver.prepare('SELECT schema_kind FROM artifacts WHERE ref = ?')
         .get<{ schema_kind: string }>(canonicalSha256(entry)))?.schema_kind, 'cliq-invocation-journal-entry-v1');
@@ -94,9 +104,8 @@ for (const phase of ['active', 'revoking', 'checkpointing'] as const) {
     const afterRows = snapshot(fixture.stateRoot);
     for (const table of ['run_journal', 'items', 'checkpoints', 'sessions', 'control_requests']) assert.deepEqual(afterRows[table], rows[table], table);
     assert.equal((afterRows.run_events as unknown[]).length, (rows.run_events as unknown[]).length + 1);
-    await assert.rejects(fixture.store.claimInvocationDispatch({ runId: fixture.runId, expectedRunRevision: waiting.revision,
-      leaseEpoch: fixture.leaseEpoch, opId: unclaimed.opId, attempt: unclaimed.attempt, dispatchId: 'forbidden',
-      brokerFenceTokenDigest: digest('forbidden') }), { code: 'LEASE_FENCED' });
+    await assert.rejects(fixture.agent.claimTool({ expectedRunRevision: waiting.revision,
+      leaseEpoch: fixture.leaseEpoch, opId: pending.opId, attempt: pending.attempt, dispatchId: 'forbidden' }), { code: 'LEASE_FENCED' });
     assert.throws(() => fixture.store.renewWorkerLease({ launchId: fixture.launchId, expectedLeaseVersion: fixture.leaseVersion,
       runId: fixture.runId, leaseEpoch: fixture.leaseEpoch, workerIdentityDigest: fixture.workerIdentityDigest,
       newLeaseExpiresAt: new Date(Date.now() + 30_000).toISOString() }), { code: 'LEASE_FENCED' });
@@ -106,6 +115,7 @@ for (const phase of ['active', 'revoking', 'checkpointing'] as const) {
     await assert.rejects(begin(fixture), { code: 'STATE_TRANSITION_INVALID' });
     assert.deepEqual(fixture.store.getRun(fixture.runId), waiting);
   });
+  }
 }
 
 test('real owner death, takeover, fencing and another owner restart retain one unchanged worker wait', async t => {
@@ -115,7 +125,7 @@ test('real owner death, takeover, fencing and another owner restart retain one u
   assert.equal(started.state, 'held', started.message);
   child.child.kill('SIGKILL');
   assert.equal((await child.exited)[1], 'SIGKILL');
-  let store = await openStateStore(started.stateRoot!);
+  let store = await openStateStore(started.stateRoot!, started.authority);
   t.after(async () => { await store.close(); await rm(container, { recursive: true, force: true }); });
   assert.equal(store.ownerEpoch, 2);
   const before = await store.readRecoveryClosure(started.runId!);
@@ -123,7 +133,7 @@ test('real owner death, takeover, fencing and another owner restart retain one u
   const waiting = await store.beginWorkerRecovery({ runId: started.runId!, expectedRunRevision: before.run.revision });
   const frozen = await store.readRecoveryClosure(started.runId!);
   await store.close();
-  store = await openStateStore(started.stateRoot!);
+  store = await openStateStore(started.stateRoot!, started.authority);
   assert.equal(store.ownerEpoch, 3);
   assert.deepEqual(await store.readRecoveryClosure(started.runId!), frozen);
   await assert.rejects(store.beginWorkerRecovery({ runId: started.runId!, expectedRunRevision: waiting.revision }), { code: 'STATE_TRANSITION_INVALID' });
@@ -159,9 +169,8 @@ for (const race of ['heartbeat', 'claim'] as const) {
     if (race === 'heartbeat') fixture.store.renewWorkerLease({ launchId: fixture.launchId, expectedLeaseVersion: fixture.leaseVersion,
       runId: fixture.runId, leaseEpoch: fixture.leaseEpoch, workerIdentityDigest: fixture.workerIdentityDigest,
       newLeaseExpiresAt: new Date(Date.now() + 30_000).toISOString() });
-    else await fixture.store.claimInvocationDispatch({ runId: fixture.runId, expectedRunRevision: revision(fixture),
-      leaseEpoch: fixture.leaseEpoch, opId: prepared.opId, attempt: prepared.attempt, dispatchId: 'won-before-fence',
-      brokerFenceTokenDigest: digest('claim-race') });
+    else await fixture.agent.claimTool({ expectedRunRevision: revision(fixture),
+      leaseEpoch: fixture.leaseEpoch, opId: prepared.opId, attempt: prepared.attempt, dispatchId: 'won-before-fence' });
     const afterRace = snapshot(fixture.stateRoot);
     release();
     await assert.rejects(pending, { code: 'REVISION_CONFLICT' });
@@ -202,55 +211,62 @@ test('failed CAS publication leaves all authority untouched and a retry can use 
   await fixture.store.readRecoveryClosure(fixture.runId);
 });
 
-test('late no-dispatch and pessimistic unknown settlements preserve the frozen wait and its invocation identities', async t => {
-  const fixture = await fixtureFor(t, 'late-evidence');
-  const prepared = await prepare(fixture, 'prepared');
-  const claimed = await prepare(fixture, 'claimed', true);
+for (const phase of ['prepared', 'claimed'] as const) {
+test(`late ${phase} evidence preserves the frozen wait and pessimistic reservation accounting`, async t => {
+  const fixture = await fixtureFor(t, `late-evidence-${phase}`);
+  const pending = phase === 'prepared'
+    ? (await fixture.agent.prepareModel({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch })).entry
+    : await prepare(fixture, 'claimed', true);
   const waiting = await begin(fixture);
-  const error = await fixture.store.artifacts.publishCanonical({ fenced: true }, 'cliq-test-error-v1');
-  await fixture.store.failInvocationBeforeDispatch({ runId: fixture.runId, expectedRunRevision: revision(fixture),
-    opId: prepared.opId, attempt: prepared.attempt, errorRef: error.ref });
-  const ambiguity = await fixture.store.artifacts.publishCanonical({ unknown: true }, 'cliq-test-ambiguity-v1');
-  await fixture.store.markInvocationUnknown({ runId: fixture.runId, expectedRunRevision: revision(fixture),
-    opId: claimed.opId, attempt: claimed.attempt, evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
+  if (phase === 'prepared') {
+    const error = await fixture.store.artifacts.publishCanonical({ fenced: true }, 'cliq-test-error-v1');
+    await fixture.store.failInvocationBeforeDispatch({ runId: fixture.runId, expectedRunRevision: revision(fixture),
+      opId: pending.opId, attempt: pending.attempt, errorRef: error.ref });
+  } else {
+    const ambiguity = await fixture.store.artifacts.publishCanonical({ unknown: true }, 'cliq-test-ambiguity-v1');
+    await fixture.store.markInvocationUnknown({ runId: fixture.runId, expectedRunRevision: revision(fixture),
+      opId: pending.opId, attempt: pending.attempt, evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
+  }
   const cut = await fixture.store.readRecoveryClosure(fixture.runId);
   assert.equal(cut.run.status, 'waiting');
   assert.equal(cut.run.waitingOnRef, waiting.waitingOnRef);
   assert.deepEqual(cut.run.budgetReserved, ZERO);
-  assert.deepEqual(cut.run.budgetConsumed, { ...ZERO, toolCalls: 1 });
-  assert.deepEqual(cut.journal.slice(-2).map(entry => entry.phase), ['failed', 'unknown']);
+  assert.deepEqual(cut.run.budgetConsumed, phase === 'prepared' ? waiting.budgetConsumed
+    : { ...waiting.budgetConsumed, toolCalls: waiting.budgetConsumed.toolCalls + 1 });
+  assert.equal(cut.journal.at(-1)?.phase, phase === 'prepared' ? 'failed' : 'unknown');
+  assert.equal(cut.run.frontierRef, waiting.frontierRef);
+  assert.equal(cut.run.latestCheckpointId, waiting.latestCheckpointId);
 });
+}
 
-for (const phase of ['completed', 'failed', 'abandoned'] as const) {
+for (const phase of ['completed', 'failed'] as const) {
   test(`recovery rejects an extra ${phase} pre-fence witness but retains a same-millisecond late settlement`, async t => {
     const fixture = await fixtureFor(t, `historical-${phase}`);
-    const now = withDb(fixture.stateRoot, driver => Date.parse(readTimeFence(driver)!.lastAcceptedAt)) + 1;
+    let now = withDb(fixture.stateRoot, driver => Date.parse(readTimeFence(driver)!.lastAcceptedAt)) + 1;
     t.mock.method(Date, 'now', () => now);
-    const historical = await prepare(fixture, 'closed-before-fence', phase !== 'failed');
-    const open = await prepare(fixture, 'settled-after-fence', true);
-    const result = await fixture.store.artifacts.publishCanonical({ received: true }, 'cliq-test-result-v1');
-    const settle = { runId: fixture.runId, opId: historical.opId, attempt: historical.attempt };
-    if (phase === 'completed') await fixture.store.completeInvocation({ ...settle, expectedRunRevision: revision(fixture),
-      resultRef: result.ref, consumed: { ...ZERO, toolCalls: 1 } });
-    else if (phase === 'failed') {
-      const error = await fixture.store.artifacts.publishCanonical({ noDispatch: true }, 'cliq-test-error-v1');
-      await fixture.store.failInvocationBeforeDispatch({ ...settle, expectedRunRevision: revision(fixture), errorRef: error.ref });
+    let historical: InvocationJournalEntry;
+    if (phase === 'completed') {
+      historical = await prepare(fixture, 'closed-before-fence', true);
+      await completeRead(fixture, historical);
     } else {
-      const evidence = await fixture.store.artifacts.publishCanonical({ unknown: true }, 'cliq-test-ambiguity-v1');
-      await fixture.store.markInvocationUnknown({ ...settle, expectedRunRevision: revision(fixture), evidenceRef: evidence.ref, evidenceDigest: evidence.ref });
-      const attestation = await fixture.store.artifacts.publishCanonical({ abandon: true }, 'cliq-test-attestation-v1');
-      await fixture.store.abandonUnknownInvocation({ ...settle, attestationRef: attestation.ref });
+      historical = (await fixture.agent.prepareModel({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch })).entry;
+      const error = await fixture.store.artifacts.publishCanonical({ noDispatch: true }, 'cliq-test-error-v1');
+      await fixture.store.failInvocationBeforeDispatch({ runId: fixture.runId, opId: historical.opId, attempt: historical.attempt,
+        expectedRunRevision: revision(fixture), errorRef: error.ref });
+      now += 500;
     }
+    const open = await prepare(fixture, 'settled-after-fence', true);
     const waiting = await begin(fixture);
     const wait = await fixture.store.artifacts.readCanonical<WorkerDeathWait>(waiting.waitingOnRef!);
     assert.deepEqual(wait.subject.openInvocationRefs, [canonicalSha256(open)]);
-    await fixture.store.completeInvocation({ runId: fixture.runId, expectedRunRevision: revision(fixture),
-      opId: open.opId, attempt: open.attempt, resultRef: result.ref, consumed: { ...ZERO, toolCalls: 1 } });
+    const uncertainty = await fixture.store.artifacts.publishCanonical({ received: false }, 'cliq-test-ambiguity-v1');
+    await fixture.store.markInvocationUnknown({ runId: fixture.runId, expectedRunRevision: revision(fixture),
+      opId: open.opId, attempt: open.attempt, evidenceRef: uncertainty.ref, evidenceDigest: uncertainty.ref });
     const cut = await fixture.store.readRecoveryClosure(fixture.runId);
-    assert.ok(cut.journal.every(entry => entry.timestamp === wait.createdAt));
+    assert.equal(cut.journal.at(-1)?.timestamp, wait.createdAt);
     assert.equal(cut.run.waitingOnRef, waiting.waitingOnRef);
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), cut);
     await fixture.store.artifacts.publishCanonical(historical, 'cliq-invocation-journal-entry-v1');
     withDb(fixture.stateRoot, driver => driver.exec('DROP TRIGGER workspace_generations_validate_update'));
@@ -265,6 +281,29 @@ for (const phase of ['completed', 'failed', 'abandoned'] as const) {
     }
   });
 }
+
+test('recovery excludes an abandoned manual call from pre-fence witnesses without inventing another open typed call', async t => {
+  const fixture = await fixtureFor(t, 'historical-abandoned');
+  const historical = await prepare(fixture, 'manual-plan', true, true);
+  const uncertainty = await fixture.store.artifacts.publishCanonical({ uncertain: true }, 'cliq-test-ambiguity-v1');
+  await fixture.store.markInvocationUnknown({ runId: fixture.runId, opId: historical.opId, attempt: historical.attempt,
+    expectedRunRevision: revision(fixture), evidenceRef: uncertainty.ref, evidenceDigest: uncertainty.ref });
+  const attestation = await fixture.store.artifacts.publishCanonical({ abandon: true }, 'cliq-test-attestation-v1');
+  await fixture.store.abandonUnknownInvocation({ runId: fixture.runId, opId: historical.opId, attempt: historical.attempt, attestationRef: attestation.ref });
+  const waiting = await begin(fixture);
+  const wait = await fixture.store.artifacts.readCanonical<WorkerDeathWait>(waiting.waitingOnRef!);
+  assert.deepEqual(wait.subject.openInvocationRefs, []);
+  const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+  const forged = await fixture.store.artifacts.publishCanonical({ ...wait, subject: { ...wait.subject,
+    openInvocationRefs: [canonicalSha256(historical)] } }, 'cliq-waiting-subject-v1');
+  withDb(fixture.stateRoot, driver => {
+    driver.exec('DROP TRIGGER workspace_generations_validate_update');
+    const generation = { ...cut.workspaceGenerations[0], waitingSubjectRef: forged.ref, waitingSubjectDigest: forged.ref };
+    driver.prepare('UPDATE workspace_generations SET row_json = ? WHERE generation_id = ?').run(JSON.stringify(generation), fixture.generationId);
+    driver.prepare('UPDATE runs SET waiting_on_ref = ? WHERE id = ?').run(forged.ref, fixture.runId);
+  });
+  await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
+});
 
 test('late native model completion cannot advance the frontier or checkpoint underneath worker recovery', async t => {
   const fixture = await createAgentFixture('worker-fence-late-model', undefined, { mode: 'plan' });
@@ -370,7 +409,8 @@ test('canonical clock regression retains its high-water and makes no partial wor
 
 test('recovery rejects rehashed foreign waits, omitted/open invocation identities, probe resets and orphan fences', async t => {
   const fixture = await fixtureFor(t, 'substitution');
-  await prepare(fixture, 'one');
+  const closed = await prepare(fixture, 'one', true);
+  await completeRead(fixture, closed);
   await prepare(fixture, 'two', true);
   const waiting = await begin(fixture);
   const original = await fixture.store.artifacts.readCanonical<WorkerDeathWait>(waiting.waitingOnRef!);
@@ -396,10 +436,10 @@ test('recovery rejects rehashed foreign waits, omitted/open invocation identitie
   await changeWait(wait => { wait.frontierRef = digest('foreign-frontier'); });
   await changeWait(wait => { wait.createdFromRevision = waiting.revision; });
   await changeWait(wait => { wait.subject.openInvocationRefs.pop(); });
-  await changeWait(wait => { wait.subject.openInvocationRefs.reverse(); });
+  await changeWait(wait => { wait.subject.openInvocationRefs.unshift(canonicalSha256(closed)); });
   await changeWait(wait => { wait.subject.openInvocationRefs.push(wait.subject.openInvocationRefs[0]!); });
   await changeWait(wait => { Object.assign(wait.probeState, { phase: 'automatic_exhausted', automaticProbeCount: 8 }); });
-  await changeWait(wait => { wait.probeState.nextProbeAt = new Date(Date.parse(wait.createdAt) + 1).toISOString(); });
+  await changeWait(wait => { Object.assign(wait.probeState, { nextProbeAt: new Date(Date.parse(wait.createdAt) + 1).toISOString() }); });
   await changeWait(wait => { Object.assign(wait, { deathProven: true }); });
   const witness = await fixture.store.artifacts.readCanonical<InvocationJournalEntry>(original.subject.openInvocationRefs[0]!);
   const forged = await fixture.store.artifacts.publishCanonical({ ...witness, requestRef: digest('foreign-request') }, 'cliq-invocation-journal-entry-v1');
@@ -438,7 +478,7 @@ test('the fence Journal cutoff is immutable, required and rejects invalid or pro
   assert.throws(() => withDb(fixture.stateRoot, driver => driver.prepare(
     'UPDATE workspace_generations SET row_version = row_version + 1, row_json = ? WHERE generation_id = ?'
   ).run(JSON.stringify({ ...generation, rowVersion: generation.rowVersion + 1, fencedJournalSeq: 0 }), fixture.generationId)),
-  /workspace generation phase transition is invalid/);
+  /workspace generation recovery fence fields are frozen/);
   withDb(fixture.stateRoot, driver => driver.exec('DROP TRIGGER workspace_generations_validate_update'));
   for (const fencedJournalSeq of [undefined, null, -1, 0.5, '2', Number.MAX_SAFE_INTEGER + 1, cut.journal.length + 1, 0, cut.journal.length - 1]) {
     withDb(fixture.stateRoot, driver => driver.prepare('UPDATE workspace_generations SET row_json = ? WHERE generation_id = ?')

@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, 'cliq/**']
+    branches: [main, 'cliq/**', 'codex/**']
 
 permissions:
   contents: read
@@ -14,6 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Public-repository qualification stays on free standard GitHub-hosted
+  # runners. Do not switch these jobs to larger/paid runner labels.
   typescript:
     name: TypeScript (${{ matrix.os }}, Node ${{ matrix.node }})
     strategy:
@@ -152,3 +154,119 @@ jobs:
             sudo rmdir "$child"
           done < <(find "$CLIQ_CGROUP_PARENT" -mindepth 1 -depth -type d -print0)
           sudo rmdir "$CLIQ_CGROUP_PARENT"
+
+  linux-run-execution:
+    name: Real Linux Run execution and recovery
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools e2fsprogs
+      - name: Build real execution images
+        id: images
+        shell: bash
+        run: |
+          installation="$RUNNER_TEMP/cliq-worker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          node scripts/kernel/build-linux-worker.mjs "$installation"
+          printf 'installation=%s\n' "$installation" >> "$GITHUB_OUTPUT"
+          foreign_installation="${installation}-foreign-owner"
+          mkdir -m 0700 "$foreign_installation"
+          printf 'foreign_installation=%s\n' "$foreign_installation" >> "$GITHUB_OUTPUT"
+          for image in linux-worker.node cliq-linux-worker-controller cliq-linux-worker cliq-linux-edit cliq-linux-bubblewrap; do
+            cp -- "$installation/$image" "$foreign_installation/$image"
+          done
+          chmod 0555 "$foreign_installation/linux-worker.node"
+          sudo chown 65534:65534 "$foreign_installation/linux-worker.node"
+      - name: Create disposable persistent state volume and delegated cgroup
+        id: fixture
+        shell: bash
+        run: |
+          parent="/sys/fs/cgroup/cliq-i1-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'parent=%s\n' "$parent" >> "$GITHUB_OUTPUT"
+          sudo mkdir "$parent"
+          for controller in cpu memory pids; do
+            grep -qw "$controller" "$parent/cgroup.controllers"
+          done
+          printf '+cpu +memory +pids\n' | sudo tee "$parent/cgroup.subtree_control" >/dev/null
+          sudo mkdir "$parent/supervisor"
+          sudo chown "$(id -u):$(id -g)" "$parent"
+          while IFS= read -r delegated_file; do
+            [ -e "$parent/$delegated_file" ] || continue
+            sudo chown "$(id -u):$(id -g)" "$parent/$delegated_file"
+          done < /sys/kernel/cgroup/delegate
+          sudo chmod 0700 "$parent"
+          volume="$RUNNER_TEMP/cliq-i1-volume-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          image="$RUNNER_TEMP/cliq-i1-volume-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.ext4"
+          printf 'volume=%s\nimage=%s\n' "$volume" "$image" >> "$GITHUB_OUTPUT"
+          mkdir -m 0700 "$volume"
+          truncate -s 128M "$image"
+          mkfs.ext4 -q -F "$image"
+          sudo mount -o loop,nodev,nosuid,noexec "$image" "$volume"
+          sudo chown "$(id -u):$(id -g)" "$volume"
+          sudo chmod 0700 "$volume"
+          uname -a
+          bwrap --version
+          stat -f -c 'state-volume-type=%T capacity-blocks=%b block-size=%S' "$volume"
+      - name: Reject a readable foreign-owned signed native installation
+        env:
+          CLIQ_I1_INSTALLATION: ${{ steps.images.outputs.installation }}
+          CLIQ_I1_FOREIGN_INSTALLATION: ${{ steps.images.outputs.foreign_installation }}
+          CLIQ_I1_CGROUP_PARENT: ${{ steps.fixture.outputs.parent }}
+        run: node --import tsx scripts/kernel/check-linux-worker-installation.ts "$CLIQ_I1_INSTALLATION" "$CLIQ_I1_FOREIGN_INSTALLATION" "$CLIQ_I1_CGROUP_PARENT"
+      - name: Exercise actual StateStore and native lifecycle
+        env:
+          CLIQ_I1_INSTALLATION: ${{ steps.images.outputs.installation }}
+          CLIQ_I1_CGROUP_PARENT: ${{ steps.fixture.outputs.parent }}
+          CLIQ_I1_STATE_VOLUME: ${{ steps.fixture.outputs.volume }}
+        shell: bash
+        run: |
+          runner_uid=$(id -u)
+          runner_gid=$(id -g)
+          runner_home=$HOME
+          runner_path=$PATH
+          node_path=$(command -v node)
+          sudo --preserve-env=CLIQ_I1_INSTALLATION,CLIQ_I1_CGROUP_PARENT,CLIQ_I1_STATE_VOLUME \
+            env CLIQ_RUNNER_UID="$runner_uid" CLIQ_RUNNER_GID="$runner_gid" \
+              CLIQ_RUNNER_HOME="$runner_home" CLIQ_RUNNER_PATH="$runner_path" CLIQ_NODE_PATH="$node_path" \
+            /bin/bash -c '
+              printf "%s\n" "$$" > "$CLIQ_I1_CGROUP_PARENT/supervisor/cgroup.procs"
+              exec /usr/bin/setpriv --reuid="$CLIQ_RUNNER_UID" --regid="$CLIQ_RUNNER_GID" --clear-groups \
+                /usr/bin/env HOME="$CLIQ_RUNNER_HOME" PATH="$CLIQ_RUNNER_PATH" \
+                "$CLIQ_NODE_PATH" --import tsx scripts/kernel/run-linux-worker-campaign.ts
+            '
+      - name: Retire disposable execution resources
+        if: always() && steps.fixture.outputs.parent != ''
+        env:
+          CLIQ_I1_PARENT: ${{ steps.fixture.outputs.parent }}
+          CLIQ_I1_VOLUME: ${{ steps.fixture.outputs.volume }}
+        shell: bash
+        run: |
+          if [ -d "$CLIQ_I1_PARENT" ]; then
+            printf '1\n' | sudo tee "$CLIQ_I1_PARENT/cgroup.kill" >/dev/null
+            for attempt in {1..100}; do
+              grep -q '^populated 0$' "$CLIQ_I1_PARENT/cgroup.events" && break
+              sleep 0.05
+            done
+            grep -q '^populated 0$' "$CLIQ_I1_PARENT/cgroup.events"
+            while IFS= read -r -d '' child; do sudo rmdir "$child"; done < <(find "$CLIQ_I1_PARENT" -mindepth 1 -depth -type d -print0)
+            sudo rmdir "$CLIQ_I1_PARENT"
+          fi
+          if [ -n "$CLIQ_I1_VOLUME" ] && mountpoint -q "$CLIQ_I1_VOLUME"; then sudo umount "$CLIQ_I1_VOLUME"; fi
+      - name: Remove the independent ownership regression installation
+        if: always() && steps.images.outputs.foreign_installation != ''
+        env:
+          CLIQ_I1_FOREIGN_INSTALLATION: ${{ steps.images.outputs.foreign_installation }}
+        shell: bash
+        run: |
+          for image in linux-worker.node cliq-linux-worker-controller cliq-linux-worker cliq-linux-edit cliq-linux-bubblewrap; do
+            rm -f -- "$CLIQ_I1_FOREIGN_INSTALLATION/$image"
+          done
+          rmdir -- "$CLIQ_I1_FOREIGN_INSTALLATION"

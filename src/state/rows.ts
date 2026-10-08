@@ -151,6 +151,7 @@ export function readCheckpoint(connection: SqliteConnection | SqliteDriver, chec
 
 export type AdmissionReplayRow = {
   admissionIntentDigest: string;
+  admissionRequestId: string | null;
   id: string;
 };
 
@@ -163,13 +164,13 @@ export function readAdmissionReplay(
 ): AdmissionReplayRow | undefined {
   const row = connection
     .prepare(
-      `SELECT id, admission_intent_digest FROM ${table}
+      `SELECT id, admission_intent_digest, admission_request_id FROM ${table}
        WHERE principal_id = ? AND admission_method = ? AND admission_key = ?`
     )
-    .get<{ id: string; admission_intent_digest: string }>(principalId, method, admissionKey);
+    .get<{ id: string; admission_intent_digest: string; admission_request_id: string | null }>(principalId, method, admissionKey);
   return row === undefined
     ? undefined
-    : { id: row.id, admissionIntentDigest: row.admission_intent_digest };
+    : { id: row.id, admissionIntentDigest: row.admission_intent_digest, admissionRequestId: row.admission_request_id };
 }
 
 export function readControlRequest(

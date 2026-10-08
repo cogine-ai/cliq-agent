@@ -19,7 +19,7 @@ import { signedToolBundle } from './testing/tool-authority.js';
 
 const native = await loadNativeStateOwner();
 
-async function startOwner(t: TestContext, authority?: StateStoreRuntimeAuthority, mode: 'store' | 'fixture' = 'store') {
+async function startOwner(t: TestContext, authority?: StateStoreRuntimeAuthority, mode: 'store' | 'fixture' | 'fixture_prepared' = 'store') {
   const container = await makePrivateDir('.cliq-owner-takeover-');
   const child = await childFor(t, container, mode);
   t.after(() => rm(container, { recursive: true, force: true }));
@@ -124,11 +124,11 @@ test('two successors racing a dead owner commit exactly one takeover and no skip
   await successors[results.findIndex(result => result.state === 'held')]!.request('close');
 });
 
-test('takeover does not adopt old workers, claim prepared effects, settle old effects, or change business state', async (t) => {
-  const fixture = await startOwner(t, undefined, 'fixture');
+for (const phase of ['prepared', 'claimed'] as const) test(`takeover preserves the exact ${phase} typed call and cannot adopt its old worker`, async (t) => {
+  const fixture = await startOwner(t, undefined, phase === 'prepared' ? 'fixture_prepared' : 'fixture');
   const before = snapshot(fixture.root);
   await fixture.crash();
-  const store = await openStateStore(fixture.root);
+  const store = await openStateStore(fixture.root, fixture.acquired.authority);
   try {
     const after = snapshot(fixture.root);
     for (const table of ['sessions', 'runs', 'items', 'run_journal', 'worker_launches', 'workspace_generations', 'checkpoints', 'control_requests']) {
@@ -136,12 +136,10 @@ test('takeover does not adopt old workers, claim prepared effects, settle old ef
     }
     const cut = await store.readRecoveryClosure(fixture.acquired.runId!);
     assert.equal(cut.run.activeWorkerLaunchId, fixture.acquired.launchId);
-    assert.equal(cut.run.budgetReserved.toolCalls, 2);
-    assert.deepEqual(cut.journal.map(entry => [entry.opId, entry.phase]),
-      [['unclaimed', 'prepared'], ['claimed', 'prepared'], ['claimed', 'dispatch_claimed']]);
-    await assert.rejects(store.claimInvocationDispatch({ runId: fixture.acquired.runId!, expectedRunRevision: fixture.acquired.runRevision!,
-      leaseEpoch: fixture.acquired.leaseEpoch!, opId: 'unclaimed', attempt: 0, dispatchId: 'forbidden-adoption',
-      brokerFenceTokenDigest: 'f'.repeat(64) }), { code: 'LEASE_FENCED' });
+    assert.equal(cut.run.budgetReserved.toolCalls, 1);
+    assert.deepEqual(cut.journal.map(entry => [entry.opKind, entry.phase]),
+      [['model', 'prepared'], ['model', 'dispatch_claimed'], ['model', 'completed'], ['tool', 'prepared'],
+        ...(phase === 'claimed' ? [['tool', 'dispatch_claimed']] : [])]);
     assert.throws(() => store.renewWorkerLease({ launchId: fixture.acquired.launchId!, expectedLeaseVersion: fixture.acquired.leaseVersion!,
       runId: cut.run.id, leaseEpoch: cut.run.leaseEpoch, workerIdentityDigest: cut.workerLaunches[0]!.workerIdentityDigest!,
       newLeaseExpiresAt: new Date(Date.now() + 60_000).toISOString() }), { code: 'LEASE_FENCED' });

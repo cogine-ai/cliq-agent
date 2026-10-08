@@ -1,11 +1,8 @@
-import { constants, type Stats } from 'node:fs';
-import { lstat, open } from 'node:fs/promises';
-import type { FileHandle } from 'node:fs/promises';
-import path from 'node:path';
-
-import { digestOmitting, normalizeAbsolutePath, unsignedDecimalId } from '../kernel/identity.js';
+import { setImmediate } from 'node:timers/promises';
+import { digestOmitting, normalizeAbsolutePath } from '../kernel/identity.js';
 import type { RepositoryIdentityV1, WorkspaceIdentityV1 } from '../kernel/types.js';
-import { KernelStorageError } from './errors.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { loadNativeStateOwner, type HeldWorkspaceRoot } from './native-owner.js';
 
 export type HostPlatform = 'macos' | 'linux';
 
@@ -15,138 +12,50 @@ export function hostPlatform(): HostPlatform {
   throw new KernelStorageError('UNSUPPORTED_PLATFORM', `workspace identity is unsupported on ${process.platform}`);
 }
 
-function requireEffectiveUid(): number {
-  if (typeof process.geteuid !== 'function') {
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'workspace identity requires a POSIX effective uid');
+function sourceError(error: unknown, opening: boolean): never {
+  if (error instanceof KernelStorageError) throw error;
+  if (error && typeof error === 'object' && 'code' in error && error.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+    throw new ResourceRetirementError('source workspace descriptor retirement failed', error);
   }
-  return process.geteuid();
-}
-
-function sameInode(left: Stats, right: Stats): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
-}
-
-function directoryIdentity(stats: Stats): { deviceId: string; fileId: string; ownerUid: number } {
-  return {
-    deviceId: unsignedDecimalId(stats.dev),
-    fileId: unsignedDecimalId(stats.ino),
-    ownerUid: stats.uid
-  };
-}
-
-async function openDirectoryNoFollow(absolutePath: string): Promise<{ handle: FileHandle; stats: Stats }> {
-  const pathInfo = await lstat(absolutePath);
-  if (pathInfo.isSymbolicLink()) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', `path component is a symlink: ${absolutePath}`);
-  }
-  if (!pathInfo.isDirectory()) {
-    throw new KernelStorageError('INVALID_REQUEST', `path is not a directory: ${absolutePath}`);
-  }
-  const handle = await open(absolutePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try {
-    const handleInfo = await handle.stat();
-    if (!handleInfo.isDirectory() || !sameInode(pathInfo, handleInfo)) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', `directory changed while it was opened: ${absolutePath}`);
-    }
-    return { handle, stats: handleInfo };
-  } catch (error) {
-    await handle.close();
-    throw error;
-  }
-}
-
-async function walkNoFollowDirectory(absolutePath: string): Promise<{ handle: FileHandle; stats: Stats }> {
-  const normalized = normalizeAbsolutePath(absolutePath);
-  const parts = normalized.split('/').filter((part) => part.length > 0);
-  let current = '/';
-  let opened = await openDirectoryNoFollow(current);
-  let transferred = false;
-  try {
-    for (const part of parts) {
-      const next = path.posix.join(current, part);
-      const nextOpened = await openDirectoryNoFollow(next);
-      const previous = opened;
-      opened = nextOpened;
-      current = next;
-      await previous.handle.close();
-    }
-    transferred = true;
-    return opened;
-  } finally {
-    if (!transferred) {
-      await opened.handle.close().catch(() => undefined);
-    }
-  }
+  throw new KernelStorageError(opening ? 'INVALID_REQUEST' : 'ARTIFACT_MISMATCH',
+    opening ? 'workspace must be a same-user no-follow root with safe in-root Git metadata'
+      : 'workspace descriptor identity or Git config changed during capture', { cause: error });
 }
 
 function parseGitObjectFormat(configUtf8: string): 'sha1' | 'sha256' {
-  const match = /^\s*objectFormat\s*=\s*(sha1|sha256)\s*$/im.exec(configUtf8);
-  return match === null ? 'sha1' : match[1] === 'sha256' ? 'sha256' : 'sha1';
-}
-
-async function captureRepositoryIdentity(
-  workspacePath: string,
-  rootStats: Stats,
-  platform: HostPlatform
-): Promise<RepositoryIdentityV1 | undefined> {
-  const gitPath = path.join(workspacePath, '.git');
-  let gitInfo: Stats;
-  try {
-    gitInfo = await lstat(gitPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
-  }
-  if (gitInfo.isSymbolicLink() || gitInfo.isFile()) {
-    throw new KernelStorageError('INVALID_REQUEST', 'workspace .git must be an in-root directory, not a file or symlink');
-  }
-  if (!gitInfo.isDirectory()) {
-    throw new KernelStorageError('INVALID_REQUEST', 'workspace .git must be a directory');
-  }
-  if (gitInfo.uid !== rootStats.uid) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace .git owner does not match the workspace root');
-  }
-
-  const handle = await open(gitPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try {
-    const handleInfo = await handle.stat();
-    if (!sameInode(gitInfo, handleInfo)) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace .git changed while it was opened');
+  let section = '', format: 'sha1' | 'sha256' = 'sha1';
+  // A continued value can contain text resembling a section. Comments and
+  // escaped quotes must therefore be handled before recognizing section lines.
+  const lines: string[] = [];
+  let line = '', quoted = false, escaped = false, comment = false;
+  for (const char of configUtf8.replace(/\r\n/gu, '\n') + '\n') {
+    if (char === '\n') {
+      if (escaped && !comment) { line = line.slice(0, -1); escaped = false; continue; }
+      if (quoted) throw new TypeError('unterminated Git config quote');
+      lines.push(line); line = ''; comment = false; escaped = false;
+    } else if (!comment) {
+      if (escaped) { line += char; escaped = false; }
+      else if (!quoted && (char === '#' || char === ';')) comment = true;
+      else { line += char; if (char === '\\') escaped = true; else if (char === '"') quoted = !quoted; }
     }
-    let objectFormat: 'sha1' | 'sha256' = 'sha1';
-    try {
-      const configHandle = await open(path.join(gitPath, 'config'), constants.O_RDONLY | constants.O_NOFOLLOW);
-      try {
-        objectFormat = parseGitObjectFormat(await configHandle.readFile('utf8'));
-      } finally {
-        await configHandle.close();
-      }
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') {
-        // default objectFormat
-      } else if (code === 'ELOOP') {
-        throw new KernelStorageError('INVALID_REQUEST', 'workspace .git/config must not be a symlink');
-      } else {
-        throw error;
+  }
+  for (const logicalLine of lines) {
+    const header = /^\s*\[([A-Za-z0-9.-]+)(?:\s+"(?:[^"\\]|\\.)*")?\]\s*$/u.exec(logicalLine);
+    if (header) section = /^\s*\[extensions\]\s*$/iu.test(logicalLine) ? 'extensions' : '';
+    else if (section === 'extensions') {
+      const variable = /^\s*([A-Za-z][A-Za-z0-9-]*)\s*=\s*(.*)$/u.exec(logicalLine);
+      if (variable?.[1].toLowerCase() === 'objectformat') {
+        const match = /^(?:"(sha1|sha256)"|(sha1|sha256))\s*$/u.exec(variable[2]);
+        if (!match) throw new TypeError('unsupported Git object-format literal');
+        format = (match[1] ?? match[2]) as 'sha1' | 'sha256';
       }
     }
-    const identity: RepositoryIdentityV1 = {
-      schemaVersion: 1,
-      format: 'cliq-repository-identity-v1',
-      platform,
-      gitDirectoryRelativePath: '.git',
-      gitDirectoryIdentity: directoryIdentity(handleInfo),
-      objectFormat,
-      repositoryIdentityDigest: ''
-    };
-    identity.repositoryIdentityDigest = digestOmitting(identity, 'repositoryIdentityDigest');
-    return identity;
-  } finally {
-    await handle.close();
   }
+  return format;
 }
 
+/** Physical identity only. This does not load runtime configuration or grant
+ * Workspace Trust, source-read permission, tool permission or execution. */
 export async function captureLiveWorkspaceIdentity(options: {
   workspacePath: string;
   ownerPrincipalId: string;
@@ -156,52 +65,54 @@ export async function captureLiveWorkspaceIdentity(options: {
 }> {
   const workspacePath = normalizeAbsolutePath(options.workspacePath);
   const platform = hostPlatform();
-  const effectiveUid = requireEffectiveUid();
-  const opened = await walkNoFollowDirectory(workspacePath);
+  const native = await loadNativeStateOwner();
+  let opened: HeldWorkspaceRoot;
+  try { opened = native.openWorkspaceRoot(workspacePath); }
+  catch (error) { return sourceError(error, true); }
   try {
-    if (opened.stats.uid !== effectiveUid) {
-      throw new KernelStorageError(
-        'INVALID_REQUEST',
-        'workspace root must be owned by the effective uid of the local principal'
-      );
+    let repository: RepositoryIdentityV1 | undefined;
+    if (opened.repositoryDirectory !== undefined) {
+      const chunks: Buffer[] = [];
+      for (;;) {
+        await setImmediate();
+        const chunk = opened.readGitConfigChunk();
+        if (chunk === null) break;
+        chunks.push(chunk);
+      }
+      const config = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+      if (config.includes('\0')) throw new TypeError('Git config contains NUL');
+      repository = {
+        schemaVersion: 1, format: 'cliq-repository-identity-v1', platform,
+        gitDirectoryRelativePath: '.git', gitDirectoryIdentity: opened.repositoryDirectory,
+        objectFormat: parseGitObjectFormat(config), repositoryIdentityDigest: ''
+      };
+      repository.repositoryIdentityDigest = digestOmitting(repository, 'repositoryIdentityDigest');
     }
-    const repository = await captureRepositoryIdentity(workspacePath, opened.stats, platform);
+    opened.assertHeld();
     const identity: Extract<WorkspaceIdentityV1, { kind: 'live' }> = {
-      schemaVersion: 1,
-      format: 'cliq-workspace-identity-v1',
-      ownerPrincipalId: options.ownerPrincipalId,
-      platform,
-      kind: 'live',
-      canonicalRootPath: workspacePath,
-      rootIdentity: directoryIdentity(opened.stats),
-      identityDigest: ''
+      schemaVersion: 1, format: 'cliq-workspace-identity-v1', ownerPrincipalId: options.ownerPrincipalId,
+      platform, kind: 'live', canonicalRootPath: workspacePath, rootIdentity: opened.identity,
+      ...(repository === undefined ? {} : { repositoryIdentityDigest: repository.repositoryIdentityDigest }), identityDigest: ''
     };
-    if (repository !== undefined) {
-      identity.repositoryIdentityDigest = repository.repositoryIdentityDigest;
-    }
     identity.identityDigest = digestOmitting(identity, 'identityDigest');
     return { identity, repository };
-  } finally {
-    await opened.handle.close();
+  } catch (error) { return sourceError(error, false); }
+  finally {
+    try { opened.close(); }
+    catch (error) { throw new ResourceRetirementError('source workspace descriptor retirement failed', error); }
   }
 }
 
 export async function recaptureLiveWorkspaceIdentity(
-  expected: Extract<WorkspaceIdentityV1, { kind: 'live' }>,
-  workspacePath: string
+  expected: Extract<WorkspaceIdentityV1, { kind: 'live' }>, workspacePath: string
 ): Promise<Extract<WorkspaceIdentityV1, { kind: 'live' }>> {
-  const captured = await captureLiveWorkspaceIdentity({
-    workspacePath,
-    ownerPrincipalId: expected.ownerPrincipalId
-  });
+  const captured = await captureLiveWorkspaceIdentity({ workspacePath, ownerPrincipalId: expected.ownerPrincipalId });
   if (captured.identity.canonicalRootPath !== expected.canonicalRootPath) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace path does not match the live Session identity');
   }
-  if (
-    captured.identity.rootIdentity.deviceId !== expected.rootIdentity.deviceId ||
-    captured.identity.rootIdentity.fileId !== expected.rootIdentity.fileId ||
-    captured.identity.rootIdentity.ownerUid !== expected.rootIdentity.ownerUid
-  ) {
+  if (captured.identity.rootIdentity.deviceId !== expected.rootIdentity.deviceId ||
+      captured.identity.rootIdentity.fileId !== expected.rootIdentity.fileId ||
+      captured.identity.rootIdentity.ownerUid !== expected.rootIdentity.ownerUid) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace root identity changed; create a new Session');
   }
   if ((captured.identity.repositoryIdentityDigest ?? null) !== (expected.repositoryIdentityDigest ?? null)) {

@@ -1,4 +1,5 @@
 import { assertArtifactRef } from '../../kernel/identity.js';
+import { immutableSnapshot } from '../../model/immutable.js';
 import type {
   WorkspaceGenerationStateV1,
   WorkspaceGenerationSnapshotEvidenceV1
@@ -13,9 +14,14 @@ import {
   decodeWorkspaceState
 } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
+import { readRecoveryClosure } from '../recovery-closure.js';
+import { requireEqual } from '../../policy/runtime-authority.js';
+import { readRequiredWorkerLaunch } from '../repositories/worker-launches.js';
 import {
   insertWorkspaceGeneration,
   readRequiredWorkspaceGeneration,
+  readRequiredWorkspaceGenerationByRef,
+  readWorkspaceGenerationsForRun,
   updateWorkspaceGeneration
 } from '../repositories/workspace-generations.js';
 import { readCheckpoint, readRun } from '../rows.js';
@@ -40,6 +46,7 @@ export async function registerWorkspaceGeneration(
   owner: StateOwnerContext,
   input: RegisterWorkspaceGenerationInput
 ): Promise<WorkspaceGenerationStateV1> {
+  input = immutableSnapshot(input);
   assertArtifactRef(input.generationRef);
   const identity = decodeWorkspaceGenerationIdentity(
     await artifacts.readCanonical(input.generationRef)
@@ -73,6 +80,17 @@ export async function registerWorkspaceGeneration(
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation source state does not match');
   }
 
+  // Preparing a replacement is nonproductive. It must not clear or bypass the
+  // exact worker-loss wait, and it may consume only that Run's latest ready cut.
+  const selected = readRun(driver, input.runId);
+  const recovery = selected.status === 'waiting' ? await readRecoveryClosure(driver, artifacts, input.runId) : undefined;
+  if (recovery && (recovery.run.waitingReason !== 'reconciliation' || !recovery.run.waitingOnRef ||
+      recovery.latestCheckpoint.id !== identity.sourceCheckpointId ||
+      recovery.latestCheckpoint.workspaceStateRef !== identity.sourceWorkspaceStateRef ||
+      recovery.workspaceGenerations.some(row => row.generationId === identity.generationId))) {
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'replacement must be distinct and restore the exact worker recovery ready Checkpoint');
+  }
+
   let created!: WorkspaceGenerationStateV1;
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
@@ -81,8 +99,21 @@ export async function registerWorkspaceGeneration(
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (fenceOutcome !== 'healthy') return;
     const run = readRun(connection, input.runId);
-    if (run.status !== 'queued' || run.activeWorkerLaunchId !== undefined) {
+    if (run.activeWorkerLaunchId !== undefined || (run.status !== 'queued' && !recovery)) {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'workspace generation requires a lease-free queued Run');
+    }
+    if (recovery) {
+      requireEqual(run, recovery.run, 'replacement worker recovery Run');
+      for (const launch of recovery.workerLaunches) {
+        requireEqual(readRequiredWorkerLaunch(connection, launch.launchId), launch, 'replacement predecessor launch');
+      }
+      for (const generation of recovery.workspaceGenerations) {
+        requireEqual(readRequiredWorkspaceGenerationByRef(connection, generation.generationRef), generation, 'replacement retained generation');
+      }
+      if (readWorkspaceGenerationsForRun(connection, run.id).some(row =>
+        row.phase === 'materializing' || row.phase === 'preactivated_readonly')) {
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker recovery already has a nonproductive replacement');
+      }
     }
     const lockedCheckpoint = readCheckpoint(connection, identity.sourceCheckpointId);
     if (
@@ -125,6 +156,7 @@ export async function recordWorkspaceGenerationPreactivated(
   owner: StateOwnerContext,
   input: RecordWorkspaceGenerationPreactivatedInput
 ): Promise<Extract<WorkspaceGenerationStateV1, { phase: 'preactivated_readonly' }>> {
+  input = immutableSnapshot(input);
   assertArtifactRef(input.snapshotEvidenceRef);
   const evidence = decodeWorkspaceGenerationSnapshotEvidence(
     await artifacts.readCanonical(input.snapshotEvidenceRef)

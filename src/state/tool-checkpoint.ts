@@ -6,7 +6,7 @@ import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeSourceManifest, decodeWorkspaceEntries, decodeWorkspaceGenerationSnapshotEvidence, decodeWorkspaceState } from './decoders.js';
-import { KernelStorageError } from './errors.js';
+import { joinResourceOperations, KernelStorageError } from './errors.js';
 import { readRequiredWorkerLaunch, updateWorkerLaunch } from './repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef, updateWorkspaceGeneration } from './repositories/workspace-generations.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
@@ -26,7 +26,7 @@ type DeathEvidence = {
   observedAt: string; evidenceDigest: string;
 };
 
-async function readCheckpointProof(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: {
+export async function readWorkerCheckpointProof(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; checkpointId: string; observedAt: string; postEffect: ToolCheckpointProof;
   launch: WorkerLaunch; generation: WorkspaceGenerationStateV1;
 }) {
@@ -44,7 +44,9 @@ async function readCheckpointProof(artifacts: ArtifactCatalog, owner: StateOwner
     throw new TypeError('post-effect snapshot differs from its result, generation or workspace closure');
   }
   for (const entry of entries.entries) if (entry.kind === 'file') {
-    if ((await artifacts.readBytes(entry.blobRef)).byteLength !== entry.size) throw new TypeError('post-effect workspace file byte count mismatch');
+    // Exhaustion verifies the exact size, retained inode and content hash. Do
+    // not retain a full workspace file merely to validate a ready Checkpoint.
+    for await (const _chunk of artifacts.readChunks(entry.blobRef, entry.size)) { /* bounded verification */ }
   }
   if (state.privateGitStateRef) await artifacts.readBytes(state.privateGitStateRef);
   const death = await readCanonicalArtifact<DeathEvidence>(artifacts, postEffect.retirementEvidenceRef);
@@ -81,7 +83,7 @@ async function readCheckpointProof(artifacts: ArtifactCatalog, owner: StateOwner
   const launchSpec = await readCanonicalArtifact<{ launchSpecDigest: string }>(artifacts, launch.sandboxLaunchSpecRef);
   if (launchSpec.launchSpecDigest !== death.sandboxLaunchSpecDigest || digestOmitting(launchSpec, 'launchSpecDigest') !== launchSpec.launchSpecDigest) throw new TypeError('retirement launch spec digest mismatch');
   await artifacts.readBytes(death.planRef);
-  const metadata = await Promise.all([
+  const metadata = await joinResourceOperations([
     [postEffect.workspaceStateRef, state.format], [state.entriesRef, entries.format],
     [postEffect.snapshotEvidenceRef, snapshot.format], [postEffect.retirementEvidenceRef, 'cliq-process-containment-death-evidence-v1'],
     [death.inspectorIdentityRef, 'cliq-supervisor-inspector-identity-v1']
@@ -101,7 +103,7 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
       generation.phase !== 'checkpointing' || generation.quiesceId !== launch.quiesceId ||
       generation.activeWorkerLaunchId !== launch.launchId || generation.leaseEpoch !== run.leaseEpoch ||
       launch.leaseEpoch !== run.leaseEpoch) throw new KernelStorageError('LEASE_FENCED', 'tool result requires a quiesced checkpointing generation');
-  const { metadata, snapshot, deathObservedAt } = await readCheckpointProof(artifacts, assertActiveStateOwner(driver, owner), { ...input, launch, generation });
+  const { metadata, snapshot, deathObservedAt } = await readWorkerCheckpointProof(artifacts, assertActiveStateOwner(driver, owner), { ...input, launch, generation });
   return { metadata, commit(connection: SqliteConnection, currentRun: Run, createdAt: string) {
     if (parseCanonicalTime(createdAt) - parseCanonicalTime(deathObservedAt) > 5_000) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale; reobserve containment death');
     if (createdAt < snapshot.observedAt || currentRun.activeWorkerLaunchId !== launch.launchId || currentRun.leaseEpoch !== run.leaseEpoch ||
@@ -137,7 +139,7 @@ export async function validateRetainedWorkerSeal(driver: SqliteDriver, artifacts
   const inspector = await readCanonicalArtifact<SupervisorInspectorIdentityV1>(artifacts, death.inspectorIdentityRef);
   const owner = readStateOwner(driver, inspector.stateOwnerEpoch);
   if (!owner || owner.acquiredAt > death.observedAt || (owner.state === 'terminal' && owner.releasedAt < death.observedAt)) throw new TypeError('historical inspector was not the state owner at retirement');
-  const { deathObservedAt } = await readCheckpointProof(artifacts, owner, { ...input, checkpointId: checkpoint.id, observedAt: launch.activatedAt,
+  const { deathObservedAt } = await readWorkerCheckpointProof(artifacts, owner, { ...input, checkpointId: checkpoint.id, observedAt: launch.activatedAt,
     postEffect: { workspaceStateRef: checkpoint.workspaceStateRef, snapshotEvidenceRef: generation.snapshotEvidenceRef, retirementEvidenceRef: launch.retirementEvidenceRef } });
   if (parseCanonicalTime(launch.retiredAt) - parseCanonicalTime(deathObservedAt) > 5_000) throw new TypeError('historical retirement proof was stale at commit');
 }

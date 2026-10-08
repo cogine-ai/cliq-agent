@@ -14,6 +14,7 @@ import { readHistoricalControlChannel } from './control-channel.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { admissionKey, createActiveFixture, makePrivateDir, uuidv7, type ActiveFixture } from './testing/fixtures.js';
+import { createAgentFixture } from './testing/agent-fixtures.js';
 
 // Internal transport integration only. No generated wire protocol, installed
 // Supervisor, sandbox execution or peer JSON attestation is being simulated.
@@ -31,7 +32,7 @@ async function bounded<T>(promise: Promise<T>): Promise<T> {
   })]); } finally { clearTimeout(timer); }
 }
 
-async function fixture(t: TestContext, seeded?: Pick<ActiveFixture, 'stateRoot' | 'workspace' | 'store'>) {
+async function fixture(t: TestContext, seeded?: Pick<ActiveFixture, 'stateRoot' | 'workspace' | 'store' | 'runtimeAuthority'>) {
   const stateRoot = seeded?.stateRoot ?? await makePrivateDir('.cliq-local-control-');
   const workspace = seeded?.workspace ?? await makePrivateDir('.cliq-local-control-ws-');
   let store = seeded?.store ?? await openStateStore(stateRoot);
@@ -66,7 +67,7 @@ async function fixture(t: TestContext, seeded?: Pick<ActiveFixture, 'stateRoot' 
     return { connection, child, exited };
   };
   return { stateRoot, workspace, reader, errors, connect, get store() { return store; },
-    async reopen() { await listener.close(); await store.close(); store = await openStateStore(stateRoot); listen(); } };
+    async reopen() { await listener.close(); await store.close(); store = await openStateStore(stateRoot, seeded?.runtimeAuthority); listen(); } };
 }
 
 test('native connection derives principal before real Session admission and preserves its peer audit closure', async t => {
@@ -295,7 +296,7 @@ test('copied identities and delayed work cannot borrow another authenticated fra
 test('bounded Run reads survive real native reconnect and owner restart without treating events as Run truth', async t => {
   // The worker/generation are explicit offline persistence fixtures, not a
   // claim that strong execution or the installed public protocol is qualified.
-  const seeded = await createActiveFixture('nr');
+  const seeded = await createAgentFixture('nr');
   const f = await fixture(t, seeded);
   const first = await f.connect();
   let copied!: AuthenticatedControlIdentity;
@@ -333,11 +334,7 @@ test('bounded Run reads survive real native reconnect and owner restart without 
   void reading.catch(() => {});
   try {
     await bounded(captured.promise);
-    const request = await catalog.publishCanonical({ fixture: 'read-cut-race' }, 'cliq-tool-request-v1');
-    await f.store.prepareInvocation({ runId: seeded.runId, expectedRunRevision: originalRun.revision,
-      leaseEpoch: seeded.leaseEpoch, opId: 'read-cut-race', opKind: 'tool', target: 'fixture.read', requestRef: request.ref,
-      replayClass: 'retry', idempotencyKey: 'read-cut-race-0',
-      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 } });
+    await seeded.agent.prepareModel({ expectedRunRevision: originalRun.revision, leaseEpoch: seeded.leaseEpoch });
   } finally { release.resolve(); catalog.readCanonical = readCanonical; }
   const fixedCut = await bounded(reading);
   if (fixedCut.method !== 'run.get') throw new Error('expected Run read cut');

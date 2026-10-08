@@ -1,15 +1,21 @@
 import { randomFillSync } from 'node:crypto';
 import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { KERNEL_DATABASE_FILENAME } from '../../config.js';
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1, RunSpec, SourceManifest, SourceProjectionSpec, VerifierSpec,
-  WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
+  StateLockIdentityV1, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationSnapshotEvidenceV1, WorkspaceIdentityV1, WorkspaceStateManifest
 } from '../../kernel/types.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { openStateStore, publishInProcessChannel, type StateStore, type StateStoreRuntimeAuthority } from '../store.js';
+import { openSqliteDriver } from '../sqlite-driver.js';
+import { readActiveStateOwner } from '../state-owner.js';
+import { reseal, testFixture } from '../../model/testing/fixtures.js';
+import { signedToolBundle } from './tool-authority.js';
+import { fixtureSandboxProfile, publishFixtureWorkerLaunch } from './worker-launch.js';
 
 export function uuidv7(): string {
   const bytes = Buffer.alloc(16);
@@ -37,7 +43,7 @@ export async function makePrivateDir(prefix: string): Promise<string> {
   return directory;
 }
 
-async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDigest: string) {
+async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDigest: string, assemblyRef: string) {
   const rules: FrozenIgnoreRulesV1 = {
     schemaVersion: 1,
     format: 'cliq-frozen-ignore-rules-v1',
@@ -69,7 +75,7 @@ async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDiges
     byteCount: 0,
     treeDigest: ''
   };
-  entries.treeDigest = digestOmitting(entries, 'treeDigest');
+  entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries });
   const entriesArtifact = await store.artifacts.publishCanonical(entries, entries.format);
   const source: SourceManifest = {
     schemaVersion: 1,
@@ -94,17 +100,16 @@ async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDiges
   };
   verifier.specDigest = digestOmitting(verifier, 'specDigest');
   const verifierArtifact = await store.artifacts.publishCanonical(verifier, verifier.format);
-  const [assembly, policy, sandbox] = await Promise.all([
-    store.artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-m2-assembly-fixture-v1' }, 'cliq-run-assembly-v1'),
+  const [policy, sandbox] = await Promise.all([
     store.artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-m2-policy-fixture-v1' }, 'cliq-run-policy-v1'),
-    store.artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-m2-sandbox-fixture-v1' }, 'cliq-sandbox-profile-v1')
+    store.artifacts.publishCanonical(fixtureSandboxProfile(), 'cliq-sandbox-profile-v1')
   ]);
   return {
     sourceProjectionRef: projectionArtifact.ref,
     frozenIgnoreRulesRef: rulesArtifact.ref,
     baseWorkspaceManifestRef: sourceArtifact.ref,
     verifierSpecRef: verifierArtifact.ref,
-    assemblyRef: assembly.ref,
+    assemblyRef,
     policyRef: policy.ref,
     sandboxProfileRef: sandbox.ref,
     treeDigest: entries.treeDigest
@@ -126,6 +131,7 @@ export type ActiveFixture = {
   leaseVersion: number;
   leaseEpoch: number;
   workerIdentityDigest: string;
+  runtimeAuthority: StateStoreRuntimeAuthority;
 };
 
 export type ActiveFixtureOptions = {
@@ -134,17 +140,42 @@ export type ActiveFixtureOptions = {
   leaseDurationMs?: number;
   assembly?: (store: StateStore) => Promise<string>;
   policy?: (store: StateStore, identity: WorkspaceIdentityV1) => Promise<string>;
+  sandboxProfile?: (store: StateStore) => Promise<string>;
   budgets?: Partial<RunSpec['budgets']>;
   credentialGrantRefs?: string[];
 };
+
+export type QueuedFixture = Pick<ActiveFixture,
+  'stateRoot' | 'workspace' | 'store' | 'principalId' | 'channelIdentityRef' | 'runId' | 'runRevision' | 'runtimeAuthority'>;
 
 export async function createActiveFixture(
   label: string,
   options: ActiveFixtureOptions = {}
 ): Promise<ActiveFixture> {
+  const fixture = await createQueuedFixture(label, options);
+  try {
+    return { ...fixture, ...await activateFixtureWorker(fixture, label, options.leaseDurationMs) };
+  } catch (error) {
+    await disposeFixture(fixture);
+    throw error;
+  }
+}
+
+export async function createQueuedFixture(
+  label: string,
+  options: ActiveFixtureOptions = {}
+): Promise<QueuedFixture> {
   const stateRoot = await makePrivateDir(`.cliq-m2-${label}-state-`);
   const workspace = await makePrivateDir(`.cliq-m2-${label}-ws-`);
-  const store = await openStateStore(stateRoot, options.runtimeAuthority);
+  const defaultAssembly = testFixture();
+  const runtimeAuthority = options.runtimeAuthority ?? await signedToolBundle(defaultAssembly.assembly, []);
+  if (options.runtimeAuthority) {
+    const worker = runtimeAuthority.bundle.entries.find((entry) => entry.role === 'worker')!;
+    Object.assign(defaultAssembly.assembly.runtime, { runtimeBundleRef: canonicalSha256(runtimeAuthority.bundle),
+      runtimeBundleManifestDigest: runtimeAuthority.bundle.manifestDigest, workerExecutableId: worker.entryId, workerExecutableDigest: worker.digest });
+  }
+  reseal(defaultAssembly);
+  const store = await openStateStore(stateRoot, runtimeAuthority);
   const { principalId, ...channel } = await publishInProcessChannel(store);
   const session = await store.createSession({
     principalId,
@@ -156,9 +187,11 @@ export async function createActiveFixture(
   const workspaceIdentity = (await store.artifacts.readCanonical(
     session.session.workspaceIdentityRef
   )) as WorkspaceIdentityV1;
-  const source = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest);
-  if (options.assembly) source.assemblyRef = await options.assembly(store);
+  const assemblyRef = options.assembly ? await options.assembly(store)
+    : (await store.artifacts.publishCanonical(defaultAssembly.assembly, defaultAssembly.assembly.format)).ref;
+  const source = await publishEmptySourceGraph(store, workspaceIdentity.identityDigest, assemblyRef);
   if (options.policy) source.policyRef = await options.policy(store, workspaceIdentity);
+  if (options.sandboxProfile) source.sandboxProfileRef = await options.sandboxProfile(store);
   const admitted = await store.admitRun({
     principalId,
     requestId: uuidv7(),
@@ -176,20 +209,60 @@ export async function createActiveFixture(
     ...channel,
     ...source
   });
-  try {
-    return { stateRoot, workspace, store, principalId, channelIdentityRef: channel.channelIdentityRef,
-      ...await activateFixtureWorker({ store, stateRoot, runId: admitted.run.id }, label, options.leaseDurationMs) };
-  } catch (error) {
-    await store.close();
-    await rm(stateRoot, { recursive: true, force: true });
-    await rm(workspace, { recursive: true, force: true });
-    throw error;
-  }
+  return { stateRoot, workspace, store, principalId, channelIdentityRef: channel.channelIdentityRef, runtimeAuthority,
+    runId: admitted.run.id, runRevision: admitted.run.revision };
 }
 
 /** A fresh offline generation/worker from the current ready checkpoint, including after a control wait or restart. */
 export async function activateFixtureWorker(
   fixture: Pick<ActiveFixture, 'store' | 'stateRoot' | 'runId'>, label: string, leaseDurationMs = 60_000
+) {
+  const prepared = await prepareFixtureGeneration(fixture, label);
+  const { store, runId } = fixture;
+  const run = store.getRun(runId);
+  const { generationId, generationArtifact, preactivatedGeneration } = prepared;
+  const { input, spec, plan } = await publishFixtureWorkerLaunch(fixture, generationArtifact.ref, label);
+  const { launchId } = input;
+  const reserved = await store.reserveWorkerLaunch(input);
+  // Offline containment identity only. This fixture never launches or claims to qualify a backend.
+  const containment = await store.artifacts.publishCanonical({ schemaVersion: 1, planRef: input.containmentPlanRef,
+    sandboxLaunchSpecRef: input.sandboxLaunchSpecRef,
+    sandboxLaunchSpecDigest: spec.launchSpecDigest,
+    owner: { kind: 'worker_activation', runId: runId, intendedLeaseEpoch: run.leaseEpoch + 1, workerLaunchId: launchId },
+    filesystemBinding: { kind: 'run-generation', generationRef: generationArtifact.ref }, launchNonceDigest: reserved.spawnNonceDigest,
+    backend: { kind: 'linux', pidNamespaceReservationId: `${label}-namespace`, pidNamespaceId: 'pid:[test]',
+      cgroupPath: plan.backend.kind === 'linux' ? plan.backend.cgroupPath : '', cgroupId: `${label}-cgroup`, namespaceInitStartToken: 'test-init', subreaperStartToken: 'test-subreaper' },
+    createdAt: sampleCanonicalNow()
+  }, 'cliq-process-containment-v1');
+  const workerIdentity: WorkerIdentity = {
+    schemaVersion: 1,
+    executableRealpath: (spec.executable as { executionPath: string }).executionPath,
+    executableDigest: (spec.executable as { executableDigest: string }).executableDigest,
+    pid: process.pid,
+    processStartToken: `${process.pid}:test`,
+    spawnNonceDigest: reserved.spawnNonceDigest,
+    activationNonceDigest: reserved.activationNonceDigest,
+    intendedLeaseEpoch: run.leaseEpoch + 1,
+    launchId,
+    supervisorInstanceId: reserved.supervisorInstanceId,
+    processContainmentRef: containment.ref
+  };
+  const workerArtifact = await store.artifacts.publishCanonical(workerIdentity, 'cliq-worker-identity-v1');
+  await store.recordWorkerPreactivated({
+    launchId,
+    workerIdentityDigest: workerArtifact.ref,
+    processContainmentRef: containment.ref
+  });
+  const activated = store.activateWorkerLease({ launchId, expectedRunRevision: run.revision,
+    expectedGenerationRowVersion: preactivatedGeneration.rowVersion, leaseDurationMs });
+  return { runId, runRevision: activated.run.revision, generationId, generationRef: generationArtifact.ref,
+    generationRowVersion: activated.generation.rowVersion, launchId, leaseVersion: activated.launch.leaseVersion,
+    leaseEpoch: activated.run.leaseEpoch, workerIdentityDigest: workerArtifact.ref };
+}
+
+/** Retained evidence fixture only: does not materialize a filesystem or observe native processes. */
+export async function prepareFixtureGeneration(
+  fixture: Pick<ActiveFixture, 'store' | 'stateRoot' | 'runId'>, label: string
 ) {
   const { store, stateRoot, runId } = fixture;
   const run = store.getRun(runId);
@@ -199,11 +272,13 @@ export async function activateFixtureWorker(
     initial.latestCheckpoint.workspaceStateRef
   )) as WorkspaceStateManifest;
   const entries = await store.artifacts.readCanonical<WorkspaceEntryManifest>(workspaceState.entriesRef);
-  const stateRootFixture = await store.artifacts.publishCanonical(
-    { schemaVersion: 1, format: 'cliq-state-root-test-fixture-v1', stateRoot },
-    'cliq-state-root-test-fixture-v1'
-  );
-  const generationId = identityHash('cliq-workspace-generation-test-v1', runId, label);
+  // Setup reads the retained owner identity; assertions still use the public StateStore boundary.
+  const reader = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+  let owner;
+  try { owner = readActiveStateOwner(reader)!; } finally { reader.close(); }
+  const lock = await store.artifacts.readCanonical<StateLockIdentityV1>(owner.stateLockIdentityRef);
+  const creationNonceDigest = digest(`${label}:generation-nonce`);
+  const generationId = identityHash(runId, initial.latestCheckpoint.id, initial.latestCheckpoint.workspaceStateRef, creationNonceDigest);
   const identity: WorkspaceGenerationIdentityV1 = {
     schemaVersion: 1,
     format: 'cliq-workspace-generation-identity-v1',
@@ -214,30 +289,17 @@ export async function activateFixtureWorker(
     sourceWorkspaceStateRef: initial.latestCheckpoint.workspaceStateRef,
     sourceWorkspaceStateDigest: workspaceState.stateDigest,
     sourceTreeDigest: entries.treeDigest,
-    creationNonceDigest: digest(`${label}:generation-nonce`),
-    locator: process.platform === 'linux'
-      ? {
+    creationNonceDigest,
+    // This is an offline Linux artifact graph even on macOS; it is never native execution evidence.
+    locator: {
           kind: 'linux_directory',
-          stateRootIdentityRef: stateRootFixture.ref,
-          stateRootIdentityDigest: stateRootFixture.ref,
-          canonicalRootRelativePath: `generations/${generationId}`,
+          stateRootIdentityRef: lock.stateRootIdentityRef,
+          stateRootIdentityDigest: lock.stateRootIdentityDigest,
+          canonicalRootRelativePath: `runs/${runId}/generations/${generationId}`,
           deviceId: '1',
           directoryFileId: '2',
           ownerUid: process.geteuid!(),
           mode: 448
-        }
-      : {
-          kind: 'macos_vm_volume',
-          stateRootIdentityRef: stateRootFixture.ref,
-          stateRootIdentityDigest: stateRootFixture.ref,
-          backingStoreCanonicalRootRelativePath: `generations/${generationId}.img`,
-          backingStoreDeviceId: '1',
-          backingStoreFileId: '2',
-          backingStoreOwnerUid: process.geteuid!(),
-          backingStoreMode: 384,
-          backingStoreLinkCount: 1,
-          vmVolumeReservationId: `${label}-reservation`,
-          guestVolumeId: `${label}-volume`
         },
     createdAt: sampleCanonicalNow(),
     identityDigest: ''
@@ -275,59 +337,10 @@ export async function activateFixtureWorker(
     snapshotEvidenceRef: snapshotArtifact.ref,
     snapshotEvidenceDigest: snapshot.evidenceDigest
   });
-  const [plan, launchSpec] = await Promise.all([
-    store.artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-containment-plan-test-v1', generationId }, 'cliq-process-containment-plan-v1'),
-    store.artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-worker-launch-spec-test-v1', generationId,
-      launchSpecDigest: canonicalSha256({ schemaVersion: 1, format: 'cliq-worker-launch-spec-test-v1', generationId }) }, 'cliq-sandbox-launch-spec-v1')
-  ]);
-  const launchId = identityHash('cliq-worker-launch-test-v1', runId, label);
-  const reserved = await store.reserveWorkerLaunch({
-    launchId,
-    runId: runId,
-    expectedRunRevision: run.revision,
-    spawnNonceDigest: digest(`${label}:spawn`),
-    activationNonceDigest: digest(`${label}:activate`),
-    workspaceGenerationRef: generationArtifact.ref,
-    containmentPlanRef: plan.ref,
-    sandboxLaunchSpecRef: launchSpec.ref
-  });
-  // Offline containment identity only. This fixture never launches or claims to qualify a backend.
-  const containment = await store.artifacts.publishCanonical({ schemaVersion: 1, planRef: plan.ref,
-    sandboxLaunchSpecRef: launchSpec.ref,
-    sandboxLaunchSpecDigest: (await store.artifacts.readCanonical<{ launchSpecDigest: string }>(launchSpec.ref)).launchSpecDigest,
-    owner: { kind: 'worker_activation', runId: runId, intendedLeaseEpoch: run.leaseEpoch + 1, workerLaunchId: launchId },
-    filesystemBinding: { kind: 'run-generation', generationRef: generationArtifact.ref }, launchNonceDigest: reserved.spawnNonceDigest,
-    backend: { kind: 'linux', pidNamespaceReservationId: `${label}-namespace`, pidNamespaceId: 'pid:[test]',
-      cgroupPath: '/cliq/test', cgroupId: `${label}-cgroup`, namespaceInitStartToken: 'test-init', subreaperStartToken: 'test-subreaper' },
-    createdAt: sampleCanonicalNow()
-  }, 'cliq-process-containment-v1');
-  const workerIdentity: WorkerIdentity = {
-    schemaVersion: 1,
-    executableRealpath: '/cliq/test-worker',
-    executableDigest: digest(`${label}:worker-executable`),
-    pid: process.pid,
-    processStartToken: `${process.pid}:test`,
-    spawnNonceDigest: reserved.spawnNonceDigest,
-    activationNonceDigest: reserved.activationNonceDigest,
-    intendedLeaseEpoch: run.leaseEpoch + 1,
-    launchId,
-    supervisorInstanceId: reserved.supervisorInstanceId,
-    processContainmentRef: containment.ref
-  };
-  const workerArtifact = await store.artifacts.publishCanonical(workerIdentity, 'cliq-worker-identity-v1');
-  await store.recordWorkerPreactivated({
-    launchId,
-    workerIdentityDigest: workerArtifact.ref,
-    processContainmentRef: containment.ref
-  });
-  const activated = store.activateWorkerLease({ launchId, expectedRunRevision: run.revision,
-    expectedGenerationRowVersion: preactivatedGeneration.rowVersion, leaseDurationMs });
-  return { runId, runRevision: activated.run.revision, generationId, generationRef: generationArtifact.ref,
-    generationRowVersion: activated.generation.rowVersion, launchId, leaseVersion: activated.launch.leaseVersion,
-    leaseEpoch: activated.run.leaseEpoch, workerIdentityDigest: workerArtifact.ref };
+  return { generationId, generationArtifact, preactivatedGeneration };
 }
 
-export async function disposeFixture(fixture: ActiveFixture): Promise<void> {
+export async function disposeFixture(fixture: Pick<ActiveFixture, 'store' | 'stateRoot' | 'workspace'>): Promise<void> {
   await fixture.store.close();
   await rm(fixture.stateRoot, { recursive: true, force: true });
   await rm(fixture.workspace, { recursive: true, force: true });

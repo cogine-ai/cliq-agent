@@ -31,7 +31,7 @@ import {
   decodeWorkspaceGenerationSnapshotEvidence,
   decodeWorkspaceState
 } from './decoders.js';
-import { KernelStorageError } from './errors.js';
+import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { validateWorkerRecoveryWait } from './worker-recovery.js';
 import { addBudget, decodeBudgetUsage, isZeroBudget } from './invariants.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
@@ -48,8 +48,9 @@ const ZERO_BUDGET: BudgetUsage = {
   repairAttempts: 0
 };
 
-function recoveryFailure(message: string): never {
-  throw new KernelStorageError('RECOVERY_REQUIRED', message);
+function recoveryFailure(message: string, cause?: unknown): never {
+  if (cause instanceof ResourceRetirementError) throw cause;
+  throw new KernelStorageError('RECOVERY_REQUIRED', message, { cause });
 }
 
 function requireRecoveryArtifactRef(value: string, label: string): void {
@@ -78,12 +79,12 @@ async function requireRecoveryArtifacts(
     requireRecoveryArtifactRef(ref, label);
     if (!unique.has(ref)) unique.set(ref, label);
   }
-  await Promise.all(
+  await joinResourceOperations(
     [...unique].map(async ([ref, label]) => {
       try {
         await artifacts.readBytes(ref);
       } catch (error) {
-        recoveryFailure(`${label} is not readable from CAS: ${(error as Error).message}`);
+        recoveryFailure(`${label} is not readable from CAS: ${(error as Error).message}`, error);
       }
     })
   );
@@ -673,7 +674,7 @@ export async function readRecoveryClosure(
         checkpoints: databaseCut.checkpoints,
         context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) });
     } catch (error) {
-      recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`);
+      recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);
     }
   }
   if (
@@ -691,8 +692,8 @@ export async function readRecoveryClosure(
   }
   await validateGenerationArtifacts(artifacts, workspaceGenerations);
   await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
-  try { await validateWorkerRecoveryWait(artifacts, databaseCut); }
-  catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`); }
+  try { await validateWorkerRecoveryWait(artifacts, databaseCut, driver); }
+  catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error); }
   await validateChildAllocationArtifacts(artifacts, childAllocations);
 
   const closure: RecoveryClosureV1 = {
@@ -706,6 +707,6 @@ export async function readRecoveryClosure(
     childAllocations
   };
   try { await validateStopRecovery(driver, artifacts, closure); }
-  catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`); }
+  catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error); }
   return closure;
 }

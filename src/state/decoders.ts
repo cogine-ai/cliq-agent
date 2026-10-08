@@ -3,8 +3,10 @@ import {
   digestOmitting,
   identityHash,
   parseCanonicalTime,
-  requiredSafeInteger
+  requiredSafeInteger,
+  sha256Bytes
 } from '../kernel/identity.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
 import type {
   AdmittedContextManifest,
   BudgetSettlementV1,
@@ -712,6 +714,7 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entry count does not match the array');
   }
   let priorPath: string | undefined;
+  let byteCount = 0;
   for (const [index, candidate] of value.entries.entries()) {
     if (!isRecord(candidate)) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} must be an object`);
@@ -730,7 +733,8 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
         ['path', 'kind', 'mode', 'size', 'blobRef'],
         `WorkspaceEntryManifest.entries[${index}]`
       );
-      requireSafeInteger(candidate.size, `WorkspaceEntryManifest.entries[${index}].size`);
+      byteCount += requireSafeInteger(candidate.size, `WorkspaceEntryManifest.entries[${index}].size`);
+      if (!Number.isSafeInteger(byteCount)) throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace byte count overflows');
       requireArtifactRef(candidate.blobRef, `WorkspaceEntryManifest.entries[${index}].blobRef`);
     } else if (candidate.kind === 'symlink') {
       rejectUnknownKeys(
@@ -738,14 +742,17 @@ export function decodeWorkspaceEntries(value: unknown): WorkspaceEntryManifest {
         ['path', 'kind', 'mode', 'target', 'targetDigest'],
         `WorkspaceEntryManifest.entries[${index}]`
       );
-      requireString(candidate.target, `WorkspaceEntryManifest.entries[${index}].target`);
-      requireDigest(candidate.targetDigest, `WorkspaceEntryManifest.entries[${index}].targetDigest`);
+      const target = requireString(candidate.target, `WorkspaceEntryManifest.entries[${index}].target`);
+      const targetDigest = requireDigest(candidate.targetDigest, `WorkspaceEntryManifest.entries[${index}].targetDigest`);
+      if (sha256Bytes(Buffer.from(target)) !== targetDigest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace symlink target digest does not rehash');
+      byteCount += Buffer.byteLength(target);
+      if (!Number.isSafeInteger(byteCount)) throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace byte count overflows');
     } else {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `workspace entry ${index} has an invalid kind`);
     }
   }
   const entries = value as WorkspaceEntryManifest;
-  if (digestOmitting(entries, 'treeDigest') !== entries.treeDigest) {
+  if (entries.byteCount !== byteCount || canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries }) !== entries.treeDigest) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace entries digest does not rehash');
   }
   return entries;
@@ -869,6 +876,13 @@ export function decodeWorkspaceGenerationIdentity(value: unknown): WorkspaceGene
   requireCanonicalTime(value.createdAt, 'WorkspaceGenerationIdentity.createdAt');
   requireDigest(value.identityDigest, 'WorkspaceGenerationIdentity.identityDigest');
   const identity = value as WorkspaceGenerationIdentityV1;
+  const generationId = identityHash(identity.runId, identity.sourceCheckpointId, identity.sourceWorkspaceStateRef, identity.creationNonceDigest);
+  const relativeRoot = `runs/${identity.runId}/generations/${generationId}`;
+  if (identity.generationId !== generationId || (identity.locator.kind === 'linux_directory'
+    ? identity.locator.canonicalRootRelativePath !== relativeRoot
+    : identity.locator.backingStoreCanonicalRootRelativePath !== `${relativeRoot}.img`)) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation id or platform-relative locator does not match its canonical identity');
+  }
   if (digestOmitting(identity, 'identityDigest') !== identity.identityDigest) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation identity digest does not rehash');
   }

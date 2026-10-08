@@ -13,7 +13,7 @@ import {
   decodeStateLockIdentity,
   decodeStateRootIdentity
 } from './decoders.js';
-import { KernelStorageError } from './errors.js';
+import { joinResourceOperations, KernelStorageError } from './errors.js';
 import { readLatestStateOwner, type StateOwnerContext } from './state-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -238,7 +238,7 @@ export async function validateControlChannelClosure(
     live.assertCurrent();
     return closure;
   }
-  const [processIdentity, ownerProcessIdentity] = await Promise.all([
+  const [processIdentity, ownerProcessIdentity] = await joinResourceOperations([
     artifacts.readCanonical(channel.transport.processIdentityRef).then(decodePlatformProcessIdentity),
     artifacts.readCanonical(owner.processIdentityRef).then(decodePlatformProcessIdentity)
   ]);
@@ -283,7 +283,7 @@ export async function readRetainedControlChannelClosure(
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel principal identity is not current');
   }
-  const metadata = await Promise.all([
+  const metadata = await joinResourceOperations([
     artifacts.describe(input.channelIdentityRef, 'application/json', 'cliq-local-control-channel-identity-v1'),
     artifacts.describe(channel.principalIdentityRef, 'application/json', 'cliq-local-principal-identity-v1')
   ]);

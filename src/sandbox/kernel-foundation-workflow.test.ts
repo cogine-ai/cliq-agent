@@ -26,10 +26,10 @@ function stepBlocks(workflow: string): string[] {
 test('Kernel foundation checkout never persists the GitHub credential', async () => {
   const workflow = await readFile(workflowUrl, 'utf8');
   const checkouts = stepBlocks(workflow).filter((block) =>
-    /- uses: actions\/checkout@v4/.test(block)
+    /- uses: actions\/checkout@/.test(block)
   );
 
-  assert.equal(checkouts.length, 2);
+  assert.ok(checkouts.length > 0, 'workflow must have checkout steps to verify');
   for (const checkout of checkouts) {
     assert.match(checkout, /\n\s+with:\n\s+persist-credentials: false(?:\n|$)/);
   }

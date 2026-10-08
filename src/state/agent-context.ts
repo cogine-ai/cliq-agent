@@ -12,7 +12,7 @@ import type { RunAssemblyToolAuthority } from '../model/run-assembly.js';
 import type { ModelTurnMaterial } from '../runtime/continuation.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeAdmittedContext, decodeRunObjective, decodeSessionProjection } from './decoders.js';
-import { KernelStorageError } from './errors.js';
+import { joinResourceOperations, KernelStorageError } from './errors.js';
 
 export async function readCanonicalArtifact<T>(artifacts: ArtifactCatalog, ref: string): Promise<T> {
   const value = await artifacts.readCanonical<T>(ref);
@@ -29,7 +29,7 @@ export async function readText(artifacts: ArtifactCatalog, ref: string, digest?:
 
 export async function readModelTurnMaterial(artifacts: ArtifactCatalog, ref: string): Promise<ModelTurnMaterial> {
   const turn = await readCanonicalArtifact<AgentModelTurn>(artifacts, ref);
-  return { turn, text: await readText(artifacts, turn.textRef), inputs: await Promise.all(turn.toolCalls.map(async (call) => {
+  return { turn, text: await readText(artifacts, turn.textRef), inputs: await joinResourceOperations(turn.toolCalls.map(async (call) => {
     const value = await readCanonicalArtifact<ToolCallInputV1>(artifacts, call.inputRef);
     const observed = await readCanonicalArtifact<ObservedToolCallInputV1>(artifacts, value.observedInputRef);
     if (value.diagnosticRef !== undefined) await artifacts.readBytes(value.diagnosticRef);
@@ -52,7 +52,7 @@ export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: 
       workspace.manifestDigest !== instructions.workspaceInstructionsDigest ||
       digestOmitting(workspace, 'manifestDigest') !== workspace.manifestDigest) throw new TypeError('workspace instructions mismatch');
   if (workspace.entries.length > 0) {
-    const entries = await Promise.all(workspace.entries.map(async (entry, index) => {
+    const entries = await joinResourceOperations(workspace.entries.map(async (entry, index) => {
       if (entry.order !== index || entry.appliesToSubtree !== true) throw new TypeError('workspace instruction scope mismatch');
       return { order: entry.order, canonicalRootRelativePath: entry.canonicalRootRelativePath, appliesToSubtree: true,
         instructionUtf8: (await readText(artifacts, entry.contentRef, entry.contentDigest)).utf8 };
