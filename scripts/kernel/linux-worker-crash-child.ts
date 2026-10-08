@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { inspect } from 'node:util';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { digestOmitting, identityHash } from '../../src/kernel/identity.js';
@@ -90,6 +91,7 @@ async function run(input: CrashChildInput) {
   let controllerLoss: { pid: number; processStartToken: string } | undefined;
   const primary = Object.assign(new Error('campaign real CAS read failure after actual controller SIGKILL'), { code: 'EIO' });
   let controllerReadFaults = 0, retainedFailure: ResourceRetirementError | undefined;
+  let operationFailure: { error: unknown } | undefined;
   try {
     prototype.readFile = (async function(this: FileHandle, ...args: unknown[]) {
       const bytes: unknown = await Reflect.apply(originalRead, this, args);
@@ -286,16 +288,28 @@ async function run(input: CrashChildInput) {
     }) as FileHandle['writeFile'];
     await execution.recoverWorker({ expectedRunRevision: waiting.run.revision });
     throw new Error('recovery completed without the required post-move/pre-CAS crash boundary');
+  } catch (error) {
+    operationFailure = { error };
+    throw error;
   } finally {
     prototype.readFile = originalRead; prototype.writeFile = originalWrite; prototype.close = originalClose;
-    metadata.close(); await store.close();
+    const cleanupFailures: unknown[] = [];
+    try { metadata.close(); } catch (error) { cleanupFailures.push(error); }
+    try { await store.close(); } catch (error) { cleanupFailures.push(error); }
+    if (cleanupFailures.length > 0) {
+      const cleanup = cleanupFailures.length === 1 ? cleanupFailures[0]
+        : new AggregateError(cleanupFailures, 'crash child metadata and Store cleanup failed');
+      if (operationFailure) throw new AggregateError([operationFailure.error, cleanup], 'crash child operation and cleanup both failed');
+      throw cleanup;
+    }
   }
 }
 
 process.once('message', (message: CrashChildInput) => {
   void run(message).catch(error => {
-    process.send!({ state: 'error', message: String(error).slice(0, 4096) });
-    console.error(error); process.exit(1);
+    const diagnostic = inspect(error, { depth: 8 }).slice(0, 8192);
+    console.error(diagnostic);
+    process.send!({ state: 'error', message: diagnostic }, () => process.exit(1));
   });
 });
 process.send({ state: 'ready' });

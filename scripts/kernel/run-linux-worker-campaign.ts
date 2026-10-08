@@ -813,7 +813,8 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
       materialData: Object.fromEntries(Object.entries(fixture.authority.material).filter(([, value]) => typeof value !== 'function')) as CrashChildInput['materialData'] };
     await new Promise<void>((resolve, reject) => child.send(input, error => error ? reject(error) : resolve()));
     const message = await refused;
-    assert.equal(message.state, fault === 'controller_loss' ? 'controller_loss_close_refused' : 'retirement_close_refused', message.message ?? diagnostic);
+    assert.equal(message.state, fault === 'controller_loss' ? 'controller_loss_close_refused' : 'retirement_close_refused',
+      `${message.message ?? ''}\ncrash child stderr/stdout:\n${diagnostic}`);
     const refusal = message as CrashChildRetirementRefused | CrashChildControllerLossRefused;
     assert.equal(refusal.runId, fixture.runId); assert.equal(refusal.fault, fault);
     assert.equal(refusal.closeCode, 'RECOVERY_REQUIRED');
