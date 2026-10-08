@@ -16,6 +16,24 @@
 #define MAX_OBSERVATION_PIDS 4096
 #define OBSERVATION_TIMEOUT_MS 5000
 
+/* Private rejection diagnostics; every nonzero status still fails closed. */
+enum spawn_rejection {
+    CLIQ_SPAWN_INPUT_GATE = 1001,
+    CLIQ_SPAWN_CGROUP_CREATE = 1002,
+    CLIQ_SPAWN_CGROUP_RESOURCES = 1003,
+    CLIQ_SPAWN_PROCESS_GROUP = 1004,
+    CLIQ_SPAWN_STDIO = 1005,
+    CLIQ_SPAWN_CHANNEL = 1006,
+    CLIQ_SPAWN_FORK = 1007,
+    CLIQ_SPAWN_MONITOR_TOKEN = 1008,
+    CLIQ_SPAWN_MONITOR_PLACEMENT = 1009,
+    CLIQ_SPAWN_INITIAL_SEND = 1010,
+    CLIQ_SPAWN_READY_WAIT = 1011,
+    CLIQ_SPAWN_READY_RECEIVE = 1012,
+    CLIQ_SPAWN_PROCESS_INSPECTION = 1013,
+    CLIQ_SPAWN_IDENTITY_TOKEN = 1014
+};
+
 struct scope {
     bool created, active, released, stopped, invocation;
     unsigned int parent;
@@ -222,6 +240,7 @@ static bool inspect_processes(struct scope *scope, const struct cliq_worker_pack
 
 static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size_t count,
                           struct cliq_worker_packet *response) {
+    response->status = CLIQ_SPAWN_INPUT_GATE;
     if (count != 5) return false;
     bool invocation = request->command == CLIQ_CREATE_WRITE;
     bool parent_ok = invocation ? request->parent > 0 && request->parent < CLIQ_WORKER_MAX_SCOPES &&
@@ -241,11 +260,14 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
         request->generation_inode != scopes[request->parent].identity.generation_inode)) return false;
     struct scope *scope = &scopes[request->scope];
     scope->invocation = invocation; scope->parent = request->parent;
+    response->status = CLIQ_SPAWN_CGROUP_CREATE;
     if (mkdirat(cgroup_parent, request->cgroup_name, 0700) != 0) return false;
     scope->cgroup = openat(cgroup_parent, request->cgroup_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     scope->created = scope->cgroup >= 0;
+    response->status = CLIQ_SPAWN_CGROUP_RESOURCES;
     if (!scope->created || !native_cgroup(scope->cgroup) || !cgroup_empty(scope->cgroup) ||
         !resources(scope->cgroup, request)) return false;
+    response->status = CLIQ_SPAWN_PROCESS_GROUP;
     if (!invocation && (!write_control(scope->cgroup, "cgroup.subtree_control", "+cpu +memory +pids") ||
         mkdirat(scope->cgroup, "worker", 0700) != 0)) return false;
     scope->process_group = invocation ? fcntl(scope->cgroup, F_DUPFD_CLOEXEC, 0) :
@@ -253,6 +275,7 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     if (scope->process_group < 0 || !native_cgroup(scope->process_group)) return false;
     struct stat cgroup;
     if (fstat(scope->cgroup, &cgroup) != 0) return false;
+    response->status = CLIQ_SPAWN_STDIO;
     scope->stdout_fd = memfd_create("cliq-scope-stdout", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     scope->stderr_fd = memfd_create("cliq-scope-stderr", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     if (scope->stdout_fd < 0 || scope->stderr_fd < 0 ||
@@ -261,8 +284,10 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
         fcntl(scope->stdout_fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SEAL) != 0 ||
         fcntl(scope->stderr_fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SEAL) != 0) return false;
     int channel[2], barrier[2];
+    response->status = CLIQ_SPAWN_CHANNEL;
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channel) != 0) return false;
     if (pipe2(barrier, O_CLOEXEC) != 0) { close(channel[0]); close(channel[1]); return false; }
+    response->status = CLIQ_SPAWN_FORK;
     scope->monitor = fork();
     if (scope->monitor < 0) { close(channel[0]); close(channel[1]); close(barrier[0]); close(barrier[1]); return false; }
     if (scope->monitor == 0) {
@@ -300,16 +325,23 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     }
     close(channel[1]); close(barrier[0]);
     scope->channel = channel[0];
+    response->status = CLIQ_SPAWN_MONITOR_TOKEN;
     if (!cliq_process_token(scope->monitor, scope->monitor_start_token)) { close(barrier[1]); return false; }
     char pid_text[32]; snprintf(pid_text, sizeof(pid_text), "%ld", (long)scope->monitor);
+    response->status = CLIQ_SPAWN_MONITOR_PLACEMENT;
     bool placed = write_control(scope->process_group, "cgroup.procs", pid_text);
     bool started = placed && write(barrier[1], "1", 1) == 1;
     close(barrier[1]);
-    if (!started || !cliq_send(scope->channel, request, input >= 0 ? &input : NULL, input >= 0 ? 1 : 0) ||
-        !readable(scope->channel, OBSERVATION_TIMEOUT_MS)) return false;
+    if (!started) return false;
+    response->status = CLIQ_SPAWN_INITIAL_SEND;
+    if (!cliq_send(scope->channel, request, input >= 0 ? &input : NULL, input >= 0 ? 1 : 0)) return false;
+    response->status = CLIQ_SPAWN_READY_WAIT;
+    if (!readable(scope->channel, OBSERVATION_TIMEOUT_MS)) return false;
     struct cliq_worker_packet ready; int extra[5]; size_t extras;
-    if (!cliq_receive(scope->channel, &ready, extra, &extras) || extras != 0 || ready.command != CLIQ_WORKER_READY ||
-        !inspect_processes(scope, &ready)) return false;
+    response->status = CLIQ_SPAWN_READY_RECEIVE;
+    if (!cliq_receive(scope->channel, &ready, extra, &extras) || extras != 0 || ready.command != CLIQ_WORKER_READY) return false;
+    response->status = CLIQ_SPAWN_PROCESS_INSPECTION;
+    if (!inspect_processes(scope, &ready)) return false;
     scope->identity = ready;
     scope->identity.scope = request->scope;
     scope->identity.cgroup_inode = (uint64_t)cgroup.st_ino;
@@ -318,6 +350,7 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     scope->identity.monitor_pid = scope->monitor;
     memcpy(scope->identity.monitor_start_token, scope->monitor_start_token, sizeof(scope->monitor_start_token));
     memcpy(scope->identity.init_native_start_token, ready.init_start_token, sizeof(ready.init_start_token));
+    response->status = CLIQ_SPAWN_IDENTITY_TOKEN;
     char init_start_token[CLIQ_WORKER_TOKEN_BYTES] = {0};
     int token_length = snprintf(init_start_token, sizeof(init_start_token),
         "linux-namespace-init:%ld:%s:monitor:%ld:%s", (long)scope->init,
@@ -331,6 +364,7 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     memcpy(scope->identity.activation_nonce, request->activation_nonce, sizeof(request->activation_nonce));
     memcpy(scope->identity.cgroup_name, request->cgroup_name, sizeof(request->cgroup_name));
     *response = scope->identity;
+    response->status = 0;
     return true;
 }
 
@@ -562,7 +596,7 @@ static int controller(void) {
         if (!ok && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES && scopes[request.scope].created) {
             struct cliq_worker_packet ignored; (void)stop_scope(request.scope, &ignored);
         }
-        response.status = ok ? 0 : 1;
+        response.status = ok ? 0 : (response.status != 0 ? response.status : 1);
         response.scope = request.scope;
         if (!cliq_send(3, &response, NULL, 0)) break;
     }

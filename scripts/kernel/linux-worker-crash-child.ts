@@ -12,13 +12,14 @@ import type { RunAssemblyValidationMaterial, RunAssemblyToolAuthority } from '..
 import { testFixture } from '../../src/model/testing/fixtures.js';
 import { decodeWorkerIdentity } from '../../src/state/decoders.js';
 import { ResourceRetirementError } from '../../src/state/errors.js';
+import { decodeWorkerProcessContainment } from '../../src/state/execution-closure.js';
 import { readRequiredWorkerLaunch } from '../../src/state/repositories/worker-launches.js';
 import { openSqliteDriver } from '../../src/state/sqlite-driver.js';
 import { openStateStore, type StateStoreRuntimeAuthority } from '../../src/state/store.js';
 
 export type CrashChildInput = {
   stateRoot: string; runId: string; runtimeAuthority: StateStoreRuntimeAuthority;
-  retirementFault?: 'pre_probe' | 'timeout_closure';
+  retirementFault?: 'pre_probe' | 'timeout_closure' | 'controller_loss';
   materialData: Omit<RunAssemblyValidationMaterial, 'resolveVerifiedCapabilityClaims' | 'verifyLocalZeroCostAuthority' |
     'resolvePriceTableAuthority' | 'resolveVerifiedTools' | 'verifyReference' | 'verifyProviderAdapter' | 'verifyProviderEndpoint'>;
 };
@@ -26,8 +27,12 @@ export type CrashChildPaused = { state: 'post_move_pre_cas'; runId: string; wait
   generationRef: string; sourceRowVersion: number; archiveRelativePath: string; archiveDevice: string; archiveInode: string;
   quarantineArtifactRef: string };
 export type CrashChildRetirementRefused = { state: 'retirement_close_refused'; runId: string;
-  fault: NonNullable<CrashChildInput['retirementFault']>; waitingOnRef: string; probePhase: string;
+  fault: Exclude<NonNullable<CrashChildInput['retirementFault']>, 'controller_loss'>; waitingOnRef: string; probePhase: string;
   closeCode: 'RECOVERY_REQUIRED'; actualCloseFaults: 1 };
+export type CrashChildControllerLossRefused = { state: 'controller_loss_close_refused'; runId: string;
+  fault: 'controller_loss'; waitingOnRef: string; probePhase: 'automatic_pending'; runRevision: number;
+  closeCode: 'RECOVERY_REQUIRED'; actualReadFaults: 1; primaryCode: 'EIO';
+  controllerPid: number; controllerStartToken: string };
 
 if (process.platform !== 'linux' || !process.send) throw new Error('real Linux crash child requires Linux and parent IPC');
 
@@ -81,11 +86,14 @@ async function run(input: CrashChildInput) {
   const prototype = Object.getPrototypeOf(sample) as Pick<FileHandle, 'readFile' | 'writeFile' | 'close'>;
   const originalRead = prototype.readFile, originalWrite = prototype.writeFile, originalClose = prototype.close;
   await sample.close();
-  let killedWorker = false, paused = false;
+  let processLossInjected = false, paused = false;
+  let controllerLoss: { pid: number; processStartToken: string } | undefined;
+  const primary = Object.assign(new Error('campaign real CAS read failure after actual controller SIGKILL'), { code: 'EIO' });
+  let controllerReadFaults = 0, retainedFailure: ResourceRetirementError | undefined;
   try {
     prototype.readFile = (async function(this: FileHandle, ...args: unknown[]) {
       const bytes: unknown = await Reflect.apply(originalRead, this, args);
-      if (!killedWorker && Buffer.isBuffer(bytes)) {
+      if (!processLossInjected && Buffer.isBuffer(bytes)) {
         const held = fs.fstatSync(this.fd, { bigint: true });
         if (held.dev === policy.dev && held.ino === policy.ino) {
           const launch = metadata.readSnapshot(connection => {
@@ -99,20 +107,65 @@ async function run(input: CrashChildInput) {
             assert.equal(canonicalSha256(JSON.parse(bytes.toString('utf8'))), before.runSpec.policyRef);
             const worker = decodeWorkerIdentity(artifact<WorkerIdentity>(input.stateRoot, launch.workerIdentityDigest!));
             assert.equal(worker.launchId, launch.launchId); assert.equal(token(worker.pid), worker.processStartToken);
-            process.kill(worker.pid, 'SIGKILL'); killedWorker = true;
+            if (input.retirementFault === 'controller_loss') {
+              assert.equal(worker.processContainmentRef, launch.processContainmentRef);
+              const containment = decodeWorkerProcessContainment(artifact(input.stateRoot, launch.processContainmentRef!));
+              assert.equal(containment.owner.kind, 'worker_activation');
+              if (containment.backend.kind !== 'linux') throw new Error('controller fault lacks actual Linux containment');
+              const match = /^linux-subreaper:([1-9][0-9]*):(linux-proc-start-ticks:[0-9]+)$/u.exec(containment.backend.subreaperStartToken);
+              assert.ok(match, 'controller PID/token must come from the exact retained native containment');
+              const pid = Number(match[1]), processStartToken = match[2]!;
+              assert.ok(Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid && pid !== worker.pid);
+              assert.equal(token(pid), processStartToken);
+              process.kill(pid, 'SIGKILL');
+              controllerLoss = { pid, processStartToken }; processLossInjected = true; controllerReadFaults++;
+              throw primary;
+            }
+            process.kill(worker.pid, 'SIGKILL'); processLossInjected = true;
             throw Object.assign(new Error('campaign OS-boundary CAS read failure after actual worker SIGKILL'), { code: 'EIO' });
           }
         }
       }
       return bytes;
     }) as FileHandle['readFile'];
-    await assert.rejects(execution.executeCurrentTool({ expectedRunRevision: before.run.revision }));
-    assert.ok(killedWorker, 'missing real activated/no-invocation worker-loss fault is not a pass');
+    await assert.rejects(execution.executeCurrentTool({ expectedRunRevision: before.run.revision }), error => {
+      if (input.retirementFault !== 'controller_loss') return true;
+      // The old implementation rejects with only the secondary native stop
+      // error, losing this exact primary and the retirement trait.
+      assert.ok(error instanceof ResourceRetirementError);
+      assert.ok(error.cause instanceof AggregateError);
+      assert.equal(error.cause.errors.length, 2);
+      assert.equal(error.cause.errors[0], primary);
+      const cleanup: unknown = error.cause.errors[1];
+      assert.ok(cleanup instanceof Error && cleanup !== primary);
+      assert.match(cleanup.message, /native|controller|scope|containment/iu);
+      retainedFailure = error;
+      return true;
+    });
+    assert.ok(processLossInjected, 'missing real activated/no-invocation process-loss fault is not a pass');
     prototype.readFile = originalRead;
     const waiting = await store.readRecoveryClosure(input.runId);
     const initialWait = await store.artifacts.readCanonical<WorkerDeathWait>(waiting.run.waitingOnRef!);
     assert.deepEqual(initialWait.subject.openInvocationRefs, []); assert.equal(waiting.journal.filter(row => row.opKind === 'tool').length, 0);
-    if (input.retirementFault) {
+    if (input.retirementFault === 'controller_loss') {
+      assert.ok(controllerLoss && retainedFailure);
+      assert.equal(controllerReadFaults, 1); assert.equal(initialWait.probeState.phase, 'automatic_pending');
+      assert.equal(initialWait.probeState.automaticProbeCount, 0); assert.equal(initialWait.probeState.userProbeCount, 0);
+      assert.equal(waiting.run.revision, before.run.revision + 2, 'activation and worker-loss fencing each advance the Run once');
+      assert.deepEqual(waiting.run.budgetConsumed, before.run.budgetConsumed);
+      // The OS read hook is gone. Both public shutdown attempts must retain
+      // the same aggregate object, not just rethrow a new similar message.
+      await assert.rejects(store.close(), error => error === retainedFailure);
+      await assert.rejects(store.close(), error => error === retainedFailure);
+      assert.deepEqual(store.getRun(input.runId), waiting.run);
+      const message: CrashChildControllerLossRefused = { state: 'controller_loss_close_refused', runId: input.runId,
+        fault: 'controller_loss', waitingOnRef: waiting.run.waitingOnRef!, probePhase: 'automatic_pending', runRevision: waiting.run.revision,
+        closeCode: 'RECOVERY_REQUIRED', actualReadFaults: 1, primaryCode: 'EIO',
+        controllerPid: controllerLoss.pid, controllerStartToken: controllerLoss.processStartToken };
+      process.channel?.ref(); process.send!(message);
+      await new Promise<never>(() => {});
+    }
+    if (input.retirementFault && input.retirementFault !== 'controller_loss') {
       assert.equal(initialWait.probeState.phase, 'automatic_pending');
       const failure = Object.assign(new Error('campaign uncertainty after the actual CAS FileHandle.close'), { code: 'EIO' });
       let closeFaults = 0, closeSelected = false;

@@ -28,7 +28,7 @@ import { readRun } from '../../src/state/rows.js';
 import { openSqliteDriver } from '../../src/state/sqlite-driver.js';
 import { readLatestStateOwner } from '../../src/state/state-owner.js';
 import { openStateStore, type StateStore } from '../../src/state/store.js';
-import type { CrashChildInput, CrashChildPaused, CrashChildRetirementRefused } from './linux-worker-crash-child.js';
+import type { CrashChildInput, CrashChildPaused, CrashChildRetirementRefused, CrashChildControllerLossRefused } from './linux-worker-crash-child.js';
 
 // This command is intentionally separate from ordinary portable unit tests.
 // Missing actual images, persistent bounded storage, namespaces or delegated
@@ -813,11 +813,14 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
       materialData: Object.fromEntries(Object.entries(fixture.authority.material).filter(([, value]) => typeof value !== 'function')) as CrashChildInput['materialData'] };
     await new Promise<void>((resolve, reject) => child.send(input, error => error ? reject(error) : resolve()));
     const message = await refused;
-    assert.equal(message.state, 'retirement_close_refused', message.message ?? diagnostic);
-    const refusal = message as CrashChildRetirementRefused;
+    assert.equal(message.state, fault === 'controller_loss' ? 'controller_loss_close_refused' : 'retirement_close_refused', message.message ?? diagnostic);
+    const refusal = message as CrashChildRetirementRefused | CrashChildControllerLossRefused;
     assert.equal(refusal.runId, fixture.runId); assert.equal(refusal.fault, fault);
-    assert.equal(refusal.closeCode, 'RECOVERY_REQUIRED'); assert.equal(refusal.actualCloseFaults, 1);
-    assert.equal(refusal.probePhase, fault === 'pre_probe' ? 'automatic_pending' : 'automatic_in_flight');
+    assert.equal(refusal.closeCode, 'RECOVERY_REQUIRED');
+    if (refusal.fault === 'controller_loss') {
+      assert.equal(refusal.actualReadFaults, 1); assert.equal(refusal.primaryCode, 'EIO');
+    } else assert.equal(refusal.actualCloseFaults, 1);
+    assert.equal(refusal.probePhase, fault === 'timeout_closure' ? 'automatic_in_flight' : 'automatic_pending');
     const metadata = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
     const held = (() => { try { return metadata.readSnapshot(connection => {
       const owner = readLatestStateOwner(connection)!;
@@ -831,14 +834,28 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
       assert.equal(wait.probeState.phase, refusal.probePhase); assert.deepEqual(wait.subject.openInvocationRefs, []);
       const processIdentity = frozenArtifact<PlatformProcessIdentityV1>(fixture.stateRoot, owner.processIdentityRef);
       assert.equal(processIdentity.pid, child.pid); assert.equal(processToken(child.pid!), processIdentity.processStartToken);
-      return { owner, run };
+      return { owner, run, wait };
     }); } finally { metadata.close(); } })();
+    if (refusal.fault === 'controller_loss') {
+      assert.equal(held.run.revision, refusal.runRevision);
+      assert.equal(held.run.revision, before.run.revision + 2, 'shutdown retries must not advance the fenced Run');
+      assert.deepEqual(held.run.budgetConsumed, before.run.budgetConsumed);
+      assert.equal(held.wait.probeState.automaticProbeCount, 0); assert.equal(held.wait.probeState.userProbeCount, 0);
+      const containment = decodeWorkerProcessContainment(frozenArtifact(fixture.stateRoot, held.wait.subject.processContainmentRef));
+      const backend = nativeBackend(containment.backend);
+      assert.equal(backend.subreaperStartToken, `linux-subreaper:${refusal.controllerPid}:${refusal.controllerStartToken}`);
+      await assert.rejects(access(`/proc/${refusal.controllerPid}`), { code: 'ENOENT' }, 'the actual killed controller has been joined');
+    }
     await assert.rejects(openStateStore(fixture.stateRoot, fixture.runtimeAuthority), /OS lock is already held/u,
       'a real contender must not acquire after the failed operation and repeated shutdown attempts');
     assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
     console.log(JSON.stringify({ scenario: `actual-${fault}-retirement-keeps-owner`, supervisorPid: child.pid,
-      ownerEpoch: held.owner.ownerEpoch, waitingOnRef: held.run.waitingOnRef, actualCloseFaults: 1,
-      nativeEffects: 0, note: 'actual Linux worker SIGKILL; real CAS close then injected EIO; public close retry refuses and actual flock stays held' }));
+      ownerEpoch: held.owner.ownerEpoch, waitingOnRef: held.run.waitingOnRef,
+      ...(refusal.fault === 'controller_loss' ? { actualReadFaults: 1, controllerPid: refusal.controllerPid,
+        note: 'actual controller SIGKILL; real CAS read then exact EIO; primary and independent native cleanup remain aggregated through close retry and actual flock retention' }
+        : { actualCloseFaults: 1,
+          note: 'actual Linux worker SIGKILL; real CAS close then injected EIO; public close retry refuses and actual flock stays held' }),
+      nativeEffects: 0 }));
     // Only real process death permits takeover and disposal of this retained
     // owner. The fault was removed before both Store.close assertions.
     child.kill('SIGKILL');
@@ -854,6 +871,7 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
 }
 
 for (const [scenario, run] of [
+  ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
   ['parent-loss-before-release', parentLossBeforeRelease],
   ['no-open-invocation-recovery', () => noOpenInvocationRecovery()],
