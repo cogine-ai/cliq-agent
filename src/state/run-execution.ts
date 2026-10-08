@@ -59,7 +59,7 @@ async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: Linux
   const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
     filesystemBinding: { kind: 'run-generation', generationRef }, launchNonceDigest: spawnNonceDigest,
     backend: { kind: 'linux', cgroupPath: path.posix.join(installation.cgroupParent, `cliq-${launchId}`),
-      cgroupNameReservationDigest: identityHash('cliq-worker-cgroup-v1', run.id, launchId),
+      cgroupNameReservationDigest: canonicalSha256(['cliq-worker-cgroup-v1', run.id, launchId]),
       pidNamespaceReservationId: identityHash('cliq-worker-namespace-v1', run.id, launchId), subreaperStartToken: controller.subreaperStartToken },
     createdAt: sampleCanonicalNow(), planDigest: '' };
   plan.planDigest = digestOmitting(plan, 'planDigest');
@@ -99,7 +99,7 @@ async function publishEditRecipe(artifacts: ArtifactCatalog, workerSpec: WorkerS
   const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
     filesystemBinding: { kind: 'run-generation', generationRef: workerSpec.filesystem.generationRef }, parentContainmentRef,
     launchNonceDigest: nonce(), backend: { kind: 'linux', cgroupPath: path.posix.join(parentCgroup, `cliq-${identityHash('cliq-edit-invocation-v1', dispatchId)}`),
-      cgroupNameReservationDigest: identityHash('cliq-edit-cgroup-v1', dispatchId), pidNamespaceReservationId: identityHash('cliq-edit-namespace-v1', dispatchId),
+      cgroupNameReservationDigest: canonicalSha256(['cliq-edit-cgroup-v1', dispatchId]), pidNamespaceReservationId: identityHash('cliq-edit-namespace-v1', dispatchId),
       subreaperStartToken: '' }, createdAt: sampleCanonicalNow(), planDigest: '' };
   const parentPlan = await artifacts.readCanonical<ProcessContainmentPlanV1>(workerSpec.containmentPlanRef);
   if (parentPlan.backend.kind !== 'linux' || plan.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'edit requires the exact Linux parent');

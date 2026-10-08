@@ -571,6 +571,19 @@ again passed **1,803/1,803**, with no failures/cancellations/skips (526,626 ms);
 design guards, the portable edit contract and all three strict script checks
 also pass. The actual Linux compile remains a separate CI gate.
 
+At `08fff28`, the free Linux job compiled the worker/controller/edit/addon
+and passed the actual foreign-owner installation regression. The campaign
+then correctly rejected the producer's base64url cgroup reservation as not
+being a lowercase SHA-256 digest. Both worker and edit producers now use
+`canonicalSha256` for that digest; opaque namespace identifiers retain `H`.
+The real edited-checkpoint scenario additionally checks both retained plans
+against their exact tag/identity inputs. The strict decoder is unchanged.
+Successful compilation/loading is still not complete worker qualification.
+The subsequent local digest-fix sweep passed **1,803/1,803**, zero
+failures/cancellations/skips (496,809 ms). Project/strict-script typechecking,
+the design contract guard and portable edit contract also pass; these cannot
+substitute for the next actual Linux lifecycle result.
+
 There is also an unqualified availability risk: the current worker death
 observation precedes the complete generation walk and checkpoint validation.
 Slow trees or storage can exceed the five-second retirement freshness window

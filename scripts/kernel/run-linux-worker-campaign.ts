@@ -141,8 +141,30 @@ async function editedCheckpoint() {
     const completed = after.closure.journal.find(entry => entry.opKind === 'tool' && entry.phase === 'completed');
     assert.ok(completed?.resultRef);
     const result = await store.artifacts.readCanonical<{ postEffect: { retirementEvidenceRef: string } }>(completed.resultRef);
-    const death = await store.artifacts.readCanonical<{ backend: ProcessContainment['backend'] & {
+    const death = await store.artifacts.readCanonical<{ planRef: string; backend: ProcessContainment['backend'] & {
       cgroupPopulated: number; namespaceInitDeadAndReaped: boolean; remainingTrackedDescendants: number } }>(result.postEffect.retirementEvidenceRef);
+    const workerPlan = await store.artifacts.readCanonical<ProcessContainmentPlanV1>(death.planRef);
+    const claim = toolClaims[0]!;
+    assert.ok(claim.sandboxLaunchSpecRef);
+    const invocationSpec = await store.artifacts.readCanonical<SandboxLaunchSpecV1>(claim.sandboxLaunchSpecRef);
+    const invocationPlan = await store.artifacts.readCanonical<ProcessContainmentPlanV1>(invocationSpec.containmentPlanRef);
+    if (workerPlan.owner.kind !== 'worker_activation' || workerPlan.backend.kind !== 'linux' ||
+        invocationSpec.owner.kind !== 'run_invocation' || invocationSpec.purpose !== 'tool' ||
+        invocationPlan.owner.kind !== 'run_invocation' || invocationPlan.backend.kind !== 'linux') {
+      throw new Error('actual edit did not retain its exact Linux worker and invocation plans');
+    }
+    assert.equal(workerPlan.owner.runId, fixture.runId);
+    assert.equal(workerPlan.owner.workerLaunchId, invocationSpec.owner.workerLaunchId);
+    assert.equal(invocationPlan.owner.dispatchId, claim.dispatchId);
+    // Digest fields are lowercase SHA-256; opaque namespace reservations keep H's base64url encoding.
+    assert.match(workerPlan.backend.cgroupNameReservationDigest, /^[0-9a-f]{64}$/u);
+    assert.equal(workerPlan.backend.cgroupNameReservationDigest,
+      canonicalSha256(['cliq-worker-cgroup-v1', fixture.runId, workerPlan.owner.workerLaunchId]));
+    assert.equal(workerPlan.backend.pidNamespaceReservationId,
+      identityHash('cliq-worker-namespace-v1', fixture.runId, workerPlan.owner.workerLaunchId));
+    assert.match(invocationPlan.backend.cgroupNameReservationDigest, /^[0-9a-f]{64}$/u);
+    assert.equal(invocationPlan.backend.cgroupNameReservationDigest, canonicalSha256(['cliq-edit-cgroup-v1', claim.dispatchId]));
+    assert.equal(invocationPlan.backend.pidNamespaceReservationId, identityHash('cliq-edit-namespace-v1', claim.dispatchId));
     assert.equal(death.backend.cgroupPopulated, 0); assert.equal(death.backend.namespaceInitDeadAndReaped, true);
     assert.equal(death.backend.remainingTrackedDescendants, 0);
     const backend = nativeBackend(death.backend);
