@@ -2,8 +2,8 @@
 
 Status: **Option A approved; implementation and real qualification in progress.
 The before-create, READY-before-identity and invalid private-entry
-retirement/retry tracers have real Linux GREEN; the successor crash boundaries
-are still being qualified.**
+retirement/retry tracers and reserved-before-create Supervisor crash have real
+Linux GREEN; the remaining successor crash boundaries are still being qualified.**
 Baseline: `854b9a95e6a99a8380772243853e5b7adc597272` (`main`, PR #514).
 
 This is one complete capability inside I1, not a new work package or a
@@ -215,6 +215,40 @@ type and deep-compared in full, including its cgroup path and namespace
 reservation. Production retirement is unchanged; a full crash/retry GREEN is
 still required:
 [Linux job 113894905863](https://github.com/cogine-ai/cliq-agent/actions/runs/37952589604/job/113894905863).
+The complete genuine reserved-before-create Supervisor crash and distinct retry
+then passed at `63cdf508e25ce5a2c6d2df35dc3196fdaca92e21`, together with all
+thirteen other native scenarios:
+[Linux job 113901454296](https://github.com/cogine-ai/cliq-agent/actions/runs/37954501234/job/113901454296).
+The parent independently observed Supervisor PID 2872 and original controller
+PID 2891, killed only the Supervisor, and verified natural controller absence,
+fresh successor no-spawn evidence, the same quarantined inode and one real
+replacement edit/claim/charge. Local build and all 1807 tests passed before this
+push; all six Linux/macOS qualification and Node 22/24 matrix jobs passed.
+READY-before-identity is the next genuine crash qualification; ordinary
+failure handling at that cut does not substitute for successor opening.
+That next tracer reuses the same child/parent operation. Before SIGKILL, its
+parent independently verifies all five native witness frame footers with Node
+SHA-256, exact zero-padded binding/READY bodies, the real PID-2 signed executable,
+same-namespace PID-1 init and exact monitor PID/token/member relationship. The
+successor must publish actual whole-containment death with those exact birth
+identities while retaining the absence of WorkerIdentity, then satisfy the same
+one-edit distinct retry and old-inode/bytes isolation checks. This addition has
+not yet passed the real Linux campaign.
+
+For the later native-fork/pre-READY window, the user approved a test-only Linux
+operating-system tracer. It may observe and suspend the real fork on the free
+runner, but must not change the production protocol or fabricate native birth
+facts. Its implementation and actual qualification remain pending.
+The selected minimal design lets the existing campaign process trace its real
+controller descendant, preserving the Supervisor IPC and process topology. A
+test-only Node-API module may only arm `PTRACE_O_TRACEFORK`, poll the exact fork
+event, and detach/join its attachment; it is not an installed runtime entry.
+The precise target is the host monitor fork before MONITOR birth identity is
+persisted: the real 2336-byte CGROUP prefix plus an actual newborn process,
+not a namespace PID-2 worker or READY claim. Failure to attach/capture/retire is
+a campaign failure, never a reason to weaken runner permissions or retry until
+capture happens. See the [ptrace contract](https://man7.org/linux/man-pages/man2/ptrace.2.html)
+and [Yama ancestry rules](https://docs.kernel.org/admin-guide/LSM/Yama.html).
 
 Then qualify the same complete scenario at these boundaries:
 

@@ -23,7 +23,7 @@ import { openStateStore, type StateStore, type StateStoreRuntimeAuthority } from
 
 export type CrashChildInput = {
   stateRoot: string; runId: string; runtimeAuthority: StateStoreRuntimeAuthority;
-  preactivationCrash?: 'reserved_before_create';
+  preactivationCrash?: 'reserved_before_create' | 'ready_before_identity';
   retirementFault?: 'pre_probe' | 'timeout_closure' | 'controller_loss';
   materialData: Omit<RunAssemblyValidationMaterial, 'resolveVerifiedCapabilityClaims' | 'verifyLocalZeroCostAuthority' |
     'resolvePriceTableAuthority' | 'resolveVerifiedTools' | 'verifyReference' | 'verifyProviderAdapter' | 'verifyProviderEndpoint'>;
@@ -63,8 +63,9 @@ function token(pid: number): string {
   return `linux-proc-start-ticks:${fields[19]}`;
 }
 
-async function stopReservedBeforeCreate(input: CrashChildInput, metadata: ReturnType<typeof openSqliteDriver>,
+async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<typeof openSqliteDriver>,
   execution: Awaited<ReturnType<StateStore['loadRunExecution']>>, expectedRunRevision: number): Promise<never> {
+  const created = input.preactivationCrash === 'ready_before_identity';
   const image = input.runtimeAuthority.bundle.entries.find(entry => entry.entryId === 'linux_worker');
   assert.ok(image?.executable && image.role === 'worker');
   const originalRead = fs.readSync;
@@ -77,7 +78,7 @@ async function stopReservedBeforeCreate(input: CrashChildInput, metadata: Return
       try {
         const fd = args[0] as number, held = fs.fstatSync(fd, { bigint: true });
         if (!held.isFile() || held.size !== BigInt(image.byteCount) ||
-            fs.readlinkSync(`/proc/self/fd/${fd}`) !== '/memfd:cliq-runtime-image (deleted)') return count;
+            (!created && fs.readlinkSync(`/proc/self/fd/${fd}`) !== '/memfd:cliq-runtime-image (deleted)')) return count;
         const launch = metadata.readSnapshot(connection => {
           const rows = connection.prepare('SELECT launch_id FROM worker_launches WHERE run_id=? AND retired_at IS NULL')
             .all<{ launch_id: string }>(input.runId);
@@ -85,6 +86,33 @@ async function stopReservedBeforeCreate(input: CrashChildInput, metadata: Return
           return rows.length === 1 ? readRequiredWorkerLaunch(connection, rows[0]!.launch_id) : undefined;
         });
         if (launch?.phase !== 'reserved') return count;
+        const plan = artifact<ProcessContainmentPlanV1>(input.stateRoot, launch.containmentPlanRef);
+        if (plan.owner.kind !== 'worker_activation' || plan.backend.kind !== 'linux' || !plan.backend.nativeReservation) {
+          throw new Error('preactivation crash lacks its bound native worker reservation');
+        }
+        const backend = plan.backend;
+        if (created) {
+          const procs = path.join(backend.cgroupPath, 'worker/cgroup.procs');
+          let members: string;
+          try { members = fs.readFileSync(procs, 'utf8').trim(); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT' && (error as NodeJS.ErrnoException).path === procs) return count;
+            throw error;
+          }
+          const running = members === '' ? [] : members.split('\n').filter(value => {
+            assert.match(value, /^[1-9][0-9]*$/u); const pid = Number(value); assert.ok(Number.isSafeInteger(pid));
+            const namespace = fs.readFileSync(`/proc/${pid}/status`, 'utf8').match(/^NSpid:\s+([0-9\s]+)$/mu)?.[1];
+            assert.ok(namespace);
+            if (Number(namespace.trim().split(/\s+/u).at(-1)) !== 2) return false;
+            const executable = fs.statSync(`/proc/${pid}/exe`, { bigint: true });
+            const runtime = fs.statSync(`/proc/${pid}/root/runtime/cliq-linux-worker`, { bigint: true });
+            return executable.dev === held.dev && executable.ino === held.ino &&
+              runtime.dev === held.dev && runtime.ino === held.ino;
+          });
+          if (running.length === 0) return count;
+          assert.equal(running.length, 1); token(Number(running[0]));
+          assert.match(fs.readFileSync(path.join(backend.cgroupPath, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 1\n/u);
+        }
         const hash = createHash('sha256'), chunk = Buffer.alloc(Math.min(64 * 1024, image.byteCount));
         for (let offset = 0; offset < image.byteCount;) {
           const length = originalRead(fd, chunk, 0, Math.min(chunk.length, image.byteCount - offset), offset);
@@ -92,14 +120,9 @@ async function stopReservedBeforeCreate(input: CrashChildInput, metadata: Return
         }
         if (hash.digest('hex') !== image.digest) return count;
         assert.ok(count > 0); assert.equal(launch.workerIdentityDigest, undefined); assert.equal(launch.processContainmentRef, undefined);
-        const plan = artifact<ProcessContainmentPlanV1>(input.stateRoot, launch.containmentPlanRef);
-        if (plan.owner.kind !== 'worker_activation' || plan.backend.kind !== 'linux' || !plan.backend.nativeReservation) {
-          throw new Error('reserved crash lacks its bound native worker reservation');
-        }
-        const backend = plan.backend;
         assert.equal(plan.owner.runId, input.runId); assert.equal(plan.owner.workerLaunchId, launch.launchId);
         assert.equal(plan.launchNonceDigest, launch.spawnNonceDigest);
-        assert.throws(() => fs.lstatSync(backend.cgroupPath), error =>
+        if (!created) assert.throws(() => fs.lstatSync(backend.cgroupPath), error =>
           (error as NodeJS.ErrnoException).code === 'ENOENT' && (error as NodeJS.ErrnoException).path === backend.cgroupPath);
         const controller = /^linux-subreaper:([1-9][0-9]*):(linux-proc-start-ticks:[0-9]+)$/u.exec(backend.subreaperStartToken);
         assert.ok(controller); assert.equal(token(Number(controller[1])), controller[2]);
@@ -110,14 +133,14 @@ async function stopReservedBeforeCreate(input: CrashChildInput, metadata: Return
         // IPC send here could remain buffered forever once this thread stops.
         fs.readSync = originalRead; syncBuiltinESMExports();
         process.kill(process.pid, 'SIGSTOP');
-        throw new Error('reserved crash barrier unexpectedly resumed');
+        throw new Error('preactivation crash barrier unexpectedly resumed');
       } finally { probing = false; }
     }) as typeof fs.readSync;
     syncBuiltinESMExports();
     await new Promise<void>((resolve, reject) => process.send!({ state: 'preactivation_crash_armed', runId: input.runId },
       error => error ? reject(error) : resolve()));
     await execution.executeCurrentTool({ expectedRunRevision });
-    throw new Error('execution missed the required actual reserved-before-create crash boundary');
+    throw new Error(`execution missed the required actual ${input.preactivationCrash} crash boundary`);
   } finally { fs.readSync = originalRead; syncBuiltinESMExports(); }
 }
 
@@ -155,9 +178,9 @@ async function run(input: CrashChildInput) {
   let controllerReadFaults = 0, retainedFailure: ResourceRetirementError | undefined;
   let operationFailure: { error: unknown } | undefined;
   try {
-    if (input.preactivationCrash === 'reserved_before_create') {
+    if (input.preactivationCrash !== undefined) {
       assert.equal(input.retirementFault, undefined);
-      return await stopReservedBeforeCreate(input, metadata, execution, before.run.revision);
+      return await stopPreactivation(input, metadata, execution, before.run.revision);
     }
     prototype.readFile = (async function(this: FileHandle, ...args: unknown[]) {
       const bytes: unknown = await Reflect.apply(originalRead, this, args);
