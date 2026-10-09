@@ -12,7 +12,7 @@ import { inspect } from 'node:util';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { identityHash } from '../../src/kernel/identity.js';
-import type { ProcessContainment, ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../src/kernel/execution.js';
+import type { ProcessContainment, ProcessContainmentDeathEvidenceV1, ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../src/kernel/execution.js';
 import type { ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1 } from '../../src/kernel/reconciliation.js';
 import type { WorkerDeathWait, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1, Run, WorkerLaunch } from '../../src/kernel/types.js';
@@ -205,15 +205,19 @@ async function editedCheckpoint() {
   } finally { await transport.close(); await store.close(); await fixture.dispose(); }
 }
 
-async function beforeSpawnRetirementRetry() {
-  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'before-spawn-retry' });
+async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_before_identity') {
+  const created = boundary === 'ready_before_identity';
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `${boundary.replaceAll('_', '-')}-retry` });
   let store = fixture.store;
   let metadata: ReturnType<typeof openSqliteDriver> | undefined;
   const originalRead = fs.readSync;
-  const primary = Object.assign(new Error('campaign actual worker image read failed before spawn'), { code: 'EIO' });
-  let injected: { launch: WorkerLaunch; controllerPid: number; controllerToken: string } | undefined;
+  const primary = Object.assign(new Error(`campaign actual worker image read failed ${created ? 'after READY before identity' : 'before spawn'}`), { code: 'EIO' });
+  type ReadyScope = { path: string; cgroupId: string; pidNamespaceId: string; workerPid: number; workerToken: string;
+    initPid: number; initToken: string; members: { pid: number; token: string }[] };
+  let injected: { launch: WorkerLaunch; controllerPid: number; controllerToken: string; physicalScope?: ReadyScope } | undefined;
   let probing = false, faults = 0;
   let operationFailure: { error: unknown } | undefined;
+  let successorOpeningFailed = false;
   try {
     const before = await checkpointBytes(store, fixture.runId);
     const execution = await store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
@@ -230,7 +234,7 @@ async function beforeSpawnRetirementRetry() {
         try {
           const fd = args[0] as number, held = fs.fstatSync(fd, { bigint: true });
           if (held.isFile() && held.size === BigInt(workerImage.byteCount) &&
-              fs.readlinkSync(`/proc/self/fd/${fd}`) === '/memfd:cliq-runtime-image (deleted)') {
+              (created || fs.readlinkSync(`/proc/self/fd/${fd}`) === '/memfd:cliq-runtime-image (deleted)')) {
             const launch = inspection.readSnapshot(connection => {
               const rows = connection.prepare('SELECT launch_id FROM worker_launches WHERE run_id=? AND retired_at IS NULL')
                 .all<{ launch_id: string }>(fixture.runId);
@@ -238,6 +242,17 @@ async function beforeSpawnRetirementRetry() {
               return rows.length === 1 ? readRequiredWorkerLaunch(connection, rows[0]!.launch_id) : undefined;
             });
             if (launch?.phase === 'reserved') {
+              assert.equal(launch.workerIdentityDigest, undefined); assert.equal(launch.processContainmentRef, undefined);
+              const plan = frozenArtifact<ProcessContainmentPlanV1>(fixture.stateRoot, launch.containmentPlanRef);
+              assert.equal(plan.owner.kind, 'worker_activation');
+              if (plan.owner.kind !== 'worker_activation' || plan.backend.kind !== 'linux') throw new Error('preactivation fault lacks its Linux worker reservation');
+              assert.equal(plan.owner.runId, fixture.runId);
+              assert.equal(plan.owner.workerLaunchId, launch.launchId); assert.equal(plan.launchNonceDigest, launch.spawnNonceDigest);
+              const scopePath = plan.backend.cgroupPath;
+              // Installed/sealed image reads precede creation. READY observation
+              // reads the real worker's executable, a different held inode.
+              const running = created ? imageProcess(path.join(scopePath, 'worker'), 'cliq-linux-worker') : undefined;
+              if (created && (!running || running.image.dev !== held.dev || running.image.ino !== held.ino)) return count;
               const hash = createHash('sha256'), chunk = Buffer.alloc(Math.min(64 * 1024, workerImage.byteCount));
               for (let offset = 0; offset < workerImage.byteCount;) {
                 const length = originalRead(fd, chunk, 0, Math.min(chunk.length, workerImage.byteCount - offset), offset);
@@ -245,21 +260,31 @@ async function beforeSpawnRetirementRetry() {
                 hash.update(chunk.subarray(0, length)); offset += length;
               }
               if (hash.digest('hex') === workerImage.digest) {
-                const plan = frozenArtifact<ProcessContainmentPlanV1>(fixture.stateRoot, launch.containmentPlanRef);
-                assert.equal(plan.owner.kind, 'worker_activation');
-                if (plan.owner.kind !== 'worker_activation' || plan.backend.kind !== 'linux') throw new Error('pre-spawn fault lacks its Linux worker reservation');
-                assert.equal(plan.owner.runId, fixture.runId);
-                assert.equal(plan.owner.workerLaunchId, launch.launchId); assert.equal(plan.launchNonceDigest, launch.spawnNonceDigest);
-                const scopePath = plan.backend.cgroupPath;
-                assert.throws(() => fs.lstatSync(scopePath), error =>
-                  (error as NodeJS.ErrnoException).code === 'ENOENT' && (error as NodeJS.ErrnoException).path === scopePath);
+                let physicalScope: ReadyScope | undefined;
+                if (running) {
+                  const group = fs.lstatSync(scopePath, { bigint: true }); assert.ok(group.isDirectory() && !group.isSymbolicLink());
+                  assert.match(fs.readFileSync(path.join(scopePath, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 1\n/u);
+                  const namespace = fs.statSync(`/proc/${running.pid}/ns/pid`, { bigint: true });
+                  const members = pids(path.join(scopePath, 'worker')).map(pid => ({ pid, token: processToken(pid) }));
+                  const init = members.filter(member => {
+                    const identity = fs.statSync(`/proc/${member.pid}/ns/pid`, { bigint: true });
+                    return identity.dev === namespace.dev && identity.ino === namespace.ino && namespacePid(member.pid) === 1;
+                  });
+                  assert.equal(init.length, 1); assert.equal(processToken(running.pid), running.token);
+                  assert.ok(members.some(member => member.pid === running.pid && member.token === running.token));
+                  physicalScope = { path: scopePath, cgroupId: String(group.ino), pidNamespaceId: String(namespace.ino),
+                    workerPid: running.pid, workerToken: running.token, initPid: init[0]!.pid, initToken: init[0]!.token, members };
+                } else {
+                  assert.throws(() => fs.lstatSync(scopePath), error =>
+                    (error as NodeJS.ErrnoException).code === 'ENOENT' && (error as NodeJS.ErrnoException).path === scopePath);
+                }
                 const controller = /^linux-subreaper:([1-9][0-9]*):(linux-proc-start-ticks:[0-9]+)$/u.exec(plan.backend.subreaperStartToken);
                 assert.ok(controller); const controllerPid = Number(controller[1]), controllerToken = controller[2]!;
                 assert.equal(processToken(controllerPid), controllerToken); assert.ok(directChildren().has(controllerPid));
                 const after = fs.fstatSync(fd, { bigint: true });
                 assert.equal(after.dev, held.dev); assert.equal(after.ino, held.ino); assert.equal(after.size, held.size);
                 assert.equal(after.mtimeNs, held.mtimeNs); assert.equal(after.ctimeNs, held.ctimeNs);
-                assert.ok(count > 0); injected = { launch, controllerPid, controllerToken }; faults++;
+                assert.ok(count > 0); injected = { launch, controllerPid, controllerToken, ...(physicalScope ? { physicalScope } : {}) }; faults++;
                 throw primary;
               }
             }
@@ -271,8 +296,9 @@ async function beforeSpawnRetirementRetry() {
     syncBuiltinESMExports();
     await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.closure.run.revision })), error => error === primary);
     fs.readSync = originalRead; syncBuiltinESMExports();
-    assert.ok(injected, 'missing actual post-reservation/pre-spawn fault is not a passed campaign'); assert.equal(faults, 1);
+    assert.ok(injected, `missing actual ${boundary} fault is not a passed campaign`); assert.equal(faults, 1);
     const fault = injected;
+    assert.equal(fault.physicalScope !== undefined, created);
     const failed = await checkpointBytes(store, fixture.runId);
     assert.equal(failed.closure.run.status, 'queued'); assert.equal(failed.closure.run.activeWorkerLaunchId, undefined);
     assert.equal(failed.closure.run.leaseEpoch, before.closure.run.leaseEpoch);
@@ -281,16 +307,16 @@ async function beforeSpawnRetirementRetry() {
     assert.deepEqual(failed.closure.run.budgetConsumed, before.closure.run.budgetConsumed);
     assert.deepEqual(failed.closure.run.budgetReserved, before.closure.run.budgetReserved);
     const identity = frozenArtifact<WorkspaceGenerationIdentityV1>(fixture.stateRoot, fault.launch.workspaceGenerationRef);
-    if (identity.locator.kind !== 'linux_directory') throw new Error('pre-spawn fixture did not materialize a real Linux generation');
+    if (identity.locator.kind !== 'linux_directory') throw new Error('preactivation fixture did not materialize a real Linux generation');
     const generation = failed.closure.workspaceGenerations.find(row => row.generationRef === fault.launch.workspaceGenerationRef);
     assert.ok(generation);
     let relativePath = identity.locator.canonicalRootRelativePath;
     if (generation.phase === 'quarantined') {
       const receipt = await store.artifacts.readCanonical<WorkspaceGenerationQuarantineEvidenceV1>(generation.quarantineEvidenceRef);
-      assert.equal(receipt.reason, 'launch_aborted'); assert.equal(receipt.generationRef, fault.launch.workspaceGenerationRef);
+      assert.equal(receipt.reason, created ? 'launch_died_before_activation' : 'launch_aborted'); assert.equal(receipt.generationRef, fault.launch.workspaceGenerationRef);
       assert.equal(receipt.quarantineDeviceId, identity.locator.deviceId); assert.equal(receipt.quarantineFileId, identity.locator.directoryFileId);
       relativePath = receipt.quarantineCanonicalRootRelativePath;
-    } else assert.equal(generation.phase, 'preactivated_readonly');
+    } else { assert.equal(created, false, 'a created worker must be physically retired and quarantined'); assert.equal(generation.phase, 'preactivated_readonly'); }
     const root = await open(path.join(fixture.stateRoot, relativePath), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     try {
       const held = await root.stat({ bigint: true });
@@ -301,8 +327,14 @@ async function beforeSpawnRetirementRetry() {
         assert.deepEqual(await file.readFile(), fixture.original, 'the actual failed private generation has zero edit effects');
       } finally { await file.close(); }
     } finally { await root.close(); }
+    if (fault.physicalScope) {
+      assert.match(await readFile(path.join(fault.physicalScope.path, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
+      for (const member of fault.physicalScope.members) await assert.rejects(access(`/proc/${member.pid}`), { code: 'ENOENT' });
+    }
     await assert.rejects(access(`/proc/${fault.controllerPid}`), { code: 'ENOENT' });
-    await store.close(); store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+    await store.close();
+    try { store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+    catch (error) { successorOpeningFailed = true; throw error; }
     const reopened = await checkpointBytes(store, fixture.runId);
     assert.deepEqual(reopened.closure.latestCheckpoint, before.closure.latestCheckpoint); assert.deepEqual(reopened.bytes, fixture.original);
     assert.deepEqual(reopened.closure.journal, before.closure.journal);
@@ -326,31 +358,56 @@ async function beforeSpawnRetirementRetry() {
     assert.equal(old.phase, 'retired'); assert.ok(old.retirementEvidenceRef); assert.equal(replacements.length, 1);
     const originalFacts = { ...old, phase: fault.launch.phase };
     delete originalFacts.retiredAt; delete originalFacts.retirementEvidenceRef;
+    if (created) delete originalFacts.processContainmentRef;
     assert.deepEqual(originalFacts, fault.launch, 'retirement must retain every original reservation binding');
     const replacement = replacements[0]!;
     assert.equal(replacement.phase, 'retired');
     assert.notEqual(replacement.launchId, old.launchId); assert.notEqual(replacement.spawnNonceDigest, old.spawnNonceDigest);
     assert.notEqual(replacement.activationNonceDigest, old.activationNonceDigest); assert.notEqual(replacement.workspaceGenerationRef, old.workspaceGenerationRef);
-    const noSpawn = await store.artifacts.readCanonical<ProcessContainmentNoSpawnEvidenceV1>(old.retirementEvidenceRef);
+    const proof = await store.artifacts.readCanonical<ProcessContainmentNoSpawnEvidenceV1 | ProcessContainmentDeathEvidenceV1>(old.retirementEvidenceRef);
     const oldPlan = frozenArtifact<ProcessContainmentPlanV1>(fixture.stateRoot, old.containmentPlanRef);
-    assert.equal(noSpawn.kind, 'containment_plan_quiescent'); assert.equal(noSpawn.planRef, old.containmentPlanRef);
-    assert.deepEqual(noSpawn.owner, oldPlan.owner);
-    assert.equal(noSpawn.sandboxLaunchSpecRef, old.sandboxLaunchSpecRef); assert.equal(noSpawn.launchNonceDigest, old.spawnNonceDigest);
-    assert.equal(noSpawn.backend.kind, 'linux'); assert.equal(noSpawn.backend.matchingLaunchNonceProcessCount, 0);
-    console.log(JSON.stringify({ scenario: 'actual-before-spawn-retirement-and-retry', runId: fixture.runId,
+    assert.equal(proof.planRef, old.containmentPlanRef); assert.deepEqual(proof.owner, oldPlan.owner);
+    assert.equal(proof.sandboxLaunchSpecRef, old.sandboxLaunchSpecRef); assert.equal(proof.launchNonceDigest, old.spawnNonceDigest);
+    assert.equal(proof.backend.kind, 'linux'); assert.equal(old.workerIdentityDigest, undefined);
+    if (fault.physicalScope) {
+      assert.equal(proof.kind, 'containment_all_descendants_dead');
+      if (proof.kind !== 'containment_all_descendants_dead' || proof.backend.kind !== 'linux') throw new Error('created worker retirement lacks exact Linux death evidence');
+      assert.equal(proof.containmentRef, old.processContainmentRef);
+      assert.equal(proof.backend.cgroupPath, fault.physicalScope.path); assert.equal(proof.backend.cgroupId, fault.physicalScope.cgroupId);
+      assert.equal(proof.backend.pidNamespaceId, fault.physicalScope.pidNamespaceId);
+      assert.equal(proof.backend.cgroupPopulated, 0); assert.equal(proof.backend.namespaceInitDeadAndReaped, true);
+      assert.equal(proof.backend.remainingTrackedDescendants, 0);
+      const tokens = /^linux-namespace-init:([1-9][0-9]*):([0-9]+):monitor:([1-9][0-9]*):([0-9]+)$/u.exec(proof.backend.namespaceInitStartToken);
+      assert.ok(tokens); assert.equal(Number(tokens[1]), fault.physicalScope.initPid);
+      assert.equal(`linux-proc-start-ticks:${tokens[2]}`, fault.physicalScope.initToken);
+      assert.ok(fault.physicalScope.members.some(member => member.pid === Number(tokens[3]) && member.token === `linux-proc-start-ticks:${tokens[4]}`));
+      const containment = decodeWorkerProcessContainment(await store.artifacts.readCanonical(proof.containmentRef));
+      assert.equal(containment.planRef, old.containmentPlanRef); assert.equal(containment.sandboxLaunchSpecRef, old.sandboxLaunchSpecRef);
+      assert.equal(containment.launchNonceDigest, old.spawnNonceDigest); assert.deepEqual(containment.owner, oldPlan.owner);
+      assert.deepEqual(containment.filesystemBinding, { kind: 'run-generation', generationRef: old.workspaceGenerationRef });
+    } else {
+      assert.equal(proof.kind, 'containment_plan_quiescent');
+      if (proof.kind !== 'containment_plan_quiescent' || proof.backend.kind !== 'linux') throw new Error('unattempted worker retirement lacks exact Linux no-spawn evidence');
+      assert.equal(proof.backend.matchingLaunchNonceProcessCount, 0);
+    }
+    console.log(JSON.stringify({ scenario: `actual-${boundary.replaceAll('_', '-')}-retirement-and-retry`, runId: fixture.runId,
       oldLaunchId: old.launchId, newLaunchId: replacement.launchId, oldGenerationRef: old.workspaceGenerationRef,
-      newGenerationRef: replacement.workspaceGenerationRef, actualReadFaults: faults, nativeEffectCount: 1, permanentToolClaims: 1 }));
+      newGenerationRef: replacement.workspaceGenerationRef,
+      ...(fault.physicalScope ? { actualWorkerPid: fault.physicalScope.workerPid, actualWorkerStartToken: fault.physicalScope.workerToken } : {}),
+      actualReadFaults: faults, nativeEffectCount: 1, permanentToolClaims: 1 }));
   } catch (error) { operationFailure = { error }; throw error; }
   finally {
     fs.readSync = originalRead; syncBuiltinESMExports();
     const failures: unknown[] = [];
-    let resourcesRetired = true;
+    // A successful close of the old Store says nothing about resources retained
+    // by a failed successor opening. Preserve that evidence even without a Store.
+    let resourcesRetired = !successorOpeningFailed;
     try { metadata?.close(); } catch (error) { failures.push(error); resourcesRetired = false; }
     try { await store.close(); } catch (error) { failures.push(error); resourcesRetired = false; }
     if (resourcesRetired) {
       try { await fixture.dispose(); } catch (error) { failures.push(error); }
-    } else console.error(`preserving uncertain pre-spawn fixture: ${fixture.stateRoot}`);
-    if (failures.length !== 0) throw new AggregateError([...(operationFailure ? [operationFailure.error] : []), ...failures], 'pre-spawn campaign and cleanup failures');
+    } else console.error(`preserving uncertain ${boundary} fixture: ${fixture.stateRoot}`);
+    if (failures.length !== 0) throw new AggregateError([...(operationFailure ? [operationFailure.error] : []), ...failures], 'preactivation campaign and cleanup failures');
   }
 }
 
@@ -1063,7 +1120,8 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
 }
 
 for (const [scenario, run] of [
-  ['before-spawn-retirement-retry', beforeSpawnRetirementRetry],
+  ['before-spawn-retirement-retry', () => preactivationRetirementRetry('before_spawn')],
+  ['ready-before-identity-retirement-retry', () => preactivationRetirementRetry('ready_before_identity')],
   ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
   ['parent-loss-before-release', parentLossBeforeRelease],
