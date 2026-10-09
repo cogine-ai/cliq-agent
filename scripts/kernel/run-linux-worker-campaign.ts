@@ -509,20 +509,24 @@ async function releaseForkTracer(tracer: LinuxForkTracer) {
   }
 }
 
-async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInput['preactivationCrash']>) {
+async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInput['preactivationCrash']>, witnessFault?: 'corrupt_ready_footer') {
+  if (witnessFault !== undefined) assert.equal(boundary, 'ready_before_identity');
   const committed = boundary === 'preactivated_before_activation';
   const postMove = boundary === 'queued_post_move_before_retirement';
   const controllerLoss = boundary === 'monitor_fork_controller_loss';
+  const corruptReadyFooter = witnessFault === 'corrupt_ready_footer';
+  const negative = controllerLoss || corruptReadyFooter;
   const monitorFork = boundary === 'monitor_fork_before_ready' || controllerLoss;
   const hasReadyAtPause = boundary === 'ready_before_identity' || committed;
-  const expectsCreatedRetirement = hasReadyAtPause || boundary === 'monitor_fork_before_ready';
-  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `${boundary.replaceAll('_', '-')}-crash` });
+  const expectsCreatedRetirement = !negative && (hasReadyAtPause || boundary === 'monitor_fork_before_ready');
+  const scenarioBoundary = witnessFault ?? boundary;
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `${scenarioBoundary.replaceAll('_', '-')}-crash` });
   let child: ReturnType<typeof fork> | undefined, exited: ReturnType<typeof once> | undefined, successor: StateStore | undefined;
   let history: ReturnType<typeof openSqliteDriver> | undefined;
   let refusedOwner: ReturnType<typeof fork> | undefined, refusedOwnerExit: ReturnType<typeof once> | undefined;
   let retainedWitness: FileHandle | undefined, tracer: LinuxForkTracer | undefined, tracerDirectory: string | undefined;
   let removeHintListener: (() => void) | undefined;
-  let diagnostic = '', resourcesRetired = false, supervisorJoined = false, controllerLossQualified = false, operationFailure: { error: unknown } | undefined;
+  let diagnostic = '', resourcesRetired = false, supervisorJoined = false, negativeQualified = false, operationFailure: { error: unknown } | undefined;
   try {
     const before = await checkpointBytes(fixture.store, fixture.runId);
     await fixture.store.close();
@@ -592,7 +596,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       assert.equal(generation.sourceCheckpointId, before.closure.latestCheckpoint.id);
       assert.equal(generation.sourceWorkspaceStateRef, before.closure.latestCheckpoint.workspaceStateRef);
       const eventSeq = connection.prepare('SELECT max(event_seq) AS seq FROM run_events WHERE run_id=?').get<{ seq: bigint }>(fixture.runId)!.seq;
-      return { run, owner, launch, generation, eventSeq, refusalRows: controllerLoss ? preactivationRefusalRows(connection, fixture.runId) : undefined };
+      return { run, owner, launch, generation, eventSeq, refusalRows: negative ? preactivationRefusalRows(connection, fixture.runId) : undefined };
     }); } finally { metadata.close(); } })();
     const supervisorIdentity = frozenArtifact<PlatformProcessIdentityV1>(fixture.stateRoot, held.owner.processIdentityRef);
     assert.equal(supervisorIdentity.platform, 'linux'); assert.equal(supervisorIdentity.pid, supervisor.pid);
@@ -631,13 +635,15 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       namespaceInitStartToken: string; birthObservation: 'independent-live-READY' | 'durable-native-birth-after-controller-release';
       members: { pid: number; token: string }[] } | undefined;
     let bindingPrefix: Buffer | undefined;
+    let readyObservation: { bytes: Buffer; witness: fs.BigIntStats; group: fs.BigIntStats } | undefined;
     let forkObservation: { prefix: Buffer; witness: fs.BigIntStats; group: fs.BigIntStats; monitorPid: number; monitorToken: string } | undefined;
     const bindingTexts: (readonly [string, number])[] = [[held.launch.containmentPlanRef, 65],
       [held.launch.sandboxLaunchSpecRef, 65], [spec.launchSpecDigest, 65], [held.launch.workspaceGenerationRef, 65],
       [held.launch.spawnNonceDigest, 65], [held.launch.activationNonceDigest, 65], [path.posix.basename(plan.backend.cgroupPath), 96],
       [plan.backend.pidNamespaceReservationId, 192], ['', 192], ['', 192], ['', 192], ['', 192], [controllerToken, 192]];
-    const witness = await open(path.join(fixture.stateRoot, 'runtime/worker-reservations',
-      identityHash('cliq-worker-reservation-v1', held.launch.launchId, held.launch.spawnNonceDigest)), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const witnessPath = path.join(fixture.stateRoot, 'runtime/worker-reservations',
+      identityHash('cliq-worker-reservation-v1', held.launch.launchId, held.launch.spawnNonceDigest));
+    const witness = await open(witnessPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     retainedWitness = witness;
     try {
       const physical = await witness.stat({ bigint: true });
@@ -693,11 +699,12 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
         physicalScope = { cgroupId: String(group.ino), pidNamespaceId: String(namespace.ino), workerPid: running.pid,
           workerToken: running.token, initPid: init[0]!.pid, initToken: init[0]!.token, monitorPid, monitorToken,
           namespaceInitStartToken, birthObservation: 'independent-live-READY', members };
+        if (corruptReadyFooter) readyObservation = { bytes, witness: physical, group };
       } else await assert.rejects(lstat(plan.backend.cgroupPath), { code: 'ENOENT' });
       const after = await witness.stat({ bigint: true });
       for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
     } finally {
-      if (!monitorFork) { await witness.close(); retainedWitness = undefined; }
+      if (!monitorFork && !corruptReadyFooter) { await witness.close(); retainedWitness = undefined; }
     }
     if (postMove) {
       assert.ok(hint); assert.equal(hint.runId, fixture.runId); assert.equal(hint.generationRef, held.generation.generationRef);
@@ -893,6 +900,80 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     assert.equal(processToken(supervisor.pid!), supervisorIdentity.processStartToken);
     assert.ok(supervisor.kill('SIGKILL'));
     const supervisorExit = await bounded(exit); supervisorJoined = true; assert.deepEqual(supervisorExit, [null, 'SIGKILL']);
+    const linuxLocator = identity.locator, linuxBackend = plan.backend;
+    const assertPublicOpeningRefusal = async (assertWitnessFault: () => Promise<void>, expectedGroup: fs.BigIntStats) => {
+      assert.ok(negative && held.refusalRows && retainedWitness === witness && supervisorJoined);
+      await assertWitnessFault();
+      // Public failed startup owns the refusal and its GC boundary. This
+      // campaign never opens, repairs, retries or closes the negative fixture.
+      refusedOwner = fork(new URL('../../src/state/testing/preactivation-owner-child.ts', import.meta.url), [], {
+        execArgv: ['--expose-gc', '--import', 'tsx'], serialization: 'advanced', stdio: ['ignore', 'pipe', 'pipe', 'ipc']
+      });
+      const helper = refusedOwner, helperExit = once(helper, 'exit'); refusedOwnerExit = helperExit; void helperExit.catch(() => {});
+      for (const output of [helper.stdout!, helper.stderr!]) output.on('data', (chunk: Buffer) => {
+        diagnostic = (diagnostic + chunk.toString()).slice(-8192);
+      });
+      const helperReply = async () => {
+        const abort = new AbortController(), timer = setTimeout(() => abort.abort(), 40_000);
+        try { return await Promise.race([
+          once(helper, 'message', { signal: abort.signal }).then(([value]) => value as unknown),
+          helperExit.then(([code, signal]) => { throw new Error(`${scenarioBoundary} refused owner exited before reply: ${code}/${signal}: ${diagnostic}`); })
+        ]); } finally { clearTimeout(timer); abort.abort(); }
+      };
+      assert.deepEqual(await helperReply(), { state: 'ready' });
+      const response = helperReply(); void response.catch(() => {});
+      await new Promise<void>((resolve, reject) => helper.send({ stateRoot: fixture.stateRoot, authority: fixture.runtimeAuthority },
+        error => error ? reject(error) : resolve()));
+      const refused = await response;
+      assert.ok(refused && typeof refused === 'object' && !Array.isArray(refused));
+      const { message: refusalMessage, ...refusalFacts } = refused as Record<string, unknown>;
+      assert.equal(typeof refusalMessage, 'string');
+      assert.deepEqual(refusalFacts, { state: 'refused', failurePhase: 'open', retirement: true, code: 'RECOVERY_REQUIRED', closeFaults: 0 },
+        typeof refusalMessage === 'string' ? refusalMessage : diagnostic);
+      const native = await loadNativeStateOwner(fixture.runtimeAuthority.bundle);
+      let incorrectlyAcquired: HeldStateOwnerLock | undefined;
+      try { incorrectlyAcquired = native.acquireLock(fixture.stateRoot, false); }
+      catch (error) { assert.match(String(error), /OS lock is already held/u); }
+      if (incorrectlyAcquired) {
+        incorrectlyAcquired.close(); assert.fail('actual failed opening released its OS owner after caller GC');
+      }
+      const inspection = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME)); history = inspection;
+      const refusingOwner = inspection.readSnapshot(connection => {
+        assert.deepEqual(readRun(connection, fixture.runId), held.run);
+        assert.deepEqual(readInvocationJournal(connection, fixture.runId), before.closure.journal);
+        assert.deepEqual(readRequiredWorkerLaunch(connection, held.launch.launchId), held.launch);
+        assert.deepEqual(readRequiredWorkspaceGenerationByRef(connection, held.generation.generationRef), held.generation);
+        assert.deepEqual(preactivationRefusalRows(connection, fixture.runId), held.refusalRows,
+          'invalid birth refusal cannot change any Run events, Journal, launch/generation rows or register positive native/quarantine proof');
+        const owner = readLatestStateOwner(connection)!;
+        assert.equal(owner.state, 'active'); assert.ok(owner.ownerEpoch > held.owner.ownerEpoch);
+        assert.notEqual(owner.supervisorInstanceId, held.owner.supervisorInstanceId); return owner;
+      });
+      const helperIdentity = frozenArtifact<PlatformProcessIdentityV1>(fixture.stateRoot, refusingOwner.processIdentityRef);
+      assert.equal(helperIdentity.platform, 'linux'); assert.equal(helperIdentity.pid, helper.pid);
+      assert.equal(processToken(helper.pid!), helperIdentity.processStartToken);
+      await assertWitnessFault();
+      const generation = await open(path.join(fixture.stateRoot, linuxLocator.canonicalRootRelativePath),
+        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      try {
+        const physical = await generation.stat({ bigint: true }); assert.ok(physical.isDirectory());
+        assert.equal(String(physical.dev), linuxLocator.deviceId); assert.equal(String(physical.ino), linuxLocator.directoryFileId);
+        assert.equal(Number(physical.uid), linuxLocator.ownerUid); assert.equal(physical.mode & 0o7777n, 0o700n);
+        const file = await open(`/proc/self/fd/${generation.fd}/a`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+        try { assert.deepEqual(await file.readFile(), fixture.original); } finally { await file.close(); }
+      } finally { await generation.close(); }
+      assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+      await assert.rejects(lstat(path.join(fixture.stateRoot, archiveRelativePath)), { code: 'ENOENT' });
+      const group = await lstat(linuxBackend.cgroupPath, { bigint: true });
+      for (const field of ['dev', 'ino', 'uid', 'mode'] as const) assert.equal(group[field], expectedGroup[field]);
+      for (const scope of [linuxBackend.cgroupPath, path.join(linuxBackend.cgroupPath, 'worker')]) {
+        assert.equal((await readFile(path.join(scope, 'cgroup.procs'), 'utf8')).trim(), '');
+        assert.match(await readFile(path.join(scope, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
+      }
+      assert.equal(processToken(helper.pid!), helperIdentity.processStartToken);
+      assert.ok(helper.kill('SIGKILL')); assert.deepEqual(await bounded(helperExit), [null, 'SIGKILL']);
+      return { refusingOwnerEpoch: refusingOwner.ownerEpoch, publicOpening: refusalFacts };
+    };
     if (controllerLoss) {
       assert.ok(tracer && forkObservation && retainedWitness === witness && held.refusalRows && supervisorJoined);
       const observedFork = forkObservation;
@@ -936,84 +1017,92 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
         const after = await witness.stat({ bigint: true });
         for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
       };
-      await assertIncompleteBirth();
-      // Public failed startup owns the real refusal and its GC boundary. The
-      // campaign itself must never open, repair, retry or close this fixture.
-      refusedOwner = fork(new URL('../../src/state/testing/preactivation-owner-child.ts', import.meta.url), [], {
-        execArgv: ['--expose-gc', '--import', 'tsx'], serialization: 'advanced', stdio: ['ignore', 'pipe', 'pipe', 'ipc']
-      });
-      const helper = refusedOwner, helperExit = once(helper, 'exit'); refusedOwnerExit = helperExit; void helperExit.catch(() => {});
-      for (const output of [helper.stdout!, helper.stderr!]) output.on('data', (chunk: Buffer) => {
-        diagnostic = (diagnostic + chunk.toString()).slice(-8192);
-      });
-      const helperReply = async () => {
-        const abort = new AbortController(), timer = setTimeout(() => abort.abort(), 40_000);
-        try { return await Promise.race([
-          once(helper, 'message', { signal: abort.signal }).then(([value]) => value as unknown),
-          helperExit.then(([code, signal]) => { throw new Error(`controller-loss refused owner exited before reply: ${code}/${signal}: ${diagnostic}`); })
-        ]); } finally { clearTimeout(timer); abort.abort(); }
-      };
-      assert.deepEqual(await helperReply(), { state: 'ready' });
-      const response = helperReply(); void response.catch(() => {});
-      await new Promise<void>((resolve, reject) => helper.send({ stateRoot: fixture.stateRoot, authority: fixture.runtimeAuthority },
-        error => error ? reject(error) : resolve()));
-      const refused = await response;
-      assert.ok(refused && typeof refused === 'object' && !Array.isArray(refused));
-      const { message: refusalMessage, ...refusalFacts } = refused as Record<string, unknown>;
-      assert.equal(typeof refusalMessage, 'string');
-      assert.deepEqual(refusalFacts, { state: 'refused', failurePhase: 'open', retirement: true, code: 'RECOVERY_REQUIRED', closeFaults: 0 },
-        typeof refusalMessage === 'string' ? refusalMessage : diagnostic);
-      const native = await loadNativeStateOwner(fixture.runtimeAuthority.bundle);
-      let incorrectlyAcquired: HeldStateOwnerLock | undefined;
-      try { incorrectlyAcquired = native.acquireLock(fixture.stateRoot, false); }
-      catch (error) { assert.match(String(error), /OS lock is already held/u); }
-      if (incorrectlyAcquired) {
-        incorrectlyAcquired.close(); assert.fail('actual controller-loss failed opening released its OS owner after caller GC');
-      }
-      const inspection = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME)); history = inspection;
-      const refusingOwner = inspection.readSnapshot(connection => {
-        assert.deepEqual(readRun(connection, fixture.runId), held.run);
-        assert.deepEqual(readInvocationJournal(connection, fixture.runId), before.closure.journal);
-        assert.deepEqual(readRequiredWorkerLaunch(connection, held.launch.launchId), held.launch);
-        assert.deepEqual(readRequiredWorkspaceGenerationByRef(connection, held.generation.generationRef), held.generation);
-        assert.deepEqual(preactivationRefusalRows(connection, fixture.runId), held.refusalRows,
-          'incomplete birth refusal cannot change any Run events, Journal, launch/generation rows or register positive native/quarantine proof');
-        const owner = readLatestStateOwner(connection)!;
-        assert.equal(owner.state, 'active'); assert.ok(owner.ownerEpoch > held.owner.ownerEpoch);
-        assert.notEqual(owner.supervisorInstanceId, held.owner.supervisorInstanceId); return owner;
-      });
-      const helperIdentity = frozenArtifact<PlatformProcessIdentityV1>(fixture.stateRoot, refusingOwner.processIdentityRef);
-      assert.equal(helperIdentity.platform, 'linux'); assert.equal(helperIdentity.pid, helper.pid);
-      assert.equal(processToken(helper.pid!), helperIdentity.processStartToken);
-      await assertIncompleteBirth();
-      const generation = await open(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath),
-        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
-      try {
-        const physical = await generation.stat({ bigint: true }); assert.ok(physical.isDirectory());
-        assert.equal(String(physical.dev), identity.locator.deviceId); assert.equal(String(physical.ino), identity.locator.directoryFileId);
-        assert.equal(Number(physical.uid), identity.locator.ownerUid); assert.equal(physical.mode & 0o7777n, 0o700n);
-        const file = await open(`/proc/self/fd/${generation.fd}/a`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-        try { assert.deepEqual(await file.readFile(), fixture.original); } finally { await file.close(); }
-      } finally { await generation.close(); }
-      assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
-      await assert.rejects(lstat(path.join(fixture.stateRoot, archiveRelativePath)), { code: 'ENOENT' });
-      const group = await lstat(plan.backend.cgroupPath, { bigint: true });
-      for (const field of ['dev', 'ino', 'uid', 'mode'] as const) assert.equal(group[field], observedFork.group[field]);
-      for (const scope of [plan.backend.cgroupPath, path.join(plan.backend.cgroupPath, 'worker')]) {
-        assert.equal((await readFile(path.join(scope, 'cgroup.procs'), 'utf8')).trim(), '');
-        assert.match(await readFile(path.join(scope, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
-      }
-      assert.equal(processToken(helper.pid!), helperIdentity.processStartToken);
-      assert.ok(helper.kill('SIGKILL')); assert.deepEqual(await bounded(helperExit), [null, 'SIGKILL']);
-      controllerLossQualified = true;
+      const refusal = await assertPublicOpeningRefusal(assertIncompleteBirth, observedFork.group);
+      negativeQualified = true;
       console.log(JSON.stringify({ scenario: 'actual-supervisor-crash-monitor-fork-controller-loss', supervisorPid: supervisor.pid,
         supervisorStartToken: supervisorIdentity.processStartToken, supervisorSignal: 'SIGKILL', controllerPid,
         controllerStartToken: controllerToken, ...terminal, monitorPid: observedFork.monitorPid, monitorStartToken: observedFork.monitorToken,
         witnessBytes: 2336, oldLaunchId: held.launch.launchId, oldGenerationRef: held.generation.generationRef,
-        sourceRowVersion: held.generation.rowVersion, refusingOwnerEpoch: refusingOwner.ownerEpoch,
-        publicOpening: refusalFacts, actualOwnerLockAfterCallerGc: 'busy', nativeEffectCount: 0, retryCount: 0,
+        sourceRowVersion: held.generation.rowVersion, ...refusal,
+        actualOwnerLockAfterCallerGc: 'busy', nativeEffectCount: 0, retryCount: 0,
         preservedStateRoot: fixture.stateRoot, preservedWorkspace: fixture.workspace,
         note: 'real monitor fork; Supervisor and original controller SIGKILL; natural monitor barrier EOF exit 70; no birth repair, no native positive proof or generation quarantine; retained unknown fixture for controlled CI teardown' }));
+      return;
+    }
+    if (corruptReadyFooter) {
+      assert.ok(readyObservation && physicalScope && retainedWitness === witness && !tracer);
+      const originalReady = readyObservation, oldScope = physicalScope;
+      // The file fault follows natural EOF cleanup, never interrupts its
+      // producer or lets an old live flock/process mask READY frame checking.
+      for (const pid of new Set([controllerPid, ...oldScope.members.map(member => member.pid), oldScope.monitorPid])) {
+        const deadline = performance.now() + 5000;
+        for (;;) {
+          try { await access(`/proc/${pid}`); }
+          catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ENOENT'); break; }
+          assert.ok(performance.now() < deadline, `pre-fault original process ${pid} remains in /proc`);
+          await delay(1);
+        }
+      }
+      const group = await lstat(plan.backend.cgroupPath, { bigint: true });
+      for (const field of ['dev', 'ino', 'uid', 'mode'] as const) assert.equal(group[field], originalReady.group[field]);
+      for (const scope of [plan.backend.cgroupPath, path.join(plan.backend.cgroupPath, 'worker')]) {
+        assert.equal((await readFile(path.join(scope, 'cgroup.procs'), 'utf8')).trim(), '');
+        assert.match(await readFile(path.join(scope, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
+      }
+      const footerShaOffset = 4736, oldByte = originalReady.bytes[footerShaOffset]!, newByte = oldByte ^ 1;
+      const writable = await open(witnessPath, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
+      let writeFailure: { error: unknown } | undefined;
+      try {
+        const physical = await writable.stat({ bigint: true }), retained = await witness.stat({ bigint: true });
+        assert.ok(physical.isFile()); assert.equal(physical.size, 4768n); assert.equal(physical.nlink, 1n); assert.equal(physical.mode & 0o7777n, 0o600n);
+        for (const field of ['dev', 'ino', 'uid', 'mode', 'nlink', 'size'] as const) {
+          assert.equal(physical[field], retained[field]); assert.equal(physical[field], originalReady.witness[field]);
+        }
+        assert.equal(String(physical.dev), plan.backend.nativeReservation.deviceId); assert.equal(String(physical.ino), plan.backend.nativeReservation.fileId);
+        assert.equal(Number(physical.uid), plan.backend.nativeReservation.ownerUid);
+        const bytes = await witnessBytes(writable, 4768); assert.deepEqual(bytes, originalReady.bytes);
+        verifyNativeBirthFrames(bytes, [2048, 32, 64, 256, 2048]);
+        const { bytesWritten } = await writable.write(Buffer.from([newByte]), 0, 1, footerShaOffset); assert.equal(bytesWritten, 1);
+        await writable.sync();
+      } catch (error) { writeFailure = { error }; throw error; }
+      finally {
+        try { await writable.close(); }
+        catch (error) { throw new AggregateError([...(writeFailure ? [writeFailure.error] : []), error], 'READY footer fault writer did not close'); }
+      }
+      const postFault = await witness.stat({ bigint: true });
+      const assertCorruptReadyFooter = async () => {
+        const physical = await witness.stat({ bigint: true }), named = await lstat(witnessPath, { bigint: true });
+        assert.ok(physical.isFile() && named.isFile() && !named.isSymbolicLink());
+        for (const field of ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const) {
+          assert.equal(physical[field], postFault[field]); assert.equal(named[field], postFault[field]);
+        }
+        assert.equal(physical.size, 4768n);
+        const bytes = await witnessBytes(witness, 4768), differences: number[] = [];
+        for (let offset = 0; offset < bytes.length; offset++) if (bytes[offset] !== originalReady.bytes[offset]) differences.push(offset);
+        assert.deepEqual(differences, [footerShaOffset]); assert.equal(bytes[footerShaOffset], newByte);
+        verifyNativeBirthFrames(bytes.subarray(0, 2656), [2048, 32, 64, 256]);
+        assert.deepEqual(bytes.subarray(4704, 4736), originalReady.bytes.subarray(4704, 4736), 'final footer framing must remain valid');
+        const actualReadySha = createHash('sha256').update(bytes.subarray(2656, 4704)).digest();
+        assert.deepEqual(actualReadySha, originalReady.bytes.subarray(4736, 4768));
+        assert.notDeepEqual(actualReadySha, bytes.subarray(4736, 4768), 'only the final READY checksum is corrupt');
+        const after = await witness.stat({ bigint: true });
+        for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
+      };
+      const refusal = await assertPublicOpeningRefusal(assertCorruptReadyFooter, originalReady.group);
+      await assertCorruptReadyFooter();
+      const faultBytes = await witnessBytes(witness, 4768);
+      negativeQualified = true;
+      console.log(JSON.stringify({ scenario: 'actual-supervisor-crash-corrupt-ready-footer', supervisorPid: supervisor.pid,
+        supervisorStartToken: supervisorIdentity.processStartToken, supervisorSignal: 'SIGKILL', controllerPid,
+        controllerStartToken: controllerToken, oldLaunchId: held.launch.launchId, oldGenerationRef: held.generation.generationRef,
+        sourceRowVersion: held.generation.rowVersion, ...refusal, actualOwnerLockAfterCallerGc: 'busy', nativeEffectCount: 0, retryCount: 0,
+        fault: { kind: 'corrupt_ready_footer', byteOffset: footerShaOffset, originalByte: oldByte, corruptedByte: faultBytes[footerShaOffset],
+          byteLength: faultBytes.length, originalSha256: createHash('sha256').update(originalReady.bytes).digest('hex'),
+          corruptedSha256: createHash('sha256').update(faultBytes).digest('hex'), deviceId: String(postFault.dev), fileId: String(postFault.ino),
+          ownerUid: Number(postFault.uid), mode: Number(postFault.mode & 0o7777n), linkCount: Number(postFault.nlink),
+          postFaultMtimeNs: String(postFault.mtimeNs), postFaultCtimeNs: String(postFault.ctimeNs), fsyncComplete: true },
+        preservedStateRoot: fixture.stateRoot, preservedWorkspace: fixture.workspace,
+        note: 'real READY observed before Supervisor loss; original controller and captured members naturally gone before one-byte footer SHA fault; public opening refuses without repair or new native birth/death evidence; retained fixture for controlled CI teardown' }));
       return;
     }
     if (tracer) { await releaseForkTracer(tracer); tracer = undefined; }
@@ -1243,9 +1332,9 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       try { await successor.close(); resourcesRetired = operationFailure === undefined && failures.length === 0; }
       catch (error) { failures.push(error); resourcesRetired = false; }
     }
-    if (!controllerLoss && resourcesRetired) {
+    if (!negative && resourcesRetired) {
       try { await fixture.dispose(); } catch (error) { failures.push(error); }
-    } else console.error(`preserving ${controllerLossQualified ? 'qualified incomplete-birth refusal' : 'uncertain'} ${boundary}-crash fixture: ${fixture.stateRoot}`);
+    } else console.error(`preserving ${negativeQualified ? 'qualified invalid-birth refusal' : 'uncertain'} ${scenarioBoundary}-crash fixture: ${fixture.stateRoot}`);
     if (failures.length !== 0) throw new AggregateError([...(operationFailure ? [operationFailure.error] : []), ...failures], 'preactivation crash campaign and cleanup failures');
   }
 }
@@ -1968,6 +2057,7 @@ for (const [scenario, run] of [
   ['supervisor-crash-queued-post-move-before-retirement', () => supervisorCrashPreactivation('queued_post_move_before_retirement')],
   ['supervisor-crash-monitor-fork-before-ready', () => supervisorCrashPreactivation('monitor_fork_before_ready')],
   ['supervisor-crash-monitor-fork-controller-loss', () => supervisorCrashPreactivation('monitor_fork_controller_loss')],
+  ['supervisor-crash-corrupt-ready-footer', () => supervisorCrashPreactivation('ready_before_identity', 'corrupt_ready_footer')],
   ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
   ['parent-loss-before-release', parentLossBeforeRelease],

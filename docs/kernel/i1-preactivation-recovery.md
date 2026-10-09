@@ -4,8 +4,9 @@ Status: **Option A approved; implementation and real qualification in progress.
 The ordinary before-create, READY-before-identity and invalid private-entry
 retirement/retry tracers have real Linux GREEN. Supervisor crash/retry also has
 GREEN at reserved, host-monitor fork/pre-READY, READY-before-identity,
-committed preactivation and queued post-move cuts. Negative witness boundaries
-remain open.**
+committed preactivation and queued post-move cuts. Actual controller loss at the
+partial fork cut also fails closed with a retained owner lock. Missing, corrupt
+and replaced witness qualification remains open.**
 Baseline: `854b9a95e6a99a8380772243853e5b7adc597272` (`main`, PR #514).
 
 This is one complete capability inside I1, not a new work package or a
@@ -327,7 +328,29 @@ birth append, repair, no-spawn invention or root retry is permitted. A fresh
 public opening must refuse the unchanged 2336-byte witness, preserve the queued
 Run/generation/Journal/event cut, and retain its real owner lock after caller
 GC. That unknown fixture is preserved for the controlled job teardown. This
-negative scenario is implemented; actual Linux qualification remains pending.
+negative scenario passed at `940dfef4923029d8a05a8e4ed70ea100db5f02a4`, together
+with all eighteen other native scenarios:
+[Linux job 113947458339](https://github.com/cogine-ai/cliq-agent/actions/runs/37968098786/job/113947458339).
+Supervisor 3135 and controller 3147 were actually SIGKILLed; monitor 3164
+naturally exited 70. The unchanged 2336-byte file was refused by public opening,
+with `RECOVERY_REQUIRED` in the opening phase. After eight caller GC rounds, the
+parent independently found the real owner lock busy. The queued Run, all events,
+Journal, launch/generation rows and registered positive-proof rows remained
+unchanged; no quarantine, repair or retry occurred. Local build, strict script
+TypeScript and all 1807 tests passed. All six Linux/macOS CI jobs passed.
+
+The next negative uses the already-qualified real READY-before-identity cut.
+Only after the Supervisor is SIGKILLed and the original controller and all old
+members naturally disappear may the test flip one SHA byte in the final READY
+footer (offset 4736). The original inode, complete 4768-byte length, valid
+binding and first four frames stay intact; independent byte/hash checks must
+confirm the sole corruption. Public opening must refuse without changing the
+original Run cut, registering positive proof, quarantining, repairing or
+retrying, and retain its actual owner lock after caller GC. The unknown fixture
+is preserved. Missing-path and replacement-inode cases remain separate later
+qualification boundaries so earlier rejection cannot mask the final-frame
+check. This single footer-corruption case is implemented; actual Linux
+qualification remains pending.
 
 Then qualify the same complete scenario at these boundaries:
 
