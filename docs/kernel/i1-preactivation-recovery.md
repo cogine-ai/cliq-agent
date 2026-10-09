@@ -1,8 +1,9 @@
 # I1 preactivation retirement and successor retry
 
 Status: **Option A approved; implementation and real qualification in progress.
-The before-create retirement/retry tracer has real Linux GREEN; the remaining
-creation and successor boundaries are not yet qualified.**
+The before-create and READY-before-identity retirement/retry tracers have real
+Linux GREEN; invalid private-entry retirement and the successor crash boundaries
+are still being qualified.**
 Baseline: `854b9a95e6a99a8380772243853e5b7adc597272` (`main`, PR #514).
 
 This is one complete capability inside I1, not a new work package or a
@@ -155,6 +156,31 @@ before any decode/read, retaining its actual lock across caller GC. An uncertain
 public close is likewise strongly owned until its exact retry succeeds or the
 process dies; neither a dropped Store nor a native finalizer can substitute for
 resource join. These are real ownership negatives, not Linux death producers.
+
+The READY-before-identity tracer subsequently passed with the before-create
+tracer and all ten existing native scenarios. It independently observes the
+actual signed worker executable, namespace/cgroup inodes and PID/start tokens
+while SQL still retains `reserved` with no WorkerIdentity or containment. The
+injected image-read error then produces real created-worker death, exact
+quarantine and one distinct successful retry; no identity commit or activation
+is invented. Source revision `6f1d4716f8b04ece7daf63df3495170ebba54993`,
+free standard Ubuntu 22.04, Node 22.13.0:
+[Linux job 113869762017](https://github.com/cogine-ai/cliq-agent/actions/runs/37945258629/job/113869762017).
+All six workflow jobs passed, and the local full suite passed 1807/1807.
+
+A separate actual private-tree tracer then created an escaping symlink beneath
+the exact descriptor-held generation after observing READY and before injecting
+the same image-read error. Its real Linux RED reached retirement and failed at
+`workspace symlink escapes the generation`, not at setup or the fault selector.
+Source revision `6021c1c32f455079392f29261eeda8dcfb1dd7bf`:
+[Linux job 113876670985](https://github.com/cogine-ai/cliq-agent/actions/runs/37947267308/job/113876670985).
+The minimal correction permits `unreadable_partial/path_or_entry_invalid` only
+for pure validation failures of actually observed physical entries, after their
+cursor/file resources retire and the generation/owner identities are rechecked.
+It makes no complete-tree digest or fsync-success claim. Source/CAS integrity,
+generic native IO, private Git parsing, cancellation, identity and descriptor
+retirement errors remain blocking uncertainty, not partial observations. This
+does not claim producer coverage for every partial-observation failure class.
 
 Then qualify the same complete scenario at these boundaries:
 

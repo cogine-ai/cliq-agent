@@ -3,7 +3,7 @@ import { setImmediate } from 'node:timers/promises';
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../../kernel/identity.js';
 import type { Checkpoint, WorkspaceEntry, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
-  WorkspaceGenerationSnapshotEvidenceV1, WorkspaceStateManifest } from '../../kernel/types.js';
+  WorkspaceGenerationSnapshotEvidenceV1, WorkspaceGenerationQuarantineEvidenceV1, WorkspaceStateManifest } from '../../kernel/types.js';
 import type { ArtifactCatalog } from '../../state/artifacts.js';
 import { decodeFrozenIgnoreRules, decodeSourceManifest, decodeSourceProjection, decodeWorkspaceEntries,
   decodeWorkspaceGenerationIdentity, decodeWorkspaceState } from '../../state/decoders.js';
@@ -42,9 +42,9 @@ export type RunWorkspaceGeneration = Readonly<{
 const generationTrees = new WeakMap<RunWorkspaceGeneration, HeldGenerationTree>();
 declare const retainedObservationBrand: unique symbol;
 export type RetainedWorkspaceObservation = Readonly<{ [retainedObservationBrand]: true }>;
-type RetainedObservationData = Readonly<WorkspaceTreeObservation & {
+type RetainedObservationData = Readonly<{
   generationRef: string; generationIdentityDigest: string; observedAt: string;
-  observedState: Readonly<{ kind: 'complete_tree'; treeDigest: string }>;
+  observedState: WorkspaceGenerationQuarantineEvidenceV1['observedState'];
 }>;
 const retainedObservations = new WeakMap<RetainedWorkspaceObservation,
   { owner: HeldStateOwnerLock; data: RetainedObservationData }>();
@@ -64,6 +64,18 @@ export function borrowRunWorkspaceForExecution(generation: RunWorkspaceGeneratio
   return borrowGenerationForExecution(tree);
 }
 function mismatch(message: string): never { throw new KernelStorageError('ARTIFACT_MISMATCH', message); }
+/** Only pure validation of actually observed entries can mint this failure.
+ * CAS, source, native identity/IO, abort and retirement failures never do. */
+class InvalidObservedEntries extends KernelStorageError {
+  constructor(cause: KernelStorageError) { super('ARTIFACT_MISMATCH', cause.message, { cause }); }
+}
+function checkObservedEntries<T>(check: () => T): T {
+  try { return check(); }
+  catch (error) {
+    if (error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH') throw new InvalidObservedEntries(error);
+    throw error;
+  }
+}
 function closeWorkspaceDescriptor(resource: { close(): void }): void {
   try { resource.close(); }
   catch (cause) { throw new ResourceRetirementError('private workspace descriptor retirement failed', cause); }
@@ -225,7 +237,7 @@ async function observeTree(tree: HeldGenerationTree, artifacts: ArtifactCatalog,
         tree.assertHeld();
         continue;
       }
-      checkedPath(entry.path);
+      checkObservedEntries(() => checkedPath(entry.path));
       if (entry.kind === 'directory') observedEntries.push({ path: entry.path, kind: 'directory', mode: entry.mode });
       else if (entry.kind === 'file') {
         try {
@@ -254,8 +266,11 @@ async function observeTree(tree: HeldGenerationTree, artifacts: ArtifactCatalog,
     snapshot.assertComplete();
   } finally { closeWorkspaceDescriptor(snapshot); }
   signal?.throwIfAborted();
-  const observed = entriesManifest(observedEntries);
-  checkedEntries(observed);
+  const observed = checkObservedEntries(() => {
+    const manifest = entriesManifest(observedEntries);
+    checkedEntries(manifest);
+    return manifest;
+  });
   const entriesRef = (await artifacts.publishCanonical(observed, observed.format)).ref;
   signal?.throwIfAborted();
   const privateGitStateRef = privateGit ? await observedPrivateGit(artifacts, privateGit, gitDirectories, gitFiles, signal) : undefined;
@@ -271,9 +286,9 @@ async function observeTree(tree: HeldGenerationTree, artifacts: ArtifactCatalog,
     descriptorRewalkComplete: true, fileFsyncComplete: true, directoryFsyncComplete: true });
 }
 
-/** Internal recovery factory supplies the current retained generation. A
- * successful complete rewalk is minted; unreadable/unsupported trees throw,
- * never fabricate partial-failure evidence or an older recovery cut. */
+/** Internal recovery factory supplies the current retained generation. Only an
+ * actual complete rewalk or a closed physical-entry validation failure is
+ * minted; unknown source/identity/IO/retirement failures still block recovery. */
 export async function observeRetainedRunWorkspace(input: { filesystem: HeldStateOwnerLock; artifacts: ArtifactCatalog;
   identity: WorkspaceGenerationIdentityV1; sourceRowVersion: number; signal?: AbortSignal }): Promise<RetainedWorkspaceObservation> {
   const { filesystem, artifacts, signal } = input;
@@ -291,13 +306,23 @@ export async function observeRetainedRunWorkspace(input: { filesystem: HeldState
   }
   const tree = filesystem.openGenerationTree(identity, input.sourceRowVersion);
   try {
-    const observed = await observeTree(tree, artifacts, sourceState, privateGit, signal);
+    let observedState: RetainedObservationData['observedState'];
+    try {
+      const observed = await observeTree(tree, artifacts, sourceState, privateGit, signal);
+      observedState = Object.freeze({ kind: 'complete_tree', treeDigest: observed.treeDigest });
+    } catch (error) {
+      if (!(error instanceof InvalidObservedEntries)) throw error;
+      // observeTree has already closed its cursor/files. This is not a complete
+      // snapshot and has no tree/state/entries digest or fsync success claims.
+      observedState = Object.freeze({ kind: 'unreadable_partial', failureCode: 'path_or_entry_invalid' });
+    }
     signal?.throwIfAborted();
     filesystem.assertHeld();
+    tree.assertHeld();
     const observation = Object.freeze({}) as RetainedWorkspaceObservation;
-    retainedObservations.set(observation, { owner: filesystem, data: Object.freeze({ ...observed,
+    retainedObservations.set(observation, { owner: filesystem, data: Object.freeze({
       generationRef: canonicalSha256(identity), generationIdentityDigest: identity.identityDigest,
-      observedAt: new Date().toISOString(), observedState: Object.freeze({ kind: 'complete_tree', treeDigest: observed.treeDigest }) }) });
+      observedAt: new Date().toISOString(), observedState }) });
     return observation;
   } finally { closeWorkspaceDescriptor(tree); }
 }
