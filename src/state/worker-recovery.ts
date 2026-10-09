@@ -13,6 +13,7 @@ import type { SqliteDriver } from './sqlite-driver.js';
 import { readStateOwner } from './state-owner.js';
 import { readStateOwnerDeath } from './state-owner-death.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
+import { validatePreactivationQuarantine } from './preactivation-retirement.js';
 import { readRequiredWorkerLaunch } from './repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef } from './repositories/workspace-generations.js';
 import { readCheckpoint } from './rows.js';
@@ -186,6 +187,10 @@ async function validateWorkerQuarantines(artifacts: ArtifactCatalog, cut: Worker
   for (const generation of cut.workspaceGenerations) {
     if (generation.phase !== 'quarantined') continue;
     const quarantine = await readCanonicalArtifact<WorkspaceGenerationQuarantineEvidenceV1>(artifacts, generation.quarantineEvidenceRef);
+    if (quarantine.reason === 'launch_aborted' || quarantine.reason === 'launch_died_before_activation') {
+      await validatePreactivationQuarantine(artifacts, driver, cut.run, generation, quarantine);
+      continue;
+    }
     if (quarantine.reason !== 'worker_recovery') continue; // Other reasons remain their owning producer's responsibility.
     const recovery = await readCanonicalArtifact<WorkerRecoveryEvidenceV1>(artifacts, quarantine.workerRecoveryEvidenceRef);
     const wait = await readCanonicalArtifact<WorkerDeathWait>(artifacts, recovery.waitingSubjectRef);

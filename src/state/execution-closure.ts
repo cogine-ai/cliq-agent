@@ -106,9 +106,17 @@ function decodeLinuxContainmentPlan(value: unknown, purpose: 'worker_activation'
   else { invocationOwner(plan.owner); digest(plan.parentContainmentRef, 'invocation parent containment'); }
   filesystemBinding(plan.filesystemBinding); digest(plan.launchNonceDigest, 'worker launch nonce');
   // macOS stays unqualified; do not accept a host-only approximation of the VM authority.
-  const backend = record(plan.backend, ['kind', 'cgroupPath', 'cgroupNameReservationDigest', 'pidNamespaceReservationId', 'subreaperStartToken'], 'Linux worker plan');
+  const backend = record(plan.backend, ['kind', 'cgroupPath', 'cgroupNameReservationDigest', 'pidNamespaceReservationId', 'subreaperStartToken'], 'Linux worker plan',
+    purpose === 'worker_activation' ? ['nativeReservation'] : []);
   literal(backend.kind, 'linux', 'worker backend'); absolute(backend.cgroupPath, 'planned cgroup');
   digest(backend.cgroupNameReservationDigest, 'cgroup reservation'); text(backend.pidNamespaceReservationId, 'PID namespace reservation'); text(backend.subreaperStartToken, 'subreaper start token');
+  if (Object.hasOwn(backend, 'nativeReservation')) {
+    const reservation = record(backend.nativeReservation, ['deviceId', 'fileId', 'ownerUid'], 'native worker reservation');
+    for (const field of ['deviceId', 'fileId']) {
+      if (!/^(0|[1-9][0-9]*)$/u.test(text(reservation[field], `reservation ${field}`))) mismatch('native reservation identity must be unsigned decimal');
+    }
+    if (!Number.isSafeInteger(reservation.ownerUid) || (reservation.ownerUid as number) < 0) mismatch('native reservation owner must be an exact uid');
+  }
   time(plan.createdAt, 'worker plan creation'); rehash(plan, 'planDigest', 'worker plan');
   return plan as ProcessContainmentPlanV1;
 }
@@ -318,6 +326,28 @@ async function readWorkerExecutionClosure(artifacts: ArtifactCatalog, owner: Sta
 }
 
 export type WorkerLaunchClosure = Awaited<ReturnType<typeof readWorkerLaunchClosure>>;
+
+/** Recovery observes an old blocked launch; it never adopts its handshake or
+ * substitutes the successor's lease/spawner for the retained reservation. */
+export async function readPreactivationWorkerLaunchClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: {
+  run: Run; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1;
+}) {
+  input = immutableSnapshot(input);
+  const { run, launch, generation } = input;
+  if (run.status !== 'queued' || run.activeWorkerLaunchId !== undefined ||
+      !['reserved', 'preactivated'].includes(launch.phase) || launch.runId !== run.id || launch.leaseVersion !== 0 ||
+      launch.generationWriteState !== 'preactivated_readonly' || generation.phase !== 'preactivated_readonly' ||
+      generation.runId !== run.id || generation.generationRef !== launch.workspaceGenerationRef ||
+      generation.sourceCheckpointId !== run.latestCheckpointId) mismatch('preactivation retirement requires its exact lease-free queued launch and readonly generation');
+  const closure = await readWorkerExecutionClosure(artifacts, owner, { run, ...launch }, {
+    kind: 'worker_activation', runId: run.id, intendedLeaseEpoch: run.leaseEpoch + 1, workerLaunchId: launch.launchId
+  }, generation.sourceCheckpointId);
+  if (closure.generation.identityDigest !== generation.generationIdentityDigest ||
+      closure.generation.generationId !== generation.generationId ||
+      closure.generation.sourceWorkspaceStateRef !== generation.sourceWorkspaceStateRef ||
+      closure.generation.sourceWorkspaceStateDigest !== generation.sourceWorkspaceStateDigest) mismatch('preactivation generation differs from its immutable source');
+  return closure;
+}
 
 /** Inspect the historical launch as retained, never as a fabricated future activation. */
 export async function readRetainedWorkerLaunchClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: {

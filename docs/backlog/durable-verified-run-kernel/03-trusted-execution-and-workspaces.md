@@ -816,6 +816,7 @@ SQLite recovery reducer, and does not advance this work package's completion.
             cgroupNameReservationDigest: string
             pidNamespaceReservationId: string
             subreaperStartToken: string
+            nativeReservation?: { deviceId: string; fileId: string; ownerUid: number }
           }
         | {
             kind: 'macos-vm'

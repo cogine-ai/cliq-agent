@@ -86,7 +86,12 @@ static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *pac
         packet->monitor_start_token[sizeof(packet->monitor_start_token) - 1] == '\0' &&
         packet->subreaper_start_token[sizeof(packet->subreaper_start_token) - 1] == '\0' &&
         packet->cgroup_name[sizeof(packet->cgroup_name) - 1] == '\0' &&
-        packet->executable_path[sizeof(packet->executable_path) - 1] == '\0' && packet->relative_path[sizeof(packet->relative_path) - 1] == '\0';
+        packet->executable_path[sizeof(packet->executable_path) - 1] == '\0' && packet->relative_path[sizeof(packet->relative_path) - 1] == '\0' &&
+        packet->plan_ref[sizeof(packet->plan_ref) - 1] == '\0' &&
+        packet->sandbox_launch_ref[sizeof(packet->sandbox_launch_ref) - 1] == '\0' &&
+        packet->sandbox_launch_digest[sizeof(packet->sandbox_launch_digest) - 1] == '\0' &&
+        packet->generation_ref[sizeof(packet->generation_ref) - 1] == '\0' &&
+        packet->pid_namespace_reservation[sizeof(packet->pid_namespace_reservation) - 1] == '\0';
     if (!valid) { for (size_t i = 0; i < *count; i++) close(fds[i]); *count = 0; errno = received == 0 ? EPIPE : EPROTO; }
     return valid;
 }

@@ -110,6 +110,7 @@ import {
 import { hostPlatform } from './workspace-identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { loadRunExecution, type LoadRunExecutionInput, type RunExecutionInstallation } from './run-execution.js';
+import { retireAbandonedPreactivations } from './preactivation-retirement.js';
 import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import type { SandboxProfileV1, SourceInspectionAttemptV1 } from '../kernel/execution.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest } from './source-target.js';
@@ -492,6 +493,9 @@ export class StateStore {
       await retireAbandonedSourceInspections(driver, artifacts, ownerContext,
         runtimeAuthority?.sourceInspection && { bundle: runtimeAuthority.bundle,
           releaseKeys: runtimeAuthority.releaseKeys, sandboxProfile: runtimeAuthority.sourceInspection.sandboxProfile });
+      await retireAbandonedPreactivations(driver, artifacts, ownerContext,
+        runtimeAuthority?.execution && { ...runtimeAuthority.execution,
+          runtimeAuthority: { bundle: runtimeAuthority.bundle, releaseKeys: runtimeAuthority.releaseKeys } });
       return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority);
     } catch (error) {
       let failure = error;
@@ -529,14 +533,17 @@ export class StateStore {
   }
 
   reserveWorkerLaunch(input: ReserveWorkerLaunchInput) {
+    if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
     return reserveWorkerLaunch(this.driver, this.artifacts, this.owner, input);
   }
 
   recordWorkerPreactivated(input: RecordWorkerPreactivatedInput) {
+    if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
     return recordWorkerPreactivated(this.driver, this.artifacts, this.owner, input);
   }
 
   activateWorkerLease(input: ActivateWorkerLeaseInput) {
+    if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
     return activateWorkerLease(this.driver, this.owner, input);
   }
 
@@ -753,6 +760,9 @@ export class StateStore {
       if (failure?.status === 'rejected') throw failure.reason;
       this.executions.clear();
       if (!this.released) {
+        await retireAbandonedPreactivations(this.driver, this.artifacts, this.owner,
+          this.runtimeAuthority?.execution && { ...this.runtimeAuthority.execution,
+            runtimeAuthority: { bundle: this.runtimeAuthority.bundle, releaseKeys: this.runtimeAuthority.releaseKeys } });
         await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
         this.released = true;
       }

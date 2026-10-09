@@ -30,6 +30,8 @@ import { startWorkerRecoveryTask, type WorkerRecoveryTask } from './worker-recov
 import { toolCheckpointId } from './tool-checkpoint.js';
 import { readToolCut } from './tool-cut.js';
 import { decodeRunSpec, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity } from './decoders.js';
+import { retirePreactivationLaunch } from './preactivation-retirement.js';
+import type { HeldWorkerReservation } from './native-owner.js';
 
 /** Trusted installation paths belong to Supervisor bootstrap, not a Run or a control frame. */
 export type RunExecutionInstallation = Pick<LinuxWorkerInstallation, 'installationRoot' | 'cgroupParent'>;
@@ -44,7 +46,8 @@ type WorkerSpec = Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>
 type EditSpec = Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocation' } }>;
 
 async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: LinuxWorkerController,
-  installation: RunExecutionInstallation, selected: Awaited<ReturnType<typeof readToolCut>>, generationRef: string) {
+  installation: RunExecutionInstallation, selected: Awaited<ReturnType<typeof readToolCut>>, generationRef: string,
+  reservation: HeldWorkerReservation, launchId: string, spawnNonceDigest: string, activationNonceDigest: string) {
   const { run, runSpec } = selected;
   const assembly = decodeRetainedRunAssembly(await artifacts.readCanonical(runSpec.assemblyRef));
   const bundle = await artifacts.readCanonical<RuntimeBundleManifest>(assembly.runtime.runtimeBundleRef);
@@ -53,15 +56,14 @@ async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: Linux
   if (!launcher || launcher.role !== 'platform_helper' || !launcher.executable || assembly.runtime.workerExecutableId !== LINUX_WORKER_RECIPE.workerId) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen Run does not select the installed worker recipe');
   }
-  const launchId = identityHash('cliq-worker-launch-v1', run.id, String(run.leaseEpoch + 1), nonce());
-  const spawnNonceDigest = nonce(), activationNonceDigest = nonce();
   const owner = { kind: 'worker_activation' as const, runId: run.id, intendedLeaseEpoch: run.leaseEpoch + 1, workerLaunchId: launchId };
   const cgroupNameReservationDigest = canonicalSha256(['cliq-worker-cgroup-v1', run.id, launchId]);
   const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
     filesystemBinding: { kind: 'run-generation', generationRef }, launchNonceDigest: spawnNonceDigest,
     backend: { kind: 'linux', cgroupPath: path.posix.join(installation.cgroupParent, `cliq-${cgroupNameReservationDigest}`),
       cgroupNameReservationDigest,
-      pidNamespaceReservationId: identityHash('cliq-worker-namespace-v1', run.id, launchId), subreaperStartToken: controller.subreaperStartToken },
+      pidNamespaceReservationId: identityHash('cliq-worker-namespace-v1', run.id, launchId), subreaperStartToken: controller.subreaperStartToken,
+      nativeReservation: reservation.identity },
     createdAt: sampleCanonicalNow(), planDigest: '' };
   plan.planDigest = digestOmitting(plan, 'planDigest');
   const containmentPlanRef = (await artifacts.publishCanonical(plan, plan.format)).ref;
@@ -172,14 +174,17 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let operationAbort: AbortController | undefined, closing: Promise<void> | undefined;
   let probe: { run: Run; wait: WorkerDeathWait; task: WorkerRecoveryTask; closure?: Promise<Run> } | undefined;
   let worker: LinuxBlockedWorker | undefined, generation: RunWorkspaceGeneration | undefined, controller: LinuxWorkerController | undefined;
+  let reservation: HeldWorkerReservation | undefined;
   let ownedLaunchId: string | undefined;
   async function retireResources() {
-    const retainedGeneration = generation, retainedController = controller;
-    generation = undefined; controller = undefined; worker = undefined; ownedLaunchId = undefined;
+    const retainedGeneration = generation, retainedController = controller, retainedReservation = reservation;
+    generation = undefined; controller = undefined; reservation = undefined; worker = undefined; ownedLaunchId = undefined;
     try { retainedGeneration?.close(); }
     catch (failure) { cleanupFailure ??= failure; }
     // One failed release must not bypass the independent process join.
     try { await retainedController?.close(); }
+    catch (failure) { cleanupFailure ??= failure; }
+    try { retainedReservation?.close(); }
     catch (failure) { cleanupFailure ??= failure; }
     if (cleanupFailure !== undefined) throw cleanupFailure;
   }
@@ -299,8 +304,14 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const borrowed = borrowRunWorkspaceForExecution(generation);
         try { borrowed.assertQuota(profile.resources.maxGenerationBytes); } finally { borrowed.close(); }
         controller = await launcher.startController({ signal });
-        const recipe = await publishWorkerRecipe(artifacts, controller, installation!, selected, authority.generationRef);
+        const launchId = identityHash('cliq-worker-launch-v1', runId, String(selected.run.leaseEpoch + 1), nonce());
+        const spawnNonceDigest = nonce(), activationNonceDigest = nonce();
+        reservation = owner.filesystem.createWorkerReservation(launchId, spawnNonceDigest);
+        const recipe = await publishWorkerRecipe(artifacts, controller, installation!, selected, authority.generationRef,
+          reservation, launchId, spawnNonceDigest, activationNonceDigest);
         const closure = await readWorkerLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...recipe.input, run: selected.run });
+        signal.throwIfAborted();
+        await controller.bindWorkerReservation({ closure, reservation, activationNonceDigest });
         signal.throwIfAborted();
         const reserved = await reserveWorkerLaunch(driver, artifacts, owner, recipe.input);
         ownedLaunchId = reserved.launchId;
@@ -408,6 +419,13 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           const run = readRun(driver, runId);
           if (ownedLaunchId !== undefined && run.activeWorkerLaunchId === ownedLaunchId) {
             await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
+          } else if (ownedLaunchId !== undefined && run.status === 'queued') {
+            // Join the original spawner first. A new controller can only inspect
+            // the exact witness; it cannot release the old activation channel.
+            await controller?.close();
+            controller = await launcher.startController();
+            await retirePreactivationLaunch(driver, artifacts, owner, ownedLaunchId, controller);
+            worker = undefined;
           }
         } catch (failure) {
           // Losing the state fence cannot bypass actual resource retirement or

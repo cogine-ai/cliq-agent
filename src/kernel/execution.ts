@@ -111,6 +111,7 @@ export type ProcessContainmentPlanV1 = {
         cgroupNameReservationDigest: string
         pidNamespaceReservationId: string
         subreaperStartToken: string
+        nativeReservation?: { deviceId: string; fileId: string; ownerUid: number }
       }
     | {
         kind: 'macos-vm'

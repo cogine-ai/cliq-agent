@@ -13,7 +13,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { sampleCanonicalNow } from '../state/canonical-time.js';
 import { assertBuiltinEditLaunchClosure, assertWorkerLaunchClosure, type BuiltinEditLaunchClosure, type WorkerLaunchClosure } from '../state/execution-closure.js';
-import type { BorrowedGenerationForExecution } from '../state/native-owner.js';
+import { borrowWorkerReservationForExecution, type BorrowedGenerationForExecution, type HeldWorkerReservation } from '../state/native-owner.js';
 import { borrowRunWorkspaceForExecution, type RunWorkspaceGeneration } from '../workspace/run-workspace/generation.js';
 
 export class LinuxExecutionIdentityError extends Error {
@@ -57,6 +57,18 @@ export type NativeContainmentDeathObservation = Readonly<{
   remainingTrackedDescendants: 0;
   observedAt: string;
 }>;
+export type NativePreactivationObservation = Readonly<{
+  kind: 'no_spawn'; observedAt: string; cgroupObservation: Readonly<{ kind: 'absent' }>;
+  pidNamespaceObservation: Readonly<{ kind: 'never_created'; pidNamespaceReservationId: string }>;
+  matchingLaunchNonceProcessCount: 0;
+}> | Readonly<{ kind: 'created'; containment: ProcessContainment; death: NativeContainmentDeathObservation }>;
+const preactivationObservations = new WeakMap<object, string>();
+export function assertNativePreactivationObservation(observation: NativePreactivationObservation, closure: WorkerLaunchClosure): void {
+  assertWorkerLaunchClosure(closure);
+  if (preactivationObservations.get(observation) !== canonicalSha256([closure.containmentPlanRef, closure.sandboxLaunchSpecRef])) {
+    throw new TypeError('preactivation closure requires its exact fresh native producer');
+  }
+}
 
 export type LinuxBlockedWorker = Readonly<{
   containment: ProcessContainment;
@@ -69,6 +81,9 @@ export type LinuxWorkerController = Readonly<{
   pid: number;
   processStartToken: string;
   subreaperStartToken: string;
+  bindWorkerReservation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string }): Promise<void>;
+  inspectPreactivation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string;
+    containment?: ProcessContainment; workerIdentity?: WorkerIdentity }): Promise<NativePreactivationObservation>;
   launchWorker(input: { closure: WorkerLaunchClosure; generation: RunWorkspaceGeneration; activationNonceDigest: string }): Promise<LinuxBlockedWorker>;
   terminateRetained(input: { closure: WorkerLaunchClosure; containment: ProcessContainment; workerIdentity: WorkerIdentity;
     signal?: AbortSignal }): Promise<NativeContainmentDeathObservation>;
@@ -91,13 +106,18 @@ type NativeScope = { pollReady(): boolean; observe(): NativeObservation; activat
   release(): void; result(): number | undefined; stop(): void; pollStopped(): NativeObservation | undefined };
 type NativeController = { pid: number; processStartToken: string;
   pollReady(): boolean;
+  bindReservation(reservation: number, config: object): void;
+  pollBound(): boolean;
+  inspectReservation(cgroup: number, reservation: number, config: object): void;
+  pollReservation(): Readonly<{ kind: 'not_attempted'; cgroupPresent: boolean; cgroupId?: string; observedAtMs: number }> |
+    (NativeObservation & Readonly<{ kind: 'created_dead'; observedAtMs: number }>) | undefined;
   createWorker(generation: number, cgroup: number, helper: NativeImage, worker: NativeImage, bwrap: NativeImage, config: object): NativeScope;
   createInvocation(generation: number, parent: NativeScope, helper: NativeImage, adapter: NativeImage, bwrap: NativeImage, input: NativeImage, config: object): NativeScope;
   terminateRetained(cgroup: number, config: object): void;
   pollRetained(): NativeObservation | undefined;
   close(): Promise<void>;
 };
-type NativeBinding = { interfaceVersion: 1; sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
+type NativeBinding = { interfaceVersion: 2; sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
   openController(helper: NativeImage): NativeController };
 
 export type LinuxInvocationClaim = Readonly<{
@@ -164,9 +184,10 @@ function retireImage(image: NativeImage): void {
   catch (error) { throw retirementError('native image retirement failed', error); }
 }
 
-function retireBorrow(borrowed: BorrowedGenerationForExecution): void {
+function retireBorrow(borrowed: Readonly<{ close(): void }>, primary?: { error: unknown }): void {
   try { borrowed.close(); }
-  catch (error) { throw retirementError('native generation descriptor retirement failed', error); }
+  catch (error) { throw retirementError('native execution descriptor did not retire',
+    primary ? new AggregateError([primary.error, error], 'operation and descriptor retirement failures') : error); }
 }
 
 async function openDirectory(absolute: string): Promise<FileHandle> {
@@ -233,6 +254,27 @@ function scopeProjection(closure: WorkerLaunchClosure | BuiltinEditLaunchClosure
     cgroupName: path.posix.basename(backend.cgroupPath), spawnNonceDigest: closure.plan.launchNonceDigest, activationNonceDigest };
 }
 
+function reservationProjection(closure: WorkerLaunchClosure, reservation: HeldWorkerReservation, activationNonceDigest: string) {
+  assertWorkerLaunchClosure(closure); assertArtifactRef(activationNonceDigest); reservation.assertHeld();
+  const backend = closure.plan.backend, locator = closure.generation.locator;
+  if (backend.kind !== 'linux' || !backend.nativeReservation || locator.kind !== 'linux_directory') {
+    mismatch('the installed worker recipe requires a descriptor-bound physical witness');
+  }
+  same(reservation.identity, backend.nativeReservation, 'native reservation identity');
+  const number = (value: string) => {
+    const result = Number(value);
+    if (!/^(0|[1-9][0-9]*)$/u.test(value) || !Number.isSafeInteger(result) || result < 0) mismatch('native identity exceeds the exact integer range');
+    return result;
+  };
+  return { planRef: closure.containmentPlanRef, sandboxLaunchSpecRef: closure.sandboxLaunchSpecRef,
+    sandboxLaunchSpecDigest: closure.spec.launchSpecDigest, workspaceGenerationRef: closure.workspaceGenerationRef,
+    spawnNonceDigest: closure.plan.launchNonceDigest, activationNonceDigest,
+    cgroupName: path.posix.basename(backend.cgroupPath), pidNamespaceReservationId: backend.pidNamespaceReservationId,
+    subreaperStartToken: backend.subreaperStartToken, reservationDevice: number(reservation.identity.deviceId),
+    reservationInode: number(reservation.identity.fileId), reservationOwnerUid: reservation.identity.ownerUid,
+    generationDevice: number(locator.deviceId), generationInode: number(locator.directoryFileId) };
+}
+
 function supportedRecipe(closure: WorkerLaunchClosure | BuiltinEditLaunchClosure): void {
   const spec = closure.spec;
   if (canonicalSha256(spec.environment) !== canonicalSha256(LINUX_WORKER_RECIPE.environment) ||
@@ -252,7 +294,8 @@ function supportedRecipe(closure: WorkerLaunchClosure | BuiltinEditLaunchClosure
   }
 }
 
-function actualContainment(closure: WorkerLaunchClosure | BuiltinEditLaunchClosure, observed: NativeObservation): ProcessContainment {
+function actualContainment(closure: WorkerLaunchClosure | BuiltinEditLaunchClosure, observed: NativeObservation,
+  createdAt = sampleCanonicalNow()): ProcessContainment {
   const backend = closure.plan.backend;
   if (backend.kind !== 'linux') mismatch('worker requires Linux containment');
   return immutableSnapshot({ schemaVersion: 1, planRef: canonicalSha256(closure.plan), sandboxLaunchSpecRef: closure.sandboxLaunchSpecRef,
@@ -261,7 +304,7 @@ function actualContainment(closure: WorkerLaunchClosure | BuiltinEditLaunchClosu
     launchNonceDigest: closure.plan.launchNonceDigest,
     backend: { kind: 'linux', pidNamespaceReservationId: backend.pidNamespaceReservationId, pidNamespaceId: observed.pidNamespaceId,
       cgroupPath: backend.cgroupPath, cgroupId: observed.cgroupId, namespaceInitStartToken: observed.namespaceInitStartToken,
-      subreaperStartToken: backend.subreaperStartToken }, createdAt: sampleCanonicalNow() });
+      subreaperStartToken: backend.subreaperStartToken }, createdAt });
 }
 
 async function awaitNative<T>(poll: () => T | undefined, close: () => Promise<void>, signal?: AbortSignal): Promise<T> {
@@ -299,12 +342,12 @@ async function death(scope: NativeScope, containment: ProcessContainment, contro
   return checkedDeath(observed, containment);
 }
 
-function checkedDeath(observed: NativeObservation, containment: ProcessContainment): NativeContainmentDeathObservation {
+function checkedDeath(observed: NativeObservation, containment: ProcessContainment, observedAt = sampleCanonicalNow()): NativeContainmentDeathObservation {
   if (containment.backend.kind !== 'linux' || observed.cgroupId !== containment.backend.cgroupId ||
       observed.pidNamespaceId !== containment.backend.pidNamespaceId || observed.namespaceInitStartToken !== containment.backend.namespaceInitStartToken ||
       observed.cgroupPopulated !== 0 || observed.namespaceInitDeadAndReaped !== 1 || observed.remainingTrackedDescendants !== 0) mismatch('native death does not close the exact containment');
   const observation: NativeContainmentDeathObservation = immutableSnapshot({ containment, cgroupPopulated: 0,
-    namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0, observedAt: sampleCanonicalNow() });
+    namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0, observedAt });
   observedDeaths.add(observation); return observation;
 }
 
@@ -366,7 +409,7 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
           await hashHeld(addon.fd, metadata.size, receiver) !== addonEntry.digest) mismatch('installed native worker module is not signed');
       const loaded = new Module('cliq-linux-worker-native');
       process.dlopen(loaded, `/proc/self/fd/${addon.fd}`); binding = loaded.exports as NativeBinding;
-      if (binding.interfaceVersion !== 1 || typeof binding.sealImage !== 'function' || typeof binding.sealImageBuffer !== 'function' ||
+      if (binding.interfaceVersion !== 2 || typeof binding.sealImage !== 'function' || typeof binding.sealImageBuffer !== 'function' ||
           typeof binding.openController !== 'function') mismatch('unsupported installed native worker interface');
     } finally { await retireFiles([addon]); }
     async function image(entryId: string, role: string): Promise<NativeImage> {
@@ -409,6 +452,58 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
         const subreaperStartToken = `linux-subreaper:${native.pid}:${native.processStartToken}`;
         const controller: LinuxWorkerController = Object.freeze({
           pid: native.pid, processStartToken: native.processStartToken, subreaperStartToken,
+          async bindWorkerReservation({ closure, reservation, activationNonceDigest }) {
+            if (this !== controller) throw new TypeError('invalid worker controller'); controllerReceiver();
+            same(closure.bundle, bundle, 'reservation bundle');
+            if (closure.plan.backend.kind !== 'linux' || closure.plan.backend.subreaperStartToken !== subreaperStartToken ||
+                path.posix.dirname(closure.plan.backend.cgroupPath) !== options.cgroupParent) mismatch('binding selects another native spawner');
+            const config = reservationProjection(closure, reservation, activationNonceDigest);
+            const borrowed = borrowWorkerReservationForExecution(reservation, closure.spec.owner.workerLaunchId, closure.plan.launchNonceDigest);
+            let primary: { error: unknown } | undefined;
+            try {
+              borrowed.assertHeld(); native.bindReservation(borrowed.fd, config);
+              await awaitNative(() => native.pollBound() ? true : undefined, closeController);
+              controllerReceiver(); borrowed.assertHeld(); reservation.assertHeld();
+            } catch (error) { primary = { error }; throw error; }
+            finally { retireBorrow(borrowed, primary); }
+          },
+          async inspectPreactivation({ closure, reservation, activationNonceDigest, containment, workerIdentity }) {
+            if (this !== controller) throw new TypeError('invalid worker controller'); controllerReceiver();
+            assertWorkerLaunchClosure(closure); same(closure.bundle, bundle, 'inspection bundle');
+            const backend = closure.plan.backend;
+            if (backend.kind !== 'linux' || backend.subreaperStartToken === subreaperStartToken ||
+                path.posix.dirname(backend.cgroupPath) !== options.cgroupParent) mismatch('inspection requires a fresh controller for the exact old reservation');
+            const config = reservationProjection(closure, reservation, activationNonceDigest);
+            const borrowed = borrowWorkerReservationForExecution(reservation, closure.spec.owner.workerLaunchId, closure.plan.launchNonceDigest);
+            let primary: { error: unknown } | undefined;
+            try {
+              borrowed.assertHeld(); native.inspectReservation(cgroup.fd, borrowed.fd, config);
+              const observed = await awaitNative(() => native.pollReservation(), closeController);
+              controllerReceiver(); borrowed.assertHeld(); reservation.assertHeld();
+              if (!Number.isSafeInteger(observed.observedAtMs) || observed.observedAtMs < 1) mismatch('native inspection timestamp is invalid');
+              const observedAt = new Date(observed.observedAtMs).toISOString();
+              let result: NativePreactivationObservation;
+              if (observed.kind === 'not_attempted') {
+                if (observed.cgroupPresent || containment || workerIdentity) mismatch('no-spawn contradicts its physical scope or recorded worker');
+                result = immutableSnapshot({ kind: 'no_spawn', observedAt,
+                  cgroupObservation: { kind: 'absent' },
+                  pidNamespaceObservation: { kind: 'never_created', pidNamespaceReservationId: backend.pidNamespaceReservationId },
+                  matchingLaunchNonceProcessCount: 0 });
+              } else if (observed.kind === 'created_dead') {
+                const actual = actualContainment(closure, observed, observedAt);
+                if (containment) {
+                  same({ ...actual, createdAt: containment.createdAt }, containment, 'retained actual containment');
+                }
+                if (workerIdentity && (workerIdentity.pid !== observed.pid || workerIdentity.processStartToken !== observed.processStartToken ||
+                    workerIdentity.processContainmentRef !== canonicalSha256(containment))) mismatch('birth witness substitutes the recorded worker process');
+                const retained = immutableSnapshot(containment ?? actual);
+                result = Object.freeze({ kind: 'created', containment: retained, death: checkedDeath(observed, retained, observedAt) });
+              } else mismatch('unsupported native reservation observation');
+              preactivationObservations.set(result, canonicalSha256([closure.containmentPlanRef, closure.sandboxLaunchSpecRef]));
+              return result;
+            } catch (error) { primary = { error }; throw error; }
+            finally { retireBorrow(borrowed, primary); }
+          },
           async launchWorker({ closure, generation, activationNonceDigest }) {
             if (this !== controller) throw new TypeError('invalid controller receiver'); controllerReceiver(); assertArtifactRef(activationNonceDigest);
             assertWorkerLaunchClosure(closure);

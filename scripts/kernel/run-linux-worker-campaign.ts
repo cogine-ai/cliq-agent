@@ -313,6 +313,7 @@ async function beforeSpawnRetirementRetry() {
     await bounded(retry.executeCurrentTool({ expectedRunRevision: reopened.closure.run.revision }));
     const after = await checkpointBytes(store, fixture.runId);
     assert.equal(after.closure.run.id, before.closure.run.id); assert.equal(after.closure.run.status, 'queued');
+    assert.equal(after.closure.run.leaseEpoch, before.closure.run.leaseEpoch + 1);
     assert.deepEqual(after.bytes, Buffer.from('after\n')); assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
     assert.equal(after.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed').length, 1);
     assert.equal(after.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'completed').length, 1);
@@ -323,6 +324,9 @@ async function beforeSpawnRetirementRetry() {
     const old = launches.find(launch => launch.launchId === fault.launch.launchId)!;
     const replacements = launches.filter(launch => launch.leaseEpoch === after.closure.run.leaseEpoch);
     assert.equal(old.phase, 'retired'); assert.ok(old.retirementEvidenceRef); assert.equal(replacements.length, 1);
+    const originalFacts = { ...old, phase: fault.launch.phase };
+    delete originalFacts.retiredAt; delete originalFacts.retirementEvidenceRef;
+    assert.deepEqual(originalFacts, fault.launch, 'retirement must retain every original reservation binding');
     const replacement = replacements[0]!;
     assert.equal(replacement.phase, 'retired');
     assert.notEqual(replacement.launchId, old.launchId); assert.notEqual(replacement.spawnNonceDigest, old.spawnNonceDigest);

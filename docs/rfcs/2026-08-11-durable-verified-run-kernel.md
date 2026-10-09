@@ -4139,6 +4139,18 @@ Retirement first publishes exact `WorkspaceGenerationRetirementEvidenceV1` and t
 
 Restore always targets a new empty generation identity through descriptor-relative no-follow creation, inserts its `materializing` row, materializes entries and an independent `.git`, fsyncs, re-walks and recomputes tree/state/index/object-closure digests, publishes snapshot evidence, then CASes to `preactivated_readonly` before a blocked worker launch may select it. Missing/unknown format, duplicate/path escape, broken blob/pack/index/ref, byte/count mismatch, unsupported runtime bundle, or partial generation state fails `RECOVERY_REQUIRED`; it never selects an older cut or existing mutable directory silently. `WorkspaceStateManifest` is the full private recovery image and is intentionally not the deliverable `resultSourceRef`.
 
+The WorkerLaunch projection rule above applies while the launch is unretired.
+A retired launch retains its last write-authority phase, never a fabricated
+`sealed` or `fenced_reconciling` phase. In particular, a reserved/preactivated
+launch retired before activation keeps `preactivated_readonly`, lease version
+zero, and no lease epoch/expiry, activated time or quiesce id. Its exact generation
+becomes quarantined through `launch_aborted` or `launch_died_before_activation`
+in the same transaction; `retirementEvidenceRef` names that branch's exact
+no-spawn or death evidence. An observed actual containment is retained even if
+WorkerIdentity publication failed; WorkerIdentity is retained only if it was
+genuinely observed. The transaction increments the Run revision/event but changes
+neither the ready Checkpoint, frontier, Journal, budgets nor lease epoch.
+
 ### 7.2 Publication Protocol
 
 1. Create context and workspace artifacts in the content-addressed store.
@@ -4803,6 +4815,7 @@ type ProcessContainmentPlanV1 = {
         cgroupNameReservationDigest: string
         pidNamespaceReservationId: string
         subreaperStartToken: string
+        nativeReservation?: { deviceId: string; fileId: string; ownerUid: number }
       }
     | {
         kind: 'macos-vm'
@@ -5480,6 +5493,26 @@ The universal owner gate has exactly three bootstrap/acquisition entrypoints, al
 Every `inspectorIdentityRef` decodes only to `SupervisorInspectorIdentityV1`; `identityDigest = SHA-256(JCS(identity with identityDigest omitted))`, and the evidence repeats that digest. The referenced signed RuntimeBundle manifest must contain exactly the named executable entry with role `supervisor` and matching version/digest; its complete signed manifest rehashes to the named ref/digest. `supervisorInstanceId`, current `stateOwnerEpoch`, RuntimeBundle/entry, process identity, lock identity, and instance nonce must equal the sole active `StateOwnerRecordV1` held throughout the evidence transaction. The identity is published only after that active row commits while the process holds the exact OS lock; it becomes historical when ownership changes and cannot justify a later observation. Evidence digests omit themselves under JCS; `inspectorSupervisorInstanceId` must equal the **current** state-owning Supervisor and the decoded identity's instance, while the original spawner remains bound independently through the plan owner, WorkerLaunch/AdminOperation, and nonces. Observation time must be within the state transaction's bounded freshness window (default/max 5s). No PID exit, timeout, worker assertion, stale inspector identity, or schema-valid artifact with mismatched plan/nonce/owner/bundle is proof.
 
 `workerIdentityDigest` resolves to that versioned artifact; a PID-shaped free string is never authority. Storage requires its `launchId`, `supervisorInstanceId`, `spawnNonceDigest`, `activationNonceDigest`, and `processContainmentRef` equal the owning row, and its `intendedLeaseEpoch` equal the epoch installed by the single activation transaction; the artifact cannot be rebound to another launch, containment, or epoch. `activationDeadlineAt = createdAt + 120s` and is never extended. `generationWriteState` is the sole mutable generation-write gate: preactivation is read-only, only `active` may write, and revocation/checkpoint/seal CASes bind a unique `quiesceId`. Phase/identity changes and retirement use revisioned storage operations; only `leaseVersion`/`leaseExpiresAt` use the narrow heartbeat CAS described in section 6.
+
+The installed Linux worker recipe requires `backend.nativeReservation`, the
+device/inode/uid of an exclusive private StateOwner-relative birth witness at
+`runtime/worker-reservations/H('cliq-worker-reservation-v1',launchId,spawnNonceDigest)`.
+Other Linux producers do not inherit this worker-specific capability. Descriptor
+and named-parent identities, private mode and single-link file are revalidated;
+an arbitrary path or structural handle cannot substitute the reservation.
+The witness is a bounded, versioned native binary record with per-frame content
+digests and commit footers, not another lifecycle or Journal. Binding plan/spec,
+nonces, generation and original controller is durably acknowledged before the
+reserved row commits; creation intent precedes resource creation, actual monitor
+identity precedes release of its fork barrier, and full native READY identities
+precede the READY response. Missing, replaced, corrupt or incomplete records
+never prove absence. A successor lets the original controller finish its bounded
+EOF retirement rather than interrupting a still-completable birth record, then
+uses a new installed controller to reobserve/terminate exact retained identities.
+Every positive observation carries its native inspection time, not a timestamp
+sampled when JavaScript later receives the packet. No death state or observation
+timestamp is cached in the witness; existing inspector/freshness/state-owner
+gates remain mandatory. Historical bytes cannot activate or adopt the old worker.
 
 Entering `running` uses a blocked preactivation handshake; the Supervisor never chooses between “spawn an unowned process” and “persist a fictional PID”:
 

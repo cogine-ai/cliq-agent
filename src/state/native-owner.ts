@@ -16,6 +16,49 @@ export const STATE_OWNER_NATIVE_RELATIVE_PATH = `native/${process.platform}-${pr
 export const STATE_OWNER_NATIVE_PATH = fileURLToPath(new URL(`../../dist/${STATE_OWNER_NATIVE_RELATIVE_PATH}`, import.meta.url));
 
 type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
+/** Physical birth witness only. It grants neither activation nor death proof. */
+export type HeldWorkerReservation = Readonly<{ identity: DescriptorIdentity; assertHeld(): void; close(): void }>;
+type NativeWorkerReservation = HeldWorkerReservation & { borrow(): Readonly<{ fd: number; identity: DescriptorIdentity; assertHeld(): void; close(): void }> };
+const workerReservations = new WeakMap<HeldWorkerReservation,
+  { lock: HeldStateOwnerLock; native: NativeWorkerReservation; launchId: string; spawnNonceDigest: string }>();
+function checkedWorkerReservation(launchId: string, spawnNonceDigest: string): string {
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(launchId) || !/^[0-9a-f]{64}$/u.test(spawnNonceDigest)) {
+    throw new KernelStorageError('INVALID_REQUEST', 'worker reservation requires the exact launch and spawn nonce');
+  }
+  return identityHash('cliq-worker-reservation-v1', launchId, spawnNonceDigest);
+}
+function workerReservationError(error: unknown): never {
+  if (error instanceof KernelStorageError || error instanceof ResourceRetirementError) throw error;
+  if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+    throw new ResourceRetirementError('worker reservation descriptors did not retire', error);
+  }
+  throw new KernelStorageError('RECOVERY_REQUIRED', 'exact native worker reservation is not held');
+}
+function wrapWorkerReservation(lock: HeldStateOwnerLock, native: NativeWorkerReservation, launchId: string,
+  spawnNonceDigest: string): HeldWorkerReservation {
+  const handle: HeldWorkerReservation = Object.freeze({ identity: Object.freeze({ ...native.identity }),
+    assertHeld() {
+      if (this !== handle) throw new TypeError('invalid worker reservation');
+      try { lock.assertHeld(); native.assertHeld(); } catch (error) { workerReservationError(error); }
+    },
+    close() {
+      if (this !== handle) throw new TypeError('invalid worker reservation');
+      try { native.close(); } catch (error) { workerReservationError(error); }
+    }
+  });
+  workerReservations.set(handle, { lock, native, launchId, spawnNonceDigest });
+  return handle;
+}
+/** Internal descriptor bridge between the two installed native modules. */
+export function borrowWorkerReservationForExecution(reservation: HeldWorkerReservation, launchId: string,
+  spawnNonceDigest: string) {
+  const held = workerReservations.get(reservation);
+  if (!held || held.launchId !== launchId || held.spawnNonceDigest !== spawnNonceDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'native witness belongs to a different launch reservation');
+  }
+  reservation.assertHeld();
+  try { return held.native.borrow(); } catch (error) { workerReservationError(error); }
+}
 export type SourceInspectionStagingIdentity = DescriptorIdentity & Readonly<{ mode: 448 }>;
 /** Physical source-inspection reservation only, never a Run or execution FD. */
 export type HeldSourceInspectionStaging = Readonly<{
@@ -254,6 +297,8 @@ export type HeldStateOwnerLock = Readonly<{
    * absent root is physical absence, never an owner/task/process join proof. */
   openSourceInspectionStaging(inspectionId: string, stagingNonceDigest: string,
     identity: SourceInspectionStagingIdentity): HeldSourceInspectionStaging;
+  createWorkerReservation(launchId: string, spawnNonceDigest: string): HeldWorkerReservation;
+  openWorkerReservation(launchId: string, spawnNonceDigest: string, identity: DescriptorIdentity): HeldWorkerReservation;
   /** Trusted Supervisor primitive. The caller must first fence/retire writers;
    * this neither revokes open descriptors/mounts nor commits generation state. */
   quarantineGeneration(generation: WorkspaceGenerationIdentityV1, sourceRowVersion: number): GenerationQuarantineMove;
@@ -319,12 +364,14 @@ export type HeldWorkspaceCursor = Readonly<{
 }>;
 
 type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'createGenerationTree' | 'openGenerationTree' |
-  'createSourceInspectionStaging' | 'openSourceInspectionStaging'> & {
+  'createSourceInspectionStaging' | 'openSourceInspectionStaging' | 'createWorkerReservation' | 'openWorkerReservation'> & {
   moveGeneration(runId: string, generationId: string, quarantineId: string, deviceId: string, fileId: string): DescriptorIdentity;
   createGenerationTree(runId: string, generationId: string): NativeGenerationTree;
   openGenerationTree(runId: string, generationId: string, quarantineId?: string, deviceId?: string, fileId?: string): NativeGenerationTree;
   createSourceInspectionStaging(stagingId: string): NativeSourceInspectionStaging;
   openSourceInspectionStaging(stagingId: string, deviceId: string, fileId: string): NativeSourceInspectionStaging;
+  createWorkerReservation(reservationId: string): NativeWorkerReservation;
+  openWorkerReservation(reservationId: string, deviceId: string, fileId: string, ownerUid: number): NativeWorkerReservation;
 };
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot };
@@ -358,6 +405,22 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
       held.assertHeld();
       if (typeof onAccept !== 'function' || typeof onError !== 'function') throw new TypeError('control listener requires callbacks');
       return held.openControlListener(onAccept, onError);
+    },
+    createWorkerReservation(launchId, spawnNonceDigest) {
+      receiver(this); held.assertHeld();
+      const name = checkedWorkerReservation(launchId, spawnNonceDigest);
+      try { return wrapWorkerReservation(handle, held.createWorkerReservation(name), launchId, spawnNonceDigest); }
+      catch (error) { workerReservationError(error); }
+    },
+    openWorkerReservation(launchId, spawnNonceDigest, identity) {
+      receiver(this); held.assertHeld();
+      const name = checkedWorkerReservation(launchId, spawnNonceDigest);
+      if (!identity || Object.keys(identity).length !== 3 || !/^(0|[1-9][0-9]*)$/u.test(identity.deviceId) ||
+          !/^[1-9][0-9]*$/u.test(identity.fileId) || identity.ownerUid !== held.root.ownerUid ||
+          identity.deviceId !== held.root.deviceId) throw new KernelStorageError('ARTIFACT_MISMATCH', 'worker witness has a foreign StateRoot identity');
+      try { return wrapWorkerReservation(handle,
+        held.openWorkerReservation(name, identity.deviceId, identity.fileId, identity.ownerUid), launchId, spawnNonceDigest); }
+      catch (error) { workerReservationError(error); }
     },
     createGenerationTree(runId, generationId) {
       receiver(this); held.assertHeld();

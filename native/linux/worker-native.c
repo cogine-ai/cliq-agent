@@ -8,6 +8,7 @@
 
 #if defined(__linux__)
 #include "worker-common.h"
+#include "worker-reservation.h"
 #include <poll.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -23,7 +24,8 @@ struct native_scope;
 struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, ready, cleanup_queued, env_closing, reaped, cleanup_done;
     unsigned int next_scope, pending; char token[CLIQ_WORKER_TOKEN_BYTES]; unsigned int references;
     struct native_scope *scopes, *pending_scope;
-    struct cliq_worker_packet retained;
+    struct cliq_worker_packet retained, reservation, reservation_inspection;
+    bool reservation_bound, inspection_only;
     napi_env env; napi_async_work cleanup_work; napi_async_cleanup_hook_handle cleanup_hook;
     napi_deferred close_deferred; napi_ref close_promise;
 };
@@ -468,7 +470,8 @@ static napi_value create_scope(napi_env env, napi_callback_info info, bool invoc
     size_t argc = expected; napi_value args[7], self; struct controller *controller;
     napi_get_cb_info(env, info, &argc, args, &self, NULL);
     if (argc != expected || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed || !controller->ready || controller->pending != 0 ||
-        controller->next_scope >= CLIQ_WORKER_MAX_SCOPES) return failure(env, "invalid held Linux controller");
+        controller->next_scope >= CLIQ_WORKER_MAX_SCOPES || controller->inspection_only ||
+        (!invocation && !controller->reservation_bound)) return failure(env, "invalid held Linux controller");
     uint64_t generation, cgroup = 0; struct image *helper, *worker, *bwrap, *input = NULL; struct native_scope *parent = NULL;
     if (!number(env, args[0], &generation) || generation > INT32_MAX ||
         (invocation ? !tagged(env, args[1], &SCOPE_TAG, (void **)&parent) || parent->controller != controller || parent->invocation ||
@@ -492,6 +495,13 @@ static napi_value create_scope(napi_env env, napi_callback_info info, bool invoc
         !field_number(env, config, "maxSingleFileBytes", &request.max_file_bytes) ||
         !field_number(env, config, "maxGenerationBytes", &request.max_generation_bytes) ||
         !field_number(env, config, "maxInvocationOutputBytes", &request.max_output_bytes)) return failure(env, "invalid closed scope projection");
+    if (!invocation) {
+        const struct cliq_worker_packet *binding = &controller->reservation;
+        if (request.generation_device != binding->generation_device || request.generation_inode != binding->generation_inode ||
+            strcmp(request.nonce, binding->nonce) != 0 || strcmp(request.activation_nonce, binding->activation_nonce) != 0 ||
+            strcmp(request.cgroup_name, binding->cgroup_name) != 0) return failure(env, "worker differs from its native reservation");
+        reservation_copy_binding(&request, binding);
+    }
     int descriptors[] = { (int)generation, invocation ? helper->fd : (int)cgroup,
         invocation ? worker->fd : helper->fd, invocation ? bwrap->fd : worker->fd, invocation ? input->fd : bwrap->fd };
     struct native_scope *scope = calloc(1, sizeof(*scope));
@@ -539,6 +549,103 @@ static bool parse_retained_tokens(const char *init_token, const char *subreaper_
     request->subreaper_pid = subreaper;
     snprintf(request->subreaper_start_token, sizeof(request->subreaper_start_token), "linux-proc-start-ticks:%s", subreaper_ticks);
     return true;
+}
+
+static bool parse_reservation_subreaper(const char *value, struct cliq_worker_packet *request) {
+    int consumed = 0; char pid_text[11] = {0}, ticks[33] = {0};
+    if (sscanf(value, "linux-subreaper:%10[0-9]:linux-proc-start-ticks:%32[0-9]%n",
+        pid_text, ticks, &consumed) != 2 || value[consumed] != '\0' || pid_text[0] == '0') return false;
+    long pid = strtol(pid_text, NULL, 10);
+    if (pid <= 0 || pid > INT32_MAX) return false;
+    request->subreaper_pid = pid;
+    int length = snprintf(request->subreaper_start_token, sizeof(request->subreaper_start_token), "linux-proc-start-ticks:%s", ticks);
+    return length >= 0 && (size_t)length < sizeof(request->subreaper_start_token);
+}
+static bool reservation_projection(napi_env env, napi_value value, struct cliq_worker_packet *request) {
+    char subreaper[CLIQ_WORKER_TOKEN_BYTES];
+    return field_string(env, value, "planRef", request->plan_ref, sizeof(request->plan_ref)) &&
+        field_string(env, value, "sandboxLaunchSpecRef", request->sandbox_launch_ref, sizeof(request->sandbox_launch_ref)) &&
+        field_string(env, value, "sandboxLaunchSpecDigest", request->sandbox_launch_digest, sizeof(request->sandbox_launch_digest)) &&
+        field_string(env, value, "workspaceGenerationRef", request->generation_ref, sizeof(request->generation_ref)) &&
+        field_string(env, value, "spawnNonceDigest", request->nonce, sizeof(request->nonce)) &&
+        field_string(env, value, "activationNonceDigest", request->activation_nonce, sizeof(request->activation_nonce)) &&
+        field_string(env, value, "cgroupName", request->cgroup_name, sizeof(request->cgroup_name)) &&
+        field_string(env, value, "pidNamespaceReservationId", request->pid_namespace_reservation, sizeof(request->pid_namespace_reservation)) &&
+        field_string(env, value, "subreaperStartToken", subreaper, sizeof(subreaper)) &&
+        parse_reservation_subreaper(subreaper, request) &&
+        field_number(env, value, "reservationDevice", &request->reservation_device) &&
+        field_number(env, value, "reservationInode", &request->reservation_inode) &&
+        field_number(env, value, "reservationOwnerUid", &request->reservation_uid) &&
+        field_number(env, value, "generationDevice", &request->generation_device) &&
+        field_number(env, value, "generationInode", &request->generation_inode) && reservation_binding_valid(request);
+}
+static napi_value controller_bind_reservation(napi_env env, napi_callback_info info) {
+    size_t argc = 2; napi_value args[2], self; struct controller *controller; uint64_t descriptor;
+    napi_get_cb_info(env, info, &argc, args, &self, NULL);
+    if (argc != 2 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed || !controller->ready ||
+        controller->pending != 0 || controller->reservation_bound || controller->inspection_only || controller->scopes ||
+        !number(env, args[0], &descriptor) || descriptor > INT32_MAX) return failure(env, "invalid native worker reservation binding");
+    struct cliq_worker_packet request = cliq_packet(CLIQ_BIND_RESERVATION); char token[CLIQ_WORKER_TOKEN_BYTES];
+    if (!reservation_projection(env, args[1], &request) || request.subreaper_pid != controller->pid ||
+        strcmp(request.subreaper_start_token, controller->token) != 0 ||
+        !cliq_process_token(controller->pid, token) || strcmp(token, controller->token) != 0)
+        return failure(env, "reservation selects another native controller");
+    controller->reservation = request; int held = (int)descriptor;
+    if (!begin_request(controller, NULL, &request, &held, 1)) return failure(env, "native reservation could not be bound");
+    return undefined(env);
+}
+static napi_value controller_poll_bound(napi_env env, napi_callback_info info) {
+    size_t argc = 0; napi_value self; struct controller *controller;
+    napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
+    if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed)
+        return failure(env, "invalid bound reservation controller");
+    int observed = 1;
+    if (!controller->reservation_bound) {
+        struct cliq_worker_packet response;
+        observed = poll_response(controller, NULL, CLIQ_BIND_RESERVATION, &response);
+        if (observed < 0) return failure(env, "native reservation persistence was not observed");
+        if (observed == 1) controller->reservation_bound = true;
+    }
+    napi_value result; napi_get_boolean(env, observed == 1, &result); return result;
+}
+static napi_value controller_inspect_reservation(napi_env env, napi_callback_info info) {
+    size_t argc = 3; napi_value args[3], self; struct controller *controller; uint64_t cgroup, reservation;
+    napi_get_cb_info(env, info, &argc, args, &self, NULL);
+    if (argc != 3 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed || !controller->ready ||
+        controller->pending != 0 || controller->reservation_bound || controller->scopes ||
+        !number(env, args[0], &cgroup) || cgroup > INT32_MAX ||
+        !number(env, args[1], &reservation) || reservation > INT32_MAX) return failure(env, "invalid native reservation inspector");
+    struct cliq_worker_packet request = cliq_packet(CLIQ_INSPECT_RESERVATION);
+    if (!reservation_projection(env, args[2], &request)) return failure(env, "invalid retained reservation binding");
+    controller->inspection_only = true; controller->reservation_inspection = request;
+    int descriptors[] = { (int)cgroup, (int)reservation };
+    if (!begin_request(controller, NULL, &request, descriptors, 2)) return failure(env, "native reservation could not be inspected");
+    return undefined(env);
+}
+static napi_value controller_poll_reservation(napi_env env, napi_callback_info info) {
+    size_t argc = 0; napi_value self; struct controller *controller;
+    napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
+    if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || !controller->inspection_only)
+        return failure(env, "invalid native reservation observation");
+    struct cliq_worker_packet response;
+    int observed = poll_response(controller, NULL, CLIQ_INSPECT_RESERVATION, &response);
+    if (observed < 0) return failure(env, "native reservation closure could not be proven");
+    if (observed == 0) return undefined(env);
+    if (!reservation_same_binding(&response, &controller->reservation_inspection) ||
+        response.observed_at_ms == 0 || response.observed_at_ms > UINT64_C(9007199254740991))
+        return failure(env, "native reservation observation belongs to another launch or lacks its actual observation time");
+    napi_value result;
+    if (response.reservation_observation == 1 && response.cgroup_inode == 0 && response.pid_namespace_inode == 0 &&
+        response.pid == 0 && response.namespace_init_pid == 0 && response.monitor_pid == 0) {
+        napi_create_object(env, &result); set_string(env, result, "kind", "not_attempted");
+        napi_value present; napi_get_boolean(env, false, &present); napi_set_named_property(env, result, "cgroupPresent", present);
+    } else if (response.reservation_observation == 2 && response.cgroup_inode != 0 && response.pid_namespace_inode != 0 &&
+        response.pid > 0 && response.namespace_init_pid > 0 && response.monitor_pid > 0 &&
+        response.init_reaped == 1 && response.populated == 0 && response.remaining_descendants == 0) {
+        result = scope_observation(env, &response); set_string(env, result, "kind", "created_dead");
+    } else return failure(env, "native reservation closure observation is incomplete");
+    set_number(env, result, "observedAtMs", (double)response.observed_at_ms);
+    napi_object_freeze(env, result); return result;
 }
 
 static napi_value terminate_retained(napi_env env, napi_callback_info info) {
@@ -684,13 +791,17 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
     set_number(env, result, "pid", child); set_string(env, result, "processStartToken", "");
     napi_property_descriptor properties[] = {
         { "pollReady", NULL, controller_poll_ready, NULL, NULL, NULL, napi_default, NULL },
+        { "bindReservation", NULL, controller_bind_reservation, NULL, NULL, NULL, napi_default, NULL },
+        { "pollBound", NULL, controller_poll_bound, NULL, NULL, NULL, napi_default, NULL },
+        { "inspectReservation", NULL, controller_inspect_reservation, NULL, NULL, NULL, napi_default, NULL },
+        { "pollReservation", NULL, controller_poll_reservation, NULL, NULL, NULL, napi_default, NULL },
         { "createWorker", NULL, create_worker, NULL, NULL, NULL, napi_default, NULL },
         { "createInvocation", NULL, create_invocation, NULL, NULL, NULL, napi_default, NULL },
         { "terminateRetained", NULL, terminate_retained, NULL, NULL, NULL, napi_default, NULL },
         { "pollRetained", NULL, poll_retained, NULL, NULL, NULL, napi_default, NULL },
         { "close", NULL, controller_close, NULL, NULL, NULL, napi_default, NULL }
     };
-    napi_define_properties(env, result, 6, properties); return result;
+    napi_define_properties(env, result, sizeof(properties) / sizeof(properties[0]), properties); return result;
 }
 
 static napi_value initialize(napi_env env, napi_value exports) {
@@ -699,7 +810,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
         { "sealImageBuffer", NULL, seal_input, NULL, NULL, NULL, napi_default, NULL },
         { "openController", NULL, open_controller, NULL, NULL, NULL, napi_default, NULL }
     };
-    napi_define_properties(env, exports, 3, properties); set_number(env, exports, "interfaceVersion", 1); return exports;
+    napi_define_properties(env, exports, 3, properties); set_number(env, exports, "interfaceVersion", 2); return exports;
 }
 #else
 static napi_value unsupported(napi_env env, napi_callback_info info) {
