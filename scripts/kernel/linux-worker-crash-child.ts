@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import fsPromises, { open, type FileHandle } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { inspect } from 'node:util';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { digestOmitting, identityHash } from '../../src/kernel/identity.js';
+import type { ProcessContainmentPlanV1 } from '../../src/kernel/execution.js';
 import type { ToolContractManifestV1, WorkerDeathWait, WorkerIdentity, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../../src/kernel/types.js';
 import type { RunAssemblyValidationMaterial, RunAssemblyToolAuthority } from '../../src/model/run-assembly.js';
@@ -16,10 +19,11 @@ import { ResourceRetirementError } from '../../src/state/errors.js';
 import { decodeWorkerProcessContainment } from '../../src/state/execution-closure.js';
 import { readRequiredWorkerLaunch } from '../../src/state/repositories/worker-launches.js';
 import { openSqliteDriver } from '../../src/state/sqlite-driver.js';
-import { openStateStore, type StateStoreRuntimeAuthority } from '../../src/state/store.js';
+import { openStateStore, type StateStore, type StateStoreRuntimeAuthority } from '../../src/state/store.js';
 
 export type CrashChildInput = {
   stateRoot: string; runId: string; runtimeAuthority: StateStoreRuntimeAuthority;
+  preactivationCrash?: 'reserved_before_create';
   retirementFault?: 'pre_probe' | 'timeout_closure' | 'controller_loss';
   materialData: Omit<RunAssemblyValidationMaterial, 'resolveVerifiedCapabilityClaims' | 'verifyLocalZeroCostAuthority' |
     'resolvePriceTableAuthority' | 'resolveVerifiedTools' | 'verifyReference' | 'verifyProviderAdapter' | 'verifyProviderEndpoint'>;
@@ -59,6 +63,64 @@ function token(pid: number): string {
   return `linux-proc-start-ticks:${fields[19]}`;
 }
 
+async function stopReservedBeforeCreate(input: CrashChildInput, metadata: ReturnType<typeof openSqliteDriver>,
+  execution: Awaited<ReturnType<StateStore['loadRunExecution']>>, expectedRunRevision: number): Promise<never> {
+  const image = input.runtimeAuthority.bundle.entries.find(entry => entry.entryId === 'linux_worker');
+  assert.ok(image?.executable && image.role === 'worker');
+  const originalRead = fs.readSync;
+  let probing = false;
+  try {
+    fs.readSync = ((...args: unknown[]) => {
+      const count = Reflect.apply(originalRead, fs, args) as number;
+      if (probing) return count;
+      probing = true;
+      try {
+        const fd = args[0] as number, held = fs.fstatSync(fd, { bigint: true });
+        if (!held.isFile() || held.size !== BigInt(image.byteCount) ||
+            fs.readlinkSync(`/proc/self/fd/${fd}`) !== '/memfd:cliq-runtime-image (deleted)') return count;
+        const launch = metadata.readSnapshot(connection => {
+          const rows = connection.prepare('SELECT launch_id FROM worker_launches WHERE run_id=? AND retired_at IS NULL')
+            .all<{ launch_id: string }>(input.runId);
+          assert.ok(rows.length <= 1, 'crash selector must not choose competing reservations');
+          return rows.length === 1 ? readRequiredWorkerLaunch(connection, rows[0]!.launch_id) : undefined;
+        });
+        if (launch?.phase !== 'reserved') return count;
+        const hash = createHash('sha256'), chunk = Buffer.alloc(Math.min(64 * 1024, image.byteCount));
+        for (let offset = 0; offset < image.byteCount;) {
+          const length = originalRead(fd, chunk, 0, Math.min(chunk.length, image.byteCount - offset), offset);
+          assert.ok(length > 0); hash.update(chunk.subarray(0, length)); offset += length;
+        }
+        if (hash.digest('hex') !== image.digest) return count;
+        assert.ok(count > 0); assert.equal(launch.workerIdentityDigest, undefined); assert.equal(launch.processContainmentRef, undefined);
+        const plan = artifact<ProcessContainmentPlanV1>(input.stateRoot, launch.containmentPlanRef);
+        if (plan.owner.kind !== 'worker_activation' || plan.backend.kind !== 'linux' || !plan.backend.nativeReservation) {
+          throw new Error('reserved crash lacks its bound native worker reservation');
+        }
+        const backend = plan.backend;
+        assert.equal(plan.owner.runId, input.runId); assert.equal(plan.owner.workerLaunchId, launch.launchId);
+        assert.equal(plan.launchNonceDigest, launch.spawnNonceDigest);
+        assert.throws(() => fs.lstatSync(backend.cgroupPath), error =>
+          (error as NodeJS.ErrnoException).code === 'ENOENT' && (error as NodeJS.ErrnoException).path === backend.cgroupPath);
+        const controller = /^linux-subreaper:([1-9][0-9]*):(linux-proc-start-ticks:[0-9]+)$/u.exec(backend.subreaperStartToken);
+        assert.ok(controller); assert.equal(token(Number(controller[1])), controller[2]);
+        const after = fs.fstatSync(fd, { bigint: true });
+        assert.equal(after.dev, held.dev); assert.equal(after.ino, held.ino); assert.equal(after.size, held.size);
+        assert.equal(after.mtimeNs, held.mtimeNs); assert.equal(after.ctimeNs, held.ctimeNs);
+        // The parent observes T and independently reads the retained cut. An
+        // IPC send here could remain buffered forever once this thread stops.
+        fs.readSync = originalRead; syncBuiltinESMExports();
+        process.kill(process.pid, 'SIGSTOP');
+        throw new Error('reserved crash barrier unexpectedly resumed');
+      } finally { probing = false; }
+    }) as typeof fs.readSync;
+    syncBuiltinESMExports();
+    await new Promise<void>((resolve, reject) => process.send!({ state: 'preactivation_crash_armed', runId: input.runId },
+      error => error ? reject(error) : resolve()));
+    await execution.executeCurrentTool({ expectedRunRevision });
+    throw new Error('execution missed the required actual reserved-before-create crash boundary');
+  } finally { fs.readSync = originalRead; syncBuiltinESMExports(); }
+}
+
 async function run(input: CrashChildInput) {
   const store = await openStateStore(input.stateRoot, input.runtimeAuthority);
   const before = await store.readRecoveryClosure(input.runId);
@@ -93,6 +155,10 @@ async function run(input: CrashChildInput) {
   let controllerReadFaults = 0, retainedFailure: ResourceRetirementError | undefined;
   let operationFailure: { error: unknown } | undefined;
   try {
+    if (input.preactivationCrash === 'reserved_before_create') {
+      assert.equal(input.retirementFault, undefined);
+      return await stopReservedBeforeCreate(input, metadata, execution, before.run.revision);
+    }
     prototype.readFile = (async function(this: FileHandle, ...args: unknown[]) {
       const bytes: unknown = await Reflect.apply(originalRead, this, args);
       if (!processLossInjected && Buffer.isBuffer(bytes)) {

@@ -1,8 +1,8 @@
 # I1 preactivation retirement and successor retry
 
 Status: **Option A approved; implementation and real qualification in progress.
-The before-create and READY-before-identity retirement/retry tracers have real
-Linux GREEN; invalid private-entry retirement and the successor crash boundaries
+The before-create, READY-before-identity and invalid private-entry
+retirement/retry tracers have real Linux GREEN; the successor crash boundaries
 are still being qualified.**
 Baseline: `854b9a95e6a99a8380772243853e5b7adc597272` (`main`, PR #514).
 
@@ -181,6 +181,21 @@ It makes no complete-tree digest or fsync-success claim. Source/CAS integrity,
 generic native IO, private Git parsing, cancellation, identity and descriptor
 retirement errors remain blocking uncertainty, not partial observations. This
 does not claim producer coverage for every partial-observation failure class.
+The unchanged real tracer then passed, together with all twelve other native
+scenarios, at source revision `ab0bc4b8e80ead581a719f5337e6de717072511b`:
+[Linux job 113882359927](https://github.com/cogine-ai/cliq-agent/actions/runs/37948929659/job/113882359927).
+The exact old directory inode was quarantined with partial-entry evidence and
+the distinct retry produced one real edit/claim/charge. Local build and all
+1807 tests passed before pushing this correction.
+
+The next tracer stops a real Supervisor after consuming its exact signed held
+image while the sole launch is still reserved. Its parent independently checks
+the committed ready cut, the actual binding-only witness and SHA-256 footer,
+owner/controller PID tokens, absent cgroup and unchanged generation inode/bytes
+before SIGKILL. Only public successor opening may perform fresh native
+retirement, followed by one distinct edit retry; the old controller is not
+signalled to manufacture closure. This genuine successor case still requires
+real Linux qualification before it is counted as complete.
 
 Then qualify the same complete scenario at these boundaries:
 

@@ -1,8 +1,9 @@
 # I1 trusted worker and recoverable private generation
 
-Status: **Paused at the user's request on 2026-10-09. The fixed worker-recovery
-intent supplement is approved; integrated execution and platform qualification
-are not complete.**
+Status: **The execution/recovery foundation is merged in PR #514. The user has
+approved resuming [preactivation retirement and successor retry](i1-preactivation-recovery.md)
+with Option A. I1 and the remaining production/platform qualifications are not
+complete; this resumption does not expand that capability's scope.**
 Source baseline: `30b93356fbc483239d320b7a31ca421b90464e63` (`main`, PR #513).
 
 This is the next integrated capability after native authenticated control and
