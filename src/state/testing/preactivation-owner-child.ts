@@ -9,8 +9,10 @@ type Input = { stateRoot: string; authority?: StateStoreRuntimeAuthority; closeF
 async function attempt(input: Input) {
   const originalOpen = fs.open;
   let closeFaults = 0;
+  let failurePhase: 'open' | 'close' = 'open';
   try {
     const store = await openStateStore(input.stateRoot, input.authority);
+    failurePhase = 'close';
     if (input.closeFault) {
       fs.open = (async (...args: Parameters<typeof fs.open>) => {
         const handle = await originalOpen(...args);
@@ -27,7 +29,7 @@ async function attempt(input: Input) {
     await store.close();
     return { state: 'unexpected_success' };
   } catch (error) {
-    return { state: 'refused', closeFaults, retirement: error instanceof ResourceRetirementError,
+    return { state: 'refused', failurePhase, closeFaults, retirement: error instanceof ResourceRetirementError,
       code: error instanceof ResourceRetirementError ? error.code : undefined,
       message: error instanceof Error ? error.message : String(error) };
   } finally { fs.open = originalOpen; }

@@ -196,6 +196,17 @@ before SIGKILL. Only public successor opening may perform fresh native
 retirement, followed by one distinct edit retry; the old controller is not
 signalled to manufacture closure. This genuine successor case still requires
 real Linux qualification before it is counted as complete.
+Its first execution at `303c2a46063698b79755e12cde24ceef0e600686` reached
+successful successor opening, unchanged ready cut, one retirement revision and
+actual original-controller absence. It then failed a test oracle: the public
+recovery cut intentionally excludes retired launches, so it cannot supply the
+old retired history row. The correction independently reads that exact SQL
+history, as the ordinary failure tracer already does, without widening the
+production recovery API. This is not an implementation RED or a completed
+crash qualification:
+[Linux job 113888908835](https://github.com/cogine-ai/cliq-agent/actions/runs/37950845506/job/113888908835).
+The portable GC tests also distinguish `open` from `close` failure explicitly;
+a later shutdown refusal cannot qualify an unreadable-plan startup rejection.
 
 Then qualify the same complete scenario at these boundaries:
 

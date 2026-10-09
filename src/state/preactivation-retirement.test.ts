@@ -34,11 +34,12 @@ test('startup with an unreadable reserved plan retains the actual owner lock eve
     });
     exited = once(child, 'exit');
     const reply = async () => (await once(child!, 'message', { signal: AbortSignal.timeout(20_000) }))[0] as
-      { state: string; retirement?: boolean; code?: string; message?: string };
+      { state: string; failurePhase?: string; retirement?: boolean; code?: string; message?: string };
     assert.equal((await reply()).state, 'ready');
     const response = reply(); child.send({ stateRoot: fixture.stateRoot, authority: fixture.runtimeAuthority });
     const refused = await response;
     assert.equal(refused.state, 'refused', refused.message);
+    assert.equal(refused.failurePhase, 'open', 'a later close refusal cannot qualify failed startup');
     const successor = ownerAt(fixture.stateRoot);
     assert.equal(successor.state, 'active'); assert.equal(successor.ownerEpoch, prior.ownerEpoch + 1);
     const native = await loadNativeStateOwner();
@@ -74,11 +75,12 @@ test('failed public Store.close retains the actual owner after its caller drops 
   let successorResourcesRetired = true;
   try {
     const reply = async () => (await once(child, 'message', { signal: AbortSignal.timeout(20_000) }))[0] as
-      { state: string; retirement?: boolean; code?: string; closeFaults?: number; message?: string };
+      { state: string; failurePhase?: string; retirement?: boolean; code?: string; closeFaults?: number; message?: string };
     assert.equal((await reply()).state, 'ready');
     const response = reply(); child.send({ stateRoot: root, closeFault: true });
     const refused = await response;
     assert.equal(refused.state, 'refused', refused.message);
+    assert.equal(refused.failurePhase, 'close');
     assert.ok(refused.closeFaults! > 0, 'the real CAS close fault must have happened');
     assert.equal(refused.retirement, true); assert.equal(refused.code, 'RECOVERY_REQUIRED');
     assert.equal(ownerAt(root).state, 'active');

@@ -440,6 +440,7 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
 async function supervisorCrashReservedBeforeCreate() {
   const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'reserved-crash' });
   let child: ReturnType<typeof fork> | undefined, exited: ReturnType<typeof once> | undefined, successor: StateStore | undefined;
+  let history: ReturnType<typeof openSqliteDriver> | undefined;
   let diagnostic = '', resourcesRetired = false, operationFailure: { error: unknown } | undefined;
   try {
     const before = await checkpointBytes(fixture.store, fixture.runId);
@@ -545,7 +546,10 @@ async function supervisorCrashReservedBeforeCreate() {
     const reopened = await checkpointBytes(successor, fixture.runId); assertQueuedReadyCut(reopened, before);
     assert.equal(reopened.closure.run.revision, held.run.revision + 1);
     await assert.rejects(access(`/proc/${controllerPid}`), { code: 'ENOENT' });
-    const retired = reopened.closure.workerLaunches.find(launch => launch.launchId === held.launch.launchId)!;
+    // The public recovery cut contains live launches, not retired history.
+    // Independently read this exact historical row without widening that API.
+    const inspection = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME)); history = inspection;
+    const retired = inspection.readSnapshot(connection => readRequiredWorkerLaunch(connection, held.launch.launchId));
     assert.equal(retired.phase, 'retired'); assert.ok(retired.retirementEvidenceRef);
     const originalFacts = { ...retired, phase: held.launch.phase }; delete originalFacts.retiredAt; delete originalFacts.retirementEvidenceRef;
     assert.deepEqual(originalFacts, held.launch, 'successor retirement cannot adopt or replace the old reservation');
@@ -587,7 +591,8 @@ async function supervisorCrashReservedBeforeCreate() {
     assert.equal(after.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'completed').length, 1);
     assert.deepEqual(after.closure.run.budgetConsumed, { ...held.run.budgetConsumed, toolCalls: held.run.budgetConsumed.toolCalls + 1 });
     assert.deepEqual(after.closure.run.budgetReserved, held.run.budgetReserved);
-    const replacements = after.closure.workerLaunches.filter(launch => launch.leaseEpoch === after.closure.run.leaseEpoch);
+    const replacements = inspection.readSnapshot(connection => readWorkerLaunchesForRun(connection, fixture.runId))
+      .filter(launch => launch.leaseEpoch === after.closure.run.leaseEpoch);
     assert.equal(replacements.length, 1); const replacement = replacements[0]!; assert.equal(replacement.phase, 'retired');
     for (const field of ['launchId', 'workspaceGenerationRef', 'spawnNonceDigest', 'activationNonceDigest'] as const) {
       assert.notEqual(replacement[field], held.launch[field]);
@@ -617,6 +622,7 @@ async function supervisorCrashReservedBeforeCreate() {
       if (child?.exitCode === null && child.signalCode === null) assert.ok(child.kill('SIGKILL'));
       if (exited) await bounded(exited);
     } catch (error) { failures.push(error); resourcesRetired = false; }
+    try { history?.close(); } catch (error) { failures.push(error); resourcesRetired = false; }
     if (successor) {
       try { await successor.close(); resourcesRetired = failures.length === 0; }
       catch (error) { failures.push(error); resourcesRetired = false; }
