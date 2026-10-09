@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fork, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
-import { access, lstat, mkdtemp, open, readFile, rm, stat, type FileHandle } from 'node:fs/promises';
+import { access, lstat, mkdtemp, open, readFile, rename, rm, stat, type FileHandle } from 'node:fs/promises';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
@@ -509,13 +509,13 @@ async function releaseForkTracer(tracer: LinuxForkTracer) {
   }
 }
 
-async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInput['preactivationCrash']>, witnessFault?: 'corrupt_ready_footer') {
+async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInput['preactivationCrash']>, witnessFault?: 'corrupt_ready_footer' | 'missing' | 'replaced_inode') {
   if (witnessFault !== undefined) assert.equal(boundary, 'ready_before_identity');
   const committed = boundary === 'preactivated_before_activation';
   const postMove = boundary === 'queued_post_move_before_retirement';
   const controllerLoss = boundary === 'monitor_fork_controller_loss';
   const corruptReadyFooter = witnessFault === 'corrupt_ready_footer';
-  const negative = controllerLoss || corruptReadyFooter;
+  const negative = controllerLoss || witnessFault !== undefined;
   const monitorFork = boundary === 'monitor_fork_before_ready' || controllerLoss;
   const hasReadyAtPause = boundary === 'ready_before_identity' || committed;
   const expectsCreatedRetirement = !negative && (hasReadyAtPause || boundary === 'monitor_fork_before_ready');
@@ -699,12 +699,12 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
         physicalScope = { cgroupId: String(group.ino), pidNamespaceId: String(namespace.ino), workerPid: running.pid,
           workerToken: running.token, initPid: init[0]!.pid, initToken: init[0]!.token, monitorPid, monitorToken,
           namespaceInitStartToken, birthObservation: 'independent-live-READY', members };
-        if (corruptReadyFooter) readyObservation = { bytes, witness: physical, group };
+        if (witnessFault !== undefined) readyObservation = { bytes, witness: physical, group };
       } else await assert.rejects(lstat(plan.backend.cgroupPath), { code: 'ENOENT' });
       const after = await witness.stat({ bigint: true });
       for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
     } finally {
-      if (!monitorFork && !corruptReadyFooter) { await witness.close(); retainedWitness = undefined; }
+      if (!monitorFork && witnessFault === undefined) { await witness.close(); retainedWitness = undefined; }
     }
     if (postMove) {
       assert.ok(hint); assert.equal(hint.runId, fixture.runId); assert.equal(hint.generationRef, held.generation.generationRef);
@@ -1029,7 +1029,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
         note: 'real monitor fork; Supervisor and original controller SIGKILL; natural monitor barrier EOF exit 70; no birth repair, no native positive proof or generation quarantine; retained unknown fixture for controlled CI teardown' }));
       return;
     }
-    if (corruptReadyFooter) {
+    if (witnessFault !== undefined) {
       assert.ok(readyObservation && physicalScope && retainedWitness === witness && !tracer);
       const originalReady = readyObservation, oldScope = physicalScope;
       // The file fault follows natural EOF cleanup, never interrupts its
@@ -1049,6 +1049,10 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
         assert.equal((await readFile(path.join(scope, 'cgroup.procs'), 'utf8')).trim(), '');
         assert.match(await readFile(path.join(scope, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
       }
+    }
+    if (corruptReadyFooter) {
+      assert.ok(readyObservation && retainedWitness === witness);
+      const originalReady = readyObservation;
       const footerShaOffset = 4736, oldByte = originalReady.bytes[footerShaOffset]!, newByte = oldByte ^ 1;
       const writable = await open(witnessPath, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
       let writeFailure: { error: unknown } | undefined;
@@ -1103,6 +1107,122 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
           postFaultMtimeNs: String(postFault.mtimeNs), postFaultCtimeNs: String(postFault.ctimeNs), fsyncComplete: true },
         preservedStateRoot: fixture.stateRoot, preservedWorkspace: fixture.workspace,
         note: 'real READY observed before Supervisor loss; original controller and captured members naturally gone before one-byte footer SHA fault; public opening refuses without repair or new native birth/death evidence; retained fixture for controlled CI teardown' }));
+      return;
+    }
+    if (witnessFault === 'missing' || witnessFault === 'replaced_inode') {
+      assert.ok(readyObservation && retainedWitness === witness);
+      const originalReady = readyObservation, parentPath = path.dirname(witnessPath);
+      const parent = await open(parentPath, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      let pathFaultFailure: { error: unknown } | undefined;
+      try {
+        const directory = await parent.stat({ bigint: true }), namedDirectory = await lstat(parentPath, { bigint: true });
+        assert.ok(directory.isDirectory() && namedDirectory.isDirectory() && !namedDirectory.isSymbolicLink());
+        assert.equal(directory.mode & 0o7777n, 0o700n); assert.equal(Number(directory.uid), plan.backend.nativeReservation.ownerUid);
+        assert.equal(directory.dev, originalReady.witness.dev);
+        for (const field of ['dev', 'ino', 'uid', 'mode'] as const) assert.equal(namedDirectory[field], directory[field]);
+        const originalName = `/proc/self/fd/${parent.fd}/${path.basename(witnessPath)}`;
+        const retainedBasename = `.retained-worker-reservation-${randomUUID()}`;
+        const retainedName = `/proc/self/fd/${parent.fd}/${retainedBasename}`;
+        const original = await witness.stat({ bigint: true }), named = await lstat(originalName, { bigint: true });
+        assert.ok(original.isFile() && named.isFile() && !named.isSymbolicLink());
+        for (const field of ['dev', 'ino', 'uid', 'mode', 'nlink', 'size'] as const) {
+          assert.equal(original[field], originalReady.witness[field]); assert.equal(named[field], original[field]);
+        }
+        assert.equal(original.mode & 0o7777n, 0o600n); assert.equal(original.nlink, 1n); assert.equal(original.size, 4768n);
+        const nativeBytes = await witnessBytes(witness, 4768); assert.deepEqual(nativeBytes, originalReady.bytes);
+        verifyNativeBirthFrames(nativeBytes, [2048, 32, 64, 256, 2048]);
+        await assert.rejects(lstat(retainedName), { code: 'ENOENT' });
+        await rename(originalName, retainedName);
+        await assert.rejects(lstat(witnessPath), { code: 'ENOENT' });
+        let copiedBytes = 0;
+        if (witnessFault === 'replaced_inode') {
+          const replacement = await open(originalName,
+            fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+          let copyFailure: { error: unknown } | undefined;
+          try {
+            const physical = await replacement.stat({ bigint: true });
+            assert.ok(physical.isFile()); assert.equal(physical.dev, original.dev); assert.notEqual(physical.ino, original.ino);
+            assert.equal(physical.uid, original.uid); assert.equal(physical.mode & 0o7777n, 0o600n);
+            assert.equal(physical.nlink, 1n); assert.equal(physical.size, 0n);
+            // Exact original native bytes retain the old inode binding. Do not
+            // recompute a body/footer or invent a replacement birth witness.
+            while (copiedBytes < nativeBytes.length) {
+              const { bytesWritten } = await replacement.write(nativeBytes, copiedBytes, nativeBytes.length - copiedBytes, copiedBytes);
+              assert.ok(bytesWritten > 0 && bytesWritten <= nativeBytes.length - copiedBytes); copiedBytes += bytesWritten;
+            }
+            assert.equal(copiedBytes, 4768); await replacement.sync();
+          } catch (error) { copyFailure = { error }; throw error; }
+          finally {
+            try { await replacement.close(); }
+            catch (error) { throw new AggregateError([...(copyFailure ? [copyFailure.error] : []), error], 'replacement witness writer did not close'); }
+          }
+        }
+        await parent.sync();
+        // Rename legally changes the original ctime; directory mutations also
+        // change parent timestamps. Only the completed fault is the baseline.
+        const postOriginal = await witness.stat({ bigint: true }), postParent = await parent.stat({ bigint: true });
+        const postReplacement = witnessFault === 'replaced_inode' ? await lstat(originalName, { bigint: true }) : undefined;
+        let replacementDigest: string | undefined;
+        const assertPathFault = async () => {
+          const physical = await witness.stat({ bigint: true }), retained = await lstat(retainedName, { bigint: true });
+          assert.ok(physical.isFile() && retained.isFile() && !retained.isSymbolicLink());
+          for (const field of ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const) {
+            assert.equal(physical[field], postOriginal[field]); assert.equal(retained[field], postOriginal[field]);
+          }
+          for (const field of ['dev', 'ino', 'uid', 'mode', 'nlink', 'size'] as const) assert.equal(physical[field], original[field]);
+          const bytes = await witnessBytes(witness, 4768); assert.deepEqual(bytes, nativeBytes);
+          verifyNativeBirthFrames(bytes, [2048, 32, 64, 256, 2048]);
+          const directory = await parent.stat({ bigint: true }), namedDirectory = await lstat(parentPath, { bigint: true });
+          assert.ok(directory.isDirectory() && namedDirectory.isDirectory() && !namedDirectory.isSymbolicLink());
+          for (const field of ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const) {
+            assert.equal(directory[field], postParent[field]); assert.equal(namedDirectory[field], postParent[field]);
+          }
+          if (witnessFault === 'missing') {
+            await assert.rejects(lstat(witnessPath), { code: 'ENOENT' });
+          } else {
+            assert.ok(postReplacement);
+            const named = await lstat(witnessPath, { bigint: true }); assert.ok(named.isFile() && !named.isSymbolicLink());
+            for (const field of ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(named[field], postReplacement[field]);
+            assert.equal(named.dev, physical.dev); assert.notEqual(named.ino, physical.ino); assert.equal(named.uid, physical.uid);
+            assert.equal(named.mode & 0o7777n, 0o600n); assert.equal(named.nlink, 1n); assert.equal(named.size, 4768n);
+            const replacement = await open(originalName, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+            try {
+              const before = await replacement.stat({ bigint: true });
+              for (const field of ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(before[field], postReplacement[field]);
+              const bytes = await witnessBytes(replacement, 4768); assert.deepEqual(bytes, nativeBytes);
+              verifyNativeBirthFrames(bytes, [2048, 32, 64, 256, 2048]);
+              assert.equal(bytes.readBigUInt64LE(24), physical.ino); assert.notEqual(bytes.readBigUInt64LE(24), before.ino);
+              replacementDigest = createHash('sha256').update(bytes).digest('hex');
+              const after = await replacement.stat({ bigint: true });
+              for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], before[field]);
+            } finally { await replacement.close(); }
+          }
+          const after = await witness.stat({ bigint: true });
+          for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
+        };
+        const refusal = await assertPublicOpeningRefusal(assertPathFault, originalReady.group);
+        await assertPathFault(); negativeQualified = true;
+        console.log(JSON.stringify({ scenario: `actual-supervisor-crash-witness-${witnessFault.replaceAll('_', '-')}`,
+          supervisorPid: supervisor.pid, supervisorStartToken: supervisorIdentity.processStartToken, supervisorSignal: 'SIGKILL',
+          controllerPid, controllerStartToken: controllerToken, oldLaunchId: held.launch.launchId,
+          oldGenerationRef: held.generation.generationRef, sourceRowVersion: held.generation.rowVersion, ...refusal,
+          actualOwnerLockAfterCallerGc: 'busy', nativeEffectCount: 0, retryCount: 0,
+          fault: { kind: witnessFault, originalFd: witness.fd, parentFd: parent.fd, derivedPath: witnessPath,
+            retainedOriginalPath: path.join(parentPath, retainedBasename), byteLength: nativeBytes.length,
+            nativeOriginalSha256: createHash('sha256').update(nativeBytes).digest('hex'), originalDeviceId: String(postOriginal.dev),
+            originalFileId: String(postOriginal.ino), ownerUid: Number(postOriginal.uid), mode: Number(postOriginal.mode & 0o7777n),
+            linkCount: Number(postOriginal.nlink), postFaultOriginalMtimeNs: String(postOriginal.mtimeNs),
+            postFaultOriginalCtimeNs: String(postOriginal.ctimeNs), parentFsyncComplete: true,
+            ...(postReplacement ? { replacementDeviceId: String(postReplacement.dev), replacementFileId: String(postReplacement.ino),
+              replacementSha256: replacementDigest, copiedBytes, replacementFsyncComplete: true, copiedBindingFileId: String(postOriginal.ino) }
+              : { derivedPathAbsent: true, derivedPathErrorCode: 'ENOENT' }) },
+          preservedStateRoot: fixture.stateRoot, preservedWorkspace: fixture.workspace,
+          note: 'real READY and natural old process cleanup precede a single path-identity fault; original inode and native bytes retained; public opening refuses without repair or new native positive proof; fixture retained for controlled CI teardown' }));
+      } catch (error) { pathFaultFailure = { error }; throw error; }
+      finally {
+        try { await parent.close(); }
+        catch (error) { throw new AggregateError([...(pathFaultFailure ? [pathFaultFailure.error] : []), error], 'path fault private parent did not close'); }
+      }
       return;
     }
     if (tracer) { await releaseForkTracer(tracer); tracer = undefined; }
@@ -2058,6 +2178,8 @@ for (const [scenario, run] of [
   ['supervisor-crash-monitor-fork-before-ready', () => supervisorCrashPreactivation('monitor_fork_before_ready')],
   ['supervisor-crash-monitor-fork-controller-loss', () => supervisorCrashPreactivation('monitor_fork_controller_loss')],
   ['supervisor-crash-corrupt-ready-footer', () => supervisorCrashPreactivation('ready_before_identity', 'corrupt_ready_footer')],
+  ['supervisor-crash-witness-missing', () => supervisorCrashPreactivation('ready_before_identity', 'missing')],
+  ['supervisor-crash-witness-replaced-inode', () => supervisorCrashPreactivation('ready_before_identity', 'replaced_inode')],
   ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
   ['parent-loss-before-release', parentLossBeforeRelease],

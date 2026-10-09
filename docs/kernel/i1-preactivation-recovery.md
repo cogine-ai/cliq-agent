@@ -1,12 +1,9 @@
 # I1 preactivation retirement and successor retry
 
-Status: **Option A approved; implementation and real qualification in progress.
-The ordinary before-create, READY-before-identity and invalid private-entry
-retirement/retry tracers have real Linux GREEN. Supervisor crash/retry also has
-GREEN at reserved, host-monitor fork/pre-READY, READY-before-identity,
-committed preactivation and queued post-move cuts. Actual controller loss at the
-partial fork cut also fails closed with a retained owner lock. Missing, corrupt
-and replaced witness qualification remains open.**
+Status: **Option A implemented. Acceptance requires build/tests and the real
+Linux campaign at the exact delivery head, including all positive crash/retry
+and negative witness boundaries below. Executed historical evidence is retained
+in this document; pending cases are not counted as qualified by static review.**
 Baseline: `854b9a95e6a99a8380772243853e5b7adc597272` (`main`, PR #514).
 
 This is one complete capability inside I1, not a new work package or a
@@ -21,16 +18,17 @@ Checkpoint using a distinct generation/launch/nonce. Supervisor loss at those
 boundaries must follow the same proof requirements. No old handshake is adopted;
 no tool claim, budget charge or workspace effect is invented during retirement.
 
-## Verified implementation gap
+## Baseline implementation gap
 
-`run-execution.ts` commits `reserved`, then creates the native worker, observes
-its executable/process, publishes containment and WorkerIdentity, and finally
-records `preactivated`. The generation remains read-only throughout this gap.
+At the baseline, `run-execution.ts` commits `reserved`, then creates the native
+worker, observes its executable/process, publishes containment and
+WorkerIdentity, and finally records `preactivated`. The generation remains
+read-only throughout this gap.
 
 The retained plan binds a cgroup path, logical namespace reservation and old
 controller start token. Actual cgroup/namespace inodes and init/monitor/worker
 PID/start-token identities exist only in the controller's memory until READY
-and the later artifact/state commit. The current controller cleans up on
+and the later artifact/state commit. The baseline controller cleans up on
 Supervisor channel loss and exits without a durable identity witness.
 
 `terminateRetained` requires those actual identities. A successor cannot obtain
@@ -349,10 +347,35 @@ original Run cut, registering positive proof, quarantining, repairing or
 retrying, and retain its actual owner lock after caller GC. The unknown fixture
 is preserved. Missing-path and replacement-inode cases remain separate later
 qualification boundaries so earlier rejection cannot mask the final-frame
-check. This single footer-corruption case is implemented; actual Linux
-qualification remains pending.
+check. This footer-corruption scenario passed at
+`6473434a1a0a4f221504cf485063c19155c9e8c6`, together with all nineteen other
+native scenarios:
+[Linux job 113954314036](https://github.com/cogine-ai/cliq-agent/actions/runs/37970118468/job/113954314036).
+Supervisor 3279 was SIGKILLed; controller 3291 and the independently observed
+old members naturally disappeared before the real file fault. The exact native
+inode 182 remained 4768 bytes with valid binding and first four frames; offset
+4736 changed from 151 to 150, invalidating only the final READY SHA. Public
+opening refused with `RECOVERY_REQUIRED`, retained its actual OS lock after
+caller GC and did not repair, register positive proof, quarantine or retry.
+Local build, strict script TypeScript and all 1807 tests passed. All six
+Linux/macOS CI jobs passed.
 
-Then qualify the same complete scenario at these boundaries:
+The last path-integrity unit uses two independent READY fixtures. After the
+same natural process cleanup, each real native file is renamed to a unique,
+previously absent retained name in its private parent, preserving its original
+inode and bytes.
+The missing-file fixture leaves the exact derived path absent. The replacement
+fixture exclusively creates that path with the same complete native bytes,
+device, uid, private mode and single link, but a different inode; it does not
+rewrite the old binding. File/parent fsync and fault-completion metadata are
+independently checked before public opening. Each fixture must refuse, retain
+its actual owner lock after caller GC, preserve the full original Run cut and
+leave its fault untouched. Neither retained original, replacement nor unknown
+fixture is repaired or deleted by the campaign. Both path cases require real
+Linux qualification alongside the checksum and incomplete-birth negatives;
+implementation or static review alone does not close this acceptance gate.
+
+The delivery campaign must qualify these boundaries:
 
 | Boundary | Required physical/fault evidence |
 | --- | --- |
