@@ -760,3 +760,47 @@ execution checks pass **14/14**; the corrected-injection full sweep passes
 **1,804/1,804**, with no failures, cancellations or skips (607,084 ms).
 Build, strict campaign typechecking and the real instance-close diagnostic
 pass. Actual Linux verification of this injection fix is pending.
+
+### Current-head review and bounded CAS correction
+
+At `fced8d0`, both the exact branch-head and PR merge-head Linux jobs complete
+all ten real lifecycle/crash scenarios, including actual pre-probe and timeout
+CAS close faults, repeated shutdown refusal and live-flock retention until
+Supervisor death. Native compilation, eleven actual syscall/ABI cases,
+foreign-owner installation rejection, namespace/cgroup qualification and all
+eight supported Node/platform build/full-test jobs pass. This qualifies the
+execution/recovery foundation, not the remaining I1 capabilities.
+
+The subsequent review identifies a real production diagnostic defect:
+`publishChunks` can lose its source/write failure when temporary metadata or
+descriptor retirement also fails. Preserve the source failure together with
+each independent retirement failure, while keeping `ResourceRetirementError`
+and refusing deletion without exact held metadata. The existing real CAS/
+FileHandle seam reproduces the missing source error RED, then passes after the
+bounded correction. A second regression retains all three source, metadata
+and close failures, proves the real handle was closed and leaves the unknown
+temporary untouched. No cleanup policy or death-authority gate is weakened.
+
+The suggested repeated-worker-stop correction is unnecessary: native stop and
+borrowed descriptor closure are already idempotent. The catch-path observation
+is discarded; it does not refresh checkpoint authority. Cached death results
+still cannot substitute for a fresh native reobservation. The six-second
+TypeScript deadline is not an IPC/file-size contradiction; native execution
+also has a bounded deadline, so changing only the outer timer cannot qualify
+slow execution. Campaign/native cleanup diagnostics and numeric spawn cleanup
+codes remain non-blocking follow-up, not reasons to introduce another lifecycle.
+
+Preactivation retirement, crash-orphan cleanup and slow-I/O fresh sealing
+remain real missing capabilities. Foundation merge is not release acceptance:
+`loadRunExecution` is exercised only by internal tests/campaigns, requires an
+explicit verified execution installation, and is not wired into the default
+CLI. The approved breaking reconstruction does not promise legacy artifact
+compatibility. The next integrated delivery should first close exact queued
+preactivation retirement and successor retry, without resetting rows or
+inventing no-spawn/death evidence.
+
+The bounded CAS correction passes build, **36/36** focused CAS/retirement
+checks, **1,805/1,805** full local tests (530,350 ms; no failures, cancellations
+or skips), the nine design-guard tests, the contract guard and portable edit
+contract. Actual Linux/current-head CI must pass separately before merge;
+the `fced8d0` results above are evidence for that prior revision only.

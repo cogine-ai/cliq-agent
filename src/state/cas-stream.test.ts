@@ -54,7 +54,9 @@ test('an interrupted stream cannot hide failure retiring its actual CAS temporar
     await assert.rejects(store.publishChunks((async function* () {
       yield Buffer.from('partial bytes');
       throw sourceFailure;
-    })(), 64), error => error instanceof ResourceRetirementError && error.cause === closeFailure);
+    })(), 64), error => error instanceof ResourceRetirementError && error.cause instanceof AggregateError &&
+      error.cause.errors.includes(sourceFailure) && error.cause.errors.some(failure =>
+        failure instanceof ResourceRetirementError && failure.cause === closeFailure));
     assert.deepEqual(await readdir(root), []);
   } finally {
     fs.open = originalOpen;
@@ -82,6 +84,48 @@ test('temporary unlink failure remains retirement failure even alongside an ordi
     assert.deepEqual(await readdir(root), []);
   } finally {
     fs.unlink = originalUnlink;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('interrupted CAS publication retains the source, metadata and close failures without deleting an unknown temporary', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-stream-metadata-failure-'));
+  await chmod(root, 0o700);
+  const store = new ContentAddressedStore(root);
+  const sourceFailure = new Error('source read failed');
+  const metadataFailure = Object.assign(new Error('temporary metadata failed'), { code: 'EIO' });
+  const closeFailure = Object.assign(new Error('temporary close failed'), { code: 'EIO' });
+  const originalOpen = fs.open;
+  let closes = 0;
+  fs.open = (async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    if (typeof args[0] === 'string' && args[0].startsWith(path.join(root, '.tmp-stream-'))) {
+      const actualChmod = handle.chmod.bind(handle), actualClose = handle.close.bind(handle);
+      handle.chmod = async mode => { await actualChmod(mode); throw metadataFailure; };
+      handle.close = async () => { await actualClose(); closes++; throw closeFailure; };
+    }
+    return handle;
+  }) as typeof fs.open;
+  try {
+    await assert.rejects(store.publishChunks((async function* () {
+      yield Buffer.from('partial');
+      throw sourceFailure;
+    })(), 64), error => {
+      assert.ok(error instanceof ResourceRetirementError);
+      assert.ok(error.cause instanceof AggregateError);
+      const failures = error.cause.errors;
+      assert.equal(failures[0], sourceFailure);
+      assert.equal(failures.length, 3);
+      assert.ok(failures[1] instanceof ResourceRetirementError && failures[1].cause === metadataFailure);
+      assert.ok(failures[2] instanceof ResourceRetirementError && failures[2].cause === closeFailure);
+      return true;
+    });
+    assert.equal(closes, 1, 'metadata failure must not bypass closing the real temporary handle');
+    const names = await readdir(root);
+    assert.equal(names.length, 1, 'without exact held metadata the temporary must not be unlinked');
+    assert.match(names[0]!, /^\.tmp-stream-[0-9a-f]{32}$/u);
+  } finally {
+    fs.open = originalOpen;
     await rm(root, { recursive: true, force: true });
   }
 });

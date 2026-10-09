@@ -429,6 +429,7 @@ export class ContentAddressedStore {
           constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
           0o600
         );
+        let streamFailure: { error: unknown } | undefined;
         try {
           for await (const chunk of source) {
             if (!(chunk instanceof Uint8Array) || chunk.byteLength > ARTIFACT_CHUNK_BYTES ||
@@ -450,17 +451,29 @@ export class ContentAddressedStore {
             throw new Error(`artifact temporary ${name} has invalid link count ${temporaryInfo.nlink}`);
           }
           if (temporaryInfo.size !== byteLength) throw new Error('artifact temporary has an inconsistent streamed size');
+        } catch (error) {
+          streamFailure = { error };
+          throw error;
         } finally {
           // Even an interrupted stream owns this one exact temporary. Give cleanup
           // its immutable metadata, never unlink a replaced path or unknown inode.
+          const retirementFailures: unknown[] = [];
           try {
             if (temporaryInfo === undefined) {
               await handle.chmod(FILE_MODE);
               temporaryInfo = await handle.stat();
             }
           } catch (cause) {
-            throw new ResourceRetirementError('CAS interrupted temporary retirement could not establish its exact metadata', cause);
-          } finally { await closeCasHandle(handle); }
+            retirementFailures.push(new ResourceRetirementError('CAS interrupted temporary retirement could not establish its exact metadata', cause));
+          }
+          try { await closeCasHandle(handle); }
+          catch (error) { retirementFailures.push(error); }
+          if (retirementFailures.length !== 0) {
+            if (!streamFailure && retirementFailures.length === 1) throw retirementFailures[0];
+            throw new ResourceRetirementError('CAS streaming and descriptor retirement failed',
+              new AggregateError([...(streamFailure ? [streamFailure.error] : []), ...retirementFailures],
+                'artifact stream and retirement failures'));
+          }
         }
         await syncRoot(this.root, openedRoot);
 
