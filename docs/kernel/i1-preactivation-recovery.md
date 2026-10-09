@@ -3,7 +3,8 @@
 Status: **Option A approved; implementation and real qualification in progress.
 The before-create, READY-before-identity and invalid private-entry
 retirement/retry tracers and reserved-before-create Supervisor crash have real
-Linux GREEN; the remaining successor crash boundaries are still being qualified.**
+Linux GREEN. The READY-before-identity Supervisor crash also has real Linux
+GREEN; the remaining successor crash boundaries are still being qualified.**
 Baseline: `854b9a95e6a99a8380772243853e5b7adc597272` (`main`, PR #514).
 
 This is one complete capability inside I1, not a new work package or a
@@ -233,7 +234,25 @@ same-namespace PID-1 init and exact monitor PID/token/member relationship. The
 successor must publish actual whole-containment death with those exact birth
 identities while retaining the absence of WorkerIdentity, then satisfy the same
 one-edit distinct retry and old-inode/bytes isolation checks. This addition has
-not yet passed the real Linux campaign.
+now passed at `82a3c081191c6fb62221f01757c80b6ab0917fce`, together with all
+fourteen other native scenarios:
+[Linux job 113909278670](https://github.com/cogine-ai/cliq-agent/actions/runs/37956807435/job/113909278670).
+Its independent pre-crash observation captured Supervisor 2924, controller 2936,
+worker 2939, init 2938 and monitor 2937 with actual start tokens. Only the
+Supervisor was killed; the successor proved those exact birth identities dead
+without inventing WorkerIdentity and completed one distinct edit/claim/charge.
+Local build, strict campaign TypeScript checks and all 1807 tests passed before
+pushing this tracer; all six qualification and Node 22/24 Linux/macOS jobs passed.
+
+The next tracer targets committed preactivation. It uses a real `Date.now`
+sample after `BEGIN IMMEDIATE` but before the activation time fence or any
+activation write. The parent must read the independently committed
+`preactivated` row and its actual WorkerIdentity/containment while all lease,
+ready-cut and budget facts remain powerless. SIGKILL interrupts that real
+activation transaction; this cut makes no claim about rolling back already
+written activation pages. Successor retirement must preserve the genuinely
+recorded identity and containment rather than adopting them for activation.
+This next tracer still requires real Linux qualification.
 
 For the later native-fork/pre-READY window, the user approved a test-only Linux
 operating-system tracer. It may observe and suspend the real fork on the free

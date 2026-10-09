@@ -23,7 +23,7 @@ import { openStateStore, type StateStore, type StateStoreRuntimeAuthority } from
 
 export type CrashChildInput = {
   stateRoot: string; runId: string; runtimeAuthority: StateStoreRuntimeAuthority;
-  preactivationCrash?: 'reserved_before_create' | 'ready_before_identity';
+  preactivationCrash?: 'reserved_before_create' | 'ready_before_identity' | 'preactivated_before_activation';
   retirementFault?: 'pre_probe' | 'timeout_closure' | 'controller_loss';
   materialData: Omit<RunAssemblyValidationMaterial, 'resolveVerifiedCapabilityClaims' | 'verifyLocalZeroCostAuthority' |
     'resolvePriceTableAuthority' | 'resolveVerifiedTools' | 'verifyReference' | 'verifyProviderAdapter' | 'verifyProviderEndpoint'>;
@@ -65,13 +65,37 @@ function token(pid: number): string {
 
 async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<typeof openSqliteDriver>,
   execution: Awaited<ReturnType<StateStore['loadRunExecution']>>, expectedRunRevision: number): Promise<never> {
+  const committed = input.preactivationCrash === 'preactivated_before_activation';
   const created = input.preactivationCrash === 'ready_before_identity';
   const image = input.runtimeAuthority.bundle.entries.find(entry => entry.entryId === 'linux_worker');
   assert.ok(image?.executable && image.role === 'worker');
   const originalRead = fs.readSync;
+  const originalNow = Date.now;
+  const soleLaunch = () => metadata.readSnapshot(connection => {
+    const rows = connection.prepare('SELECT launch_id FROM worker_launches WHERE run_id=? AND retired_at IS NULL')
+      .all<{ launch_id: string }>(input.runId);
+    assert.ok(rows.length <= 1, 'crash selector must not choose competing reservations');
+    return rows.length === 1 ? readRequiredWorkerLaunch(connection, rows[0]!.launch_id) : undefined;
+  });
   let probing = false;
   try {
-    fs.readSync = ((...args: unknown[]) => {
+    if (committed) {
+      Date.now = () => {
+        const now = originalNow();
+        if (probing) return now;
+        probing = true;
+        try {
+          const launch = soleLaunch();
+          if (launch?.phase !== 'preactivated') return now;
+          assert.ok(launch.workerIdentityDigest && launch.processContainmentRef);
+          // This real clock sample occurs after BEGIN IMMEDIATE and the read-only
+          // owner check, but before advanceTimeFence or any activation write.
+          Date.now = originalNow;
+          process.kill(process.pid, 'SIGSTOP');
+          throw new Error('committed preactivation crash barrier unexpectedly resumed');
+        } finally { probing = false; }
+      };
+    } else fs.readSync = ((...args: unknown[]) => {
       const count = Reflect.apply(originalRead, fs, args) as number;
       if (probing) return count;
       probing = true;
@@ -79,12 +103,7 @@ async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<ty
         const fd = args[0] as number, held = fs.fstatSync(fd, { bigint: true });
         if (!held.isFile() || held.size !== BigInt(image.byteCount) ||
             (!created && fs.readlinkSync(`/proc/self/fd/${fd}`) !== '/memfd:cliq-runtime-image (deleted)')) return count;
-        const launch = metadata.readSnapshot(connection => {
-          const rows = connection.prepare('SELECT launch_id FROM worker_launches WHERE run_id=? AND retired_at IS NULL')
-            .all<{ launch_id: string }>(input.runId);
-          assert.ok(rows.length <= 1, 'crash selector must not choose competing reservations');
-          return rows.length === 1 ? readRequiredWorkerLaunch(connection, rows[0]!.launch_id) : undefined;
-        });
+        const launch = soleLaunch();
         if (launch?.phase !== 'reserved') return count;
         const plan = artifact<ProcessContainmentPlanV1>(input.stateRoot, launch.containmentPlanRef);
         if (plan.owner.kind !== 'worker_activation' || plan.backend.kind !== 'linux' || !plan.backend.nativeReservation) {
@@ -141,7 +160,7 @@ async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<ty
       error => error ? reject(error) : resolve()));
     await execution.executeCurrentTool({ expectedRunRevision });
     throw new Error(`execution missed the required actual ${input.preactivationCrash} crash boundary`);
-  } finally { fs.readSync = originalRead; syncBuiltinESMExports(); }
+  } finally { Date.now = originalNow; fs.readSync = originalRead; syncBuiltinESMExports(); }
 }
 
 async function run(input: CrashChildInput) {

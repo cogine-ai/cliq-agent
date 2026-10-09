@@ -451,7 +451,8 @@ function expectedNativeBirthBody(numbers: readonly bigint[], texts: readonly (re
 }
 
 async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInput['preactivationCrash']>) {
-  const created = boundary === 'ready_before_identity';
+  const committed = boundary === 'preactivated_before_activation';
+  const created = boundary !== 'reserved_before_create';
   const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `${boundary.replaceAll('_', '-')}-crash` });
   let child: ReturnType<typeof fork> | undefined, exited: ReturnType<typeof once> | undefined, successor: StateStore | undefined;
   let history: ReturnType<typeof openSqliteDriver> | undefined;
@@ -501,8 +502,11 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       const generation = readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef);
       assert.deepEqual(run, before.closure.run); assert.deepEqual(readInvocationJournal(connection, fixture.runId), before.closure.journal);
       assert.equal(owner.state, 'active'); assert.equal(launch.supervisorInstanceId, owner.supervisorInstanceId);
-      assert.equal(launch.phase, 'reserved'); assert.equal(launch.workerIdentityDigest, undefined); assert.equal(launch.processContainmentRef, undefined);
-      assert.equal(launch.leaseVersion, 0); assert.equal(launch.leaseEpoch, undefined); assert.equal(launch.activatedAt, undefined);
+      assert.equal(launch.phase, committed ? 'preactivated' : 'reserved');
+      if (committed) assert.ok(launch.workerIdentityDigest && launch.processContainmentRef);
+      else { assert.equal(launch.workerIdentityDigest, undefined); assert.equal(launch.processContainmentRef, undefined); }
+      assert.equal(launch.leaseVersion, 0); assert.equal(launch.leaseEpoch, undefined); assert.equal(launch.leaseExpiresAt, undefined);
+      assert.equal(launch.activatedAt, undefined); assert.equal(launch.quiesceId, undefined);
       assert.equal(launch.generationWriteState, 'preactivated_readonly'); assert.equal(generation.phase, 'preactivated_readonly');
       assert.equal(generation.sourceCheckpointId, before.closure.latestCheckpoint.id);
       assert.equal(generation.sourceWorkspaceStateRef, before.closure.latestCheckpoint.workspaceStateRef);
@@ -514,11 +518,15 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     assert.equal(supervisorIdentity.processStartToken, processToken(supervisor.pid!));
     const plan = frozenArtifact<ProcessContainmentPlanV1>(fixture.stateRoot, held.launch.containmentPlanRef);
     if (plan.owner.kind !== 'worker_activation' || plan.backend.kind !== 'linux' || !plan.backend.nativeReservation) {
-      throw new Error('independent reserved crash observation lacks its bound native witness');
+      throw new Error('independent preactivation crash observation lacks its bound native witness');
     }
     assert.equal(plan.owner.runId, fixture.runId); assert.equal(plan.owner.workerLaunchId, held.launch.launchId);
     assert.equal(plan.launchNonceDigest, held.launch.spawnNonceDigest);
     const spec = frozenArtifact<SandboxLaunchSpecV1>(fixture.stateRoot, held.launch.sandboxLaunchSpecRef);
+    const recordedWorker = committed
+      ? decodeWorkerIdentity(frozenArtifact(fixture.stateRoot, held.launch.workerIdentityDigest!)) : undefined;
+    const recordedContainment = committed
+      ? decodeWorkerProcessContainment(frozenArtifact(fixture.stateRoot, held.launch.processContainmentRef!)) : undefined;
     const controller = /^linux-subreaper:([1-9][0-9]*):(linux-proc-start-ticks:[0-9]+)$/u.exec(plan.backend.subreaperStartToken);
     assert.ok(controller); const controllerPid = Number(controller[1]), controllerToken = controller[2]!;
     assert.equal(processToken(controllerPid), controllerToken);
@@ -599,6 +607,28 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       const after = await witness.stat({ bigint: true });
       for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
     } finally { await witness.close(); }
+    if (committed) {
+      assert.ok(recordedWorker && recordedContainment && physicalScope);
+      assert.equal(spec.executable.kind, 'runtime_bundle');
+      if (spec.executable.kind !== 'runtime_bundle') throw new Error('committed preactivation lacks its signed worker recipe');
+      assert.deepEqual(recordedWorker, {
+        schemaVersion: 1, executableRealpath: spec.executable.executionPath, executableDigest: spec.executable.executableDigest,
+        pid: physicalScope.workerPid, processStartToken: physicalScope.workerToken,
+        spawnNonceDigest: held.launch.spawnNonceDigest, activationNonceDigest: held.launch.activationNonceDigest,
+        intendedLeaseEpoch: held.run.leaseEpoch + 1, launchId: held.launch.launchId,
+        supervisorInstanceId: held.owner.supervisorInstanceId, processContainmentRef: held.launch.processContainmentRef!
+      } satisfies WorkerIdentity);
+      assert.deepEqual(recordedContainment, {
+        schemaVersion: 1, planRef: held.launch.containmentPlanRef, sandboxLaunchSpecRef: held.launch.sandboxLaunchSpecRef,
+        sandboxLaunchSpecDigest: spec.launchSpecDigest, owner: plan.owner,
+        filesystemBinding: { kind: 'run-generation', generationRef: held.launch.workspaceGenerationRef },
+        launchNonceDigest: held.launch.spawnNonceDigest,
+        backend: { kind: 'linux', cgroupPath: plan.backend.cgroupPath, cgroupId: physicalScope.cgroupId,
+          pidNamespaceReservationId: plan.backend.pidNamespaceReservationId, pidNamespaceId: physicalScope.pidNamespaceId,
+          namespaceInitStartToken: physicalScope.namespaceInitStartToken, subreaperStartToken: plan.backend.subreaperStartToken },
+        createdAt: recordedContainment.createdAt
+      } satisfies ProcessContainment);
+    }
     const root = await open(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath),
       fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     try {
@@ -626,13 +656,19 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     const inspection = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME)); history = inspection;
     const retired = inspection.readSnapshot(connection => readRequiredWorkerLaunch(connection, held.launch.launchId));
     assert.equal(retired.phase, 'retired'); assert.ok(retired.retirementEvidenceRef);
-    assert.equal(retired.workerIdentityDigest, undefined, 'successor must not invent or adopt a READY WorkerIdentity');
+    assert.equal(retired.workerIdentityDigest, held.launch.workerIdentityDigest, 'successor must retain only the genuinely committed WorkerIdentity');
     const originalFacts = { ...retired, phase: held.launch.phase }; delete originalFacts.retiredAt; delete originalFacts.retirementEvidenceRef;
-    if (created) delete originalFacts.processContainmentRef;
+    if (created && !committed) delete originalFacts.processContainmentRef;
     assert.deepEqual(originalFacts, held.launch, 'successor retirement cannot adopt or replace the old reservation');
+    if (committed) {
+      assert.deepEqual(frozenArtifact(fixture.stateRoot, retired.workerIdentityDigest!), recordedWorker,
+        'the historical WorkerIdentity bytes keep the original owner and nonces');
+      assert.equal(retired.processContainmentRef, held.launch.processContainmentRef);
+      assert.deepEqual(frozenArtifact(fixture.stateRoot, retired.processContainmentRef!), recordedContainment);
+    }
     const archived = reopened.closure.workspaceGenerations.find(generation => generation.generationRef === held.generation.generationRef)!;
     assert.equal(archived.phase, 'quarantined');
-    if (archived.phase !== 'quarantined') throw new Error('successor did not quarantine the old reserved generation');
+    if (archived.phase !== 'quarantined') throw new Error('successor did not quarantine the old preactivation generation');
     assert.equal(archived.rowVersion, held.generation.rowVersion + 1);
     const receipt = await successor.artifacts.readCanonical<WorkspaceGenerationQuarantineEvidenceV1>(archived.quarantineEvidenceRef);
     assert.equal(receipt.reason, created ? 'launch_died_before_activation' : 'launch_aborted'); assert.equal(receipt.sourceRowVersion, held.generation.rowVersion);
@@ -660,6 +696,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       assert.deepEqual(proof.backend, backend);
       const containment = decodeWorkerProcessContainment(await successor.artifacts.readCanonical(proof.containmentRef));
       assert.equal(canonicalSha256(containment), proof.containmentRef);
+      if (committed) assert.deepEqual(containment, recordedContainment, 'fresh death inspection cannot replace committed birth facts');
       const { cgroupPopulated: _populated, namespaceInitDeadAndReaped: _reaped, remainingTrackedDescendants: _remaining, ...birth } = backend;
       assert.deepEqual(containment.backend, birth); assert.deepEqual(containment.owner, plan.owner);
       assert.equal(containment.planRef, held.launch.containmentPlanRef); assert.equal(containment.sandboxLaunchSpecRef, held.launch.sandboxLaunchSpecRef);
@@ -696,6 +733,12 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     assert.deepEqual(after.closure.run.budgetReserved, held.run.budgetReserved);
     const replacements = inspection.readSnapshot(connection => readWorkerLaunchesForRun(connection, fixture.runId))
       .filter(launch => launch.leaseEpoch === after.closure.run.leaseEpoch);
+    assert.deepEqual(inspection.readSnapshot(connection => readRequiredWorkerLaunch(connection, held.launch.launchId)), retired,
+      'the distinct retry cannot replace or mutate the retired preactivation history');
+    if (committed) {
+      assert.deepEqual(frozenArtifact(fixture.stateRoot, retired.workerIdentityDigest!), recordedWorker);
+      assert.deepEqual(frozenArtifact(fixture.stateRoot, retired.processContainmentRef!), recordedContainment);
+    }
     assert.equal(replacements.length, 1); const replacement = replacements[0]!; assert.equal(replacement.phase, 'retired');
     for (const field of ['launchId', 'workspaceGenerationRef', 'spawnNonceDigest', 'activationNonceDigest'] as const) {
       assert.notEqual(replacement[field], held.launch[field]);
@@ -719,7 +762,8 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       priorOwnerEpoch: held.owner.ownerEpoch, successorOwnerEpoch: newOwner.ownerEpoch, oldLaunchId: retired.launchId,
       newLaunchId: replacement.launchId, oldGenerationRef: held.generation.generationRef, newGenerationRef: replacement.workspaceGenerationRef,
       sourceRowVersion: held.generation.rowVersion, nativeEffectCount: 1, permanentToolClaims: 1,
-      note: `actual signed held-image read then OS stop/SIGKILL; no signal to original controller, fresh successor ${created ? 'whole-created-death' : 'no-spawn'} closure` }));
+      ...(committed ? { interruptedTransaction: 'activation-begun-before-any-write' } : {}),
+      note: `actual ${committed ? 'committed preactivation and real clock sample inside unwritten activation transaction' : 'signed held-image read'} then OS stop/SIGKILL; no signal to original controller, fresh successor ${created ? 'whole-created-death' : 'no-spawn'} closure` }));
     await successor.close(); successor = undefined; resourcesRetired = true;
   } catch (error) { operationFailure = { error }; throw error; }
   finally {
@@ -1454,6 +1498,7 @@ for (const [scenario, run] of [
   ['invalid-preactivation-tree-retirement-retry', () => preactivationRetirementRetry('ready_invalid_tree')],
   ['supervisor-crash-reserved-before-create', () => supervisorCrashPreactivation('reserved_before_create')],
   ['supervisor-crash-ready-before-identity', () => supervisorCrashPreactivation('ready_before_identity')],
+  ['supervisor-crash-preactivated-before-activation', () => supervisorCrashPreactivation('preactivated_before_activation')],
   ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
   ['parent-loss-before-release', parentLossBeforeRelease],
