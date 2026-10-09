@@ -205,8 +205,8 @@ async function editedCheckpoint() {
   } finally { await transport.close(); await store.close(); await fixture.dispose(); }
 }
 
-async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_before_identity') {
-  const created = boundary === 'ready_before_identity';
+async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_before_identity' | 'ready_invalid_tree') {
+  const created = boundary !== 'before_spawn', invalidTree = boundary === 'ready_invalid_tree';
   const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `${boundary.replaceAll('_', '-')}-retry` });
   let store = fixture.store;
   let metadata: ReturnType<typeof openSqliteDriver> | undefined;
@@ -284,6 +284,27 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
                 const after = fs.fstatSync(fd, { bigint: true });
                 assert.equal(after.dev, held.dev); assert.equal(after.ino, held.ino); assert.equal(after.size, held.size);
                 assert.equal(after.mtimeNs, held.mtimeNs); assert.equal(after.ctimeNs, held.ctimeNs);
+                if (invalidTree) {
+                  const generation = frozenArtifact<WorkspaceGenerationIdentityV1>(fixture.stateRoot, launch.workspaceGenerationRef);
+                  if (generation.locator.kind !== 'linux_directory') throw new Error('invalid-tree fault has no exact Linux generation');
+                  const root = fs.openSync(path.join(fixture.stateRoot, generation.locator.canonicalRootRelativePath),
+                    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+                  try {
+                    const heldRoot = fs.fstatSync(root, { bigint: true });
+                    assert.equal(String(heldRoot.dev), generation.locator.deviceId);
+                    assert.equal(String(heldRoot.ino), generation.locator.directoryFileId);
+                    assert.equal(Number(heldRoot.uid), generation.locator.ownerUid); assert.equal(heldRoot.mode & 0o7777n, 0o700n);
+                    // A real invalid entry in this disposable private tree. It
+                    // is never followed and no source/host bytes are changed.
+                    fs.symlinkSync('../../outside', `/proc/self/fd/${root}/escape`);
+                    const afterRoot = fs.fstatSync(root, { bigint: true });
+                    assert.equal(afterRoot.dev, heldRoot.dev); assert.equal(afterRoot.ino, heldRoot.ino);
+                    assert.equal(afterRoot.uid, heldRoot.uid); assert.equal(afterRoot.mode, heldRoot.mode);
+                    console.log(JSON.stringify({ scenario: 'actual-invalid-private-entry-observed', launchId: launch.launchId,
+                      generationRef: launch.workspaceGenerationRef, directoryFileId: generation.locator.directoryFileId,
+                      workerPid: physicalScope!.workerPid, fault: 'escaping_symlink_then_image_EIO' }));
+                  } finally { fs.closeSync(root); }
+                }
                 assert.ok(count > 0); injected = { launch, controllerPid, controllerToken, ...(physicalScope ? { physicalScope } : {}) }; faults++;
                 throw primary;
               }
@@ -314,6 +335,11 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
     if (generation.phase === 'quarantined') {
       const receipt = await store.artifacts.readCanonical<WorkspaceGenerationQuarantineEvidenceV1>(generation.quarantineEvidenceRef);
       assert.equal(receipt.reason, created ? 'launch_died_before_activation' : 'launch_aborted'); assert.equal(receipt.generationRef, fault.launch.workspaceGenerationRef);
+      if (invalidTree) {
+        assert.deepEqual(receipt.observedState, { kind: 'unreadable_partial', failureCode: 'path_or_entry_invalid' });
+        assert.deepEqual(generation.observedState, receipt.observedState);
+        assert.equal(Object.hasOwn(receipt.observedState, 'treeDigest'), false);
+      }
       assert.equal(receipt.quarantineDeviceId, identity.locator.deviceId); assert.equal(receipt.quarantineFileId, identity.locator.directoryFileId);
       relativePath = receipt.quarantineCanonicalRootRelativePath;
     } else { assert.equal(created, false, 'a created worker must be physically retired and quarantined'); assert.equal(generation.phase, 'preactivated_readonly'); }
@@ -1122,6 +1148,7 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
 for (const [scenario, run] of [
   ['before-spawn-retirement-retry', () => preactivationRetirementRetry('before_spawn')],
   ['ready-before-identity-retirement-retry', () => preactivationRetirementRetry('ready_before_identity')],
+  ['invalid-preactivation-tree-retirement-retry', () => preactivationRetirementRetry('ready_invalid_tree')],
   ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
   ['parent-loss-before-release', parentLossBeforeRelease],

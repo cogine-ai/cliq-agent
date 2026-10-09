@@ -16,6 +16,7 @@ test('startup with an unreadable reserved plan retains the actual owner lock eve
   let child: ReturnType<typeof fork> | undefined;
   let exited: Promise<unknown[]> | undefined;
   let retainedPath: string | undefined, planPath: string | undefined;
+  let successorOpeningFailed = false;
   try {
     // This is negative retained-metadata validation at the public Store seam,
     // not a fabricated Linux birth, no-spawn observation or death proof.
@@ -51,14 +52,16 @@ test('startup with an unreadable reserved plan retains the actual owner lock eve
     assert.equal(refused.retirement, true); assert.equal(refused.code, 'RECOVERY_REQUIRED');
     child.kill('SIGKILL'); assert.equal((await exited)[1], 'SIGKILL');
     await rename(retainedPath, planPath); retainedPath = undefined;
-    fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+    try { fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+    catch (error) { successorOpeningFailed = true; throw error; }
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before,
       'failed discovery cannot retire, activate or mutate the old ready cut');
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     if (exited) await exited;
     if (retainedPath && planPath) await rename(retainedPath, planPath);
-    await disposeFixture(fixture);
+    if (!successorOpeningFailed) await disposeFixture(fixture);
+    else console.error(`preserving uncertain startup fixture: ${fixture.stateRoot}`);
   }
 });
 
@@ -68,6 +71,7 @@ test('failed public Store.close retains the actual owner after its caller drops 
     execArgv: ['--expose-gc', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'inherit', 'ipc']
   });
   const exited = once(child, 'exit');
+  let successorResourcesRetired = true;
   try {
     const reply = async () => (await once(child, 'message', { signal: AbortSignal.timeout(20_000) }))[0] as
       { state: string; retirement?: boolean; code?: string; closeFaults?: number; message?: string };
@@ -87,11 +91,14 @@ test('failed public Store.close retains the actual owner after its caller drops 
       assert.fail('GC released the real owner lock after an unresolved Store.close');
     }
     child.kill('SIGKILL'); assert.equal((await exited)[1], 'SIGKILL');
+    successorResourcesRetired = false;
     const successor = await openStateStore(root);
-    try { assert.equal(successor.ownerEpoch, 2); } finally { await successor.close(); }
+    try { assert.equal(successor.ownerEpoch, 2); }
+    finally { await successor.close(); successorResourcesRetired = true; }
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     await exited;
-    await rm(root, { recursive: true, force: true });
+    if (successorResourcesRetired) await rm(root, { recursive: true, force: true });
+    else console.error(`preserving uncertain close fixture: ${root}`);
   }
 });
