@@ -406,6 +406,15 @@ function validateClosedShape(assembly: RunAssemblyV1): boolean {
   return true;
 }
 
+/** Decode retained assembly bytes without granting model/provider execution authority. */
+export function decodeRetainedRunAssembly(value: unknown): RunAssemblyV1 {
+  if (!validateClosedShape(value as RunAssemblyV1)) throw new TypeError('Run assembly has an invalid closed shape');
+  const assembly = value as RunAssemblyV1;
+  parseCanonicalTime(assembly.createdAt);
+  if (digestOmitting(assembly, 'assemblyDigest') !== assembly.assemblyDigest) throw new TypeError('Run assembly digest does not rehash');
+  return assembly;
+}
+
 function verifyReference(
   material: RunAssemblyValidationMaterial,
   kind: RunAssemblyReferenceKind,

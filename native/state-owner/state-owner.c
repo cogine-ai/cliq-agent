@@ -25,12 +25,18 @@ static napi_value native_error(napi_env env, const char *message) {
 }
 
 typedef struct control_listener control_listener;
+typedef struct generation_tree generation_tree;
+typedef struct source_staging source_staging;
 
 typedef struct {
     int root_fd, runtime_fd, lock_fd;
     struct stat root, runtime, lock;
     char *path;
     control_listener *listeners;
+    generation_tree *trees;
+    source_staging *source_stagings;
+    int source_retirement_error;
+    int finalized;
 } state_lock;
 
 static const napi_type_tag lock_tag = {0x3d641bc705864cfbULL, 0xab53499f3ee988c4ULL};
@@ -39,23 +45,37 @@ static napi_value assert_prior_process_dead(napi_env env, napi_callback_info inf
 static napi_value move_generation(napi_env env, napi_callback_info info);
 static napi_value open_control_listener(napi_env env, napi_callback_info info);
 static void close_lock_listeners(state_lock *lock);
+static void close_lock_trees(state_lock *lock);
+static napi_value create_generation_tree(napi_env env, napi_callback_info info);
+static napi_value open_generation_tree(napi_env env, napi_callback_info info);
+static int close_lock_source_stagings(state_lock *lock);
+static napi_value create_source_staging(napi_env env, napi_callback_info info);
+static napi_value open_source_staging(napi_env env, napi_callback_info info);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
 static void close_lock(state_lock *lock) {
     close_lock_listeners(lock);
+    close_lock_trees(lock);
+    close_lock_source_stagings(lock);
     if (lock->lock_fd >= 0) close(lock->lock_fd);
     if (lock->runtime_fd >= 0) close(lock->runtime_fd);
     if (lock->root_fd >= 0) close(lock->root_fd);
     lock->root_fd = lock->runtime_fd = lock->lock_fd = -1;
 }
 
+static void free_lock_if_done(state_lock *lock) {
+    if (!lock->finalized || lock->trees || lock->listeners || lock->source_stagings) return;
+    free(lock->path);
+    free(lock);
+}
+
 static void finalize_lock(napi_env env, void *data, void *hint) {
     (void)env; (void)hint;
     state_lock *lock = data;
     close_lock(lock);
-    free(lock->path);
-    free(lock);
+    lock->finalized = 1;
+    free_lock_if_done(lock);
 }
 
 static int same_inode(const struct stat *left, const struct stat *right) {
@@ -137,6 +157,9 @@ static napi_value assert_held(napi_env env, napi_callback_info info) {
 static napi_value release_lock(napi_env env, napi_callback_info info) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
+    if (close_lock_source_stagings(lock)) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source staging descriptors did not retire; StateOwner remains held"); return NULL;
+    }
     close_lock(lock);
     napi_value result;
     if (napi_get_undefined(env, &result) != napi_ok) return NULL;
@@ -207,6 +230,10 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"assertPriorProcessDead", NULL, assert_prior_process_dead, NULL, NULL, NULL, napi_default, NULL},
         {"moveGeneration", NULL, move_generation, NULL, NULL, NULL, napi_default, NULL},
         {"openControlListener", NULL, open_control_listener, NULL, NULL, NULL, napi_default, NULL},
+        {"createGenerationTree", NULL, create_generation_tree, NULL, NULL, NULL, napi_default, NULL},
+        {"openGenerationTree", NULL, open_generation_tree, NULL, NULL, NULL, napi_default, NULL},
+        {"createSourceInspectionStaging", NULL, create_source_staging, NULL, NULL, NULL, napi_default, NULL},
+        {"openSourceInspectionStaging", NULL, open_source_staging, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -435,6 +462,9 @@ static int observe_process(pid_t pid, char token[128]) {
 }
 
 #include "control-socket.c"
+#include "generation-tree.c"
+#include "source-staging.c"
+#include "source-root.c"
 
 static napi_value process_start_token(napi_env env, napi_callback_info info) {
     (void)info;
@@ -486,7 +516,8 @@ static napi_value assert_prior_process_dead(napi_env env, napi_callback_info inf
 static napi_value initialize(napi_env env, napi_value exports) {
     const napi_property_descriptor methods[] = {
         {"acquireLock", NULL, acquire_lock, NULL, NULL, NULL, napi_default, NULL},
-        {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL}
+        {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},
+        {"openWorkspaceRoot", NULL, open_workspace_root, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok) return NULL;
     return exports;

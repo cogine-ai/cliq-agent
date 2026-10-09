@@ -1,4 +1,5 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
+import { immutableSnapshot } from '../../model/immutable.js';
 import {
   addCanonicalDuration,
   assertAdmissionKey,
@@ -51,7 +52,6 @@ import {
   mergeBudgets,
   readAdmissionReplay,
   readControlRequest,
-  readRun,
   readSession,
   readSessionPrincipalId,
   ZERO_BUDGET
@@ -164,6 +164,7 @@ async function readPublishedResponse(
 async function replayAdmitRun(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
+  owner: StateOwnerContext,
   input: AdmitRunInput,
   admissionIntentDigest: string,
   requestDigest: string
@@ -182,15 +183,48 @@ async function replayAdmitRun(
     if (existingAdmission.admissionIntentDigest !== admissionIntentDigest) {
       throw new KernelStorageError('ADMISSION_KEY_CONFLICT', 'run.submit admissionKey was reused with a different intent');
     }
-    const run = readRun(driver, existingAdmission.id);
-    const response: RunSubmitResponse = {
-      protocolVersion: 1,
-      ok: true,
-      result: {
-        method: 'run.submit',
-        snapshot: { schemaVersion: 1, operation: 'agent', run, latestRunItemSeq: 0 }
+    if (existingAdmission.admissionRequestId === null) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'Run admission has no original control request');
+    }
+    const originalRequestId = existingAdmission.admissionRequestId;
+    const original = readControlRequest(driver, input.principalId, 'run.submit', originalRequestId);
+    if (!original || original.requestDigest !== admitRequestDigest({ ...input, requestId: originalRequestId },
+      input.workspacePath, input.objective, input.budgets as typeof DEFAULT_RUN_BUDGETS)) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'Run admission original control request does not match');
+    }
+    const response = await readPublishedResponse(artifacts, original.responseRef);
+    const run = response.result.snapshot.run;
+    if (run.id !== existingAdmission.id) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'Run admission original response names another Run');
+    }
+    const channel = await validateControlChannelClosure(artifacts, owner, input);
+    let fenceOutcome: TimeFenceAdvance | undefined;
+    driver.transaction(connection => {
+      const control = readControlRequest(connection, input.principalId, 'run.submit', input.requestId);
+      if (control !== undefined) {
+        if (control.requestDigest !== requestDigest || control.responseRef !== original.responseRef) {
+          throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.submit requestId was reused with different bytes');
+        }
+        return;
       }
-    };
+      const current = readAdmissionReplay(connection, 'runs', input.principalId, 'run.submit', input.admissionKey);
+      const currentOriginal = readControlRequest(connection, input.principalId, 'run.submit', originalRequestId);
+      if (!current || !currentOriginal || canonicalSha256(current) !== canonicalSha256(existingAdmission) ||
+          canonicalSha256(currentOriginal) !== canonicalSha256(original)) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'Run admission original response link changed');
+      }
+      assertActiveStateOwner(connection, owner);
+      const now = sampleCanonicalNow();
+      fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
+      if (fenceOutcome !== 'healthy') return;
+      for (const artifact of channel.metadata) insertArtifactMetadata(connection, artifact, now);
+      insertControlRequest(connection, { principalId: input.principalId, method: 'run.submit', requestId: input.requestId,
+        channelIdentityRef: input.channelIdentityRef, channelIdentityDigest: input.channelIdentityDigest, requestDigest,
+        responseRef: original.responseRef, committedAt: now });
+    });
+    if (fenceOutcome !== undefined && fenceOutcome !== 'healthy') {
+      throw new KernelStorageError('INVALID_REQUEST', 'canonical clock has regressed; admission replay binding is paused');
+    }
     return { replayed: true, run, response };
   }
   return undefined;
@@ -221,10 +255,11 @@ export async function admitRun(
   const workspacePath = normalizeAbsolutePath(input.workspacePath);
   const objectiveText = normalizeBoundedText(input.objective, 1, 262_144);
   const budgets = mergeBudgets(input.budgets);
+  input = immutableSnapshot({ ...input, workspacePath, objective: objectiveText, budgets });
   const admissionIntentDigest = admitIntent(input, workspacePath, objectiveText, budgets);
   const requestDigest = admitRequestDigest(input, workspacePath, objectiveText, budgets);
 
-  const replayed = await replayAdmitRun(driver, artifacts, input, admissionIntentDigest, requestDigest);
+  const replayed = await replayAdmitRun(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
   if (replayed !== undefined) return replayed;
 
   const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
@@ -543,9 +578,9 @@ export async function admitRun(
            latest_checkpoint_id, budget_reserved_json, budget_consumed_json, repair_count,
            result_ref, terminal_reason, terminal_detail_ref, stop_intent_ref, cancel_requested,
            created_at, deadline_at, updated_at, principal_id, admission_method, admission_key,
-           admission_intent_digest, admitted_request_digest
+           admission_intent_digest, admitted_request_digest, admission_request_id
          ) VALUES (?, ?, NULL, ?, 'queued', 'agent', ?, NULL, NULL, 1, 0, NULL, ?, ?, ?, 0,
-                   NULL, NULL, NULL, NULL, 0, ?, ?, ?, ?, 'run.submit', ?, ?, ?)`
+                   NULL, NULL, NULL, NULL, 0, ?, ?, ?, ?, 'run.submit', ?, ?, ?, ?)`
       )
       .run(
         runId,
@@ -561,7 +596,8 @@ export async function admitRun(
         input.principalId,
         input.admissionKey,
         admissionIntentDigest,
-        admittedRequestDigest
+        admittedRequestDigest,
+        input.requestId
       );
     insertRunEvent(connection, event);
     insertControlRequest(connection, {
@@ -584,7 +620,7 @@ export async function admitRun(
     throw new KernelStorageError('INVALID_REQUEST', 'canonical clock is still in clock_regressed');
   }
   if (committed) return { replayed: false, run, response };
-  const raced = await replayAdmitRun(driver, artifacts, input, admissionIntentDigest, requestDigest);
+  const raced = await replayAdmitRun(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
   if (raced !== undefined) return raced;
   throw new KernelStorageError('RECOVERY_REQUIRED', 'run.submit transaction committed no Run');
 }

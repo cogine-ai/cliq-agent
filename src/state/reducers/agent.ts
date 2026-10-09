@@ -16,7 +16,7 @@ import { contextSourceDigest, planContextCompaction, replaceCompactedPrefix, val
 import { loadInstructionText, projectNormalContext, readCanonicalArtifact, readModelContext, readModelTurnMaterial } from '../agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
-import { KernelStorageError, ModelRetryPendingError, stateOperation } from '../errors.js';
+import { joinResourceOperations, KernelStorageError, ModelRetryPendingError, stateOperation } from '../errors.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from '../repositories/journal.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
@@ -78,7 +78,7 @@ const agentCut = stateOperation('RECOVERY_REQUIRED', async (driver: SqliteDriver
 async function readContextItems(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string, through: number): Promise<ContextItem[]> {
   const rows = driver.prepare('SELECT item_seq, item_id, kind, payload_ref FROM items WHERE run_id = ? AND item_seq <= ? ORDER BY item_seq')
     .all<{ item_seq: unknown; item_id: string; kind: string; payload_ref: string }>(runId, BigInt(through));
-  return Promise.all(rows.map(async (row) => {
+  return joinResourceOperations(rows.map(async (row) => {
     const item = await readCanonicalArtifact<ContinuationItem>(artifacts, row.payload_ref);
     if (item.itemId !== row.item_id || item.kind !== row.kind) throw new TypeError('context item does not match its owner row');
     return { itemSeq: Number(row.item_seq), itemRef: row.payload_ref, item };
@@ -132,7 +132,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       new Set(manifest.entries.map((entry) => entry.name)).size !== manifest.entries.length) {
     throw new TypeError('Run tool manifest does not match its retained assembly');
   }
-  const contracts = immutableSnapshot(await Promise.all(manifest.entries.map(async (entry) => {
+  const contracts = immutableSnapshot(await joinResourceOperations(manifest.entries.map(async (entry) => {
     const output = entry.outputSchemaRef !== undefined;
     if (!exactKeys(entry, ['name', 'version', 'description', 'access', 'inputSchemaRef', 'inputSchemaDigest', 'replayClass', 'execution',
       ...(output ? ['outputSchemaRef', 'outputSchemaDigest'] : [])]) || typeof entry.version !== 'string' || !entry.version ||

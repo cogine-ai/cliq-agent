@@ -16,6 +16,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { ContentAddressedStore } from './cas.js';
+import { ResourceRetirementError } from './errors.js';
 
 test('publish makes immutable bytes readable by their raw SHA-256 ref', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-publish-'));
@@ -106,7 +107,9 @@ for (const { existingArtifact, code } of [
         throw failure;
       });
 
-      await assert.rejects(store.publish(bytes), (error) => error === failure);
+      await assert.rejects(store.publish(bytes), (error) => error instanceof ResourceRetirementError &&
+        error.code === 'RECOVERY_REQUIRED' && error.cause === failure &&
+        (error.cause as NodeJS.ErrnoException).code === code);
     } finally {
       t.mock.restoreAll();
       await rm(home, { recursive: true, force: true });

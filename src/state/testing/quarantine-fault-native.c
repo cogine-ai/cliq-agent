@@ -9,9 +9,11 @@
 
 static int fault_fsync(int fd);
 static int fault_rename(int from, const char *source, int to, const char *target, unsigned int flags);
+static int fault_unlink(int directory, const char *name, int flags);
 #undef NAPI_MODULE
 #define NAPI_MODULE(modname, register)
 #define fsync fault_fsync
+#define unlinkat fault_unlink
 #ifdef __APPLE__
 #define renameatx_np fault_rename
 #else
@@ -19,6 +21,7 @@ static int fault_rename(int from, const char *source, int to, const char *target
 #endif
 #include "../../../native/state-owner/state-owner.c"
 #undef fsync
+#undef unlinkat
 #ifdef __APPLE__
 #undef renameatx_np
 #else
@@ -47,6 +50,12 @@ static int fault_fsync(int fd) {
     int error = inject("fsync");
     if (error) { errno = error; return -1; }
     return fsync(fd);
+}
+
+static int fault_unlink(int directory, const char *name, int flags) {
+    int error = inject("before_unlink");
+    if (error) { errno = error; return -1; }
+    return unlinkat(directory, name, flags);
 }
 
 static int fault_rename(int from, const char *source, int to, const char *target, unsigned int flags) {

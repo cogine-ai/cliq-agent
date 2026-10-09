@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomFillSync } from 'node:crypto';
+import { once } from 'node:events';
 import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { createConnection } from 'node:net';
 import path from 'node:path';
 import { test } from 'node:test';
 
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1,
@@ -17,8 +20,11 @@ import type {
   WorkspaceIdentityV1
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
+import type { LocalControlConnection } from './control-channel.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
+import { createAgentFixture } from './testing/agent-fixtures.js';
+import { disposeFixture } from './testing/fixtures.js';
 
 function uuidv7(): string {
   const bytes = Buffer.alloc(16);
@@ -85,7 +91,7 @@ async function publishEmptySourceGraph(store: StateStore, workspaceIdentityDiges
     byteCount: 0,
     treeDigest: ''
   };
-  entries.treeDigest = digestOmitting(entries, 'treeDigest');
+  entries.treeDigest = canonicalSha256({ schemaVersion: entries.schemaVersion, format: entries.format, entries: entries.entries });
   const entriesArtifact = await store.artifacts.publishCanonical(entries, 'cliq-workspace-entries-v1');
 
   const source: SourceManifest = {
@@ -276,6 +282,182 @@ test('admission-key replay returns the original Session and Run without a second
       );
       assert.equal(Number(driver.prepare('SELECT count(*) AS count FROM runs').get<{ count: unknown }>()?.count), 1);
     });
+  } finally {
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('new request ids replay the accepted admission snapshots after progress and source removal', async () => {
+  const fixture = await createAgentFixture('admission-original-response', undefined, { mode: 'plan' });
+  const movedWorkspace = `${fixture.workspace}-moved`;
+  try {
+    const channel = await publishInProcessChannel(fixture.store);
+    const sessionInput = { ...channel, requestId: uuidv7(), admissionKey: admissionKey('original-session'),
+      workspacePath: fixture.workspace };
+    const created = await fixture.store.createSession(sessionInput);
+    const { runSpec } = await fixture.store.readRecoveryClosure(fixture.runId);
+    const projection = await fixture.store.artifacts.readCanonical<SourceProjectionSpec>(runSpec.sourceProjectionRef);
+    const runInput = { ...channel, requestId: uuidv7(), admissionKey: admissionKey('original-run'),
+      sessionId: created.session.id, expectedContextRevision: 1, workspacePath: fixture.workspace,
+      objective: 'replay the original accepted response', allowUnverified: true,
+      assemblyRef: runSpec.assemblyRef, policyRef: runSpec.policyRef, sandboxProfileRef: runSpec.sandboxProfileRef,
+      verifierSpecRef: runSpec.verifierSpecRef, credentialGrantRefs: runSpec.credentialGrantRefs,
+      budgets: runSpec.budgets, sourceProjectionRef: runSpec.sourceProjectionRef,
+      frozenIgnoreRulesRef: projection.frozenIgnoreRulesRef, baseWorkspaceManifestRef: runSpec.baseWorkspaceManifestRef };
+    const admitted = await fixture.store.admitRun(runInput);
+    const agent = await fixture.store.loadAgentRun({ runId: admitted.run.id, material: fixture.authority.material,
+      releaseKeys: fixture.signed!.releaseKeys });
+    const stopped = await agent.cancelRun({ ...channel, requestId: uuidv7(), expectedRunRevision: admitted.run.revision });
+    await agent.commitTerminalStop({ expectedRunRevision: stopped.run.revision });
+    assert.equal(fixture.store.getRun(admitted.run.id).status, 'cancelled');
+    assert.equal(fixture.store.getSession(created.session.id).contextRevision, 2);
+    await rename(fixture.workspace, movedWorkspace);
+
+    const runRequestId = uuidv7();
+    const replayedRun = await fixture.store.admitRun({ ...runInput, requestId: runRequestId });
+    assert.deepEqual(replayedRun.response, admitted.response);
+    const sessionRequestId = uuidv7();
+    const replayedSession = await fixture.store.createSession({ ...sessionInput, requestId: sessionRequestId });
+    assert.deepEqual(replayedSession.response, created.response);
+    await assert.rejects(fixture.store.admitRun({ ...runInput, requestId: runRequestId,
+      admissionKey: admissionKey('different-run'), objective: 'a different intent' }), { code: 'REQUEST_ID_CONFLICT' });
+    await assert.rejects(fixture.store.createSession({ ...sessionInput, requestId: sessionRequestId,
+      admissionKey: admissionKey('different-session') }), { code: 'REQUEST_ID_CONFLICT' });
+  } finally {
+    await rm(movedWorkspace, { recursive: true, force: true });
+    await disposeFixture(fixture);
+  }
+});
+
+test('admission replay rejects a corrupted original response link without claiming its new request id', async () => {
+  const stateRoot = await makePrivateDir('.cliq-admission-response-corruption-');
+  const workspace = await makePrivateDir('.cliq-admission-response-ws-');
+  const store = await openStateStore(stateRoot);
+  const fault = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const channel = await publishInProcessChannel(store);
+    const input = { ...channel, workspacePath: workspace, requestId: uuidv7(), admissionKey: admissionKey('original-response') };
+    const original = await store.createSession(input);
+    const other = await store.createSession({ ...input, requestId: uuidv7(), admissionKey: admissionKey('other-response') });
+    const newRequestId = uuidv7();
+    fault.prepare('UPDATE control_requests SET response_ref = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
+      .run(canonicalSha256(other.response), channel.principalId, 'session.create', input.requestId);
+    await assert.rejects(store.createSession({ ...input, requestId: newRequestId }), { code: 'RECOVERY_REQUIRED' });
+    fault.prepare('UPDATE control_requests SET response_ref = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
+      .run(canonicalSha256(original.response), channel.principalId, 'session.create', input.requestId);
+    const different = await store.createSession({ ...input, requestId: newRequestId, admissionKey: admissionKey('new-after-corruption') });
+    assert.equal(different.replayed, false);
+    assert.notEqual(different.session.id, original.session.id);
+  } finally {
+    fault.close();
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('new admission request ids require a current authenticated native frame', async () => {
+  const stateRoot = await makePrivateDir('.cliq-admission-replay-auth-');
+  const workspace = await makePrivateDir('.cliq-admission-replay-auth-ws-');
+  const store = await openStateStore(stateRoot);
+  let accept!: (connection: LocalControlConnection) => void;
+  let reject!: (error: Error) => void;
+  const accepted = new Promise<LocalControlConnection>((resolve, fail) => { accept = resolve; reject = fail; });
+  const listener = store.openLocalControl(accept, reject);
+  const socket = createConnection(path.join(stateRoot, 'runtime', 'control-v1.sock'));
+  try {
+    await once(socket, 'connect');
+    const connection = await accepted;
+    const input = await connection.dispatch(async identity => ({ ...identity, requestId: uuidv7(),
+      admissionKey: admissionKey('native-admission-replay'), workspacePath: workspace }));
+    const original = await connection.dispatch(() => store.createSession(input));
+    const requestId = uuidv7();
+    await assert.rejects(store.createSession({ ...input, requestId }), { code: 'ARTIFACT_MISMATCH' });
+    const replay = await connection.dispatch(() => store.createSession({ ...input, requestId }));
+    assert.deepEqual(replay.response, original.response);
+    await assert.rejects(connection.dispatch(() => store.createSession({ ...input, requestId,
+      admissionKey: admissionKey('native-replay-conflict') })), { code: 'REQUEST_ID_CONFLICT' });
+  } finally {
+    socket.destroy();
+    await listener.close();
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('clock regression blocks a new admission replay binding without changing retained replay', async t => {
+  const stateRoot = await makePrivateDir('.cliq-admission-replay-time-');
+  const workspace = await makePrivateDir('.cliq-admission-replay-time-ws-');
+  const store = await openStateStore(stateRoot);
+  try {
+    const channel = await publishInProcessChannel(store);
+    const input = { ...channel, requestId: uuidv7(), admissionKey: admissionKey('time-replay'), workspacePath: workspace };
+    const original = await store.createSession(input);
+    const newRequestId = uuidv7();
+    t.mock.method(Date, 'now', () => Date.parse(original.session.createdAt) - 1);
+    assert.deepEqual((await store.createSession(input)).response, original.response);
+    await assert.rejects(store.createSession({ ...input, requestId: newRequestId }), { code: 'INVALID_REQUEST' });
+    t.mock.restoreAll();
+    assert.equal(store.recoverCanonicalTime(), 'healthy');
+    const fresh = await store.createSession({ ...input, requestId: newRequestId, admissionKey: admissionKey('after-time-recovery') });
+    assert.equal(fresh.replayed, false);
+    assert.notEqual(fresh.session.id, original.session.id);
+  } finally {
+    t.mock.restoreAll();
+    store.recoverCanonicalTime();
+    await store.close();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('schema v3 admissions without original links stay recoverable but cannot invent admission-key replay', async () => {
+  const stateRoot = await makePrivateDir('.cliq-admission-v3-');
+  const workspace = await makePrivateDir('.cliq-admission-v3-ws-');
+  let store = await openStateStore(stateRoot);
+  try {
+    const channel = await publishInProcessChannel(store);
+    const sessionInput = { ...channel, requestId: uuidv7(), admissionKey: admissionKey('v3-session'), workspacePath: workspace };
+    const created = await store.createSession(sessionInput);
+    const identity = await store.artifacts.readCanonical<WorkspaceIdentityV1>(created.session.workspaceIdentityRef);
+    const source = await publishEmptySourceGraph(store, identity.identityDigest);
+    const runInput = { ...channel, ...source, requestId: uuidv7(), admissionKey: admissionKey('v3-run'),
+      sessionId: created.session.id, expectedContextRevision: 1, workspacePath: workspace,
+      objective: 'retain admitted work across the storage upgrade', allowUnverified: true };
+    const admitted = await store.admitRun(runInput);
+    await store.close();
+    // Recreate the exact pre-link v3 SQL layout around real accepted artifacts
+    // and owner history; migration must not guess a response from these rows.
+    inspectKernel(stateRoot, driver => driver.transaction(connection => {
+      connection.exec('DROP TRIGGER sessions_admission_identity_immutable');
+      connection.exec('DROP TRIGGER runs_admission_identity_immutable');
+      connection.exec('ALTER TABLE sessions DROP COLUMN admission_request_id');
+      connection.exec('ALTER TABLE runs DROP COLUMN admission_request_id');
+      // V3 also predates the inspection ledger. Keeping this V4 table while
+      // relabeling the fixture would test a corrupt layout, not an upgrade.
+      connection.exec('DROP TABLE source_inspection_attempts');
+      connection.exec('PRAGMA user_version=3');
+    }));
+    store = await openStateStore(stateRoot);
+    const freshChannel = await publishInProcessChannel(store);
+    assert.deepEqual((await store.readRecoveryClosure(admitted.run.id)).run, admitted.run);
+    assert.deepEqual((await store.createSession({ ...sessionInput, ...freshChannel })).response, created.response);
+    assert.deepEqual((await store.admitRun({ ...runInput, ...freshChannel })).response, admitted.response);
+    await assert.rejects(store.createSession({ ...sessionInput, ...freshChannel, requestId: uuidv7() }), { code: 'RECOVERY_REQUIRED' });
+    await assert.rejects(store.admitRun({ ...runInput, ...freshChannel, requestId: uuidv7() }), { code: 'RECOVERY_REQUIRED' });
+    inspectKernel(stateRoot, driver => {
+      assert.throws(() => driver.prepare('UPDATE sessions SET admission_request_id = ? WHERE id = ?')
+        .run(sessionInput.requestId, created.session.id), /admission identity is immutable/);
+      assert.throws(() => driver.prepare('UPDATE runs SET admission_request_id = ? WHERE id = ?')
+        .run(runInput.requestId, admitted.run.id), /admission identity is immutable/);
+    });
+    await store.close();
+    store = await openStateStore(stateRoot);
+    await assert.rejects(store.createSession({ ...sessionInput, ...await publishInProcessChannel(store), requestId: uuidv7() }),
+      { code: 'RECOVERY_REQUIRED' });
   } finally {
     await store.close();
     await rm(stateRoot, { recursive: true, force: true });

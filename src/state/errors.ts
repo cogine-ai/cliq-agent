@@ -25,6 +25,27 @@ export class KernelStorageError extends Error {
   }
 }
 
+/** Internal resource-retirement failure, not an inspection outcome or a
+ * caller-supplied proof. It must survive operation error handling so that an
+ * unsettled descriptor/process cleanup can never mint a joined receipt. */
+export class ResourceRetirementError extends KernelStorageError {
+  constructor(message: string, cause: unknown) {
+    super('RECOVERY_REQUIRED', message, { cause });
+    this.name = 'ResourceRetirementError';
+  }
+}
+
+/** A failed read must still join its siblings before the resource owner can
+ * retire. Cleanup uncertainty takes precedence over ordinary read failures. */
+export async function joinResourceOperations<T extends readonly unknown[] | []>(operations: T):
+Promise<{ -readonly [P in keyof T]: Awaited<T[P]> }> {
+  const results = await Promise.allSettled(operations as readonly unknown[]);
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+  const failure = failures.find(result => result.reason instanceof ResourceRetirementError) ?? failures[0];
+  if (failure) throw failure.reason;
+  return results.map(result => (result as PromiseFulfilledResult<unknown>).value) as { -readonly [P in keyof T]: Awaited<T[P]> };
+}
+
 /** Scheduling information, not an instruction to sleep inside a StateStore transaction. */
 export class ModelRetryPendingError extends KernelStorageError {
   constructor(readonly nextAttempt: number, readonly notBefore: string) {

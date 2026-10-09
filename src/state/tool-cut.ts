@@ -8,7 +8,7 @@ import { exactKeys } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact, readModelTurnMaterial } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeContextManifest } from './decoders.js';
-import { KernelStorageError, stateOperation } from './errors.js';
+import { joinResourceOperations, KernelStorageError, stateOperation } from './errors.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 
@@ -23,7 +23,7 @@ export const readToolCut = stateOperation('RECOVERY_REQUIRED', async (
   if (frontier.kind !== 'tool' || !exactKeys(frontier, ['schemaVersion', 'kind', 'batchItemId', 'orderedCallIds', 'nextCallIndex'])) {
     throw new TypeError('tool step requires an exact tool frontier');
   }
-  const items = await Promise.all(closure.items.map(async (row) => ({
+  const items = await joinResourceOperations(closure.items.map(async (row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)
   })));
   const context = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));

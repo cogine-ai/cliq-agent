@@ -374,15 +374,11 @@ test('terminal event retention accepts earliest minus one and expiry carries the
 });
 
 test('attach refuses a missing event inside its retained interval instead of advancing a reconnect cursor past it', async () => {
-  const fixture = await createActiveFixture('control-read-event-gap');
+  const fixture = await createAgentFixture('control-read-event-gap');
   const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
   try {
     const identity = await publishInProcessChannel(fixture.store);
-    const artifact = await fixture.store.artifacts.publishCanonical({ fixture: 'retained-event-gap' }, 'cliq-tool-request-v1');
-    await fixture.store.prepareInvocation({ runId: fixture.runId, expectedRunRevision: fixture.runRevision,
-      leaseEpoch: fixture.leaseEpoch, opId: 'retained-event-gap', opKind: 'tool', target: 'fixture.read', requestRef: artifact.ref,
-      replayClass: 'retry', idempotencyKey: 'retained-event-gap-0',
-      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 } });
+    await fixture.agent.prepareModel({ expectedRunRevision: fixture.runRevision, leaseEpoch: fixture.leaseEpoch });
     const request = { protocolVersion: 1 as const, method: 'run.attach' as const, runId: fixture.runId, afterEventSeq: 0 };
     const intact = await fixture.store.readControl(request, identity);
     assert.ok(intact.method === 'run.attach');
@@ -483,7 +479,7 @@ test('control queries reject future cursors, malformed bounds and identifiers, a
 });
 
 test('a later attach page sees a committed reducer transition, while the earlier snapshot and cut remain unchanged', async () => {
-  const fixture = await createActiveFixture('control-read-events');
+  const fixture = await createAgentFixture('control-read-events');
   try {
     const identity = await publishInProcessChannel(fixture.store);
     const request = { protocolVersion: 1 as const, method: 'run.attach' as const, runId: fixture.runId, afterEventSeq: 0, limit: 1 };
@@ -495,11 +491,7 @@ test('a later attach page sees a committed reducer transition, while the earlier
     assert.equal(first.earliestRetainedEventSeq, 1);
     assert.ok(first.nextEventSeq < first.highWaterEventSeq);
     const beforeBytes = canonicalJsonBytes(first);
-    const artifact = await fixture.store.artifacts.publishCanonical({ fixture: 'control-read-invocation' }, 'cliq-tool-request-v1');
-    const prepared = await fixture.store.prepareInvocation({ runId: fixture.runId, expectedRunRevision: fixture.runRevision,
-      leaseEpoch: fixture.leaseEpoch, opId: 'control-read-op', opKind: 'tool', target: 'fixture.read', requestRef: artifact.ref,
-      replayClass: 'retry', idempotencyKey: 'control-read-op-0',
-      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 } });
+    const prepared = await fixture.agent.prepareModel({ expectedRunRevision: fixture.runRevision, leaseEpoch: fixture.leaseEpoch });
     const second = await fixture.store.readControl({ ...request, afterEventSeq: first.nextEventSeq, limit: 100 }, identity);
     assert.ok(second.method === 'run.attach');
     assert.equal(second.highWaterEventSeq, first.highWaterEventSeq + 1);
@@ -520,14 +512,10 @@ test('a later attach page sees a committed reducer transition, while the earlier
 });
 
 test('run journal cursors and checkpoint cursors survive owner reopen with a fresh authenticated channel', async () => {
-  const fixture = await createActiveFixture('control-read-reopen');
+  const fixture = await createAgentFixture('control-read-reopen');
   try {
     const identity = await publishInProcessChannel(fixture.store);
-    const artifact = await fixture.store.artifacts.publishCanonical({ fixture: 'reopen-request' }, 'cliq-tool-request-v1');
-    const prepared = await fixture.store.prepareInvocation({ runId: fixture.runId, expectedRunRevision: fixture.runRevision,
-      leaseEpoch: fixture.leaseEpoch, opId: 'reopen-op', opKind: 'tool', target: 'fixture.read', requestRef: artifact.ref,
-      replayClass: 'retry', idempotencyKey: 'reopen-op-0',
-      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 } });
+    const prepared = await fixture.agent.prepareModel({ expectedRunRevision: fixture.runRevision, leaseEpoch: fixture.leaseEpoch });
     const first = await fixture.store.readControl({ protocolVersion: 1, method: 'run.get', runId: fixture.runId, journalLimit: 1 }, identity);
     assert.ok(first.method === 'run.get');
     assert.deepEqual(first.journal, [prepared.entry]);
@@ -538,7 +526,7 @@ test('run journal cursors and checkpoint cursors survive owner reopen with a fre
       expectedRunRevision: prepared.run.revision, errorRef: errorArtifact.ref });
     assert.equal(first.snapshot.run.revision, prepared.run.revision);
     await fixture.store.close();
-    fixture.store = await openStateStore(fixture.stateRoot);
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
     const fresh = await publishInProcessChannel(fixture.store);
     assert.equal(fresh.principalId, identity.principalId);
     assert.notEqual(fresh.channelIdentityRef, identity.channelIdentityRef);

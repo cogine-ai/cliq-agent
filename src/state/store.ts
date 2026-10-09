@@ -44,7 +44,7 @@ import {
 import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
-import { KernelStorageError } from './errors.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
   decodePlatformProcessIdentity,
@@ -91,7 +91,7 @@ import {
   type RegisterWorkspaceGenerationInput
 } from './reducers/workspace-transition.js';
 import { readRecoveryClosure } from './recovery-closure.js';
-import { beginWorkerRecovery, type BeginWorkerRecoveryInput } from './reducers/worker-recovery.js';
+import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, type BeginWorkerRecoveryInput } from './reducers/worker-recovery.js';
 import { readRun, readSession } from './rows.js';
 import { applyKernelSchema, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
 import { openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
@@ -109,10 +109,19 @@ import {
 } from './state-owner.js';
 import { hostPlatform } from './workspace-identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
+import { loadRunExecution, type LoadRunExecutionInput, type RunExecutionInstallation } from './run-execution.js';
 import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import type { SandboxProfileV1, SourceInspectionAttemptV1 } from '../kernel/execution.js';
+import { normalizeRunSubmitRequest, runSubmitIntentDigest } from './source-target.js';
+import { validateControlChannelClosure } from './control-channel.js';
 
 /** Trusted Supervisor bootstrap input, never loaded from Run/workspace configuration. Required again on signed-owner reopen. */
-export type StateStoreRuntimeAuthority = { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[] };
+export type StateStoreRuntimeAuthority = { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[];
+  execution?: RunExecutionInstallation;
+  sourceInspection?: { controlledHome: string; sandboxProfile: SandboxProfileV1 } };
+
+export type CaptureSubmittedSourceInput = Readonly<{ request: unknown; identity: AuthenticatedControlIdentity }>;
+type SourceInspectionTask = { abort: AbortController; promise: Promise<SourceInspectionAttemptV1> };
 
 export type {
   LoadAgentRunInput,
@@ -154,6 +163,7 @@ const AUTHORITY_TABLES = [
   'list_read_cut_entries',
   'child_allocations',
   'authorization_grants',
+  'source_inspection_attempts',
   'mcp_registrations',
   'admin_operations'
 ] as const;
@@ -366,17 +376,32 @@ async function readStateOwnerProcess(artifacts: ArtifactCatalog, owner: StateOwn
   return processIdentity;
 }
 
+// Failed opening has no Store for a caller to close. Keep uncertain resources
+// strongly owned until actual process death; skipping close alone would let
+// the native finalizer release the flock after GC. This is resource retention,
+// not another durable lifecycle or a permission to retry the failed opening.
+const unretiredStateStoreOpenings = new Set<Readonly<{
+  lock: HeldStateOwnerLock; driver: SqliteDriver | undefined; failure: ResourceRetirementError;
+}>>();
+
 export class StateStore {
   private closed = false;
   private released = false;
+  private closeRequested = false;
   private closing: Promise<void> | undefined;
   private readonly controlListeners = new Set<LocalControlListener>();
+  // Reserve the Run through validation and join that opening during shutdown.
+  // This protects resources; SQLite remains the sole lifecycle authority.
+  private readonly executions = new Map<string, Promise<Awaited<ReturnType<typeof loadRunExecution>>>>();
+  private readonly sourceInspectionTasks = new Set<SourceInspectionTask>();
+  private readonly sourceInspections = new Map<string, { intent: string; task: SourceInspectionTask }>();
 
   private constructor(
     readonly stateRoot: string,
     private readonly driver: SqliteDriver,
     readonly artifacts: ArtifactCatalog,
-    private readonly owner: StateOwnerContext
+    private readonly owner: StateOwnerContext,
+    private readonly runtimeAuthority?: StateStoreRuntimeAuthority
   ) {}
 
   get ownerEpoch(): number {
@@ -460,15 +485,30 @@ export class StateStore {
       const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
       const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts, native, heldLock, runtimeAuthority?.bundle);
       const ownerContext = await stateOwnerContextFromArtifacts(stateRoot, artifacts, owner, heldLock);
-      return new StateStore(stateRoot, driver, artifacts, ownerContext);
+      // Close abandoned capture resources before publishing the successor
+      // Store. Retained reservations replace neither source nor client: only
+      // actual authenticated replay later binds the immutable error response.
+      const { retireAbandonedSourceInspections } = await import('./source-inspection-owner.js');
+      await retireAbandonedSourceInspections(driver, artifacts, ownerContext,
+        runtimeAuthority?.sourceInspection && { bundle: runtimeAuthority.bundle,
+          releaseKeys: runtimeAuthority.releaseKeys, sandboxProfile: runtimeAuthority.sourceInspection.sandboxProfile });
+      return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority);
     } catch (error) {
-      try {
-        driver?.close();
-      } catch {
-        // Preserve the open/acquisition failure as the primary diagnostic.
+      let failure = error;
+      if (!(error instanceof ResourceRetirementError)) {
+        try {
+          // A failed SQLite close must retain the flock, rather than free the
+          // native owner while database resource retirement is unproven.
+          driver?.close();
+          heldLock.close();
+        } catch (cause) {
+          failure = new ResourceRetirementError('StateStore opening resources did not retire',
+            new AggregateError([error, cause]));
+        }
       }
-      heldLock.close();
-      throw error;
+      if (failure instanceof ResourceRetirementError)
+        unretiredStateStoreOpenings.add(Object.freeze({ lock: heldLock, driver, failure }));
+      throw failure;
     }
   }
 
@@ -522,6 +562,82 @@ export class StateStore {
 
   loadAgentRun(input: LoadAgentRunInput) {
     return loadAgentRun(this.driver, this.artifacts, this.owner, input);
+  }
+
+  async loadRunExecution(input: LoadRunExecutionInput) {
+    if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
+    const runId = input.runId;
+    if (this.executions.has(runId)) throw new KernelStorageError('REVISION_CONFLICT', 'Run already has an execution resource owner');
+    const opening = loadRunExecution(this.driver, this.artifacts, this.owner, this.runtimeAuthority, input,
+      () => this.closed || this.closeRequested || this.released);
+    this.executions.set(runId, opening);
+    let scope: Awaited<typeof opening> | undefined;
+    try {
+      scope = await opening;
+      if (this.closed || this.closeRequested || this.released) {
+        await scope.close();
+        throw new KernelStorageError('LEASE_FENCED', 'StateStore closed while loading execution');
+      }
+      return scope.execution;
+    } catch (error) {
+      // A failed factory whose cleanup completed releases its reservation.
+      // A resolved scope or unjoined opening must remain owned across close
+      // retries, even when the original load caller receives an error.
+      if (!scope && !(error instanceof ResourceRetirementError) && this.executions.get(runId) === opening) {
+        this.executions.delete(runId);
+      }
+      throw error;
+    }
+  }
+
+  /** Internal source producer, not a public wire method or accepted Run.
+   * The whole factory, including validation/replay reads, is Store-owned before
+   * its first asynchronous action; shutdown cancels and joins every operation. */
+  async captureSubmittedSource(input: CaptureSubmittedSourceInput): Promise<SourceInspectionAttemptV1> {
+    if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
+    input = immutableSnapshot(input);
+    if (!input || Object.keys(input).length !== 2 || !Object.hasOwn(input, 'request') || !Object.hasOwn(input, 'identity')) {
+      throw new KernelStorageError('INVALID_REQUEST', 'source capture requires one inline request and authenticated identity');
+    }
+    const normalized = normalizeRunSubmitRequest(input.request);
+    const key = identityHash('cliq-source-inspection-task-v1', input.identity.principalId, normalized.request.admissionKey);
+    const intent = runSubmitIntentDigest(input.identity.principalId, normalized.request);
+    const existing = this.sourceInspections.get(key);
+    const abort = new AbortController();
+    const promise = Promise.resolve().then(async () => {
+      abort.signal.throwIfAborted();
+      await validateControlChannelClosure(this.artifacts, this.owner, input.identity);
+      abort.signal.throwIfAborted();
+      assertActiveStateOwner(this.driver, this.owner);
+      const { captureSubmittedSource, assertSourceInspectionRequestId } = await import('./source-inspection-owner.js');
+      assertSourceInspectionRequestId(this.driver, input.identity.principalId, normalized.request,
+        existing && identityHash('cliq-source-inspection-v1', input.identity.principalId, 'run.submit', normalized.request.admissionKey, intent));
+      if (existing) {
+        if (existing.intent !== intent) throw new KernelStorageError('ADMISSION_KEY_CONFLICT', 'source key belongs to a different original intent');
+        // Join one physical task, then bind this authenticated follower through
+        // the ordinary retained replay path. A failed resource join propagates
+        // as-is; it must never become a new capture of live source bytes.
+        await existing.task.promise;
+      }
+      const bootstrap = this.runtimeAuthority;
+      if (!bootstrap?.sourceInspection) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'trusted source inspection installation is not configured');
+      abort.signal.throwIfAborted();
+      return captureSubmittedSource(this.driver, this.artifacts, this.owner,
+        { bundle: bootstrap.bundle, releaseKeys: bootstrap.releaseKeys, ...bootstrap.sourceInspection }, input, abort.signal);
+    });
+    const task: SourceInspectionTask = { abort, promise };
+    this.sourceInspectionTasks.add(task);
+    if (!existing) this.sourceInspections.set(key, { intent, task });
+    const settled = (error?: unknown) => {
+      // A rejected resource join is retained across close retries. Ordinary
+      // validation failures own nothing once their complete task has ended.
+      if (!(error instanceof ResourceRetirementError)) {
+        if (this.sourceInspections.get(key)?.task === task) this.sourceInspections.delete(key);
+        this.sourceInspectionTasks.delete(task);
+      }
+    };
+    void promise.then(() => settled(), settled);
+    return promise;
   }
 
   claimInvocationDispatch(input: ClaimInvocationDispatchInput) {
@@ -584,6 +700,21 @@ export class StateStore {
     return beginWorkerRecovery(this.driver, this.artifacts, this.owner, input);
   }
 
+  beginWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }) {
+    if (this.closed || this.closeRequested || this.released) {
+      return Promise.reject(new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed'));
+    }
+    return beginWorkerRecoveryProbe(this.driver, this.artifacts, this.owner, input);
+  }
+
+  async closeWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }) {
+    input = immutableSnapshot(input);
+    if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
+    const opening = this.executions.get(input.runId);
+    if (opening) return (await opening).closeWorkerRecoveryProbe(input);
+    return closeWorkerRecoveryProbe(this.driver, this.artifacts, this.owner, input);
+  }
+
   recoverCanonicalTime(): TimeFenceAdvance {
     let outcome!: TimeFenceAdvance;
     this.driver.transaction((connection) => {
@@ -596,8 +727,31 @@ export class StateStore {
   close(): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.closing !== undefined) return this.closing;
+    // The gate is synchronous: existing execution references cannot dispatch
+    // while listeners/opening resources are being joined.
+    this.closeRequested = true;
+    for (const task of this.sourceInspectionTasks) task.abort.abort();
     const attempt = (async () => {
-      await Promise.all([...this.controlListeners].map(listener => listener.close()));
+      const results = await Promise.allSettled([
+        ...[...this.controlListeners].map(listener => listener.close()),
+        ...[...this.sourceInspectionTasks].map(async task => {
+          try { await task.promise; }
+          catch (error) { if (error instanceof ResourceRetirementError) throw error; }
+        }),
+        ...[...this.executions.entries()].map(async ([runId, opening]) => {
+          let scope: Awaited<typeof opening> | undefined;
+          try { scope = await opening; await scope.close(); }
+          catch (error) {
+            if (scope || error instanceof ResourceRetirementError) throw error;
+            // Ordinary failed validation owns no outstanding resources; it
+            // must not make an otherwise successful Store shutdown fail.
+            if (this.executions.get(runId) === opening) this.executions.delete(runId);
+          }
+        })
+      ]);
+      const failure = results.find(result => result.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
+      this.executions.clear();
       if (!this.released) {
         await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
         this.released = true;
@@ -608,6 +762,9 @@ export class StateStore {
     })();
     this.closing = attempt.catch((error: unknown) => {
       this.closing = undefined;
+      // Failed close retains the owner and permits its exact recovery path;
+      // it never makes a retired execution resource reusable.
+      this.closeRequested = false;
       throw error;
     });
     return this.closing;

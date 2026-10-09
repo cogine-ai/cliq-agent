@@ -1,4 +1,5 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
+import { immutableSnapshot } from '../../model/immutable.js';
 import {
   assertAdmissionKey,
   assertArtifactRef,
@@ -25,8 +26,7 @@ import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.j
 import {
   insertControlRequest,
   readAdmissionReplay,
-  readControlRequest,
-  readSession
+  readControlRequest
 } from '../rows.js';
 import type { SqliteDriver } from '../sqlite-driver.js';
 import { captureLiveWorkspaceIdentity } from '../workspace-identity.js';
@@ -101,6 +101,7 @@ async function readPublishedResponse(
 async function replayCreateSession(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
+  owner: StateOwnerContext,
   input: CreateSessionInput,
   admissionIntentDigest: string,
   requestDigest: string
@@ -128,12 +129,47 @@ async function replayCreateSession(
         'session.create admissionKey was reused with a different intent'
       );
     }
-    const session = readSession(driver, existingAdmission.id);
-    const response: SessionCreateResponse = {
-      protocolVersion: 1,
-      ok: true,
-      result: { method: 'session.create', snapshot: { schemaVersion: 1, session } }
-    };
+    if (existingAdmission.admissionRequestId === null) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission has no original control request');
+    }
+    const originalRequestId = existingAdmission.admissionRequestId;
+    const original = readControlRequest(driver, input.principalId, 'session.create', originalRequestId);
+    if (!original || original.requestDigest !== sessionCreateRequestDigest({ ...input, requestId: originalRequestId })) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original control request does not match');
+    }
+    const response = await readPublishedResponse(artifacts, original.responseRef);
+    const session = response.result.snapshot.session;
+    if (session.id !== existingAdmission.id) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original response names another Session');
+    }
+    const channel = await validateControlChannelClosure(artifacts, owner, input);
+    let fenceOutcome: TimeFenceAdvance | undefined;
+    driver.transaction(connection => {
+      const control = readControlRequest(connection, input.principalId, 'session.create', input.requestId);
+      if (control !== undefined) {
+        if (control.requestDigest !== requestDigest || control.responseRef !== original.responseRef) {
+          throw new KernelStorageError('REQUEST_ID_CONFLICT', 'session.create requestId was reused with different bytes');
+        }
+        return;
+      }
+      const current = readAdmissionReplay(connection, 'sessions', input.principalId, 'session.create', input.admissionKey);
+      const currentOriginal = readControlRequest(connection, input.principalId, 'session.create', originalRequestId);
+      if (!current || !currentOriginal || canonicalSha256(current) !== canonicalSha256(existingAdmission) ||
+          canonicalSha256(currentOriginal) !== canonicalSha256(original)) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original response link changed');
+      }
+      assertActiveStateOwner(connection, owner);
+      const now = sampleCanonicalNow();
+      fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
+      if (fenceOutcome !== 'healthy') return;
+      for (const artifact of channel.metadata) insertArtifactMetadata(connection, artifact, now);
+      insertControlRequest(connection, { principalId: input.principalId, method: 'session.create', requestId: input.requestId,
+        channelIdentityRef: input.channelIdentityRef, channelIdentityDigest: input.channelIdentityDigest, requestDigest,
+        responseRef: original.responseRef, committedAt: now });
+    });
+    if (fenceOutcome !== undefined && fenceOutcome !== 'healthy') {
+      throw new KernelStorageError('INVALID_REQUEST', 'canonical clock has regressed; admission replay binding is paused');
+    }
     return { replayed: true, session, response };
   }
   return undefined;
@@ -150,6 +186,7 @@ export async function createSession(
   assertArtifactRef(input.channelIdentityRef);
   const workspacePath = normalizeAbsolutePath(input.workspacePath);
   const name = input.name === undefined ? undefined : normalizeBoundedText(input.name, 1, 256);
+  input = immutableSnapshot({ ...input, workspacePath, ...(name === undefined ? {} : { name }) });
   const admissionIntentDigest = sessionCreateIntent({
     principalId: input.principalId,
     workspacePath,
@@ -162,7 +199,7 @@ export async function createSession(
     name
   });
 
-  const replayed = await replayCreateSession(driver, artifacts, input, admissionIntentDigest, requestDigest);
+  const replayed = await replayCreateSession(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
   if (replayed !== undefined) return replayed;
 
   const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
@@ -265,8 +302,8 @@ export async function createSession(
         `INSERT INTO sessions (
            id, workspace_identity_ref, name, parent_session_id, forked_through_item_seq,
            context_revision, latest_item_seq, context_projection_ref, created_at, updated_at,
-           principal_id, admission_method, admission_key, admission_intent_digest
-         ) VALUES (?, ?, ?, NULL, NULL, 1, 0, ?, ?, ?, ?, 'session.create', ?, ?)`
+           principal_id, admission_method, admission_key, admission_intent_digest, admission_request_id
+         ) VALUES (?, ?, ?, NULL, NULL, 1, 0, ?, ?, ?, ?, 'session.create', ?, ?, ?)`
       )
       .run(
         session.id,
@@ -277,7 +314,8 @@ export async function createSession(
         session.updatedAt,
         input.principalId,
         input.admissionKey,
-        admissionIntentDigest
+        admissionIntentDigest,
+        input.requestId
       );
     insertControlRequest(connection, {
       principalId: input.principalId,
@@ -299,7 +337,7 @@ export async function createSession(
     throw new KernelStorageError('INVALID_REQUEST', 'canonical clock is still in clock_regressed');
   }
   if (committed) return { replayed: false, session, response };
-  const raced = await replayCreateSession(driver, artifacts, input, admissionIntentDigest, requestDigest);
+  const raced = await replayCreateSession(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
   if (raced !== undefined) return raced;
   throw new KernelStorageError('RECOVERY_REQUIRED', 'session.create transaction committed no Session');
 }

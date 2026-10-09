@@ -1,6 +1,15 @@
 export type ArtifactRef = string;
 
 export type {
+  ProcessContainmentOwner, ProcessContainmentPlanV1, ProcessContainment,
+  ProcessContainmentRef, ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentDeathEvidenceV1,
+  SandboxRootImageV1, GuestExecutableIdentity, GuestToolchainManifest,
+  SandboxRuntimeBindingV1, SandboxExecutableIdentityV1, SandboxCapturedStdioV1,
+  SandboxProcessInvocationV1, SanitizedSandboxEnvironmentV1, SandboxFilesystemV1,
+  SandboxMountV1, SandboxLaunchBaseV1, SandboxLaunchSpecV1, SandboxResourceSpec, SandboxProfileV1
+} from './execution.js';
+
+export type {
   ToolContractManifestV1, ModelTurnItem, ToolBatchItem, ToolResultItem,
   ToolResultPayloadV1, ToolResultModelContentV1, RunContextCompactionPlan,
   RunContextCompactionItem, ContinuationItem
@@ -1326,7 +1335,7 @@ export type WorkerIdentity = {
   processContainmentRef: ArtifactRef;
 };
 
-/** Initial worker-death branch of the RFC WaitingSubject. Probe execution has its own reducer. */
+/** Worker-death branch of the RFC WaitingSubject; probe facts remain in the same immutable wait. */
 export type WorkerDeathWait = {
   schemaVersion: 1;
   kind: 'reconciliation';
@@ -1343,12 +1352,7 @@ export type WorkerDeathWait = {
     workspaceGenerationRef: ArtifactRef;
     openInvocationRefs: ArtifactRef[];
   };
-  probeState: {
-    phase: 'automatic_pending';
-    automaticProbeCount: 0;
-    userProbeCount: 0;
-    nextProbeAt: string;
-  };
+  probeState: import('./reconciliation.js').ReconciliationProbeStateV1;
 };
 
 export type WorkerLaunch = {
@@ -1542,6 +1546,9 @@ export type ControlResultV1 =
     };
 
 export type { StopIntent, TerminalReasonDetail, TerminalDetail, SessionRunTerminalItem, RunCancel } from './stop.js';
+export type { WorkerRecoveryEvidenceV1, ReconciliationProbeDispatchV1, ReconciliationInspectorTaskClosureV1,
+  ReconciliationProbeTimeoutClosureV1, ReconciliationProbeEvidenceV1, ReconciliationLastProbeEvidenceV1,
+  ReconciliationProbeStateV1 } from './reconciliation.js';
 
 export type ControlApplicationResponseV1 =
   | { protocolVersion: 1; ok: true; result: ControlResultV1 }

@@ -7,12 +7,15 @@ import { KERNEL_DATABASE_FILENAME } from '../../config.js';
 import { openSqliteDriver } from '../sqlite-driver.js';
 import { readLatestStateOwner } from '../state-owner.js';
 import type { StateStoreRuntimeAuthority } from '../store.js';
-import type { WorkspaceGenerationIdentityV1 } from '../../kernel/types.js';
+import type { WorkerDeathWait, WorkspaceGenerationIdentityV1 } from '../../kernel/types.js';
 
-type ChildReply = { state: string; message?: string; epoch?: number; pid?: number; token?: string;
-  stateRoot?: string; runId?: string; launchId?: string; runRevision?: number; leaseEpoch?: number; leaseVersion?: number };
+type ChildReply = { state: string; message?: string; code?: string; epoch?: number; pid?: number; token?: string;
+  closeCode?: string; probeCode?: string;
+  authority?: StateStoreRuntimeAuthority;
+  stateRoot?: string; runId?: string; launchId?: string; runRevision?: number; waitingOnRef?: string; wait?: WorkerDeathWait;
+  leaseEpoch?: number; leaseVersion?: number };
 
-export async function childFor(t: TestContext, root: string, mode: 'store' | 'native' | 'fixture' = 'store') {
+export async function childFor(t: TestContext, root: string, mode: 'store' | 'native' | 'fixture' | 'fixture_prepared' | 'fixture_probe' = 'store') {
   const child = fork(new URL('./state-owner-child.ts', import.meta.url), [root, mode], {
     execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc']
   });
@@ -27,9 +30,13 @@ export async function childFor(t: TestContext, root: string, mode: 'store' | 'na
     } catch (error) { throw new Error(`StateOwner child did not reply: ${diagnostic}`, { cause: error }); }
   };
   assert.equal((await reply()).state, 'ready');
-  return { child, exited, request(command: 'acquire' | 'close' | 'drop-lock', authority?: StateStoreRuntimeAuthority) {
+  return { child, exited, request(command: 'acquire' | 'close' | 'drop-lock', authority?: StateStoreRuntimeAuthority, clockNow?: number) {
     const pending = reply();
-    child.send(authority ? { command, authority } : command);
+    child.send(authority || clockNow !== undefined ? { command, authority, clockNow } : command);
+    return pending;
+  }, probe(command: 'close-probe' | 'begin-probe' | 'close-and-begin-probe', runId: string, expectedRunRevision: number, clockNow: number) {
+    const pending = reply();
+    child.send({ command, runId, expectedRunRevision, clockNow });
     return pending;
   }, quarantine(generation: WorkspaceGenerationIdentityV1, sourceRowVersion: number) {
     const pending = reply();

@@ -1,6 +1,8 @@
+import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, requiredSafeInteger } from '../kernel/identity.js';
 import type {
   CanonicalTimeFenceV1,
+  WorkerDeathWait,
   StateOwnerRecordV1,
   StateOwnerTransitionEvidenceV1
 } from '../kernel/types.js';
@@ -9,6 +11,8 @@ import { insertArtifactMetadata } from './artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { decodeStateOwnerRecord } from './decoders.js';
 import { KernelStorageError } from './errors.js';
+import { readCanonicalArtifact } from './agent-context.js';
+import { readRecoveryClosure } from './recovery-closure.js';
 import { assertStateOwnerLock, type HeldStateOwnerLock } from './native-owner.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 
@@ -189,6 +193,17 @@ export async function gracefullyReleaseStateOwner(
   expected: StateOwnerContext
 ): Promise<StateOwnerRecordV1> {
   const active = assertActiveStateOwner(driver, expected);
+  assertSourceInspectionsRetired(driver);
+  const waitingCut = readWaitingRunCut(driver);
+  for (const row of waitingCut) {
+    const wait = await readCanonicalArtifact<WorkerDeathWait>(artifacts, row.waiting_on_ref);
+    if (wait.kind !== 'reconciliation' || wait.subject?.kind !== 'worker_death' ||
+        (wait.probeState?.phase !== 'automatic_in_flight' && wait.probeState?.phase !== 'user_in_flight')) continue;
+    await readRecoveryClosure(driver, artifacts, row.id);
+    if (wait.probeState.dispatch.owningSupervisorInstanceId === expected.supervisorInstanceId) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'graceful release requires the exact worker inspection cancellation and join closure');
+    }
+  }
   const fence = readTimeFence(driver);
   if (fence === undefined) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence is missing');
@@ -218,6 +233,11 @@ export async function gracefullyReleaseStateOwner(
 
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, expected);
+    assertSourceInspectionsRetired(connection);
+    // No new or replaced wait can slip between retained validation and the final owner transition.
+    if (canonicalSha256(readWaitingRunCut(connection)) !== canonicalSha256(waitingCut)) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'worker inspection cut changed during graceful release');
+    }
     const transactionObservedAt = sampleCanonicalNow();
     const lockedFence = readTimeFence(connection);
     if (lockedFence === undefined) {
@@ -239,6 +259,19 @@ export async function gracefullyReleaseStateOwner(
     }
   });
   return terminal;
+}
+
+function assertSourceInspectionsRetired(connection: SqliteConnection | SqliteDriver): void {
+  if (connection.prepare("SELECT inspection_id FROM source_inspection_attempts WHERE phase != 'retired' LIMIT 1").get()) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection requires actual resource retirement before owner release');
+  }
+}
+
+function readWaitingRunCut(connection: SqliteConnection | SqliteDriver) {
+  return connection.prepare(`SELECT id, revision, status, waiting_reason, waiting_on_ref
+    FROM runs WHERE waiting_on_ref IS NOT NULL ORDER BY id`)
+    .all<{ id: string; revision: unknown; status: string; waiting_reason: string | null; waiting_on_ref: string }>()
+    .map(row => ({ ...row, revision: requiredSafeInteger(row.revision, 'waiting Run revision') }));
 }
 
 export function insertStateOwnerArtifacts(

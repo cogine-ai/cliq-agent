@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
-import { chmod, link, lstat, mkdir, open, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, symlink, writeFile } from 'node:fs/promises';
 import { Module } from 'node:module';
 import { constants } from 'node:os';
 import path from 'node:path';
@@ -12,7 +12,8 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { StateRootIdentityV1, WorkspaceGenerationIdentityV1 } from '../kernel/types.js';
 import { decodeWorkspaceGenerationIdentity } from './decoders.js';
-import { loadNativeStateOwner, type HeldStateOwnerLock } from './native-owner.js';
+import { loadNativeStateOwner, STATE_OWNER_NATIVE_PATH, type HeldGenerationFileWriter, type HeldGenerationSnapshot,
+  type HeldGenerationTree, type HeldStateOwnerLock } from './native-owner.js';
 import { openStateStore } from './store.js';
 import { makePrivateDir } from './testing/fixtures.js';
 import { childFor } from './testing/state-owner-process.js';
@@ -100,17 +101,129 @@ test('native quarantine moves only the exact generation and reobserves the same 
 
 test('quarantine retries the identical target after a real owner process is killed', async (t) => {
   const f = await fixture(t);
+  const before = await f.contents(f.source);
   f.held.close();
   const child = await childFor(t, f.root, 'native');
   assert.equal((await child.request('acquire')).state, 'held');
   assert.equal((await child.quarantine(f.generation, f.version)).state, 'quarantined');
-  child.child.kill('SIGKILL');
-  await child.exited;
+  assert.equal(child.child.kill('SIGKILL'), true);
+  const [exitCode, signal] = await child.exited;
+  assert.equal(exitCode, null);
+  assert.equal(signal, 'SIGKILL');
   const successor = native.acquireLock(f.root, false);
   try {
+    const newerVersion = f.version + 1;
+    const newerTarget = path.join(path.dirname(f.target), identityHash(f.generation.generationId, String(newerVersion)));
+    assert.throws(() => successor.quarantineGeneration(f.generation, newerVersion), /exactly one original or exact target/);
+    assert.equal((await lstat(f.target, { bigint: true })).ino, f.stat.ino);
+    assert.equal(await f.contents(f.target), before);
+    await assert.rejects(lstat(f.source), { code: 'ENOENT' });
+    await assert.rejects(lstat(newerTarget), { code: 'ENOENT' });
+
     assert.equal(successor.quarantineGeneration(f.generation, f.version).quarantineFileId, String(f.stat.ino));
-    assert.equal(await f.contents(f.target), linux ? 'uncheckpointed bytes' : 'uncheckpointed image bytes');
+    assert.equal((await lstat(f.target, { bigint: true })).ino, f.stat.ino);
+    assert.equal(await f.contents(f.target), before);
+    await assert.rejects(lstat(f.source), { code: 'ENOENT' });
+    await assert.rejects(lstat(newerTarget), { code: 'ENOENT' });
   } finally { successor.close(); }
+});
+
+test('the native staging seam reopens and observes only the fixed archived private directory', async (t) => {
+  // This actual directory exercises the native filesystem seam on both hosts;
+  // a Darwin staging tree is not a macOS VM or Linux containment identity.
+  const root = await makePrivateDir('.cliq-quarantine-directory-');
+  const module = new Module(STATE_OWNER_NATIVE_PATH);
+  process.dlopen(module, STATE_OWNER_NATIVE_PATH);
+  type StagingTree = HeldGenerationTree & {
+    openFileWriter(path: string, mode: number, byteCount: number): HeldGenerationFileWriter;
+    openSnapshot(): HeldGenerationSnapshot;
+    mkdir(path: string): void;
+    symlink(path: string, target: string): void;
+    borrow(): unknown;
+  };
+  const binding = module.exports as { acquireLock(root: string, create: boolean): {
+    createGenerationTree(run: string, generation: string): StagingTree;
+    openGenerationTree(run: string, generation: string, target: string, device: string, file: string): StagingTree;
+    close(): void;
+  } };
+  const held = binding.acquireLock(root, true);
+  t.after(async () => { held.close(); await rm(root, { recursive: true, force: true }); });
+  const runId = 'archived-staging', generationId = identityHash(runId, 'frozen-checkpoint');
+  const sourceVersion = 7;
+  const targetId = identityHash(generationId, String(sourceVersion));
+  const source = path.join(root, 'runs', runId, 'generations', generationId);
+  const target = path.join(root, 'quarantine/workspace-generations', targetId);
+  const tree = held.createGenerationTree(runId, generationId);
+  const before = tree.identity;
+  try {
+    const writer = tree.openFileWriter('dirty', 0o644, 3);
+    try { writer.writeChunk(Buffer.from([0, 127, 255])); writer.finish(); } finally { writer.close(); }
+  } finally { tree.close(); }
+  const original = held.openGenerationTree(runId, generationId, targetId, before.deviceId, before.fileId);
+  try { original.assertHeld(); assert.deepEqual(original.identity, before); } finally { original.close(); }
+  await assert.rejects(lstat(path.join(root, 'quarantine')), { code: 'ENOENT' });
+  await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+  await rename(source, target);
+  const reopened = held.openGenerationTree(runId, generationId, targetId, before.deviceId, before.fileId);
+  try {
+    assert.deepEqual(reopened.identity, before);
+    const snapshot = reopened.openSnapshot();
+    try {
+      const entry = snapshot.next();
+      assert.equal(entry?.kind, 'file');
+      if (entry?.kind !== 'file') throw new Error('actual archived file missing');
+      try {
+        assert.deepEqual(entry.file.readChunk(), Buffer.from([0, 127, 255]));
+        assert.equal(entry.file.readChunk(), null);
+      } finally { entry.file.close(); }
+      assert.equal(snapshot.next(), null);
+      snapshot.assertComplete();
+    } finally { snapshot.close(); }
+    reopened.assertHeld();
+    await assert.rejects(lstat(source), { code: 'ENOENT' });
+    assert.equal((await lstat(target, { bigint: true })).ino.toString(), before.fileId);
+    assert.throws(() => reopened.openFileWriter('injected', 0o644, 0));
+    assert.throws(() => reopened.mkdir('injected'));
+    assert.throws(() => reopened.symlink('injected', 'dirty'));
+    assert.throws(() => reopened.borrow());
+    assert.deepEqual(await readdir(target), ['dirty']);
+
+    const reopen = (id = targetId, file = before.fileId) =>
+      held.openGenerationTree(runId, generationId, id, before.deviceId, file);
+    assert.throws(() => reopen(identityHash(generationId, String(sourceVersion + 1))), /exactly one original or exact target/);
+    assert.throws(() => reopen(targetId, String(BigInt(before.fileId) + 1n)), /conflict or identity drift/);
+    await mkdir(source, { mode: 0o700 });
+    assert.throws(reopen, /conflict or identity drift/);
+    assert.throws(() => reopened.assertHeld(), /changed or closed/);
+    await rmdir(source);
+    const retained = `${target}.retained`;
+    await rename(target, retained);
+    assert.throws(reopen, /exactly one original or exact target/);
+    assert.throws(() => reopened.assertHeld(), /changed or closed/);
+    await symlink(retained, target);
+    assert.throws(reopen, /conflict or identity drift/);
+    assert.ok((await lstat(target)).isSymbolicLink());
+    await rm(target);
+    await rename(retained, target);
+    await chmod(target, 0o755);
+    assert.throws(reopen, /conflict or identity drift/);
+    assert.throws(() => reopened.assertHeld(), /changed or closed/);
+    await chmod(target, 0o700);
+
+    const parent = path.dirname(target), oldParent = `${parent}.retained`;
+    await rename(parent, oldParent);
+    await mkdir(parent, { mode: 0o700 });
+    assert.throws(reopen, /exactly one original or exact target/);
+    assert.throws(() => reopened.assertHeld(), /changed or closed/);
+    await rmdir(parent);
+    await rename(oldParent, parent);
+    reopened.assertHeld();
+    assert.deepEqual(await readFile(path.join(target, 'dirty')), Buffer.from([0, 127, 255]));
+    assert.equal((await lstat(target, { bigint: true })).ino.toString(), before.fileId);
+    held.close();
+    assert.throws(() => reopened.assertHeld(), /changed or closed/);
+    assert.throws(reopen, /closed StateOwner/);
+  } finally { reopened.close(); }
 });
 
 test('quarantine accepts the StateStore-published root identity without changing SQLite bytes', async (t) => {
@@ -230,7 +343,8 @@ test('quarantine requires the same live owner and exact parent and generation pe
 test('Linux generation identity has no immutable directory link-count field', async (t) => {
   const f = await fixture(t);
   const locator = { kind: 'linux_directory', stateRootIdentityRef: digest, stateRootIdentityDigest: digest,
-    canonicalRootRelativePath: 'runs/r/generations/g', deviceId: '1', directoryFileId: '2', ownerUid: process.geteuid!(), mode: 448 };
+    canonicalRootRelativePath: `runs/${f.generation.runId}/generations/${f.generation.generationId}`,
+    deviceId: '1', directoryFileId: '2', ownerUid: process.geteuid!(), mode: 448 };
   const value = changed(f.generation, g => { g.locator = locator as WorkspaceGenerationIdentityV1['locator']; });
   decodeWorkspaceGenerationIdentity(value);
   assert.throws(() => decodeWorkspaceGenerationIdentity(changed(value, g => Object.assign(g.locator, { linkCount: 1 }))));

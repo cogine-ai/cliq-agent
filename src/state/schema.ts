@@ -417,7 +417,155 @@ BEFORE DELETE ON canonical_time_fence BEGIN
 END;
 `;
 
-export const KERNEL_SCHEMA_SQL = `${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}`;
+// Recovery probes only replace the installed wait. The original fence cut and identity stay frozen.
+export const KERNEL_SCHEMA_V3_SQL = `
+DROP TRIGGER workspace_generations_validate_update;
+CREATE TRIGGER workspace_generations_validate_update
+BEFORE UPDATE ON workspace_generations BEGIN
+  SELECT CASE
+    WHEN NEW.generation_id != OLD.generation_id OR NEW.run_id != OLD.run_id
+      THEN RAISE(ABORT, 'workspace generation identity is immutable')
+    WHEN NEW.row_version != OLD.row_version + 1
+      THEN RAISE(ABORT, 'workspace generation row version must increment by one')
+    WHEN OLD.phase = 'fenced_reconciling' AND NEW.phase = 'fenced_reconciling' AND (
+      json_remove(NEW.row_json, '$.rowVersion', '$.updatedAt', '$.waitingSubjectRef', '$.waitingSubjectDigest')
+        IS NOT json_remove(OLD.row_json, '$.rowVersion', '$.updatedAt', '$.waitingSubjectRef', '$.waitingSubjectDigest') OR
+      json_extract(NEW.row_json, '$.rowVersion') IS NOT NEW.row_version OR
+      json_type(NEW.row_json, '$.waitingSubjectRef') IS NOT 'text' OR
+      json_type(NEW.row_json, '$.waitingSubjectDigest') IS NOT 'text' OR
+      length(json_extract(NEW.row_json, '$.waitingSubjectRef')) != 64 OR
+      json_extract(NEW.row_json, '$.waitingSubjectRef') GLOB '*[^0-9a-f]*' OR
+      json_extract(NEW.row_json, '$.waitingSubjectRef') IS NOT json_extract(NEW.row_json, '$.waitingSubjectDigest') OR
+      json_extract(NEW.row_json, '$.waitingSubjectRef') IS json_extract(OLD.row_json, '$.waitingSubjectRef') OR
+      json_type(NEW.row_json, '$.updatedAt') IS NOT 'text' OR
+      json_extract(NEW.row_json, '$.updatedAt') < json_extract(OLD.row_json, '$.updatedAt')
+    ) THEN RAISE(ABORT, 'workspace generation recovery fence fields are frozen')
+    WHEN NOT (
+      (OLD.phase = 'materializing' AND NEW.phase IN ('preactivated_readonly', 'quarantined')) OR
+      (OLD.phase = 'preactivated_readonly' AND NEW.phase IN ('active', 'quarantined')) OR
+      (OLD.phase = 'active' AND NEW.phase IN ('revoking', 'fenced_reconciling')) OR
+      (OLD.phase = 'revoking' AND NEW.phase IN ('checkpointing', 'fenced_reconciling', 'quarantined')) OR
+      (OLD.phase = 'checkpointing' AND NEW.phase IN ('sealed', 'fenced_reconciling', 'quarantined')) OR
+      (OLD.phase = 'fenced_reconciling' AND NEW.phase IN ('fenced_reconciling', 'quarantined')) OR
+      (OLD.phase IN ('sealed', 'quarantined') AND NEW.phase = 'retired')
+    ) THEN RAISE(ABORT, 'workspace generation phase transition is invalid')
+  END;
+END;
+`;
+
+// Existing admissions without a direct original request link cannot be safely
+// backfilled from mutable snapshots or inferred by commit order.
+export const KERNEL_SCHEMA_V4_SQL = `
+ALTER TABLE sessions ADD COLUMN admission_request_id TEXT;
+ALTER TABLE runs ADD COLUMN admission_request_id TEXT;
+
+CREATE TABLE source_inspection_attempts (
+  inspection_id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL,
+  method TEXT NOT NULL CHECK (method = 'run.submit'),
+  admission_key TEXT NOT NULL,
+  admission_intent_digest TEXT NOT NULL,
+  original_request_id TEXT NOT NULL,
+  original_request_digest TEXT NOT NULL,
+  workspace_identity_digest TEXT NOT NULL,
+  phase TEXT NOT NULL CHECK (phase IN ('capturing', 'prepared', 'active', 'retired')),
+  row_version INTEGER NOT NULL CHECK (row_version >= 1),
+  row_json TEXT NOT NULL CHECK (json_valid(row_json) AND length(CAST(row_json AS BLOB)) <= 1048576),
+  UNIQUE (principal_id, method, admission_key),
+  UNIQUE (principal_id, method, original_request_id)
+) STRICT;
+CREATE UNIQUE INDEX source_inspections_one_unretired_per_workspace
+  ON source_inspection_attempts(workspace_identity_digest) WHERE phase != 'retired';
+
+CREATE TRIGGER source_inspections_validate_insert
+BEFORE INSERT ON source_inspection_attempts BEGIN
+  SELECT CASE
+    WHEN NEW.phase != 'capturing' OR NEW.row_version != 1
+      THEN RAISE(ABORT, 'source inspection must begin capturing at row version one')
+    WHEN json_extract(NEW.row_json, '$.inspectionId') IS NOT NEW.inspection_id OR
+      json_extract(NEW.row_json, '$.principalId') IS NOT NEW.principal_id OR
+      json_extract(NEW.row_json, '$.method') IS NOT NEW.method OR
+      json_extract(NEW.row_json, '$.admissionKey') IS NOT NEW.admission_key OR
+      json_extract(NEW.row_json, '$.admissionIntentDigest') IS NOT NEW.admission_intent_digest OR
+      json_extract(NEW.row_json, '$.workspaceIdentityDigest') IS NOT NEW.workspace_identity_digest OR
+      json_extract(NEW.row_json, '$.phase') IS NOT NEW.phase OR
+      json_extract(NEW.row_json, '$.rowVersion') IS NOT NEW.row_version
+      THEN RAISE(ABORT, 'source inspection columns must equal row_json')
+  END;
+END;
+CREATE TRIGGER source_inspections_validate_update
+BEFORE UPDATE ON source_inspection_attempts BEGIN
+  SELECT CASE
+    WHEN NEW.inspection_id IS NOT OLD.inspection_id OR NEW.principal_id IS NOT OLD.principal_id OR
+      NEW.method IS NOT OLD.method OR NEW.admission_key IS NOT OLD.admission_key OR
+      NEW.admission_intent_digest IS NOT OLD.admission_intent_digest OR
+      NEW.original_request_id IS NOT OLD.original_request_id OR NEW.original_request_digest IS NOT OLD.original_request_digest OR
+      NEW.workspace_identity_digest IS NOT OLD.workspace_identity_digest
+      THEN RAISE(ABORT, 'source inspection identity is immutable')
+    WHEN NEW.row_version != OLD.row_version + 1
+      THEN RAISE(ABORT, 'source inspection row version must increment by one')
+    WHEN NOT (
+      (OLD.phase = 'capturing' AND NEW.phase IN ('capturing', 'prepared', 'retired')) OR
+      (OLD.phase = 'prepared' AND NEW.phase IN ('prepared', 'active', 'retired')) OR
+      (OLD.phase = 'active' AND NEW.phase IN ('active', 'retired'))
+    ) THEN RAISE(ABORT, 'source inspection phase transition is invalid')
+    WHEN json_extract(NEW.row_json, '$.inspectionId') IS NOT NEW.inspection_id OR
+      json_extract(NEW.row_json, '$.principalId') IS NOT NEW.principal_id OR
+      json_extract(NEW.row_json, '$.method') IS NOT NEW.method OR
+      json_extract(NEW.row_json, '$.admissionKey') IS NOT NEW.admission_key OR
+      json_extract(NEW.row_json, '$.admissionIntentDigest') IS NOT NEW.admission_intent_digest OR
+      json_extract(NEW.row_json, '$.workspaceIdentityDigest') IS NOT NEW.workspace_identity_digest OR
+      json_extract(NEW.row_json, '$.phase') IS NOT NEW.phase OR
+      json_extract(NEW.row_json, '$.rowVersion') IS NOT NEW.row_version
+      THEN RAISE(ABORT, 'source inspection columns must equal row_json')
+    WHEN json_extract(NEW.row_json, '$.cancelRequested') < json_extract(OLD.row_json, '$.cancelRequested')
+      THEN RAISE(ABORT, 'source inspection cancellation is monotonic')
+    WHEN json_remove(NEW.row_json, '$.phase', '$.rowVersion', '$.rowDigest', '$.updatedAt', '$.cancelRequested',
+        '$.inputRef', '$.inputDigest', '$.plan', '$.processContainmentRef', '$.retirementEvidenceRef', '$.retiredAt', '$.outcome')
+      IS NOT json_remove(OLD.row_json, '$.phase', '$.rowVersion', '$.rowDigest', '$.updatedAt', '$.cancelRequested',
+        '$.inputRef', '$.inputDigest', '$.plan', '$.processContainmentRef', '$.retirementEvidenceRef', '$.retiredAt', '$.outcome')
+      THEN RAISE(ABORT, 'source inspection target and reservation are frozen')
+    WHEN OLD.phase = NEW.phase AND json_remove(NEW.row_json, '$.rowVersion', '$.rowDigest', '$.updatedAt', '$.cancelRequested')
+      IS NOT json_remove(OLD.row_json, '$.rowVersion', '$.rowDigest', '$.updatedAt', '$.cancelRequested')
+      THEN RAISE(ABORT, 'source inspection unchanged phase may only request cancellation')
+    WHEN OLD.phase IN ('prepared', 'active') AND (
+      json_extract(NEW.row_json, '$.inputRef') IS NOT json_extract(OLD.row_json, '$.inputRef') OR
+      json_extract(NEW.row_json, '$.inputDigest') IS NOT json_extract(OLD.row_json, '$.inputDigest') OR
+      json_extract(NEW.row_json, '$.plan') IS NOT json_extract(OLD.row_json, '$.plan')
+    ) THEN RAISE(ABORT, 'source inspection frozen input and plan are immutable')
+    WHEN OLD.phase = 'active' AND
+      json_extract(NEW.row_json, '$.processContainmentRef') IS NOT json_extract(OLD.row_json, '$.processContainmentRef')
+      THEN RAISE(ABORT, 'source inspection actual containment is immutable')
+  END;
+END;
+CREATE TRIGGER source_inspections_immutable_delete
+BEFORE DELETE ON source_inspection_attempts BEGIN
+  SELECT RAISE(ABORT, 'source inspection history is retained');
+END;
+
+CREATE TRIGGER sessions_admission_identity_immutable
+BEFORE UPDATE ON sessions WHEN
+  NEW.id IS NOT OLD.id OR NEW.principal_id IS NOT OLD.principal_id OR
+  NEW.admission_method IS NOT OLD.admission_method OR NEW.admission_key IS NOT OLD.admission_key OR
+  NEW.admission_intent_digest IS NOT OLD.admission_intent_digest OR
+  NEW.admission_request_id IS NOT OLD.admission_request_id
+BEGIN
+  SELECT RAISE(ABORT, 'session admission identity is immutable');
+END;
+
+CREATE TRIGGER runs_admission_identity_immutable
+BEFORE UPDATE ON runs WHEN
+  NEW.id IS NOT OLD.id OR NEW.principal_id IS NOT OLD.principal_id OR
+  NEW.admission_method IS NOT OLD.admission_method OR NEW.admission_key IS NOT OLD.admission_key OR
+  NEW.admission_intent_digest IS NOT OLD.admission_intent_digest OR
+  NEW.admitted_request_digest IS NOT OLD.admitted_request_digest OR
+  NEW.admission_request_id IS NOT OLD.admission_request_id
+BEGIN
+  SELECT RAISE(ABORT, 'Run admission identity is immutable');
+END;
+`;
+
+export const KERNEL_SCHEMA_SQL = `${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}\n${KERNEL_SCHEMA_V3_SQL}\n${KERNEL_SCHEMA_V4_SQL}`;
 
 const REQUIRED_TABLES = [
   'canonical_time_fence',
@@ -426,6 +574,7 @@ const REQUIRED_TABLES = [
   'sessions',
   'items',
   'runs',
+  'source_inspection_attempts',
   'checkpoints',
   'run_journal',
   'run_events',
@@ -451,7 +600,7 @@ function pragmaScalar(driver: SqliteDriver, name: string): unknown {
 export function applyKernelSchema(driver: SqliteDriver): void {
   const userVersion = requiredSafeInteger(pragmaScalar(driver, 'user_version'), 'user_version');
   const applicationId = requiredSafeInteger(pragmaScalar(driver, 'application_id'), 'application_id');
-  if (![0, 1, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
+  if (![0, 1, 2, 3, KERNEL_STATE_SCHEMA_VERSION].includes(userVersion)) {
     throw new Error(`unsupported kernel schema version ${userVersion}`);
   }
   if (applicationId !== 0 && applicationId !== KERNEL_SQLITE_APPLICATION_ID) {
@@ -474,9 +623,11 @@ export function applyKernelSchema(driver: SqliteDriver): void {
       connection.exec(KERNEL_SCHEMA_SQL);
       connection.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`);
     });
-  } else if (userVersion === 1 && KERNEL_STATE_SCHEMA_VERSION === 2) {
+  } else if (userVersion < KERNEL_STATE_SCHEMA_VERSION) {
     driver.transaction((connection) => {
-      connection.exec(KERNEL_SCHEMA_V2_SQL);
+      if (userVersion === 1) connection.exec(KERNEL_SCHEMA_V2_SQL);
+      if (userVersion < 3) connection.exec(KERNEL_SCHEMA_V3_SQL);
+      connection.exec(KERNEL_SCHEMA_V4_SQL);
       connection.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION}`);
     });
   }

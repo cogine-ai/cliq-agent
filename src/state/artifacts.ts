@@ -28,6 +28,18 @@ export class ArtifactCatalog {
     return this.publishBytes(canonicalJsonBytes(value), 'application/json', schemaKind);
   }
 
+  async publishChunks(chunks: AsyncIterable<Uint8Array>, mediaType: string, schemaKind: string,
+    maxByteCount: number): Promise<PublishedArtifact> {
+    const result = await this.cas.publishChunks(chunks, maxByteCount);
+    return { ref: result.ref, mediaType, schemaKind, byteLength: result.byteLength };
+  }
+
+  /** Exhaustion verifies the complete object; partially consumed chunks cannot establish authority. */
+  readChunks(ref: ArtifactRef, expectedByteCount: number): AsyncIterable<Buffer> {
+    assertArtifactRef(ref);
+    return this.cas.readChunks(ref, expectedByteCount);
+  }
+
   async readBytes(ref: ArtifactRef): Promise<Buffer> {
     assertArtifactRef(ref);
     return this.cas.read(ref);

@@ -1,5 +1,5 @@
 import { assertArtifactRef, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
-import type { RunAssemblyV1, StateOwnerRecordV1, SupervisorInspectorIdentityV1 } from '../kernel/types.js';
+import type { StateOwnerRecordV1, SupervisorInspectorIdentityV1 } from '../kernel/types.js';
 import { exactKeys, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
@@ -7,7 +7,8 @@ import { decodePlatformProcessIdentity, decodeStateLockIdentity } from './decode
 
 /** Shared identity check, not proof of a live observation. Each consumer owns freshness and state-owner fencing. */
 export async function readSupervisorInspector(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1,
-  assembly: RunAssemblyV1, input: { inspectorIdentityRef: string; inspectorIdentityDigest: string; observedAt: string }) {
+  assembly: { runtime: { runtimeBundleRef: string; runtimeBundleManifestDigest: string } },
+  input: { inspectorIdentityRef: string; inspectorIdentityDigest: string; observedAt: string }) {
   const inspector = await readCanonicalArtifact<SupervisorInspectorIdentityV1>(artifacts, input.inspectorIdentityRef);
   const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
   const supervisor = bundle.entries.find((entry) => entry.role === 'supervisor');

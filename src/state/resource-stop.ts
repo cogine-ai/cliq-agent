@@ -17,7 +17,7 @@ import { isZeroBudget } from './invariants.js';
 import { readSession } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readToolApproval } from './tool-approval-recovery.js';
-import { stateOperation } from './errors.js';
+import { joinResourceOperations, stateOperation } from './errors.js';
 
 type WithoutIdentity<T> = T extends ResourceStopIntent ? Omit<T, 'schemaVersion' | 'runId' | 'createdAt'> : never;
 type ResourceCause = WithoutIdentity<ResourceStopIntent>;
@@ -36,12 +36,12 @@ export const readResourceStopCause = stateOperation('RECOVERY_REQUIRED', async f
   if (assembly.mcpServers.length) return undefined;
   const manifest = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
   if (manifest.manifestDigest !== assembly.tools.manifestDigest || digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest) throw new TypeError('resource tool manifest mismatch');
-  const contracts = await Promise.all(manifest.entries.map(async (entry) => {
+  const contracts = await joinResourceOperations(manifest.entries.map(async (entry) => {
     const inputSchema = await readCanonicalArtifact(artifacts, entry.inputSchemaRef);
     if (canonicalSha256(inputSchema) !== entry.inputSchemaDigest) throw new TypeError('resource tool schema mismatch');
     return { ...entry, inputSchema };
   }));
-  const allItems: ContextItem[] = await Promise.all(cut.items.map(async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+  const allItems: ContextItem[] = await joinResourceOperations(cut.items.map(async (row) => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
     item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) })));
   // Terminal drain adds only an undispatched suffix. Reconstruct the pre-drain call cut for its stop proof.
   const items = allItems.filter(({ item }) => item.kind !== 'tool_result' || item.outcome !== 'cancelled');

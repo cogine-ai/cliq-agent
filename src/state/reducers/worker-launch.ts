@@ -1,17 +1,21 @@
 import { assertArtifactRef, addCanonicalDuration, parseCanonicalTime } from '../../kernel/identity.js';
 import type { Checkpoint, Run, RunEvent, WorkerIdentity, WorkerLaunch, WorkspaceGenerationStateV1 } from '../../kernel/types.js';
+import { immutableSnapshot } from '../../model/immutable.js';
+import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
+import { canonicalSha256 } from '../../kernel/canonical.js';
 import type { ArtifactCatalog } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import {
   decodeContextManifest,
+  decodeRunSpec,
   decodeWorkerIdentity,
   decodeWorkspaceEntries,
-  decodeWorkspaceGenerationIdentity,
   decodeWorkspaceGenerationSnapshotEvidence,
   decodeWorkspaceState
 } from '../decoders.js';
-import { KernelStorageError } from '../errors.js';
+import { joinResourceOperations, KernelStorageError } from '../errors.js';
+import { readWorkerLaunchClosure, readWorkerPreactivationClosure } from '../execution-closure.js';
 import { insertRunEvent, readRun } from '../rows.js';
 import {
   insertWorkerLaunch,
@@ -26,6 +30,7 @@ import {
 } from '../repositories/workspace-generations.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
+import { readWorkerCheckpointProof } from '../tool-checkpoint.js';
 
 const ACTIVATION_DEADLINE_MS = 120_000;
 const MAX_LEASE_EXTENSION_MS = 60_000;
@@ -107,6 +112,7 @@ export async function reserveWorkerLaunch(
   owner: StateOwnerContext,
   input: ReserveWorkerLaunchInput
 ): Promise<WorkerLaunch> {
+  input = immutableSnapshot(input);
   for (const ref of [
     input.spawnNonceDigest,
     input.activationNonceDigest,
@@ -114,17 +120,11 @@ export async function reserveWorkerLaunch(
     input.containmentPlanRef,
     input.sandboxLaunchSpecRef
   ]) assertArtifactRef(ref);
-  const identity = decodeWorkspaceGenerationIdentity(
-    await artifacts.readCanonical(input.workspaceGenerationRef)
-  );
-  if (identity.runId !== input.runId) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation belongs to another Run');
-  }
-  await Promise.all([
-    artifacts.readBytes(input.containmentPlanRef),
-    artifacts.readBytes(input.sandboxLaunchSpecRef)
-  ]);
-  const authorityMetadata = await Promise.all([
+  const retainedOwner = assertActiveStateOwner(driver, owner);
+  const { generation: identity } = await readWorkerLaunchClosure(artifacts, retainedOwner, {
+    ...input, run: readRun(driver, input.runId)
+  });
+  const authorityMetadata = await joinResourceOperations([
     artifacts.describe(input.workspaceGenerationRef, 'application/json', 'cliq-workspace-generation-identity-v1'),
     artifacts.describe(input.containmentPlanRef, 'application/json', 'cliq-process-containment-plan-v1'),
     artifacts.describe(input.sandboxLaunchSpecRef, 'application/json', 'cliq-sandbox-launch-spec-v1')
@@ -187,10 +187,14 @@ export async function recordWorkerPreactivated(
   owner: StateOwnerContext,
   input: RecordWorkerPreactivatedInput
 ): Promise<WorkerLaunch> {
+  input = immutableSnapshot(input);
   assertArtifactRef(input.workerIdentityDigest);
   assertArtifactRef(input.processContainmentRef);
   const identity = decodeWorkerIdentity(await artifacts.readCanonical(input.workerIdentityDigest));
-  await artifacts.readBytes(input.processContainmentRef);
+  const reserved = readRequiredWorkerLaunch(driver, input.launchId);
+  await readWorkerPreactivationClosure(artifacts, assertActiveStateOwner(driver, owner), {
+    run: readRun(driver, reserved.runId), launch: reserved, identity, processContainmentRef: input.processContainmentRef
+  });
   const identityMetadata = await artifacts.describe(
     input.workerIdentityDigest,
     'application/json',
@@ -555,12 +559,12 @@ export async function sealWorkerGeneration(
   owner: StateOwnerContext,
   input: SealWorkerGenerationInput
 ): Promise<{ run: Run; checkpoint: Checkpoint; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 }> {
-  input = { ...input };
+  input = immutableSnapshot(input);
   const initialLaunch = readRequiredWorkerLaunch(driver, input.launchId);
   const initialRun = readRun(driver, initialLaunch.runId);
   const spec = await artifacts.readCanonical<{ assemblyRef: string }>(initialRun.specRef);
   const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
-  const [context, workspaceState, snapshot] = await Promise.all([
+  const [context, workspaceState, snapshot] = await joinResourceOperations([
     artifacts.readCanonical(input.contextManifestRef).then(decodeContextManifest),
     artifacts.readCanonical(input.workspaceStateRef).then(decodeWorkspaceState),
     artifacts.readCanonical(input.snapshotEvidenceRef).then(decodeWorkspaceGenerationSnapshotEvidence)
@@ -568,8 +572,15 @@ export async function sealWorkerGeneration(
   const workspaceEntries = decodeWorkspaceEntries(
     await artifacts.readCanonical(workspaceState.entriesRef)
   );
-  await artifacts.readBytes(input.retirementEvidenceRef);
-  const checkpointMetadata = await Promise.all([
+  const initialGeneration = readRequiredWorkspaceGenerationByRef(driver, initialLaunch.workspaceGenerationRef);
+  const proof = assembly.format === 'cliq-run-assembly-v1' ? await readWorkerCheckpointProof(artifacts, assertActiveStateOwner(driver, owner), {
+    run: initialRun, spec: decodeRunSpec(spec), assembly: decodeRetainedRunAssembly(assembly), checkpointId: input.checkpointId,
+    observedAt: initialLaunch.activatedAt!, postEffect: { workspaceStateRef: input.workspaceStateRef,
+      snapshotEvidenceRef: input.snapshotEvidenceRef, retirementEvidenceRef: input.retirementEvidenceRef },
+    launch: initialLaunch, generation: initialGeneration
+  }) : undefined;
+  if (!proof) await artifacts.readBytes(input.retirementEvidenceRef);
+  const checkpointMetadata = await joinResourceOperations([
     artifacts.describe(input.contextManifestRef, 'application/json', 'cliq-context-manifest-v1'),
     artifacts.describe(input.workspaceStateRef, 'application/json', 'cliq-workspace-state-v1'),
     artifacts.describe(
@@ -583,6 +594,7 @@ export async function sealWorkerGeneration(
       'cliq-process-containment-death-evidence-v1'
     )
   ]);
+  checkpointMetadata.push(...proof?.metadata ?? []);
   if (
     snapshot.evidenceDigest !== input.snapshotEvidenceDigest ||
     snapshot.purpose !== 'sealed_to_checkpoint' ||
@@ -603,6 +615,11 @@ export async function sealWorkerGeneration(
     if (fenceOutcome !== 'healthy') return;
     const currentLaunch = readRequiredWorkerLaunch(connection, input.launchId);
     const run = readRun(connection, currentLaunch.runId);
+    if (proof && (parseCanonicalTime(now) - parseCanonicalTime(proof.deathObservedAt) > 5_000 ||
+        canonicalSha256(currentLaunch) !== canonicalSha256(initialLaunch) || canonicalSha256(run) !== canonicalSha256(initialRun) ||
+        canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, initialLaunch.workspaceGenerationRef)) !== canonicalSha256(initialGeneration))) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale or its exact cut changed');
+    }
     // This path adopts workspace bytes and requeues the Run. Unknown/abandoned attempts
     // are not completion proof; manual abandonment needs a separate terminal-only closure.
     if (assembly.format === 'cliq-run-assembly-v1' && connection.prepare(`SELECT 1 FROM run_journal AS claim

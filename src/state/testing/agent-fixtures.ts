@@ -18,7 +18,8 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
   rules?: RunPolicySnapshotV1['decisionRules']; outputSchema?: unknown;
 } = {}) {
   const authority = testFixture();
-  const builtins = (options.tools ?? ['read']).map((name) => builtinInputContracts[name]);
+  const builtins = (options.tools ?? ['read']).map((name) => builtinInputContracts[name])
+    .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
   const selected = builtins.map((builtin) => ({ name: builtin.name, description: `Use ${builtin.name}`, inputSchema: builtin.inputSchema,
     inputSchemaRef: canonicalSha256(builtin.inputSchema), inputSchemaDigest: canonicalSha256(builtin.inputSchema), replayClass: builtin.replayClass }));
   authority.assembly.provider.negotiation.exposedToolNames = selected.map((tool) => tool.name).sort();
@@ -32,7 +33,7 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
     ...(options.outputSchema === undefined ? {} : { outputSchemaRef: canonicalSha256(options.outputSchema), outputSchemaDigest: canonicalSha256(options.outputSchema) })
   })), manifestDigest: '' };
   manifest.manifestDigest = digestOmitting(manifest, 'manifestDigest');
-  const signed = options.mode === undefined ? undefined : await signedToolBundle(authority.assembly, manifest.entries);
+  const signed = await signedToolBundle(authority.assembly, manifest.entries);
   const credentials: string[] = [];
   const fixture = await createActiveFixture(label, { budgets, runtimeAuthority: signed, credentialGrantRefs: credentials, assembly: async (store) => {
     const grant = await store.artifacts.publishCanonical({ format: 'cliq-offline-credential-fixture-v1' }, 'cliq-offline-credential-fixture-v1');
@@ -90,7 +91,8 @@ export async function createAgentFixture(label: string, budgets?: Partial<RunSpe
     return (await store.artifacts.publishCanonical(policy, policy.format)).ref;
   } }) });
   try {
-    const agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: authority.material, releaseKeys: signed?.releaseKeys });
+    const agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: authority.material,
+      ...(options.mode === undefined ? {} : { releaseKeys: signed.releaseKeys }) });
     return { ...fixture, authority, agent, signed };
   } catch (error) { await disposeFixture(fixture); throw error; }
 }

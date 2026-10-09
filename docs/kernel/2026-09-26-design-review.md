@@ -124,8 +124,11 @@ It cannot establish capability or spend bounds. Managed Ollama is an eligible
 alternative only when its complete signed local-service/no-egress contract is
 actually qualified, not merely because a loopback server responds.
 
-Next implementation order within I1: finish WP03 containment/descriptor evidence
-and WP04 UDS capture; connect the existing admission/worker-loss reducers; ship
+Next implementation order within I1: WP04 native UDS capture and internal
+authenticated read/admission integration landed in PR #513. Continue with the
+[real trusted-worker/private-generation lifecycle](i1-trusted-worker-lifecycle.md),
+including WP03 containment/descriptor evidence and the existing worker-loss
+reducers; ship
 that composition with WP06's stable bootstrap; then execute the restart scenario.
 WP05 builds its result reducers on the same real store in parallel with that
 work, rather than waiting for all of WP01–WP04 to finish.

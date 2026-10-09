@@ -44,7 +44,7 @@ export async function quiescedToolCheckpoint(fixture: Awaited<ReturnType<typeof 
     const blob = await store.artifacts.publishBytes(bytes, 'application/octet-stream', 'cliq-workspace-file-v1');
     entries = { schemaVersion: 1, format: 'cliq-workspace-entries-v1',
       entries: [{ kind: 'file', path: 'a', mode: 0o644, size: bytes.byteLength, blobRef: blob.ref }], entryCount: 1, byteCount: bytes.byteLength, treeDigest: '' };
-    entries.treeDigest = digestOmitting(entries, 'treeDigest');
+    entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries });
     workspace.entriesRef = (await store.artifacts.publishCanonical(entries, entries.format)).ref;
     workspace.stateDigest = digestOmitting(workspace, 'stateDigest');
   }

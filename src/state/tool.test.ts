@@ -196,7 +196,7 @@ test('schema/size failures and received tool errors remain fully charged, model-
   } finally { await disposeFixture(fixture); }
 });
 
-test('unknown and abandoned typed tools cannot seal changed workspace bytes or continue the open call', async () => {
+for (const phase of ['unknown', 'abandoned'] as const) test(`${phase} typed tools cannot seal changed workspace bytes or continue the open call`, async () => {
   const fixture = await createAgentFixture('tool-unresolved', undefined, { mode: 'accept-edits', tools: ['edit', 'read'] });
   try {
     await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } }, { name: 'read', input: { path: 'a' } }]);
@@ -205,35 +205,34 @@ test('unknown and abandoned typed tools cannot seal changed workspace bytes or c
     const unknown = await fixture.store.markInvocationUnknown({ runId: fixture.runId, opId: prepared.entry.opId, attempt: 0,
       expectedRunRevision: prepared.run.revision, evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
     await assert.rejects(fixture.agent.prepareTool({ expectedRunRevision: unknown.run.revision, leaseEpoch: fixture.leaseEpoch }), /tool attempt already exists/);
-    const proof = await postEffectObservation(fixture, await observation(fixture, claimed, { changed: true }), prepared.checkpointId);
-    for (const phase of ['unknown', 'abandoned']) {
-      if (phase === 'abandoned') {
-        // A low-level Journal acknowledgement is not the authenticated terminal Run closure.
-        const acknowledgement = await fixture.store.artifacts.publishCanonical({ acknowledgeExactRisk: true }, 'cliq-manual-abandon-attestation-v1');
-        const abandoned = await fixture.store.abandonUnknownInvocation({ runId: fixture.runId, opId: prepared.entry.opId,
-          attempt: 0, attestationRef: acknowledgement.ref });
-        assert.equal(abandoned.budgetSettlementRef, unknown.entry.budgetSettlementRef);
-      }
-      const before = await fixture.store.readRecoveryClosure(fixture.runId);
-      assert.equal(before.journal.at(-1)!.phase, phase);
-      assert.equal(before.run.status, 'running');
-      assert.equal(before.run.budgetConsumed.toolCalls, 1);
-      assert.equal(before.run.budgetReserved.toolCalls, 0);
-      assert.equal(before.latestCheckpoint.workspaceStateRef, proof.priorWorkspaceStateRef);
-      await assert.rejects(fixture.store.sealWorkerGeneration({ launchId: fixture.launchId, expectedRunRevision: before.run.revision,
-        expectedGenerationRowVersion: before.workspaceGenerations[0]!.rowVersion, quiesceId: 'tool-test-quiesce', checkpointId: prepared.checkpointId,
-        contextManifestRef: before.latestCheckpoint.contextManifestRef, workspaceStateRef: proof.workspaceStateRef,
-        snapshotEvidenceRef: proof.observation.postEffect!.snapshotEvidenceRef, snapshotEvidenceDigest: proof.snapshot.evidenceDigest,
-        retirementEvidenceRef: proof.observation.postEffect!.retirementEvidenceRef, checkpointReason: 'auto' }), /post-effect Checkpoint together/);
-      assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
-      assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
-      // Exercise both durable cuts independently; restarting only after abandonment missed unknown-only recovery.
-      await fixture.store.close();
-      fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
-      fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
-      assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).journal.at(-1)!.phase, phase);
-      assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
+    if (phase === 'abandoned') {
+      // A low-level Journal acknowledgement is not the authenticated terminal Run closure.
+      const acknowledgement = await fixture.store.artifacts.publishCanonical({ acknowledgeExactRisk: true }, 'cliq-manual-abandon-attestation-v1');
+      const abandoned = await fixture.store.abandonUnknownInvocation({ runId: fixture.runId, opId: prepared.entry.opId,
+        attempt: 0, attestationRef: acknowledgement.ref });
+      assert.equal(abandoned.budgetSettlementRef, unknown.entry.budgetSettlementRef);
     }
+    // Each cut has a fresh owner-bound proof, so stale inspector rejection
+    // cannot mask the unresolved Journal guard being exercised here.
+    const proof = await postEffectObservation(fixture, await observation(fixture, claimed, { changed: true }), prepared.checkpointId);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal(before.journal.at(-1)!.phase, phase);
+    assert.equal(before.run.status, 'running');
+    assert.equal(before.run.budgetConsumed.toolCalls, 1);
+    assert.equal(before.run.budgetReserved.toolCalls, 0);
+    assert.equal(before.latestCheckpoint.workspaceStateRef, proof.priorWorkspaceStateRef);
+    await assert.rejects(fixture.store.sealWorkerGeneration({ launchId: fixture.launchId, expectedRunRevision: before.run.revision,
+      expectedGenerationRowVersion: before.workspaceGenerations[0]!.rowVersion, quiesceId: 'tool-test-quiesce', checkpointId: prepared.checkpointId,
+      contextManifestRef: before.latestCheckpoint.contextManifestRef, workspaceStateRef: proof.workspaceStateRef,
+      snapshotEvidenceRef: proof.observation.postEffect!.snapshotEvidenceRef, snapshotEvidenceDigest: proof.snapshot.evidenceDigest,
+      retirementEvidenceRef: proof.observation.postEffect!.retirementEvidenceRef, checkpointReason: 'auto' }), /post-effect Checkpoint together/);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
+    // Independently reopen unknown and abandoned cuts, not just abandonment.
+    await fixture.store.close();
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
+    fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });
+    assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).journal.at(-1)!.phase, phase);
     assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
     const recovered = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.deepEqual(await Promise.all(recovered.items.map(async (item) => (await fixture.store.artifacts.readCanonical<{ kind: string }>(item.payloadRef)).kind)),

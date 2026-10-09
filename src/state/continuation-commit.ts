@@ -3,6 +3,7 @@ import { digestOmitting } from '../kernel/identity.js';
 import type { ContextManifest, ContinuationItem, Run, RunFrontier } from '../kernel/types.js';
 import { contextSourceDigest, validateContextItems, type ContextItem } from '../runtime/context-compaction.js';
 import type { ArtifactCatalog } from './artifacts.js';
+import { joinResourceOperations } from './errors.js';
 import type { SqliteConnection } from './sqlite-driver.js';
 
 /** Internal continuation commit plan. No StateStore caller can append arbitrary items or patch a frontier. */
@@ -25,7 +26,7 @@ export async function prepareContinuationCommit(artifacts: ArtifactCatalog, inpu
   validateContextItems(context, [...input.existingItems, ...added]);
   const contextPlan = planCanonicalArtifact(context, context.format);
   const frontierPlan = planCanonicalArtifact(input.frontier, 'cliq-run-frontier-v1');
-  const metadata = await Promise.all([...itemPlans, contextPlan, frontierPlan, ...(input.artifacts ?? [])]
+  const metadata = await joinResourceOperations([...itemPlans, contextPlan, frontierPlan, ...(input.artifacts ?? [])]
     .map((plan) => artifacts.publishBytes(plan.bytes, plan.mediaType, plan.schemaKind)));
   return { metadata, throughItemSeq: context.throughItemSeq,
     runUpdate: { latestCheckpointId: checkpointId, frontierRef: frontierPlan.ref, nextStep: input.frontier.kind },

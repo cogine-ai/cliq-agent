@@ -11,10 +11,7 @@ import {
 } from '../kernel/identity.js';
 import type {
   LocalControlChannelIdentityV1,
-  PlatformProcessIdentityV1,
-  WorkspaceEntryManifest,
-  WorkspaceGenerationSnapshotEvidenceV1,
-  WorkspaceStateManifest
+  PlatformProcessIdentityV1
 } from '../kernel/types.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { KernelStorageError } from './errors.js';
@@ -23,51 +20,28 @@ import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
 
 import { admissionKey, createActiveFixture, digest, disposeFixture, makePrivateDir, uuidv7 } from './testing/fixtures.js';
+import { createAgentFixture } from './testing/agent-fixtures.js';
+import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
+import { quiescedToolCheckpoint } from './testing/tool-effects.js';
 
 test('WP01 state core persists activation, permanent dispatch claim, settlement, and recovery closure', async () => {
-  const fixture = await createActiveFixture('lifecycle');
+  const fixture = await createAgentFixture('lifecycle', undefined, { mode: 'default' });
   try {
-    const request = await fixture.store.artifacts.publishCanonical(
-      { schemaVersion: 1, format: 'cliq-tool-request-test-v1' },
-      'cliq-tool-request-v1'
-    );
-    const prepared = await fixture.store.prepareInvocation({
-      runId: fixture.runId,
-      expectedRunRevision: fixture.runRevision,
-      leaseEpoch: fixture.leaseEpoch,
-      opId: 'tool-op-1',
-      opKind: 'tool',
-      target: 'test.read',
-      requestRef: request.ref,
-      replayClass: 'retry',
-      idempotencyKey: 'tool-op-1-attempt-0',
-      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
-    });
+    await batch(fixture, [{ name: 'read', input: { path: 'a' } }]);
+    const before = fixture.store.getRun(fixture.runId);
+    const prepared = await prepareTool(fixture);
     assert.equal(prepared.entry.phase, 'prepared');
     assert.equal(prepared.entry.attempt, 0);
-    assert.equal(prepared.run.revision, fixture.runRevision + 1);
-    const claimed = await fixture.store.claimInvocationDispatch({
-      runId: fixture.runId,
-      expectedRunRevision: prepared.run.revision,
-      leaseEpoch: fixture.leaseEpoch,
-      opId: prepared.entry.opId,
-      attempt: 0,
-      dispatchId: 'dispatch-tool-op-1',
-      brokerFenceTokenDigest: digest('dispatch-tool-op-1:fence')
-    });
-    assert.equal(claimed.phase, 'dispatch_claimed');
-    assert.equal(claimed.stateOwnerEpoch, fixture.store.ownerEpoch);
-    const resultArtifact = await fixture.store.artifacts.publishCanonical(
-      { schemaVersion: 1, format: 'cliq-tool-result-test-v1', ok: true },
-      'cliq-tool-result-v1'
-    );
-    const completed = await fixture.store.completeInvocation({
-      runId: fixture.runId,
+    assert.equal(prepared.run.revision, before.revision + 1);
+    const claimed = await claimTool(fixture, prepared);
+    assert.equal(claimed.entry.phase, 'dispatch_claimed');
+    assert.equal(claimed.entry.stateOwnerEpoch, fixture.store.ownerEpoch);
+    const resultRef = await observation(fixture, claimed, { contents: 'read result' });
+    const completed = await fixture.agent.completeTool({
       opId: prepared.entry.opId,
       attempt: 0,
       expectedRunRevision: prepared.run.revision,
-      resultRef: resultArtifact.ref,
-      consumed: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
+      observationRef: resultRef
     });
     assert.equal(completed.entry.phase, 'completed');
     assert.equal(completed.run.budgetReserved.toolCalls, 0);
@@ -89,22 +63,22 @@ test('WP01 state core persists activation, permanent dispatch claim, settlement,
           )
           .all<{ ref: string; schema_kind: string }>(
             fixture.channelIdentityRef,
-            request.ref,
-            resultArtifact.ref,
+            prepared.entry.requestRef,
+            resultRef,
             completed.entry.budgetSettlementRef!
           )
           .map((row) => [row.ref, row.schema_kind])
       );
       assert.equal(registered.get(fixture.channelIdentityRef), 'cliq-local-control-channel-identity-v1');
-      assert.equal(registered.get(request.ref), 'cliq-invocation-request-v1');
-      assert.equal(registered.get(resultArtifact.ref), 'cliq-invocation-result-v1');
+      assert.equal(registered.get(prepared.entry.requestRef), 'cliq-tool-request-v1');
+      assert.equal(registered.get(resultRef), 'cliq-tool-observation-v1');
       assert.equal(registered.get(completed.entry.budgetSettlementRef!), 'cliq-budget-settlement-v1');
     } finally {
       metadataReader.close();
     }
 
     const closure = await fixture.store.readRecoveryClosure(fixture.runId);
-    assert.deepEqual(closure.journal.map((entry) => entry.phase), [
+    assert.deepEqual(closure.journal.filter(entry => entry.opId === prepared.entry.opId).map((entry) => entry.phase), [
       'prepared',
       'dispatch_claimed',
       'completed'
@@ -115,63 +89,21 @@ test('WP01 state core persists activation, permanent dispatch claim, settlement,
     assert.equal(closure.workspaceGenerations[0]?.phase, 'active');
     assert.equal(closure.run.activeWorkerLaunchId, fixture.launchId);
 
-    const revoking = fixture.store.beginGenerationRevocation({
-      launchId: fixture.launchId,
-      expectedLeaseVersion: fixture.leaseVersion,
-      expectedGenerationRowVersion: closure.workspaceGenerations[0]!.rowVersion,
-      quiesceId: 'lifecycle-quiesce'
-    });
-    const checkpointing = fixture.store.beginGenerationCheckpoint({
-      launchId: fixture.launchId,
-      expectedLeaseVersion: fixture.leaseVersion,
-      expectedGenerationRowVersion: revoking.generation.rowVersion,
-      quiesceId: 'lifecycle-quiesce'
-    });
-    const workspaceState = (await fixture.store.artifacts.readCanonical(
-      closure.latestCheckpoint.workspaceStateRef
-    )) as WorkspaceStateManifest;
-    const entries = (await fixture.store.artifacts.readCanonical(
-      workspaceState.entriesRef
-    )) as WorkspaceEntryManifest;
     const checkpointId = identityHash('cliq-checkpoint-test-v1', fixture.runId, 'sealed');
-    const sealedSnapshot: WorkspaceGenerationSnapshotEvidenceV1 = {
-      schemaVersion: 1,
-      format: 'cliq-workspace-generation-snapshot-evidence-v1',
-      purpose: 'sealed_to_checkpoint',
-      runId: fixture.runId,
-      generationRef: fixture.generationRef,
-      generationIdentityDigest: closure.workspaceGenerations[0]!.generationIdentityDigest,
-      checkpointId,
-      workspaceStateRef: closure.latestCheckpoint.workspaceStateRef,
-      workspaceStateDigest: workspaceState.stateDigest,
-      entriesRef: workspaceState.entriesRef,
-      treeDigest: entries.treeDigest,
-      descriptorRewalkComplete: true,
-      fileFsyncComplete: true,
-      directoryFsyncComplete: true,
-      observedAt: sampleCanonicalNow(),
-      evidenceDigest: ''
-    };
-    sealedSnapshot.evidenceDigest = digestOmitting(sealedSnapshot, 'evidenceDigest');
-    const sealedSnapshotArtifact = await fixture.store.artifacts.publishCanonical(
-      sealedSnapshot,
-      sealedSnapshot.format
-    );
-    const retirement = await fixture.store.artifacts.publishCanonical(
-      { schemaVersion: 1, format: 'cliq-worker-retirement-test-v1', launchId: fixture.launchId },
-      'cliq-worker-retirement-evidence-v1'
-    );
+    // Canonical retained proofs exercise persistence only; no native execution is asserted here.
+    const proof = await quiescedToolCheckpoint(fixture, checkpointId);
+    const checkpointing = await fixture.store.readRecoveryClosure(fixture.runId);
     const sealed = await fixture.store.sealWorkerGeneration({
       launchId: fixture.launchId,
       expectedRunRevision: completed.run.revision,
-      expectedGenerationRowVersion: checkpointing.generation.rowVersion,
-      quiesceId: 'lifecycle-quiesce',
+      expectedGenerationRowVersion: checkpointing.workspaceGenerations[0]!.rowVersion,
+      quiesceId: 'tool-test-quiesce',
       checkpointId,
       contextManifestRef: closure.latestCheckpoint.contextManifestRef,
       workspaceStateRef: closure.latestCheckpoint.workspaceStateRef,
-      snapshotEvidenceRef: sealedSnapshotArtifact.ref,
-      snapshotEvidenceDigest: sealedSnapshot.evidenceDigest,
-      retirementEvidenceRef: retirement.ref,
+      snapshotEvidenceRef: proof.checkpoint.snapshotEvidenceRef,
+      snapshotEvidenceDigest: proof.snapshot.evidenceDigest,
+      retirementEvidenceRef: proof.checkpoint.retirementEvidenceRef,
       checkpointReason: 'auto'
     });
     assert.equal(sealed.run.status, 'queued');
@@ -198,32 +130,20 @@ test('initial worker lease cannot extend past the Run deadline', async () => {
 });
 
 test('dispatch claim is singleflight and cannot be appended twice', async () => {
-  const fixture = await createActiveFixture('singleflight');
+  const fixture = await createAgentFixture('singleflight', undefined, { mode: 'default' });
   try {
-    const request = await fixture.store.artifacts.publishCanonical({ request: true }, 'cliq-tool-request-v1');
-    const prepared = await fixture.store.prepareInvocation({
-      runId: fixture.runId,
-      expectedRunRevision: fixture.runRevision,
-      leaseEpoch: fixture.leaseEpoch,
-      opId: 'singleflight-op',
-      opKind: 'tool',
-      target: 'test.effect',
-      requestRef: request.ref,
-      replayClass: 'manual',
-      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
-    });
+    await batch(fixture, [{ name: 'read', input: { path: 'a' } }]);
+    const prepared = await prepareTool(fixture);
     const claimInput = {
-      runId: fixture.runId,
       expectedRunRevision: prepared.run.revision,
       leaseEpoch: fixture.leaseEpoch,
       opId: prepared.entry.opId,
       attempt: 0,
-      dispatchId: 'singleflight-dispatch',
-      brokerFenceTokenDigest: digest('singleflight:fence')
+      dispatchId: 'singleflight-dispatch'
     };
-    await fixture.store.claimInvocationDispatch(claimInput);
+    await fixture.agent.claimTool(claimInput);
     await assert.rejects(
-      fixture.store.claimInvocationDispatch({ ...claimInput, dispatchId: 'losing-dispatch' }),
+      fixture.agent.claimTool({ ...claimInput, dispatchId: 'losing-dispatch' }),
       (error) => error instanceof KernelStorageError && error.code === 'STATE_TRANSITION_INVALID'
     );
   } finally {
@@ -232,47 +152,20 @@ test('dispatch claim is singleflight and cannot be appended twice', async () => 
 });
 
 test('recovery requires every terminal Journal artifact to remain in CAS', async () => {
-  const fixture = await createActiveFixture('recovery-terminal-cas');
+  const fixture = await createAgentFixture('recovery-terminal-cas', undefined, { mode: 'default' });
   try {
-    const request = await fixture.store.artifacts.publishCanonical(
-      { schemaVersion: 1, format: 'cliq-tool-request-test-v1' },
-      'cliq-tool-request-v1'
-    );
-    const prepared = await fixture.store.prepareInvocation({
-      runId: fixture.runId,
-      expectedRunRevision: fixture.runRevision,
-      leaseEpoch: fixture.leaseEpoch,
-      opId: 'missing-result-op',
-      opKind: 'tool',
-      target: 'test.read',
-      requestRef: request.ref,
-      replayClass: 'retry',
-      idempotencyKey: 'missing-result-op-attempt-0',
-      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
-    });
-    await fixture.store.claimInvocationDispatch({
-      runId: fixture.runId,
-      expectedRunRevision: prepared.run.revision,
-      leaseEpoch: fixture.leaseEpoch,
-      opId: prepared.entry.opId,
-      attempt: 0,
-      dispatchId: 'missing-result-dispatch',
-      brokerFenceTokenDigest: digest('missing-result:fence')
-    });
-    const result = await fixture.store.artifacts.publishCanonical(
-      { schemaVersion: 1, format: 'cliq-tool-result-test-v1', ok: true },
-      'cliq-tool-result-v1'
-    );
-    await fixture.store.completeInvocation({
-      runId: fixture.runId,
+    await batch(fixture, [{ name: 'read', input: { path: 'a' } }]);
+    const prepared = await prepareTool(fixture);
+    const claimed = await claimTool(fixture, prepared);
+    const resultRef = await observation(fixture, claimed, { contents: 'read result' });
+    await fixture.agent.completeTool({
       opId: prepared.entry.opId,
       attempt: 0,
       expectedRunRevision: prepared.run.revision,
-      resultRef: result.ref,
-      consumed: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
+      observationRef: resultRef
     });
 
-    await rm(path.join(fixture.stateRoot, 'cas', result.ref));
+    await rm(path.join(fixture.stateRoot, 'cas', resultRef));
     await assert.rejects(
       fixture.store.readRecoveryClosure(fixture.runId),
       (error) => error instanceof KernelStorageError && error.code === 'RECOVERY_REQUIRED'
@@ -283,26 +176,15 @@ test('recovery requires every terminal Journal artifact to remain in CAS', async
 });
 
 test('budget reservation and revoked generation fence dispatch and heartbeat', async () => {
-  const fixture = await createActiveFixture('fencing');
+  const fixture = await createAgentFixture('fencing', { toolCalls: 1 }, { mode: 'default' });
   try {
-    const request = await fixture.store.artifacts.publishCanonical({ request: true }, 'cliq-model-request-v1');
+    await batch(fixture, [{ name: 'read', input: { path: 'a' } }, { name: 'read', input: { path: 'b' } }]);
+    const first = await prepareTool(fixture), claimed = await claimTool(fixture, first);
+    await fixture.agent.completeTool({ opId: first.entry.opId, attempt: first.entry.attempt,
+      expectedRunRevision: first.run.revision, observationRef: await observation(fixture, claimed, { contents: 'read result' }) });
     await assert.rejects(
-      fixture.store.prepareInvocation({
-        runId: fixture.runId,
-        expectedRunRevision: fixture.runRevision,
-        leaseEpoch: fixture.leaseEpoch,
-        opId: 'over-budget',
-        opKind: 'tool',
-        target: 'test.tool',
-        requestRef: request.ref,
-        replayClass: 'retry',
-        reservation: {
-          modelTokens: 0,
-          costMicros: 0,
-          toolCalls: 1_001,
-          repairAttempts: 0
-        }
-      }),
+      fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision,
+        leaseEpoch: fixture.leaseEpoch }),
       (error) => error instanceof KernelStorageError && error.code === 'BUDGET_EXHAUSTED'
     );
     const revoked = fixture.store.beginGenerationRevocation({

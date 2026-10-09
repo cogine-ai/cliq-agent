@@ -12,7 +12,7 @@ import {
 } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 
-test('applyKernelSchema creates the twenty-table M2 authority layout and state-machine guards', async () => {
+test('applyKernelSchema includes pre-admission source inspection in the authority layout', async () => {
   const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-m1-schema-'));
   await chmod(stateRoot, 0o700);
   const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
@@ -41,6 +41,7 @@ test('applyKernelSchema creates the twenty-table M2 authority layout and state-m
       'run_journal',
       'runs',
       'sessions',
+      'source_inspection_attempts',
       'state_owners',
       'worker_launches',
       'workspace_generations'
@@ -82,10 +83,45 @@ test('schema v1 upgrades atomically to the M2 invariant layer', async () => {
       driver
         .prepare(`SELECT count(*) AS count FROM sqlite_schema WHERE type = 'trigger'`)
         .get<{ count: unknown }>()?.count,
-      16n
+      21n
     );
     applyKernelSchema(driver);
     assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
+  } finally {
+    driver.close();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('SQLite fences source inspection phase, admission key and workspace reservations', async () => {
+  const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-source-inspection-schema-'));
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  try {
+    applyKernelSchema(driver);
+    // This exercises the SQL invariant seam, not a native resource receipt.
+    const capturing = { inspectionId: 'inspection', principalId: 'principal', method: 'run.submit',
+      admissionKey: 'abcdefghijklmnopqrstuv', admissionIntentDigest: 'a'.repeat(64), workspaceIdentityDigest: 'b'.repeat(64),
+      phase: 'capturing', rowVersion: 1, cancelRequested: false };
+    const originalRequestId = '0199b011-1111-7111-8111-111111111111';
+    driver.prepare(`INSERT INTO source_inspection_attempts
+      (inspection_id, principal_id, method, admission_key, admission_intent_digest, original_request_id, original_request_digest,
+       workspace_identity_digest, phase, row_version, row_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(capturing.inspectionId, capturing.principalId, capturing.method,
+      capturing.admissionKey, capturing.admissionIntentDigest, originalRequestId,
+      'a'.repeat(64), capturing.workspaceIdentityDigest, capturing.phase, 1n, JSON.stringify(capturing));
+    assert.throws(() => driver.prepare(`UPDATE source_inspection_attempts SET phase = 'active', row_version = 2, row_json = ?
+      WHERE inspection_id = 'inspection'`).run(JSON.stringify({ ...capturing, phase: 'active', rowVersion: 2 })),
+    /source inspection phase transition is invalid/);
+    const insert = (next: typeof capturing, originalId = next.inspectionId) => driver.prepare(`INSERT INTO source_inspection_attempts
+      (inspection_id, principal_id, method, admission_key, admission_intent_digest, original_request_id, original_request_digest,
+       workspace_identity_digest, phase, row_version, row_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(next.inspectionId, next.principalId, next.method,
+      next.admissionKey, next.admissionIntentDigest, originalId, 'a'.repeat(64), next.workspaceIdentityDigest, next.phase, 1n, JSON.stringify(next));
+    assert.throws(() => insert({ ...capturing, inspectionId: 'same-key', workspaceIdentityDigest: 'c'.repeat(64) }), /UNIQUE constraint/);
+    assert.throws(() => insert({ ...capturing, inspectionId: 'same-workspace', admissionKey: 'zyxwvutsrqponmlkjihgfe' }), /UNIQUE constraint/);
+    assert.throws(() => insert({ ...capturing, inspectionId: 'same-request', admissionKey: 'different-admission-key',
+      workspaceIdentityDigest: 'c'.repeat(64) }, originalRequestId), /UNIQUE constraint/);
+    assert.throws(() => driver.prepare('DELETE FROM source_inspection_attempts').run(), /source inspection history is retained/);
   } finally {
     driver.close();
     await rm(stateRoot, { recursive: true, force: true });
