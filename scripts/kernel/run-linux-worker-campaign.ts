@@ -3,11 +3,13 @@ import { createHash } from 'node:crypto';
 import { fork, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
-import { access, lstat, open, readFile, stat, type FileHandle } from 'node:fs/promises';
-import { syncBuiltinESMExports } from 'node:module';
+import { access, lstat, mkdtemp, open, readFile, rm, stat, type FileHandle } from 'node:fs/promises';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import net from 'node:net';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { inspect } from 'node:util';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
@@ -451,15 +453,52 @@ function expectedNativeBirthBody(numbers: readonly bigint[], texts: readonly (re
   assert.ok(cursor <= body.length); return body;
 }
 
+async function witnessBytes(handle: FileHandle, length: number) {
+  const bytes = Buffer.alloc(length);
+  for (let offset = 0; offset < bytes.length;) {
+    const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+    assert.ok(bytesRead > 0); offset += bytesRead;
+  }
+  return bytes;
+}
+
+function verifyNativeBirthFrames(bytes: Buffer, lengths: readonly number[]) {
+  let offset = 0;
+  for (const [index, length] of lengths.entries()) {
+    const end = offset + length + 64, footer = bytes.subarray(offset + length, end);
+    assert.equal(footer.length, 64);
+    assert.deepEqual(footer.subarray(0, 8), Buffer.from('CLIQWRF1')); assert.equal(footer.readBigUInt64LE(8), BigInt(index + 1));
+    assert.equal(footer.readBigUInt64LE(16), BigInt(end)); assert.equal(footer.readBigUInt64LE(24), BigInt.asUintN(64, ~BigInt(end)));
+    assert.deepEqual(footer.subarray(32), createHash('sha256').update(bytes.subarray(offset, offset + length)).digest());
+    offset = end;
+  }
+  assert.equal(offset, bytes.length);
+}
+
+type LinuxForkTracer = { arm(controllerPid: number): void; pollFork(): number | null; release(): boolean };
+
+async function releaseForkTracer(tracer: LinuxForkTracer) {
+  const deadline = performance.now() + 30_000;
+  for (;;) {
+    const released = tracer.release(); assert.equal(typeof released, 'boolean');
+    if (released) return;
+    assert.ok(performance.now() < deadline, 'actual fork tracer attachment release timed out');
+    await delay(1);
+  }
+}
+
 async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInput['preactivationCrash']>) {
   const committed = boundary === 'preactivated_before_activation';
   const postMove = boundary === 'queued_post_move_before_retirement';
-  const created = boundary === 'ready_before_identity' || committed;
+  const monitorFork = boundary === 'monitor_fork_before_ready';
+  const hasReadyAtPause = boundary === 'ready_before_identity' || committed;
+  const expectsCreatedRetirement = hasReadyAtPause || monitorFork;
   const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `${boundary.replaceAll('_', '-')}-crash` });
   let child: ReturnType<typeof fork> | undefined, exited: ReturnType<typeof once> | undefined, successor: StateStore | undefined;
   let history: ReturnType<typeof openSqliteDriver> | undefined;
+  let retainedWitness: FileHandle | undefined, tracer: LinuxForkTracer | undefined, tracerDirectory: string | undefined;
   let removeHintListener: (() => void) | undefined;
-  let diagnostic = '', resourcesRetired = false, operationFailure: { error: unknown } | undefined;
+  let diagnostic = '', resourcesRetired = false, supervisorJoined = false, operationFailure: { error: unknown } | undefined;
   try {
     const before = await checkpointBytes(fixture.store, fixture.runId);
     await fixture.store.close();
@@ -565,34 +604,31 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     let pendingReceiptRef: string | undefined;
     let physicalScope: { cgroupId: string; pidNamespaceId: string; workerPid: number; workerToken: string;
       initPid: number; initToken: string; monitorPid: number; monitorToken: string;
-      namespaceInitStartToken: string; members: { pid: number; token: string }[] } | undefined;
+      namespaceInitStartToken: string; birthObservation: 'independent-live-READY' | 'durable-native-birth-after-controller-release';
+      members: { pid: number; token: string }[] } | undefined;
+    let bindingPrefix: Buffer | undefined;
+    let forkObservation: { prefix: Buffer; group: fs.BigIntStats; monitorPid: number; monitorToken: string } | undefined;
+    const bindingTexts: (readonly [string, number])[] = [[held.launch.containmentPlanRef, 65],
+      [held.launch.sandboxLaunchSpecRef, 65], [spec.launchSpecDigest, 65], [held.launch.workspaceGenerationRef, 65],
+      [held.launch.spawnNonceDigest, 65], [held.launch.activationNonceDigest, 65], [path.posix.basename(plan.backend.cgroupPath), 96],
+      [plan.backend.pidNamespaceReservationId, 192], ['', 192], ['', 192], ['', 192], ['', 192], [controllerToken, 192]];
     const witness = await open(path.join(fixture.stateRoot, 'runtime/worker-reservations',
       identityHash('cliq-worker-reservation-v1', held.launch.launchId, held.launch.spawnNonceDigest)), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    retainedWitness = witness;
     try {
       const physical = await witness.stat({ bigint: true });
       assert.ok(physical.isFile()); assert.equal(physical.nlink, 1n); assert.equal(physical.mode & 0o7777n, 0o600n);
       assert.equal(String(physical.dev), plan.backend.nativeReservation.deviceId); assert.equal(String(physical.ino), plan.backend.nativeReservation.fileId);
-      assert.equal(Number(physical.uid), plan.backend.nativeReservation.ownerUid); assert.equal(physical.size, created ? 4768n : 2112n);
+      assert.equal(Number(physical.uid), plan.backend.nativeReservation.ownerUid); assert.equal(physical.size, hasReadyAtPause ? 4768n : 2112n);
       // Every footer hashes its own actual body, not an accumulated prefix.
       // Verify all five durable birth facts before using any recorded PID.
-      const bytes = await witness.readFile(); assert.equal(bytes.length, created ? 4768 : 2112);
-      const lengths = created ? [2048, 32, 64, 256, 2048] : [2048]; let offset = 0;
-      for (const [index, length] of lengths.entries()) {
-        const end = offset + length + 64, footer = bytes.subarray(offset + length, end);
-        assert.deepEqual(footer.subarray(0, 8), Buffer.from('CLIQWRF1')); assert.equal(footer.readBigUInt64LE(8), BigInt(index + 1));
-        assert.equal(footer.readBigUInt64LE(16), BigInt(end)); assert.equal(footer.readBigUInt64LE(24), BigInt.asUintN(64, ~BigInt(end)));
-        assert.deepEqual(footer.subarray(32), createHash('sha256').update(bytes.subarray(offset, offset + length)).digest());
-        offset = end;
-      }
-      assert.equal(offset, bytes.length);
+      const bytes = await witnessBytes(witness, hasReadyAtPause ? 4768 : 2112);
+      verifyNativeBirthFrames(bytes, hasReadyAtPause ? [2048, 32, 64, 256, 2048] : [2048]);
+      if (monitorFork) bindingPrefix = bytes;
       const bindingNumbers = [physical.dev, physical.ino, physical.uid, BigInt(identity.locator.deviceId),
         BigInt(identity.locator.directoryFileId), 0n, 0n, 0n, 0n, 0n, 0n, BigInt(controllerPid)];
-      const bindingTexts: (readonly [string, number])[] = [[held.launch.containmentPlanRef, 65],
-        [held.launch.sandboxLaunchSpecRef, 65], [spec.launchSpecDigest, 65], [held.launch.workspaceGenerationRef, 65],
-        [held.launch.spawnNonceDigest, 65], [held.launch.activationNonceDigest, 65], [path.posix.basename(plan.backend.cgroupPath), 96],
-        [plan.backend.pidNamespaceReservationId, 192], ['', 192], ['', 192], ['', 192], ['', 192], [controllerToken, 192]];
       assert.deepEqual(bytes.subarray(0, 2048), expectedNativeBirthBody(bindingNumbers, bindingTexts));
-      if (created) {
+      if (hasReadyAtPause) {
         const intent = Buffer.alloc(32); intent.write('CREATE1'); assert.deepEqual(bytes.subarray(2112, 2144), intent);
         const group = await lstat(plan.backend.cgroupPath, { bigint: true }); assert.ok(group.isDirectory() && !group.isSymbolicLink());
         const cgroup = Buffer.alloc(64);
@@ -632,11 +668,13 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
         assert.deepEqual(bytes.subarray(2656, 4704), expectedNativeBirthBody(readyNumbers, readyTexts));
         physicalScope = { cgroupId: String(group.ino), pidNamespaceId: String(namespace.ino), workerPid: running.pid,
           workerToken: running.token, initPid: init[0]!.pid, initToken: init[0]!.token, monitorPid, monitorToken,
-          namespaceInitStartToken, members };
+          namespaceInitStartToken, birthObservation: 'independent-live-READY', members };
       } else await assert.rejects(lstat(plan.backend.cgroupPath), { code: 'ENOENT' });
       const after = await witness.stat({ bigint: true });
       for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
-    } finally { await witness.close(); }
+    } finally {
+      if (!monitorFork) { await witness.close(); retainedWitness = undefined; }
+    }
     if (postMove) {
       assert.ok(hint); assert.equal(hint.runId, fixture.runId); assert.equal(hint.generationRef, held.generation.generationRef);
       assert.equal(hint.sourceRowVersion, held.generation.rowVersion); assert.equal(hint.actualReadFaults, 1);
@@ -742,11 +780,142 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       try { assert.deepEqual(await file.readFile(), fixture.original); } finally { await file.close(); }
     } finally { await root.close(); }
     await assert.rejects(openStateStore(fixture.stateRoot, fixture.runtimeAuthority), /OS lock is already held/u);
+    if (monitorFork) {
+      assert.ok(bindingPrefix && retainedWitness === witness);
+      // Compile a test-only module in its own directory, using the installed
+      // Node header selector without staging or replacing a production image.
+      tracerDirectory = await mkdtemp(path.join(tmpdir(), 'cliq-linux-fork-tracer-'));
+      const queried = spawnSync(process.execPath, [fileURLToPath(new URL('./build-state-owner-native.mjs', import.meta.url)), '--print-includes'],
+        { encoding: 'utf8', timeout: 30_000 });
+      if (queried.error) throw queried.error;
+      assert.equal(queried.status, 0, queried.stderr);
+      const includes: unknown = JSON.parse(queried.stdout);
+      assert.ok(Array.isArray(includes) && includes.length > 0 && includes.every(value => typeof value === 'string' && path.isAbsolute(value)));
+      const binary = path.join(tracerDirectory, 'linux-fork-tracer.node');
+      const compiled = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
+        ...includes.flatMap(value => ['-I', value as string]), fileURLToPath(new URL('./linux-fork-tracer.c', import.meta.url)), '-o', binary],
+        { encoding: 'utf8', timeout: 30_000 });
+      if (compiled.error) throw compiled.error;
+      assert.equal(compiled.status, 0, compiled.stderr);
+      const loaded: unknown = createRequire(import.meta.url)(binary);
+      assert.ok(loaded && typeof loaded === 'object');
+      const candidate = loaded as LinuxForkTracer;
+      for (const method of ['arm', 'pollFork', 'release'] as const) assert.equal(typeof candidate[method], 'function');
+      tracer = candidate;
+      assert.equal(processToken(controllerPid), controllerToken);
+      const beforeAttach = await readFile(`/proc/${controllerPid}/status`, 'utf8');
+      assert.match(beforeAttach, new RegExp(`^PPid:\\s+${supervisor.pid}$`, 'mu')); assert.match(beforeAttach, /^TracerPid:\s+0$/mu);
+      tracer.arm(controllerPid);
+      assert.equal(processToken(controllerPid), controllerToken);
+      const afterAttach = await readFile(`/proc/${controllerPid}/status`, 'utf8');
+      assert.match(afterAttach, new RegExp(`^TracerPid:\\s+${process.pid}$`, 'mu'));
+      assert.match(afterAttach, new RegExp(`^PPid:\\s+${supervisor.pid}$`, 'mu'));
+      assert.equal(processToken(supervisor.pid!), supervisorIdentity.processStartToken);
+      assert.ok(supervisor.kill('SIGCONT'));
+      const deadline = performance.now() + 30_000;
+      let monitorPid: number;
+      for (;;) {
+        const observed = tracer.pollFork();
+        if (observed !== null) {
+          assert.ok(Number.isSafeInteger(observed) && observed > 0 && observed !== controllerPid && observed !== supervisor.pid);
+          monitorPid = observed; break;
+        }
+        assert.ok(supervisor.exitCode === null && supervisor.signalCode === null, `Supervisor exited before the actual monitor fork: ${diagnostic}`);
+        assert.ok(performance.now() < deadline, 'actual monitor fork was not captured (not retried or skipped)');
+        await delay(1);
+      }
+      const monitorToken = processToken(monitorPid);
+      const assertTraceStop = async (pid: number, startToken: string, parentPid: number) => {
+        assert.equal(processToken(pid), startToken);
+        const line = await readFile(`/proc/${pid}/stat`, 'utf8');
+        assert.equal(line.slice(line.lastIndexOf(')') + 2).trim().split(/\s+/u)[0], 't');
+        const status = await readFile(`/proc/${pid}/status`, 'utf8');
+        assert.match(status, new RegExp(`^TracerPid:\\s+${process.pid}$`, 'mu'));
+        assert.match(status, new RegExp(`^PPid:\\s+${parentPid}$`, 'mu'));
+        assert.equal(Number(status.match(/^Uid:\s+([0-9]+)/mu)?.[1]), supervisorIdentity.ownerUid);
+      };
+      await assertTraceStop(controllerPid, controllerToken, supervisor.pid!);
+      await assertTraceStop(monitorPid, monitorToken, controllerPid);
+      const physical = await witness.stat({ bigint: true });
+      assert.ok(physical.isFile()); assert.equal(physical.nlink, 1n); assert.equal(physical.mode & 0o7777n, 0o600n);
+      assert.equal(String(physical.dev), plan.backend.nativeReservation.deviceId); assert.equal(String(physical.ino), plan.backend.nativeReservation.fileId);
+      assert.equal(Number(physical.uid), plan.backend.nativeReservation.ownerUid); assert.equal(physical.size, 2336n);
+      const prefix = await witnessBytes(witness, 2336); verifyNativeBirthFrames(prefix, [2048, 32, 64]);
+      assert.deepEqual(prefix.subarray(0, 2112), bindingPrefix);
+      const intent = Buffer.alloc(32); intent.write('CREATE1'); assert.deepEqual(prefix.subarray(2112, 2144), intent);
+      const group = await lstat(plan.backend.cgroupPath, { bigint: true }); assert.ok(group.isDirectory() && !group.isSymbolicLink());
+      const cgroup = Buffer.alloc(64);
+      for (const [index, value] of [group.dev, group.ino, group.uid, group.mode].entries()) cgroup.writeBigUInt64LE(value, index * 8);
+      assert.deepEqual(prefix.subarray(2208, 2272), cgroup);
+      for (const scope of [plan.backend.cgroupPath, path.join(plan.backend.cgroupPath, 'worker')]) {
+        assert.equal((await readFile(path.join(scope, 'cgroup.procs'), 'utf8')).trim(), '');
+        assert.match(await readFile(path.join(scope, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
+      }
+      const after = await witness.stat({ bigint: true });
+      for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
+      await assertTraceStop(controllerPid, controllerToken, supervisor.pid!);
+      await assertTraceStop(monitorPid, monitorToken, controllerPid);
+      const cut = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+      try { cut.readSnapshot(connection => {
+        assert.deepEqual(readRun(connection, fixture.runId), held.run);
+        assert.deepEqual(readLatestStateOwner(connection), held.owner);
+        assert.deepEqual(readInvocationJournal(connection, fixture.runId), before.closure.journal);
+        assert.deepEqual(readRequiredWorkerLaunch(connection, held.launch.launchId), held.launch);
+        assert.deepEqual(readRequiredWorkspaceGenerationByRef(connection, held.generation.generationRef), held.generation);
+      }); } finally { cut.close(); }
+      forkObservation = { prefix, group, monitorPid, monitorToken };
+    }
     assert.equal(processToken(supervisor.pid!), supervisorIdentity.processStartToken);
-    assert.ok(supervisor.kill('SIGKILL')); assert.deepEqual(await bounded(exit), [null, 'SIGKILL']);
+    assert.ok(supervisor.kill('SIGKILL'));
+    const supervisorExit = await bounded(exit); supervisorJoined = true; assert.deepEqual(supervisorExit, [null, 'SIGKILL']);
+    if (tracer) { await releaseForkTracer(tracer); tracer = undefined; }
     // Do not signal the original controller: actual EOF cleanup and natural
     // orphan reaping must satisfy the native inspector's own five-second bound.
     successor = await bounded(openStateStore(fixture.stateRoot, fixture.runtimeAuthority));
+    if (monitorFork) {
+      assert.ok(forkObservation && retainedWitness === witness);
+      const physical = await witness.stat({ bigint: true });
+      assert.ok(physical.isFile()); assert.equal(physical.nlink, 1n); assert.equal(physical.mode & 0o7777n, 0o600n);
+      assert.equal(String(physical.dev), plan.backend.nativeReservation.deviceId); assert.equal(String(physical.ino), plan.backend.nativeReservation.fileId);
+      assert.equal(Number(physical.uid), plan.backend.nativeReservation.ownerUid); assert.equal(physical.size, 4768n);
+      const bytes = await witnessBytes(witness, 4768); verifyNativeBirthFrames(bytes, [2048, 32, 64, 256, 2048]);
+      assert.deepEqual(bytes.subarray(0, 2336), forkObservation.prefix, 'natural birth completion must preserve every durable pre-fork byte');
+      const group = await lstat(plan.backend.cgroupPath, { bigint: true }); assert.ok(group.isDirectory() && !group.isSymbolicLink());
+      for (const field of ['dev', 'ino', 'uid', 'mode'] as const) assert.equal(group[field], forkObservation.group[field]);
+      const monitor = Buffer.alloc(256); monitor.writeBigUInt64LE(BigInt(forkObservation.monitorPid)); monitor.write(forkObservation.monitorToken, 8);
+      assert.deepEqual(bytes.subarray(2336, 2592), monitor, 'the durable monitor fact must name the independently captured fork child');
+      const body = bytes.subarray(2656, 4704);
+      const nativePid = (index: number) => {
+        const value = Number(body.readBigUInt64LE(16 + index * 8)); assert.ok(Number.isSafeInteger(value) && value > 0); return value;
+      };
+      const workerPid = nativePid(8), initPid = nativePid(9), monitorPid = nativePid(10);
+      assert.equal(monitorPid, forkObservation.monitorPid);
+      assert.equal(new Set([workerPid, initPid, monitorPid, controllerPid, supervisor.pid]).size, 5);
+      const namespaceInode = body.readBigUInt64LE(16 + 7 * 8); assert.ok(namespaceInode > 0n);
+      let cursor = 112;
+      const actualTexts = bindingTexts.map(([, width]) => {
+        const end = body.indexOf(0, cursor); assert.ok(end >= cursor && end < cursor + width);
+        const text = body.subarray(cursor, end).toString('utf8'); cursor += width; return text;
+      });
+      const workerToken = actualTexts[8]!, initToken = actualTexts[10]!;
+      assert.match(workerToken, /^linux-proc-start-ticks:[0-9]+$/u); assert.match(initToken, /^linux-proc-start-ticks:[0-9]+$/u);
+      const monitorToken = forkObservation.monitorToken;
+      const namespaceInitStartToken = `linux-namespace-init:${initPid}:${initToken.slice('linux-proc-start-ticks:'.length)}:monitor:${monitorPid}:${monitorToken.slice('linux-proc-start-ticks:'.length)}`;
+      const readyNumbers = [physical.dev, physical.ino, physical.uid, BigInt(identity.locator.deviceId),
+        BigInt(identity.locator.directoryFileId), group.dev, group.ino, namespaceInode,
+        BigInt(workerPid), BigInt(initPid), BigInt(monitorPid), BigInt(controllerPid)];
+      const readyTexts = [...bindingTexts]; readyTexts.splice(8, 4, [workerToken, 192], [namespaceInitStartToken, 192], [initToken, 192], [monitorToken, 192]);
+      assert.deepEqual(body, expectedNativeBirthBody(readyNumbers, readyTexts), 'full native birth keeps exact bindings, captured monitor token and zero padding');
+      const after = await witness.stat({ bigint: true });
+      for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
+      // Worker/init were born after detach; their PIDs and tokens come from
+      // this actual held durable witness, not a claimed live PID-2 observation
+      // or the successor's death evidence that will be compared below.
+      physicalScope = { cgroupId: String(group.ino), pidNamespaceId: String(namespaceInode), workerPid, workerToken,
+        initPid, initToken, monitorPid, monitorToken, namespaceInitStartToken,
+        birthObservation: 'durable-native-birth-after-controller-release',
+        members: [{ pid: workerPid, token: workerToken }, { pid: initPid, token: initToken }, { pid: monitorPid, token: monitorToken }] };
+    }
     const reopened = await checkpointBytes(successor, fixture.runId); assertQueuedReadyCut(reopened, before);
     assert.equal(reopened.closure.run.revision, held.run.revision + 1);
     await assert.rejects(access(`/proc/${controllerPid}`), { code: 'ENOENT' });
@@ -761,7 +930,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     assert.equal(retired.phase, 'retired'); assert.ok(retired.retirementEvidenceRef);
     assert.equal(retired.workerIdentityDigest, held.launch.workerIdentityDigest, 'successor must retain only the genuinely committed WorkerIdentity');
     const originalFacts = { ...retired, phase: held.launch.phase }; delete originalFacts.retiredAt; delete originalFacts.retirementEvidenceRef;
-    if (created && !committed) delete originalFacts.processContainmentRef;
+    if (expectsCreatedRetirement && !committed) delete originalFacts.processContainmentRef;
     assert.deepEqual(originalFacts, held.launch, 'successor retirement cannot adopt or replace the old reservation');
     if (committed) {
       assert.deepEqual(frozenArtifact(fixture.stateRoot, retired.workerIdentityDigest!), recordedWorker,
@@ -774,7 +943,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     if (archived.phase !== 'quarantined') throw new Error('successor did not quarantine the old preactivation generation');
     assert.equal(archived.rowVersion, held.generation.rowVersion + 1);
     const receipt = await successor.artifacts.readCanonical<WorkspaceGenerationQuarantineEvidenceV1>(archived.quarantineEvidenceRef);
-    assert.equal(receipt.reason, created ? 'launch_died_before_activation' : 'launch_aborted'); assert.equal(receipt.sourceRowVersion, held.generation.rowVersion);
+    assert.equal(receipt.reason, expectsCreatedRetirement ? 'launch_died_before_activation' : 'launch_aborted'); assert.equal(receipt.sourceRowVersion, held.generation.rowVersion);
     assert.equal(receipt.quarantineCanonicalRootRelativePath, archiveRelativePath);
     if (postMove) {
       assert.ok(pendingReceipt && pendingReceiptRef);
@@ -794,7 +963,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     assert.deepEqual(proof.owner, plan.owner);
     if (physicalScope) {
       assert.equal(proof.kind, 'containment_all_descendants_dead');
-      if (proof.kind !== 'containment_all_descendants_dead' || proof.backend.kind !== 'linux') throw new Error('READY crash lacks actual Linux created-death closure');
+      if (proof.kind !== 'containment_all_descendants_dead' || proof.backend.kind !== 'linux') throw new Error('created preactivation crash lacks actual Linux created-death closure');
       assert.equal(proof.containmentRef, retired.processContainmentRef);
       const backend = {
         kind: 'linux', cgroupPath: plan.backend.cgroupPath, cgroupId: physicalScope.cgroupId,
@@ -812,7 +981,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       assert.equal(containment.sandboxLaunchSpecDigest, spec.launchSpecDigest); assert.equal(containment.launchNonceDigest, held.launch.spawnNonceDigest);
       assert.deepEqual(containment.filesystemBinding, { kind: 'run-generation', generationRef: held.launch.workspaceGenerationRef });
     } else {
-      assert.equal(created, false); assert.equal(proof.kind, 'containment_plan_quiescent');
+      assert.equal(expectsCreatedRetirement, false); assert.equal(proof.kind, 'containment_plan_quiescent');
       if (proof.kind !== 'containment_plan_quiescent' || proof.backend.kind !== 'linux') throw new Error('reserved crash lacks actual Linux no-spawn closure');
       assert.deepEqual(proof.backend, noSpawnBackend);
     }
@@ -825,6 +994,11 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     assert.equal(proof.inspectorSupervisorInstanceId, newOwner.supervisorInstanceId);
     const inspector = await successor.artifacts.readCanonical<{ supervisorInstanceId: string; stateOwnerEpoch: number }>(proof.inspectorIdentityRef);
     assert.equal(inspector.supervisorInstanceId, newOwner.supervisorInstanceId); assert.equal(inspector.stateOwnerEpoch, newOwner.ownerEpoch);
+    if (monitorFork) {
+      assert.ok(proof.observedAt >= newOwner.acquiredAt && proof.observedAt <= retired.retiredAt!);
+      assert.ok(Date.parse(retired.retiredAt!) - Date.parse(proof.observedAt) <= 5000);
+      assert.equal(receipt.inspectorIdentityRef, proof.inspectorIdentityRef); assert.equal(receipt.inspectorIdentityDigest, proof.inspectorIdentityDigest);
+    }
     if (postMove) {
       assert.ok(pendingReceipt && pendingProof);
       assert.notEqual(retired.retirementEvidenceRef, pendingReceipt.containmentNoSpawnEvidenceRef);
@@ -877,7 +1051,8 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       supervisorStartToken: supervisorIdentity.processStartToken, signal: 'SIGKILL', controllerPid, controllerStartToken: controllerToken,
       ...(physicalScope ? { actualWorkerPid: physicalScope.workerPid, actualWorkerStartToken: physicalScope.workerToken,
         actualInitPid: physicalScope.initPid, actualInitStartToken: physicalScope.initToken,
-        actualMonitorPid: physicalScope.monitorPid, actualMonitorStartToken: physicalScope.monitorToken } : {}),
+        actualMonitorPid: physicalScope.monitorPid, actualMonitorStartToken: physicalScope.monitorToken,
+        birthObservation: physicalScope.birthObservation } : {}),
       priorOwnerEpoch: held.owner.ownerEpoch, successorOwnerEpoch: newOwner.ownerEpoch, oldLaunchId: retired.launchId,
       newLaunchId: replacement.launchId, oldGenerationRef: held.generation.generationRef, newGenerationRef: replacement.workspaceGenerationRef,
       sourceRowVersion: held.generation.rowVersion, nativeEffectCount: 1, permanentToolClaims: 1,
@@ -885,7 +1060,9 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       ...(postMove ? { interruptedPublication: 'canonical-quarantine-written-before-cas-publication', priorQuarantineRef: pendingReceiptRef,
         successorQuarantineRef: archived.quarantineEvidenceRef, priorProofRef: pendingReceipt!.containmentNoSpawnEvidenceRef,
         successorProofRef: retired.retirementEvidenceRef, actualReadFaults: 1 } : {}),
-      note: `actual ${postMove ? 'sealed-image EIO then quarantine temp write before publication' : committed ? 'committed preactivation and real clock sample inside unwritten activation transaction' : 'signed held-image read'} then OS stop/SIGKILL; no signal to original controller, fresh successor ${created ? 'whole-created-death' : 'no-spawn'} closure` }));
+      ...(monitorFork ? { interruptedBirth: 'actual-controller-monitor-fork-before-monitor-record-or-READY',
+        forkWitnessBytes: 2336, completedWitnessBytes: 4768, independentLiveWorkerPid2AtCrash: false } : {}),
+      note: `actual ${monitorFork ? 'monitor fork with original C/M trace-stopped, then Supervisor SIGKILL and M-to-C detach with signal 0' : postMove ? 'sealed-image EIO then quarantine temp write before publication' : committed ? 'committed preactivation and real clock sample inside unwritten activation transaction' : 'signed held-image read'}; fresh successor ${expectsCreatedRetirement ? 'whole-created-death' : 'no-spawn'} closure` }));
     await successor.close(); successor = undefined; resourcesRetired = true;
   } catch (error) { operationFailure = { error }; throw error; }
   finally {
@@ -893,11 +1070,24 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     removeHintListener?.();
     try {
       if (child?.exitCode === null && child.signalCode === null) assert.ok(child.kill('SIGKILL'));
-      if (exited) await bounded(exited);
     } catch (error) { failures.push(error); resourcesRetired = false; }
+    try { if (exited) { await bounded(exited); supervisorJoined = true; } }
+    catch (error) { failures.push(error); resourcesRetired = false; }
+    // Never resume an attached controller while its Supervisor is still alive.
+    // Even after a primary failure, independently join it before attempting
+    // bounded M-to-C signal-zero detach; uncertainty retains the fixture.
+    try { if (tracer) {
+      assert.ok(supervisorJoined, 'cannot release native fork attachments before the Supervisor is actually joined');
+      await releaseForkTracer(tracer); tracer = undefined;
+    } }
+    catch (error) { failures.push(error); resourcesRetired = false; }
+    try { if (retainedWitness) { await retainedWitness.close(); retainedWitness = undefined; } }
+    catch (error) { failures.push(error); resourcesRetired = false; }
+    try { if (tracerDirectory) { await rm(tracerDirectory, { recursive: true, force: true }); tracerDirectory = undefined; } }
+    catch (error) { failures.push(error); resourcesRetired = false; }
     try { history?.close(); } catch (error) { failures.push(error); resourcesRetired = false; }
     if (successor) {
-      try { await successor.close(); resourcesRetired = failures.length === 0; }
+      try { await successor.close(); resourcesRetired = operationFailure === undefined && failures.length === 0; }
       catch (error) { failures.push(error); resourcesRetired = false; }
     }
     if (resourcesRetired) {
@@ -1623,6 +1813,7 @@ for (const [scenario, run] of [
   ['supervisor-crash-ready-before-identity', () => supervisorCrashPreactivation('ready_before_identity')],
   ['supervisor-crash-preactivated-before-activation', () => supervisorCrashPreactivation('preactivated_before_activation')],
   ['supervisor-crash-queued-post-move-before-retirement', () => supervisorCrashPreactivation('queued_post_move_before_retirement')],
+  ['supervisor-crash-monitor-fork-before-ready', () => supervisorCrashPreactivation('monitor_fork_before_ready')],
   ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
   ['parent-loss-before-release', parentLossBeforeRelease],

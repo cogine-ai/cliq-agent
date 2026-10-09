@@ -4,8 +4,9 @@ Status: **Option A approved; implementation and real qualification in progress.
 The before-create, READY-before-identity and invalid private-entry
 retirement/retry tracers and reserved-before-create Supervisor crash have real
 Linux GREEN. The READY-before-identity Supervisor crash also has real Linux
-GREEN, as does committed preactivation before lease activation; the remaining
-successor crash boundaries are still being qualified.**
+GREEN, as do committed preactivation before lease activation and queued
+post-move retirement; the remaining creation/negative boundaries are still
+being qualified.**
 Baseline: `854b9a95e6a99a8380772243853e5b7adc597272` (`main`, PR #514).
 
 This is one complete capability inside I1, not a new work package or a
@@ -271,12 +272,23 @@ hints: it independently verifies actual canonical bytes, file identity and the
 one derived quarantine inode/path for the still-retained generation version.
 Successor opening must reuse that exact target, create fresh owner-bound proof,
 and commit exactly one retirement without scanning or incrementing the version
-before the move. This scenario is not yet qualified.
+before the move. This scenario passed at
+`6c54a701338eba1934e769d87e69305953f6ee51`, together with all sixteen other
+native scenarios:
+[Linux job 113928944164](https://github.com/cogine-ai/cliq-agent/actions/runs/37962600816/job/113928944164).
+Supervisor 3144 was killed after the real receipt write; original controller
+3156 was already independently absent. The retained generation version was 2;
+the successor reused the exact quarantine inode/target, obtained different
+owner-bound proof/receipt refs, committed version 3, and completed one distinct
+edit/claim/charge. Local build, strict campaign TypeScript checks and all 1807
+tests passed before this push. All six qualification and Node 22/24
+Linux/macOS workflow jobs passed.
 
 For the later native-fork/pre-READY window, the user approved a test-only Linux
 operating-system tracer. It may observe and suspend the real fork on the free
 runner, but must not change the production protocol or fabricate native birth
-facts. Its implementation and actual qualification remain pending.
+facts. Its test-only implementation is present; actual Linux qualification
+remains pending.
 The selected minimal design lets the existing campaign process trace its real
 controller descendant, preserving the Supervisor IPC and process topology. A
 test-only Node-API module may only arm `PTRACE_O_TRACEFORK`, poll the exact fork
@@ -287,6 +299,14 @@ not a namespace PID-2 worker or READY claim. Failure to attach/capture/retire is
 a campaign failure, never a reason to weaken runner permissions or retry until
 capture happens. See the [ptrace contract](https://man7.org/linux/man-pages/man2/ptrace.2.html)
 and [Yama ancestry rules](https://docs.kernel.org/admin-guide/LSM/Yama.html).
+The parent holds one read-only witness descriptor across the genuine fork,
+Supervisor SIGKILL/join and signal-zero M-to-C detach. A successful successor
+must see that same inode complete its five native birth frames, with the exact
+captured monitor token and unchanged three-frame prefix, then obtain fresh
+whole-containment death before distinct retry. Worker/init identities in this
+scene come from the actual completed native birth file, not an independent live
+PID-2 observation or the successor's death proof. Unknown trace stops retain
+bookkeeping and fail the campaign; detach never counts as physical death.
 
 Then qualify the same complete scenario at these boundaries:
 
