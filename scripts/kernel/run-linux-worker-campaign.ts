@@ -570,8 +570,12 @@ async function supervisorCrashReservedBeforeCreate() {
     assert.equal(proof.sandboxLaunchSpecRef, held.launch.sandboxLaunchSpecRef); assert.equal(proof.launchNonceDigest, held.launch.spawnNonceDigest);
     assert.deepEqual(proof.owner, plan.owner);
     if (proof.backend.kind !== 'linux') throw new Error('reserved crash lacks actual Linux no-spawn closure');
-    assert.equal(proof.backend.cgroupObservation, 'absent'); assert.equal(proof.backend.pidNamespaceObservation, 'never_created');
-    assert.equal(proof.backend.matchingLaunchNonceProcessCount, 0); assert.equal(proof.backend.subreaperStartToken, plan.backend.subreaperStartToken);
+    assert.deepEqual(proof.backend, {
+      kind: 'linux', cgroupPath: plan.backend.cgroupPath, cgroupObservation: { kind: 'absent' },
+      pidNamespaceObservation: { kind: 'never_created', pidNamespaceReservationId: plan.backend.pidNamespaceReservationId },
+      matchingLaunchNonceProcessCount: 0,
+      subreaperStartToken: plan.backend.subreaperStartToken
+    } satisfies Extract<ProcessContainmentNoSpawnEvidenceV1['backend'], { kind: 'linux' }>);
     const metadataAfter = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
     const newOwner = (() => { try { return metadataAfter.readSnapshot(connection => {
       const eventSeq = connection.prepare('SELECT max(event_seq) AS seq FROM run_events WHERE run_id=?').get<{ seq: bigint }>(fixture.runId)!.seq;

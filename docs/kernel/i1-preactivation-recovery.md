@@ -207,6 +207,14 @@ crash qualification:
 [Linux job 113888908835](https://github.com/cogine-ai/cliq-agent/actions/runs/37950845506/job/113888908835).
 The portable GC tests also distinguish `open` from `close` failure explicitly;
 a later shutdown refusal cannot qualify an unreadable-plan startup rejection.
+The next execution at `969dd2162dde99b866bdace872baa0cbaa640462` also verified
+the old retired row and exact quarantine before exposing a second oracle error:
+canonical no-spawn observations are closed objects, not string discriminants.
+The corrected expected backend is now checked against the canonical TypeScript
+type and deep-compared in full, including its cgroup path and namespace
+reservation. Production retirement is unchanged; a full crash/retry GREEN is
+still required:
+[Linux job 113894905863](https://github.com/cogine-ai/cliq-agent/actions/runs/37952589604/job/113894905863).
 
 Then qualify the same complete scenario at these boundaries:
 
