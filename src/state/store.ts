@@ -384,6 +384,9 @@ async function readStateOwnerProcess(artifacts: ArtifactCatalog, owner: StateOwn
 const unretiredStateStoreOpenings = new Set<Readonly<{
   lock: HeldStateOwnerLock; driver: SqliteDriver | undefined; failure: ResourceRetirementError;
 }>>();
+// A rejected close can outlive the caller too. GC is not a successful join;
+// release this strong owner only after the exact close actually succeeds.
+const unretiredStateStoreClosings = new Set<StateStore>();
 
 export class StateStore {
   private closed = false;
@@ -769,8 +772,10 @@ export class StateStore {
       this.driver.close();
       this.owner.filesystem.close();
       this.closed = true;
+      unretiredStateStoreClosings.delete(this);
     })();
     this.closing = attempt.catch((error: unknown) => {
+      unretiredStateStoreClosings.add(this);
       this.closing = undefined;
       // Failed close retains the owner and permits its exact recovery path;
       // it never makes a retired execution resource reusable.

@@ -30,22 +30,26 @@ type RetirementProof = ProcessContainmentNoSpawnEvidenceV1 | ProcessContainmentD
 const FRESHNESS_MS = 5000;
 
 /** Join qualified abandoned attempts before exposing a successor Store or
- * gracefully releasing its owner. Unqualified retained metadata never proves
- * absence and remains blocking; it is not an installed execution capability. */
+ * gracefully releasing its owner. Metadata-only fixtures have no installed
+ * capability and remain blocking for retry, without claiming native retirement.
+ * Unknown retained data cannot establish that exception and retains the owner. */
 export async function retireAbandonedPreactivations(driver: SqliteDriver, artifacts: ArtifactCatalog,
   owner: StateOwnerContext, installation?: LinuxWorkerInstallation): Promise<void> {
-  const rows = driver.prepare("SELECT launch_id FROM worker_launches WHERE phase IN ('reserved','preactivated') ORDER BY rowid")
-    .all<{ launch_id: string }>();
-  const launches: WorkerLaunch[] = [];
-  for (const row of rows) {
-    const launch = readRequiredWorkerLaunch(driver, row.launch_id);
-    const plan = decodeWorkerContainmentPlan(await readCanonicalArtifact(artifacts, launch.containmentPlanRef));
-    if (plan.backend.kind === 'linux' && plan.backend.nativeReservation) launches.push(launch);
-  }
-  if (launches.length === 0) return;
   let launcher: Awaited<ReturnType<typeof openLinuxWorkerLauncher>> | undefined;
   let primary: { error: unknown } | undefined;
   try {
+    const rows = driver.prepare("SELECT launch_id FROM worker_launches WHERE phase IN ('reserved','preactivated') ORDER BY rowid")
+      .all<{ launch_id: string }>();
+    const launches: WorkerLaunch[] = [];
+    for (const row of rows) {
+      // A missing/corrupt plan cannot distinguish metadata-only fixtures from
+      // an installed scope. Discovery is part of retirement, not a harmless
+      // validation failure that may release the actual owner lock.
+      const launch = readRequiredWorkerLaunch(driver, row.launch_id);
+      const plan = decodeWorkerContainmentPlan(await readCanonicalArtifact(artifacts, launch.containmentPlanRef));
+      if (plan.backend.kind === 'linux' && plan.backend.nativeReservation) launches.push(launch);
+    }
+    if (launches.length === 0) return;
     launcher = await openLinuxWorkerLauncher(installation);
     for (const launch of launches) {
       const controller = await launcher.startController();

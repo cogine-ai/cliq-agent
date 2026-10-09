@@ -1,7 +1,8 @@
 # I1 preactivation retirement and successor retry
 
 Status: **Option A approved; implementation and real qualification in progress.
-No new positive native evidence is claimed yet.**
+The before-create retirement/retry tracer has real Linux GREEN; the remaining
+creation and successor boundaries are not yet qualified.**
 Baseline: `854b9a95e6a99a8380772243853e5b7adc597272` (`main`, PR #514).
 
 This is one complete capability inside I1, not a new work package or a
@@ -120,7 +121,11 @@ delivery's completion criterion.
   quarantines the generation, retires the old launch, and emits the existing
   Run revision/event. Checkpoint, frontier, Journal, budget and lease epoch stay
   unchanged. Normal retry materializes a new generation and reserves a new
-  launch; unsupported/unknown closure leaves the old reservation blocking release.
+  launch; unsupported/unknown physical closure leaves the old reservation
+  blocking release. Existing metadata-only fixtures have no installed execution
+  capability: they may close without claiming native retirement, but their
+  unretired rows still block retry. A missing/corrupt retained plan cannot make
+  that distinction and must retain the actual owner.
 
 ## Real verification, one tracer at a time
 
@@ -135,7 +140,21 @@ passed before that expected failure. Source revision:
 Node 22.13.0; [Linux job 113850776335](https://github.com/cogine-ai/cliq-agent/actions/runs/37939743525/job/113850776335).
 Baseline local build and all 1805 tests passed before this diagnostic push.
 The implementation's focused portable regressions subsequently passed 60/60;
-this is not yet a positive Linux qualification claim.
+its local full suite passed 1805/1805. Source revision
+`43028a3741a0e9fc69319895e33a9d6d88dae96a` then passed the complete new
+before-create tracer and all ten existing execution/recovery scenarios on
+free standard Ubuntu 22.04, Node 22.13.0:
+[Linux job 113861683215](https://github.com/cogine-ai/cliq-agent/actions/runs/37942930149/job/113861683215).
+It proves exact old no-spawn retirement, close/reopen, distinct retry and one
+real edit/claim/charge, not yet the later creation or successor crash windows.
+
+Two subsequent portable public Store regressions separately produced actual
+OS-lock RED, then GREEN after minimal resource-owner corrections. Startup
+discovery of a missing reserved plan now enters the retirement-failure boundary
+before any decode/read, retaining its actual lock across caller GC. An uncertain
+public close is likewise strongly owned until its exact retry succeeds or the
+process dies; neither a dropped Store nor a native finalizer can substitute for
+resource join. These are real ownership negatives, not Linux death producers.
 
 Then qualify the same complete scenario at these boundaries:
 
