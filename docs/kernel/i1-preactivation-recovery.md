@@ -1,12 +1,11 @@
 # I1 preactivation retirement and successor retry
 
 Status: **Option A approved; implementation and real qualification in progress.
-The before-create, READY-before-identity and invalid private-entry
-retirement/retry tracers and reserved-before-create Supervisor crash have real
-Linux GREEN. The READY-before-identity Supervisor crash also has real Linux
-GREEN, as do committed preactivation before lease activation and queued
-post-move retirement; the remaining creation/negative boundaries are still
-being qualified.**
+The ordinary before-create, READY-before-identity and invalid private-entry
+retirement/retry tracers have real Linux GREEN. Supervisor crash/retry also has
+GREEN at reserved, host-monitor fork/pre-READY, READY-before-identity,
+committed preactivation and queued post-move cuts. Negative witness boundaries
+remain open.**
 Baseline: `854b9a95e6a99a8380772243853e5b7adc597272` (`main`, PR #514).
 
 This is one complete capability inside I1, not a new work package or a
@@ -287,8 +286,8 @@ Linux/macOS workflow jobs passed.
 For the later native-fork/pre-READY window, the user approved a test-only Linux
 operating-system tracer. It may observe and suspend the real fork on the free
 runner, but must not change the production protocol or fabricate native birth
-facts. Its test-only implementation is present; actual Linux qualification
-remains pending.
+facts. Its test-only implementation and positive actual Linux qualification
+are now present.
 The selected minimal design lets the existing campaign process trace its real
 controller descendant, preserving the Supervisor IPC and process topology. A
 test-only Node-API module may only arm `PTRACE_O_TRACEFORK`, poll the exact fork
@@ -307,6 +306,28 @@ whole-containment death before distinct retry. Worker/init identities in this
 scene come from the actual completed native birth file, not an independent live
 PID-2 observation or the successor's death proof. Unknown trace stops retain
 bookkeeping and fail the campaign; detach never counts as physical death.
+This scenario passed at `2c1b7f54469d5a6f85417155f37ac9500bec4e47`, together with
+all seventeen other native scenarios:
+[Linux job 113939753308](https://github.com/cogine-ai/cliq-agent/actions/runs/37965813347/job/113939753308).
+The unmodified free Ubuntu 22.04 runner compiled and attached the test module.
+Actual controller 3106 and monitor 3123 were independently trace-stopped with
+the 2336-byte prefix. Only Supervisor 3094 was SIGKILLed; signal-zero detach
+allowed the same native inode to complete to 4768 bytes. The successor obtained
+fresh created-scope death and completed one distinct edit/claim/charge. Worker
+3125 and init 3124 were retained birth-file identities, not independently live
+PID-2 observations at the crash. Local build, strict campaign TypeScript checks
+and all 1807 tests passed before pushing. All six Linux/macOS CI jobs passed.
+
+Next, the same genuine fork cut must remain fail-closed if the original
+controller is killed before retaining the monitor identity. Only after the
+tracer observes that exact controller's SIGKILL terminal status may it resume
+the already-captured monitor. The actual child closes its own barrier writer,
+reads EOF from the now-absent original writer, and exits 70. No monitor kill,
+birth append, repair, no-spawn invention or root retry is permitted. A fresh
+public opening must refuse the unchanged 2336-byte witness, preserve the queued
+Run/generation/Journal/event cut, and retain its real owner lock after caller
+GC. That unknown fixture is preserved for the controlled job teardown. This
+negative scenario is implemented; actual Linux qualification remains pending.
 
 Then qualify the same complete scenario at these boundaries:
 

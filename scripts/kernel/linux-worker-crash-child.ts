@@ -26,7 +26,7 @@ import { openStateStore, type StateStore, type StateStoreRuntimeAuthority } from
 
 export type CrashChildInput = {
   stateRoot: string; runId: string; runtimeAuthority: StateStoreRuntimeAuthority;
-  preactivationCrash?: 'reserved_before_create' | 'ready_before_identity' | 'preactivated_before_activation' | 'queued_post_move_before_retirement' | 'monitor_fork_before_ready';
+  preactivationCrash?: 'reserved_before_create' | 'ready_before_identity' | 'preactivated_before_activation' | 'queued_post_move_before_retirement' | 'monitor_fork_before_ready' | 'monitor_fork_controller_loss';
   retirementFault?: 'pre_probe' | 'timeout_closure' | 'controller_loss';
   materialData: Omit<RunAssemblyValidationMaterial, 'resolveVerifiedCapabilityClaims' | 'verifyLocalZeroCostAuthority' |
     'resolvePriceTableAuthority' | 'resolveVerifiedTools' | 'verifyReference' | 'verifyProviderAdapter' | 'verifyProviderEndpoint'>;
@@ -241,9 +241,9 @@ async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<ty
           readFaults++; throw primary;
         }
         process.kill(process.pid, 'SIGSTOP');
-        // Only this scene resumes the real sealed-image read so that the
+        // Only monitor-fork scenes resume the real sealed-image read so that the
         // original controller can reach an externally observed fork event.
-        if (input.preactivationCrash === 'monitor_fork_before_ready') return count;
+        if (input.preactivationCrash === 'monitor_fork_before_ready' || input.preactivationCrash === 'monitor_fork_controller_loss') return count;
         throw new Error('preactivation crash barrier unexpectedly resumed');
       } finally { probing = false; }
     }) as typeof fs.readSync;

@@ -22,7 +22,7 @@ struct tracee { pid_t pid; enum trace_state state; int status; };
 static struct {
     pid_t thread;
     struct tracee controller, monitor;
-    bool interrupt_requested, releasing, unknown_child;
+    bool interrupt_requested, releasing, unknown_child, controller_loss, monitor_continued;
 } active;
 
 static napi_value error(napi_env env, const char *message) {
@@ -97,7 +97,7 @@ static bool observe(napi_env env, struct tracee *tracee, bool controller) {
             tracee->state = FORK_STOP;
         } else if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP &&
                    ((unsigned int)status >> 16) == PTRACE_EVENT_STOP &&
-                   (!controller || active.interrupt_requested)) {
+                   ((!controller && !active.monitor_continued) || (controller && active.interrupt_requested))) {
             tracee->state = controller ? INTERRUPT_STOP : INITIAL_STOP;
         } else {
             tracee->state = UNKNOWN_STOP;
@@ -125,7 +125,8 @@ static napi_value arm(napi_env env, napi_callback_info info) {
 }
 static napi_value poll_fork(napi_env env, napi_callback_info info) {
     if (!main_thread(env) || !no_arguments(env, info)) return NULL;
-    if (active.thread == 0 || active.releasing) return error(env, "fork capture requires an armed, non-releasing tracer");
+    if (active.thread == 0 || active.releasing || active.controller_loss)
+        return error(env, "fork capture requires an armed, non-releasing tracer");
     if (!observe(env, &active.controller, true)) return NULL;
     if (active.controller.state == TERMINAL) return status_error(env, "controller exited before fork capture", &active.controller);
     if (!observe(env, &active.monitor, false)) return NULL;
@@ -135,6 +136,57 @@ static napi_value poll_fork(napi_env env, napi_callback_info info) {
         if (napi_create_int32(env, active.monitor.pid, &result) != napi_ok) return error(env, "cannot return captured monitor PID");
     } else if (napi_get_null(env, &result) != napi_ok) return error(env, "cannot return pending fork capture");
     return result;
+}
+static bool progress_controller_loss(napi_env env) {
+    if (!observe(env, &active.controller, true)) return false;
+    if (active.controller.state == FORK_STOP) return true;
+    if (active.controller.state != TERMINAL || !WIFSIGNALED(active.controller.status) ||
+        WTERMSIG(active.controller.status) != SIGKILL) {
+        status_error(env, "controller loss requires its actual SIGKILL termination", &active.controller); return false;
+    }
+    if (!observe(env, &active.monitor, false)) return false;
+    if (!active.monitor_continued) {
+        if (active.monitor.state != INITIAL_STOP) {
+            status_error(env, "controller loss requires the captured monitor's initial stop", &active.monitor); return false;
+        }
+        /* Only a joined controller permits the monitor to close its inherited
+         * writer and observe genuine EOF. The tracer never sends a signal. */
+        if (ptrace(PTRACE_CONT, active.monitor.pid, (void *)0, (void *)0) == -1) {
+            system_error(env, "PTRACE_CONT monitor after controller loss", errno); return false;
+        }
+        active.monitor.state = RUNNING; active.monitor_continued = true;
+        return true;
+    }
+    if (active.monitor.state == RUNNING) return true;
+    if (active.monitor.state != TERMINAL || !WIFEXITED(active.monitor.status) ||
+        WEXITSTATUS(active.monitor.status) != 70) {
+        status_error(env, "monitor did not naturally exit 70 after controller loss", &active.monitor); return false;
+    }
+    return true;
+}
+static napi_value finish_controller_loss(napi_env env, napi_callback_info info) {
+    if (!main_thread(env) || !no_arguments(env, info)) return NULL;
+    if (active.thread == 0 || active.releasing)
+        return error(env, "controller loss requires a captured, non-releasing tracer");
+    if (!active.controller_loss) {
+        if (active.controller.state != FORK_STOP || active.monitor.pid == 0 || active.monitor.state != INITIAL_STOP)
+            return error(env, "controller loss requires both genuine captured fork stops");
+        active.controller_loss = true;
+    }
+    if (!progress_controller_loss(env)) return NULL;
+    napi_value result;
+    if (active.controller.state != TERMINAL || active.monitor.state != TERMINAL) {
+        if (napi_get_null(env, &result) != napi_ok) return error(env, "cannot return pending controller loss");
+        return result;
+    }
+    napi_value controller_signal, monitor_exit;
+    if (napi_create_object(env, &result) != napi_ok ||
+        napi_create_int32(env, WTERMSIG(active.controller.status), &controller_signal) != napi_ok ||
+        napi_create_int32(env, WEXITSTATUS(active.monitor.status), &monitor_exit) != napi_ok ||
+        napi_set_named_property(env, result, "controllerSignal", controller_signal) != napi_ok ||
+        napi_set_named_property(env, result, "monitorExitCode", monitor_exit) != napi_ok)
+        return error(env, "cannot return observed controller-loss statuses");
+    memset(&active, 0, sizeof(active)); return result;
 }
 static bool detach(napi_env env, struct tracee *tracee, bool controller) {
     if (closed(tracee)) return true;
@@ -151,6 +203,13 @@ static napi_value release(napi_env env, napi_callback_info info) {
     if (!main_thread(env) || !no_arguments(env, info)) return NULL;
     if (active.thread == 0) return boolean(env, true);
     active.releasing = true;
+    if (active.controller_loss) {
+        if (!progress_controller_loss(env)) return NULL;
+        if (active.controller.state != TERMINAL || active.monitor.state != TERMINAL) return boolean(env, false);
+        napi_value result = boolean(env, true);
+        if (result != NULL) memset(&active, 0, sizeof(active));
+        return result;
+    }
     if (!observe(env, &active.controller, true)) return NULL;
     if (active.unknown_child) return status_error(env, "signaled controller may retain an unregistered tracee", &active.controller);
     if (!observe(env, &active.monitor, false)) return NULL;
@@ -173,9 +232,10 @@ static napi_value initialize(napi_env env, napi_value exports) {
     napi_property_descriptor properties[] = {
         { "arm", NULL, arm, NULL, NULL, NULL, napi_default, NULL },
         { "pollFork", NULL, poll_fork, NULL, NULL, NULL, napi_default, NULL },
+        { "finishControllerLoss", NULL, finish_controller_loss, NULL, NULL, NULL, napi_default, NULL },
         { "release", NULL, release, NULL, NULL, NULL, napi_default, NULL }
     };
-    if (napi_define_properties(env, exports, 3, properties) != napi_ok) return error(env, "cannot install test-only tracer interface");
+    if (napi_define_properties(env, exports, 4, properties) != napi_ok) return error(env, "cannot install test-only tracer interface");
     return exports;
 }
 NAPI_MODULE(NODE_GYP_MODULE_NAME, initialize)
