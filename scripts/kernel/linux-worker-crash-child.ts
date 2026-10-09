@@ -9,7 +9,7 @@ import { inspect } from 'node:util';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { digestOmitting, identityHash } from '../../src/kernel/identity.js';
-import type { ProcessContainmentPlanV1 } from '../../src/kernel/execution.js';
+import type { ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentPlanV1 } from '../../src/kernel/execution.js';
 import type { ToolContractManifestV1, WorkerDeathWait, WorkerIdentity, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../../src/kernel/types.js';
 import type { RunAssemblyValidationMaterial, RunAssemblyToolAuthority } from '../../src/model/run-assembly.js';
@@ -18,12 +18,15 @@ import { decodeWorkerIdentity } from '../../src/state/decoders.js';
 import { ResourceRetirementError } from '../../src/state/errors.js';
 import { decodeWorkerProcessContainment } from '../../src/state/execution-closure.js';
 import { readRequiredWorkerLaunch } from '../../src/state/repositories/worker-launches.js';
+import { readRequiredWorkspaceGenerationByRef } from '../../src/state/repositories/workspace-generations.js';
+import { readInvocationJournal } from '../../src/state/repositories/journal.js';
+import { readRun } from '../../src/state/rows.js';
 import { openSqliteDriver } from '../../src/state/sqlite-driver.js';
 import { openStateStore, type StateStore, type StateStoreRuntimeAuthority } from '../../src/state/store.js';
 
 export type CrashChildInput = {
   stateRoot: string; runId: string; runtimeAuthority: StateStoreRuntimeAuthority;
-  preactivationCrash?: 'reserved_before_create' | 'ready_before_identity' | 'preactivated_before_activation';
+  preactivationCrash?: 'reserved_before_create' | 'ready_before_identity' | 'preactivated_before_activation' | 'queued_post_move_before_retirement';
   retirementFault?: 'pre_probe' | 'timeout_closure' | 'controller_loss';
   materialData: Omit<RunAssemblyValidationMaterial, 'resolveVerifiedCapabilityClaims' | 'verifyLocalZeroCostAuthority' |
     'resolvePriceTableAuthority' | 'resolveVerifiedTools' | 'verifyReference' | 'verifyProviderAdapter' | 'verifyProviderEndpoint'>;
@@ -31,6 +34,9 @@ export type CrashChildInput = {
 export type CrashChildPaused = { state: 'post_move_pre_cas'; runId: string; waitingOnRef: string;
   generationRef: string; sourceRowVersion: number; archiveRelativePath: string; archiveDevice: string; archiveInode: string;
   quarantineArtifactRef: string };
+export type CrashChildQueuedPostMove = { state: 'queued_post_move_pre_retirement'; runId: string;
+  generationRef: string; sourceRowVersion: number; temporaryBasename: string; temporaryFd: number;
+  quarantineArtifactRef: string; actualReadFaults: 1 };
 export type CrashChildRetirementRefused = { state: 'retirement_close_refused'; runId: string;
   fault: Exclude<NonNullable<CrashChildInput['retirementFault']>, 'controller_loss'>; waitingOnRef: string; probePhase: string;
   closeCode: 'RECOVERY_REQUIRED'; actualCloseFaults: 1 };
@@ -64,13 +70,20 @@ function token(pid: number): string {
 }
 
 async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<typeof openSqliteDriver>,
-  execution: Awaited<ReturnType<StateStore['loadRunExecution']>>, expectedRunRevision: number): Promise<never> {
+  execution: Awaited<ReturnType<StateStore['loadRunExecution']>>, before: Awaited<ReturnType<StateStore['readRecoveryClosure']>>,
+  prototype: Pick<FileHandle, 'writeFile'>): Promise<never> {
   const committed = input.preactivationCrash === 'preactivated_before_activation';
+  const postMove = input.preactivationCrash === 'queued_post_move_before_retirement';
   const created = input.preactivationCrash === 'ready_before_identity';
   const image = input.runtimeAuthority.bundle.entries.find(entry => entry.entryId === 'linux_worker');
   assert.ok(image?.executable && image.role === 'worker');
   const originalRead = fs.readSync;
   const originalNow = Date.now;
+  const originalWrite = prototype.writeFile;
+  const primary = Object.assign(new Error('campaign actual sealed-image read fault before native creation'), { code: 'EIO' });
+  let readFaults = 0, publicationSelected = false;
+  let failedLaunch: ReturnType<typeof readRequiredWorkerLaunch> | undefined;
+  let failedGeneration: WorkspaceGenerationStateV1 | undefined;
   const soleLaunch = () => metadata.readSnapshot(connection => {
     const rows = connection.prepare('SELECT launch_id FROM worker_launches WHERE run_id=? AND retired_at IS NULL')
       .all<{ launch_id: string }>(input.runId);
@@ -79,6 +92,77 @@ async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<ty
   });
   let probing = false;
   try {
+    if (postMove) prototype.writeFile = (async function(this: FileHandle, data: unknown, ...args: unknown[]) {
+      let value: unknown;
+      if (Buffer.isBuffer(data)) { try { value = JSON.parse(data.toString('utf8')); } catch { /* Other actual CAS chunks. */ } }
+      const candidate = value as Partial<WorkspaceGenerationQuarantineEvidenceV1> | undefined;
+      const selected = !publicationSelected && candidate?.format === 'cliq-workspace-generation-quarantine-evidence-v1' &&
+        candidate.reason === 'launch_aborted' && candidate.runId === input.runId;
+      if (selected) publicationSelected = true;
+      const result = await Reflect.apply(originalWrite, this, [data, ...args]);
+      if (!selected) return result;
+      assert.ok(Buffer.isBuffer(data) && data.length <= 64 * 1024 && failedLaunch && failedGeneration);
+      assert.equal(readFaults, 1);
+      const receipt = candidate as Extract<WorkspaceGenerationQuarantineEvidenceV1, { reason: 'launch_aborted' }>;
+      assert.deepEqual(data, canonicalJsonBytes(receipt));
+      assert.equal(receipt.evidenceDigest, digestOmitting(receipt, 'evidenceDigest'));
+      const launch = soleLaunch(); assert.deepEqual(launch, failedLaunch);
+      const cut = metadata.readSnapshot(connection => {
+        const run = readRun(connection, input.runId), generation = readRequiredWorkspaceGenerationByRef(connection, failedLaunch!.workspaceGenerationRef);
+        assert.deepEqual(run, before.run); assert.deepEqual(readInvocationJournal(connection, input.runId), before.journal);
+        assert.equal(run.status, 'queued'); assert.equal(run.activeWorkerLaunchId, undefined);
+        assert.equal(generation.phase, 'preactivated_readonly'); assert.deepEqual(generation, failedGeneration,
+          'the post-move publication pause must retain the exact pre-fault generation version');
+        return { run, generation };
+      });
+      const identity = artifact<WorkspaceGenerationIdentityV1>(input.stateRoot, cut.generation.generationRef);
+      if (identity.locator.kind !== 'linux_directory') throw new Error('queued post-move target lacks its actual Linux generation');
+      const archiveRelativePath = `quarantine/workspace-generations/${identityHash(identity.generationId, String(cut.generation.rowVersion))}`;
+      const originalPath = path.join(input.stateRoot, identity.locator.canonicalRootRelativePath);
+      assert.throws(() => fs.lstatSync(originalPath), { code: 'ENOENT' });
+      const archive = fs.lstatSync(path.join(input.stateRoot, archiveRelativePath), { bigint: true });
+      assert.ok(archive.isDirectory() && !archive.isSymbolicLink());
+      assert.equal(String(archive.dev), identity.locator.deviceId); assert.equal(String(archive.ino), identity.locator.directoryFileId);
+      const proof = artifact<ProcessContainmentNoSpawnEvidenceV1>(input.stateRoot, receipt.containmentNoSpawnEvidenceRef);
+      assert.equal(proof.kind, 'containment_plan_quiescent'); assert.equal(proof.evidenceDigest, receipt.containmentNoSpawnEvidenceDigest);
+      assert.equal(proof.evidenceDigest, digestOmitting(proof, 'evidenceDigest'));
+      assert.deepEqual(receipt, {
+        schemaVersion: 1, format: 'cliq-workspace-generation-quarantine-evidence-v1', runId: input.runId,
+        generationRef: cut.generation.generationRef, generationIdentityDigest: cut.generation.generationIdentityDigest,
+        sourceRowVersion: cut.generation.rowVersion, observedState: { kind: 'complete_tree', treeDigest: cut.generation.lastVerifiedTreeDigest },
+        inspectorIdentityRef: proof.inspectorIdentityRef, inspectorIdentityDigest: proof.inspectorIdentityDigest,
+        quarantineCanonicalRootRelativePath: archiveRelativePath, quarantineDeviceId: identity.locator.deviceId,
+        quarantineFileId: identity.locator.directoryFileId, originalLocatorAbsent: true, renameNoReplace: true,
+        directoryFsyncComplete: true, observedAt: receipt.observedAt, evidenceDigest: receipt.evidenceDigest,
+        workerLaunchId: failedLaunch.launchId, fromPhase: 'preactivated_readonly', reason: 'launch_aborted',
+        containmentNoSpawnEvidenceRef: receipt.containmentNoSpawnEvidenceRef, containmentNoSpawnEvidenceDigest: proof.evidenceDigest
+      } satisfies Extract<WorkspaceGenerationQuarantineEvidenceV1, { reason: 'launch_aborted' }>);
+      const fdPath = fs.readlinkSync(`/proc/self/fd/${this.fd}`), temporaryBasename = path.basename(fdPath);
+      assert.equal(path.dirname(fdPath), path.join(input.stateRoot, KERNEL_CAS_DIRECTORY));
+      assert.match(temporaryBasename, /^\.tmp-stream-[0-9a-f]{32}$/u);
+      const held = fs.fstatSync(this.fd, { bigint: true }), named = fs.lstatSync(fdPath, { bigint: true });
+      assert.ok(held.isFile()); assert.equal(held.nlink, 1n); assert.equal(held.mode & 0o7777n, 0o600n);
+      assert.equal(Number(held.uid), process.getuid!()); assert.equal(held.size, BigInt(data.length));
+      assert.equal(named.dev, held.dev); assert.equal(named.ino, held.ino);
+      const actualBytes = Buffer.alloc(data.length);
+      for (let offset = 0; offset < actualBytes.length;) {
+        const length = originalRead(this.fd, actualBytes, offset, actualBytes.length - offset, offset);
+        assert.ok(length > 0); offset += length;
+      }
+      assert.deepEqual(actualBytes, data);
+      const after = fs.fstatSync(this.fd, { bigint: true });
+      for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], held[field]);
+      const quarantineArtifactRef = canonicalSha256(receipt);
+      assert.throws(() => fs.lstatSync(path.join(input.stateRoot, KERNEL_CAS_DIRECTORY, quarantineArtifactRef)), { code: 'ENOENT' });
+      const message: CrashChildQueuedPostMove = { state: 'queued_post_move_pre_retirement', runId: input.runId,
+        generationRef: cut.generation.generationRef, sourceRowVersion: cut.generation.rowVersion,
+        temporaryBasename, temporaryFd: this.fd, quarantineArtifactRef, actualReadFaults: 1 };
+      // Flush this diagnostic locator hint before stopping; it does not grant
+      // authority. The parent independently opens and rechecks the real bytes.
+      await new Promise<void>((resolve, reject) => process.send!(message, error => error ? reject(error) : resolve()));
+      process.kill(process.pid, 'SIGSTOP');
+      throw new Error('queued post-move crash barrier unexpectedly resumed');
+    }) as FileHandle['writeFile'];
     if (committed) {
       Date.now = () => {
         const now = originalNow();
@@ -151,6 +235,11 @@ async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<ty
         // The parent observes T and independently reads the retained cut. An
         // IPC send here could remain buffered forever once this thread stops.
         fs.readSync = originalRead; syncBuiltinESMExports();
+        if (postMove) {
+          failedLaunch = launch;
+          failedGeneration = metadata.readSnapshot(connection => readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef));
+          readFaults++; throw primary;
+        }
         process.kill(process.pid, 'SIGSTOP');
         throw new Error('preactivation crash barrier unexpectedly resumed');
       } finally { probing = false; }
@@ -158,9 +247,9 @@ async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<ty
     syncBuiltinESMExports();
     await new Promise<void>((resolve, reject) => process.send!({ state: 'preactivation_crash_armed', runId: input.runId },
       error => error ? reject(error) : resolve()));
-    await execution.executeCurrentTool({ expectedRunRevision });
+    await execution.executeCurrentTool({ expectedRunRevision: before.run.revision });
     throw new Error(`execution missed the required actual ${input.preactivationCrash} crash boundary`);
-  } finally { Date.now = originalNow; fs.readSync = originalRead; syncBuiltinESMExports(); }
+  } finally { Date.now = originalNow; fs.readSync = originalRead; prototype.writeFile = originalWrite; syncBuiltinESMExports(); }
 }
 
 async function run(input: CrashChildInput) {
@@ -199,7 +288,7 @@ async function run(input: CrashChildInput) {
   try {
     if (input.preactivationCrash !== undefined) {
       assert.equal(input.retirementFault, undefined);
-      return await stopPreactivation(input, metadata, execution, before.run.revision);
+      return await stopPreactivation(input, metadata, execution, before, prototype);
     }
     prototype.readFile = (async function(this: FileHandle, ...args: unknown[]) {
       const bytes: unknown = await Reflect.apply(originalRead, this, args);

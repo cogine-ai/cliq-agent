@@ -4,7 +4,8 @@ Status: **Option A approved; implementation and real qualification in progress.
 The before-create, READY-before-identity and invalid private-entry
 retirement/retry tracers and reserved-before-create Supervisor crash have real
 Linux GREEN. The READY-before-identity Supervisor crash also has real Linux
-GREEN; the remaining successor crash boundaries are still being qualified.**
+GREEN, as does committed preactivation before lease activation; the remaining
+successor crash boundaries are still being qualified.**
 Baseline: `854b9a95e6a99a8380772243853e5b7adc597272` (`main`, PR #514).
 
 This is one complete capability inside I1, not a new work package or a
@@ -252,7 +253,25 @@ ready-cut and budget facts remain powerless. SIGKILL interrupts that real
 activation transaction; this cut makes no claim about rolling back already
 written activation pages. Successor retirement must preserve the genuinely
 recorded identity and containment rather than adopting them for activation.
-This next tracer still requires real Linux qualification.
+This tracer passed at `1a463acaef2772b6bd8b76e852aadfdb3aba4ea1`, together with all
+fifteen other native scenarios:
+[Linux job 113917641321](https://github.com/cogine-ai/cliq-agent/actions/runs/37959269294/job/113917641321).
+Actual Supervisor 3028 was killed inside that unwritten activation transaction;
+controller 3040, worker 3043, init 3042 and monitor 3041 were independently
+observed before the crash. Successor retirement and distinct retry retained the
+original committed identity/containment and exact old history. Build, strict
+campaign TypeScript checks and all 1807 tests passed locally before pushing;
+all six qualification and Node 22/24 Linux/macOS jobs passed.
+
+Queued post-move retirement is next. After one actual pre-create image-read EIO,
+the real FileHandle write must finish the temporary quarantine receipt before
+the child stops. Publication and the retirement SQL commit have not happened.
+The parent treats the child's temporary filename/ref only as untrusted locator
+hints: it independently verifies actual canonical bytes, file identity and the
+one derived quarantine inode/path for the still-retained generation version.
+Successor opening must reuse that exact target, create fresh owner-bound proof,
+and commit exactly one retirement without scanning or incrementing the version
+before the move. This scenario is not yet qualified.
 
 For the later native-fork/pre-READY window, the user approved a test-only Linux
 operating-system tracer. It may observe and suspend the real fork on the free

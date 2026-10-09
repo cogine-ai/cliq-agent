@@ -11,11 +11,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { inspect } from 'node:util';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
-import { identityHash } from '../../src/kernel/identity.js';
+import { digestOmitting, identityHash } from '../../src/kernel/identity.js';
 import type { ProcessContainment, ProcessContainmentDeathEvidenceV1, ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../src/kernel/execution.js';
 import type { ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1 } from '../../src/kernel/reconciliation.js';
 import type { WorkerDeathWait, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
-  WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1, Run, WorkerLaunch } from '../../src/kernel/types.js';
+  WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1,
+  SupervisorInspectorIdentityV1, Run, WorkerLaunch } from '../../src/kernel/types.js';
 import { openLinuxWorkerLauncher } from '../../src/sandbox/linux-worker.js';
 import { createLinuxWorkerCampaignFixture } from '../../src/sandbox/testing/worker-campaign-fixture.js';
 import type { LocalControlConnection, LocalControlListener } from '../../src/state/control-channel.js';
@@ -28,7 +29,7 @@ import { readRun } from '../../src/state/rows.js';
 import { openSqliteDriver } from '../../src/state/sqlite-driver.js';
 import { readLatestStateOwner } from '../../src/state/state-owner.js';
 import { openStateStore, type StateStore } from '../../src/state/store.js';
-import type { CrashChildInput, CrashChildPaused, CrashChildRetirementRefused, CrashChildControllerLossRefused } from './linux-worker-crash-child.js';
+import type { CrashChildInput, CrashChildPaused, CrashChildQueuedPostMove, CrashChildRetirementRefused, CrashChildControllerLossRefused } from './linux-worker-crash-child.js';
 
 // This command is intentionally separate from ordinary portable unit tests.
 // Missing actual images, persistent bounded storage, namespaces or delegated
@@ -452,10 +453,12 @@ function expectedNativeBirthBody(numbers: readonly bigint[], texts: readonly (re
 
 async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInput['preactivationCrash']>) {
   const committed = boundary === 'preactivated_before_activation';
-  const created = boundary !== 'reserved_before_create';
+  const postMove = boundary === 'queued_post_move_before_retirement';
+  const created = boundary === 'ready_before_identity' || committed;
   const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `${boundary.replaceAll('_', '-')}-crash` });
   let child: ReturnType<typeof fork> | undefined, exited: ReturnType<typeof once> | undefined, successor: StateStore | undefined;
   let history: ReturnType<typeof openSqliteDriver> | undefined;
+  let removeHintListener: (() => void) | undefined;
   let diagnostic = '', resourcesRetired = false, operationFailure: { error: unknown } | undefined;
   try {
     const before = await checkpointBytes(fixture.store, fixture.runId);
@@ -476,6 +479,17 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       ]); } finally { clearTimeout(timer); abort.abort(); }
     };
     assert.equal((await reply()).state, 'ready');
+    // This listener is installed before dispatch, not after awaiting the arming
+    // reply. A quick producer must not lose its flushed diagnostic locator hint.
+    let hintCount = 0;
+    const hintPromise = postMove ? new Promise<unknown>(resolve => {
+      const listener = (value: unknown) => {
+        if (value && typeof value === 'object' && (value as { state?: unknown }).state === 'queued_post_move_pre_retirement') {
+          hintCount++; resolve(value);
+        }
+      };
+      supervisor.on('message', listener); removeHintListener = () => supervisor.off('message', listener);
+    }) : undefined;
     const armed = reply(); void armed.catch(() => {});
     const input: CrashChildInput = { stateRoot: fixture.stateRoot, runId: fixture.runId, runtimeAuthority: fixture.runtimeAuthority,
       preactivationCrash: boundary,
@@ -483,6 +497,9 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     await new Promise<void>((resolve, reject) => supervisor.send(input, error => error ? reject(error) : resolve()));
     const message = await armed;
     assert.equal(message.state, 'preactivation_crash_armed', message.message ?? diagnostic); assert.equal(message.runId, fixture.runId);
+    const hint = hintPromise ? await bounded(Promise.race([hintPromise,
+      exit.then(([code, signal]) => { throw new Error(`queued post-move Supervisor exited before its hint: ${code}/${signal}: ${diagnostic}`); })
+    ]), 40_000) as CrashChildQueuedPostMove : undefined;
     // Arming is flushed before execution. Stopping is an actual OS barrier,
     // not a child's IPC assertion about which persisted cut was reached.
     await bounded((async () => {
@@ -494,6 +511,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
         await delay(10);
       }
     })(), 40_000);
+    if (postMove) assert.equal(hintCount, 1);
     const metadata = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
     const held = (() => { try { return metadata.readSnapshot(connection => {
       const run = readRun(connection, fixture.runId), owner = readLatestStateOwner(connection)!;
@@ -529,10 +547,22 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       ? decodeWorkerProcessContainment(frozenArtifact(fixture.stateRoot, held.launch.processContainmentRef!)) : undefined;
     const controller = /^linux-subreaper:([1-9][0-9]*):(linux-proc-start-ticks:[0-9]+)$/u.exec(plan.backend.subreaperStartToken);
     assert.ok(controller); const controllerPid = Number(controller[1]), controllerToken = controller[2]!;
-    assert.equal(processToken(controllerPid), controllerToken);
-    assert.match(await readFile(`/proc/${controllerPid}/status`, 'utf8'), new RegExp(`^PPid:\\s+${supervisor.pid}$`, 'mu'));
+    if (postMove) await assert.rejects(access(`/proc/${controllerPid}`), { code: 'ENOENT' });
+    else {
+      assert.equal(processToken(controllerPid), controllerToken);
+      assert.match(await readFile(`/proc/${controllerPid}/status`, 'utf8'), new RegExp(`^PPid:\\s+${supervisor.pid}$`, 'mu'));
+    }
     const identity = frozenArtifact<WorkspaceGenerationIdentityV1>(fixture.stateRoot, held.generation.generationRef);
     if (identity.locator.kind !== 'linux_directory') throw new Error('preactivation crash lacks an actual private Linux generation');
+    const archiveRelativePath = `quarantine/workspace-generations/${identityHash(identity.generationId, String(held.generation.rowVersion))}`;
+    const noSpawnBackend = {
+      kind: 'linux', cgroupPath: plan.backend.cgroupPath, cgroupObservation: { kind: 'absent' },
+      pidNamespaceObservation: { kind: 'never_created', pidNamespaceReservationId: plan.backend.pidNamespaceReservationId },
+      matchingLaunchNonceProcessCount: 0, subreaperStartToken: plan.backend.subreaperStartToken
+    } satisfies Extract<ProcessContainmentNoSpawnEvidenceV1['backend'], { kind: 'linux' }>;
+    let pendingReceipt: Extract<WorkspaceGenerationQuarantineEvidenceV1, { reason: 'launch_aborted' }> | undefined;
+    let pendingProof: ProcessContainmentNoSpawnEvidenceV1 | undefined;
+    let pendingReceiptRef: string | undefined;
     let physicalScope: { cgroupId: string; pidNamespaceId: string; workerPid: number; workerToken: string;
       initPid: number; initToken: string; monitorPid: number; monitorToken: string;
       namespaceInitStartToken: string; members: { pid: number; token: string }[] } | undefined;
@@ -607,6 +637,78 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       const after = await witness.stat({ bigint: true });
       for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
     } finally { await witness.close(); }
+    if (postMove) {
+      assert.ok(hint); assert.equal(hint.runId, fixture.runId); assert.equal(hint.generationRef, held.generation.generationRef);
+      assert.equal(hint.sourceRowVersion, held.generation.rowVersion); assert.equal(hint.actualReadFaults, 1);
+      assert.equal(typeof hint.temporaryBasename, 'string'); assert.match(hint.temporaryBasename, /^\.tmp-stream-[0-9a-f]{32}$/u);
+      assert.ok(Number.isSafeInteger(hint.temporaryFd) && hint.temporaryFd >= 3);
+      assert.match(hint.quarantineArtifactRef, /^[0-9a-f]{64}$/u);
+      const temporaryPath = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, hint.temporaryBasename);
+      assert.equal(fs.readlinkSync(`/proc/${supervisor.pid}/fd/${hint.temporaryFd}`), temporaryPath);
+      const temporary = await open(temporaryPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      try {
+        const physical = await temporary.stat({ bigint: true });
+        assert.ok(physical.isFile()); assert.equal(physical.mode & 0o7777n, 0o600n); assert.equal(physical.nlink, 1n);
+        assert.equal(Number(physical.uid), supervisorIdentity.ownerUid); assert.ok(physical.size > 0n && physical.size <= 64n * 1024n);
+        const remote = await stat(`/proc/${supervisor.pid}/fd/${hint.temporaryFd}`, { bigint: true });
+        assert.equal(remote.dev, physical.dev); assert.equal(remote.ino, physical.ino);
+        const bytes = Buffer.alloc(Number(physical.size));
+        for (let offset = 0; offset < bytes.length;) {
+          const { bytesRead } = await temporary.read(bytes, offset, bytes.length - offset, offset);
+          assert.ok(bytesRead > 0); offset += bytesRead;
+        }
+        const receipt = JSON.parse(bytes.toString('utf8')) as Extract<WorkspaceGenerationQuarantineEvidenceV1, { reason: 'launch_aborted' }>;
+        assert.deepEqual(bytes, canonicalJsonBytes(receipt)); assert.equal(receipt.evidenceDigest, digestOmitting(receipt, 'evidenceDigest'));
+        pendingReceiptRef = canonicalSha256(receipt); assert.equal(pendingReceiptRef, hint.quarantineArtifactRef);
+        await assert.rejects(lstat(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, pendingReceiptRef)), { code: 'ENOENT' });
+        const proof = frozenArtifact<ProcessContainmentNoSpawnEvidenceV1>(fixture.stateRoot, receipt.containmentNoSpawnEvidenceRef);
+        const inspector = frozenArtifact<SupervisorInspectorIdentityV1>(fixture.stateRoot, proof.inspectorIdentityRef);
+        assert.equal(inspector.identityDigest, digestOmitting(inspector, 'identityDigest'));
+        assert.deepEqual(inspector, {
+          schemaVersion: 1, format: 'cliq-supervisor-inspector-identity-v1', supervisorInstanceId: held.owner.supervisorInstanceId,
+          stateOwnerEpoch: held.owner.ownerEpoch, runtimeBundleRef: held.owner.runtimeBundleRef,
+          runtimeBundleManifestDigest: held.owner.runtimeBundleManifestDigest, supervisorEntryId: held.owner.supervisorEntryId,
+          supervisorEntryVersion: held.owner.supervisorEntryVersion, supervisorExecutableDigest: held.owner.supervisorExecutableDigest,
+          processIdentityRef: held.owner.processIdentityRef, processIdentityDigest: held.owner.processIdentityDigest,
+          stateLockIdentityRef: held.owner.stateLockIdentityRef, stateLockIdentityDigest: held.owner.stateLockIdentityDigest,
+          instanceNonceDigest: held.owner.instanceNonceDigest, activatedAt: held.owner.acquiredAt, identityDigest: inspector.identityDigest
+        } satisfies SupervisorInspectorIdentityV1);
+        assert.equal(proof.evidenceDigest, digestOmitting(proof, 'evidenceDigest'));
+        assert.deepEqual(proof, {
+          schemaVersion: 1, kind: 'containment_plan_quiescent', planRef: held.launch.containmentPlanRef,
+          sandboxLaunchSpecRef: held.launch.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: spec.launchSpecDigest,
+          owner: plan.owner, launchNonceDigest: held.launch.spawnNonceDigest,
+          inspectorSupervisorInstanceId: held.owner.supervisorInstanceId, inspectorIdentityRef: proof.inspectorIdentityRef,
+          inspectorIdentityDigest: inspector.identityDigest, backend: noSpawnBackend, observedAt: proof.observedAt,
+          evidenceDigest: proof.evidenceDigest
+        } satisfies ProcessContainmentNoSpawnEvidenceV1);
+        assert.deepEqual(receipt, {
+          schemaVersion: 1, format: 'cliq-workspace-generation-quarantine-evidence-v1', runId: fixture.runId,
+          generationRef: held.generation.generationRef, generationIdentityDigest: held.generation.generationIdentityDigest,
+          sourceRowVersion: held.generation.rowVersion, observedState: { kind: 'complete_tree', treeDigest: held.generation.lastVerifiedTreeDigest },
+          inspectorIdentityRef: proof.inspectorIdentityRef, inspectorIdentityDigest: inspector.identityDigest,
+          quarantineCanonicalRootRelativePath: archiveRelativePath, quarantineDeviceId: identity.locator.deviceId,
+          quarantineFileId: identity.locator.directoryFileId, originalLocatorAbsent: true, renameNoReplace: true,
+          directoryFsyncComplete: true, observedAt: receipt.observedAt, evidenceDigest: receipt.evidenceDigest,
+          workerLaunchId: held.launch.launchId, fromPhase: 'preactivated_readonly', reason: 'launch_aborted',
+          containmentNoSpawnEvidenceRef: receipt.containmentNoSpawnEvidenceRef, containmentNoSpawnEvidenceDigest: proof.evidenceDigest
+        } satisfies Extract<WorkspaceGenerationQuarantineEvidenceV1, { reason: 'launch_aborted' }>);
+        assert.ok(proof.observedAt >= held.owner.acquiredAt && proof.observedAt >= held.launch.createdAt && proof.observedAt <= receipt.observedAt);
+        const pending = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+        try { pending.readSnapshot(connection => {
+          for (const ref of [pendingReceiptRef!, receipt.containmentNoSpawnEvidenceRef]) {
+            assert.equal(connection.prepare('SELECT ref FROM artifacts WHERE ref=?').get(ref), undefined,
+              'after-real-write pause must precede retirement artifact metadata registration');
+          }
+          assert.deepEqual(readRequiredWorkerLaunch(connection, held.launch.launchId), held.launch);
+          assert.deepEqual(readRequiredWorkspaceGenerationByRef(connection, held.generation.generationRef), held.generation);
+        }); } finally { pending.close(); }
+        const after = await temporary.stat({ bigint: true }), named = await lstat(temporaryPath, { bigint: true });
+        for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
+        assert.equal(named.dev, physical.dev); assert.equal(named.ino, physical.ino);
+        pendingReceipt = receipt; pendingProof = proof;
+      } finally { await temporary.close(); }
+    }
     if (committed) {
       assert.ok(recordedWorker && recordedContainment && physicalScope);
       assert.equal(spec.executable.kind, 'runtime_bundle');
@@ -629,7 +731,8 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
         createdAt: recordedContainment.createdAt
       } satisfies ProcessContainment);
     }
-    const root = await open(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath),
+    if (postMove) await assert.rejects(lstat(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath)), { code: 'ENOENT' });
+    const root = await open(path.join(fixture.stateRoot, postMove ? archiveRelativePath : identity.locator.canonicalRootRelativePath),
       fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     try {
       const physical = await root.stat({ bigint: true });
@@ -672,8 +775,14 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     assert.equal(archived.rowVersion, held.generation.rowVersion + 1);
     const receipt = await successor.artifacts.readCanonical<WorkspaceGenerationQuarantineEvidenceV1>(archived.quarantineEvidenceRef);
     assert.equal(receipt.reason, created ? 'launch_died_before_activation' : 'launch_aborted'); assert.equal(receipt.sourceRowVersion, held.generation.rowVersion);
-    assert.equal(receipt.quarantineCanonicalRootRelativePath,
-      `quarantine/workspace-generations/${identityHash(identity.generationId, String(held.generation.rowVersion))}`);
+    assert.equal(receipt.quarantineCanonicalRootRelativePath, archiveRelativePath);
+    if (postMove) {
+      assert.ok(pendingReceipt && pendingReceiptRef);
+      assert.notEqual(archived.quarantineEvidenceRef, pendingReceiptRef, 'successor must rebuild with its own inspector, not adopt the temporary receipt');
+      assert.equal(receipt.quarantineCanonicalRootRelativePath, pendingReceipt.quarantineCanonicalRootRelativePath);
+      assert.equal(receipt.sourceRowVersion, pendingReceipt.sourceRowVersion);
+      assert.deepEqual(receipt.observedState, pendingReceipt.observedState);
+    }
     const physical = await lstat(path.join(fixture.stateRoot, receipt.quarantineCanonicalRootRelativePath), { bigint: true });
     assert.ok(physical.isDirectory() && !physical.isSymbolicLink()); assert.equal(String(physical.dev), identity.locator.deviceId);
     assert.equal(String(physical.ino), identity.locator.directoryFileId);
@@ -705,12 +814,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     } else {
       assert.equal(created, false); assert.equal(proof.kind, 'containment_plan_quiescent');
       if (proof.kind !== 'containment_plan_quiescent' || proof.backend.kind !== 'linux') throw new Error('reserved crash lacks actual Linux no-spawn closure');
-      assert.deepEqual(proof.backend, {
-        kind: 'linux', cgroupPath: plan.backend.cgroupPath, cgroupObservation: { kind: 'absent' },
-        pidNamespaceObservation: { kind: 'never_created', pidNamespaceReservationId: plan.backend.pidNamespaceReservationId },
-        matchingLaunchNonceProcessCount: 0,
-        subreaperStartToken: plan.backend.subreaperStartToken
-      } satisfies Extract<ProcessContainmentNoSpawnEvidenceV1['backend'], { kind: 'linux' }>);
+      assert.deepEqual(proof.backend, noSpawnBackend);
     }
     const metadataAfter = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
     const newOwner = (() => { try { return metadataAfter.readSnapshot(connection => {
@@ -721,6 +825,21 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     assert.equal(proof.inspectorSupervisorInstanceId, newOwner.supervisorInstanceId);
     const inspector = await successor.artifacts.readCanonical<{ supervisorInstanceId: string; stateOwnerEpoch: number }>(proof.inspectorIdentityRef);
     assert.equal(inspector.supervisorInstanceId, newOwner.supervisorInstanceId); assert.equal(inspector.stateOwnerEpoch, newOwner.ownerEpoch);
+    if (postMove) {
+      assert.ok(pendingReceipt && pendingProof);
+      assert.notEqual(retired.retirementEvidenceRef, pendingReceipt.containmentNoSpawnEvidenceRef);
+      assert.notEqual(proof.inspectorIdentityRef, pendingProof.inspectorIdentityRef);
+      assert.equal(proof.kind, 'containment_plan_quiescent');
+      const { inspectorSupervisorInstanceId: _oldSupervisor, inspectorIdentityRef: _oldInspector,
+        inspectorIdentityDigest: _oldInspectorDigest, observedAt: _oldTime, evidenceDigest: _oldDigest, ...oldBirth } = pendingProof;
+      const { inspectorSupervisorInstanceId: _newSupervisor, inspectorIdentityRef: _newInspector,
+        inspectorIdentityDigest: _newInspectorDigest, observedAt: _newTime, evidenceDigest: _newDigest, ...newBirth } = proof;
+      assert.deepEqual(newBirth, oldBirth, 'fresh native inspection must preserve the exact original reservation bindings');
+      assert.ok(proof.observedAt >= newOwner.acquiredAt && proof.observedAt <= retired.retiredAt!);
+      assert.ok(Date.parse(retired.retiredAt!) - Date.parse(proof.observedAt) <= 5000);
+      assert.equal(receipt.inspectorIdentityRef, proof.inspectorIdentityRef);
+      assert.equal(receipt.inspectorIdentityDigest, proof.inspectorIdentityDigest);
+    }
     const retry = await successor.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
     await bounded(retry.executeCurrentTool({ expectedRunRevision: reopened.closure.run.revision }));
     const after = await checkpointBytes(successor, fixture.runId);
@@ -763,11 +882,15 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       newLaunchId: replacement.launchId, oldGenerationRef: held.generation.generationRef, newGenerationRef: replacement.workspaceGenerationRef,
       sourceRowVersion: held.generation.rowVersion, nativeEffectCount: 1, permanentToolClaims: 1,
       ...(committed ? { interruptedTransaction: 'activation-begun-before-any-write' } : {}),
-      note: `actual ${committed ? 'committed preactivation and real clock sample inside unwritten activation transaction' : 'signed held-image read'} then OS stop/SIGKILL; no signal to original controller, fresh successor ${created ? 'whole-created-death' : 'no-spawn'} closure` }));
+      ...(postMove ? { interruptedPublication: 'canonical-quarantine-written-before-cas-publication', priorQuarantineRef: pendingReceiptRef,
+        successorQuarantineRef: archived.quarantineEvidenceRef, priorProofRef: pendingReceipt!.containmentNoSpawnEvidenceRef,
+        successorProofRef: retired.retirementEvidenceRef, actualReadFaults: 1 } : {}),
+      note: `actual ${postMove ? 'sealed-image EIO then quarantine temp write before publication' : committed ? 'committed preactivation and real clock sample inside unwritten activation transaction' : 'signed held-image read'} then OS stop/SIGKILL; no signal to original controller, fresh successor ${created ? 'whole-created-death' : 'no-spawn'} closure` }));
     await successor.close(); successor = undefined; resourcesRetired = true;
   } catch (error) { operationFailure = { error }; throw error; }
   finally {
     const failures: unknown[] = [];
+    removeHintListener?.();
     try {
       if (child?.exitCode === null && child.signalCode === null) assert.ok(child.kill('SIGKILL'));
       if (exited) await bounded(exited);
@@ -1499,6 +1622,7 @@ for (const [scenario, run] of [
   ['supervisor-crash-reserved-before-create', () => supervisorCrashPreactivation('reserved_before_create')],
   ['supervisor-crash-ready-before-identity', () => supervisorCrashPreactivation('ready_before_identity')],
   ['supervisor-crash-preactivated-before-activation', () => supervisorCrashPreactivation('preactivated_before_activation')],
+  ['supervisor-crash-queued-post-move-before-retirement', () => supervisorCrashPreactivation('queued_post_move_before_retirement')],
   ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
   ['parent-loss-before-release', parentLossBeforeRelease],
