@@ -117,8 +117,8 @@ type NativeController = { pid: number; processStartToken: string;
   pollRetained(): NativeObservation | undefined;
   close(): Promise<void>;
 };
-type NativeBinding = { interfaceVersion: 2; sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
-  openController(helper: NativeImage): NativeController };
+type NativeBinding = { interfaceVersion: 3; sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
+  openController(helper: NativeImage, cgroupRootFd: number): NativeController };
 
 export type LinuxInvocationClaim = Readonly<{
   runId: string;
@@ -411,7 +411,7 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
           await hashHeld(addon.fd, metadata.size, receiver) !== addonEntry.digest) mismatch('installed native worker module is not signed');
       const loaded = new Module('cliq-linux-worker-native');
       process.dlopen(loaded, `/proc/self/fd/${addon.fd}`); binding = loaded.exports as NativeBinding;
-      if (binding.interfaceVersion !== 2 || typeof binding.sealImage !== 'function' || typeof binding.sealImageBuffer !== 'function' ||
+      if (binding.interfaceVersion !== 3 || typeof binding.sealImage !== 'function' || typeof binding.sealImageBuffer !== 'function' ||
           typeof binding.openController !== 'function') mismatch('unsupported installed native worker interface');
     } finally { await retireFiles([addon]); }
     async function image(entryId: string, role: string): Promise<NativeImage> {
@@ -434,7 +434,7 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
         if (this !== launcher) throw new TypeError('invalid worker launcher receiver'); receiver();
         const signal = controlOptions?.signal;
         signal?.throwIfAborted();
-        const native = binding.openController(helper); controllers.add(native);
+        const native = binding.openController(helper, cgroup.fd); controllers.add(native);
         let controllerClosed = false, controllerClosing: Promise<void> | undefined;
         const closeController = () => {
           controllerClosed = true;
@@ -450,184 +450,190 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
         try {
           await awaitNative(() => native.pollReady() ? true : undefined, closeController, signal);
           controllerReceiver(); signal?.throwIfAborted();
-        } catch (error) { await closeController(); throw error; }
-        const subreaperStartToken = `linux-subreaper:${native.pid}:${native.processStartToken}`;
-        const controller: LinuxWorkerController = Object.freeze({
-          pid: native.pid, processStartToken: native.processStartToken, subreaperStartToken,
-          async bindWorkerReservation({ closure, reservation, activationNonceDigest }) {
-            if (this !== controller) throw new TypeError('invalid worker controller'); controllerReceiver();
-            same(closure.bundle, bundle, 'reservation bundle');
-            if (closure.plan.backend.kind !== 'linux' || closure.plan.backend.subreaperStartToken !== subreaperStartToken ||
-                path.posix.dirname(closure.plan.backend.cgroupPath) !== options.cgroupParent) mismatch('binding selects another native spawner');
-            const config = reservationProjection(closure, reservation, activationNonceDigest);
-            const borrowed = borrowWorkerReservationForExecution(reservation, closure.spec.owner.workerLaunchId, closure.plan.launchNonceDigest);
-            let primary: { error: unknown } | undefined;
-            try {
-              borrowed.assertHeld(); native.bindReservation(borrowed.fd, config);
-              await awaitNative(() => native.pollBound() ? true : undefined, closeController);
-              controllerReceiver(); borrowed.assertHeld(); reservation.assertHeld();
-            } catch (error) { primary = { error }; throw error; }
-            finally { retireBorrow(borrowed, primary); }
-          },
-          async inspectPreactivation({ closure, reservation, activationNonceDigest, containment, workerIdentity }) {
-            if (this !== controller) throw new TypeError('invalid worker controller'); controllerReceiver();
-            assertWorkerLaunchClosure(closure); same(closure.bundle, bundle, 'inspection bundle');
-            const backend = closure.plan.backend;
-            if (backend.kind !== 'linux' || backend.subreaperStartToken === subreaperStartToken ||
-                path.posix.dirname(backend.cgroupPath) !== options.cgroupParent) mismatch('inspection requires a fresh controller for the exact old reservation');
-            const config = reservationProjection(closure, reservation, activationNonceDigest);
-            const borrowed = borrowWorkerReservationForExecution(reservation, closure.spec.owner.workerLaunchId, closure.plan.launchNonceDigest);
-            let primary: { error: unknown } | undefined;
-            try {
-              borrowed.assertHeld(); native.inspectReservation(cgroup.fd, borrowed.fd, config);
-              const observed = await awaitNative(() => native.pollReservation(), closeController);
-              controllerReceiver(); borrowed.assertHeld(); reservation.assertHeld();
-              if (!Number.isSafeInteger(observed.observedAtMs) || observed.observedAtMs < 1) mismatch('native inspection timestamp is invalid');
-              const observedAt = new Date(observed.observedAtMs).toISOString();
-              let result: NativePreactivationObservation;
-              if (observed.kind === 'not_attempted') {
-                if (observed.cgroupPresent || containment || workerIdentity) mismatch('no-spawn contradicts its physical scope or recorded worker');
-                result = immutableSnapshot({ kind: 'no_spawn', observedAt,
-                  cgroupObservation: { kind: 'absent' },
-                  pidNamespaceObservation: { kind: 'never_created', pidNamespaceReservationId: backend.pidNamespaceReservationId },
-                  matchingLaunchNonceProcessCount: 0 });
-              } else if (observed.kind === 'created_dead') {
-                const actual = actualContainment(closure, observed, observedAt);
-                if (containment) {
-                  same({ ...actual, createdAt: containment.createdAt }, containment, 'retained actual containment');
-                }
-                if (workerIdentity && (workerIdentity.pid !== observed.pid || workerIdentity.processStartToken !== observed.processStartToken ||
-                    workerIdentity.processContainmentRef !== canonicalSha256(containment))) mismatch('birth witness substitutes the recorded worker process');
-                const retained = immutableSnapshot(containment ?? actual);
-                result = Object.freeze({ kind: 'created', containment: retained, death: checkedDeath(observed, retained) });
-              } else mismatch('unsupported native reservation observation');
-              preactivationObservations.set(result, canonicalSha256([closure.containmentPlanRef, closure.sandboxLaunchSpecRef]));
-              return result;
-            } catch (error) { primary = { error }; throw error; }
-            finally { retireBorrow(borrowed, primary); }
-          },
-          async launchWorker({ closure, generation, activationNonceDigest }) {
-            if (this !== controller) throw new TypeError('invalid controller receiver'); controllerReceiver(); assertArtifactRef(activationNonceDigest);
-            assertWorkerLaunchClosure(closure);
-            same(closure.bundle, bundle, 'worker bundle');
-            const backend = closure.plan.backend;
-            if (backend.kind !== 'linux' || backend.subreaperStartToken !== subreaperStartToken ||
-                path.posix.dirname(backend.cgroupPath) !== options.cgroupParent || !/^cliq-[0-9a-f]{64}$/u.test(path.posix.basename(backend.cgroupPath))) mismatch('worker plan selects another controller or cgroup reservation');
-            supportedRecipe(closure);
-            if (closure.spec.executable.kind !== 'runtime_bundle' || closure.spec.executable.executionPath !== LINUX_WORKER_RECIPE.workerPath ||
-                closure.spec.executable.executableId !== LINUX_WORKER_RECIPE.workerId) {
-              throw new LinuxExecutionIdentityError('worker launch is outside the installed closed recipe');
-            }
-            const executable = await image(closure.spec.executable.executableId, 'worker');
-            const workerDigest = closure.spec.executable.executableDigest;
-            const borrowed = borrowRunWorkspaceForExecution(generation);
-            let nativeScope: NativeScope | undefined;
-            try {
-              borrowed.assertHeld(); borrowed.assertQuota(closure.spec.resources.maxGenerationBytes);
-              if (closure.generation.locator.kind !== 'linux_directory' || closure.generation.locator.deviceId !== borrowed.identity.deviceId ||
-                  closure.generation.locator.directoryFileId !== borrowed.identity.fileId) mismatch('worker selected a different physical generation');
-              const created = native.createWorker(borrowed.fd, cgroup.fd, helper, executable, bwrap, scopeProjection(closure, borrowed, activationNonceDigest));
-              nativeScope = created;
-              await awaitNative(() => created.pollReady() ? true : undefined, closeController); borrowed.assertHeld(); receiver();
-              const containment = actualContainment(closure, created.observe()); let active = false, borrowRetired = false;
-              const worker: LinuxBlockedWorker = Object.freeze({
-                containment,
-                async observeProcess() { if (this !== worker) throw new TypeError('invalid blocked worker'); receiver(); borrowed.assertHeld(); return observedProcess(created, workerDigest); },
-                async activateCommitted(launch) {
-                  if (this !== worker) throw new TypeError('invalid blocked worker'); borrowed.assertHeld();
-                  if (active || launch.phase !== 'activated' || launch.launchId !== closure.spec.owner.workerLaunchId ||
-                      launch.leaseEpoch !== closure.spec.owner.intendedLeaseEpoch || launch.processContainmentRef !== canonicalSha256(containment) ||
-                      launch.sandboxLaunchSpecRef !== closure.sandboxLaunchSpecRef || launch.activationNonceDigest !== activationNonceDigest ||
-                      launch.generationWriteState !== 'active') throw new KernelStorageError('LEASE_FENCED', 'worker activation does not match the committed launch');
-                  active = true; created.activate(activationNonceDigest);
-                  await awaitNative(() => created.pollActivated() ? true : undefined, closeController); receiver(); borrowed.assertHeld();
-                },
-                async createInvocation(invocationClosure) {
-                  if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'invocation requires the actual active parent worker');
-                  receiver(); borrowed.assertHeld();
-                  assertBuiltinEditLaunchClosure(invocationClosure);
-                  same(invocationClosure.bundle, bundle, 'invocation bundle');
-                  supportedRecipe(invocationClosure);
-                  const invocationBackend = invocationClosure.plan.backend;
-                  if (invocationBackend.kind !== 'linux' || invocationClosure.plan.parentContainmentRef !== canonicalSha256(containment) || invocationClosure.spec.parentWorkerContainmentRef !== canonicalSha256(containment) ||
-                      invocationClosure.spec.executable.kind !== 'runtime_bundle' || invocationClosure.spec.executable.executionPath !== LINUX_WORKER_RECIPE.editPath ||
-                      invocationClosure.spec.executable.executableId !== LINUX_WORKER_RECIPE.editId ||
-                      invocationClosure.spec.filesystem.kind !== 'run_generation' || invocationClosure.spec.filesystem.generationRef !== closure.workspaceGenerationRef ||
-                      path.posix.dirname(invocationBackend.cgroupPath) !== backend.cgroupPath) mismatch('invocation does not select the exact actual parent, recipe and generation');
-                  const adapter = await image(invocationClosure.spec.executable.executableId, 'tool_adapter');
-                  const adapterDigest = invocationClosure.spec.executable.executableDigest;
-                  // The exact JCS input is transferred through the authenticated operation channel, never argv or a writable mount.
-                  const input = canonicalJsonBytes(invocationClosure.call.value);
-                  if (canonicalSha256(invocationClosure.request) !== invocationClosure.spec.requestRef ||
-                      canonicalSha256(invocationClosure.target) !== invocationClosure.spec.targetRef ||
-                      canonicalSha256(invocationClosure.grant) !== invocationClosure.spec.operationGrantRef ||
-                      canonicalSha256(invocationClosure.call) !== invocationClosure.request.inputRef ||
-                      invocationClosure.call.inputDigest !== invocationClosure.request.inputDigest) mismatch('edit input differs from the retained canonical input');
-                  const inputImage = binding.sealImageBuffer(input);
-                  let scope: NativeScope;
-                  try { scope = native.createInvocation(borrowed.fd, created, helper, adapter, bwrap, inputImage,
-                    scopeProjection(invocationClosure, borrowed, invocationClosure.plan.launchNonceDigest)); }
-                  finally { retireImage(inputImage); }
-                  let invocationContainment: ProcessContainment;
-                  try {
-                    await awaitNative(() => scope.pollReady() ? true : undefined, closeController); borrowed.assertHeld(); receiver();
-                    invocationContainment = actualContainment(invocationClosure, scope.observe());
-                  } catch (error) { await closeController(); throw error; }
-                  const owner = invocationClosure.spec.owner;
-                  const claim: LinuxInvocationClaim = immutableSnapshot({ runId: owner.runId, leaseEpoch: owner.intendedLeaseEpoch,
-                    workerLaunchId: owner.workerLaunchId, opId: owner.opId, attempt: owner.attempt, dispatchId: owner.dispatchId,
-                    sandboxLaunchSpecRef: invocationClosure.sandboxLaunchSpecRef, requestRef: invocationClosure.spec.requestRef,
-                    requestDigest: invocationClosure.spec.requestDigest, targetRef: invocationClosure.spec.targetRef, targetDigest: invocationClosure.spec.targetDigest,
-                    operationGrantRef: invocationClosure.spec.operationGrantRef, parentWorkerContainmentRef: invocationClosure.spec.parentWorkerContainmentRef });
-                  const handle: LinuxBlockedInvocation = Object.freeze({ containment: invocationContainment,
-                    async observeProcess() { if (this !== handle) throw new TypeError('invalid blocked invocation'); borrowed.assertHeld(); return observedProcess(scope, adapterDigest); },
-                    async result() { if (this !== handle) throw new TypeError('invalid blocked invocation');
-                      const status = await awaitNative(() => scope.result(), closeController);
-                      if (status !== 0 && status !== 1) mismatch('invalid native edit result'); return status === 0 ? 'ok' : 'error'; },
-                    async stop() { if (this !== handle) throw new TypeError('invalid blocked invocation'); return death(scope, invocationContainment, native, controllerReceiver); } });
-                  invocations.set(handle, { consumed: false, claim, release() { receiver(); borrowed.assertHeld(); scope.release(); } });
-                  return handle;
-                },
-                async stop() {
-                  if (this !== worker) throw new TypeError('invalid blocked worker'); active = false;
-                  try { return await death(created, containment, native, controllerReceiver); }
-                  finally {
-                    // Fresh STOP uses only the original held native scope. A
-                    // retired generation duplicate is never reopened/reused.
-                    if (!borrowRetired) { retireBorrow(borrowed); borrowRetired = true; }
+          const subreaperStartToken = `linux-subreaper:${native.pid}:${native.processStartToken}`;
+          const controller: LinuxWorkerController = Object.freeze({
+            pid: native.pid, processStartToken: native.processStartToken, subreaperStartToken,
+            async bindWorkerReservation({ closure, reservation, activationNonceDigest }) {
+              if (this !== controller) throw new TypeError('invalid worker controller'); controllerReceiver();
+              same(closure.bundle, bundle, 'reservation bundle');
+              if (closure.plan.backend.kind !== 'linux' || closure.plan.backend.subreaperStartToken !== subreaperStartToken ||
+                  path.posix.dirname(closure.plan.backend.cgroupPath) !== options.cgroupParent) mismatch('binding selects another native spawner');
+              const config = reservationProjection(closure, reservation, activationNonceDigest);
+              const borrowed = borrowWorkerReservationForExecution(reservation, closure.spec.owner.workerLaunchId, closure.plan.launchNonceDigest);
+              let primary: { error: unknown } | undefined;
+              try {
+                borrowed.assertHeld(); native.bindReservation(borrowed.fd, config);
+                await awaitNative(() => native.pollBound() ? true : undefined, closeController);
+                controllerReceiver(); borrowed.assertHeld(); reservation.assertHeld();
+              } catch (error) { primary = { error }; throw error; }
+              finally { retireBorrow(borrowed, primary); }
+            },
+            async inspectPreactivation({ closure, reservation, activationNonceDigest, containment, workerIdentity }) {
+              if (this !== controller) throw new TypeError('invalid worker controller'); controllerReceiver();
+              assertWorkerLaunchClosure(closure); same(closure.bundle, bundle, 'inspection bundle');
+              const backend = closure.plan.backend;
+              if (backend.kind !== 'linux' || backend.subreaperStartToken === subreaperStartToken ||
+                  path.posix.dirname(backend.cgroupPath) !== options.cgroupParent) mismatch('inspection requires a fresh controller for the exact old reservation');
+              const config = reservationProjection(closure, reservation, activationNonceDigest);
+              const borrowed = borrowWorkerReservationForExecution(reservation, closure.spec.owner.workerLaunchId, closure.plan.launchNonceDigest);
+              let primary: { error: unknown } | undefined;
+              try {
+                borrowed.assertHeld(); native.inspectReservation(cgroup.fd, borrowed.fd, config);
+                const observed = await awaitNative(() => native.pollReservation(), closeController);
+                controllerReceiver(); borrowed.assertHeld(); reservation.assertHeld();
+                if (!Number.isSafeInteger(observed.observedAtMs) || observed.observedAtMs < 1) mismatch('native inspection timestamp is invalid');
+                const observedAt = new Date(observed.observedAtMs).toISOString();
+                let result: NativePreactivationObservation;
+                if (observed.kind === 'not_attempted') {
+                  if (observed.cgroupPresent || containment || workerIdentity) mismatch('no-spawn contradicts its physical scope or recorded worker');
+                  result = immutableSnapshot({ kind: 'no_spawn', observedAt,
+                    cgroupObservation: { kind: 'absent' },
+                    pidNamespaceObservation: { kind: 'never_created', pidNamespaceReservationId: backend.pidNamespaceReservationId },
+                    matchingLaunchNonceProcessCount: 0 });
+                } else if (observed.kind === 'created_dead') {
+                  const actual = actualContainment(closure, observed, observedAt);
+                  if (containment) {
+                    same({ ...actual, createdAt: containment.createdAt }, containment, 'retained actual containment');
                   }
-                }
-              });
-              return worker;
-            } catch (error) {
-              try { if (nativeScope) await closeController(); }
-              finally { retireBorrow(borrowed); }
-              throw error;
-            }
-          },
-          async terminateRetained({ closure, containment, workerIdentity, signal }) {
-            if (this !== controller) throw new TypeError('invalid controller receiver'); controllerReceiver();
-            if (signal?.aborted) { await closeController(); signal.throwIfAborted(); }
-            assertWorkerLaunchClosure(closure);
-            same(closure.bundle, bundle, 'retained worker bundle');
-            const planBackend = closure.plan.backend, actual = containment.backend;
-            if (planBackend.kind !== 'linux' || actual.kind !== 'linux' ||
-                path.posix.dirname(actual.cgroupPath) !== options.cgroupParent || actual.cgroupPath !== planBackend.cgroupPath ||
-                containment.planRef !== canonicalSha256(closure.plan) || containment.sandboxLaunchSpecRef !== closure.sandboxLaunchSpecRef ||
-                workerIdentity.processContainmentRef !== canonicalSha256(containment) || actual.subreaperStartToken !== planBackend.subreaperStartToken) {
-              mismatch('retained worker does not close the exact native reservation');
-            }
-            native.terminateRetained(cgroup.fd, { cgroupName: path.posix.basename(actual.cgroupPath),
-              cgroupId: Number(actual.cgroupId), pidNamespaceId: Number(actual.pidNamespaceId),
-              namespaceInitStartToken: actual.namespaceInitStartToken, subreaperStartToken: actual.subreaperStartToken,
-              workerPid: workerIdentity.pid, processStartToken: workerIdentity.processStartToken });
-            const observed = await awaitNative(() => native.pollRetained(), closeController, signal);
-            controllerReceiver(); signal?.throwIfAborted();
-            return checkedDeath(observed, containment);
-          },
-          async close() { if (this !== controller) throw new TypeError('invalid worker controller'); await closeController(); controllers.delete(native); }
-        });
-        return controller;
+                  if (workerIdentity && (workerIdentity.pid !== observed.pid || workerIdentity.processStartToken !== observed.processStartToken ||
+                      workerIdentity.processContainmentRef !== canonicalSha256(containment))) mismatch('birth witness substitutes the recorded worker process');
+                  const retained = immutableSnapshot(containment ?? actual);
+                  result = Object.freeze({ kind: 'created', containment: retained, death: checkedDeath(observed, retained) });
+                } else mismatch('unsupported native reservation observation');
+                preactivationObservations.set(result, canonicalSha256([closure.containmentPlanRef, closure.sandboxLaunchSpecRef]));
+                return result;
+              } catch (error) { primary = { error }; throw error; }
+              finally { retireBorrow(borrowed, primary); }
+            },
+            async launchWorker({ closure, generation, activationNonceDigest }) {
+              if (this !== controller) throw new TypeError('invalid controller receiver'); controllerReceiver(); assertArtifactRef(activationNonceDigest);
+              assertWorkerLaunchClosure(closure);
+              same(closure.bundle, bundle, 'worker bundle');
+              const backend = closure.plan.backend;
+              if (backend.kind !== 'linux' || backend.subreaperStartToken !== subreaperStartToken ||
+                  path.posix.dirname(backend.cgroupPath) !== options.cgroupParent || !/^cliq-[0-9a-f]{64}$/u.test(path.posix.basename(backend.cgroupPath))) mismatch('worker plan selects another controller or cgroup reservation');
+              supportedRecipe(closure);
+              if (closure.spec.executable.kind !== 'runtime_bundle' || closure.spec.executable.executionPath !== LINUX_WORKER_RECIPE.workerPath ||
+                  closure.spec.executable.executableId !== LINUX_WORKER_RECIPE.workerId) {
+                throw new LinuxExecutionIdentityError('worker launch is outside the installed closed recipe');
+              }
+              const executable = await image(closure.spec.executable.executableId, 'worker');
+              const workerDigest = closure.spec.executable.executableDigest;
+              const borrowed = borrowRunWorkspaceForExecution(generation);
+              let nativeScope: NativeScope | undefined;
+              try {
+                borrowed.assertHeld(); borrowed.assertQuota(closure.spec.resources.maxGenerationBytes);
+                if (closure.generation.locator.kind !== 'linux_directory' || closure.generation.locator.deviceId !== borrowed.identity.deviceId ||
+                    closure.generation.locator.directoryFileId !== borrowed.identity.fileId) mismatch('worker selected a different physical generation');
+                const created = native.createWorker(borrowed.fd, cgroup.fd, helper, executable, bwrap, scopeProjection(closure, borrowed, activationNonceDigest));
+                nativeScope = created;
+                await awaitNative(() => created.pollReady() ? true : undefined, closeController); borrowed.assertHeld(); receiver();
+                const containment = actualContainment(closure, created.observe()); let active = false, borrowRetired = false;
+                const worker: LinuxBlockedWorker = Object.freeze({
+                  containment,
+                  async observeProcess() { if (this !== worker) throw new TypeError('invalid blocked worker'); receiver(); borrowed.assertHeld(); return observedProcess(created, workerDigest); },
+                  async activateCommitted(launch) {
+                    if (this !== worker) throw new TypeError('invalid blocked worker'); borrowed.assertHeld();
+                    if (active || launch.phase !== 'activated' || launch.launchId !== closure.spec.owner.workerLaunchId ||
+                        launch.leaseEpoch !== closure.spec.owner.intendedLeaseEpoch || launch.processContainmentRef !== canonicalSha256(containment) ||
+                        launch.sandboxLaunchSpecRef !== closure.sandboxLaunchSpecRef || launch.activationNonceDigest !== activationNonceDigest ||
+                        launch.generationWriteState !== 'active') throw new KernelStorageError('LEASE_FENCED', 'worker activation does not match the committed launch');
+                    active = true; created.activate(activationNonceDigest);
+                    await awaitNative(() => created.pollActivated() ? true : undefined, closeController); receiver(); borrowed.assertHeld();
+                  },
+                  async createInvocation(invocationClosure) {
+                    if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'invocation requires the actual active parent worker');
+                    receiver(); borrowed.assertHeld();
+                    assertBuiltinEditLaunchClosure(invocationClosure);
+                    same(invocationClosure.bundle, bundle, 'invocation bundle');
+                    supportedRecipe(invocationClosure);
+                    const invocationBackend = invocationClosure.plan.backend;
+                    if (invocationBackend.kind !== 'linux' || invocationClosure.plan.parentContainmentRef !== canonicalSha256(containment) || invocationClosure.spec.parentWorkerContainmentRef !== canonicalSha256(containment) ||
+                        invocationClosure.spec.executable.kind !== 'runtime_bundle' || invocationClosure.spec.executable.executionPath !== LINUX_WORKER_RECIPE.editPath ||
+                        invocationClosure.spec.executable.executableId !== LINUX_WORKER_RECIPE.editId ||
+                        invocationClosure.spec.filesystem.kind !== 'run_generation' || invocationClosure.spec.filesystem.generationRef !== closure.workspaceGenerationRef ||
+                        path.posix.dirname(invocationBackend.cgroupPath) !== backend.cgroupPath) mismatch('invocation does not select the exact actual parent, recipe and generation');
+                    const adapter = await image(invocationClosure.spec.executable.executableId, 'tool_adapter');
+                    const adapterDigest = invocationClosure.spec.executable.executableDigest;
+                    // The exact JCS input is transferred through the authenticated operation channel, never argv or a writable mount.
+                    const input = canonicalJsonBytes(invocationClosure.call.value);
+                    if (canonicalSha256(invocationClosure.request) !== invocationClosure.spec.requestRef ||
+                        canonicalSha256(invocationClosure.target) !== invocationClosure.spec.targetRef ||
+                        canonicalSha256(invocationClosure.grant) !== invocationClosure.spec.operationGrantRef ||
+                        canonicalSha256(invocationClosure.call) !== invocationClosure.request.inputRef ||
+                        invocationClosure.call.inputDigest !== invocationClosure.request.inputDigest) mismatch('edit input differs from the retained canonical input');
+                    const inputImage = binding.sealImageBuffer(input);
+                    let scope: NativeScope;
+                    try { scope = native.createInvocation(borrowed.fd, created, helper, adapter, bwrap, inputImage,
+                      scopeProjection(invocationClosure, borrowed, invocationClosure.plan.launchNonceDigest)); }
+                    finally { retireImage(inputImage); }
+                    let invocationContainment: ProcessContainment;
+                    try {
+                      await awaitNative(() => scope.pollReady() ? true : undefined, closeController); borrowed.assertHeld(); receiver();
+                      invocationContainment = actualContainment(invocationClosure, scope.observe());
+                    } catch (error) { await closeController(); throw error; }
+                    const owner = invocationClosure.spec.owner;
+                    const claim: LinuxInvocationClaim = immutableSnapshot({ runId: owner.runId, leaseEpoch: owner.intendedLeaseEpoch,
+                      workerLaunchId: owner.workerLaunchId, opId: owner.opId, attempt: owner.attempt, dispatchId: owner.dispatchId,
+                      sandboxLaunchSpecRef: invocationClosure.sandboxLaunchSpecRef, requestRef: invocationClosure.spec.requestRef,
+                      requestDigest: invocationClosure.spec.requestDigest, targetRef: invocationClosure.spec.targetRef, targetDigest: invocationClosure.spec.targetDigest,
+                      operationGrantRef: invocationClosure.spec.operationGrantRef, parentWorkerContainmentRef: invocationClosure.spec.parentWorkerContainmentRef });
+                    const handle: LinuxBlockedInvocation = Object.freeze({ containment: invocationContainment,
+                      async observeProcess() { if (this !== handle) throw new TypeError('invalid blocked invocation'); borrowed.assertHeld(); return observedProcess(scope, adapterDigest); },
+                      async result() { if (this !== handle) throw new TypeError('invalid blocked invocation');
+                        const status = await awaitNative(() => scope.result(), closeController);
+                        if (status !== 0 && status !== 1) mismatch('invalid native edit result'); return status === 0 ? 'ok' : 'error'; },
+                      async stop() { if (this !== handle) throw new TypeError('invalid blocked invocation'); return death(scope, invocationContainment, native, controllerReceiver); } });
+                    invocations.set(handle, { consumed: false, claim, release() { receiver(); borrowed.assertHeld(); scope.release(); } });
+                    return handle;
+                  },
+                  async stop() {
+                    if (this !== worker) throw new TypeError('invalid blocked worker'); active = false;
+                    try { return await death(created, containment, native, controllerReceiver); }
+                    finally {
+                      // Fresh STOP uses only the original held native scope. A
+                      // retired generation duplicate is never reopened/reused.
+                      if (!borrowRetired) { retireBorrow(borrowed); borrowRetired = true; }
+                    }
+                  }
+                });
+                return worker;
+              } catch (error) {
+                try { if (nativeScope) await closeController(); }
+                finally { retireBorrow(borrowed); }
+                throw error;
+              }
+            },
+            async terminateRetained({ closure, containment, workerIdentity, signal }) {
+              if (this !== controller) throw new TypeError('invalid controller receiver'); controllerReceiver();
+              if (signal?.aborted) { await closeController(); signal.throwIfAborted(); }
+              assertWorkerLaunchClosure(closure);
+              same(closure.bundle, bundle, 'retained worker bundle');
+              const planBackend = closure.plan.backend, actual = containment.backend;
+              if (planBackend.kind !== 'linux' || actual.kind !== 'linux' ||
+                  path.posix.dirname(actual.cgroupPath) !== options.cgroupParent || actual.cgroupPath !== planBackend.cgroupPath ||
+                  containment.planRef !== canonicalSha256(closure.plan) || containment.sandboxLaunchSpecRef !== closure.sandboxLaunchSpecRef ||
+                  workerIdentity.processContainmentRef !== canonicalSha256(containment) || actual.subreaperStartToken !== planBackend.subreaperStartToken) {
+                mismatch('retained worker does not close the exact native reservation');
+              }
+              native.terminateRetained(cgroup.fd, { cgroupName: path.posix.basename(actual.cgroupPath),
+                cgroupId: Number(actual.cgroupId), pidNamespaceId: Number(actual.pidNamespaceId),
+                namespaceInitStartToken: actual.namespaceInitStartToken, subreaperStartToken: actual.subreaperStartToken,
+                workerPid: workerIdentity.pid, processStartToken: workerIdentity.processStartToken });
+              const observed = await awaitNative(() => native.pollRetained(), closeController, signal);
+              controllerReceiver(); signal?.throwIfAborted();
+              return checkedDeath(observed, containment);
+            },
+            async close() { if (this !== controller) throw new TypeError('invalid worker controller'); await closeController(); controllers.delete(native); }
+          });
+          return controller;
+        } catch (error) {
+          // Native ownership already exists. Getter/wrapper construction
+          // failure must join it just as a failed HELLO does.
+          try { await closeController(); }
+          catch (cleanup) { throw retirementError('controller construction and join failed', new AggregateError([error, cleanup])); }
+          throw error;
+        }
       },
       close() { if (this !== launcher) throw new TypeError('invalid worker launcher');
         if (closing) return closing;

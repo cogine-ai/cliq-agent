@@ -382,7 +382,11 @@ export class ContentAddressedStore {
   private readonly root: string;
 
   constructor(root: string) {
-    if (!path.isAbsolute(root) || path.resolve(root) !== root) {
+    // Trusted composition may borrow an already-held Linux directory. Keep
+    // the final dot: O_NOFOLLOW then opens the directory, not its procfd link.
+    // I/O still checks the actual root metadata and acquires its own handle.
+    const heldDirectoryLocator = /^\/proc\/self\/fd\/(?:0|[1-9][0-9]*)\/\.$/.test(root);
+    if (!path.isAbsolute(root) || (path.resolve(root) !== root && !heldDirectoryLocator)) {
       throw new Error(`CAS root must be a normalized absolute path: ${JSON.stringify(root)}`);
     }
     this.root = root;

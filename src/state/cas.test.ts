@@ -125,6 +125,41 @@ test('constructor rejects roots that are not normalized absolute paths', () => {
   );
 });
 
+test('constructor preserves the exact held-directory locator grammar without normalizing its final dot away', () => {
+  // Syntax only: accepting this locator does not assert that a descriptor is
+  // open or that this host supports Linux procfs. Every I/O still verifies the
+  // actual private directory. The final dot makes O_NOFOLLOW open a directory,
+  // not the procfd symlink, while children stay relative to that exact fd.
+  assert.doesNotThrow(() => new ContentAddressedStore('/proc/self/fd/12/.'));
+  for (const root of ['/proc/self/fd/012/.', '/proc/self/fd/-1/.', '/proc/other/fd/12/.',
+    '/proc/self/fd/12/../.', '/proc/self/fd/12/./', '/tmp/objects/.']) {
+    assert.throws(() => new ContentAddressedStore(root), /normalized absolute/i);
+  }
+});
+
+if (process.platform === 'linux') test('publication through a held directory cannot follow replacement of its original path', async () => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-held-root-'));
+  const root = path.join(fixture, 'objects');
+  const original = path.join(fixture, 'original');
+  let directory: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    await mkdir(root, { mode: 0o700 });
+    directory = await fs.open(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    const store = new ContentAddressedStore(`/proc/self/fd/${directory.fd}/.`);
+    await fs.rename(root, original);
+    await mkdir(root, { mode: 0o700 });
+    const bytes = Buffer.from('publication stays in the held inode');
+    const ref = await store.publish(bytes);
+    assert.deepEqual(await fs.readFile(path.join(original, ref)), bytes);
+    assert.deepEqual(await readdir(root), []);
+    assert.deepEqual(await store.verify(ref), { ref, byteLength: bytes.length });
+    assert.deepEqual(await store.read(ref), bytes);
+  } finally {
+    await directory?.close();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test('every operation rejects a missing, symlinked, or incorrectly protected root', async (t) => {
   await t.test('missing root', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-root-missing-'));

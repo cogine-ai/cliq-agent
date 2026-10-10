@@ -13,7 +13,7 @@ remain open. This is not a completed I1 claim or a release artifact.
 
 ### Source
 
-Baseline: main `0b26675c23ce6bbefd133d9a20d93569513e65cc`, merged PR #518.
+Baseline: main `3292f1e87cdd56aaef7babb193658135923b87c4`, merged PR #519.
 The user requested continued high-quality progress with no unnecessary slices.
 The normative contract remains the [Kernel RFC](../rfcs/2026-08-11-durable-verified-run-kernel.md),
 especially sections 9 and 15, and the [I1 integration checkpoint](2026-09-26-design-review.md#5-internal-integration-checkpoints).
@@ -251,9 +251,34 @@ roles. Initial installation creates a new private StateRoot and stages entries
 without adopting an existing active selection or database. Descriptor-relative
 no-follow walks verify the root and every signed entry, including type, owner,
 mode, link count, exact count/digest and metadata stability around the read.
+The current initial installer supports Linux only. A real macOS experiment
+showed that `/dev/fd/<directory-fd>/<child>` does not provide this traversal;
+unsupported hosts refuse before any StateRoot write. There is no absolute-path
+fallback, and the refusal test is not a Linux installation qualification.
+CAS import borrows the exact held Linux root through
+`/proc/self/fd/<directory-fd>/.`, retaining the ordinary CAS durability protocol
+without returning to the mutable original path. The caller keeps that descriptor
+open for the entire operation; accepting locator syntax does not verify a root.
 Complete the supported structured-root/member walk and ordinary CAS import
 before publishing; unsupported kinds fail closed rather than being ignored.
 This does not claim the remaining WP06 closure/upgrade matrix is complete.
+
+The user approved `fresh_installed` genesis on 2026-10-11. Initial installation
+does not open StateStore or acquire StateOwner; trusted startup borrows its
+still-held verified installation into the existing first StateOwner transaction.
+Before genesis staging, the business/authority database is empty and the CAS is
+all-and-only the complete signed manifest/imported structured-root/member seed.
+Startup revalidates the same held StateRoot and installation; extra/missing or
+changed objects and structural lookalikes cannot substitute authority. The birth
+manifest records exact seed refs/counts/bytes/root; immediately before commit,
+only that seed plus the specifically staged genesis objects may exist. Their
+metadata and epoch one commit together, without another ledger or acquisition
+operation. Generation origin binds the installation's bundle ref and manifest
+digest, and `stateSchemaVersion` reflects the actual schema (currently 4), not
+the V1 structure version. Ordinary `fresh_empty` retains its strict empty-CAS
+requirement; restarts use existing successor acquisition rather than bootstrap
+again. Approval is a contract decision, not completed Linux installed-startup,
+migration/cutover, admission or execution qualification.
 
 Publish immutable side-by-side directories under
 `runtime/bundles/<bundleDigest>/`, where `bundleDigest` is the complete signed

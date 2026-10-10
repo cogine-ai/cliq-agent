@@ -3,7 +3,7 @@ export type ArtifactRef = string;
 export type {
   ProcessContainmentOwner, ProcessContainmentPlanV1, ProcessContainment,
   ProcessContainmentRef, ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentDeathEvidenceV1,
-  SandboxRootImageV1, GuestExecutableIdentity, GuestToolchainManifest,
+  SandboxRootProfileV1, SandboxRootImageV1, GuestExecutableIdentity, GuestToolchainManifest,
   SandboxRuntimeBindingV1, SandboxExecutableIdentityV1, SandboxCapturedStdioV1,
   SandboxProcessInvocationV1, SanitizedSandboxEnvironmentV1, SandboxFilesystemV1,
   SandboxMountV1, SandboxLaunchBaseV1, SandboxLaunchSpecV1, SandboxResourceSpec, SandboxProfileV1
