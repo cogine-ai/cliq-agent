@@ -18,7 +18,7 @@ import type { ProcessContainment, ProcessContainmentDeathEvidenceV1, ProcessCont
 import type { ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1 } from '../../src/kernel/reconciliation.js';
 import type { WorkerDeathWait, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1,
-  SupervisorInspectorIdentityV1, Run, WorkerLaunch } from '../../src/kernel/types.js';
+  SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1 } from '../../src/kernel/types.js';
 import { openLinuxWorkerLauncher } from '../../src/sandbox/linux-worker.js';
 import { createLinuxWorkerCampaignFixture } from '../../src/sandbox/testing/worker-campaign-fixture.js';
 import type { LocalControlConnection, LocalControlListener } from '../../src/state/control-channel.js';
@@ -216,6 +216,166 @@ async function editedCheckpoint() {
     assert.equal((await checkpointBytes(store, fixture.runId)).closure.run.budgetConsumed.toolCalls, 1);
     reconnected.close();
   } finally { await transport.close(); await store.close(); await fixture.dispose(); }
+}
+
+async function delayedToolSettlement() {
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'late-tool-settlement' });
+  let reopened: StateStore | undefined, sample: FileHandle | undefined, root: FileHandle | undefined, file: FileHandle | undefined;
+  let reopeningFailed = false;
+  let operationFailure: { error: unknown } | undefined;
+  let prototype: { writeFile: FileHandle['writeFile'] } | undefined, originalWrite: FileHandle['writeFile'] | undefined;
+  let death: { ref: string; value: ProcessContainmentDeathEvidenceV1 } | undefined;
+  let held: { cut: Awaited<ReturnType<typeof checkpointBytes>>; settlement: BudgetSettlementV1; elapsedMs: number } | undefined;
+  let delays = 0;
+  try {
+    sample = await open(path.join(fixture.workspace, 'a'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }; originalWrite = prototype.writeFile;
+    await sample.close(); sample = undefined;
+    const writeFile = originalWrite;
+    const before = await checkpointBytes(fixture.store, fixture.runId);
+    const originalHost = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
+    const startingChildren = directChildren();
+    const execution = await fixture.store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
+    // Keep the real write and all native producers. The only injected fault is
+    // slow publication after the exact completed tool settlement was timestamped.
+    prototype.writeFile = (async function(this: FileHandle, ...args: unknown[]) {
+      await Reflect.apply(writeFile, this, args);
+      if (!Buffer.isBuffer(args[0])) return;
+      const text = args[0].toString('utf8');
+      if (text.includes('"kind":"containment_all_descendants_dead"')) {
+        const value = JSON.parse(text) as ProcessContainmentDeathEvidenceV1;
+        if (value.kind === 'containment_all_descendants_dead' && value.owner.kind === 'worker_activation' && value.owner.runId === fixture.runId) {
+          assert.equal(death, undefined, 'exact productive worker retirement is published once');
+          death = { ref: canonicalSha256(value), value };
+        }
+      }
+      if (!text.includes('"format":"cliq-budget-settlement-v1"')) return;
+      const settlement = JSON.parse(text) as BudgetSettlementV1;
+      if (settlement.runId !== fixture.runId) return;
+      delays++;
+      assert.equal(delays, 1, 'the fixture has one actual tool settlement, never a delayed retry');
+      const cut = await checkpointBytes(fixture.store, fixture.runId);
+      const claims = cut.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed');
+      assert.equal(claims.length, 1);
+      const claim = claims[0]!;
+      assert.equal(settlement.opId, claim.opId); assert.equal(settlement.attempt, claim.attempt);
+      assert.equal(settlement.terminalPhase, 'completed'); assert.equal(settlement.consumed.toolCalls, 1);
+      assert.equal(cut.closure.run.status, 'running');
+      assert.ok(cut.closure.run.activeWorkerLaunchId);
+      const launch = cut.closure.workerLaunches.find(row => row.launchId === cut.closure.run.activeWorkerLaunchId)!;
+      assert.equal(launch.phase, 'activated'); assert.equal(launch.generationWriteState, 'checkpointing');
+      assert.ok(death, 'the completed native edit must first publish actual worker retirement');
+      assert.deepEqual(await fixture.store.artifacts.readCanonical(death.ref), death.value);
+      assert.equal(death.value.owner.kind, 'worker_activation');
+      if (death.value.owner.kind !== 'worker_activation') throw new Error('retirement selected another owner');
+      assert.equal(death.value.owner.workerLaunchId, launch.launchId);
+      assert.equal(death.value.containmentRef, launch.processContainmentRef);
+      const stagedAge = Date.parse(settlement.settledAt) - Date.parse(death.value.observedAt);
+      assert.ok(stagedAge >= 0 && stagedAge <= 5_000, 'the staged settlement really precedes death-evidence expiration');
+      const identity = await fixture.store.artifacts.readCanonical<WorkspaceGenerationIdentityV1>(launch.workspaceGenerationRef);
+      if (identity.locator.kind !== 'linux_directory') throw new Error('late settlement has no actual Linux generation');
+      root = await open(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath),
+        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      const rootStat = await root.stat({ bigint: true });
+      assert.equal(String(rootStat.dev), identity.locator.deviceId); assert.equal(String(rootStat.ino), identity.locator.directoryFileId);
+      file = await open(`/proc/self/fd/${root.fd}/a`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      const actualFile = await file.stat();
+      assert.ok(actualFile.isFile()); assert.equal(actualFile.size, Buffer.byteLength('after\n'));
+      assert.deepEqual(await witnessBytes(file, actualFile.size), Buffer.from('after\n'), 'the real edit already happened before slow publication');
+      assert.deepEqual(cut.bytes, fixture.original);
+      const started = performance.now();
+      await delay(6_000);
+      while (performance.now() < started + 6_000) await delay(Math.ceil(started + 6_000 - performance.now()));
+      const elapsedMs = performance.now() - started;
+      assert.ok(elapsedMs >= 6_000, 'qualification uses actual elapsed time, not a mocked clock');
+      assert.ok(Date.now() - Date.parse(death.value.observedAt) > 5_000, 'declared retirement time is expired at the actual transaction');
+      held = { cut, settlement, elapsedMs };
+    }) as FileHandle['writeFile'];
+    await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.closure.run.revision })), error => {
+      const pending: unknown[] = [error], seen = new Set<Error>();
+      while (pending.length) {
+        const next = pending.pop();
+        if (!(next instanceof Error) || seen.has(next)) continue;
+        seen.add(next);
+        if ((next as NodeJS.ErrnoException).code === 'RECOVERY_REQUIRED' && /worker retirement proof is stale/u.test(next.message)) return true;
+        pending.push(next.cause);
+        if (next instanceof AggregateError) pending.push(...next.errors);
+      }
+      return false;
+    });
+    prototype.writeFile = originalWrite;
+    assert.equal(delays, 1); assert.ok(held); assert.ok(death); assert.ok(file);
+    const failed = await checkpointBytes(fixture.store, fixture.runId), cut = held.cut.closure;
+    assert.equal(failed.closure.run.status, 'waiting'); assert.equal(failed.closure.run.waitingReason, 'reconciliation');
+    assert.equal(failed.closure.run.activeWorkerLaunchId, undefined); assert.equal(failed.closure.run.cancelRequested, false);
+    assert.equal(failed.closure.run.revision, cut.run.revision + 1, 'only the conservative recovery fence advances the Run');
+    assert.deepEqual(failed.closure.journal, cut.journal, 'no tool completion or budget settlement can commit');
+    assert.deepEqual(failed.closure.items, cut.items, 'no completed-effect continuation can commit');
+    assert.equal(failed.closure.run.frontierRef, cut.run.frontierRef);
+    assert.deepEqual(failed.closure.latestCheckpoint, cut.latestCheckpoint, 'no completed-effect ready Checkpoint can commit');
+    assert.deepEqual(failed.bytes, fixture.original);
+    assert.equal(failed.closure.latestCheckpoint.workspaceStateRef, before.closure.latestCheckpoint.workspaceStateRef);
+    assert.deepEqual(failed.closure.run.budgetConsumed, cut.run.budgetConsumed);
+    assert.deepEqual(failed.closure.run.budgetReserved, cut.run.budgetReserved);
+    assert.equal(failed.closure.run.budgetConsumed.toolCalls, 0); assert.equal(failed.closure.run.budgetReserved.toolCalls, 1);
+    const claim = cut.journal.find(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed')!;
+    const prepared = cut.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'prepared' &&
+      entry.opId === claim.opId && entry.attempt === claim.attempt);
+    assert.equal(prepared.length, 1);
+    const wait = await fixture.store.artifacts.readCanonical<WorkerDeathWait>(failed.closure.run.waitingOnRef!);
+    assert.deepEqual(wait.subject.openInvocationRefs, [canonicalSha256(prepared[0]!)]);
+    assert.equal(wait.subject.oldWorkerLaunchId, cut.run.activeWorkerLaunchId);
+    const generation = failed.closure.workspaceGenerations.find(row => row.generationRef === wait.subject.workspaceGenerationRef)!;
+    assert.equal(generation.phase, 'fenced_reconciling');
+    if (generation.phase !== 'fenced_reconciling') throw new Error('late settlement did not fence its exact private generation');
+    assert.equal(generation.fencedFromPhase, 'checkpointing');
+    assert.equal(failed.closure.workerLaunches[0]!.phase, 'reconciling');
+    assert.equal(failed.closure.workerLaunches[0]!.retiredAt, undefined);
+    assert.equal((await file.stat()).size, Buffer.byteLength('after\n'));
+    assert.deepEqual(await witnessBytes(file, Buffer.byteLength('after\n')), Buffer.from('after\n'));
+    assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+    const host = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
+    assert.equal(host.dev, originalHost.dev); assert.equal(host.ino, originalHost.ino);
+    assert.equal(death.value.backend.kind, 'linux');
+    if (death.value.backend.kind !== 'linux') throw new Error('late settlement did not retire real Linux containment');
+    const backend = nativeBackend(death.value.backend);
+    assert.match(await readFile(path.join(backend.cgroupPath, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
+    const controller = /^linux-subreaper:([1-9][0-9]*):linux-proc-start-ticks:[0-9]+$/u.exec(backend.subreaperStartToken);
+    const members = /^linux-namespace-init:([1-9][0-9]*):[0-9]+:monitor:([1-9][0-9]*):[0-9]+$/u.exec(backend.namespaceInitStartToken);
+    assert.ok(controller); assert.ok(members);
+    const worker = decodeWorkerIdentity(await fixture.store.artifacts.readCanonical(wait.subject.oldWorkerIdentity));
+    for (const pid of [worker.pid, Number(controller[1]), Number(members[1]), Number(members[2])]) {
+      await assert.rejects(access(`/proc/${pid}`), { code: 'ENOENT' }, 'the actual worker hierarchy and controller are joined');
+    }
+    assert.deepEqual(directChildren(), startingChildren);
+    await file.close(); file = undefined; await root!.close(); root = undefined;
+    await fixture.store.close();
+    try { reopened = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+    catch (error) { reopeningFailed = true; throw error; }
+    assert.deepEqual(await reopened.readRecoveryClosure(fixture.runId), failed.closure,
+      'public reopen acquires the released OS owner lock and preserves the conservative unresolved attempt');
+    await reopened.close(); reopened = undefined;
+    console.log(JSON.stringify({ scenario: 'actual-expired-tool-retirement-at-settlement-commit', runId: fixture.runId,
+      settledAt: held.settlement.settledAt, deathObservedAt: death.value.observedAt, publicationDelayMs: held.elapsedMs,
+      permanentToolClaims: 1, actualPrivateEditObserved: true, completedToolEntries: 0, remainingBudgetReservation: 1,
+      note: 'actual six-second FileHandle publication delay; fail-closed commit and joined cleanup, not slow-I/O completion or native timestamp refresh' }));
+  } catch (error) { operationFailure = { error }; throw error; }
+  finally {
+    if (prototype && originalWrite) prototype.writeFile = originalWrite;
+    const failures: unknown[] = [];
+    // Store.close joins an in-flight operation even if the outer bound failed;
+    // only then can the separately owned observation descriptors be released.
+    for (const resource of [reopened, fixture.store]) {
+      try { await resource?.close(); } catch (error) { failures.push(error); }
+    }
+    for (const resource of [sample, file, root]) {
+      try { await resource?.close(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length === 0 && !reopeningFailed) {
+      try { await fixture.dispose(); } catch (error) { failures.push(error); }
+    } else console.error(`preserving uncertain late-settlement fixture: ${fixture.stateRoot}`);
+    if (failures.length) throw new AggregateError([...(operationFailure ? [operationFailure.error] : []), ...failures], 'late settlement campaign and cleanup failures');
+  }
 }
 
 async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_before_identity' | 'ready_invalid_tree') {
@@ -2182,6 +2342,7 @@ for (const [scenario, run] of [
   ['supervisor-crash-witness-replaced-inode', () => supervisorCrashPreactivation('ready_before_identity', 'replaced_inode')],
   ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
+  ['expired-tool-retirement-at-settlement-commit', delayedToolSettlement],
   ['parent-loss-before-release', parentLossBeforeRelease],
   ['no-open-invocation-recovery', () => noOpenInvocationRecovery()],
   ['cancelled-recovery', () => noOpenInvocationRecovery(true)],

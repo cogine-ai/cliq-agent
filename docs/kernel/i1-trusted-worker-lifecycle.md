@@ -805,3 +805,20 @@ checks, **1,805/1,805** full local tests (530,350 ms; no failures, cancellations
 or skips), the nine design-guard tests, the contract guard and portable edit
 contract. Actual Linux/current-head CI must pass separately before merge;
 the `fced8d0` results above are evidence for that prior revision only.
+
+### After preactivation retirement
+
+PR #516 completes the bounded Linux queued-preactivation retirement and
+distinct successor retry capability; its exact-head evidence is retained in
+[the preactivation record](i1-preactivation-recovery.md). It does not complete
+the slow-I/O seal or installed I1 path.
+
+Subsequent analysis identified a correctness prerequisite for that next seal
+capability: tool completion checked death-evidence age using the settlement
+timestamp sampled before asynchronous settlement/continuation publication,
+not the actual transaction clock. The baseline public loaded-Run regression
+reproduces acceptance after a 5,001 ms late-publication clock advance. The
+[bounded transaction-time correction](i1-worker-seal-freshness.md) enforces the
+existing five-second gate without adding a retry lifecycle or pretending to
+refresh native evidence. Its delivery requires new build/full-test and real
+Linux evidence; #516's qualification cannot be reused for it.
