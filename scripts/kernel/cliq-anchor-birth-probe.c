@@ -271,7 +271,7 @@ int main(int argc, char **argv) {
             "NODE_CHANNEL_FD=3", "NODE_CHANNEL_SERIALIZATION_MODE=json", NULL };
         fexecve(node, arguments, environment);
         static const char message[] = "anchor birth probe: controller exec failed\n";
-        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+        if (write(STDERR_FILENO, message, sizeof(message) - 1) != (ssize_t)(sizeof(message) - 1)) _exit(70);
         _exit(127);
     }
     int channel = 3, error = 0;
