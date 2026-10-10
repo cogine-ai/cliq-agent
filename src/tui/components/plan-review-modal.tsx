@@ -2,6 +2,7 @@ import { Box, Text, useInput, type Key } from 'ink';
 import { useEffect, useRef, useState } from 'react';
 
 import type { PendingPlanReview, UiPlanDecision } from '../store.js';
+import { semanticStyle, semanticTextProps } from '../semantic-styles.js';
 
 export type PlanReviewModalProps = {
   review: PendingPlanReview;
@@ -50,9 +51,9 @@ export function PlanReviewModal({ review, activationKey, onDecide }: PlanReviewM
   });
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-      <Text color="cyan" bold>
-        Plan review
+    <Box flexDirection="column" borderStyle="round" borderColor={semanticStyle('info').color} paddingX={1}>
+      <Text {...semanticTextProps('info')} bold>
+        i Plan review
       </Text>
       <Box flexDirection="column" marginTop={1}>
         <Field label="title" value={review.title} />
@@ -62,7 +63,7 @@ export function PlanReviewModal({ review, activationKey, onDecide }: PlanReviewM
       </Box>
       {review.items.length > 0 ? (
         <Box flexDirection="column" marginTop={1}>
-          <Text color="cyan">Plan items</Text>
+          <Text {...semanticTextProps('info')}>Plan items</Text>
           {review.items.map((item, index) => (
             <Text key={item.id}>{`${index + 1}. ${statusMarker(item.status)} ${item.title}`}</Text>
           ))}
@@ -72,17 +73,17 @@ export function PlanReviewModal({ review, activationKey, onDecide }: PlanReviewM
         <Text>{review.contentMarkdown}</Text>
       </Box>
       <Box marginTop={1}>
-        <Text color="green">[d]efault Run </Text>
-        <Text color="green"> [a]ccept-edits Run </Text>
-        <Text color="red" bold>
+        <Text {...semanticTextProps('warning')}>! [d]efault Run </Text>
+        <Text {...semanticTextProps('info')}> i [a]ccept-edits Run </Text>
+        <Text {...semanticTextProps('danger')} bold>
           {' '}
           [Y]OLO Run{' '}
         </Text>
-        <Text color="yellow"> [r]eject </Text>
-        <Text dimColor> [c]ancel Esc=cancel</Text>
+        <Text {...semanticTextProps('warning')}> ! [r]eject </Text>
+        <Text {...semanticTextProps('muted')}> · [c]ancel Esc=cancel</Text>
       </Box>
-      <Text color="red">YOLO Run auto-approves actions and is dangerous.</Text>
-      {!isActive ? <Text dimColor>Waiting for fresh input...</Text> : null}
+      <Text {...semanticTextProps('danger')}>! YOLO Run auto-approves actions and is dangerous.</Text>
+      {!isActive ? <Text {...semanticTextProps('warning')}>… Waiting for plan decision</Text> : null}
     </Box>
   );
 }
@@ -96,7 +97,7 @@ function statusMarker(status: PendingPlanReview['items'][number]['status']) {
 function Field({ label, value }: { label: string; value: string }) {
   return (
     <Box>
-      <Text dimColor>{`  ${label}: `}</Text>
+      <Text {...semanticTextProps('muted')}>{`  ${label}: `}</Text>
       <Text>{value}</Text>
     </Box>
   );

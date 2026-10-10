@@ -4,6 +4,7 @@ import { useRef, useState } from 'react';
 import type { PolicyMode } from '../../policy/types.js';
 import { isShiftTabInput } from '../hooks/use-keybindings.js';
 import { formatModeForComposer, getModeColor } from '../mode-language.js';
+import { semanticTextProps } from '../semantic-styles.js';
 
 const PANEL_BACKGROUND = '#1d1b2a';
 
@@ -205,9 +206,9 @@ export function InputBar({
     >
       <Box flexDirection="column" flexGrow={1} backgroundColor={PANEL_BACKGROUND} paddingX={1}>
         <Box height={1} overflow="hidden">
-          {disabled ? <Text color="gray">… </Text> : null}
+          {disabled ? <Text {...semanticTextProps('warning')}>… waiting </Text> : null}
           {disabled ? (
-            <Text dimColor>{value}</Text>
+            <Text {...semanticTextProps('muted')}>{value}</Text>
           ) : (
             <MiniTextInput
               value={value}
@@ -220,7 +221,7 @@ export function InputBar({
         </Box>
         <Box height={1} overflow="hidden">
           <Text color={policyColor}>{formatModeForComposer(policy)}</Text>
-          {modelLabel ? <Text dimColor>{` > ${modelLabel}`}</Text> : null}
+          {modelLabel ? <Text {...semanticTextProps('muted')}>{` > ${modelLabel}`}</Text> : null}
         </Box>
       </Box>
     </Box>

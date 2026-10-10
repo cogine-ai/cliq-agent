@@ -3,13 +3,25 @@ import path from 'node:path';
 import { Box, Text } from 'ink';
 
 import type { UiState } from '../store.js';
+import {
+  semanticStyle,
+  semanticTextProps,
+  type SemanticTone
+} from '../semantic-styles.js';
 
-export function TopStatusBar({ hint = null }: { hint?: string | null }) {
+export function TopStatusBar({
+  hint = null,
+  tone = 'muted'
+}: {
+  hint?: string | null;
+  tone?: SemanticTone;
+}) {
   if (!hint) return null;
+  const style = semanticStyle(tone);
   return (
     <Box width="100%" height={1} overflow="hidden">
-      <Text dimColor wrap="truncate">
-        {hint}
+      <Text {...semanticTextProps(tone)} wrap="truncate">
+        {`${style.marker} ${hint}`}
       </Text>
     </Box>
   );
@@ -25,32 +37,41 @@ export function BottomStatusBar({ state }: { state: UiState }) {
     <Box width="100%" height={1} overflow="hidden">
       {hasError ? (
         <Box flexShrink={0}>
-          <Text color="red">● </Text>
+          <Text {...semanticTextProps('error')}>{`${semanticStyle('error').marker} error `}</Text>
         </Box>
       ) : null}
       <Box flexShrink={1} minWidth={0} overflow="hidden">
-        <Text dimColor wrap="truncate">
+        <Text {...semanticTextProps('muted')} wrap="truncate">
           {cwdLabel}
         </Text>
       </Box>
-      <StatusSegment label={txStatus} />
+      <StatusSegment label={txStatus} tone={txTone(state.tx)} />
       {tokensLabel ? <StatusSegment label={tokensLabel} /> : null}
       {state.versionUpdate ? (
         <Box flexShrink={0} marginLeft={1}>
-          <Text dimColor>{'· '}</Text>
-          <Text color="yellow">{`update ${state.versionUpdate.latest}`}</Text>
+          <Text {...semanticTextProps('warning')}>
+            {`${semanticStyle('warning').marker} update ${state.versionUpdate.latest}`}
+          </Text>
         </Box>
       ) : null}
     </Box>
   );
 }
 
-function StatusSegment({ label }: { label: string }) {
+function StatusSegment({ label, tone = 'muted' }: { label: string; tone?: SemanticTone }) {
+  const style = semanticStyle(tone);
   return (
     <Box flexShrink={0} marginLeft={1}>
-      <Text dimColor>{`· ${label}`}</Text>
+      <Text {...semanticTextProps(tone)}>{`${style.marker} ${label}`}</Text>
     </Box>
   );
+}
+
+function txTone(tx: UiState['tx']): SemanticTone {
+  if (!tx) return 'muted';
+  if (tx.state === 'staging') return 'active';
+  if (tx.state === 'finalized') return 'info';
+  return 'success';
 }
 
 function formatTxStatus(tx: UiState['tx']): string {
