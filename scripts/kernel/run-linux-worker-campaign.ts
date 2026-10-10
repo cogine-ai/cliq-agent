@@ -407,9 +407,9 @@ async function slowToolSealReobservesPausedController() {
     // pause and one real FileHandle publication delay are fault injections.
     prototype.writeFile = (async function(this: FileHandle, ...args: Parameters<FileHandle['writeFile']>) {
       await Reflect.apply(writeFile, this, args);
-      if (typeof args[0] !== 'string') return;
+      if (typeof args[0] !== 'string' && !Buffer.isBuffer(args[0])) return;
       let candidate: Record<string, unknown>;
-      try { candidate = JSON.parse(args[0]) as Record<string, unknown>; }
+      try { candidate = JSON.parse(args[0].toString()) as Record<string, unknown>; }
       catch { return; }
       if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return;
       if (candidate.kind === 'containment_all_descendants_dead') {
