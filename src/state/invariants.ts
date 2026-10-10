@@ -381,8 +381,17 @@ export function decodeWorkerLaunch(value: unknown): WorkerLaunch {
     }
     if (has(record, 'activatedAt')) requireCanonicalTime(record.activatedAt, 'WorkerLaunch.activatedAt');
     if (has(record, 'quiesceId')) requireString(record.quiesceId, 'WorkerLaunch.quiesceId');
-    if (!['sealed', 'fenced_reconciling'].includes(String(record.generationWriteState))) {
-      invalid('retired launch must retain sealed or fenced generation projection');
+    if (!['preactivated_readonly', 'sealed', 'fenced_reconciling'].includes(String(record.generationWriteState))) {
+      invalid('retired launch must retain its preactivation, sealed or fenced generation projection');
+    }
+    if (record.generationWriteState === 'preactivated_readonly') {
+      requireLiteral(record.leaseVersion, 0, 'WorkerLaunch.leaseVersion');
+      for (const key of [...WORKER_LEASE_KEYS, 'quiesceId']) {
+        if (has(record, key)) invalid('retired preactivation launch cannot contain activation or lease fields');
+      }
+      if (has(record, 'workerIdentityDigest') && !has(record, 'processContainmentRef')) {
+        invalid('retired preactivation identity requires its genuinely observed containment');
+      }
     }
   }
   return record as WorkerLaunch;

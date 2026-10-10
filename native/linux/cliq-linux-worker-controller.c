@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "worker-common.h"
+#include "worker-reservation.h"
 #include <dirent.h>
 #include <poll.h>
 #include <signal.h>
@@ -43,6 +44,8 @@ struct scope {
     struct cliq_worker_packet identity;
 };
 static struct scope scopes[CLIQ_WORKER_MAX_SCOPES];
+static struct cliq_reservation worker_reservation = { .fd = -1 };
+static bool worker_creation_attempted;
 static volatile sig_atomic_t shutdown_requested;
 
 static void request_shutdown(int signal_number) {
@@ -260,11 +263,34 @@ static bool inspect_processes(struct scope *scope, const struct cliq_worker_pack
     return scope->init > 0 && scope->worker > 0 && scope->init != scope->worker;
 }
 
+static bool bind_worker_reservation(const struct cliq_worker_packet *request, int passed[5], size_t count) {
+    char token[CLIQ_WORKER_TOKEN_BYTES]; struct stat file;
+    if (count != 1 || request->scope != 0 || worker_reservation.fd >= 0 || !reservation_binding_valid(request) ||
+        request->subreaper_pid != getpid() || !cliq_process_token(getpid(), token) ||
+        strcmp(request->subreaper_start_token, token) != 0 ||
+        !reservation_file(passed[0], request, &file) || file.st_size != 0) return false;
+    int fd = reservation_independent(passed[0], request, true);
+    if (fd < 0) return false;
+    worker_reservation.fd = fd; worker_reservation.binding = *request; worker_reservation.bytes = 0;
+    unsigned char body[CLIQ_RESERVATION_BODY]; reservation_encode(body, request);
+    return reservation_append(&worker_reservation, CLIQ_RESERVATION_BINDING, body, sizeof(body));
+}
+static bool worker_request_matches_reservation(const struct cliq_worker_packet *request) {
+    const struct cliq_worker_packet *binding = &worker_reservation.binding;
+    return worker_reservation.fd >= 0 && !worker_creation_attempted &&
+        worker_reservation.bytes == CLIQ_RESERVATION_HEADER_END &&
+        request->parent == 0 && request->generation_device == binding->generation_device &&
+        request->generation_inode == binding->generation_inode &&
+        strcmp(request->cgroup_name, binding->cgroup_name) == 0 &&
+        strcmp(request->nonce, binding->nonce) == 0 && strcmp(request->activation_nonce, binding->activation_nonce) == 0;
+}
+
 static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size_t count,
                           struct cliq_worker_packet *response) {
     response->status = CLIQ_SPAWN_INPUT_GATE;
     if (count != 5) return false;
     bool invocation = request->command == CLIQ_CREATE_WRITE;
+    if (!invocation && !worker_request_matches_reservation(request)) return false;
     bool parent_ok = invocation ? request->parent > 0 && request->parent < CLIQ_WORKER_MAX_SCOPES &&
         scopes[request->parent].created && scopes[request->parent].active && !scopes[request->parent].stopped &&
         !scopes[request->parent].invocation : request->parent == 0;
@@ -283,6 +309,11 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     struct scope *scope = &scopes[request->scope];
     scope->invocation = invocation; scope->parent = request->parent;
     response->status = CLIQ_SPAWN_CGROUP_CREATE;
+    if (!invocation) {
+        unsigned char intent[32] = {0}; memcpy(intent, "CREATE1", 7);
+        worker_creation_attempted = true;
+        if (!reservation_append(&worker_reservation, CLIQ_RESERVATION_INTENT, intent, sizeof(intent))) return false;
+    }
     if (mkdirat(cgroup_parent, request->cgroup_name, 0700) != 0) return false;
     scope->cgroup = openat(cgroup_parent, request->cgroup_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     scope->created = scope->cgroup >= 0;
@@ -297,6 +328,12 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     if (scope->process_group < 0 || !native_cgroup(scope->process_group)) return false;
     struct stat cgroup;
     if (fstat(scope->cgroup, &cgroup) != 0) return false;
+    if (!invocation) {
+        unsigned char body[64] = {0}; unsigned char *cursor = body;
+        reservation_u64(&cursor, cgroup.st_dev); reservation_u64(&cursor, cgroup.st_ino);
+        reservation_u64(&cursor, cgroup.st_uid); reservation_u64(&cursor, cgroup.st_mode);
+        if (!reservation_append(&worker_reservation, CLIQ_RESERVATION_CGROUP, body, sizeof(body))) return false;
+    }
     response->status = CLIQ_SPAWN_STDIO;
     scope->stdout_fd = memfd_create("cliq-scope-stdout", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     scope->stderr_fd = memfd_create("cliq-scope-stderr", MFD_CLOEXEC | MFD_ALLOW_SEALING);
@@ -354,6 +391,12 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     scope->channel = channel[0];
     response->status = CLIQ_SPAWN_MONITOR_TOKEN;
     if (!cliq_process_token(scope->monitor, scope->monitor_start_token)) { close(barrier[1]); return false; }
+    if (!invocation) {
+        unsigned char body[256] = {0}; unsigned char *cursor = body;
+        reservation_u64(&cursor, (uint64_t)scope->monitor);
+        reservation_text(&cursor, scope->monitor_start_token, sizeof(scope->monitor_start_token));
+        if (!reservation_append(&worker_reservation, CLIQ_RESERVATION_MONITOR, body, sizeof(body))) { close(barrier[1]); return false; }
+    }
     char pid_text[32]; snprintf(pid_text, sizeof(pid_text), "%ld", (long)scope->monitor);
     response->status = CLIQ_SPAWN_MONITOR_PLACEMENT;
     bool placed = write_control(scope->process_group, "cgroup.procs", pid_text);
@@ -372,6 +415,7 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     scope->identity = ready;
     scope->identity.scope = request->scope;
     scope->identity.cgroup_inode = (uint64_t)cgroup.st_ino;
+    scope->identity.cgroup_device = (uint64_t)cgroup.st_dev;
     scope->identity.pid = scope->worker;
     scope->identity.namespace_init_pid = scope->init;
     scope->identity.monitor_pid = scope->monitor;
@@ -390,6 +434,11 @@ static bool spawn_worker(struct cliq_worker_packet *request, int passed[5], size
     memcpy(scope->identity.nonce, request->nonce, sizeof(request->nonce));
     memcpy(scope->identity.activation_nonce, request->activation_nonce, sizeof(request->activation_nonce));
     memcpy(scope->identity.cgroup_name, request->cgroup_name, sizeof(request->cgroup_name));
+    if (!invocation) {
+        reservation_copy_binding(&scope->identity, &worker_reservation.binding);
+        unsigned char body[CLIQ_RESERVATION_BODY]; reservation_encode(body, &scope->identity);
+        if (!reservation_append(&worker_reservation, CLIQ_RESERVATION_READY, body, sizeof(body))) return false;
+    }
     *response = scope->identity;
     response->status = 0;
     return true;
@@ -525,12 +574,14 @@ static bool stop_scope(unsigned int id, struct cliq_worker_packet *response) {
     return false;
 }
 
-static bool terminate_retained(struct cliq_worker_packet *request, int directory, struct cliq_worker_packet *response) {
+static bool terminate_retained_until(struct cliq_worker_packet *request, int directory,
+                                    struct cliq_worker_packet *response, int64_t deadline) {
     struct stat metadata;
     if (!native_cgroup(directory) || !valid_cgroup_name(request->cgroup_name)) return false;
     int scope = openat(directory, request->cgroup_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (scope < 0) return false;
-    bool valid = native_cgroup(scope) && fstat(scope, &metadata) == 0 && (uint64_t)metadata.st_ino == request->cgroup_inode;
+    bool valid = native_cgroup(scope) && fstat(scope, &metadata) == 0 && (uint64_t)metadata.st_ino == request->cgroup_inode &&
+        (request->cgroup_device == 0 || (uint64_t)metadata.st_dev == request->cgroup_device);
     struct tracked_set tracked = {0};
     valid = valid && collect_processes(scope, &tracked, 0) &&
         track_process(&tracked, (pid_t)request->pid, request->start_token) &&
@@ -544,7 +595,7 @@ static bool terminate_retained(struct cliq_worker_packet *request, int directory
     }
     if (valid) valid = write_control(scope, "cgroup.kill", "1");
     int64_t start = milliseconds(); if (start < 0) { close(scope); return false; }
-    int64_t deadline = start + OBSERVATION_TIMEOUT_MS;
+    if (deadline < 0) deadline = start + OBSERVATION_TIMEOUT_MS;
     while (valid) {
         int64_t now = milliseconds(); if (now < 0 || now > deadline) break;
         if (native_cgroup(scope) && cgroup_empty(scope) && tracked_absent(&tracked)) {
@@ -554,6 +605,74 @@ static bool terminate_retained(struct cliq_worker_packet *request, int directory
         struct timespec delay = { 0, 10000000 }; nanosleep(&delay, NULL);
     }
     close(scope); return false;
+}
+
+static bool terminate_retained(struct cliq_worker_packet *request, int directory, struct cliq_worker_packet *response) {
+    return terminate_retained_until(request, directory, response, -1);
+}
+
+/* This command never adopts execution or reads an arbitrary locator. The
+ * immutable header is checked before signalling its original controller. */
+static bool inspect_worker_reservation(struct cliq_worker_packet *request, int passed[5], size_t count,
+                                      struct cliq_worker_packet *response) {
+    int64_t start = milliseconds();
+    if (start < 0) return false;
+    int64_t deadline = start + OBSERVATION_TIMEOUT_MS;
+    if (count != 2 || request->scope != 0 || !native_cgroup(passed[0]) ||
+        !reservation_binding_valid(request)) return false;
+    struct stat file; unsigned char body[CLIQ_RESERVATION_BODY]; size_t offset = 0;
+    struct cliq_worker_packet binding;
+    if (!reservation_file(passed[1], request, &file) || file.st_size < (off_t)CLIQ_RESERVATION_HEADER_END ||
+        file.st_size > (off_t)CLIQ_RESERVATION_FULL_END ||
+        !reservation_frame(passed[1], &offset, CLIQ_RESERVATION_BINDING, body, sizeof(body)) ||
+        !reservation_decode(body, &binding) || !reservation_same_binding(&binding, request) ||
+        !reservation_birth_empty(&binding)) return false;
+    if (request->subreaper_pid == getpid() &&
+        !original_process_absent((pid_t)request->subreaper_pid, request->subreaper_start_token)) return false;
+    /* The original Supervisor's EOF must be allowed to finish durable READY
+     * before shutdown. Signalling a partial producer interrupts readable()
+     * and permanently strands its otherwise completable birth record. */
+    while (!original_process_absent((pid_t)request->subreaper_pid, request->subreaper_start_token)) {
+        int64_t now = milliseconds();
+        if (now < 0) return false;
+        if (now >= deadline) {
+            /* Bounded fallback requests shutdown, but cannot claim it joined.
+             * A later inspector still needs the complete immutable record. */
+            (void)stop_retained_subreaper((pid_t)request->subreaper_pid, request->subreaper_start_token);
+            return false;
+        }
+        struct timespec delay = { 0, 10000000 }; nanosleep(&delay, NULL);
+    }
+    int held = reservation_independent(passed[1], request, false);
+    if (held < 0) return false;
+    bool attempted; struct cliq_worker_packet actual;
+    bool valid = reservation_read(held, request, &attempted, &actual);
+    if (valid && !attempted) {
+        /* An empty same-named cgroup is not evidence it belongs to this file. */
+        struct stat named;
+        valid = fstatat(passed[0], request->cgroup_name, &named, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT &&
+            original_process_absent((pid_t)request->subreaper_pid, request->subreaper_start_token);
+        if (valid) { *response = *request; response->reservation_observation = 1; }
+    } else if (valid) {
+        valid = terminate_retained_until(&actual, passed[0], response, deadline);
+        if (valid) response->reservation_observation = 2;
+    }
+    if (close(held) != 0) valid = false;
+    int64_t observed = milliseconds();
+    valid = valid && observed >= 0 && observed <= deadline;
+    if (valid) {
+        /* Sample the actual native inspection, not a later JS receipt of this
+         * response. Birth records never contain death facts or timestamps. */
+        struct timespec now;
+        valid = clock_gettime(CLOCK_REALTIME, &now) == 0 && now.tv_sec >= 0 &&
+            (uint64_t)now.tv_sec <= (UINT64_C(9007199254740991) - 999) / 1000 &&
+            now.tv_nsec >= 0 && now.tv_nsec < 1000000000;
+        if (valid) {
+            response->observed_at_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+            response->command = CLIQ_INSPECT_RESERVATION; response->scope = 0;
+        }
+    }
+    return valid;
 }
 
 static void stop_everything(void) {
@@ -570,6 +689,7 @@ static void stop_everything(void) {
         }
     }
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
+    if (worker_reservation.fd >= 0) { close(worker_reservation.fd); worker_reservation.fd = -1; }
 }
 
 static int controller(void) {
@@ -590,7 +710,9 @@ static int controller(void) {
         if (!cliq_receive(3, &request, passed, &count)) break;
         response = cliq_packet(request.command); response.scope = request.scope;
         bool ok = false;
-        if (request.command == CLIQ_CREATE_WORKER || request.command == CLIQ_CREATE_WRITE) ok = spawn_worker(&request, passed, count, &response);
+        if (request.command == CLIQ_BIND_RESERVATION) ok = bind_worker_reservation(&request, passed, count);
+        else if (request.command == CLIQ_INSPECT_RESERVATION) ok = inspect_worker_reservation(&request, passed, count, &response);
+        else if (request.command == CLIQ_CREATE_WORKER || request.command == CLIQ_CREATE_WRITE) ok = spawn_worker(&request, passed, count, &response);
         else if (request.command == CLIQ_TERMINATE_RETAINED && count == 1) ok = terminate_retained(&request, passed[0], &response);
         else if (request.command == CLIQ_ACTIVATE_WORKER && count == 0 && request.scope > 0 && request.scope < CLIQ_WORKER_MAX_SCOPES) {
             struct scope *scope = &scopes[request.scope];

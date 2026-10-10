@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #define CLIQ_WORKER_MAGIC UINT32_C(0x43575131)
-#define CLIQ_WORKER_VERSION UINT32_C(1)
+#define CLIQ_WORKER_VERSION UINT32_C(2)
 #define CLIQ_WORKER_MAX_SCOPES 16
 #define CLIQ_WORKER_TOKEN_BYTES 192
 #define CLIQ_WORKER_PATH_BYTES 4096
@@ -24,7 +24,9 @@ enum cliq_worker_command {
     CLIQ_WORKER_READY = 8,
     CLIQ_WORKER_ACTIVATED = 9,
     CLIQ_WRITE_RESULT = 10,
-    CLIQ_TERMINATE_RETAINED = 11
+    CLIQ_TERMINATE_RETAINED = 11,
+    CLIQ_BIND_RESERVATION = 12,
+    CLIQ_INSPECT_RESERVATION = 13
 };
 
 struct cliq_worker_packet {
@@ -44,6 +46,11 @@ struct cliq_worker_packet {
     uint64_t generation_device;
     uint64_t generation_inode;
     uint64_t cgroup_inode;
+    uint64_t cgroup_device;
+    uint64_t reservation_device;
+    uint64_t reservation_inode;
+    uint64_t reservation_uid;
+    uint64_t observed_at_ms;
     uint64_t pid_namespace_inode;
     int64_t pid;
     int64_t namespace_init_pid;
@@ -53,6 +60,7 @@ struct cliq_worker_packet {
     uint32_t populated;
     uint32_t remaining_descendants;
     uint32_t init_reaped;
+    uint32_t reservation_observation;
     char nonce[65];
     char activation_nonce[65];
     char start_token[CLIQ_WORKER_TOKEN_BYTES];
@@ -63,6 +71,11 @@ struct cliq_worker_packet {
     char cgroup_name[96];
     char executable_path[256];
     char relative_path[CLIQ_WORKER_PATH_BYTES];
+    char plan_ref[65];
+    char sandbox_launch_ref[65];
+    char sandbox_launch_digest[65];
+    char generation_ref[65];
+    char pid_namespace_reservation[CLIQ_WORKER_TOKEN_BYTES];
 };
 
 #endif
