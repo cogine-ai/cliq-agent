@@ -45,6 +45,7 @@ import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
   decodePlatformProcessIdentity,
@@ -415,7 +416,15 @@ export class StateStore {
     return listener;
   }
 
-  static async open(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority): Promise<StateStore> {
+  static async open(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority,
+    installedRuntime?: HeldInstalledRuntime): Promise<StateStore> {
+    if (installedRuntime !== undefined) {
+      return withHeldInstalledRuntime(installedRuntime, () => StateStore.openCore(stateRoot, runtimeAuthority));
+    }
+    return StateStore.openCore(stateRoot, runtimeAuthority);
+  }
+
+  private static async openCore(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority): Promise<StateStore> {
     runtimeAuthority = runtimeAuthority === undefined ? undefined : immutableSnapshot(runtimeAuthority);
     if (process.platform !== 'darwin' && process.platform !== 'linux') {
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', `state store is unsupported on ${process.platform}`);
@@ -768,8 +777,9 @@ export class StateStore {
   }
 }
 
-export async function openStateStore(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority): Promise<StateStore> {
-  return StateStore.open(stateRoot, runtimeAuthority);
+export async function openStateStore(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority,
+  installedRuntime?: HeldInstalledRuntime): Promise<StateStore> {
+  return StateStore.open(stateRoot, runtimeAuthority, installedRuntime);
 }
 
 async function acquireOrBootstrapStateOwner(
@@ -909,7 +919,7 @@ async function acquireOrBootstrapStateOwner(
     casNamespaceManifestDigest: casNamespace.manifestDigest,
     casNamespaceId: casNamespace.namespaceId,
     casRootDigest: casNamespace.rootDigest,
-    stateSchemaVersion: 1,
+    stateSchemaVersion: readSchemaUserVersion(driver),
     generationDigest: '',
     origin: 'fresh_empty',
     pristineSchemaManifestRef: schemaArtifact.ref,

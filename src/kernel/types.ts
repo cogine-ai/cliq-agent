@@ -1483,7 +1483,7 @@ export type KernelGenerationIdentityV1 = {
   casNamespaceManifestDigest: string;
   casNamespaceId: string;
   casRootDigest: string;
-  stateSchemaVersion: 1;
+  stateSchemaVersion: number;
   generationDigest: string;
 } & (
   | {
@@ -1491,12 +1491,33 @@ export type KernelGenerationIdentityV1 = {
       pristineSchemaManifestRef: ArtifactRef;
       pristineSchemaManifestDigest: string;
       pristineSchemaDigest: string;
+      runtimeBundleRef?: never;
+      runtimeBundleManifestDigest?: never;
+      candidateRef?: never;
+      candidateDigest?: never;
+      migrationId?: never;
+    }
+  | {
+      origin: 'fresh_installed';
+      pristineSchemaManifestRef: ArtifactRef;
+      pristineSchemaManifestDigest: string;
+      pristineSchemaDigest: string;
+      runtimeBundleRef: ArtifactRef;
+      runtimeBundleManifestDigest: string;
+      candidateRef?: never;
+      candidateDigest?: never;
+      migrationId?: never;
     }
   | {
       origin: 'migrated_candidate';
       candidateRef: ArtifactRef;
       candidateDigest: string;
       migrationId: string;
+      pristineSchemaManifestRef?: never;
+      pristineSchemaManifestDigest?: never;
+      pristineSchemaDigest?: never;
+      runtimeBundleRef?: never;
+      runtimeBundleManifestDigest?: never;
     }
 );
 

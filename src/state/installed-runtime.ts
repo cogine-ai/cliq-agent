@@ -8,7 +8,7 @@ import { assertArtifactRef, normalizeAbsolutePath, sha256Bytes } from '../kernel
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ContentAddressedStore } from './cas.js';
-import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 
 export type HeldInstalledRuntime = Readonly<{
@@ -17,6 +17,31 @@ export type HeldInstalledRuntime = Readonly<{
   assertHeld(): Promise<void>;
   close(): Promise<void>;
 }>;
+
+type InstalledDirectoryIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
+/** Trusted startup observation only. No descriptor or independently supplied
+ * installation evidence can outlive the callback's held borrow. */
+export type InstalledRuntimeBorrow = Readonly<{
+  bundle: RuntimeBundleManifest;
+  bundleDigest: string;
+  stateRoot: InstalledDirectoryIdentity & Readonly<{ canonicalPath: string }>;
+  casRoot: InstalledDirectoryIdentity;
+  seed: readonly Readonly<{ artifactRef: string; byteCount: number }>[];
+  revalidate(): Promise<void>;
+}>;
+type InstalledRuntimeBinding = {
+  borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T>;
+};
+const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
+
+/** Look up the producer's private brand before observing any caller property.
+ * Structural objects, proxies and clones cannot impersonate a held selection. */
+export function withHeldInstalledRuntime<T>(held: HeldInstalledRuntime,
+  operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T> {
+  const binding = heldInstalledRuntimes.get(held);
+  if (binding === undefined) mismatch('installed runtime is not a verified held selection');
+  return binding.borrow(operation);
+}
 
 type InstalledRuntime = Readonly<{
   installInitial(target: { packageRoot: string; stateRoot: string }): Promise<{ bundleDigest: string; manifestDigest: string }>;
@@ -224,7 +249,7 @@ function validateBundle(value: unknown, releaseKeys: readonly ReleaseTrustKey[])
           entry.relativePath === 'manifest.json' || entry.relativePath.startsWith('manifest.json/') ||
           (entry.executable && entry.byteCount === 0) ||
           (['supervisor', 'worker', 'provider_adapter', 'tool_adapter', 'platform_helper', 'mcp_server', 'mcp_recovery_adapter', 'local_inference'].includes(entry.role) && !entry.executable) ||
-          ['guest_toolchain', 'skill_bundle', 'mcp_recovery_profile', 'bundle_object'].includes(entry.role)) {
+          ['guest_toolchain', 'skill_bundle', 'mcp_recovery_profile', 'bundle_object', 'system_prompt', 'compaction_prompt'].includes(entry.role)) {
         mismatch('installed runtime entry path or role is unsupported');
       }
     }
@@ -432,21 +457,64 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           await checkPackageGraph(scope, version, signed.bundle); await scope.assertDirectories();
         };
         await revalidate();
+        const checkedRevalidate = async () => {
+          if (poisoned !== undefined) throw poisoned;
+          try { await revalidate(); }
+          catch (error) { rememberRetirement(error); poisoned = error; throw error; }
+        };
+        const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
+          if (closed) mismatch('installed runtime handle is closed');
+          const pending = tail.then(operation);
+          tail = pending.then(() => undefined, () => undefined);
+          return pending;
+        };
+        const identity = (directory: Directory): InstalledDirectoryIdentity => Object.freeze({
+          deviceId: directory.info.dev.toString(), fileId: directory.info.ino.toString(), ownerUid: Number(directory.info.uid),
+        });
+        const observation = Object.freeze({
+          bundle: signed.bundle, bundleDigest: signed.bundleDigest,
+          stateRoot: Object.freeze({ ...identity(state), canonicalPath: stateRoot }),
+          casRoot: identity(casRoot),
+          seed: Object.freeze([...signed.roots].map(([artifactRef, bytes]) =>
+            Object.freeze({ artifactRef, byteCount: bytes.length }))
+            .sort((left, right) => left.artifactRef < right.artifactRef ? -1 : left.artifactRef > right.artifactRef ? 1 : 0)),
+        });
         const selected: HeldInstalledRuntime = Object.freeze({
           bundle: signed.bundle, bundleDigest: signed.bundleDigest,
           async assertHeld(this: HeldInstalledRuntime): Promise<void> {
             if (this !== selected) mismatch('installed runtime handle receiver is not its held instance');
-            if (closed) mismatch('installed runtime handle is closed');
-            const operation = tail.then(async () => {
-              if (poisoned !== undefined) throw poisoned;
-              try { await revalidate(); } catch (error) { rememberRetirement(error); poisoned = error; throw error; }
-            });
-            tail = operation.catch(() => undefined); return operation;
+            return enqueue(checkedRevalidate);
           },
           close(this: HeldInstalledRuntime): Promise<void> {
             if (this !== selected) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime handle receiver is not its held instance'));
             closed = true;
             return closePromise ??= tail.then(() => scope.close());
+          },
+        });
+        heldInstalledRuntimes.set(selected, {
+          borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T> {
+            return enqueue(async () => {
+              await checkedRevalidate();
+              let active = true;
+              const revalidations: Promise<void>[] = [];
+              const installed: InstalledRuntimeBorrow = Object.freeze({
+                ...observation,
+                revalidate(): Promise<void> {
+                  if (!active) mismatch('installed runtime borrow has ended');
+                  const pending = checkedRevalidate();
+                  revalidations.push(pending);
+                  // The borrow owns joining even a caller-unawaited check.
+                  void pending.catch(() => undefined);
+                  return pending;
+                },
+              });
+              const result = Promise.resolve().then(() => operation(installed));
+              await result.then(() => undefined, () => undefined);
+              active = false;
+              // Join every check, preserving retirement uncertainty over an
+              // ordinary callback or validation error.
+              return (await joinResourceOperations([result, ...revalidations] as const))[0];
+            });
           },
         });
         return selected;

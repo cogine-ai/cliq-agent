@@ -13,6 +13,7 @@
 #include <linux/sched.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/statfs.h>
@@ -22,6 +23,10 @@
 static const napi_type_tag IMAGE_TAG = { UINT64_C(0x671ca1bc736f4411), UINT64_C(0xa1d7e8ec9f001820) };
 static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0x875a7b5a31bc4112), UINT64_C(0xbf12ad50275ed149) };
 static const napi_type_tag SCOPE_TAG = { UINT64_C(0x00d75ac01fa14d87), UINT64_C(0x9b1c5a0256e81d29) };
+
+/* The fixed loaded native image owns this uncertainty across controllers and
+ * N-API environments. A new receiver cannot erase an unjoined resource. */
+static atomic_bool native_retirement_failed;
 
 struct image { int fd; };
 struct native_scope;
@@ -84,7 +89,9 @@ static void set_string(napi_env env, napi_value object, const char *name, const 
 /* Consume before close: an uncertain close is never retried on a reused FD. */
 static bool retire_descriptor(int *descriptor) {
     int owned = *descriptor; *descriptor = -1;
-    return owned < 0 || close(owned) == 0;
+    if (owned < 0 || close(owned) == 0) return true;
+    atomic_store(&native_retirement_failed, true);
+    return false;
 }
 
 static bool same_directory(const struct stat *expected, const struct stat *actual) {
@@ -342,6 +349,7 @@ static void cleanup_complete(napi_env env, napi_status status, void *data) {
     /* Only this main-thread completion publishes fully joined resources.
      * The worker's reaped result must not be read before this callback. */
     controller->cleanup_done = true;
+    if (!controller->reaped || controller->retirement_failed) atomic_store(&native_retirement_failed, true);
     settle_controller_close(env, controller);
     controller_release(controller);
 }
@@ -365,6 +373,8 @@ static void cleanup_hook(napi_async_cleanup_hook_handle handle, void *data) {
 static bool begin_request(struct controller *controller, struct native_scope *scope,
                           const struct cliq_worker_packet *request, const int *fds, size_t count) {
     if (controller->closed || !controller->ready || controller->pending != 0) return false;
+    if (atomic_load(&native_retirement_failed) && request->command != CLIQ_STOP_SCOPE &&
+        request->command != CLIQ_TERMINATE_RETAINED && request->command != CLIQ_INSPECT_RESERVATION) return false;
     controller->pending = request->command; controller->pending_scope = scope;
     if (cliq_send(controller->socket, request, fds, count)) return true;
     (void)close_controller(controller); return false;
@@ -541,6 +551,7 @@ static napi_value scope_inspect(napi_env env, napi_callback_info info) {
     return result;
 }
 static napi_value scope_activate(napi_env env, napi_callback_info info) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 1; napi_value args[1], self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, args, &self, NULL);
     if (argc != 1 || !tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->ready || scope->invocation || scope->stopped || scope->released || scope->controller->closed)
@@ -555,6 +566,7 @@ static napi_value scope_activate(napi_env env, napi_callback_info info) {
 }
 
 static napi_value scope_poll_activated(napi_env env, napi_callback_info info) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || scope->controller->closed || scope->invocation || !scope->released)
@@ -570,6 +582,7 @@ static napi_value scope_poll_activated(napi_env env, napi_callback_info info) {
 }
 
 static napi_value scope_release(napi_env env, napi_callback_info info) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->ready || !scope->invocation || scope->stopped || scope->released || scope->controller->closed)
@@ -646,6 +659,7 @@ static napi_value scope_poll_stopped(napi_env env, napi_callback_info info) {
 }
 
 static napi_value scope_poll_ready(napi_env env, napi_callback_info info) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || scope->controller->closed) return failure(env, "invalid native blocked scope");
@@ -668,6 +682,7 @@ static napi_value scope_poll_ready(napi_env env, napi_callback_info info) {
 }
 
 static napi_value create_scope(napi_env env, napi_callback_info info, bool invocation) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t expected = invocation ? 7 : 6;
     size_t argc = expected; napi_value args[7], self; struct controller *controller;
     napi_get_cb_info(env, info, &argc, args, &self, NULL);
@@ -898,7 +913,13 @@ static napi_value controller_close(napi_env env, napi_callback_info info) {
     }
     if (controller->cleanup_done) { settle_controller_close(env, controller); return promise; }
     napi_create_reference(env, promise, 1, &controller->close_promise);
-    if (!close_controller(controller)) return failure(env, "controller join could not be queued");
+    if (!close_controller(controller)) {
+        /* No work was submitted. Reject this attempt, retain actual ownership
+         * and let a later close queue the same join. Never cache an unsettled
+         * promise or confuse queue failure with uncertain descriptor close. */
+        napi_delete_reference(env, controller->close_promise); controller->close_promise = NULL;
+        settle_controller_close(env, controller);
+    }
     return promise;
 }
 
@@ -926,6 +947,7 @@ static napi_value controller_poll_ready(napi_env env, napi_callback_info info) {
     /* Revocation is main-thread-only and precedes queueing cleanup. Do not
      * read worker-written retirement state once that join is in flight. */
     if (controller->closed) return failure(env, "invalid starting controller");
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     if (controller->constructor_failed || controller->retirement_failed) {
         (void)close_controller(controller); return failure(env, "native atomic controller construction failed; no fallback");
     }
@@ -968,6 +990,7 @@ static bool prepare_controller_io(struct controller *controller) {
 }
 
 static napi_value open_controller(napi_env env, napi_callback_info info) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 2; napi_value args[2]; struct image *helper; uint64_t root;
     napi_get_cb_info(env, info, &argc, args, NULL, NULL);
     if (argc != 2 || !tagged(env, args[0], &IMAGE_TAG, (void **)&helper) || helper->fd < 0 ||
