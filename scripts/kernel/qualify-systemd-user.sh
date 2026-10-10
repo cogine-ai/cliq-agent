@@ -49,6 +49,7 @@ readonly probe_suffix=${probe_fixture##*.}
 readonly probe_username="cliq-probe-${probe_suffix,,}"
 readonly probe_home="$probe_fixture/home"
 readonly probe_skel="$probe_fixture/empty-skel"
+readonly probe_mail="$probe_fixture/mail"
 readonly probe_script="$probe_fixture/systemd-user-probe.mjs"
 readonly probe_ledger="$probe_fixture/ownership-ledger.json"
 readonly probe_before="$probe_output/runner-baseline-before.json"
@@ -294,7 +295,10 @@ readonly probe_ledger_digest
 groupadd --gid "$probe_gid" "$probe_username"
 probe_group_created=1
 mkdir -m 0755 -- "$probe_skel"
-useradd --create-home --no-user-group --no-log-init -K CREATE_MAIL_SPOOL=no --uid "$probe_uid" --gid "$probe_gid" \
+# CREATE_MAIL_SPOOL is a useradd default, not a -K login.defs option. Keep
+# any enabled spool inside the already ledger-scoped disposable fixture.
+mkdir -m 0700 -- "$probe_mail"
+useradd --create-home --no-user-group --no-log-init -K "MAIL_DIR=$probe_mail" --uid "$probe_uid" --gid "$probe_gid" \
   --skel "$probe_skel" --home-dir "$probe_home" --shell /usr/sbin/nologin "$probe_username"
 probe_created=1
 [[ $(id -u "$probe_username") = "$probe_uid" && $(id -g "$probe_username") = "$probe_gid" ]] || exit 1
