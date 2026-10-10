@@ -157,38 +157,73 @@ its unchecked acceptance criteria or a mandatory separate product slice:
   changed app with the old signature, a proven ordinary-Node preload ignored by
   SEA, writable helper, missing helper with a valid cwd decoy, and changed helper
   bytes. All run outside the checkout cwd; refusal leaves StateRoot empty.
-- `qualify-systemd-user.sh` diagnoses actual delegated user services for empty
-  and live dummy workers under manual and automatic restart. It uses a new UID,
-  frozen root-owned resource ledger and exact runner before/after baseline.
+- `qualify-systemd-user.sh` compares actual delegated user services with an
+  independent persistent anchor for empty and live dummy workers under manual
+  and automatic restart. It uses a new UID, frozen root-owned resource ledger
+  and exact runner before/after baseline. A test-only C helper requires genuine
+  non-root `clone3(CLONE_INTO_CGROUP)` before controller exec; it has no
+  fork-then-migrate fallback. The keeper initializes its delegation, then only
+  stays alive; each Supervisor creates and retires its private worker subtrees.
+  Root explicitly provisions the fresh UID's `user@UID.service` with an
+  instance-specific `Delegate=cpu memory pids` drop-in. Results establish
+  non-root birth/retirement under that authorized delegation, not support in
+  every distribution's defaults or administrator-free installation.
   Missing/changed cgroup paths are negative prerequisite facts, never death
   authority. Provisioning, incomplete observation and cleanup failure fail the
   diagnostic. The ordinary Node dummy is explicitly not a signed Supervisor.
 
 Local build, all 1,840 portable tests, focused real native regressions and the
 seven SEA cases passed on macOS; this is not macOS execution qualification.
-The same seven image cases and all four actual user-manager diagnostic cases
+The same seven image cases and all eight actual user-manager A/B cases
 passed on free standard Ubuntu 22.04 at source
+`85e7232a2ae1b62dc3400f41358de93a4a580191` in
+[run 38088093224](https://github.com/cogine-ai/cliq-agent/actions/runs/38088093224).
+Systemd 249.11 on kernel 6.8.0-1064-azure again removed every original direct
+service/worker cgroup, corroborating the initial four-case result at
 `f3d1879e35f75890d7ef01eb9e7cf7ec11a9faaf` in
 [run 38086725642](https://github.com/cogine-ai/cliq-agent/actions/runs/38086725642).
-The diagnostic succeeded by reporting real facts, not by qualifying recovery:
-systemd 249.11 on kernel 6.8.0-1064-azure removed every original service and
-worker cgroup. Held descriptors still named the old inodes with ` (deleted)`;
-each successfully restarted service had a different inode, on cgroup device 29.
+In A, held descriptors still named the old inodes with ` (deleted)` and each
+restarted service had a different inode. In B, the Supervisor service inode
+was likewise deleted, but the independent anchor and exact old worker scope
+remained on cgroup device 29:
 
-| Dummy worker / restart | Old service inode | Restarted service inode | Old worker inode / outcome |
-| --- | --- | --- | --- |
-| empty / manual | 6894 | 7041 | 6992 / deleted |
-| empty / automatic | 7209 | 7356 | 7307 / deleted |
-| live / manual | 7524 | 7671 | 7622 / deleted |
-| live / automatic | 7839 | 7986 | 7937 / deleted |
+| Layout / dummy worker / restart | Root inode before → after | Old worker scope inode / outcome |
+| --- | --- | --- |
+| A / empty / manual | 6954 → 7101 | 7052 / deleted |
+| A / empty / automatic | 7269 → 7416 | 7367 / deleted |
+| A / live / manual | 7584 → 7791 | 7682 / deleted |
+| A / live / automatic | 7959 → 8106 | 8057 / deleted |
+| B / empty / manual | 8274 → 8274 | 8519 / retained, empty |
+| B / empty / automatic | 8274 → 8274 | 9058 / retained, empty |
+| B / live / manual | 8274 → 8274 | 9597 / retained, non-root retired |
+| B / live / automatic | 8274 → 8274 | 10136 / retained, non-root retired |
 
-The original live dummy workers were independently observed before MainPID
-SIGKILL. Cleanup reported zero errors and the runner's complete before/after
-baseline was identical: UID 1001, manager PID 893/start ticks 995, manager
-InvocationID `9e294d442d9b4379a6ac7bf6873e62a4`, cgroup inode 5848.
-These are OS prerequisite observations, not native worker or all-descendant
-death evidence. Full installed/control/admission/execution/restart I1 and the
-credential/TLS dependencies below remain open.
+All four B worker-parent inodes (8470, 9009, 9548, 10087) stayed unchanged,
+as did keeper PID 2848/start ticks 30449 and InvocationID
+`38253acac9c94b00b2825c9681371992`. The real common ancestor was the new UID's
+`app.slice`, inode 6807, whose `cgroup.procs` belonged to UID/GID 20000 with
+mode 0644. Source and destination used cgroup namespace `4026531835`.
+These metadata are observations; actual non-root clone3 success verifies birth
+access, not a permission-mode inference or root-assisted migration.
+
+In both live B cases, the successor independently observed the old worker and
+grandchild with their original PID/start identities still alive and non-zombie
+after controller IPC EOF. UID 20000 then wrote `cgroup.kill` through the held
+exact old scope; `populated` became zero and all three recorded original
+lifetimes, including zombies, disappeared without deleting that scope.
+Cleanup reported zero errors and the runner's complete before/after baseline
+was identical: UID 1001, manager PID 899/start ticks 857, manager InvocationID
+`b7006721924b41c5b9673aeac6fd931e`, cgroup inode 5848.
+The bounded reports are retained as
+[artifact 11682906299](https://github.com/cogine-ai/cliq-agent/actions/runs/38088093224/artifacts/11682906299)
+for seven days; zip SHA-256 is
+`23ee4904c66a8e7124094c2d234b9ff1f3855ef5ed00e4195ca9d4fb49e545e8`.
+
+This qualifies the tested OS prerequisite, not production native worker birth,
+all-descendant death evidence or signed keeper startup. Full installed/control/
+admission/execution/restart I1 and the credential/TLS dependencies below remain
+open. The test-only launcher stays in the Supervisor service; it is not the
+production controller or a durable reservation witness.
 
 ### Risks And Dependencies
 
@@ -225,16 +260,15 @@ Run, database or broker authority and adds no second lifecycle ledger. Only
 the current Supervisor manages its delegated execution subtrees after a
 bounded initialization handoff.
 
-The next OS prerequisite campaign must retain the four direct-service cases
-and compare independent anchor cases. Protect the complete controller/monitor
-birth chain, not only a worker moved after fork: require actual non-root
+The OS A/B campaign above passed. Next integrate the fixed keeper role into
+trusted signed startup and atomically protect the production controller/monitor
+birth chain, not only a worker moved after fork. Preserve actual non-root
 `clone3(CLONE_INTO_CGROUP)` placement before the first controller birth, with no
-fork-then-migrate fallback. Same-user delegation alone does not prove cross-unit
-placement permission. Verify the actual common ancestor and namespace access;
-do not chmod manager ancestors or perform a root-assisted migration to pass.
-Across Supervisor restart, retain exact anchor/worker inode and keeper process
-identities before attempting the existing native death proof. Dummy OS results
-do not qualify production native READY/birth-witness fault cuts.
+fork-then-migrate fallback or root-assisted permission workaround. Across
+Supervisor restart, validate exact retained identities before attempting the
+existing native death proof. Dummy OS results do not qualify production native
+READY/birth-witness fault cuts, which still require the real signed controller,
+reservation, monitor, namespace worker and existing OS tracer campaign.
 
 Anchor loss or machine reboot remains explicit recovery waiting when original
 containment death cannot be proved. The user accepted this boundary; a strict
