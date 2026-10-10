@@ -74,14 +74,17 @@ test('tool completion refuses a transaction clock that regressed behind its stag
 
 test('a sealed snapshot retains initial quiescence while a fresh final death owns a later atomic checkpoint', async t => {
   let clock = Date.now();
-  t.mock.method(Date, 'now', () => clock);
+  let observing = false;
+  t.mock.method(Date, 'now', () => observing ? clock++ : clock);
   const fixture = await createAgentFixture('seal-two-observations', undefined, { mode: 'accept-edits' });
   try {
+    observing = true;
     const proof = await quiescedToolCheckpoint(fixture, 'seal-two-observations-checkpoint');
-    const initial = await fixture.store.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(proof.checkpoint.retirementEvidenceRef);
-    const snapshot = { ...proof.snapshot, quiescenceEvidenceRef: proof.checkpoint.retirementEvidenceRef };
-    snapshot.evidenceDigest = digestOmitting(snapshot, 'evidenceDigest');
-    const retainedSnapshot = await fixture.store.artifacts.publishCanonical(snapshot, snapshot.format);
+    observing = false;
+    const initial = await fixture.store.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(proof.snapshot.quiescenceEvidenceRef);
+    const snapshot = proof.snapshot;
+    assert.notEqual(snapshot.quiescenceEvidenceRef, proof.checkpoint.retirementEvidenceRef);
+    assert.ok(initial.observedAt < snapshot.observedAt);
     clock += 6_000;
     // Offline canonical proof exercises the public StateStore contract; it
     // neither mints a native capability nor qualifies actual process death.
@@ -96,12 +99,13 @@ test('a sealed snapshot retains initial quiescence while a fresh final death own
       expectedRunRevision: before.run.revision, expectedGenerationRowVersion: generation.rowVersion,
       quiesceId: generation.quiesceId, checkpointId: snapshot.checkpointId,
       contextManifestRef: before.latestCheckpoint.contextManifestRef, workspaceStateRef: proof.workspaceStateRef,
-      snapshotEvidenceRef: retainedSnapshot.ref, snapshotEvidenceDigest: snapshot.evidenceDigest,
+      snapshotEvidenceRef: proof.checkpoint.snapshotEvidenceRef, snapshotEvidenceDigest: snapshot.evidenceDigest,
       retirementEvidenceRef: retainedFinal.ref, checkpointReason: 'auto' });
     assert.equal(sealed.run.status, 'queued');
     assert.equal(sealed.checkpoint.createdAt, new Date(clock).toISOString());
     assert.equal(sealed.launch.retiredAt, sealed.checkpoint.createdAt);
     assert.equal(sealed.launch.retirementEvidenceRef, retainedFinal.ref);
+    assert.notEqual(snapshot.quiescenceEvidenceRef, retainedFinal.ref);
     assert.ok(initial.observedAt < final.observedAt);
     const metadata = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
     try { assert.deepEqual(readRequiredWorkerLaunch(metadata, fixture.launchId), sealed.launch); }
