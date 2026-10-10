@@ -615,7 +615,7 @@ export async function sealWorkerGeneration(
     if (fenceOutcome !== 'healthy') return;
     const currentLaunch = readRequiredWorkerLaunch(connection, input.launchId);
     const run = readRun(connection, currentLaunch.runId);
-    if (proof && (parseCanonicalTime(now) - parseCanonicalTime(proof.deathObservedAt) > 5_000 ||
+    if (proof && (proof.snapshot.observedAt > now || parseCanonicalTime(now) - parseCanonicalTime(proof.deathObservedAt) > 5_000 ||
         canonicalSha256(currentLaunch) !== canonicalSha256(initialLaunch) || canonicalSha256(run) !== canonicalSha256(initialRun) ||
         canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, initialLaunch.workspaceGenerationRef)) !== canonicalSha256(initialGeneration))) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale or its exact cut changed');

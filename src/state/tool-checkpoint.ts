@@ -13,6 +13,7 @@ import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { readCheckpoint } from './rows.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
+import { sampleCanonicalNow } from './canonical-time.js';
 
 export const toolCheckpointId = (runId: string, opId: string, attempt: number) =>
   identityHash('cliq-tool-checkpoint-v1', runId, opId, String(attempt));
@@ -105,7 +106,12 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
       launch.leaseEpoch !== run.leaseEpoch) throw new KernelStorageError('LEASE_FENCED', 'tool result requires a quiesced checkpointing generation');
   const { metadata, snapshot, deathObservedAt } = await readWorkerCheckpointProof(artifacts, assertActiveStateOwner(driver, owner), { ...input, launch, generation });
   return { metadata, commit(connection: SqliteConnection, currentRun: Run, createdAt: string) {
-    if (parseCanonicalTime(createdAt) - parseCanonicalTime(deathObservedAt) > 5_000) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale; reobserve containment death');
+    // Artifact timestamps precede asynchronous publication. Only the actual
+    // transaction clock can establish that retirement authority is still fresh.
+    const now = sampleCanonicalNow();
+    if (now < createdAt || parseCanonicalTime(now) - parseCanonicalTime(deathObservedAt) > 5_000) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale; reobserve containment death');
+    }
     if (createdAt < snapshot.observedAt || currentRun.activeWorkerLaunchId !== launch.launchId || currentRun.leaseEpoch !== run.leaseEpoch ||
         canonicalSha256(readRequiredWorkerLaunch(connection, launch.launchId)) !== canonicalSha256(launch) ||
         canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef)) !== canonicalSha256(generation)) {
