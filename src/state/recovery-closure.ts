@@ -5,6 +5,7 @@ import type {
   ContextManifest,
   InvocationJournalEntry,
   RecoveryClosureV1,
+  RunAssemblyV1,
   RunItemReferenceV1,
   RunSpec,
   WorkerLaunch,
@@ -40,6 +41,7 @@ import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
 import { checkpointFromRow, readCheckpoint, readRun } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
+import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -572,13 +574,15 @@ export async function readRecoveryClosure(
     const latestCheckpoint = readCheckpoint(connection, run.latestCheckpointId);
     const checkpoints = connection.prepare('SELECT * FROM checkpoints WHERE run_id = ? ORDER BY rowid')
       .all(run.id).map(checkpointFromRow);
+    const allWorkerLaunches = readWorkerLaunchesForRun(connection, run.id);
     return {
       run,
       latestCheckpoint,
       checkpoints,
       items: readRunItems(connection, run.id),
       journal: readInvocationJournal(connection, run.id),
-      workerLaunches: readWorkerLaunchesForRun(connection, run.id, true),
+      workerLaunches: allWorkerLaunches.filter(launch => launch.phase !== 'retired'),
+      allWorkerLaunches,
       workspaceGenerations: readWorkspaceGenerationsForRun(connection, run.id, true),
       childAllocations: readChildAllocationsForRun(connection, run.id)
     };
@@ -671,7 +675,7 @@ export async function readRecoveryClosure(
   if (journal.some((entry) => entry.opKind === 'model')) {
     try {
       await validateAgentRecovery({ artifacts, run, spec: runSpec, items, journal,
-        checkpoints: databaseCut.checkpoints,
+        checkpoints: databaseCut.checkpoints, workspaceGenerations,
         context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) });
     } catch (error) {
       recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);
@@ -691,6 +695,25 @@ export async function readRecoveryClosure(
     recoveryFailure('lease-free Run has an unexplained budget reservation');
   }
   await validateGenerationArtifacts(artifacts, workspaceGenerations);
+  const sealedGenerations = workspaceGenerations.filter(generation => generation.phase === 'sealed');
+  const sealedLaunches = databaseCut.allWorkerLaunches.filter(launch => launch.phase === 'retired' && launch.generationWriteState === 'sealed');
+  if (sealedGenerations.length || sealedLaunches.length) {
+    const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+    if (assembly.format === 'cliq-run-assembly-v1') {
+      try {
+        for (const generation of sealedGenerations) {
+          const matches = sealedLaunches.filter(launch => launch.workspaceGenerationRef === generation.generationRef);
+          if (matches.length !== 1 || !matches[0]!.activatedAt) throw new TypeError('sealed generation has no unique retired activated worker');
+          await validateRetainedWorkerSeal(driver, artifacts, { run, spec: runSpec, assembly, launch: matches[0]!, generation });
+        }
+        if (sealedLaunches.some(launch => !sealedGenerations.some(generation => generation.generationRef === launch.workspaceGenerationRef))) {
+          throw new TypeError('retired sealed worker has no matching sealed generation');
+        }
+      } catch (error) {
+        recoveryFailure(`worker seal history is invalid: ${(error as Error).message}`, error);
+      }
+    }
+  }
   await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
   try { await validateWorkerRecoveryWait(artifacts, databaseCut, driver); }
   catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error); }

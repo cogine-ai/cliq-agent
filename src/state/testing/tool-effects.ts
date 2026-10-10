@@ -59,13 +59,16 @@ export async function quiescedToolCheckpoint(fixture: Awaited<ReturnType<typeof 
     observedAt: sampleCanonicalNow() };
   const death = await store.artifacts.publishCanonical({ ...deathCore, evidenceDigest: canonicalSha256(deathCore) }, 'cliq-process-containment-death-evidence-v1');
   const snapshot: WorkspaceGenerationSnapshotEvidenceV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-snapshot-evidence-v1',
-    purpose: 'sealed_to_checkpoint', runId, generationRef: generation.generationRef, generationIdentityDigest: generation.generationIdentityDigest,
+    purpose: 'sealed_to_checkpoint', quiescenceEvidenceRef: death.ref, runId,
+    generationRef: generation.generationRef, generationIdentityDigest: generation.generationIdentityDigest,
     checkpointId, workspaceStateRef: state.ref, workspaceStateDigest: workspace.stateDigest, entriesRef: workspace.entriesRef, treeDigest: entries.treeDigest,
     ...(workspace.privateGitStateRef ? { privateGitStateRef: workspace.privateGitStateRef } : {}),
     descriptorRewalkComplete: true, fileFsyncComplete: true, directoryFsyncComplete: true, observedAt: sampleCanonicalNow(), evidenceDigest: '' };
   snapshot.evidenceDigest = digestOmitting(snapshot, 'evidenceDigest');
   const snapshotArtifact = await store.artifacts.publishCanonical(snapshot, snapshot.format);
-  return { checkpoint: { workspaceStateRef: state.ref, snapshotEvidenceRef: snapshotArtifact.ref, retirementEvidenceRef: death.ref },
+  const finalCore = { ...deathCore, observedAt: sampleCanonicalNow() };
+  const finalDeath = await store.artifacts.publishCanonical({ ...finalCore, evidenceDigest: canonicalSha256(finalCore) }, 'cliq-process-containment-death-evidence-v1');
+  return { checkpoint: { workspaceStateRef: state.ref, snapshotEvidenceRef: snapshotArtifact.ref, retirementEvidenceRef: finalDeath.ref },
     snapshot, workspaceStateRef: state.ref, priorWorkspaceStateRef: closure.latestCheckpoint.workspaceStateRef };
 }
 

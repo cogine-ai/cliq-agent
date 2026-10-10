@@ -757,7 +757,6 @@ export type WorkspaceGenerationIdentityV1 = {
 export type WorkspaceGenerationSnapshotEvidenceV1 = {
   schemaVersion: 1;
   format: 'cliq-workspace-generation-snapshot-evidence-v1';
-  purpose: 'materialized_from_checkpoint' | 'sealed_to_checkpoint';
   runId: string;
   generationRef: ArtifactRef;
   generationIdentityDigest: string;
@@ -772,7 +771,10 @@ export type WorkspaceGenerationSnapshotEvidenceV1 = {
   directoryFsyncComplete: true;
   observedAt: string;
   evidenceDigest: string;
-};
+} & (
+  | { purpose: 'materialized_from_checkpoint'; quiescenceEvidenceRef?: never }
+  | { purpose: 'sealed_to_checkpoint'; quiescenceEvidenceRef: ArtifactRef }
+);
 
 export type WorkspaceGenerationQuarantineEvidenceBaseV1 = {
   schemaVersion: 1;

@@ -905,12 +905,17 @@ export function decodeWorkspaceGenerationSnapshotEvidence(
       'schemaVersion', 'format', 'purpose', 'runId', 'generationRef',
       'generationIdentityDigest', 'checkpointId', 'workspaceStateRef', 'workspaceStateDigest',
       'entriesRef', 'treeDigest', 'privateGitStateRef', 'descriptorRewalkComplete',
-      'fileFsyncComplete', 'directoryFsyncComplete', 'observedAt', 'evidenceDigest'
+      'fileFsyncComplete', 'directoryFsyncComplete', 'observedAt', 'evidenceDigest', 'quiescenceEvidenceRef'
     ],
     'WorkspaceGenerationSnapshotEvidence'
   );
   if (value.purpose !== 'materialized_from_checkpoint' && value.purpose !== 'sealed_to_checkpoint') {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace generation snapshot purpose is invalid');
+  }
+  if (value.purpose === 'sealed_to_checkpoint') {
+    requireArtifactRef(value.quiescenceEvidenceRef, 'WorkspaceGenerationSnapshotEvidence.quiescenceEvidenceRef');
+  } else if (Object.hasOwn(value, 'quiescenceEvidenceRef')) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'materialization cannot claim worker quiescence');
   }
   requireString(value.runId, 'WorkspaceGenerationSnapshotEvidence.runId');
   requireArtifactRef(value.generationRef, 'WorkspaceGenerationSnapshotEvidence.generationRef');

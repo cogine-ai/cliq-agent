@@ -61,6 +61,15 @@ static int64_t milliseconds(void) {
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
+static bool stamp_observation(struct cliq_worker_packet *response) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0 ||
+        (uint64_t)now.tv_sec > (UINT64_C(9007199254740991) - 999) / 1000 ||
+        now.tv_nsec < 0 || now.tv_nsec >= 1000000000) return false;
+    response->observed_at_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+    return response->observed_at_ms != 0;
+}
+
 static bool readable(int fd, int timeout) {
     struct pollfd observed = { .fd = fd, .events = POLLIN };
     int ready;
@@ -535,10 +544,28 @@ static bool tracked_absent(const struct tracked_set *set) {
     return true;
 }
 
+static bool held_scope_dead(const struct scope *scope) {
+    struct stat metadata;
+    return native_cgroup(scope->cgroup) && fstat(scope->cgroup, &metadata) == 0 &&
+        (uint64_t)metadata.st_dev == scope->identity.cgroup_device &&
+        (uint64_t)metadata.st_ino == scope->identity.cgroup_inode && cgroup_empty(scope->cgroup) &&
+        original_process_absent(scope->monitor, scope->monitor_start_token) &&
+        original_process_absent(scope->init, scope->identity.init_native_start_token) &&
+        original_process_absent(scope->worker, scope->identity.start_token);
+}
+
 static bool stop_scope(unsigned int id, struct cliq_worker_packet *response) {
     if (id == 0 || id >= CLIQ_WORKER_MAX_SCOPES || !scopes[id].created) return false;
     struct scope *scope = &scopes[id];
-    if (scope->stopped) { *response = scope->identity; response->command = CLIQ_STOP_SCOPE; return true; }
+    if (scope->stopped) {
+        /* Original process identities cannot resurrect. Reobserve the held
+         * exact hierarchy and tokens nevertheless; a cached zero is not new
+         * retirement authority and no named path chooses a replacement. */
+        if (!held_scope_dead(scope)) return false;
+        *response = scope->identity; response->command = CLIQ_STOP_SCOPE;
+        if (!stamp_observation(response)) return false;
+        scope->identity = *response; return true;
+    }
     scope->active = false;
     struct tracked_set tracked = {0};
     if (!collect_processes(scope->cgroup, &tracked, 0) ||
@@ -560,14 +587,15 @@ static bool stop_scope(unsigned int id, struct cliq_worker_packet *response) {
         int64_t now = milliseconds(); if (now < 0 || now > deadline) break;
         int status; pid_t reaped;
         do { reaped = waitpid(-1, &status, WNOHANG); } while (reaped > 0);
-        if (cgroup_empty(scope->cgroup) && tracked_absent(&tracked)) {
+        if (held_scope_dead(scope) && tracked_absent(&tracked)) {
             scope->stopped = true;
             scope->identity.populated = 0;
             scope->identity.init_reaped = 1;
             scope->identity.remaining_descendants = 0;
             *response = scope->identity;
             response->command = CLIQ_STOP_SCOPE;
-            return true;
+            if (!stamp_observation(response)) return false;
+            scope->identity = *response; return true;
         }
         struct timespec delay = { 0, 10000000 }; nanosleep(&delay, NULL);
     }
@@ -582,6 +610,8 @@ static bool terminate_retained_until(struct cliq_worker_packet *request, int dir
     if (scope < 0) return false;
     bool valid = native_cgroup(scope) && fstat(scope, &metadata) == 0 && (uint64_t)metadata.st_ino == request->cgroup_inode &&
         (request->cgroup_device == 0 || (uint64_t)metadata.st_dev == request->cgroup_device);
+    const dev_t device = valid ? metadata.st_dev : 0;
+    const ino_t inode = valid ? metadata.st_ino : 0;
     struct tracked_set tracked = {0};
     valid = valid && collect_processes(scope, &tracked, 0) &&
         track_process(&tracked, (pid_t)request->pid, request->start_token) &&
@@ -598,9 +628,12 @@ static bool terminate_retained_until(struct cliq_worker_packet *request, int dir
     if (deadline < 0) deadline = start + OBSERVATION_TIMEOUT_MS;
     while (valid) {
         int64_t now = milliseconds(); if (now < 0 || now > deadline) break;
-        if (native_cgroup(scope) && cgroup_empty(scope) && tracked_absent(&tracked)) {
+        if (native_cgroup(scope) && fstat(scope, &metadata) == 0 && metadata.st_dev == device && metadata.st_ino == inode &&
+            cgroup_empty(scope) && tracked_absent(&tracked)) {
             *response = *request; response->populated = 0; response->init_reaped = 1; response->remaining_descendants = 0;
-            close(scope); return true;
+            bool observed = stamp_observation(response);
+            if (close(scope) != 0) observed = false;
+            return observed;
         }
         struct timespec delay = { 0, 10000000 }; nanosleep(&delay, NULL);
     }
@@ -663,12 +696,8 @@ static bool inspect_worker_reservation(struct cliq_worker_packet *request, int p
     if (valid) {
         /* Sample the actual native inspection, not a later JS receipt of this
          * response. Birth records never contain death facts or timestamps. */
-        struct timespec now;
-        valid = clock_gettime(CLOCK_REALTIME, &now) == 0 && now.tv_sec >= 0 &&
-            (uint64_t)now.tv_sec <= (UINT64_C(9007199254740991) - 999) / 1000 &&
-            now.tv_nsec >= 0 && now.tv_nsec < 1000000000;
+        valid = stamp_observation(response);
         if (valid) {
-            response->observed_at_ms = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
             response->command = CLIQ_INSPECT_RESERVATION; response->scope = 0;
         }
     }

@@ -483,7 +483,7 @@ export type SettlementContinuation = (input: {
   settlement: BudgetSettlementV1;
 }) => Promise<{
   metadata: PublishedArtifact[];
-  commit: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry) => void;
+  commit: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void;
 }>;
 
 export async function settleValidatedInvocation(
@@ -603,7 +603,10 @@ export async function settleValidatedInvocation(
         continuationPlan?.commit
       );
     } catch (error) {
-      if (error instanceof ReducerSnapshotChanged) continue;
+      if (error instanceof ReducerSnapshotChanged) {
+        if (continuationPlan) throw new KernelStorageError('REVISION_CONFLICT', 'prepared continuation cut changed before settlement');
+        continue;
+      }
       throw error;
     }
   }
@@ -621,16 +624,13 @@ function commitInitialSettlement(
   settlement: BudgetSettlementV1,
   settlementArtifact: PublishedArtifact,
   terminalMetadata: PublishedArtifact[],
-  commitContinuation?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry) => void
+  commitContinuation?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void
 ): { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run } {
   let result!: { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run };
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
-    const currentFence = readTimeFence(connection);
-    if (currentFence === undefined || settlement.settledAt < currentFence.lastAcceptedAt) {
-      throw new ReducerSnapshotChanged();
-    }
+    const committedAt = sampleCanonicalNow();
     const run = readRun(connection, input.runId);
     if (
       run.revision !== runSnapshot.revision ||
@@ -651,11 +651,12 @@ function commitInitialSettlement(
       entries.some((entry) => ['completed', 'failed', 'unknown', 'abandoned'].includes(entry.phase)) ||
       nextJournalSequence(connection, input.runId) !== settlement.terminalJournalSeq
     ) throw new ReducerSnapshotChanged();
-    fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, settlement.settledAt);
+    fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, committedAt);
     if (fenceOutcome !== 'healthy') return;
-    insertArtifactMetadata(connection, settlementArtifact, settlement.settledAt);
+    if (committedAt < settlement.settledAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'transaction clock precedes its staged settlement');
+    insertArtifactMetadata(connection, settlementArtifact, committedAt);
     for (const artifact of terminalMetadata) {
-      insertArtifactMetadata(connection, artifact, settlement.settledAt);
+      insertArtifactMetadata(connection, artifact, committedAt);
     }
     const source = claim ?? prepared!;
     const entry: InvocationJournalEntry = {
@@ -689,16 +690,16 @@ function commitInitialSettlement(
       .run(
         JSON.stringify(settlement.budgetReservedAfter),
         JSON.stringify(settlement.budgetConsumedAfter),
-        settlement.settledAt,
+        committedAt,
         run.id,
         BigInt(run.revision),
         JSON.stringify(run.budgetReserved),
         JSON.stringify(run.budgetConsumed)
       );
     if (update.changes !== 1n) throw new ReducerSnapshotChanged();
-    commitContinuation?.(connection, run, entry);
+    commitContinuation?.(connection, run, entry, committedAt);
     const updatedRun = readRun(connection, run.id);
-    appendRunStateEvent(connection, updatedRun, settlement.settledAt);
+    appendRunStateEvent(connection, updatedRun, committedAt);
     result = { entry, settlement, run: updatedRun };
   });
   requireHealthyFence(fenceOutcome);

@@ -314,6 +314,7 @@ static napi_value scope_observation(napi_env env, const struct cliq_worker_packe
     set_number(env, result, "cgroupPopulated", packet->populated);
     set_number(env, result, "remainingTrackedDescendants", packet->remaining_descendants);
     set_number(env, result, "namespaceInitDeadAndReaped", packet->init_reaped);
+    set_number(env, result, "observedAtMs", (double)packet->observed_at_ms);
     return result;
 }
 
@@ -414,7 +415,6 @@ static napi_value scope_stop(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->ready || scope->controller->closed) return failure(env, "invalid native stop scope");
-    if (scope->stopped) return undefined(env);
     struct cliq_worker_packet request = cliq_packet(CLIQ_STOP_SCOPE); request.scope = scope->id;
     if (!begin_request(scope->controller, scope, &request, NULL, 0)) return failure(env, "complete native death could not be requested");
     return undefined(env);
@@ -424,17 +424,24 @@ static napi_value scope_poll_stopped(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || scope->controller->closed) return failure(env, "invalid native death observation");
-    if (!scope->stopped) {
+    if (!scope->stopped || (scope->controller->pending == CLIQ_STOP_SCOPE && scope->controller->pending_scope == scope)) {
         struct cliq_worker_packet response;
         int observed = poll_response(scope->controller, scope, CLIQ_STOP_SCOPE, &response);
         if (observed < 0) return failure(env, "complete native death could not be proven");
         if (observed == 0) return undefined(env);
         if (response.init_reaped != 1 || response.populated != 0 || response.remaining_descendants != 0 ||
-            response.cgroup_inode != scope->identity.cgroup_inode || response.pid_namespace_inode != scope->identity.pid_namespace_inode ||
-            strcmp(response.init_start_token, scope->identity.init_start_token) != 0) return failure(env, "native death belongs to another scope");
+            response.observed_at_ms == 0 || response.observed_at_ms > UINT64_C(9007199254740991) ||
+            response.cgroup_device != scope->identity.cgroup_device || response.cgroup_inode != scope->identity.cgroup_inode ||
+            response.pid_namespace_inode != scope->identity.pid_namespace_inode || response.pid != scope->identity.pid ||
+            response.namespace_init_pid != scope->identity.namespace_init_pid || response.monitor_pid != scope->identity.monitor_pid ||
+            strcmp(response.start_token, scope->identity.start_token) != 0 ||
+            strcmp(response.init_start_token, scope->identity.init_start_token) != 0 ||
+            strcmp(response.monitor_start_token, scope->identity.monitor_start_token) != 0)
+            return failure(env, "native death belongs to another scope or lacks its actual observation time");
         scope->identity = response;
         for (struct native_scope *child = scope->controller->scopes; child; child = child->next) {
             if (child == scope || child->parent == scope) {
+                if (!child->stopped) child->identity.observed_at_ms = response.observed_at_ms;
                 child->stopped = true; child->identity.populated = 0; child->identity.init_reaped = 1; child->identity.remaining_descendants = 0;
                 if (child->image_fd >= 0) { close(child->image_fd); child->image_fd = -1; }
             }
@@ -679,6 +686,7 @@ static napi_value poll_retained(napi_env env, napi_callback_info info) {
     if (observed < 0) return failure(env, "retained native death could not be proven");
     if (observed == 0) return undefined(env);
     if (response.init_reaped != 1 || response.populated != 0 || response.remaining_descendants != 0 ||
+        response.observed_at_ms == 0 || response.observed_at_ms > UINT64_C(9007199254740991) ||
         response.cgroup_inode != controller->retained.cgroup_inode || response.pid_namespace_inode != controller->retained.pid_namespace_inode ||
         strcmp(response.init_start_token, controller->retained.init_start_token) != 0) return failure(env, "retained native death belongs to another reservation");
     return scope_observation(env, &response);

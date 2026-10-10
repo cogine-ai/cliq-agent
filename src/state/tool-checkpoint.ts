@@ -14,6 +14,10 @@ import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from '
 import { readCheckpoint } from './rows.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
 import { sampleCanonicalNow } from './canonical-time.js';
+import { assertNativeContainmentDeath, type NativeContainmentDeathObservation } from '../sandbox/linux-worker.js';
+
+/** Private live-scope dependency. Retained canonical evidence cannot mint it. */
+export type NativeWorkerRetirement = () => Promise<NativeContainmentDeathObservation>;
 
 export const toolCheckpointId = (runId: string, opId: string, attempt: number) =>
   identityHash('cliq-tool-checkpoint-v1', runId, opId, String(attempt));
@@ -26,6 +30,20 @@ type DeathEvidence = {
   backend: Record<string, unknown> & { kind: 'linux' | 'macos-vm' };
   observedAt: string; evidenceDigest: string;
 };
+
+/** Canonical correspondence only; callers independently validate the rooted
+ * quiescence proof, inspector and live or historical commit freshness. */
+export function validateMatchingWorkerDeath(quiescence: unknown, candidate: unknown, label: string): DeathEvidence {
+  const death = quiescence as DeathEvidence, finalDeath = candidate as DeathEvidence;
+  if (!exactKeys(finalDeath, Object.keys(death)) || digestOmitting(finalDeath, 'evidenceDigest') !== finalDeath.evidenceDigest ||
+      typeof finalDeath.observedAt !== 'string' || finalDeath.observedAt < death.observedAt) throw new TypeError(`${label} is invalid`);
+  parseCanonicalTime(finalDeath.observedAt);
+  requireEqual(finalDeath.owner, death.owner, `${label}: retired worker owner`);
+  requireEqual(finalDeath.backend, death.backend, `${label}: containment retirement is not positive all-descendant death`);
+  requireEqual({ ...finalDeath, owner: death.owner, backend: death.backend,
+    observedAt: death.observedAt, evidenceDigest: death.evidenceDigest }, death, label);
+  return finalDeath;
+}
 
 export async function readWorkerCheckpointProof(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; checkpointId: string; observedAt: string; postEffect: ToolCheckpointProof;
@@ -50,7 +68,7 @@ export async function readWorkerCheckpointProof(artifacts: ArtifactCatalog, owne
     for await (const _chunk of artifacts.readChunks(entry.blobRef, entry.size)) { /* bounded verification */ }
   }
   if (state.privateGitStateRef) await artifacts.readBytes(state.privateGitStateRef);
-  const death = await readCanonicalArtifact<DeathEvidence>(artifacts, postEffect.retirementEvidenceRef);
+  const death = await readCanonicalArtifact<DeathEvidence>(artifacts, snapshot.quiescenceEvidenceRef);
   if (!exactKeys(death, ['schemaVersion', 'kind', 'containmentRef', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner',
     'launchNonceDigest', 'inspectorSupervisorInstanceId', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'backend', 'observedAt', 'evidenceDigest']) ||
       death.schemaVersion !== 1 || death.kind !== 'containment_all_descendants_dead' || digestOmitting(death, 'evidenceDigest') !== death.evidenceDigest ||
@@ -84,18 +102,64 @@ export async function readWorkerCheckpointProof(artifacts: ArtifactCatalog, owne
   const launchSpec = await readCanonicalArtifact<{ launchSpecDigest: string }>(artifacts, launch.sandboxLaunchSpecRef);
   if (launchSpec.launchSpecDigest !== death.sandboxLaunchSpecDigest || digestOmitting(launchSpec, 'launchSpecDigest') !== launchSpec.launchSpecDigest) throw new TypeError('retirement launch spec digest mismatch');
   await artifacts.readBytes(death.planRef);
+  const finalDeath = validateMatchingWorkerDeath(death, await readCanonicalArtifact(artifacts, postEffect.retirementEvidenceRef),
+    'final retirement proof of containment death and inspector');
   const metadata = await joinResourceOperations([
     [postEffect.workspaceStateRef, state.format], [state.entriesRef, entries.format],
-    [postEffect.snapshotEvidenceRef, snapshot.format], [postEffect.retirementEvidenceRef, 'cliq-process-containment-death-evidence-v1'],
+    [postEffect.snapshotEvidenceRef, snapshot.format], [snapshot.quiescenceEvidenceRef, 'cliq-process-containment-death-evidence-v1'],
+    [postEffect.retirementEvidenceRef, 'cliq-process-containment-death-evidence-v1'],
     [death.inspectorIdentityRef, 'cliq-supervisor-inspector-identity-v1']
   ].map(([ref, format]) => artifacts.describe(ref!, 'application/json', format!)));
-  return { metadata, snapshot, deathObservedAt: death.observedAt };
+  return { metadata, snapshot, quiescence: death, death: finalDeath, deathObservedAt: finalDeath.observedAt };
+}
+
+/** All immutable closure I/O is already verified. Only genuine current death
+ * and its small canonical publication may be retried, never the tool effect. */
+export function prepareWorkerRetirement(artifacts: ArtifactCatalog,
+  proof: Awaited<ReturnType<typeof readWorkerCheckpointProof>>, retirementEvidenceRef: string,
+  reobserve?: NativeWorkerRetirement) {
+  let observedAt = proof.deathObservedAt, finalRef = retirementEvidenceRef, attempts = 0;
+  return {
+    metadata: proof.metadata,
+    get retirementEvidenceRef() { return finalRef; },
+    async refresh() {
+      if (!reobserve) return;
+      while (attempts < 3) {
+        attempts++;
+        const observation = await reobserve();
+        assertNativeContainmentDeath(observation);
+        if (canonicalSha256(observation.containment) !== proof.quiescence.containmentRef) {
+          throw new KernelStorageError('LEASE_FENCED', 'native retirement observation belongs to another containment');
+        }
+        parseCanonicalTime(observation.observedAt);
+        if (observation.observedAt < proof.snapshot.observedAt) {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement proof predates the prepared snapshot');
+        }
+        const death = { ...proof.quiescence, observedAt: observation.observedAt, evidenceDigest: '' };
+        death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
+        const artifact = await artifacts.publishCanonical(death, 'cliq-process-containment-death-evidence-v1');
+        const now = sampleCanonicalNow();
+        if (now < death.observedAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement proof is in the future');
+        if (parseCanonicalTime(now) - parseCanonicalTime(death.observedAt) > 5_000) continue;
+        finalRef = artifact.ref; observedAt = death.observedAt; proof.metadata.push(artifact);
+        return;
+      }
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale after bounded native reobservation');
+    },
+    assertFresh(createdAt: string) {
+      const now = sampleCanonicalNow();
+      if (now < createdAt || observedAt < proof.snapshot.observedAt || observedAt > createdAt ||
+          parseCanonicalTime(now) - parseCanonicalTime(observedAt) > 5_000) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale; reobserve containment death');
+      }
+    }
+  };
 }
 
 /** Shared worker seal for tool completion, control waits and terminal stop. Only this path accepts current authority for mutation. */
 export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; checkpointId: string; observedAt: string; postEffect: ToolCheckpointProof;
-}) {
+}, reobserve?: NativeWorkerRetirement) {
   const { run, postEffect } = input;
   if (!run.activeWorkerLaunchId) throw new TypeError('post-effect result has no owning worker launch');
   const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId);
@@ -104,14 +168,11 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
       generation.phase !== 'checkpointing' || generation.quiesceId !== launch.quiesceId ||
       generation.activeWorkerLaunchId !== launch.launchId || generation.leaseEpoch !== run.leaseEpoch ||
       launch.leaseEpoch !== run.leaseEpoch) throw new KernelStorageError('LEASE_FENCED', 'tool result requires a quiesced checkpointing generation');
-  const { metadata, snapshot, deathObservedAt } = await readWorkerCheckpointProof(artifacts, assertActiveStateOwner(driver, owner), { ...input, launch, generation });
-  return { metadata, commit(connection: SqliteConnection, currentRun: Run, createdAt: string) {
-    // Artifact timestamps precede asynchronous publication. Only the actual
-    // transaction clock can establish that retirement authority is still fresh.
-    const now = sampleCanonicalNow();
-    if (now < createdAt || parseCanonicalTime(now) - parseCanonicalTime(deathObservedAt) > 5_000) {
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale; reobserve containment death');
-    }
+  const proof = await readWorkerCheckpointProof(artifacts, assertActiveStateOwner(driver, owner), { ...input, launch, generation });
+  const { snapshot } = proof;
+  const retirement = prepareWorkerRetirement(artifacts, proof, postEffect.retirementEvidenceRef, reobserve);
+  return { metadata: retirement.metadata, refresh: retirement.refresh, commit(connection: SqliteConnection, currentRun: Run, createdAt: string) {
+    retirement.assertFresh(createdAt);
     if (createdAt < snapshot.observedAt || currentRun.activeWorkerLaunchId !== launch.launchId || currentRun.leaseEpoch !== run.leaseEpoch ||
         canonicalSha256(readRequiredWorkerLaunch(connection, launch.launchId)) !== canonicalSha256(launch) ||
         canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef)) !== canonicalSha256(generation)) {
@@ -125,7 +186,7 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
       updatedAt: createdAt, phase: 'sealed', snapshotEvidenceRef: postEffect.snapshotEvidenceRef, snapshotEvidenceDigest: snapshot.evidenceDigest
     });
     updateWorkerLaunch(connection, launch, { ...launch, phase: 'retired', generationWriteState: 'sealed',
-      retiredAt: createdAt, retirementEvidenceRef: postEffect.retirementEvidenceRef });
+      retiredAt: createdAt, retirementEvidenceRef: retirement.retirementEvidenceRef });
     connection.prepare("UPDATE runs SET status = 'queued', active_worker_launch_id = NULL WHERE id = ?").run(run.id);
   } };
 }
@@ -147,5 +208,6 @@ export async function validateRetainedWorkerSeal(driver: SqliteDriver, artifacts
   if (!owner || owner.acquiredAt > death.observedAt || (owner.state === 'terminal' && owner.releasedAt < death.observedAt)) throw new TypeError('historical inspector was not the state owner at retirement');
   const { deathObservedAt } = await readWorkerCheckpointProof(artifacts, owner, { ...input, checkpointId: checkpoint.id, observedAt: launch.activatedAt,
     postEffect: { workspaceStateRef: checkpoint.workspaceStateRef, snapshotEvidenceRef: generation.snapshotEvidenceRef, retirementEvidenceRef: launch.retirementEvidenceRef } });
-  if (parseCanonicalTime(launch.retiredAt) - parseCanonicalTime(deathObservedAt) > 5_000) throw new TypeError('historical retirement proof was stale at commit');
+  if (deathObservedAt < snapshot.observedAt || deathObservedAt > launch.retiredAt ||
+      parseCanonicalTime(launch.retiredAt) - parseCanonicalTime(deathObservedAt) > 5_000) throw new TypeError('historical retirement proof was stale at commit');
 }

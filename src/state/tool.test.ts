@@ -286,7 +286,7 @@ test('mutating completion requires exact retirement/snapshot proof and seals res
       bad.postEffect!.retirementEvidenceRef = (await fixture.store.artifacts.publishCanonical(death, 'cliq-process-containment-death-evidence-v1')).ref;
       bad.observationDigest = digestOmitting(bad, 'observationDigest');
       const artifact = await fixture.store.artifacts.publishCanonical(bad, bad.format);
-      await assert.rejects(fixture.agent.completeTool({ ...input, observationRef: artifact.ref }), /current trusted state owner/);
+      await assert.rejects(fixture.agent.completeTool({ ...input, observationRef: artifact.ref }), /retirement proof.*inspector/);
     }
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
     const sealInput = { launchId: fixture.launchId, expectedRunRevision: before.run.revision,

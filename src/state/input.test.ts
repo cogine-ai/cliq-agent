@@ -295,7 +295,7 @@ test('recovery rejects orphan input results, including substituted invocation or
         : { kind: 'raw', fromItemSeq: row.itemSeq, throughItemSeq: row.itemSeq, items: [{ itemSeq: row.itemSeq, itemRef: row.payloadRef }] });
       context.projectionDigest = digestOmitting(context, 'projectionDigest');
       await assert.rejects(validateAgentRecovery({ artifacts: fixture.store.artifacts, run: closure.run, spec, items: rows,
-        journal: closure.journal, context, checkpoints: [ordinaryCheckpoint] }), source.source === 'invocation' ? /completed Journal owner/ : /unknown source/);
+        journal: closure.journal, context, checkpoints: [ordinaryCheckpoint], workspaceGenerations: closure.workspaceGenerations }), source.source === 'invocation' ? /completed Journal owner/ : /unknown source/);
     }
   } finally { await disposeFixture(fixture); }
 });

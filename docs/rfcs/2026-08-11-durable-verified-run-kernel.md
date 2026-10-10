@@ -3771,7 +3771,6 @@ type WorkspaceGenerationIdentityV1 = {
 type WorkspaceGenerationSnapshotEvidenceV1 = {
   schemaVersion: 1
   format: 'cliq-workspace-generation-snapshot-evidence-v1'
-  purpose: 'materialized_from_checkpoint' | 'sealed_to_checkpoint'
   runId: string
   generationRef: ArtifactRef
   generationIdentityDigest: string
@@ -3786,7 +3785,10 @@ type WorkspaceGenerationSnapshotEvidenceV1 = {
   directoryFsyncComplete: true
   observedAt: string
   evidenceDigest: string
-}
+} & (
+  | { purpose: 'materialized_from_checkpoint'; quiescenceEvidenceRef?: never }
+  | { purpose: 'sealed_to_checkpoint'; quiescenceEvidenceRef: ArtifactRef }
+)
 
 type WorkspaceGenerationFailureDetailV1 = {
   schemaVersion: 1
@@ -5546,6 +5548,41 @@ on both sides of the fence) nor `run_events` reconstruct this historical cut.
 A new Supervisor instance never adopts or reconnects an old worker, even when its persisted lease has not yet expired. Launch claims and broker channels are bound to the old `supervisorInstanceId`; takeover revokes them, kills/proves the entire containment, quarantines/restores through a Checkpoint, and uses a fresh launch/epoch. This removes an adoption protocol and prevents two trusted processes from sharing effect authority.
 
 `quiesceGeneration` is the only route to a workspace snapshot or verifier/publication proof. It closes new dispatch, performs a worker barrier, may freeze only as a transient stop-the-world aid, then terminates/reaps and positively proves the full invocation containment empty before retirement/state release. It acquires the generation's exclusive write token, hashes and publishes artifacts while holding that token, revalidates bytes, and holds the token through the SQLite state commit. A frozen-but-live containment is never quiescent. A failure with positive death proof follows `checkpoint_failed -> quarantined`; indeterminate death follows the same atomic `fenced_reconciling` wait transition as takeover. Neither publishes a ready Checkpoint or receipt from possibly changing bytes, and a claimed attempt remains `unknown` until its own effect evidence closes.
+
+Successful sealing retains two distinct, truthful observations. Initial death
+evidence D0 proves the exact all-descendant containment empty before snapshot S;
+`WorkspaceGenerationSnapshotEvidenceV1(purpose='sealed_to_checkpoint')` roots
+the complete canonical D0 through `quiescenceEvidenceRef`. Materialization
+snapshots forbid that member. After all tree/blob verification and immutable
+result, settlement, continuation or terminal-projection publication, the live
+controller reobserves the same held containment and original process identities.
+It samples D1 in native code, never at JavaScript receipt or from cached death
+facts. `WorkerLaunch.retirementEvidenceRef` roots the complete canonical D1,
+not a scalar timestamp or a second mutable authority table. Explicit STOP of
+an already-dead scope performs a new inspection; polling without a new request
+preserves the original native observation time.
+
+The synchronous authority-seal transaction samples C and requires
+`D0 <= S <= D1 <= C` and `C - D1 <= 5,000 ms`, as well as the exact current
+StateOwner, Run revision, launch, generation, quiesce and Journal/item cut.
+Checkpoint creation, launch retirement, Run/event and terminal Session SQL
+projection use C. Immutable observations, items and settlement/Journal facts
+keep their preparation time T, with `T <= C`; terminal stop uses one exact
+detail/refund/cancelled-item T with `StopIntent.createdAt <= T <= C`.
+Sequence, revision and artifact correspondence, not timestamp equality, prove
+atomic publication. Every typed historical sealed worker closure revalidates
+both observations and their freshness at C, including after owner turnover.
+
+Only final native inspection and its small D1 publication may retry after
+slow publication, at most three attempts for one prepared seal. Bulk artifacts
+and tool effects are never rebuilt or replayed. An unrelated Run advancing
+the global time fence does not invalidate immutable preparation; an exact
+prepared cut change rejects it. A cold StateStore command has no refresh
+capability and must supply valid current canonical evidence or refuse.
+Uncertain death, exhausted freshness, owner/cut loss or clock regression
+publishes no completion, ready Checkpoint or charge. This does not promise
+success under arbitrary disk blocking, nor freshness at the unknowable future
+end of SQLite COMMIT fsync.
 
 ### 9.2 Recovery Algorithm
 

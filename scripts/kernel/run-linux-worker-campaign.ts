@@ -218,15 +218,16 @@ async function editedCheckpoint() {
   } finally { await transport.close(); await store.close(); await fixture.dispose(); }
 }
 
-async function delayedToolSettlement() {
-  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'late-tool-settlement' });
+async function expiredFinalDeathPublication() {
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'late-final-death' });
   let reopened: StateStore | undefined, sample: FileHandle | undefined, root: FileHandle | undefined, file: FileHandle | undefined;
   let reopeningFailed = false;
   let operationFailure: { error: unknown } | undefined;
   let prototype: { writeFile: FileHandle['writeFile'] } | undefined, originalWrite: FileHandle['writeFile'] | undefined;
   let death: { ref: string; value: ProcessContainmentDeathEvidenceV1 } | undefined;
   let held: { cut: Awaited<ReturnType<typeof checkpointBytes>>; settlement: BudgetSettlementV1; elapsedMs: number } | undefined;
-  let delays = 0;
+  let delays = 0, settlementWrites = 0;
+  const finalObservationTimes: string[] = [];
   try {
     sample = await open(path.join(fixture.workspace, 'a'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }; originalWrite = prototype.writeFile;
@@ -236,8 +237,8 @@ async function delayedToolSettlement() {
     const originalHost = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
     const startingChildren = directChildren();
     const execution = await fixture.store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
-    // Keep the real write and all native producers. The only injected fault is
-    // slow publication after the exact completed tool settlement was timestamped.
+    // Keep the real native producers and every actual CAS write. Only the
+    // final small death publications are delayed; the prepared graph is stable.
     prototype.writeFile = (async function(this: FileHandle, ...args: unknown[]) {
       await Reflect.apply(writeFile, this, args);
       if (!Buffer.isBuffer(args[0])) return;
@@ -245,15 +246,28 @@ async function delayedToolSettlement() {
       if (text.includes('"kind":"containment_all_descendants_dead"')) {
         const value = JSON.parse(text) as ProcessContainmentDeathEvidenceV1;
         if (value.kind === 'containment_all_descendants_dead' && value.owner.kind === 'worker_activation' && value.owner.runId === fixture.runId) {
-          assert.equal(death, undefined, 'exact productive worker retirement is published once');
-          death = { ref: canonicalSha256(value), value };
+          if (!death) { death = { ref: canonicalSha256(value), value }; return; }
+          assert.ok(held, 'final death follows the one prepared tool settlement');
+          assert.equal(value.containmentRef, death.value.containmentRef);
+          assert.ok(value.observedAt > (finalObservationTimes.at(-1) ?? death.value.observedAt));
+          assert.ok(Date.now() - Date.parse(value.observedAt) <= 5_000, 'each final death is genuinely fresh before the real delayed write');
+          finalObservationTimes.push(value.observedAt); delays++;
+          assert.ok(delays <= 3, 'the authority-only retry bound cannot reset or rebuild the prepared completion');
+          const started = performance.now();
+          await delay(6_000);
+          while (performance.now() < started + 6_000) await delay(Math.ceil(started + 6_000 - performance.now()));
+          const elapsedMs = performance.now() - started;
+          assert.ok(elapsedMs >= 6_000);
+          assert.ok(Date.now() - Date.parse(value.observedAt) > 5_000);
+          held.elapsedMs += elapsedMs;
+          return;
         }
       }
       if (!text.includes('"format":"cliq-budget-settlement-v1"')) return;
       const settlement = JSON.parse(text) as BudgetSettlementV1;
       if (settlement.runId !== fixture.runId) return;
-      delays++;
-      assert.equal(delays, 1, 'the fixture has one actual tool settlement, never a delayed retry');
+      settlementWrites++;
+      assert.equal(settlementWrites, 1, 'the fixture has one actual tool settlement, never a rebuilt retry');
       const cut = await checkpointBytes(fixture.store, fixture.runId);
       const claims = cut.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed');
       assert.equal(claims.length, 1);
@@ -283,15 +297,9 @@ async function delayedToolSettlement() {
       assert.ok(actualFile.isFile()); assert.equal(actualFile.size, Buffer.byteLength('after\n'));
       assert.deepEqual(await witnessBytes(file, actualFile.size), Buffer.from('after\n'), 'the real edit already happened before slow publication');
       assert.deepEqual(cut.bytes, fixture.original);
-      const started = performance.now();
-      await delay(6_000);
-      while (performance.now() < started + 6_000) await delay(Math.ceil(started + 6_000 - performance.now()));
-      const elapsedMs = performance.now() - started;
-      assert.ok(elapsedMs >= 6_000, 'qualification uses actual elapsed time, not a mocked clock');
-      assert.ok(Date.now() - Date.parse(death.value.observedAt) > 5_000, 'declared retirement time is expired at the actual transaction');
-      held = { cut, settlement, elapsedMs };
+      held = { cut, settlement, elapsedMs: 0 };
     }) as FileHandle['writeFile'];
-    await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.closure.run.revision })), error => {
+    await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.closure.run.revision }), 40_000), error => {
       const pending: unknown[] = [error], seen = new Set<Error>();
       while (pending.length) {
         const next = pending.pop();
@@ -304,7 +312,7 @@ async function delayedToolSettlement() {
       return false;
     });
     prototype.writeFile = originalWrite;
-    assert.equal(delays, 1); assert.ok(held); assert.ok(death); assert.ok(file);
+    assert.equal(delays, 3); assert.equal(settlementWrites, 1); assert.ok(held); assert.ok(death); assert.ok(file);
     const failed = await checkpointBytes(fixture.store, fixture.runId), cut = held.cut.closure;
     assert.equal(failed.closure.run.status, 'waiting'); assert.equal(failed.closure.run.waitingReason, 'reconciliation');
     assert.equal(failed.closure.run.activeWorkerLaunchId, undefined); assert.equal(failed.closure.run.cancelRequested, false);
@@ -355,10 +363,11 @@ async function delayedToolSettlement() {
     assert.deepEqual(await reopened.readRecoveryClosure(fixture.runId), failed.closure,
       'public reopen acquires the released OS owner lock and preserves the conservative unresolved attempt');
     await reopened.close(); reopened = undefined;
-    console.log(JSON.stringify({ scenario: 'actual-expired-tool-retirement-at-settlement-commit', runId: fixture.runId,
+    console.log(JSON.stringify({ scenario: 'actual-expired-final-death-publication', runId: fixture.runId,
       settledAt: held.settlement.settledAt, deathObservedAt: death.value.observedAt, publicationDelayMs: held.elapsedMs,
+      finalObservationTimes, authorityAttempts: delays, preparedSettlements: settlementWrites,
       permanentToolClaims: 1, actualPrivateEditObserved: true, completedToolEntries: 0, remainingBudgetReservation: 1,
-      note: 'actual six-second FileHandle publication delay; fail-closed commit and joined cleanup, not slow-I/O completion or native timestamp refresh' }));
+      note: 'three actual six-second final-evidence publications exhaust the authority-only bound; no effect or immutable graph replay; joined cleanup' }));
   } catch (error) { operationFailure = { error }; throw error; }
   finally {
     if (prototype && originalWrite) prototype.writeFile = originalWrite;
@@ -375,6 +384,168 @@ async function delayedToolSettlement() {
       try { await fixture.dispose(); } catch (error) { failures.push(error); }
     } else console.error(`preserving uncertain late-settlement fixture: ${fixture.stateRoot}`);
     if (failures.length) throw new AggregateError([...(operationFailure ? [operationFailure.error] : []), ...failures], 'late settlement campaign and cleanup failures');
+  }
+}
+
+async function slowToolSealReobservesPausedController() {
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'slow-seal-reobserve' });
+  let reopened: StateStore | undefined, sample: FileHandle | undefined, cgroup: FileHandle | undefined;
+  let prototype: { writeFile: FileHandle['writeFile'] } | undefined, originalWrite: FileHandle['writeFile'] | undefined;
+  let resumeTimer: ReturnType<typeof setTimeout> | undefined, resumeFailure: unknown;
+  let operationFailure: { error: unknown } | undefined, reopeningFailed = false;
+  let controller: { pid: number; token: string; stopped: boolean; pausedAt: number; resumedAt?: number } | undefined;
+  let scope: { device: bigint; inode: bigint; pids: number[] } | undefined;
+  const deaths: ProcessContainmentDeathEvidenceV1[] = [];
+  let slowWrites = 0, publicationDelayMs = 0;
+  function resumeController() {
+    if (!controller?.stopped) return;
+    assert.equal(processToken(controller.pid), controller.token, 'SIGCONT targets only the original controller identity');
+    controller.resumedAt = Date.now();
+    process.kill(controller.pid, 'SIGCONT'); controller.stopped = false;
+  }
+  try {
+    const before = await checkpointBytes(fixture.store, fixture.runId);
+    const hostBefore = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
+    const startingChildren = directChildren();
+    const execution = await fixture.store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
+    sample = await open(path.join(fixture.workspace, 'a'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }; originalWrite = prototype.writeFile;
+    await sample.close(); sample = undefined;
+    const writeFile = originalWrite;
+    // Preserve actual native execution and publication. Only the OS process
+    // pause and one real FileHandle publication delay are fault injections.
+    prototype.writeFile = (async function(this: FileHandle, ...args: Parameters<FileHandle['writeFile']>) {
+      await Reflect.apply(writeFile, this, args);
+      if (typeof args[0] !== 'string' && !Buffer.isBuffer(args[0])) return;
+      let candidate: Record<string, unknown>;
+      try { candidate = JSON.parse(args[0].toString()) as Record<string, unknown>; }
+      catch { return; }
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return;
+      if (candidate.kind === 'containment_all_descendants_dead') {
+        const death = candidate as unknown as ProcessContainmentDeathEvidenceV1;
+        if (death.owner.kind !== 'worker_activation' || death.owner.runId !== fixture.runId) return;
+        assert.equal(death.evidenceDigest, digestOmitting(death, 'evidenceDigest'));
+        assert.equal(death.backend.kind, 'linux');
+        if (death.backend.kind !== 'linux') throw new Error('slow seal did not observe its actual Linux containment');
+        const backend = death.backend;
+        if (deaths.length !== 0) {
+          assert.ok(controller && !controller.stopped && controller.resumedAt !== undefined,
+            'a stopped real controller cannot produce a fresh second death observation');
+          assert.ok(Date.parse(death.observedAt) >= controller.resumedAt,
+            'fresh death must be inspected after the exact controller is resumed, not reuse the first native observation');
+          assert.equal(death.containmentRef, deaths[0]!.containmentRef);
+          deaths.push(death); return;
+        }
+        deaths.push(death);
+        const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+        const workerOwner = death.owner;
+        const launch = cut.workerLaunches.find(row => row.launchId === workerOwner.workerLaunchId)!;
+        assert.equal(launch.phase, 'activated'); assert.equal(cut.run.activeWorkerLaunchId, launch.launchId);
+        assert.equal(death.containmentRef, launch.processContainmentRef);
+        const worker = decodeWorkerIdentity(await fixture.store.artifacts.readCanonical(launch.workerIdentityDigest!));
+        const subreaper = /^linux-subreaper:([1-9][0-9]*):(linux-proc-start-ticks:[0-9]+)$/u.exec(backend.subreaperStartToken);
+        const members = /^linux-namespace-init:([1-9][0-9]*):[0-9]+:monitor:([1-9][0-9]*):[0-9]+$/u.exec(backend.namespaceInitStartToken);
+        assert.ok(subreaper); assert.ok(members);
+        const pid = Number(subreaper[1]), token = subreaper[2]!;
+        assert.equal(processToken(pid), token); assert.ok(directChildren().has(pid));
+        const controllerImage = fixture.signed.bundle.entries.find(entry => entry.entryId === 'linux_worker_controller')!;
+        const image = await open(`/proc/${pid}/exe`, fs.constants.O_RDONLY);
+        try {
+          const physical = await image.stat({ bigint: true });
+          assert.equal(physical.size, BigInt(controllerImage.byteCount));
+          assert.equal(createHash('sha256').update(await image.readFile()).digest('hex'), controllerImage.digest);
+          const after = await image.stat({ bigint: true });
+          for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], physical[field]);
+        } finally { await image.close(); }
+        cgroup = await open(backend.cgroupPath, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+        const physical = await cgroup.stat({ bigint: true }), named = await lstat(backend.cgroupPath, { bigint: true });
+        assert.ok(physical.isDirectory() && named.isDirectory() && !named.isSymbolicLink());
+        assert.equal(physical.dev, named.dev); assert.equal(physical.ino, named.ino); assert.equal(String(physical.ino), backend.cgroupId);
+        scope = { device: physical.dev, inode: physical.ino, pids: [worker.pid, Number(members[1]), Number(members[2])] };
+        assert.match(await readFile(`/proc/self/fd/${cgroup.fd}/cgroup.events`, 'utf8'), /(?:^|\n)populated 0\n/u);
+        for (const member of scope.pids) await assert.rejects(access(`/proc/${member}`), { code: 'ENOENT' });
+        assert.equal(processToken(pid), token);
+        process.kill(pid, 'SIGSTOP');
+        controller = { pid, token, stopped: true, pausedAt: Date.now() };
+        const deadline = performance.now() + 1000;
+        while (!/^State:\s+T\b/mu.test(await readFile(`/proc/${pid}/status`, 'utf8'))) {
+          assert.equal(processToken(pid), token);
+          assert.ok(performance.now() < deadline, 'the first native death must actually pause its original controller');
+          await delay(1);
+        }
+        return;
+      }
+      if (candidate.format !== 'cliq-budget-settlement-v1' || candidate.runId !== fixture.runId ||
+          candidate.terminalPhase !== 'completed' || slowWrites !== 0) return;
+      assert.ok(controller?.stopped && deaths.length === 1, 'slow completion retains the original stopped controller');
+      const settlement = candidate as unknown as BudgetSettlementV1;
+      const cut = await checkpointBytes(fixture.store, fixture.runId);
+      const claims = cut.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed');
+      assert.equal(claims.length, 1); assert.equal(settlement.opId, claims[0]!.opId); assert.equal(settlement.attempt, claims[0]!.attempt);
+      assert.deepEqual(cut.bytes, fixture.original); assert.equal(cut.closure.run.budgetReserved.toolCalls, 1);
+      slowWrites++;
+      const started = performance.now();
+      resumeTimer = setTimeout(() => { try { resumeController(); } catch (error) { resumeFailure = error; } }, 6500);
+      await delay(6000);
+      while (performance.now() < started + 6000) await delay(Math.ceil(started + 6000 - performance.now()));
+      publicationDelayMs = performance.now() - started;
+      assert.ok(publicationDelayMs >= 6000); assert.ok(Date.now() - Date.parse(deaths[0]!.observedAt) > 5000);
+      assert.equal(deaths.length, 1, 'no fresh death can be published while its actual inspector is stopped');
+    }) as FileHandle['writeFile'];
+    const result = await bounded(execution.executeCurrentTool({ expectedRunRevision: before.closure.run.revision }), 40_000);
+    prototype.writeFile = originalWrite;
+    if (resumeFailure !== undefined) throw resumeFailure;
+    assert.equal(slowWrites, 1); assert.ok(controller?.resumedAt !== undefined); assert.ok(scope && cgroup);
+    assert.ok(deaths.length >= 2, 'slow I/O success requires a genuinely refreshed native death, not a longer freshness window');
+    assert.equal(result.status, 'queued'); assert.equal(result.activeWorkerLaunchId, undefined);
+    const after = await checkpointBytes(fixture.store, fixture.runId);
+    assert.deepEqual(after.bytes, Buffer.from('after\n'));
+    assert.equal(after.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed').length, 1);
+    assert.equal(after.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'completed').length, 1);
+    assert.equal(after.closure.run.budgetConsumed.toolCalls, 1); assert.equal(after.closure.run.budgetReserved.toolCalls, 0);
+    const refreshed = deaths.at(-1)!;
+    if (refreshed.owner.kind !== 'worker_activation') throw new Error('refreshed death lost its original worker owner');
+    const refreshedOwner = refreshed.owner;
+    const metadata = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+    let retired: WorkerLaunch;
+    try { retired = metadata.readSnapshot(connection => readRequiredWorkerLaunch(connection, refreshedOwner.workerLaunchId)); }
+    finally { metadata.close(); }
+    assert.equal(retired.phase, 'retired'); assert.equal(retired.retirementEvidenceRef, canonicalSha256(refreshed));
+    const group = await cgroup.stat({ bigint: true }); assert.equal(group.dev, scope.device); assert.equal(group.ino, scope.inode);
+    assert.match(await readFile(`/proc/self/fd/${cgroup.fd}/cgroup.events`, 'utf8'), /(?:^|\n)populated 0\n/u);
+    for (const pid of [...scope.pids, controller.pid]) await assert.rejects(access(`/proc/${pid}`), { code: 'ENOENT' });
+    assert.deepEqual(directChildren(), startingChildren);
+    assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+    const hostAfter = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
+    assert.equal(hostAfter.dev, hostBefore.dev); assert.equal(hostAfter.ino, hostBefore.ino);
+    await cgroup.close(); cgroup = undefined;
+    await fixture.store.close();
+    try { reopened = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+    catch (error) { reopeningFailed = true; throw error; }
+    assert.deepEqual((await checkpointBytes(reopened, fixture.runId)).bytes, Buffer.from('after\n'));
+    assert.deepEqual(await reopened.readRecoveryClosure(fixture.runId), after.closure);
+    await reopened.close(); reopened = undefined;
+    console.log(JSON.stringify({ scenario: 'actual-slow-tool-seal-reobserves-paused-controller', runId: fixture.runId,
+      pausedAt: controller.pausedAt, resumedAt: controller.resumedAt, initialDeathObservedAt: deaths[0]!.observedAt,
+      finalDeathObservedAt: refreshed.observedAt, publicationDelayMs, permanentToolClaims: 1, completedToolEntries: 1,
+      consumedToolCalls: 1, remainingBudgetReservation: 0, nativeEffects: 1 }));
+  } catch (error) { operationFailure = { error }; throw error; }
+  finally {
+    if (prototype && originalWrite) prototype.writeFile = originalWrite;
+    clearTimeout(resumeTimer);
+    const failures: unknown[] = [];
+    try { resumeController(); } catch (error) { failures.push(error); }
+    if (resumeFailure !== undefined) failures.push(resumeFailure);
+    for (const resource of [reopened, fixture.store]) {
+      try { await resource?.close(); } catch (error) { failures.push(error); }
+    }
+    for (const resource of [sample, cgroup]) {
+      try { await resource?.close(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length === 0 && !reopeningFailed) {
+      try { await fixture.dispose(); } catch (error) { failures.push(error); }
+    } else console.error(`preserving uncertain slow-seal fixture: ${fixture.stateRoot}`);
+    if (failures.length) throw new AggregateError([...(operationFailure ? [operationFailure.error] : []), ...failures], 'slow seal campaign and cleanup failures');
   }
 }
 
@@ -2342,7 +2513,8 @@ for (const [scenario, run] of [
   ['supervisor-crash-witness-replaced-inode', () => supervisorCrashPreactivation('ready_before_identity', 'replaced_inode')],
   ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
-  ['expired-tool-retirement-at-settlement-commit', delayedToolSettlement],
+  ['expired-final-death-publication', expiredFinalDeathPublication],
+  ['slow-tool-seal-reobserves-paused-controller', slowToolSealReobservesPausedController],
   ['parent-loss-before-release', parentLossBeforeRelease],
   ['no-open-invocation-recovery', () => noOpenInvocationRecovery()],
   ['cancelled-recovery', () => noOpenInvocationRecovery(true)],

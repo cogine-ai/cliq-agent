@@ -26,7 +26,7 @@ import { nextJournalSequence, readHighestPreparedAttempt, readInvocationAttempt 
 import { insertControlRequest, readCheckpoint, readControlRequest, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
-import { prepareToolCheckpoint, toolCheckpointId } from '../tool-checkpoint.js';
+import { prepareToolCheckpoint, toolCheckpointId, type NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { readToolCut, type ToolCut } from '../tool-cut.js';
 import { readToolApproval, readToolApprovalWait, type ApprovalResponse } from '../tool-approval-recovery.js';
 import { loadAgentStop } from './stop.js';
@@ -83,7 +83,7 @@ function nextFrontier(cut: ToolCut, addedItems: number): RunFrontier {
 export async function loadToolContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; contracts: ToolInputAuthority[];
   resolveToolInput: ResolveToolInput; releaseKeys?: readonly ReleaseTrustKey[];
-}) {
+}, reobserve?: NativeWorkerRetirement) {
   const { run: admittedRun, spec, assembly, contracts, resolveToolInput } = input;
   const runId = admittedRun.id;
   const session = readSession(driver, admittedRun.sessionId);
@@ -224,10 +224,10 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       for (const ref of policyArtifactRefs) await artifacts.readBytes(ref);
     }
   };
-  const inputContinuation = await loadInputContinuation(driver, artifacts, owner, { ...controlAuthority, contracts });
+  const inputContinuation = await loadInputContinuation(driver, artifacts, owner, { ...controlAuthority, contracts }, reobserve);
 
   return {
-    ...loadAgentStop(driver, artifacts, owner, controlAuthority),
+    ...loadAgentStop(driver, artifacts, owner, controlAuthority, reobserve),
     waitForInput: inputContinuation.waitForInput,
     submitInput: inputContinuation.submitInput,
     prepareTool: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {
@@ -328,13 +328,13 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
           throw new TypeError('approval wait requires retirement proof over the unchanged ready workspace');
         }
         seal = await prepareToolCheckpoint(driver, artifacts, owner, { run: selected.run, spec, assembly, checkpointId,
-          observedAt: proof.wait.createdAt, postEffect: input.checkpoint });
+          observedAt: proof.wait.createdAt, postEffect: input.checkpoint }, reobserve);
       } else if (selected.run.status !== 'queued' || input.checkpoint !== undefined) {
         throw new TypeError('only a worker-free queued Run can wait without a generation seal');
       }
       const plan = await prepareContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items, items: [],
         frontier: selected.frontier, checkpointId, workspaceStateRef: selected.checkpoint.workspaceStateRef });
-      const metadata = [...plan.metadata, ...(seal?.metadata ?? []), ...await joinResourceOperations([
+      const metadata = [...plan.metadata, ...await joinResourceOperations([
         [input.waitingOnRef, 'cliq-waiting-subject-v1'], [canonicalSha256(proof.evidence), proof.evidence.format],
         [canonicalSha256(proof.request), proof.request.format], [canonicalSha256(proof.target), proof.target.format]
       ].map(([ref, format]) => artifacts.describe(ref!, 'application/json', format!)))];
@@ -353,10 +353,15 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
         const error = await artifacts.publishCanonical(expiry, expiry.format);
         const settled = await settleValidatedInvocation(driver, artifacts, owner,
           { runId, expectedRunRevision: input.expectedRunRevision, opId: pending.opId, attempt: pending.attempt },
-          { phase: 'failed', requireClaim: false, errorRef: error.ref, consumed: ZERO_BUDGET }, async () => ({ metadata: [...metadata, error],
-            commit(connection, run, journal) { commit(connection, run, journal.seq, journal.timestamp); } }));
+          { phase: 'failed', requireClaim: false, errorRef: error.ref, consumed: ZERO_BUDGET }, async () => {
+            await seal?.refresh();
+            return { metadata: [...metadata, error, ...(seal?.metadata ?? [])],
+              commit(connection, run, journal, committedAt) { commit(connection, run, journal.seq, committedAt); } };
+          });
         return immutableSnapshot({ run: settled.run, waitingOnRef: input.waitingOnRef });
       }
+      await seal?.refresh();
+      metadata.push(...(seal?.metadata ?? []));
       let outcome: TimeFenceAdvance | undefined, updated!: Run;
       driver.transaction((connection) => {
         assertActiveStateOwner(connection, owner);
@@ -582,7 +587,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       const checkpointId = toolCheckpointId(runId, input.opId, input.attempt);
       const seal = observation.postEffect === undefined ? undefined : await prepareToolCheckpoint(driver, artifacts, owner, {
         run: selected.run, spec, assembly, checkpointId, observedAt: observation.observedAt, postEffect: observation.postEffect
-      });
+      }, reobserve);
       const observed = observation;
       // A received tool error is a known, executed result, not proof that dispatch released nothing.
       return immutableSnapshot(await settleValidatedInvocation(driver, artifacts, owner, { ...input, runId },
@@ -598,11 +603,12 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
           items: [result.item], frontier: nextFrontier(selected, 1), checkpointId,
           workspaceStateRef: observed.postEffect?.workspaceStateRef ?? selected.checkpoint.workspaceStateRef, artifacts: result.artifacts });
         const observationMetadata = await artifacts.describe(observationRef, 'application/json', observed.format);
-        return { metadata: [observationMetadata, ...plan.metadata, ...(seal?.metadata ?? [])], commit(connection, current, journal) {
+        await seal?.refresh();
+        return { metadata: [observationMetadata, ...plan.metadata, ...(seal?.metadata ?? [])], commit(connection, current, journal, committedAt) {
           assertCut(connection, current, selected);
           if (settlement.settledAt < observed.observedAt || run.revision !== selected.run.revision) throw new TypeError('tool settlement precedes its observation');
-          seal?.commit(connection, current, settlement.settledAt);
-          plan.commit(connection, current, journal.seq, settlement.settledAt);
+          seal?.commit(connection, current, committedAt);
+          plan.commit(connection, current, journal.seq, committedAt);
         } };
       }));
     })
