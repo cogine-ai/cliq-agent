@@ -675,7 +675,7 @@ export async function readRecoveryClosure(
   if (journal.some((entry) => entry.opKind === 'model')) {
     try {
       await validateAgentRecovery({ artifacts, run, spec: runSpec, items, journal,
-        checkpoints: databaseCut.checkpoints,
+        checkpoints: databaseCut.checkpoints, workspaceGenerations,
         context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) });
     } catch (error) {
       recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);

@@ -12,7 +12,6 @@ import { joinResourceOperations } from './errors.js';
 import { isZeroBudget } from './invariants.js';
 import { readControlRequest, readSession, readSessionPrincipalId } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
-import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readResourceStopCause } from './resource-stop.js';
 import { validateModelFailureStop } from './model-failure.js';
@@ -86,11 +85,10 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   if (preparedAt < intent.createdAt || preparedAt > run.updatedAt) throw new TypeError('terminal preparation time is outside its intent and committed Checkpoint');
   requireEqual(detail, agentStopDetail(intent, run.stopIntentRef, preparedAt), 'terminal reason closure');
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
-  if (assembly.mcpServers.length) throw new TypeError('terminal stop lacks MCP server containment closure');
-  for (const launch of readWorkerLaunchesForRun(driver, run.id)) {
-    const generation = closure.workspaceGenerations.find((generation) => generation.generationRef === launch.workspaceGenerationRef);
-    if (!generation) throw new TypeError('retired worker has no generation');
-    await validateRetainedWorkerSeal(driver, artifacts, { run, spec, assembly, launch, generation });
+  if (assembly.format !== 'cliq-run-assembly-v1' || assembly.mcpServers.length) throw new TypeError('terminal stop lacks its typed containment closure');
+  // Common recovery has already verified the complete sealed-worker graph.
+  if (readWorkerLaunchesForRun(driver, run.id).some(launch => launch.phase !== 'retired' || launch.generationWriteState !== 'sealed')) {
+    throw new TypeError('terminal stop retains an unsealed worker');
   }
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
     if (!['model', 'tool'].includes(entry.opKind) || (entry.phase !== 'completed' &&

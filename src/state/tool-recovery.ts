@@ -1,6 +1,6 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
-import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, RunFrontier, RunSpec, TerminalDetail, ToolContractManifestV1, ToolResultPayloadV1, ToolResultModelContentV1 } from '../kernel/types.js';
+import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, RunFrontier, RunSpec, TerminalDetail, ToolContractManifestV1, ToolResultPayloadV1, ToolResultModelContentV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import type { RunPolicySnapshotV1, ToolObservationV1, ToolOperationGrantV1, ToolPolicyChannelEvidenceV1, ToolPolicyDecisionItem,
   ToolRequestV1, ToolTargetV1, ToolApprovalWait, ToolApprovalDecisionV1, ToolGrantExpiryV1 } from '../kernel/tool-authorization.js';
 import { toolOperationId } from '../policy/tool-policy.js';
@@ -9,13 +9,13 @@ import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeWorkspaceGenerationSnapshotEvidence, decodeWorkspaceState, decodeWorkspaceEntries } from './decoders.js';
-import { toolCheckpointId } from './tool-checkpoint.js';
+import { toolCheckpointId, validateMatchingWorkerDeath } from './tool-checkpoint.js';
 import { compileOutputSchema } from '../tools/input-schema.js';
 
 /** Reachability and durable ownership. The loaded Run additionally verifies release signatures and replays the fixed evaluator. */
 export async function validateToolRecovery(input: {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: Map<string, ContinuationItem>; journal: InvocationJournalEntry[];
-  checkpoints: Checkpoint[];
+  checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
 }): Promise<void> {
   const { artifacts, run, spec, items, journal } = input;
   const decisions = new Map<string, ToolPolicyDecisionItem>();
@@ -229,6 +229,12 @@ export async function validateToolRecovery(input: {
     if (result.postEffect) {
       if (!exactKeys(result.postEffect, ['workspaceStateRef', 'snapshotEvidenceRef', 'retirementEvidenceRef'])) throw new TypeError('unknown post-effect proof field');
       const snapshot = decodeWorkspaceGenerationSnapshotEvidence(await readCanonicalArtifact(artifacts, result.postEffect.snapshotEvidenceRef));
+      const generation = input.workspaceGenerations.find(row => row.generationRef === snapshot.generationRef);
+      const proofLabel = 'completed mutating tool substitutes its sealed worker proof';
+      if (snapshot.purpose !== 'sealed_to_checkpoint' || generation?.phase !== 'sealed' ||
+          generation.snapshotEvidenceRef !== result.postEffect.snapshotEvidenceRef || generation.snapshotEvidenceDigest !== snapshot.evidenceDigest) {
+        throw new TypeError(proofLabel);
+      }
       const workspace = decodeWorkspaceState(await readCanonicalArtifact(artifacts, result.postEffect.workspaceStateRef));
       const entries = decodeWorkspaceEntries(await readCanonicalArtifact(artifacts, workspace.entriesRef));
       if (checkpoint.workspaceStateRef !== result.postEffect.workspaceStateRef || snapshot.checkpointId !== checkpoint.id ||
@@ -244,8 +250,9 @@ export async function validateToolRecovery(input: {
       }
       if (workspace.privateGitStateRef) await artifacts.readBytes(workspace.privateGitStateRef);
       await artifacts.readBytes(snapshot.generationRef);
-      const death = await readCanonicalArtifact<{ inspectorIdentityRef: string }>(artifacts, result.postEffect.retirementEvidenceRef);
-      await artifacts.readBytes(death.inspectorIdentityRef);
+      const death = validateMatchingWorkerDeath(await readCanonicalArtifact(artifacts, snapshot.quiescenceEvidenceRef),
+        await readCanonicalArtifact(artifacts, result.postEffect.retirementEvidenceRef), proofLabel);
+      if (death.observedAt > checkpoint.createdAt) throw new TypeError(proofLabel);
     } else {
       const prior = input.checkpoints.filter((candidate) => candidate.basedOnRunRevision < checkpoint.basedOnRunRevision).at(-1);
       if (!prior || checkpoint.workspaceStateRef !== prior.workspaceStateRef) throw new TypeError('read-only completion replaced workspace state');

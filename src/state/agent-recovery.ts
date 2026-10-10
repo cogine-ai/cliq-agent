@@ -2,7 +2,7 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
   ContextManifest, ContinuationItem, InvocationJournalEntry, Run, RunItemReferenceV1, RunSpec,
-  ToolResultPayloadV1, ToolResultModelContentV1, RunContextCompactionPlan, RunAssemblyV1
+  ToolResultPayloadV1, ToolResultModelContentV1, RunContextCompactionPlan, RunAssemblyV1, WorkspaceGenerationStateV1
 } from '../kernel/types.js';
 import type { ModelUnusableResponseV1 } from '../protocol/agent-ir.js';
 import { modelResponseDigest } from '../model/attempt.js';
@@ -21,7 +21,7 @@ import type { Checkpoint } from '../kernel/types.js';
 export async function validateAgentRecovery(input: {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: RunItemReferenceV1[];
   journal: InvocationJournalEntry[]; context: ContextManifest;
-  checkpoints: Checkpoint[];
+  checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
 }): Promise<void> {
   const { artifacts, run, spec, journal } = input;
   const requests = new Map<string, ModelRequestV1>();
@@ -137,7 +137,7 @@ export async function validateAgentRecovery(input: {
       if (payload.outcome === 'error') await artifacts.readBytes(payload.diagnosticRef);
     }
   }
-  await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
+  await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations });
   await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
   validateContextItems(input.context, input.items.map((row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: items.get(row.itemId)!

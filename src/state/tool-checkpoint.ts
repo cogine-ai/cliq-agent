@@ -31,6 +31,20 @@ type DeathEvidence = {
   observedAt: string; evidenceDigest: string;
 };
 
+/** Canonical correspondence only; callers independently validate the rooted
+ * quiescence proof, inspector and live or historical commit freshness. */
+export function validateMatchingWorkerDeath(quiescence: unknown, candidate: unknown, label: string): DeathEvidence {
+  const death = quiescence as DeathEvidence, finalDeath = candidate as DeathEvidence;
+  if (!exactKeys(finalDeath, Object.keys(death)) || digestOmitting(finalDeath, 'evidenceDigest') !== finalDeath.evidenceDigest ||
+      typeof finalDeath.observedAt !== 'string' || finalDeath.observedAt < death.observedAt) throw new TypeError(`${label} is invalid`);
+  parseCanonicalTime(finalDeath.observedAt);
+  requireEqual(finalDeath.owner, death.owner, `${label}: retired worker owner`);
+  requireEqual(finalDeath.backend, death.backend, `${label}: containment retirement is not positive all-descendant death`);
+  requireEqual({ ...finalDeath, owner: death.owner, backend: death.backend,
+    observedAt: death.observedAt, evidenceDigest: death.evidenceDigest }, death, label);
+  return finalDeath;
+}
+
 export async function readWorkerCheckpointProof(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; checkpointId: string; observedAt: string; postEffect: ToolCheckpointProof;
   launch: WorkerLaunch; generation: WorkspaceGenerationStateV1;
@@ -88,16 +102,7 @@ export async function readWorkerCheckpointProof(artifacts: ArtifactCatalog, owne
   const launchSpec = await readCanonicalArtifact<{ launchSpecDigest: string }>(artifacts, launch.sandboxLaunchSpecRef);
   if (launchSpec.launchSpecDigest !== death.sandboxLaunchSpecDigest || digestOmitting(launchSpec, 'launchSpecDigest') !== launchSpec.launchSpecDigest) throw new TypeError('retirement launch spec digest mismatch');
   await artifacts.readBytes(death.planRef);
-  const finalDeath = await readCanonicalArtifact<DeathEvidence>(artifacts, postEffect.retirementEvidenceRef);
-  if (!exactKeys(finalDeath, Object.keys(death)) || digestOmitting(finalDeath, 'evidenceDigest') !== finalDeath.evidenceDigest ||
-      typeof finalDeath.observedAt !== 'string' || finalDeath.observedAt < death.observedAt) {
-    throw new TypeError('tool checkpoint has no exact final containment retirement proof');
-  }
-  parseCanonicalTime(finalDeath.observedAt);
-  requireEqual(finalDeath.owner, death.owner, 'retired worker owner');
-  requireEqual(finalDeath.backend, death.backend, 'containment retirement is not positive all-descendant death');
-  requireEqual({ ...finalDeath, owner: death.owner, backend: death.backend,
-    observedAt: death.observedAt, evidenceDigest: death.evidenceDigest }, death,
+  const finalDeath = validateMatchingWorkerDeath(death, await readCanonicalArtifact(artifacts, postEffect.retirementEvidenceRef),
     'final retirement proof of containment death and inspector');
   const metadata = await joinResourceOperations([
     [postEffect.workspaceStateRef, state.format], [state.entriesRef, entries.format],

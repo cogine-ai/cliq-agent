@@ -25,7 +25,7 @@ import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.j
 import { readCancelResponse, readAgentStop, type CancelResponse } from '../stop-recovery.js';
 import { readResourceStopCause } from '../resource-stop.js';
 import { prepareModelFailureStop } from '../model-failure.js';
-import { prepareToolCheckpoint, validateRetainedWorkerSeal, type NativeWorkerRetirement } from '../tool-checkpoint.js';
+import { prepareToolCheckpoint, type NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { readToolCut } from '../tool-cut.js';
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
 
@@ -206,10 +206,10 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       const { run, latestCheckpoint: checkpoint } = selected;
       if (!run.stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal drain requires a persisted StopIntent');
       if (assembly.mcpServers.length) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'MCP stop requires server-containment closure');
-      for (const launch of readWorkerLaunchesForRun(driver, runId).filter((launch) => launch.phase === 'retired')) {
-        const generation = selected.workspaceGenerations.find((generation) => generation.generationRef === launch.workspaceGenerationRef);
-        if (!generation) throw new TypeError('retired worker has no generation');
-        await validateRetainedWorkerSeal(driver, artifacts, { run, spec, assembly, launch, generation });
+      // The public recovery cut already verified every sealed worker proof;
+      // stop additionally forbids the preactivation and fenced branches.
+      if (readWorkerLaunchesForRun(driver, runId).some(launch => launch.phase === 'retired' && launch.generationWriteState !== 'sealed')) {
+        throw new TypeError('terminal stop retains an unsealed retired worker');
       }
       const intent = await readAgentStop(driver, artifacts, selected);
       const checkpointId = stopCheckpointId(runId, run.stopIntentRef);
