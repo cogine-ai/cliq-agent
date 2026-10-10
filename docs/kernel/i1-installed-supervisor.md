@@ -5,10 +5,11 @@
 ### Verdict
 
 READY WITH RISKS: the user confirmed A and the installed-startup/v1-control
-test seam on 2026-10-11. Native image binding has passed component qualification;
-trusted installed startup, persistent containment, admission assembly and first
-model dispatch still require implementation and real qualification. This is not
-a completed I1 claim or a release artifact.
+test seam on 2026-10-11. Native image binding and the persistent-anchor OS
+prerequisite have passed component qualification. The next implementation joins
+trusted installed startup to the production native controller/monitor birth
+chain; control-service composition, admission assembly and first model dispatch
+remain open. This is not a completed I1 claim or a release artifact.
 
 ### Source
 
@@ -224,6 +225,106 @@ all-descendant death evidence or signed keeper startup. Full installed/control/
 admission/execution/restart I1 and the credential/TLS dependencies below remain
 open. The test-only launcher stays in the Supervisor service; it is not the
 production controller or a durable reservation witness.
+
+### Installed Anchor Chain Implementation Notes
+
+After merged PR #519, implement signed installed startup and the complete
+production native birth/recovery chain together. These are implementation notes
+inside I1, not a new micro-slice or a claim that public control, admission or
+model execution is implemented. First establish a genuine failing regression
+through the existing public native launcher and real Linux process behavior,
+then qualify the completed chain through the actual installed entry. The initial
+HELLO-time placement test does not prove atomic birth; a kernel first-fork stop
+must additionally exclude fork-then-migrate. A simulated fork, synthetic witness
+or dummy OS launcher cannot satisfy either native qualification.
+
+Reuse the same SEA with closed bootstrap, keeper and Supervisor modes. The
+stable executable is `${stateRoot}/runtime/bootstrap`; user services select
+only its fixed bootstrap-keeper or bootstrap-supervisor mode. Compiled release
+keys, not argv/environment/control inputs, authenticate the detached manifest.
+The keeper is an internal mode of the sole signed `supervisor` entry, not an
+extra manifest entry with duplicate complete-file bytes or a new role.
+
+Keep one installed-runtime deep interface: initial installation, opening the
+selected held runtime, and executing that runtime in one of the two fixed
+roles. Initial installation creates a new private StateRoot and stages entries
+without adopting an existing active selection or database. Descriptor-relative
+no-follow walks verify the root and every signed entry, including type, owner,
+mode, link count, exact count/digest and metadata stability around the read.
+Complete the supported structured-root/member walk and ordinary CAS import
+before publishing; unsupported kinds fail closed rather than being ignored.
+This does not claim the remaining WP06 closure/upgrade matrix is complete.
+
+Publish immutable side-by-side directories under
+`runtime/bundles/<bundleDigest>/`, where `bundleDigest` is the complete signed
+manifest's ArtifactRef, not its distinct self-omitting `manifestDigest`.
+Directories remain same-owner `0700`; published data/manifest files are `0400`
+and executable/helpers `0500`. File and directory fsync precede selection.
+The same-owner single-link `0600` `runtime/active.json` is a closed bundle-digest
+locator, published through same-directory exclusive temp creation, file fsync,
+atomic rename and directory fsync, never a symlink. No selected bundle is
+overwritten or removed. This round supports only initial installation: an
+existing selection cannot be switched under nonterminal Runs; compatible
+activation, drain and rollback require the canonical upgrade transition later.
+
+Bootstrap derives its StateRoot from the fixed installed location, holds and
+revalidates the selection/manifest/entry descriptors, then loads only the
+verified native helper through its held FD. A small existing-helper extension
+executes the held on-disk Supervisor image with fixed role/root/bundle locators;
+these locators are revalidated by the selected image, never taken as authority.
+Do not use the worker's sealed memfd for this image: actual Supervisor image
+binding still requires its original filesystem identity and independent path.
+The systemd unit closes native-loader environment routes before the first ELF
+startup; native exec independently uses a fixed environment and FD whitelist.
+SEA's ignored `NODE_OPTIONS` alone does not exclude `LD_PRELOAD` or alternate
+native library loading. There is no general spawn/import facade.
+
+The independent anchor service owns this delegated topology:
+
+```text
+anchor root/
+  keeper/
+  controllers/<native-created-unique>/
+  cliq-<worker-reservation>/
+```
+
+Keeper observes its actual service cgroup, moves only itself to `keeper`,
+initializes delegation, then stays alive. It never opens StateStore, holds a
+StateOwner lock, or manages Run/broker state or a second ledger. Sharing the
+Supervisor UID is not an additional OS-level database-access isolation claim.
+Ready metadata is only a locator: the Supervisor independently verifies the
+actual keeper lifetime/image, namespace and exact held anchor identity. Only
+the Supervisor/native execution owner creates or retires execution subtrees.
+The service dependency is one-way; Supervisor restart must not stop the anchor.
+
+Keep `LinuxWorkerInstallation.cgroupParent` as the held anchor-root seam;
+do not add a separately caller-selected controller parent. Internally,
+`openController(helper, cgroupRootFd)` creates the unique private controller
+leaf and requires non-root `clone3(CLONE_INTO_CGROUP)` before the first
+controller instruction. No fork-then-migrate or root-assisted fallback is
+allowed. The monitor is born inside that protected leaf; retain the existing
+durable MONITOR -> exact worker placement -> barrier release -> durable READY
+ordering. Controller leaves stay outside each worker's `cliq-*` kill scope,
+so Supervisor-service cleanup cannot erase the producer or original worker
+scope halfway through recording physical birth.
+
+Consume each resource before retirement and never retry a possibly reused FD.
+Any uncertain close/join blocks exec, READY or fresh activation rather than
+being erased by a new handle, finalizer, cache or success-shaped cleanup. Exec
+failure must not resume a Node event loop whose descriptors were destroyed.
+Recovery keeps the original scope inode and reservation closure and uses the
+existing fresh native all-descendant death proof; neither a missing path,
+controller EOF alone, timeout nor the ready metadata can substitute for it.
+
+Qualification runs the actual signed installed entry under the real systemd
+user manager on a free standard Linux runner. Extend the accepted test-only OS
+tracer to stop real processes at controller birth/HELLO and monitor fork before
+READY, then kill the real Supervisor. The oracle independently observes actual
+PID/start/image and cgroup placement, durable reservation phases, unchanged
+scope identity, positive descendant join and exact cleanup; it never manufactures
+evidence or adds a production fault switch. Exercise normal and automatic
+restart, empty/live descendants and damaged-witness refusal. Anchor loss or a
+new boot still waits for recovery when the original death cannot be proved.
 
 ### Risks And Dependencies
 

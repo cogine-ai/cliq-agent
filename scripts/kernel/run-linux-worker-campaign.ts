@@ -19,7 +19,7 @@ import type { ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1
 import type { WorkerDeathWait, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1,
   SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1 } from '../../src/kernel/types.js';
-import { openLinuxWorkerLauncher } from '../../src/sandbox/linux-worker.js';
+import { openLinuxWorkerLauncher, type LinuxWorkerController, type LinuxWorkerLauncher } from '../../src/sandbox/linux-worker.js';
 import { createLinuxWorkerCampaignFixture } from '../../src/sandbox/testing/worker-campaign-fixture.js';
 import type { LocalControlConnection, LocalControlListener } from '../../src/state/control-channel.js';
 import { decodeWorkerIdentity } from '../../src/state/decoders.js';
@@ -63,6 +63,106 @@ async function bounded<T>(operation: Promise<T>, milliseconds = 30_000): Promise
       timer = setTimeout(() => reject(new Error('actual Linux campaign operation timed out')), milliseconds);
     })]);
   } finally { clearTimeout(timer); }
+}
+
+async function controllerAnchorBirth() {
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'controller-anchor' });
+  let launcher: LinuxWorkerLauncher | undefined, controller: LinuxWorkerController | undefined;
+  const held: FileHandle[] = [];
+  let primary: { error: unknown } | undefined;
+  const directoryFlags = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
+  const descriptorPath = (handle: FileHandle) => `/proc/self/fd/${handle.fd}`;
+  const identity = (value: fs.BigIntStats) => ({ dev: value.dev, ino: value.ino, uid: value.uid, gid: value.gid, mode: value.mode });
+  const processCgroup = async (pid: number) => {
+    const lines = (await readFile(`/proc/${pid}/cgroup`, 'utf8')).trim().split('\n');
+    assert.equal(lines.length, 1, 'qualification requires a single unified cgroup hierarchy');
+    assert.match(lines[0]!, /^0::\//u);
+    const relative = lines[0]!.slice(3);
+    assert.equal(path.posix.normalize(relative), relative);
+    return path.posix.join('/sys/fs/cgroup', relative);
+  };
+  const assertDirectory = async (handle: FileHandle, namedPath: string, expected: fs.BigIntStats) => {
+    const physical = await handle.stat({ bigint: true }), named = await lstat(namedPath, { bigint: true });
+    assert.ok(physical.isDirectory() && named.isDirectory() && !named.isSymbolicLink());
+    assert.deepEqual(identity(physical), identity(expected)); assert.deepEqual(identity(named), identity(expected));
+    assert.equal(fs.statfsSync(descriptorPath(handle)).type, 0x63677270, 'held directory must be native cgroup2');
+  };
+  try {
+    const uid = process.getuid!(), gid = process.getgid!();
+    assert.notEqual(uid, 0, 'controller qualification must exercise actual non-root delegation');
+    const sourcePath = await processCgroup(process.pid), sourceToken = processToken(process.pid);
+    assert.equal(sourcePath, path.join(options.cgroupParent, 'supervisor'));
+    // Hold every directory reached without following a caller path symlink.
+    let root = await open('/', directoryFlags); held.push(root);
+    assert.equal(path.normalize(options.cgroupParent), options.cgroupParent);
+    assert.ok(options.cgroupParent.startsWith('/sys/fs/cgroup/'));
+    for (const component of options.cgroupParent.split('/').slice(1)) {
+      assert.ok(component !== '' && component !== '.' && component !== '..');
+      root = await open(`${descriptorPath(root)}/${component}`, directoryFlags); held.push(root);
+    }
+    const rootBefore = await root.stat({ bigint: true });
+    assert.equal(rootBefore.uid, BigInt(uid)); assert.equal(rootBefore.gid, BigInt(gid));
+    assert.equal(rootBefore.mode & 0o7777n, 0o700n);
+    await assertDirectory(root, options.cgroupParent, rootBefore);
+    assert.deepEqual(pids(descriptorPath(root)), [], 'delegation root must have no internal processes');
+
+    launcher = await openLinuxWorkerLauncher({ ...options, runtimeAuthority: fixture.runtimeAuthority });
+    controller = await bounded(launcher.startController());
+    assert.ok(Number.isSafeInteger(controller.pid) && controller.pid > 0 && controller.pid !== process.pid);
+    const pid = controller.pid, token = processToken(pid), controllerPath = await processCgroup(pid);
+    assert.equal(token, controller.processStartToken, 'public process identity must match the real kernel lifetime');
+    const status = await readFile(`/proc/${pid}/status`, 'utf8');
+    assert.match(status, new RegExp(`^PPid:\\s+${process.pid}$`, 'mu'));
+    assert.deepEqual(status.match(/^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)$/mu)?.slice(1).map(Number),
+      [uid, uid, uid, uid], 'controller must retain the non-root calling identity');
+    const controllersPath = path.join(options.cgroupParent, 'controllers');
+    assert.equal(path.dirname(controllerPath), controllersPath,
+      'controller must be in a private anchor/controllers leaf, outside the Supervisor service leaf');
+    assert.notEqual(controllerPath, sourcePath);
+    const controllerName = path.basename(controllerPath);
+    assert.match(controllerName, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
+    const controllers = await open(`${descriptorPath(root)}/controllers`, directoryFlags); held.push(controllers);
+    const controllersBefore = await controllers.stat({ bigint: true });
+    const leaf = await open(`${descriptorPath(controllers)}/${controllerName}`, directoryFlags); held.push(leaf);
+    const leafBefore = await leaf.stat({ bigint: true });
+    for (const metadata of [controllersBefore, leafBefore]) {
+      assert.equal(metadata.uid, BigInt(uid)); assert.equal(metadata.gid, BigInt(gid));
+      assert.equal(metadata.mode & 0o7777n, 0o700n);
+    }
+    await assertDirectory(root, options.cgroupParent, rootBefore);
+    await assertDirectory(controllers, controllersPath, controllersBefore);
+    await assertDirectory(leaf, controllerPath, leafBefore);
+    assert.equal((await readFile(`${descriptorPath(leaf)}/cgroup.type`, 'utf8')).trim(), 'domain');
+    assert.equal((await readFile(`${descriptorPath(leaf)}/cgroup.subtree_control`, 'utf8')).trim(), '');
+    assert.deepEqual(pids(descriptorPath(leaf)), [pid], 'idle controller leaf contains its sole original producer');
+    assert.match(await readFile(`${descriptorPath(leaf)}/cgroup.events`, 'utf8'), /(?:^|\n)populated 1\n/u);
+    assert.equal(await processCgroup(pid), controllerPath); assert.equal(processToken(pid), token);
+    assert.equal(await processCgroup(process.pid), sourcePath); assert.equal(processToken(process.pid), sourceToken);
+
+    // No reservation, scope or worker was created: this controller is the
+    // complete producer set. Normal close must join it before retiring its leaf.
+    await bounded(controller.close(), 15_000); controller = undefined;
+    await assert.rejects(access(`/proc/${pid}`), { code: 'ENOENT' }, 'close must join the original controller child');
+    await assert.rejects(lstat(controllerPath), { code: 'ENOENT' }, 'joined controller-only leaf must retire safely');
+    assert.deepEqual(identity(await leaf.stat({ bigint: true })), identity(leafBefore), 'held leaf retains its original inode');
+    await assertDirectory(root, options.cgroupParent, rootBefore);
+    await assertDirectory(controllers, controllersPath, controllersBefore);
+    console.log(JSON.stringify({ scenario: 'actual-controller-anchor-birth', supervisorPid: process.pid, supervisorStartToken: sourceToken,
+      sourcePath, controllerPid: pid, controllerStartToken: token, controllerPath, ownerUid: uid,
+      rootDevice: String(rootBefore.dev), rootInode: String(rootBefore.ino), controllerDevice: String(leafBefore.dev), controllerInode: String(leafBefore.ino),
+      note: 'HELLO-time actual placement and controller-only retirement; not initial-fork atomicity, whole-worker death or installed signed Supervisor I1; offline fixture prefix only' }));
+  } catch (error) { primary = { error }; throw error; }
+  finally {
+    const failures: unknown[] = [];
+    for (const resource of [controller, launcher]) {
+      try { await resource?.close(); } catch (error) { failures.push(error); }
+    }
+    for (const handle of [...held].reverse()) {
+      try { await handle.close(); } catch (error) { failures.push(error); }
+    }
+    try { await fixture.dispose(); } catch (error) { failures.push(error); }
+    if (failures.length !== 0) throw new AggregateError([...(primary ? [primary.error] : []), ...failures], 'controller anchor campaign and cleanup failures');
+  }
 }
 
 async function control(store: StateStore) {
@@ -2499,6 +2599,7 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
 }
 
 for (const [scenario, run] of [
+  ['controller-anchor-birth', controllerAnchorBirth],
   ['before-spawn-retirement-retry', () => preactivationRetirementRetry('before_spawn')],
   ['ready-before-identity-retirement-retry', () => preactivationRetirementRetry('ready_before_identity')],
   ['invalid-preactivation-tree-retirement-retry', () => preactivationRetirementRetry('ready_invalid_tree')],
