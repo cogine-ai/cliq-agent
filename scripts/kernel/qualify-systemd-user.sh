@@ -25,6 +25,8 @@ readonly probe_runner_uid=$SUDO_UID
 readonly probe_source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly probe_source="$probe_source_dir/systemd-user-probe.mjs"
 [[ -f "$probe_source" && ! -L "$probe_source" ]] || exit 2
+readonly probe_birth_source="$probe_source_dir/cliq-anchor-birth-probe.c"
+[[ -f "$probe_birth_source" && ! -L "$probe_birth_source" ]] || exit 2
 [[ $(stat -f -c '%t' /sys/fs/cgroup) = 63677270 ]] || {
   printf 'actual unified cgroup v2 is required\n' >&2; exit 2;
 }
@@ -51,6 +53,9 @@ readonly probe_home="$probe_fixture/home"
 readonly probe_skel="$probe_fixture/empty-skel"
 readonly probe_mail="$probe_fixture/mail"
 readonly probe_script="$probe_fixture/systemd-user-probe.mjs"
+readonly probe_birth_helper="$probe_fixture/cliq-anchor-birth-probe"
+readonly probe_anchor_unit="cliq-probe-$probe_suffix-anchor.service"
+readonly probe_anchor_directory="$probe_home/probe/anchor"
 readonly probe_ledger="$probe_fixture/ownership-ledger.json"
 readonly probe_before="$probe_output/runner-baseline-before.json"
 readonly probe_after="$probe_output/runner-baseline-after.json"
@@ -277,17 +282,21 @@ readonly probe_dropin="$probe_dropin_directory/50-cliq-probe.conf"
 # Root-owned write-once ledger/config. It cannot be replaced through the new
 # user's home; cleanup uses its frozen hash and the in-process exact identities.
 "$probe_node" --input-type=module - "$probe_ledger" "$probe_fixture" "$probe_fixture_identity" \
-  "$probe_username" "$probe_uid" "$probe_gid" "$probe_runner_uid" "$probe_home" "$probe_dropin" "$probe_output" <<'NODE'
+  "$probe_username" "$probe_uid" "$probe_gid" "$probe_runner_uid" "$probe_home" "$probe_dropin" "$probe_output" "$probe_birth_helper" <<'NODE'
 import { writeFileSync } from 'node:fs';
-const [file, fixture, fixtureIdentity, username, uidText, gidText, runnerText, home, dropin, output] = process.argv.slice(2);
+const [file, fixture, fixtureIdentity, username, uidText, gidText, runnerText, home, dropin, output, birthHelper] = process.argv.slice(2);
 const uid = Number(uidText), gid = Number(gidText), runnerUid = Number(runnerText);
 const suffix = fixture.slice(fixture.lastIndexOf('.') + 1);
-const scenarios = ['empty', 'live'].flatMap(mode => ['manual', 'automatic'].map(restart => {
-  const unit = `cliq-probe-${suffix}-${mode}-${restart}.service`;
-  return { mode, restart, unit, unitFile: `${home}/.config/systemd/user/${unit}`, directory: `${home}/probe/${mode}-${restart}` };
-}));
+const scenarios = ['A', 'B'].flatMap(layout => ['empty', 'live'].flatMap(mode => ['manual', 'automatic'].map(restart => {
+  const prefix = layout === 'B' ? 'anchor-' : '';
+  const unit = `cliq-probe-${suffix}-${prefix}${mode}-${restart}.service`;
+  return { layout, mode, restart, unit, unitFile: `${home}/.config/systemd/user/${unit}`, directory: `${home}/probe/${prefix}${mode}-${restart}` };
+})));
+const anchorUnit = `cliq-probe-${suffix}-anchor.service`;
+const anchor = { unit: anchorUnit, unitFile: `${home}/.config/systemd/user/${anchorUnit}`,
+  directory: `${home}/probe/anchor`, readyFile: `${home}/probe/anchor/anchor.json` };
 writeFileSync(file, JSON.stringify({ diagnosticOnly: true, fixture, fixtureIdentity, username,
-  uid, gid, runnerUid, home, dropin, scenarios, reportFile: `${output}/systemd-user-probe.json` }, null, 2) + '\n',
+  uid, gid, runnerUid, home, dropin, birthHelper, anchor, scenarios, reportFile: `${output}/systemd-user-probe.json` }, null, 2) + '\n',
   { flag: 'wx', mode: 0o444 });
 NODE
 probe_ledger_digest=$(sha256sum "$probe_ledger" | cut -d' ' -f1)
@@ -303,23 +312,41 @@ useradd --create-home --no-user-group --no-log-init -K "MAIL_DIR=$probe_mail" --
 probe_created=1
 [[ $(id -u "$probe_username") = "$probe_uid" && $(id -g "$probe_username") = "$probe_gid" ]] || exit 1
 install -o root -g root -m 0444 -- "$probe_source" "$probe_script"
+cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_birth_source" -o "$probe_birth_helper"
+chmod 0555 "$probe_birth_helper"
 mkdir -m 0755 -- "$probe_home/.config" "$probe_home/.config/systemd" "$probe_home/.config/systemd/user"
 mkdir -m 0700 -- "$probe_home/probe"
 chown "$probe_uid:$probe_gid" "$probe_home/probe"
-for probe_mode in empty live; do
-  for probe_restart in manual automatic; do
-    probe_unit="cliq-probe-$probe_suffix-$probe_mode-$probe_restart.service"
+for probe_layout in A B; do
+  if [[ "$probe_layout" = B ]]; then probe_prefix=anchor-; else probe_prefix=''; fi
+  for probe_mode in empty live; do
+    for probe_restart in manual automatic; do
+    probe_unit="cliq-probe-$probe_suffix-$probe_prefix$probe_mode-$probe_restart.service"
     probe_units+=("$probe_unit")
-    probe_directory="$probe_home/probe/$probe_mode-$probe_restart"
+    probe_directory="$probe_home/probe/$probe_prefix$probe_mode-$probe_restart"
     mkdir -m 0700 -- "$probe_directory"
     chown "$probe_uid:$probe_gid" "$probe_directory"
     if [[ "$probe_restart" = automatic ]]; then probe_restart_setting=on-failure; else probe_restart_setting=no; fi
-    printf '[Unit]\nStartLimitIntervalSec=30s\nStartLimitBurst=2\n[Service]\nType=exec\nExecStart=%s %s main %s %s %s\nDelegate=cpu memory pids\nKillMode=control-group\nRestart=%s\nRestartSec=2s\nTimeoutStopSec=2s\nEnvironment=NODE_OPTIONS=\n' \
-      "$probe_node" "$probe_script" "$probe_mode" "$probe_directory" "$probe_unit" "$probe_restart_setting" \
-      > "$probe_home/.config/systemd/user/$probe_unit"
+    {
+      printf '[Unit]\nStartLimitIntervalSec=30s\nStartLimitBurst=2\n'
+      if [[ "$probe_layout" = B ]]; then
+        printf 'Requires=%s\nAfter=%s\n' "$probe_anchor_unit" "$probe_anchor_unit"
+      fi
+      printf '[Service]\nType=exec\nExecStart=%s %s main %s %s %s %s' \
+        "$probe_node" "$probe_script" "$probe_mode" "$probe_directory" "$probe_unit" "$probe_layout"
+      if [[ "$probe_layout" = B ]]; then printf ' %s %s' "$probe_anchor_directory/anchor.json" "$probe_birth_helper"; fi
+      printf '\nDelegate=cpu memory pids\nKillMode=control-group\nRestart=%s\nRestartSec=2s\nTimeoutStopSec=2s\nEnvironment=NODE_OPTIONS=\n' "$probe_restart_setting"
+    } > "$probe_home/.config/systemd/user/$probe_unit"
     chmod 0444 "$probe_home/.config/systemd/user/$probe_unit"
+    done
   done
 done
+probe_units+=("$probe_anchor_unit")
+mkdir -m 0700 -- "$probe_anchor_directory"
+chown "$probe_uid:$probe_gid" "$probe_anchor_directory"
+printf '[Service]\nType=exec\nExecStart=%s %s anchor %s %s\nDelegate=cpu memory pids\nKillMode=control-group\nRestart=no\nTimeoutStopSec=2s\nEnvironment=NODE_OPTIONS=\n' \
+  "$probe_node" "$probe_script" "$probe_anchor_directory" "$probe_anchor_unit" > "$probe_home/.config/systemd/user/$probe_anchor_unit"
+chmod 0444 "$probe_home/.config/systemd/user/$probe_anchor_unit"
 readonly probe_units
 mkdir -m 0755 -- "$probe_dropin_directory"
 probe_dropin_created=1

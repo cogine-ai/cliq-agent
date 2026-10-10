@@ -5,9 +5,10 @@
 ### Verdict
 
 READY WITH RISKS: the user confirmed A and the installed-startup/v1-control
-test seam on 2026-10-11. Native image binding, actual systemd-user operation,
-trusted admission assembly and first model dispatch still require implementation
-and real qualification. This is not a completed I1 claim or a release artifact.
+test seam on 2026-10-11. Native image binding has passed component qualification;
+trusted installed startup, persistent containment, admission assembly and first
+model dispatch still require implementation and real qualification. This is not
+a completed I1 claim or a release artifact.
 
 ### Source
 
@@ -163,12 +164,31 @@ its unchecked acceptance criteria or a mandatory separate product slice:
   authority. Provisioning, incomplete observation and cleanup failure fail the
   diagnostic. The ordinary Node dummy is explicitly not a signed Supervisor.
 
-Local build, focused real native regressions and the seven SEA cases have
-passed on macOS; this is not macOS execution qualification. Free standard
-Ubuntu 22.04 CI runs both the image component and actual user-manager diagnostic;
-the Linux results and full-suite validation must be recorded before this gate
-is considered verified. Full installed/control/admission/execution/restart I1
-and the credential/TLS dependencies below remain open.
+Local build, all 1,840 portable tests, focused real native regressions and the
+seven SEA cases passed on macOS; this is not macOS execution qualification.
+The same seven image cases and all four actual user-manager diagnostic cases
+passed on free standard Ubuntu 22.04 at source
+`f3d1879e35f75890d7ef01eb9e7cf7ec11a9faaf` in
+[run 38086725642](https://github.com/cogine-ai/cliq-agent/actions/runs/38086725642).
+The diagnostic succeeded by reporting real facts, not by qualifying recovery:
+systemd 249.11 on kernel 6.8.0-1064-azure removed every original service and
+worker cgroup. Held descriptors still named the old inodes with ` (deleted)`;
+each successfully restarted service had a different inode, on cgroup device 29.
+
+| Dummy worker / restart | Old service inode | Restarted service inode | Old worker inode / outcome |
+| --- | --- | --- | --- |
+| empty / manual | 6894 | 7041 | 6992 / deleted |
+| empty / automatic | 7209 | 7356 | 7307 / deleted |
+| live / manual | 7524 | 7671 | 7622 / deleted |
+| live / automatic | 7839 | 7986 | 7937 / deleted |
+
+The original live dummy workers were independently observed before MainPID
+SIGKILL. Cleanup reported zero errors and the runner's complete before/after
+baseline was identical: UID 1001, manager PID 893/start ticks 995, manager
+InvocationID `9e294d442d9b4379a6ac7bf6873e62a4`, cgroup inode 5848.
+These are OS prerequisite observations, not native worker or all-descendant
+death evidence. Full installed/control/admission/execution/restart I1 and the
+credential/TLS dependencies below remain open.
 
 ### Risks And Dependencies
 
@@ -181,7 +201,7 @@ never supplied by a control client. A scripted endpoint still requires installed
 signed adapter/catalog/price objects, principal-bound endpoint/credential
 registration and actual TLS/broker claim-before-send. Offline credential JSON,
 always-true validators and fictitious Ollama zero-cost provenance are forbidden.
-Test systemd MainPID death with an active worker early: service cleanup may remove
+Actual systemd MainPID-death diagnostics confirmed that service cleanup removes
 the original cgroup inode, which the current retained-death inspector requires.
 No missing cgroup can be relabeled as the old containment's empty observation.
 
@@ -197,7 +217,28 @@ until the existing canonical upgrade transition is implemented.
 
 ### Open Questions
 
-No remaining product choice for this capability. A and the integration-test
-seam are confirmed.
+Single-image A and the integration-test seam remain confirmed. After the real
+negative lifecycle result above, the user additionally approved **first
+qualifying an independent persistent containment anchor** on 2026-10-11.
+Reuse the same signed image with a fixed keeper role; it has no StateOwner,
+Run, database or broker authority and adds no second lifecycle ledger. Only
+the current Supervisor manages its delegated execution subtrees after a
+bounded initialization handoff.
+
+The next OS prerequisite campaign must retain the four direct-service cases
+and compare independent anchor cases. Protect the complete controller/monitor
+birth chain, not only a worker moved after fork: require actual non-root
+`clone3(CLONE_INTO_CGROUP)` placement before the first controller birth, with no
+fork-then-migrate fallback. Same-user delegation alone does not prove cross-unit
+placement permission. Verify the actual common ancestor and namespace access;
+do not chmod manager ancestors or perform a root-assisted migration to pass.
+Across Supervisor restart, retain exact anchor/worker inode and keeper process
+identities before attempting the existing native death proof. Dummy OS results
+do not qualify production native READY/birth-witness fault cuts.
+
+Anchor loss or machine reboot remains explicit recovery waiting when original
+containment death cannot be proved. The user accepted this boundary; a strict
+new-boot or retired-containment evidence branch requires a separate normative
+design, not an ENOENT/timeout shortcut.
 Exact embedded runtime/build pins are engineering qualification work; release
 key/channel ownership is needed only before real publication, not CI fixtures.
