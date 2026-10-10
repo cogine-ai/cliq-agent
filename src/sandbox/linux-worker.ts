@@ -99,7 +99,7 @@ export type LinuxWorkerInstallation = {
 type NativeObservation = {
   pid: number; processStartToken: string; namespaceInitStartToken: string; namespaceInitPid: number;
   cgroupId: string; pidNamespaceId: string; cgroupPopulated: number; namespaceInitDeadAndReaped: number;
-  remainingTrackedDescendants: number; imageFd: number; imageByteCount: number; executableRealpath: string;
+  remainingTrackedDescendants: number; observedAtMs: number; imageFd: number; imageByteCount: number; executableRealpath: string;
 };
 type NativeImage = { descriptor(): number; close(): void };
 type NativeScope = { pollReady(): boolean; observe(): NativeObservation; activate(nonce: string): void; pollActivated(): boolean;
@@ -342,10 +342,12 @@ async function death(scope: NativeScope, containment: ProcessContainment, contro
   return checkedDeath(observed, containment);
 }
 
-function checkedDeath(observed: NativeObservation, containment: ProcessContainment, observedAt = sampleCanonicalNow()): NativeContainmentDeathObservation {
+function checkedDeath(observed: NativeObservation, containment: ProcessContainment): NativeContainmentDeathObservation {
   if (containment.backend.kind !== 'linux' || observed.cgroupId !== containment.backend.cgroupId ||
       observed.pidNamespaceId !== containment.backend.pidNamespaceId || observed.namespaceInitStartToken !== containment.backend.namespaceInitStartToken ||
       observed.cgroupPopulated !== 0 || observed.namespaceInitDeadAndReaped !== 1 || observed.remainingTrackedDescendants !== 0) mismatch('native death does not close the exact containment');
+  if (!Number.isSafeInteger(observed.observedAtMs) || observed.observedAtMs < 1) mismatch('native death observation timestamp is invalid');
+  const observedAt = new Date(observed.observedAtMs).toISOString();
   const observation: NativeContainmentDeathObservation = immutableSnapshot({ containment, cgroupPopulated: 0,
     namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0, observedAt });
   observedDeaths.add(observation); return observation;
@@ -497,7 +499,7 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
                 if (workerIdentity && (workerIdentity.pid !== observed.pid || workerIdentity.processStartToken !== observed.processStartToken ||
                     workerIdentity.processContainmentRef !== canonicalSha256(containment))) mismatch('birth witness substitutes the recorded worker process');
                 const retained = immutableSnapshot(containment ?? actual);
-                result = Object.freeze({ kind: 'created', containment: retained, death: checkedDeath(observed, retained, observedAt) });
+                result = Object.freeze({ kind: 'created', containment: retained, death: checkedDeath(observed, retained) });
               } else mismatch('unsupported native reservation observation');
               preactivationObservations.set(result, canonicalSha256([closure.containmentPlanRef, closure.sandboxLaunchSpecRef]));
               return result;
@@ -527,7 +529,7 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
               const created = native.createWorker(borrowed.fd, cgroup.fd, helper, executable, bwrap, scopeProjection(closure, borrowed, activationNonceDigest));
               nativeScope = created;
               await awaitNative(() => created.pollReady() ? true : undefined, closeController); borrowed.assertHeld(); receiver();
-              const containment = actualContainment(closure, created.observe()); let active = false;
+              const containment = actualContainment(closure, created.observe()); let active = false, borrowRetired = false;
               const worker: LinuxBlockedWorker = Object.freeze({
                 containment,
                 async observeProcess() { if (this !== worker) throw new TypeError('invalid blocked worker'); receiver(); borrowed.assertHeld(); return observedProcess(created, workerDigest); },
@@ -586,7 +588,15 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
                   invocations.set(handle, { consumed: false, claim, release() { receiver(); borrowed.assertHeld(); scope.release(); } });
                   return handle;
                 },
-                async stop() { if (this !== worker) throw new TypeError('invalid blocked worker'); active = false; try { return await death(created, containment, native, controllerReceiver); } finally { retireBorrow(borrowed); } }
+                async stop() {
+                  if (this !== worker) throw new TypeError('invalid blocked worker'); active = false;
+                  try { return await death(created, containment, native, controllerReceiver); }
+                  finally {
+                    // Fresh STOP uses only the original held native scope. A
+                    // retired generation duplicate is never reopened/reused.
+                    if (!borrowRetired) { retireBorrow(borrowed); borrowRetired = true; }
+                  }
+                }
               });
               return worker;
             } catch (error) {

@@ -363,14 +363,28 @@ test('concurrent root stops append separate Session segments in commit order wit
     const firstStop = await fixture.agent.cancelRun(await cancelCommand(fixture));
     const secondStop = await agent.cancelRun({ ...await cancelCommand(fixture), expectedRunRevision: second.run.revision });
     const proof = await quiescedToolCheckpoint(fixture, firstStop.checkpointId);
-    const completed = await Promise.all([fixture.agent.commitTerminalStop({ expectedRunRevision: firstStop.run.revision, checkpoint: proof.checkpoint }),
+    const outcomes = await Promise.allSettled([fixture.agent.commitTerminalStop({ expectedRunRevision: firstStop.run.revision, checkpoint: proof.checkpoint }),
       agent.commitTerminalStop({ expectedRunRevision: secondStop.run.revision })]);
-    assert.ok(completed.every(({ run }) => run.status === 'cancelled'));
+    assert.ok(outcomes[1]!.status === 'fulfilled');
+    assert.equal(outcomes[1]!.value.run.status, 'cancelled');
+    if (outcomes[0]!.status === 'rejected') {
+      assert.equal(outcomes[0]!.reason.code, 'REVISION_CONFLICT');
+      // A sealed completion cannot rebuild bulk artifacts under a new Session
+      // cut. A new public command may prepare that same undispatched stop again.
+      const retried = await fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture), checkpoint: proof.checkpoint });
+      assert.equal(retried.run.status, 'cancelled');
+    } else assert.equal(outcomes[0]!.value.run.status, 'cancelled');
     const session = fixture.store.getSession(run.sessionId);
     assert.equal(session.latestItemSeq, 2);
     assert.equal(session.contextRevision, 3);
     const projection = await fixture.store.artifacts.readCanonical<SessionContextProjection>(session.contextProjectionRef);
     assert.deepEqual(projection.segments.map((segment) => [segment.kind, segment.fromItemSeq, segment.throughItemSeq]), [['raw', 1, 1], ['raw', 2, 2]]);
+    const terminalItems = await Promise.all(projection.segments.map(segment => {
+      assert.ok(segment.kind === 'raw');
+      return fixture.store.artifacts.readCanonical<{ runId: string }>(segment.items[0]!.payloadRef);
+    }));
+    assert.deepEqual(terminalItems.map(item => item.runId).sort(), [fixture.runId, second.run.id].sort());
+    if (outcomes[0]!.status === 'rejected') assert.equal(terminalItems[0]!.runId, second.run.id);
     await fixture.store.readRecoveryClosure(second.run.id);
     await reopen(fixture);
     await fixture.store.readRecoveryClosure(second.run.id);

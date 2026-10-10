@@ -3,7 +3,12 @@ import { promises as fs } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { KERNEL_CAS_DIRECTORY } from '../config.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
+import { digestOmitting } from '../kernel/identity.js';
+import type { ProcessContainmentDeathEvidenceV1 } from '../kernel/execution.js';
+import { openSqliteDriver } from './sqlite-driver.js';
+import { readRequiredWorkerLaunch } from './repositories/worker-launches.js';
+import { openStateStore } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
@@ -39,7 +44,8 @@ async function completeAfterSettlementDelay(t: TestContext, elapsedMs: number) {
     await completion.catch(() => {});
     assert.equal(delayed, 1, 'the real late publication boundary must be reached exactly once');
     if (elapsedMs < 0 || elapsedMs > 5_000) {
-      await assert.rejects(completion, { code: 'RECOVERY_REQUIRED', message: /retirement proof is stale/ });
+      await assert.rejects(completion, { code: 'RECOVERY_REQUIRED',
+        message: elapsedMs < 0 ? /canonical clock is not healthy|transaction clock precedes|retirement proof is stale/ : /retirement proof is stale/ });
       assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before,
         'expired authority cannot commit a result, settlement, budget, frontier, checkpoint or generation seal');
     } else {
@@ -65,6 +71,49 @@ test('tool completion accepts the exact five-second retirement freshness boundar
 
 test('tool completion refuses a transaction clock that regressed behind its staged settlement',
   t => completeAfterSettlementDelay(t, -1));
+
+test('a sealed snapshot retains initial quiescence while a fresh final death owns a later atomic checkpoint', async t => {
+  let clock = Date.now();
+  t.mock.method(Date, 'now', () => clock);
+  const fixture = await createAgentFixture('seal-two-observations', undefined, { mode: 'accept-edits' });
+  try {
+    const proof = await quiescedToolCheckpoint(fixture, 'seal-two-observations-checkpoint');
+    const initial = await fixture.store.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(proof.checkpoint.retirementEvidenceRef);
+    const snapshot = { ...proof.snapshot, quiescenceEvidenceRef: proof.checkpoint.retirementEvidenceRef };
+    snapshot.evidenceDigest = digestOmitting(snapshot, 'evidenceDigest');
+    const retainedSnapshot = await fixture.store.artifacts.publishCanonical(snapshot, snapshot.format);
+    clock += 6_000;
+    // Offline canonical proof exercises the public StateStore contract; it
+    // neither mints a native capability nor qualifies actual process death.
+    const final = { ...initial, observedAt: new Date(clock).toISOString() };
+    final.evidenceDigest = digestOmitting(final, 'evidenceDigest');
+    const retainedFinal = await fixture.store.artifacts.publishCanonical(final, 'cliq-process-containment-death-evidence-v1');
+    clock += 125;
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const generation = before.workspaceGenerations.find(row => row.generationRef === fixture.generationRef)!;
+    if (generation.phase !== 'checkpointing') assert.fail('fixture must be checkpointing');
+    const sealed = await fixture.store.sealWorkerGeneration({ launchId: fixture.launchId,
+      expectedRunRevision: before.run.revision, expectedGenerationRowVersion: generation.rowVersion,
+      quiesceId: generation.quiesceId, checkpointId: snapshot.checkpointId,
+      contextManifestRef: before.latestCheckpoint.contextManifestRef, workspaceStateRef: proof.workspaceStateRef,
+      snapshotEvidenceRef: retainedSnapshot.ref, snapshotEvidenceDigest: snapshot.evidenceDigest,
+      retirementEvidenceRef: retainedFinal.ref, checkpointReason: 'auto' });
+    assert.equal(sealed.run.status, 'queued');
+    assert.equal(sealed.checkpoint.createdAt, new Date(clock).toISOString());
+    assert.equal(sealed.launch.retiredAt, sealed.checkpoint.createdAt);
+    assert.equal(sealed.launch.retirementEvidenceRef, retainedFinal.ref);
+    assert.ok(initial.observedAt < final.observedAt);
+    const metadata = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+    try { assert.deepEqual(readRequiredWorkerLaunch(metadata, fixture.launchId), sealed.launch); }
+    finally { metadata.close(); }
+    const after = await fixture.store.readRecoveryClosure(fixture.runId);
+    clock += 6_000;
+    await fixture.store.close();
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), after,
+      'historical authority remains valid after its owner retires and the live freshness window expires');
+  } finally { t.mock.restoreAll(); await disposeFixture(fixture); }
+});
 
 test('a direct worker seal rejects future observations after a clock correction above the stored fence', async t => {
   const initial = Date.now();

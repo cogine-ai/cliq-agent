@@ -218,15 +218,16 @@ async function editedCheckpoint() {
   } finally { await transport.close(); await store.close(); await fixture.dispose(); }
 }
 
-async function delayedToolSettlement() {
-  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'late-tool-settlement' });
+async function expiredFinalDeathPublication() {
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'late-final-death' });
   let reopened: StateStore | undefined, sample: FileHandle | undefined, root: FileHandle | undefined, file: FileHandle | undefined;
   let reopeningFailed = false;
   let operationFailure: { error: unknown } | undefined;
   let prototype: { writeFile: FileHandle['writeFile'] } | undefined, originalWrite: FileHandle['writeFile'] | undefined;
   let death: { ref: string; value: ProcessContainmentDeathEvidenceV1 } | undefined;
   let held: { cut: Awaited<ReturnType<typeof checkpointBytes>>; settlement: BudgetSettlementV1; elapsedMs: number } | undefined;
-  let delays = 0;
+  let delays = 0, settlementWrites = 0;
+  const finalObservationTimes: string[] = [];
   try {
     sample = await open(path.join(fixture.workspace, 'a'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }; originalWrite = prototype.writeFile;
@@ -236,8 +237,8 @@ async function delayedToolSettlement() {
     const originalHost = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
     const startingChildren = directChildren();
     const execution = await fixture.store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
-    // Keep the real write and all native producers. The only injected fault is
-    // slow publication after the exact completed tool settlement was timestamped.
+    // Keep the real native producers and every actual CAS write. Only the
+    // final small death publications are delayed; the prepared graph is stable.
     prototype.writeFile = (async function(this: FileHandle, ...args: unknown[]) {
       await Reflect.apply(writeFile, this, args);
       if (!Buffer.isBuffer(args[0])) return;
@@ -245,15 +246,28 @@ async function delayedToolSettlement() {
       if (text.includes('"kind":"containment_all_descendants_dead"')) {
         const value = JSON.parse(text) as ProcessContainmentDeathEvidenceV1;
         if (value.kind === 'containment_all_descendants_dead' && value.owner.kind === 'worker_activation' && value.owner.runId === fixture.runId) {
-          assert.equal(death, undefined, 'exact productive worker retirement is published once');
-          death = { ref: canonicalSha256(value), value };
+          if (!death) { death = { ref: canonicalSha256(value), value }; return; }
+          assert.ok(held, 'final death follows the one prepared tool settlement');
+          assert.equal(value.containmentRef, death.value.containmentRef);
+          assert.ok(value.observedAt > (finalObservationTimes.at(-1) ?? death.value.observedAt));
+          assert.ok(Date.now() - Date.parse(value.observedAt) <= 5_000, 'each final death is genuinely fresh before the real delayed write');
+          finalObservationTimes.push(value.observedAt); delays++;
+          assert.ok(delays <= 3, 'the authority-only retry bound cannot reset or rebuild the prepared completion');
+          const started = performance.now();
+          await delay(6_000);
+          while (performance.now() < started + 6_000) await delay(Math.ceil(started + 6_000 - performance.now()));
+          const elapsedMs = performance.now() - started;
+          assert.ok(elapsedMs >= 6_000);
+          assert.ok(Date.now() - Date.parse(value.observedAt) > 5_000);
+          held.elapsedMs += elapsedMs;
+          return;
         }
       }
       if (!text.includes('"format":"cliq-budget-settlement-v1"')) return;
       const settlement = JSON.parse(text) as BudgetSettlementV1;
       if (settlement.runId !== fixture.runId) return;
-      delays++;
-      assert.equal(delays, 1, 'the fixture has one actual tool settlement, never a delayed retry');
+      settlementWrites++;
+      assert.equal(settlementWrites, 1, 'the fixture has one actual tool settlement, never a rebuilt retry');
       const cut = await checkpointBytes(fixture.store, fixture.runId);
       const claims = cut.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed');
       assert.equal(claims.length, 1);
@@ -283,15 +297,9 @@ async function delayedToolSettlement() {
       assert.ok(actualFile.isFile()); assert.equal(actualFile.size, Buffer.byteLength('after\n'));
       assert.deepEqual(await witnessBytes(file, actualFile.size), Buffer.from('after\n'), 'the real edit already happened before slow publication');
       assert.deepEqual(cut.bytes, fixture.original);
-      const started = performance.now();
-      await delay(6_000);
-      while (performance.now() < started + 6_000) await delay(Math.ceil(started + 6_000 - performance.now()));
-      const elapsedMs = performance.now() - started;
-      assert.ok(elapsedMs >= 6_000, 'qualification uses actual elapsed time, not a mocked clock');
-      assert.ok(Date.now() - Date.parse(death.value.observedAt) > 5_000, 'declared retirement time is expired at the actual transaction');
-      held = { cut, settlement, elapsedMs };
+      held = { cut, settlement, elapsedMs: 0 };
     }) as FileHandle['writeFile'];
-    await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.closure.run.revision })), error => {
+    await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.closure.run.revision }), 40_000), error => {
       const pending: unknown[] = [error], seen = new Set<Error>();
       while (pending.length) {
         const next = pending.pop();
@@ -304,7 +312,7 @@ async function delayedToolSettlement() {
       return false;
     });
     prototype.writeFile = originalWrite;
-    assert.equal(delays, 1); assert.ok(held); assert.ok(death); assert.ok(file);
+    assert.equal(delays, 3); assert.equal(settlementWrites, 1); assert.ok(held); assert.ok(death); assert.ok(file);
     const failed = await checkpointBytes(fixture.store, fixture.runId), cut = held.cut.closure;
     assert.equal(failed.closure.run.status, 'waiting'); assert.equal(failed.closure.run.waitingReason, 'reconciliation');
     assert.equal(failed.closure.run.activeWorkerLaunchId, undefined); assert.equal(failed.closure.run.cancelRequested, false);
@@ -355,10 +363,11 @@ async function delayedToolSettlement() {
     assert.deepEqual(await reopened.readRecoveryClosure(fixture.runId), failed.closure,
       'public reopen acquires the released OS owner lock and preserves the conservative unresolved attempt');
     await reopened.close(); reopened = undefined;
-    console.log(JSON.stringify({ scenario: 'actual-expired-tool-retirement-at-settlement-commit', runId: fixture.runId,
+    console.log(JSON.stringify({ scenario: 'actual-expired-final-death-publication', runId: fixture.runId,
       settledAt: held.settlement.settledAt, deathObservedAt: death.value.observedAt, publicationDelayMs: held.elapsedMs,
+      finalObservationTimes, authorityAttempts: delays, preparedSettlements: settlementWrites,
       permanentToolClaims: 1, actualPrivateEditObserved: true, completedToolEntries: 0, remainingBudgetReservation: 1,
-      note: 'actual six-second FileHandle publication delay; fail-closed commit and joined cleanup, not slow-I/O completion or native timestamp refresh' }));
+      note: 'three actual six-second final-evidence publications exhaust the authority-only bound; no effect or immutable graph replay; joined cleanup' }));
   } catch (error) { operationFailure = { error }; throw error; }
   finally {
     if (prototype && originalWrite) prototype.writeFile = originalWrite;
@@ -2504,7 +2513,7 @@ for (const [scenario, run] of [
   ['supervisor-crash-witness-replaced-inode', () => supervisorCrashPreactivation('ready_before_identity', 'replaced_inode')],
   ['controller-loss-retirement-failure', () => retirementFailureKeepsOwner('controller_loss')],
   ['edit-ready-checkpoint', editedCheckpoint],
-  ['expired-tool-retirement-at-settlement-commit', delayedToolSettlement],
+  ['expired-final-death-publication', expiredFinalDeathPublication],
   ['slow-tool-seal-reobserves-paused-controller', slowToolSealReobservesPausedController],
   ['parent-loss-before-release', parentLossBeforeRelease],
   ['no-open-invocation-recovery', () => noOpenInvocationRecovery()],

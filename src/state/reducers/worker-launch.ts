@@ -30,7 +30,7 @@ import {
 } from '../repositories/workspace-generations.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
-import { readWorkerCheckpointProof } from '../tool-checkpoint.js';
+import { readWorkerCheckpointProof, prepareWorkerRetirement, type NativeWorkerRetirement } from '../tool-checkpoint.js';
 
 const ACTIVATION_DEADLINE_MS = 120_000;
 const MAX_LEASE_EXTENSION_MS = 60_000;
@@ -557,7 +557,8 @@ export async function sealWorkerGeneration(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
-  input: SealWorkerGenerationInput
+  input: SealWorkerGenerationInput,
+  reobserve?: NativeWorkerRetirement
 ): Promise<{ run: Run; checkpoint: Checkpoint; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 }> {
   input = immutableSnapshot(input);
   const initialLaunch = readRequiredWorkerLaunch(driver, input.launchId);
@@ -594,7 +595,6 @@ export async function sealWorkerGeneration(
       'cliq-process-containment-death-evidence-v1'
     )
   ]);
-  checkpointMetadata.push(...proof?.metadata ?? []);
   if (
     snapshot.evidenceDigest !== input.snapshotEvidenceDigest ||
     snapshot.purpose !== 'sealed_to_checkpoint' ||
@@ -606,6 +606,10 @@ export async function sealWorkerGeneration(
     snapshot.privateGitStateRef !== workspaceState.privateGitStateRef
   ) throw new KernelStorageError('ARTIFACT_MISMATCH', 'sealed snapshot does not match the new Checkpoint');
 
+  const retirement = proof && prepareWorkerRetirement(artifacts, proof, input.retirementEvidenceRef, reobserve);
+  await retirement?.refresh();
+  checkpointMetadata.push(...(retirement?.metadata ?? []));
+
   let result!: { run: Run; checkpoint: Checkpoint; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 };
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
@@ -615,8 +619,8 @@ export async function sealWorkerGeneration(
     if (fenceOutcome !== 'healthy') return;
     const currentLaunch = readRequiredWorkerLaunch(connection, input.launchId);
     const run = readRun(connection, currentLaunch.runId);
-    if (proof && (proof.snapshot.observedAt > now || parseCanonicalTime(now) - parseCanonicalTime(proof.deathObservedAt) > 5_000 ||
-        canonicalSha256(currentLaunch) !== canonicalSha256(initialLaunch) || canonicalSha256(run) !== canonicalSha256(initialRun) ||
+    retirement?.assertFresh(now);
+    if (proof && (canonicalSha256(currentLaunch) !== canonicalSha256(initialLaunch) || canonicalSha256(run) !== canonicalSha256(initialRun) ||
         canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, initialLaunch.workspaceGenerationRef)) !== canonicalSha256(initialGeneration))) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale or its exact cut changed');
     }
@@ -707,7 +711,7 @@ export async function sealWorkerGeneration(
       phase: 'retired',
       generationWriteState: 'sealed',
       retiredAt: now,
-      retirementEvidenceRef: input.retirementEvidenceRef
+      retirementEvidenceRef: retirement?.retirementEvidenceRef ?? input.retirementEvidenceRef
     };
     updateWorkspaceGeneration(connection, currentGeneration, generation);
     updateWorkerLaunch(connection, currentLaunch, launch);

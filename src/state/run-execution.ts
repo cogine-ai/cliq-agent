@@ -151,9 +151,17 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   const runId = input.runId;
   const installation = bootstrap?.execution && immutableSnapshot(bootstrap.execution);
   const launcher = await openLinuxWorkerLauncher(installation && bootstrap && { ...installation, runtimeAuthority: bootstrap });
+  let worker: LinuxBlockedWorker | undefined;
+  async function reobserveRetirement() {
+    if (closed || isClosing() || operationAbort?.signal.aborted || !worker) {
+      throw new KernelStorageError('LEASE_FENCED', 'native worker retirement scope is closing or unavailable');
+    }
+    assertActiveStateOwner(driver, owner);
+    return worker.stop();
+  }
   let agent: Awaited<ReturnType<typeof loadAgentRun>>;
   try {
-    agent = await loadAgentRun(driver, artifacts, owner, { runId, material: input.material, releaseKeys: bootstrap!.releaseKeys });
+    agent = await loadAgentRun(driver, artifacts, owner, { runId, material: input.material, releaseKeys: bootstrap!.releaseKeys }, reobserveRetirement);
     const run = readRun(driver, runId);
     if (run.parentRunId !== undefined) throw new KernelStorageError('INVALID_REQUEST', 'this installed execution recipe does not support child Runs');
     const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
@@ -173,7 +181,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let pending: Promise<Run> | undefined, closed = false, cleanupFailure: unknown;
   let operationAbort: AbortController | undefined, closing: Promise<void> | undefined;
   let probe: { run: Run; wait: WorkerDeathWait; task: WorkerRecoveryTask; closure?: Promise<Run> } | undefined;
-  let worker: LinuxBlockedWorker | undefined, generation: RunWorkspaceGeneration | undefined, controller: LinuxWorkerController | undefined;
+  let generation: RunWorkspaceGeneration | undefined, controller: LinuxWorkerController | undefined;
   let reservation: HeldWorkerReservation | undefined;
   let ownedLaunchId: string | undefined;
   async function retireResources() {
@@ -349,7 +357,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           const retirement = await artifacts.publishCanonical({ ...deathCore, evidenceDigest: canonicalSha256(deathCore) }, 'cliq-process-containment-death-evidence-v1');
           const state = await artifacts.readCanonical<import('../kernel/types.js').WorkspaceStateManifest>(observed.workspaceStateRef);
           const snapshot: WorkspaceGenerationSnapshotEvidenceV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-snapshot-evidence-v1',
-            purpose: 'sealed_to_checkpoint', runId, generationRef: authority.generationRef, generationIdentityDigest: authority.generationIdentityDigest,
+            purpose: 'sealed_to_checkpoint', quiescenceEvidenceRef: retirement.ref, runId,
+            generationRef: authority.generationRef, generationIdentityDigest: authority.generationIdentityDigest,
             checkpointId, workspaceStateRef: observed.workspaceStateRef, workspaceStateDigest: observed.workspaceStateDigest,
             entriesRef: observed.entriesRef, treeDigest: observed.treeDigest,
             ...(state.privateGitStateRef ? { privateGitStateRef: state.privateGitStateRef } : {}),
@@ -373,7 +382,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             await sealWorkerGeneration(driver, artifacts, owner, { launchId: activated.launch.launchId,
               expectedRunRevision: current.run.revision, expectedGenerationRowVersion: proof.checkpointing.generation.rowVersion,
               quiesceId: proof.quiesceId, checkpointId, contextManifestRef: current.latestCheckpoint.contextManifestRef,
-              ...proof.postEffect, snapshotEvidenceDigest: proof.snapshot.evidenceDigest, checkpointReason: 'auto' });
+              ...proof.postEffect, snapshotEvidenceDigest: proof.snapshot.evidenceDigest, checkpointReason: 'auto' }, reobserveRetirement);
           }
           return readRun(driver, runId);
         }

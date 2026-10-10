@@ -90,6 +90,11 @@ Session SQL projection use C. Public recovery validates both death observations
 for every typed sealed/retired activated worker, not only terminal stops, while
 preserving the separate no-spawn and quarantined recovery contracts.
 
+Generation retirement itself is not yet produced. Its future implementation
+must retain and validate the original sealed-worker closure through exact
+canonical generation-retirement evidence before retired generations become
+recoverable; this work does not silently skip that unsupported history.
+
 ## Required evidence
 
 - Public StateStore regressions prove the D0/S/D1/C ordering, exact five-second

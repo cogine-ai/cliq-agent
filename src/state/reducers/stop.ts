@@ -25,7 +25,7 @@ import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.j
 import { readCancelResponse, readAgentStop, type CancelResponse } from '../stop-recovery.js';
 import { readResourceStopCause } from '../resource-stop.js';
 import { prepareModelFailureStop } from '../model-failure.js';
-import { prepareToolCheckpoint, validateRetainedWorkerSeal } from '../tool-checkpoint.js';
+import { prepareToolCheckpoint, validateRetainedWorkerSeal, type NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { readToolCut } from '../tool-cut.js';
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
 
@@ -33,7 +33,7 @@ import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
 export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, authority: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; principalId: string; resolveToolInput: ResolveToolInput;
   assertAuthority: () => Promise<void>;
-}) {
+}, reobserve?: NativeWorkerRetirement) {
   const { run: admitted, spec, assembly, principalId } = authority;
   const runId = admitted.id;
   const result = (run: Run) => ({ run, checkpointId: stopCheckpointId(runId, run.stopIntentRef!) });
@@ -232,7 +232,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         if (!input.checkpoint || !exactKeys(input.checkpoint, ['workspaceStateRef', 'snapshotEvidenceRef', 'retirementEvidenceRef']) ||
             input.checkpoint.workspaceStateRef !== checkpoint.workspaceStateRef) throw new TypeError('stop requires positive retirement over the current accounted workspace');
         seal = await prepareToolCheckpoint(driver, artifacts, owner, { run, spec, assembly, checkpointId,
-          observedAt: intent.createdAt, postEffect: input.checkpoint });
+          observedAt: intent.createdAt, postEffect: input.checkpoint }, reobserve);
       } else if (input.checkpoint !== undefined) throw new TypeError('worker-free stop cannot substitute a workspace proof');
       for (let retry = 0; retry < 8; retry++) {
         const now = sampleCanonicalNow();
@@ -272,32 +272,39 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           items: [{ sourceSessionId: session.id, itemSeq: seq, itemId, kind: 'run_terminal', payloadRef: terminalArtifact.ref }] });
         projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
         const projectionArtifact = await artifacts.publishCanonical(projection, projection.format);
+        await seal?.refresh();
         let time: ReturnType<typeof acceptTime> | undefined, updated: Run | undefined;
         driver.transaction((connection) => {
           assertActiveStateOwner(connection, owner);
-          if (canonicalSha256(readSession(connection, session.id)) !== canonicalSha256(session)) return;
-          time = acceptTime(connection, now);
+          if (canonicalSha256(readSession(connection, session.id)) !== canonicalSha256(session)) {
+            if (seal) throw new KernelStorageError('REVISION_CONFLICT', 'terminal Session changed after sealed completion preparation');
+            return;
+          }
+          const committedAt = sampleCanonicalNow();
+          time = acceptTime(connection, committedAt);
           if (!time.accepted) return;
+          if (committedAt < now) throw new KernelStorageError('RECOVERY_REQUIRED', 'terminal transaction precedes its prepared artifacts');
           assertCut(connection, selected);
           if (connection.prepare("SELECT 1 FROM worker_launches WHERE run_id = ? AND phase != 'retired' AND launch_id != ? LIMIT 1")
             .get(runId, run.activeWorkerLaunchId ?? '')) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop cannot retain a pending worker launch');
-          for (const artifact of [...continuation.metadata, ...(seal?.metadata ?? []), terminalArtifact, projectionArtifact]) insertArtifactMetadata(connection, artifact, now);
-          seal?.commit(connection, run, now);
+          for (const artifact of [...continuation.metadata, ...(seal?.metadata ?? []), terminalArtifact, projectionArtifact]) insertArtifactMetadata(connection, artifact, committedAt);
+          seal?.commit(connection, run, committedAt);
           if (connection.prepare("SELECT 1 FROM workspace_generations WHERE run_id = ? AND phase != 'sealed' LIMIT 1").get(runId)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop requires every workspace generation sealed');
           for (const refund of refunds) appendInvocationJournalEntry(connection, refund.entry);
-          continuation.commit(connection, run, selected.journal.length + refunds.length, now);
+          continuation.commit(connection, run, selected.journal.length + refunds.length, committedAt);
           connection.prepare(`UPDATE runs SET status = ?, next_step = NULL, frontier_ref = NULL, waiting_reason = NULL, waiting_on_ref = NULL,
             active_worker_launch_id = NULL, budget_reserved_json = ?, terminal_reason = ?, terminal_detail_ref = ?, revision = revision + 1, updated_at = ? WHERE id = ?`)
-            .run(intent.targetStatus, JSON.stringify(ZERO_BUDGET), intent.reason, detail.ref, now, runId);
+            .run(intent.targetStatus, JSON.stringify(ZERO_BUDGET), intent.reason, detail.ref, committedAt, runId);
           connection.prepare("INSERT INTO items (item_id, session_id, run_id, item_seq, kind, payload_ref, created_at) VALUES (?, ?, NULL, ?, 'run_terminal', ?, ?)")
-            .run(itemId, session.id, BigInt(seq), terminalArtifact.ref, now);
+            .run(itemId, session.id, BigInt(seq), terminalArtifact.ref, committedAt);
           connection.prepare('UPDATE sessions SET latest_item_seq = ?, context_revision = context_revision + 1, context_projection_ref = ?, updated_at = ? WHERE id = ?')
-            .run(BigInt(seq), projectionArtifact.ref, now, session.id);
+            .run(BigInt(seq), projectionArtifact.ref, committedAt, session.id);
           updated = readRun(connection, runId);
-          appendRunStateEvent(connection, updated, now);
+          appendRunStateEvent(connection, updated, committedAt);
         });
         requireHealthyFence(time?.outcome);
         if (updated) return immutableSnapshot({ run: updated });
+        if (seal) throw new KernelStorageError('RECOVERY_REQUIRED', 'terminal time cut changed after sealed completion preparation');
       }
       throw new KernelStorageError('REVISION_CONFLICT', 'terminal Session/time cut kept changing');
     })

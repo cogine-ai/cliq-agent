@@ -20,7 +20,7 @@ import { nextJournalSequence } from '../repositories/journal.js';
 import { insertControlRequest, readCheckpoint, readControlRequest, readRun } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
-import { prepareToolCheckpoint } from '../tool-checkpoint.js';
+import { prepareToolCheckpoint, type NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { readToolCut, type ToolCut } from '../tool-cut.js';
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
 
@@ -31,7 +31,7 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; principalId: string; resolveToolInput: ResolveToolInput;
   contracts: readonly ToolInputAuthority[];
   assertAuthority: () => Promise<void>;
-}) {
+}, reobserve?: NativeWorkerRetirement) {
   const { run: admitted, spec, assembly, principalId, resolveToolInput } = authority;
   const runId = admitted.id;
   const contract = authority.contracts.find((entry) => entry.name === 'request_input' && entry.access === 'control' && entry.execution.kind === 'builtin');
@@ -124,10 +124,11 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
         if (!input.checkpoint || !exactKeys(input.checkpoint, ['workspaceStateRef', 'snapshotEvidenceRef', 'retirementEvidenceRef']) ||
             input.checkpoint.workspaceStateRef !== selected.checkpoint.workspaceStateRef) throw new TypeError('input wait requires retirement proof over the unchanged workspace');
         seal = await prepareToolCheckpoint(driver, artifacts, owner, { run: selected.run, spec, assembly, checkpointId: proof.checkpointId,
-          observedAt: wait.createdAt, postEffect: input.checkpoint });
+          observedAt: wait.createdAt, postEffect: input.checkpoint }, reobserve);
       } else if (selected.run.status !== 'queued' || input.checkpoint !== undefined) throw new TypeError('only a worker-free queued Run can wait without a seal');
       const plan = await prepareContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items, items: [proof.item],
         frontier: selected.frontier, checkpointId: proof.checkpointId, workspaceStateRef: selected.checkpoint.workspaceStateRef, artifacts: proof.artifacts });
+      await seal?.refresh();
       let outcome: TimeFenceAdvance | undefined, updated!: Run;
       driver.transaction((connection) => {
         const now = sampleCanonicalNow();

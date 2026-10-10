@@ -27,6 +27,7 @@ import { prepareValidatedInvocation, readModelRetryHistory, settleValidatedInvoc
 import { loadToolContinuation } from './tool.js';
 import { readToolCut } from '../tool-cut.js';
 import type { ReleaseTrustKey } from '../../policy/runtime-authority.js';
+import type { NativeWorkerRetirement } from '../tool-checkpoint.js';
 
 export type LoadAgentRunInput = {
   runId: string;
@@ -113,7 +114,8 @@ function appendItems(connection: SqliteConnection, run: Run, items: Continuation
 
 /** A loaded authority handle only: every mutable Run/frontier/Journal value is read from SQLite on each operation. */
 export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function loadAgentRun(
-  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: LoadAgentRunInput
+  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: LoadAgentRunInput,
+  reobserve?: NativeWorkerRetirement
 ) {
   const runId = input.runId;
   const releaseKeys = input.releaseKeys === undefined ? undefined : immutableSnapshot(input.releaseKeys);
@@ -235,7 +237,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
 
   const toolContinuation = await loadToolContinuation(driver, artifacts, owner, {
     run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys
-  });
+  }, reobserve);
   return Object.freeze({
     ...toolContinuation,
     model,

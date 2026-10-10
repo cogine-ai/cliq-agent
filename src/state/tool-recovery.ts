@@ -1,6 +1,6 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
-import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, RunFrontier, RunSpec, ToolContractManifestV1, ToolResultPayloadV1, ToolResultModelContentV1 } from '../kernel/types.js';
+import type { Checkpoint, ContinuationItem, InvocationJournalEntry, Run, RunFrontier, RunSpec, TerminalDetail, ToolContractManifestV1, ToolResultPayloadV1, ToolResultModelContentV1 } from '../kernel/types.js';
 import type { RunPolicySnapshotV1, ToolObservationV1, ToolOperationGrantV1, ToolPolicyChannelEvidenceV1, ToolPolicyDecisionItem,
   ToolRequestV1, ToolTargetV1, ToolApprovalWait, ToolApprovalDecisionV1, ToolGrantExpiryV1 } from '../kernel/tool-authorization.js';
 import { toolOperationId } from '../policy/tool-policy.js';
@@ -163,7 +163,8 @@ export async function validateToolRecovery(input: {
     if (prepared.timestamp < grant.issuedAt || prepared.timestamp >= grant.expiresAt) throw new TypeError('tool preparation uses an expired grant');
     const failed = attempts.find((entry) => entry.attempt === prepared.attempt && entry.phase === 'failed');
     if (failed && run.stopIntentRef && failed.errorRef === run.stopIntentRef) {
-      if (!['failed', 'cancelled'].includes(run.status) || failed.timestamp !== run.updatedAt ||
+      const detail = await readCanonicalArtifact<TerminalDetail>(artifacts, run.terminalDetailRef!);
+      if (!['failed', 'cancelled'].includes(run.status) || failed.timestamp !== detail.createdAt || detail.createdAt > run.updatedAt ||
           claims.some((claim) => claim.attempt === prepared.attempt)) throw new TypeError('stop refund is not an atomic undispatched terminal closure');
       requireEqual(failed.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, 'stop no-dispatch refund');
     } else if (failed) {
@@ -175,7 +176,7 @@ export async function validateToolRecovery(input: {
         grantRef: prepared.grantRef, waitingSubjectRef: expiry.waitingSubjectRef, observedAt: proof.wait.createdAt }, 'no-dispatch expiry');
       if (grant.provenance.kind !== 'user_approval' || claims.some((claim) => claim.attempt === prepared.attempt) ||
           expiry.observedAt < grant.expiresAt || failed.timestamp < expiry.observedAt || proof.checkpoint.journalSeq !== failed.seq ||
-          proof.checkpoint.createdAt !== failed.timestamp) throw new TypeError('expired tool grant has no atomic positive no-dispatch closure');
+          proof.checkpoint.createdAt < failed.timestamp) throw new TypeError('expired tool grant has no atomic positive no-dispatch closure');
       requireEqual(failed.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, 'no-dispatch refund');
     }
     const completion = attempts.find((entry) => entry.attempt === prepared.attempt && entry.phase === 'completed');
@@ -223,7 +224,7 @@ export async function validateToolRecovery(input: {
     const checkpoint = input.checkpoints.find((checkpoint) => checkpoint.id === toolCheckpointId(run.id, prepared.opId, prepared.attempt));
     const itemSeq = [...items.keys()].indexOf(item.itemId) + 1;
     if (!checkpoint || checkpoint.runId !== run.id || checkpoint.journalSeq !== completion.seq || checkpoint.runItemSeq !== itemSeq ||
-        checkpoint.createdAt !== completion.timestamp) throw new TypeError('tool result has no atomically matching ready Checkpoint');
+        checkpoint.createdAt < completion.timestamp) throw new TypeError('tool result has no atomically matching ready Checkpoint');
     if ((contract.access !== 'read') !== (result.postEffect !== undefined)) throw new TypeError('tool result post-effect proof does not match its access class');
     if (result.postEffect) {
       if (!exactKeys(result.postEffect, ['workspaceStateRef', 'snapshotEvidenceRef', 'retirementEvidenceRef'])) throw new TypeError('unknown post-effect proof field');

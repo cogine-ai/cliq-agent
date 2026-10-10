@@ -1,6 +1,6 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { identityHash } from '../kernel/identity.js';
-import type { ControlApplicationResponseV1, ControlResultV1, ContinuationItem, RecoveryClosureV1, Run, RunAssemblyV1, SessionRunTerminalItem } from '../kernel/types.js';
+import { identityHash, parseCanonicalTime } from '../kernel/identity.js';
+import type { ControlApplicationResponseV1, ControlResultV1, ContinuationItem, RecoveryClosureV1, Run, RunAssemblyV1, SessionRunTerminalItem, TerminalDetail } from '../kernel/types.js';
 import { cancelledCall, agentStopDetail, decodeAgentStop, openStopBatch, stopCheckpointId, stopInvocationHistory } from '../runtime/stop.js';
 import { toolOperationId } from '../policy/tool-policy.js';
 import { requireEqual } from '../policy/runtime-authority.js';
@@ -80,7 +80,11 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
       closure.workspaceGenerations.some((generation) => generation.phase !== 'sealed') ||
       checkpoint.id !== stopCheckpointId(run.id, run.stopIntentRef) || checkpoint.createdAt !== run.updatedAt ||
       checkpoint.journalSeq !== journal.length || checkpoint.runItemSeq !== closure.items.length) throw new TypeError('terminal stop has an open Run/worker/budget cut');
-  requireEqual(await readCanonicalArtifact(artifacts, run.terminalDetailRef), agentStopDetail(intent, run.stopIntentRef, run.updatedAt), 'terminal reason closure');
+  const detail = await readCanonicalArtifact<TerminalDetail>(artifacts, run.terminalDetailRef);
+  const preparedAt = detail.createdAt;
+  parseCanonicalTime(preparedAt);
+  if (preparedAt < intent.createdAt || preparedAt > run.updatedAt) throw new TypeError('terminal preparation time is outside its intent and committed Checkpoint');
+  requireEqual(detail, agentStopDetail(intent, run.stopIntentRef, preparedAt), 'terminal reason closure');
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
   if (assembly.mcpServers.length) throw new TypeError('terminal stop lacks MCP server containment closure');
   for (const launch of readWorkerLaunchesForRun(driver, run.id)) {
@@ -91,15 +95,15 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
     if (!['model', 'tool'].includes(entry.opKind) || (entry.phase !== 'completed' &&
         (entry.phase !== 'failed' || hasClaim))) throw new TypeError('terminal stop retains unresolved dispatch evidence');
-    if (entry.phase === 'failed' && entry.errorRef === run.stopIntentRef && entry.timestamp !== run.updatedAt) throw new TypeError('stop refund has no atomic terminal owner');
+    if (entry.phase === 'failed' && entry.errorRef === run.stopIntentRef && entry.timestamp !== preparedAt) throw new TypeError('stop refund has no atomic terminal owner');
   }
   const items = await joinResourceOperations(closure.items.map((row) => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)));
   if (openStopBatch(items)) throw new TypeError('terminal stop retains an unclosed tool batch');
   for (const item of items) if (item.kind === 'tool_result' && item.outcome === 'cancelled') {
     const batch = items.find((candidate) => candidate.kind === 'assistant_tool_batch' && candidate.itemId === item.batchItemId);
-    if (batch?.kind !== 'assistant_tool_batch' || item.createdAt !== run.updatedAt || journal.some((row) =>
+    if (batch?.kind !== 'assistant_tool_batch' || item.createdAt !== preparedAt || journal.some((row) =>
         row.opId === toolOperationId(run.id, item.batchItemId, item.callId) && row.phase === 'dispatch_claimed')) throw new TypeError('cancelled result does not prove an undispatched call');
-    const plan = cancelledCall(batch, item.index, run.stopIntentRef, run.updatedAt);
+    const plan = cancelledCall(batch, item.index, run.stopIntentRef, preparedAt);
     requireEqual(item, plan.item, 'ordered stop result');
     for (const artifact of plan.artifacts) if (!(await artifacts.readBytes(artifact.ref)).equals(Buffer.from(artifact.bytes))) throw new TypeError('stop result artifact substitution');
   }
