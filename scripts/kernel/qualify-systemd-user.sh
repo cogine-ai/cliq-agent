@@ -48,6 +48,7 @@ readonly probe_fixture_identity=$(stat -c '%d:%i:%u' "$probe_fixture")
 readonly probe_suffix=${probe_fixture##*.}
 readonly probe_username="cliq-probe-${probe_suffix,,}"
 readonly probe_home="$probe_fixture/home"
+readonly probe_skel="$probe_fixture/empty-skel"
 readonly probe_script="$probe_fixture/systemd-user-probe.mjs"
 readonly probe_ledger="$probe_fixture/ownership-ledger.json"
 readonly probe_before="$probe_output/runner-baseline-before.json"
@@ -292,8 +293,9 @@ probe_ledger_digest=$(sha256sum "$probe_ledger" | cut -d' ' -f1)
 readonly probe_ledger_digest
 groupadd --gid "$probe_gid" "$probe_username"
 probe_group_created=1
-useradd --create-home --no-user-group --uid "$probe_uid" --gid "$probe_gid" \
-  --home-dir "$probe_home" --shell /usr/sbin/nologin "$probe_username"
+mkdir -m 0755 -- "$probe_skel"
+useradd --create-home --no-user-group --no-log-init -K CREATE_MAIL_SPOOL=no --uid "$probe_uid" --gid "$probe_gid" \
+  --skel "$probe_skel" --home-dir "$probe_home" --shell /usr/sbin/nologin "$probe_username"
 probe_created=1
 [[ $(id -u "$probe_username") = "$probe_uid" && $(id -g "$probe_username") = "$probe_gid" ]] || exit 1
 install -o root -g root -m 0444 -- "$probe_source" "$probe_script"

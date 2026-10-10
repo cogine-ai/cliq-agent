@@ -36,8 +36,9 @@ const report: { diagnosticOnly: true; scope: string; nodeVersion: string; carrie
   scope: 'complete Supervisor application image binding only; not installation/control/admission/execution/restart',
   nodeVersion: version, carrierArchiveDigest: checksums[platform]!, cases: [],
 };
-function run(executable: string, args: string[]) {
-  const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 2 * 1024 * 1024 });
+function run(executable: string, args: string[], env?: NodeJS.ProcessEnv) {
+  const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 60_000, cwd: fixture,
+    maxBuffer: 2 * 1024 * 1024, env });
   assert.equal(result.error, undefined, `${executable}: ${result.error}`);
   assert.equal(result.status, 0, `${executable}: ${result.stderr}`);
   return result;
@@ -164,7 +165,7 @@ try {
   const preload = path.join(fixture, 'preload.cjs');
   await writeFile(preload, `require('node:fs').writeFileSync(${JSON.stringify(preloadMarker)}, 'unsafe preload executed');\n`,
     { flag: 'wx', mode: 0o400 });
-  run(carrier, ['--require', preload, '-e', '']);
+  run(carrier, ['-e', ''], { PATH: process.env.PATH, NODE_OPTIONS: `--require=${preload}` });
   assert.equal(await readFile(preloadMarker, 'utf8'), 'unsafe preload executed', 'preload control must actually run');
   await unlink(preloadMarker);
   await exercise('closed-node-options', supervisor, true, { NODE_OPTIONS: `--require=${preload}` });

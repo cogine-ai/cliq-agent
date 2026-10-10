@@ -105,10 +105,24 @@ function sameDirectory(current, original) {
 
 function baseline(uid) {
   const unit = properties(command('/usr/bin/systemctl', ['show', `user@${uid}.service`,
-    '--property=LoadState,ActiveState,SubState,MainPID,ControlGroup,InvocationID', '--no-pager'], true).stdout);
-  const userResult = command('/usr/bin/loginctl', ['show-user', String(uid),
-    '--property=Linger,State,RuntimePath'], true);
-  const user = userResult.status === 0 ? properties(userResult.stdout) : { unavailable: true };
+    '--property=LoadState,ActiveState,SubState,MainPID,ControlGroup,InvocationID', '--no-pager']).stdout);
+  for (const name of ['LoadState', 'ActiveState', 'SubState', 'MainPID', 'ControlGroup', 'InvocationID']) {
+    assert(Object.hasOwn(unit, name), `runner unit baseline lacks ${name}`);
+  }
+  assert(/^\d+$/.test(unit.MainPID), 'runner manager PID is not a confirmed integer');
+  // A successful enumeration can confirm no registered user. A failed lookup
+  // or unavailable bus cannot be relabeled as the same "unknown" twice.
+  const users = command('/usr/bin/loginctl', ['list-users', '--no-legend', '--no-pager']).stdout;
+  const registered = users.trim().split('\n').filter(Boolean).some((line) => {
+    const match = line.match(/^\s*(\d+)\s+\S/);
+    assert(match, 'invalid loginctl user enumeration');
+    return Number(match[1]) === uid;
+  });
+  const user = registered ? { registered: true, ...properties(command('/usr/bin/loginctl', ['show-user', String(uid),
+    '--property=Linger', '--property=State', '--property=RuntimePath']).stdout) } : { registered: false };
+  if (registered) for (const name of ['Linger', 'State', 'RuntimePath']) {
+    assert(Object.hasOwn(user, name), `runner user baseline lacks ${name}`);
+  }
   const pid = Number(unit.MainPID ?? 0);
   return { uid, unit, user, manager: processFact(pid),
     cgroup: unit.ControlGroup ? directoryFact(cgroupPath(unit.ControlGroup)) : { present: false } };
@@ -249,14 +263,15 @@ async function campaign(config) {
     }
     return data;
   };
-  const waitReady = async (scenario, initial) => {
+  const waitReady = async (scenario, initial, precedingInvocationId) => {
     const deadline = Date.now() + 15_000;
     let last;
     do {
       last = show(scenario.unit);
-      const data = ready(scenario, last);
+      const data = Number(last.MainPID) > 0 && last.InvocationID !== precedingInvocationId ? ready(scenario, last) : undefined;
       if (data) return { outcome: 'started', unit: last, data };
-      if (last.ActiveState === 'failed' && Number(last.MainPID) === 0) {
+      if (last.ActiveState === 'failed' && Number(last.MainPID) === 0 &&
+        (!precedingInvocationId || last.InvocationID !== precedingInvocationId || last.Result === 'start-limit-hit')) {
         if (initial) throw new Error(`initial dummy start failed: ${JSON.stringify(last)}`);
         return { outcome: 'failed', unit: last };
       }
@@ -324,8 +339,9 @@ async function campaign(config) {
             // No old directory is recreated by the orchestrator or dummy.
             const result = userCommand(['start', scenario.unit], true);
             item.startCommand = result;
-            replacement = result.status === 0 ? await waitReady(scenario, false)
-              : { outcome: 'failed', unit: show(scenario.unit) };
+            // A failed CLI call is not evidence of a service failure, and the
+            // killed predecessor's failed state is not a new restart outcome.
+            replacement = await waitReady(scenario, false, first.unit.InvocationID);
           }
         }
         item.restartResult = replacement ?? { outcome: 'timeout', unit: show(scenario.unit) };
@@ -338,6 +354,15 @@ async function campaign(config) {
           assert(replacement.data.main.startTimeTicks !== first.data.main.startTimeTicks ||
             replacement.data.main.pid !== first.data.main.pid, 'restart reused MainPID lifetime');
         }
+      } catch (error) {
+        item.error = errorText(error);
+        try {
+          // Diagnostics for this exact disposable UID/unit only. Journal
+          // text never participates in readiness or containment authority.
+          item.journal = command('/usr/bin/journalctl', ['--no-pager', '--output=short-monotonic', '--lines=40',
+            `_UID=${config.uid}`, `_SYSTEMD_USER_UNIT=${scenario.unit}`], true);
+        } catch (journalError) { item.journalError = errorText(journalError); }
+        throw error;
       } finally {
         if (rootHeld) closeSync(rootHeld.fd);
         if (workerHeld) closeSync(workerHeld.fd);
