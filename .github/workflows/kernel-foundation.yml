@@ -38,6 +38,39 @@ jobs:
       - run: npm run build
       - run: npm test
 
+  linux-supervisor-preflight:
+    name: Linux Supervisor image and actual user-manager diagnostics
+    # Component/OS facts only, not an installed I1 qualification. Standard
+    # public-repository runner; never substitute a detached child manager.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - name: Qualify complete application image binding
+        run: node --import tsx scripts/kernel/qualify-supervisor-image.ts "$RUNNER_TEMP/cliq-supervisor-image"
+      - name: Observe real systemd-user delegation and restart identities
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh "$probe_node" "$RUNNER_TEMP/cliq-systemd-user"
+      - name: Retain bounded component and lifecycle reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supervisor-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cliq-supervisor-image/report.json
+            ${{ runner.temp }}/cliq-systemd-user/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-strong-probe:
     name: Linux namespace and cgroup qualification
     # Ubuntu 24.04's hosted image denies the network-namespace setup under

@@ -1,6 +1,8 @@
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { Module } from 'node:module';
+import path from 'node:path';
+import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import { setImmediate } from 'node:timers/promises';
 
@@ -10,10 +12,13 @@ import type { StateRootIdentityV1, WorkspaceGenerationIdentityV1 } from '../kern
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { hashHeldProcessImage } from './process-image.js';
 
 export const STATE_OWNER_NATIVE_ENTRY_ID = 'state_owner_native';
 export const STATE_OWNER_NATIVE_RELATIVE_PATH = `native/${process.platform}-${process.arch}/state-owner.node`;
-export const STATE_OWNER_NATIVE_PATH = fileURLToPath(new URL(`../../dist/${STATE_OWNER_NATIVE_RELATIVE_PATH}`, import.meta.url));
+export const STATE_OWNER_NATIVE_PATH = isSea()
+  ? path.join(path.dirname(process.execPath), STATE_OWNER_NATIVE_RELATIVE_PATH)
+  : fileURLToPath(new URL(`../../dist/${STATE_OWNER_NATIVE_RELATIVE_PATH}`, import.meta.url));
 
 type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
 /** Physical birth witness only. It grants neither activation nor death proof. */
@@ -308,6 +313,9 @@ export type HeldStateOwnerLock = Readonly<{
 export type NativeStateOwner = Readonly<{
   acquireLock(stateRoot: string, createLayout: boolean): HeldStateOwnerLock;
   processStartToken(): string;
+  observeCurrentProcess(): Promise<Readonly<{
+    pid: number; uid: number; processStartToken: string; executableImageDigest: string;
+  }>>;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
 }>;
 
@@ -373,7 +381,13 @@ type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'createGener
   createWorkerReservation(reservationId: string): NativeWorkerReservation;
   openWorkerReservation(reservationId: string, deviceId: string, fileId: string, ownerUid: number): NativeWorkerReservation;
 };
+type NativeCurrentProcess = Readonly<{
+  pid: number; uid: number; processStartToken: string;
+  imageFd: number; imageByteCount: number; imageIdentityKey: string;
+  assertHeld(): void; close(): void;
+}>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
+  captureCurrentProcess(): NativeCurrentProcess;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot };
 
 /** One canonical projection for bootstrap and native filesystem consumers.
@@ -513,6 +527,36 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
 }
 
 let loaded: { digest: string; implementation: NativeStateOwner } | undefined;
+// Cache bytes, never authority. Every use still captures and revalidates the
+// actual mapped image; the private key includes the complete native stat tuple.
+let currentImageHash: { key: string; digest: string } | undefined;
+
+async function observeCurrentProcess(binding: NativeBinding) {
+  let observation: NativeCurrentProcess | undefined;
+  let operationError: unknown;
+  try {
+    observation = binding.captureCurrentProcess();
+    observation.assertHeld();
+    const executableImageDigest = currentImageHash?.key === observation.imageIdentityKey
+      ? currentImageHash.digest
+      : await hashHeldProcessImage(observation.imageFd, observation.imageByteCount, () => observation!.assertHeld());
+    observation.assertHeld();
+    currentImageHash = { key: observation.imageIdentityKey, digest: executableImageDigest };
+    return Object.freeze({ pid: observation.pid, uid: observation.uid,
+      processStartToken: observation.processStartToken, executableImageDigest });
+  } catch (error) {
+    operationError = error;
+    if (error instanceof KernelStorageError || error instanceof ResourceRetirementError) throw error;
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+      throw new ResourceRetirementError('Supervisor process image descriptors did not retire', error);
+    }
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'actual Supervisor process image is unavailable or changed', { cause: error });
+  } finally {
+    try { observation?.close(); }
+    catch (error) { throw new ResourceRetirementError('Supervisor process image descriptor did not retire',
+      operationError === undefined ? error : new AggregateError([operationError, error])); }
+  }
+}
 
 /** Load only the fixed host helper, through its verified held descriptor.
  * Bundle signature verification belongs to the trusted StateStore bootstrap. */
@@ -550,7 +594,8 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
     const nativeModule = new Module(STATE_OWNER_NATIVE_PATH);
     process.dlopen(nativeModule, `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${file.fd}`);
     const binding: NativeBinding = nativeModule.exports;
-    if (typeof binding.acquireLock !== 'function' || typeof binding.processStartToken !== 'function' || typeof binding.openWorkspaceRoot !== 'function') {
+    if (typeof binding.acquireLock !== 'function' || typeof binding.processStartToken !== 'function' ||
+        typeof binding.captureCurrentProcess !== 'function' || typeof binding.openWorkspaceRoot !== 'function') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper has an unsupported interface');
     }
     const implementation: NativeStateOwner = {
@@ -560,6 +605,7 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
         try { return wrapLock(held, stateRoot); } catch (error) { held.close(); throw error; }
       },
       processStartToken: () => binding.processStartToken(),
+      observeCurrentProcess: () => observeCurrentProcess(binding),
       openWorkspaceRoot(workspacePath) {
         if (normalizeAbsolutePath(workspacePath) !== workspacePath) throw new TypeError('source workspace root must be canonical');
         const root = Object.freeze(binding.openWorkspaceRoot(workspacePath));
