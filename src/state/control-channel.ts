@@ -1,8 +1,7 @@
-import { createHash, randomBytes } from 'node:crypto';
-import { closeSync, fstatSync, readSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { closeSync } from 'node:fs';
 import { Socket } from 'node:net';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { setImmediate } from 'node:timers/promises';
 import type { LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, LocalSocketPeerObservationV1, PlatformProcessIdentityV1 } from '../kernel/types.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import {
@@ -20,6 +19,7 @@ import { readCanonicalArtifact } from './agent-context.js';
 import { digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import type { HeldControlListener, HeldControlPeer, NativePeerObservation } from './native-owner.js';
+import { hashHeldProcessImage } from './process-image.js';
 
 export type AuthenticatedControlIdentity = Readonly<{
   principalId: string;
@@ -42,30 +42,7 @@ type AuthenticatedFrame = { owner: StateOwnerContext; identity: AuthenticatedCon
 const authenticatedFrames = new AsyncLocalStorage<AuthenticatedFrame>();
 
 async function hashNativeImage(peer: HeldControlPeer, observation: NativePeerObservation): Promise<string> {
-  const before = fstatSync(observation.imageFd, { bigint: true });
-  if (!before.isFile() || before.size !== BigInt(observation.imageByteCount) ||
-      observation.imageByteCount <= 0 || observation.imageByteCount > 256 * 1024 * 1024) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control peer executable image is unavailable or unbounded');
-  }
-  const hash = createHash('sha256');
-  const buffer = Buffer.allocUnsafe(Math.min(observation.imageByteCount, 1024 * 1024));
-  for (let offset = 0; offset < observation.imageByteCount;) {
-    // Bound synchronous work per turn. Never queue an asynchronous read on a
-    // borrowed fd: native close may invalidate or reuse it while we yield.
-    await setImmediate();
-    peer.assertObservation(observation);
-    const count = readSync(observation.imageFd, buffer, 0, Math.min(buffer.length, observation.imageByteCount - offset), offset);
-    if (count === 0) throw new KernelStorageError('ARTIFACT_MISMATCH', 'control peer executable image ended early');
-    hash.update(buffer.subarray(0, count));
-    offset += count;
-  }
-  const after = fstatSync(observation.imageFd, { bigint: true });
-  if (before.dev !== after.dev || before.ino !== after.ino || before.mode !== after.mode ||
-      before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control peer executable image changed while hashing');
-  }
-  peer.assertObservation(observation);
-  return hash.digest('hex');
+  return hashHeldProcessImage(observation.imageFd, observation.imageByteCount, () => peer.assertObservation(observation));
 }
 
 /** Owner-bound native listener. Historical JSON never populates this registry. */

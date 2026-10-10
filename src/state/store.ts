@@ -1,5 +1,5 @@
 import type { Stats } from 'node:fs';
-import { lstat, mkdir, readFile, readdir } from 'node:fs/promises';
+import { lstat, mkdir, readdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
@@ -190,33 +190,15 @@ function requireEffectiveUid(): number {
   return process.geteuid();
 }
 
-let currentProcessBasePromise:
-  | Promise<{ processStartToken: string; executableImageDigest: string }>
-  | undefined;
-
-async function currentProcessBase(native: NativeStateOwner): Promise<{
-  processStartToken: string;
-  executableImageDigest: string;
-}> {
-  currentProcessBasePromise ??= (async () => {
-    const executableImageDigest = sha256Bytes(await readFile(process.execPath));
-    return {
-      processStartToken: native.processStartToken(),
-      executableImageDigest
-    };
-  })();
-  return currentProcessBasePromise;
-}
-
 async function currentProcessIdentity(native: NativeStateOwner, observedAt: string): Promise<PlatformProcessIdentityV1> {
-  const base = await currentProcessBase(native);
+  const base = await native.observeCurrentProcess();
   const identity: PlatformProcessIdentityV1 = {
     schemaVersion: 1,
     format: 'cliq-platform-process-identity-v1',
     platform: hostPlatform(),
-    pid: process.pid,
+    pid: base.pid,
     processStartToken: base.processStartToken,
-    ownerUid: requireEffectiveUid(),
+    ownerUid: base.uid,
     executableImageDigest: base.executableImageDigest,
     observedAt,
     identityDigest: ''
@@ -444,7 +426,7 @@ export class StateStore {
     const native = await loadNativeStateOwner(runtimeAuthority?.bundle);
     if (runtimeAuthority) {
       const supervisor = runtimeAuthority.bundle.entries.find((entry) => entry.role === 'supervisor')!;
-      if (supervisor.digest !== (await currentProcessBase(native)).executableImageDigest ||
+      if (supervisor.digest !== (await native.observeCurrentProcess()).executableImageDigest ||
           runtimeAuthority.bundle.stateSchemaRange.min > KERNEL_STATE_SCHEMA_VERSION ||
           runtimeAuthority.bundle.stateSchemaRange.max < KERNEL_STATE_SCHEMA_VERSION) {
         throw new KernelStorageError('ARTIFACT_MISMATCH', 'signed Supervisor does not match this process or state schema');

@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,33 @@ static napi_value native_error(napi_env env, const char *message) {
     napi_throw_error(env, "ERR_CLIQ_STATE_OWNER_NATIVE", message);
     return NULL;
 }
+
+/* Self-image retirement uncertainty cannot be discarded with a failed
+ * observation or cleared by another Node worker environment. Only a fresh
+ * process can acquire Supervisor image authority after such a failure. */
+static atomic_int current_process_retirement_failed = 0;
+
+static void record_process_retirement_failure(int *retirement_failed) {
+    if (!retirement_failed) return;
+    *retirement_failed = 1;
+    atomic_store(&current_process_retirement_failed, 1);
+}
+
+/* Consume ownership before close: the numeric FD may already be reused when
+ * an unsuccessful close returns. NULL preserves callers' existing semantics. */
+static void retire_process_fd(int *fd, int *retirement_failed) {
+    int owned = *fd;
+    *fd = -1;
+    if (owned >= 0 && close(owned) < 0) record_process_retirement_failure(retirement_failed);
+}
+
+#ifdef __linux__
+static void retire_process_file(FILE **file, int *retirement_failed) {
+    FILE *owned = *file;
+    *file = NULL;
+    if (owned && fclose(owned) != 0) record_process_retirement_failure(retirement_failed);
+}
+#endif
 
 typedef struct control_listener control_listener;
 typedef struct generation_tree generation_tree;
@@ -98,7 +126,7 @@ static int private_lock_file(const struct stat *info) {
 }
 
 /* No pathname component may be a symlink, including ancestors of StateRoot. */
-static int open_root(const char *path) {
+static int open_root_with_retirement(const char *path, int *retirement_failed) {
     if (path[0] != '/' || path[1] == '\0') { errno = EINVAL; return -1; }
     int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (current < 0) return -1;
@@ -108,20 +136,27 @@ static int open_root(const char *path) {
         size_t size = end ? (size_t)(end - part) : strlen(part);
         if (size == 0 || size > NAME_MAX || (size == 1 && part[0] == '.') ||
             (size == 2 && part[0] == '.' && part[1] == '.')) {
-            close(current); errno = EINVAL; return -1;
+            retire_process_fd(&current, retirement_failed); errno = EINVAL; return -1;
         }
         char name[NAME_MAX + 1];
         memcpy(name, part, size); name[size] = '\0';
         int next = openat(current, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         int failure = errno;
-        close(current);
+        retire_process_fd(&current, retirement_failed);
+        if (retirement_failed && *retirement_failed) {
+            retire_process_fd(&next, retirement_failed); return -1;
+        }
         if (next < 0) { errno = failure; return -1; }
         current = next;
         if (!end) break;
         part = end + 1;
-        if (*part == '\0') { close(current); errno = EINVAL; return -1; }
+        if (*part == '\0') { retire_process_fd(&current, retirement_failed); errno = EINVAL; return -1; }
     }
     return current;
+}
+
+static int open_root(const char *path) {
+    return open_root_with_retirement(path, NULL);
 }
 
 static int lock_is_held(state_lock *lock) {
@@ -417,8 +452,9 @@ done:
 
 /* 1 = observed identity, 0 = positively absent, -1 = unavailable/invalid.
  * Permission failures and hidden procfs entries are never death evidence. */
-static int observe_process(pid_t pid, char token[128]) {
+static int observe_process_with_retirement(pid_t pid, char token[128], int *retirement_failed) {
 #ifdef __APPLE__
+    (void)retirement_failed;
     struct proc_bsdinfo process;
     memset(&process, 0, sizeof(process));
     errno = 0;
@@ -440,13 +476,15 @@ static int observe_process(pid_t pid, char token[128]) {
         return (errno == ENOENT || errno == ESRCH) && kill(pid, 0) < 0 && errno == ESRCH ? 0 : -1;
     }
     struct statfs filesystem;
-    if (fstatfs(fd, &filesystem) < 0 || filesystem.f_type != PROC_SUPER_MAGIC) { close(fd); return -1; }
+    if (fstatfs(fd, &filesystem) < 0 || filesystem.f_type != PROC_SUPER_MAGIC) {
+        retire_process_fd(&fd, retirement_failed); return -1;
+    }
     FILE *file = fdopen(fd, "r");
-    if (file == NULL) { close(fd); return -1; }
+    if (file == NULL) { retire_process_fd(&fd, retirement_failed); return -1; }
     size_t size = fread(stat, 1, sizeof(stat) - 1, file);
     int failed = ferror(file);
-    fclose(file);
-    if (failed || size == 0 || size == sizeof(stat) - 1) return -1;
+    retire_process_file(&file, retirement_failed);
+    if ((retirement_failed && *retirement_failed) || failed || size == 0 || size == sizeof(stat) - 1) return -1;
     stat[size] = '\0';
     char *pid_end;
     errno = 0;
@@ -470,6 +508,10 @@ static int observe_process(pid_t pid, char token[128]) {
 #error StateOwner supports only macOS and Linux
 #endif
     return 1;
+}
+
+static int observe_process(pid_t pid, char token[128]) {
+    return observe_process_with_retirement(pid, token, NULL);
 }
 
 #include "control-socket.c"
@@ -529,6 +571,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
     const napi_property_descriptor methods[] = {
         {"acquireLock", NULL, acquire_lock, NULL, NULL, NULL, napi_default, NULL},
         {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},
+        {"captureCurrentProcess", NULL, capture_current_process, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkspaceRoot", NULL, open_workspace_root, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok) return NULL;

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { fork } from 'node:child_process';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { readdir, rename, rm } from 'node:fs/promises';
+import { once } from 'node:events';
+import { chmod, copyFile, mkdir, readdir, rename, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
@@ -26,6 +28,49 @@ function resign(bundle: RuntimeBundleManifest): StateStoreRuntimeAuthority {
 function ownerAt(stateRoot: string) {
   const reader = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
   try { return readLatestStateOwner(reader)!; } finally { reader.close(); }
+}
+
+for (const mode of ['replacement', 'removed-after-open'] as const) {
+test(`signed bootstrap refuses ${mode === 'replacement' ? 'a substituted executable pathname' : 'a deleted running image after warming the digest cache'} before touching state`, async () => {
+  const images = await makePrivateDir('.cliq-runtime-owner-images-');
+  const stateRoot = await makePrivateDir('.cliq-runtime-owner-image-state-');
+  const executable = path.join(images, 'bin', 'supervisor-node');
+  try {
+    await mkdir(path.dirname(executable), { mode: 0o700 });
+    // Preserve Node's installation-relative dynamic library search, without
+    // modifying the installed runtime or the disposable executable's bytes.
+    await symlink(path.resolve(process.execPath, '../../lib'), path.join(images, 'lib'), 'dir');
+    await copyFile(process.execPath, executable);
+    await chmod(executable, 0o500);
+    const warmState = path.join(images, 'warm-state');
+    await mkdir(warmState, { mode: 0o700 });
+    const child = fork(new URL('./testing/supervisor-image-child.ts', import.meta.url), [stateRoot, mode, warmState], {
+      execPath: executable, execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc']
+    });
+    const exited = once(child, 'exit');
+    let diagnostic = '';
+    child.stderr!.on('data', (bytes: Buffer) => { diagnostic = (diagnostic + bytes.toString()).slice(-4096); });
+    try {
+      const [reply] = await Promise.race([
+        once(child, 'message', { signal: AbortSignal.timeout(30_000) }),
+        exited.then(([code, signal]) => { throw new Error(`image child exited before replying: ${code}/${signal}`); }),
+      ])
+        .catch(error => { throw new Error(`image regression child did not reply: ${diagnostic}`, { cause: error }); });
+      const result = reply as { accepted: boolean; substituted: boolean; observedBeforeSubstitution: boolean; code?: string };
+      assert.equal(result.observedBeforeSubstitution, true, `native image preflight failed: ${diagnostic}`);
+      assert.equal(result.substituted, true, `image regression did not reach substitution: ${diagnostic}`);
+      assert.equal(result.accepted, false, 'a signature of the replacement pathname must not authenticate the running image');
+      assert.equal(result.code, 'ARTIFACT_MISMATCH');
+      assert.deepEqual(await readdir(stateRoot), []);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await exited;
+    }
+  } finally {
+    await rm(images, { recursive: true, force: true });
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
 }
 
 test('signed state-owner bootstrap authenticates the actual process before publishing authority', async () => {

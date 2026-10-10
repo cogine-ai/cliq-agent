@@ -170,7 +170,7 @@ static int same_image(const struct stat *left, const struct stat *right) {
 
 /* A native-derived absolute executable locator, never caller input. Each
  * ancestor and the final regular image are opened no-follow. */
-static int open_image_path(const char *path) {
+static int open_image_path(const char *path, int *retirement_failed) {
     if (path[0] != '/' || strlen(path) >= PATH_MAX) return -1;
     char parent[PATH_MAX];
     memcpy(parent, path, strlen(path) + 1);
@@ -179,10 +179,13 @@ static int open_image_path(const char *path) {
     const char *base = path + (name - parent) + 1;
     int directory;
     if (name == parent) directory = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    else { *name = '\0'; directory = open_root(parent); }
+    else { *name = '\0'; directory = open_root_with_retirement(parent, retirement_failed); }
     if (directory < 0) return -1;
     int fd = openat(directory, base, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
-    close(directory);
+    retire_process_fd(&directory, retirement_failed);
+    if (retirement_failed && *retirement_failed) {
+        retire_process_fd(&fd, retirement_failed); return -1;
+    }
     return fd;
 }
 
@@ -207,58 +210,123 @@ static int mapped_image(pid_t pid, const char *path, const struct stat *image) {
 }
 #endif
 
-/* Opens the peer's actual native executable and independently checks its
+/* Opens the process's actual native executable and independently checks its
  * native path. Deleted/replaced images, credentials drift, hidden procfs and
  * unavailable VM-region inspection are all indeterminate, never authority. */
-static int open_peer_image(control_peer *peer, char path[PATH_MAX], struct stat *image) {
+static int open_process_image(pid_t pid, uid_t uid, gid_t gid, char path[PATH_MAX], struct stat *image,
+    int *retirement_failed) {
     int fd = -1, named = -1;
 #ifdef __APPLE__
     struct proc_bsdinfo process;
     memset(&process, 0, sizeof(process));
-    if (proc_pidinfo(peer->pid, PROC_PIDTBSDINFO, 0, &process, sizeof(process)) != sizeof(process) ||
-        process.pbi_pid != (uint32_t)peer->pid || process.pbi_uid != peer->uid || process.pbi_gid != peer->gid ||
-        proc_pidpath(peer->pid, path, PATH_MAX) <= 0 || !memchr(path, '\0', PATH_MAX)) return -1;
-    fd = open_image_path(path);
-    if (fd < 0 || fstat(fd, image) < 0 || !same_image(image, image) || !mapped_image(peer->pid, path, image)) goto fail;
+    if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &process, sizeof(process)) != sizeof(process) ||
+        process.pbi_pid != (uint32_t)pid || process.pbi_uid != uid || process.pbi_gid != gid ||
+        proc_pidpath(pid, path, PATH_MAX) <= 0 || !memchr(path, '\0', PATH_MAX)) return -1;
+    fd = open_image_path(path, retirement_failed);
+    if (fd < 0 || fstat(fd, image) < 0 || !same_image(image, image) || !mapped_image(pid, path, image)) goto fail;
 #else
     char proc_path[64];
-    snprintf(proc_path, sizeof(proc_path), "/proc/%ld", (long)peer->pid);
+    snprintf(proc_path, sizeof(proc_path), "/proc/%ld", (long)pid);
     int process = open(proc_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (process < 0) return -1;
     struct statfs filesystem;
-    if (fstatfs(process, &filesystem) < 0 || filesystem.f_type != PROC_SUPER_MAGIC) { close(process); return -1; }
+    if (fstatfs(process, &filesystem) < 0 || filesystem.f_type != PROC_SUPER_MAGIC) {
+        retire_process_fd(&process, retirement_failed); return -1;
+    }
     int status_fd = openat(process, "status", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     FILE *status = status_fd < 0 ? NULL : fdopen(status_fd, "r");
-    if (!status) { if (status_fd >= 0) close(status_fd); close(process); return -1; }
+    if (!status) {
+        retire_process_fd(&status_fd, retirement_failed);
+        retire_process_fd(&process, retirement_failed); return -1;
+    }
     char line[4096];
     int uid_matches = 0, gid_matches = 0;
     while (fgets(line, sizeof(line), status)) {
         unsigned long first, effective, saved, filesystem_id;
         if (strncmp(line, "Uid:", 4) == 0 && sscanf(line + 4, "%lu %lu %lu %lu", &first, &effective, &saved, &filesystem_id) == 4)
-            uid_matches = effective == peer->uid;
+            uid_matches = effective == uid;
         if (strncmp(line, "Gid:", 4) == 0 && sscanf(line + 4, "%lu %lu %lu %lu", &first, &effective, &saved, &filesystem_id) == 4)
-            gid_matches = effective == peer->gid;
+            gid_matches = effective == gid;
     }
     int failed = ferror(status);
-    fclose(status);
+    retire_process_file(&status, retirement_failed);
+    if (retirement_failed && *retirement_failed) {
+        retire_process_fd(&process, retirement_failed); return -1;
+    }
     ssize_t length = readlinkat(process, "exe", path, PATH_MAX - 1);
     if (!failed && uid_matches && gid_matches && length > 0 && length < PATH_MAX - 1) {
         path[length] = '\0';
         /* Only this verified procfs kernel entry is intentionally followed. */
         fd = openat(process, "exe", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     }
-    close(process);
+    retire_process_fd(&process, retirement_failed);
+    if (retirement_failed && *retirement_failed) goto fail;
     if (fd < 0 || fstat(fd, image) < 0 || !same_image(image, image)) goto fail;
-    named = open_image_path(path);
+    named = open_image_path(path, retirement_failed);
     struct stat named_image;
     if (named < 0 || fstat(named, &named_image) < 0 || !same_image(image, &named_image)) goto fail;
-    close(named);
+    retire_process_fd(&named, retirement_failed);
+    if (retirement_failed && *retirement_failed) goto fail;
 #endif
     return fd;
 fail:
-    if (named >= 0) close(named);
-    if (fd >= 0) close(fd);
+    retire_process_fd(&named, retirement_failed);
+    retire_process_fd(&fd, retirement_failed);
     return -1;
+}
+
+static int open_peer_image(control_peer *peer, char path[PATH_MAX], struct stat *image) {
+    return open_process_image(peer->pid, peer->uid, peer->gid, path, image, NULL);
+}
+
+typedef struct {
+    int image_fd, retirement_failed;
+    pid_t pid;
+    uid_t uid;
+    gid_t gid;
+    struct stat image;
+    char start_token[128], image_path[PATH_MAX];
+} current_process_observation;
+
+static const napi_type_tag current_process_tag = {0x4729bb55ecdc4e43ULL, 0x82eddf1ed57422f5ULL};
+
+/* Mark consumed before close: retrying a possibly closed descriptor could
+ * close an unrelated reused FD. An uncertain retirement stays an error. */
+static int close_current_process_image(current_process_observation *observation) {
+    retire_process_fd(&observation->image_fd, &observation->retirement_failed);
+    return !observation->retirement_failed && !atomic_load(&current_process_retirement_failed);
+}
+
+static void finalize_current_process(napi_env env, void *data, void *hint) {
+    (void)env; (void)hint;
+    current_process_observation *observation = data;
+    close_current_process_image(observation);
+    free(observation);
+}
+
+static int current_process_is_held(current_process_observation *observation) {
+    if (observation->retirement_failed || atomic_load(&current_process_retirement_failed)) return -1;
+    if (observation->image_fd < 0 || observation->pid != getpid() ||
+        observation->uid != geteuid() || observation->gid != getegid()) return 0;
+    struct stat held, current;
+    char token[128], path[PATH_MAX];
+    if (fstat(observation->image_fd, &held) < 0 || !same_image(&held, &observation->image) ||
+        observe_process_with_retirement(observation->pid, token, &observation->retirement_failed) != 1 ||
+        strcmp(token, observation->start_token) != 0) {
+        return observation->retirement_failed || atomic_load(&current_process_retirement_failed) ? -1 : 0;
+    }
+    int fd = open_process_image(observation->pid, observation->uid, observation->gid, path, &current,
+        &observation->retirement_failed);
+    int valid = fd >= 0 && strcmp(path, observation->image_path) == 0 && same_image(&current, &held);
+    retire_process_fd(&fd, &observation->retirement_failed);
+    if (observation->retirement_failed || atomic_load(&current_process_retirement_failed)) return -1;
+    valid = valid && observation->pid == getpid() && observation->uid == geteuid() && observation->gid == getegid() &&
+        observe_process_with_retirement(observation->pid, token, &observation->retirement_failed) == 1 &&
+        strcmp(token, observation->start_token) == 0;
+    /* Reopening and retiring temporary resources may span an image change.
+     * Close that cut on the original held descriptor after the final sample. */
+    valid = valid && fstat(observation->image_fd, &held) == 0 && same_image(&held, &observation->image);
+    return observation->retirement_failed || atomic_load(&current_process_retirement_failed) ? -1 : valid;
 }
 
 static void close_observation(control_observation *observation) {
@@ -312,6 +380,27 @@ static napi_value undefined_result(napi_env env) {
     return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
 }
 
+static napi_value current_process_retirement_error(napi_env env) {
+    napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "current process image descriptors did not retire");
+    return NULL;
+}
+
+static napi_value release_current_process(napi_env env, napi_callback_info info) {
+    current_process_observation *observation = unwrap_control(env, info, &current_process_tag, "invalid current process observation handle");
+    if (!observation) return NULL;
+    if (!close_current_process_image(observation)) return current_process_retirement_error(env);
+    return undefined_result(env);
+}
+
+static napi_value assert_current_process(napi_env env, napi_callback_info info) {
+    current_process_observation *observation = unwrap_control(env, info, &current_process_tag, "invalid current process observation handle");
+    if (!observation) return NULL;
+    int held = current_process_is_held(observation);
+    if (held < 0) return current_process_retirement_error(env);
+    if (!held) return native_error(env, "current process image, credentials, start identity, or descriptor changed or closed");
+    return undefined_result(env);
+}
+
 static napi_value release_observation(napi_env env, napi_callback_info info) {
     control_observation *observation = unwrap_control(env, info, &observation_tag, "invalid control observation handle");
     if (!observation) return NULL;
@@ -341,6 +430,66 @@ static napi_value take_socket_fd(napi_env env, napi_callback_info info) {
 static int uint_member(napi_env env, napi_value object, const char *name, uint32_t number) {
     napi_value value;
     return napi_create_uint32(env, number, &value) == napi_ok && napi_set_named_property(env, object, name, value) == napi_ok;
+}
+
+/* Cache metadata only, not a canonical identity or a substitute for a fresh
+ * native observation. Include every field checked by same_image. */
+static int current_image_cache_key(napi_env env, napi_value object, const struct stat *image) {
+#ifdef __APPLE__
+    const struct timespec modified = image->st_mtimespec, changed = image->st_ctimespec;
+#else
+    const struct timespec modified = image->st_mtim, changed = image->st_ctim;
+#endif
+    char key[512];
+    int length = snprintf(key, sizeof(key), "current-image-v1:%llu:%llu:%llu:%lld:%ld:%lld:%ld:%lu:%lu:%u:%llu",
+        (unsigned long long)image->st_dev, (unsigned long long)image->st_ino, (unsigned long long)image->st_size,
+        (long long)modified.tv_sec, modified.tv_nsec, (long long)changed.tv_sec, changed.tv_nsec,
+        (unsigned long)image->st_uid, (unsigned long)image->st_gid, (unsigned int)image->st_mode,
+        (unsigned long long)image->st_nlink);
+    napi_value value;
+    return length > 0 && (size_t)length < sizeof(key) &&
+        napi_create_string_utf8(env, key, (size_t)length, &value) == napi_ok &&
+        napi_set_named_property(env, object, "imageIdentityKey", value) == napi_ok;
+}
+
+/* This observation is independent of StateRoot or a socket peer. No caller
+ * path/PID/descriptor can select which running process or image is attested. */
+static napi_value capture_current_process(napi_env env, napi_callback_info info) {
+    if (atomic_load(&current_process_retirement_failed)) return current_process_retirement_error(env);
+    size_t argc = 1;
+    napi_value argv[1];
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc != 0)
+        return native_error(env, "current process capture takes no arguments");
+    current_process_observation *observation = calloc(1, sizeof(*observation));
+    if (!observation) return native_error(env, "current process observation allocation failed");
+    observation->image_fd = -1;
+    observation->pid = getpid(); observation->uid = geteuid(); observation->gid = getegid();
+    if (observe_process_with_retirement(observation->pid, observation->start_token,
+        &observation->retirement_failed) != 1) goto fail;
+    observation->image_fd = open_process_image(observation->pid, observation->uid, observation->gid,
+        observation->image_path, &observation->image, &observation->retirement_failed);
+    if (observation->image_fd < 0 || current_process_is_held(observation) != 1) goto fail;
+    napi_value result, start, fd, bytes;
+    const napi_property_descriptor methods[] = {
+        {"assertHeld", NULL, assert_current_process, NULL, NULL, NULL, napi_default, NULL},
+        {"close", NULL, release_current_process, NULL, NULL, NULL, napi_default, NULL}
+    };
+    if (napi_create_object(env, &result) != napi_ok || !uint_member(env, result, "pid", observation->pid) ||
+        !uint_member(env, result, "uid", observation->uid) || !current_image_cache_key(env, result, &observation->image) ||
+        napi_create_string_utf8(env, observation->start_token, NAPI_AUTO_LENGTH, &start) != napi_ok ||
+        napi_set_named_property(env, result, "processStartToken", start) != napi_ok ||
+        napi_create_int32(env, observation->image_fd, &fd) != napi_ok || napi_set_named_property(env, result, "imageFd", fd) != napi_ok ||
+        napi_create_double(env, observation->image.st_size, &bytes) != napi_ok || napi_set_named_property(env, result, "imageByteCount", bytes) != napi_ok ||
+        napi_define_properties(env, result, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
+        napi_type_tag_object(env, result, &current_process_tag) != napi_ok || napi_object_freeze(env, result) != napi_ok ||
+        atomic_load(&current_process_retirement_failed) ||
+        napi_wrap(env, result, observation, finalize_current_process, NULL, NULL) != napi_ok) goto fail;
+    return result;
+fail:;
+    int retired = close_current_process_image(observation);
+    free(observation);
+    if (!retired) return current_process_retirement_error(env);
+    return native_error(env, "current process image, credentials, start identity, or descriptor observation failed");
 }
 
 static int observation_is_held(control_peer *peer, control_observation *observation) {

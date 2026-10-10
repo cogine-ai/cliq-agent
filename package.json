@@ -69,7 +69,9 @@
   "devDependencies": {
     "@types/node": "^24.5.2",
     "@types/react": "19.2.14",
+    "esbuild": "0.28.2",
     "ink-testing-library": "4.0.0",
+    "postject": "1.0.0-alpha.6",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   }
