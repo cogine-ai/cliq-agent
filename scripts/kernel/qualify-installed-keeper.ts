@@ -478,9 +478,20 @@ async function campaign(ledgerFile: string): Promise<void> {
             report.supervisorStopCommand = stopSupervisor; assert.equal(stopSupervisor.status, 0, stopSupervisor.stderr);
             const stoppedSupervisor = show(installed.supervisorUnit); report.supervisorStopped = stoppedSupervisor;
             assert.equal(stoppedSupervisor.MainPID, '0'); assert.equal(stoppedSupervisor.ActiveState, 'inactive');
-            assert.equal(stoppedSupervisor.ExecMainPID, String(supervisorPid));
-            assert.equal(stoppedSupervisor.ExecMainCode, '1'); assert.equal(stoppedSupervisor.ExecMainStatus, '0');
             assert.equal(stoppedSupervisor.Result, 'success');
+            // Inactive units may be unloaded, losing historical ExecMain*
+            // and InvocationID. Check the actual prior process lifetime instead.
+            const stoppedProcess = await readFile(`/proc/${supervisorPid}/stat`, 'utf8').catch((error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT' || error.code === 'ESRCH') return undefined; throw error;
+            });
+            if (stoppedProcess !== undefined) {
+              assert(stoppedProcess.startsWith(`${supervisorPid} (`));
+              const stoppedFields = stoppedProcess.slice(stoppedProcess.lastIndexOf(') ') + 2).trim().split(/\s+/u);
+              assert.match(stoppedFields[19]!, /^[1-9][0-9]*$/u);
+              assert.notEqual(`linux-proc-start-ticks:${stoppedFields[19]}`, identity.processStartToken);
+            }
+            report.supervisorStoppedProcess = { pid: supervisorPid, priorProcessStartToken: identity.processStartToken,
+              priorLifetimeGone: true, procStat: stoppedProcess ?? null };
             const terminal = inspectInstalledOwner(installed.stateRoot);
             assert(terminal?.state === 'terminal'); assert.equal(terminal.ownerEpoch, 1);
             assert.equal(terminal.terminalReason, 'graceful_release');
