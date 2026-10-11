@@ -13,6 +13,8 @@ import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '
 import { ContentAddressedStore } from './cas.js';
 import { createInstalledRuntime } from './installed-runtime.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from './native-owner.js';
+import { openInstalledLinuxWorkerLauncher } from '../sandbox/linux-worker.js';
+import { KernelStorageError } from './errors.js';
 
 /** Real signed files for installer/CAS semantics only. The opaque executable
  * entries are deliberately not running Supervisor/worker/addon images and are
@@ -146,6 +148,24 @@ if (process.platform === 'linux') test('initial installation retains the complet
       assert.equal(selected.bundleDigest, bundleDigest);
       assert.deepEqual(selected.bundle, signed.bundle);
       await selected.assertHeld();
+      let observed = 0;
+      const untrusted = () => { observed++; throw new Error('untrusted anchor property'); };
+      const proxy = new Proxy({}, { get: untrusted, getPrototypeOf: untrusted, ownKeys: untrusted,
+        getOwnPropertyDescriptor: untrusted });
+      const anchorShape = { assertHeld() {}, close() {} };
+      for (const anchor of [undefined, {}, proxy, { ...anchorShape }, structuredClone({})]) {
+        // The selection is genuine but these anchors are not. Refusal must
+        // precede dlopen of this deliberately opaque installer-only package.
+        await assert.rejects(() => openInstalledLinuxWorkerLauncher(selected, anchor as never),
+          error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH' &&
+            error.message === 'installed anchor does not belong to this exact held selection');
+      }
+      for (const copy of [{ ...selected }, structuredClone({ bundle: selected.bundle, bundleDigest: selected.bundleDigest })]) {
+        await assert.rejects(() => openInstalledLinuxWorkerLauncher(copy as never, proxy as never),
+          error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH' &&
+            error.message === 'installed runtime is not a verified held selection');
+      }
+      assert.equal(observed, 0);
       await rm(packageRoot, { recursive: true });
       await selected.assertHeld();
     } finally { await selected.close(); }

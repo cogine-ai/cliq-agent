@@ -387,7 +387,8 @@ type NativeCurrentProcess = Readonly<{
   assertHeld(): void; close(): void;
 }>;
 type NativeInstalledKeeper = Readonly<{ assertHeld(): void; readyLocator(): Buffer; close(): void }>;
-type NativeInstalledAnchor = Readonly<{ assertHeld(): void; close(): void }>;
+type NativeInstalledAnchor = Readonly<{ assertHeld(): void;
+  withRoot(operation: (fd: number, rootPath: string) => void): void; close(): void }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
   captureCurrentProcess(): NativeCurrentProcess;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
@@ -464,6 +465,17 @@ export function acquireHeldInstalledAnchor(native: NativeStateOwner, input: Read
     assertHeld() {
       if (this !== handle) throw new TypeError('invalid installed anchor handle');
       try { owned.assertHeld(); } catch (error) { failed(error); }
+    },
+    withRoot(operation) {
+      if (this !== handle) throw new TypeError('invalid installed anchor handle');
+      let callbackFailure: { error: unknown } | undefined;
+      try { owned.withRoot((fd, rootPath) => {
+        try { return operation(fd, rootPath); }
+        catch (error) { callbackFailure = { error }; throw error; }
+      }); } catch (error) {
+        if (callbackFailure && error === callbackFailure.error) throw error;
+        failed(error);
+      }
     },
     close() {
       if (this !== handle) throw new TypeError('invalid installed anchor handle');

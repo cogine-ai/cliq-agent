@@ -540,7 +540,7 @@ typedef struct {
 
 typedef struct {
     current_process_observation process;
-    int peer_process, peer_image, root_fd, source_fd, closed, retirement_failed;
+    int peer_process, peer_image, root_fd, source_fd, closed, retirement_failed, root_borrowed;
     pid_t peer_pid;
     uint64_t peer_ticks, state_root_identity[5];
     unsigned char boot[16];
@@ -808,10 +808,57 @@ static napi_value installed_anchor_assert(napi_env env, napi_callback_info info)
     return undefined_result(env);
 }
 
+/* Only the trusted installed launcher uses this synchronous void callback.
+ * The original held root never becomes a public descriptor getter or a new
+ * acquisition: native consumers dup or send it before this borrow returns. */
+static napi_value installed_anchor_with_root(napi_env env, napi_callback_info info) {
+    installed_anchor *anchor = unwrap_control(env, info, &installed_anchor_tag, "invalid installed anchor handle");
+    if (!anchor) return NULL;
+    if (syscall(SYS_gettid) != getpid()) return native_error(env, "installed anchor requires the process main thread");
+    if (anchor->root_borrowed) return native_error(env, "installed anchor root is already borrowed");
+    size_t argc = 2;
+    napi_value args[2], arguments[2], receiver, result;
+    napi_valuetype type;
+    if (napi_get_cb_info(env, info, &argc, args, NULL, NULL) != napi_ok || argc != 1 ||
+        napi_typeof(env, args[0], &type) != napi_ok || type != napi_function)
+        return native_error(env, "installed anchor root requires a synchronous void callback");
+    int retirement_failed = 0;
+    if (!installed_anchor_current(anchor, &retirement_failed))
+        return installed_keeper_error(env, "installed anchor image, original source, namespaces, membership, or delegation changed", retirement_failed);
+    if (napi_create_int32(env, anchor->root_fd, &arguments[0]) != napi_ok ||
+        napi_create_string_utf8(env, anchor->root_path, NAPI_AUTO_LENGTH, &arguments[1]) != napi_ok ||
+        napi_get_undefined(env, &receiver) != napi_ok)
+        return native_error(env, "installed anchor root callback input construction failed");
+    anchor->root_borrowed = 1;
+    napi_status called = napi_call_function(env, receiver, args[0], 2, arguments, &result);
+    anchor->root_borrowed = 0;
+    bool pending = false;
+    napi_value exception;
+    napi_status saved = napi_is_exception_pending(env, &pending);
+    if (saved == napi_ok && pending) saved = napi_get_and_clear_last_exception(env, &exception);
+    int current = installed_anchor_current(anchor, &retirement_failed);
+    /* Complete the postcheck even on callback exceptions, preserving that
+     * exception unless real descriptor retirement is uncertain. */
+    if (retirement_failed || atomic_load(&current_process_retirement_failed))
+        return installed_keeper_error(env, "installed anchor root callback resources did not retire", 1);
+    if (saved != napi_ok) return NULL;
+    if (pending) {
+        napi_throw(env, exception);
+        return NULL;
+    }
+    if (called != napi_ok) return native_error(env, "installed anchor root callback failed");
+    if (!current)
+        return installed_keeper_error(env, "installed anchor image, original source, namespaces, membership, or delegation changed", 0);
+    if (napi_typeof(env, result, &type) != napi_ok || type != napi_undefined)
+        return native_error(env, "installed anchor root callback must return undefined synchronously");
+    return result;
+}
+
 static napi_value installed_anchor_release(napi_env env, napi_callback_info info) {
     installed_anchor *anchor = unwrap_control(env, info, &installed_anchor_tag, "invalid installed anchor handle");
     if (!anchor) return NULL;
     if (syscall(SYS_gettid) != getpid()) return native_error(env, "installed anchor requires the process main thread");
+    if (anchor->root_borrowed) return native_error(env, "installed anchor cannot close during a root borrow");
     if (!installed_anchor_close(anchor)) return installed_keeper_error(env, "installed anchor close failed", 1);
     return undefined_result(env);
 }
@@ -927,10 +974,11 @@ static napi_value acquire_installed_anchor(napi_env env, napi_callback_info info
     napi_value result;
     const napi_property_descriptor methods[] = {
         {"assertHeld", NULL, installed_anchor_assert, NULL, NULL, NULL, napi_default, NULL},
+        {"withRoot", NULL, installed_anchor_with_root, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, installed_anchor_release, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "installed anchor handle construction failed";
-    if (napi_create_object(env, &result) != napi_ok || napi_define_properties(env, result, 2, methods) != napi_ok ||
+    if (napi_create_object(env, &result) != napi_ok || napi_define_properties(env, result, 3, methods) != napi_ok ||
         napi_type_tag_object(env, result, &installed_anchor_tag) != napi_ok || napi_object_freeze(env, result) != napi_ok ||
         !installed_anchor_current(anchor, &retirement_failed) ||
         napi_wrap(env, result, anchor, installed_anchor_finalize, NULL, NULL) != napi_ok) goto fail;

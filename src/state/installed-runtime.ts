@@ -2,6 +2,7 @@ import { createHash, randomBytes, X509Certificate } from 'node:crypto';
 import { constants, type BigIntStats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, type FileHandle } from 'node:fs/promises';
 import { isMainThread } from 'node:worker_threads';
+import { Module } from 'node:module';
 
 import { KERNEL_CAS_DIRECTORY } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
@@ -11,6 +12,7 @@ import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, ty
 import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
+import type { NativeWorkerBinding, NativeWorkerImage } from '../sandbox/linux-worker.js';
 import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
 
@@ -45,8 +47,35 @@ type InstalledRuntimeBinding = {
   execute(role: 'keeper' | 'supervisor'): Promise<never>;
   initializeKeeper(): Promise<HeldInstalledKeeper>;
   acquireAnchor(): Promise<HeldInstalledAnchor>;
+  loadWorkerNative(): Promise<NativeWorkerBinding>;
+  sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
 };
 const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
+const heldInstalledAnchors = new WeakMap<HeldInstalledAnchor, { selected: HeldInstalledRuntime;
+  withRoot(operation: (fd: number, rootPath: string) => void): void }>();
+
+/** Private worker producer bridge. Only synchronous fixed native operations
+ * borrow the original root; neither public handle offers a descriptor getter. */
+export function withInstalledWorkerRoot(selected: HeldInstalledRuntime, anchor: HeldInstalledAnchor,
+  operation: (fd: number, rootPath: string) => void): void {
+  if (!heldInstalledRuntimes.has(selected)) mismatch('installed runtime is not a verified held selection');
+  const binding = heldInstalledAnchors.get(anchor);
+  if (!binding || binding.selected !== selected) mismatch('installed anchor does not belong to this exact held selection');
+  binding.withRoot(operation);
+}
+
+/** Private fixed-image bridges: original selected FileHandles remain owned by
+ * their existing scope; only the new seal is owned by the worker launcher. */
+export function loadInstalledWorkerNative(selected: HeldInstalledRuntime): Promise<NativeWorkerBinding> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('installed runtime is not a verified held selection');
+  return binding.loadWorkerNative();
+}
+export function sealInstalledWorkerImage(selected: HeldInstalledRuntime, entryId: string): Promise<NativeWorkerImage> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('installed runtime is not a verified held selection');
+  return binding.sealWorkerImage(entryId);
+}
 
 export function initializeInstalledKeeper(held: HeldInstalledRuntime): Promise<HeldInstalledKeeper> {
   const binding = heldInstalledRuntimes.get(held);
@@ -502,6 +531,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         let poisoned: unknown;
         let tail = Promise.resolve();
         let closePromise: Promise<void> | undefined;
+        let workerNative: NativeWorkerBinding | undefined;
         const revalidate = async () => {
           healthy(); await scope.assertDirectories();
           for (const file of [active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]) await verifyBytes(file);
@@ -563,6 +593,49 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         });
         heldInstalledRuntimes.set(selected, {
           factory: runtime,
+          loadWorkerNative() {
+            return enqueue(async () => {
+              await checkedRevalidate();
+              if (!workerNative) {
+                const entry = signed.bundle.entries.find(value => value.entryId === 'linux_worker_native');
+                const file = signed.entries.get('linux_worker_native');
+                if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable)
+                  mismatch('signed worker native module is missing');
+                const loaded = new Module('cliq-installed-linux-worker-native');
+                process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+                const native = loaded.exports as NativeWorkerBinding;
+                if (native.interfaceVersion !== 3 || typeof native.sealImage !== 'function' ||
+                    typeof native.sealImageBuffer !== 'function' || typeof native.openController !== 'function')
+                  mismatch('unsupported installed native worker interface');
+                workerNative = native;
+              }
+              await checkedRevalidate();
+              return workerNative;
+            });
+          },
+          sealWorkerImage(entryId) {
+            return enqueue(async () => {
+              await checkedRevalidate();
+              const roles: Record<string, string> = { linux_worker_controller: 'platform_helper',
+                linux_bubblewrap: 'platform_helper', linux_worker: 'worker', edit: 'tool_adapter' };
+              const entry = signed.bundle.entries.find(value => value.entryId === entryId);
+              const file = signed.entries.get(entryId);
+              if (!workerNative || !Object.hasOwn(roles, entryId) || !entry || !file ||
+                  entry.role !== roles[entryId] || !entry.executable)
+                mismatch('executable is not in the signed installed worker recipe');
+              const sealed = workerNative.sealImage(file.handle.fd);
+              try { await checkedRevalidate(); return sealed; }
+              catch (error) {
+                try { sealed.close(); }
+                catch (failure) {
+                  const retirement = new ResourceRetirementError('installed worker image did not retire',
+                    new AggregateError([error, failure]));
+                  rememberRetirement(retirement); throw retirement;
+                }
+                throw error;
+              }
+            });
+          },
           acquireAnchor(): Promise<HeldInstalledAnchor> {
             return enqueue(async () => {
               const native = await loadSelectedNative();
@@ -594,6 +667,12 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                     try { anchor.close(); } catch (error) { rememberRetirement(error); throw error; }
                   },
                 });
+                heldInstalledAnchors.set(held, { selected, withRoot(operation) {
+                  if (closed) mismatch('installed runtime handle is closed');
+                  if (poisoned !== undefined) throw poisoned;
+                  try { healthy(); anchor.withRoot(operation); }
+                  catch (error) { rememberRetirement(error); throw error; }
+                } });
                 return held;
               } catch (error) {
                 rememberRetirement(error);

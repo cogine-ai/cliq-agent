@@ -46,7 +46,8 @@ import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { withHeldInstalledRuntime, type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
+import { withHeldInstalledRuntime, withInstalledWorkerRoot, type HeldInstalledAnchor,
+  type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
 import type { SupervisorHelloV1, SupervisorStatusV1 } from './installed-control.js';
 import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
@@ -391,7 +392,8 @@ export class StateStore {
     readonly artifacts: ArtifactCatalog,
     private readonly owner: StateOwnerContext,
     private readonly runtimeAuthority?: StateStoreRuntimeAuthority,
-    private readonly installedRuntime?: HeldInstalledRuntime
+    private readonly installedRuntime?: HeldInstalledRuntime,
+    private readonly installedAnchor?: HeldInstalledAnchor
   ) {}
 
   get ownerEpoch(): number {
@@ -491,16 +493,18 @@ export class StateStore {
   }
 
   static async open(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority,
-    installedRuntime?: HeldInstalledRuntime): Promise<StateStore> {
+    installedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor): Promise<StateStore> {
+    if (installedAnchor !== undefined) withInstalledWorkerRoot(installedRuntime!, installedAnchor, () => {});
     if (installedRuntime !== undefined) {
       return withHeldInstalledRuntime(installedRuntime,
-        installed => StateStore.openCore(stateRoot, runtimeAuthority, installed, installedRuntime));
+        installed => StateStore.openCore(stateRoot, runtimeAuthority, installed, installedRuntime, installedAnchor));
     }
     return StateStore.openCore(stateRoot, runtimeAuthority);
   }
 
   private static async openCore(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority,
-    installed?: InstalledRuntimeBorrow, installedRuntime?: HeldInstalledRuntime): Promise<StateStore> {
+    installed?: InstalledRuntimeBorrow, installedRuntime?: HeldInstalledRuntime,
+    installedAnchor?: HeldInstalledAnchor): Promise<StateStore> {
     runtimeAuthority = runtimeAuthority === undefined ? undefined : immutableSnapshot(runtimeAuthority);
     if (process.platform !== 'darwin' && process.platform !== 'linux') {
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', `state store is unsupported on ${process.platform}`);
@@ -571,8 +575,9 @@ export class StateStore {
           releaseKeys: runtimeAuthority.releaseKeys, sandboxProfile: runtimeAuthority.sourceInspection.sandboxProfile });
       await retireAbandonedPreactivations(driver, artifacts, ownerContext,
         runtimeAuthority?.execution && { ...runtimeAuthority.execution,
-          runtimeAuthority: { bundle: runtimeAuthority.bundle, releaseKeys: runtimeAuthority.releaseKeys } });
-      return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority, installedRuntime);
+          runtimeAuthority: { bundle: runtimeAuthority.bundle, releaseKeys: runtimeAuthority.releaseKeys } },
+        installedRuntime, installedAnchor);
+      return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority, installedRuntime, installedAnchor);
     } catch (error) {
       let failure = error;
       if (!(error instanceof ResourceRetirementError)) {
@@ -652,7 +657,7 @@ export class StateStore {
     const runId = input.runId;
     if (this.executions.has(runId)) throw new KernelStorageError('REVISION_CONFLICT', 'Run already has an execution resource owner');
     const opening = loadRunExecution(this.driver, this.artifacts, this.owner, this.runtimeAuthority, input,
-      () => this.closed || this.closeRequested || this.released);
+      () => this.closed || this.closeRequested || this.released, this.installedRuntime, this.installedAnchor);
     this.executions.set(runId, opening);
     let scope: Awaited<typeof opening> | undefined;
     try {
@@ -838,7 +843,8 @@ export class StateStore {
       if (!this.released) {
         await retireAbandonedPreactivations(this.driver, this.artifacts, this.owner,
           this.runtimeAuthority?.execution && { ...this.runtimeAuthority.execution,
-            runtimeAuthority: { bundle: this.runtimeAuthority.bundle, releaseKeys: this.runtimeAuthority.releaseKeys } });
+            runtimeAuthority: { bundle: this.runtimeAuthority.bundle, releaseKeys: this.runtimeAuthority.releaseKeys } },
+          this.installedRuntime, this.installedAnchor);
         await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
         this.released = true;
       }
@@ -860,8 +866,8 @@ export class StateStore {
 }
 
 export async function openStateStore(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority,
-  installedRuntime?: HeldInstalledRuntime): Promise<StateStore> {
-  return StateStore.open(stateRoot, runtimeAuthority, installedRuntime);
+  installedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor): Promise<StateStore> {
+  return StateStore.open(stateRoot, runtimeAuthority, installedRuntime, installedAnchor);
 }
 
 async function assertInstalledRootBinding(stateRoot: string, heldLock: HeldStateOwnerLock, installed: InstalledRuntimeBorrow) {
