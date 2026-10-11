@@ -66,6 +66,7 @@ async function cutWriter(input: { phase: 'before' | 'after'; bootstrap: string; 
   const main = input.wal.slice(0, -'-wal'.length);
   const originalMain = physical(await lstat(main, { bigint: true }));
   const baselineBytes = await walBytes(input.wal, original), baseline = inspectWal(baselineBytes);
+  await writeFile(path.join(input.evidence, `${input.phase}-baseline-wal.bin`), baselineBytes, { flag: 'wx', mode: 0o600 });
   const prefix = path.join(input.evidence, `${input.phase}.trace`);
   const tracedWal = [...Buffer.from(input.wal)].map(byte => `\\x${byte.toString(16).padStart(2, '0')}`).join('');
   const trace = spawn('strace', ['-ff', '-ttt', '-yy', '-xx', '-s', '65536', '-o', prefix,
@@ -73,12 +74,12 @@ async function cutWriter(input: { phase: 'before' | 'after'; bootstrap: string; 
     '-e', input.phase === 'before' ? 'inject=pwrite64:delay_enter=2s' : 'inject=fsync:delay_exit=2s',
     input.bootstrap, '--bootstrap-endpoint'], { cwd: input.fixture, env: { PATH: process.env.PATH, LANG: 'C' },
     stdio: ['pipe', 'pipe', 'pipe'] });
-  let stdout = '', stderr = '', spawnError: Error | undefined;
+  let stdout = '', stderr = '', spawnError: Error | undefined, traceClosed = false;
   let writer: { pid: number; start: string } | undefined, cut: Record<string, unknown> | undefined;
   let actualWal: Buffer | undefined, actualMain: Buffer | undefined;
   const joined = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     trace.once('error', error => { spawnError = error; reject(error); });
-    trace.once('close', (code, signal) => resolve({ code, signal }));
+    trace.once('close', (code, signal) => { traceClosed = true; resolve({ code, signal }); });
   });
   void joined.catch(() => {});
   const boundedJoin = async (milliseconds: number) => {
@@ -178,7 +179,8 @@ async function cutWriter(input: { phase: 'before' | 'after'; bootstrap: string; 
       actualMain = await walBytes(main, originalMain);
       assert(Date.now() - enteredAt < delayMs - 250, 'verified cut escaped its OS pause');
       cut = { phase: input.phase, writer, originalWal: original, image: input.image, actualImageSha256: input.imageDigest,
-        sampledAt, enteredAt, delayedEvent: line, observed, prospectiveIdentificationOnly: prospective,
+        sampledAt, enteredAt, delayedEvent: line, baseline, baselineWalSha256: hash(baselineBytes),
+        observed, prospectiveIdentificationOnly: prospective,
         actualWalSha256: hash(before), actualMainSha256: hash(actualMain), stdinSha256: hash(canonicalJsonBytes(input.request)), requestId:
           input.request.kind === 'commit' ? input.request.requestId : undefined };
       actualWal = before;
@@ -205,13 +207,20 @@ async function cutWriter(input: { phase: 'before' | 'after'; bootstrap: string; 
   } catch (error) { primaryFailure = error; throw error; }
   finally {
     clearTimeout(watchdog);
-    if (trace.exitCode === null && trace.signalCode === null) {
+    if (!traceClosed) {
       const failures: unknown[] = [];
       try { await killOwnedWriter(); } catch (error) { failures.push(error); }
       try { await boundedJoin(10000); }
       catch (error) {
         failures.push(error); trace.kill('SIGKILL');
-        try { await boundedJoin(5000); } catch (forced) { failures.push(forced); }
+        try { await boundedJoin(5000); }
+        catch (forced) {
+          failures.push(forced);
+          // An exited tracer can leave an unretired tracee holding its pipes.
+          // Stop only this test's handles from keeping the runner alive; this
+          // is failure containment, never positive process-retirement proof.
+          trace.stdin.destroy(); trace.stdout.destroy(); trace.stderr.destroy(); trace.unref();
+        }
       }
       if (failures.length) throw new AggregateError(primaryFailure === undefined ? failures : [primaryFailure, ...failures],
         'owned test processes could not positively retire; preserve the failed fixture');

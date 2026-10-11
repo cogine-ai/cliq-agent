@@ -5,11 +5,12 @@
 ### Verdict
 
 READY WITH RISKS: the user confirmed A and the installed-startup/v1-control
-test seam on 2026-10-11. Native image binding and the persistent-anchor OS
-prerequisite have passed component qualification. The next implementation joins
-trusted installed startup to the production native controller/monitor birth
-chain; control-service composition, admission assembly and first model dispatch
-remain open. This is not a completed I1 claim or a release artifact.
+test seam on 2026-10-11. This increment implements the signed Linux installation,
+keeper handoff and owner restart, bounded read control, same-engine private
+descriptor VFS and authenticated ordinary endpoint registry. Their recorded
+component qualifications do not complete inline admission, model/broker
+composition, private edit or the integrated I1 restart/fault campaign.
+This is not a completed I1 claim or a release artifact.
 
 ### Source
 
@@ -238,17 +239,18 @@ HELLO-time placement test does not prove atomic birth; a kernel first-fork stop
 must additionally exclude fork-then-migrate. A simulated fork, synthetic witness
 or dummy OS launcher cannot satisfy either native qualification.
 
-Reuse the same SEA with closed bootstrap, keeper and Supervisor modes. The
-stable executable is `${stateRoot}/runtime/bootstrap`; user services select
+Reuse the same SEA with closed bootstrap, keeper, Supervisor and endpoint modes.
+The stable executable is `${stateRoot}/runtime/bootstrap`; user services select
 only its fixed bootstrap-keeper or bootstrap-supervisor mode. Compiled release
 keys, not argv/environment/control inputs, authenticate the detached manifest.
 The keeper is an internal mode of the sole signed `supervisor` entry, not an
 extra manifest entry with duplicate complete-file bytes or a new role.
 
 Keep one installed-runtime deep interface: initial installation, opening the
-selected held runtime, and executing that runtime in one of the two fixed
-roles. Initial installation creates a new private StateRoot and stages entries
-without adopting an existing active selection or database. Descriptor-relative
+selected held runtime, and executing that runtime in one of three fixed
+selected roles: keeper, Supervisor or endpoint. Only keeper and Supervisor are
+systemd services. Initial installation creates a new private StateRoot and stages
+entries without adopting an existing active selection or database. Descriptor-relative
 no-follow walks verify the root and every signed entry, including type, owner,
 mode, link count, exact count/digest and metadata stability around the read.
 The current initial installer supports Linux only. A real macOS experiment
@@ -708,8 +710,25 @@ historical replay, current-owner refusal before replay and oversized-result
 refusal without occupying the request id; the component group passed 76/76
 with no skip. The preceding real-entry RED runs remain evidence of the missing
 role, input-validation and business behavior, not qualification failures to
-silently overwrite. Joined process-crash business cuts are still a separate
-gate; normal close/reopen and the lower-level VFS campaign do not replace them.
+silently overwrite. Normal close/reopen and the lower-level VFS campaign do not
+replace the separate joined process-crash business gate below.
+
+At `e7af4d19211573a6b7521598e2cb70cb54061ec2`, all seven jobs passed in
+[run 38157002788](https://github.com/cogine-ai/cliq-agent/actions/runs/38157002788),
+including 85/85 component cases with no skip. The actual signed bootstrap
+register transaction was killed at two verified cuts: immediately before the
+write that would complete a new checksum-valid WAL commit, and after the real
+original WAL's successful sync with that commit already present. Each corpus
+closed all 19 observed TIDs and positively joined SIGKILL before recovery.
+Fresh installed reads then found no target record before commit, or the exact
+active record and original source operation after commit. After the committed
+cut, original-request replay returned the immutable operation without a new
+revision/channel/time; before the commit cut, the original request committed
+once and then replayed exactly.
+Raw traces, precrash MAIN/WAL bytes and recovered responses remain CI artifacts;
+the pending-write overlay is only cut identification, never written evidence.
+This qualifies these register process-crash cuts, not power loss, revoke crash,
+credential enrollment, cross-version provenance or installed I1.
 
 SEA bundling, fixed helper locations, preload control and actual-image binding
 must be qualified together. Public admission is not a wrapper around internal
@@ -724,9 +743,10 @@ Actual systemd MainPID-death diagnostics confirmed that service cleanup removes
 the original cgroup inode, which the current retained-death inspector requires.
 No missing cgroup can be relabeled as the old containment's empty observation.
 
-Required sequence: establish signed installed startup;
+Required sequence before claiming installed I1 or default CLI cutover:
+establish signed installed startup;
 bind real capture to original admission; drive first model and existing edit;
-qualify reconnect/restart and fault cuts; independent review before a normal PR.
+qualify reconnect/restart and fault cuts; independently review that complete chain.
 These are implementation steps inside one capability, not mandatory tiny PRs.
 
 Rollback: this hidden integration does not migrate or activate existing user
@@ -744,9 +764,11 @@ Run, database or broker authority and adds no second lifecycle ledger. Only
 the current Supervisor manages its delegated execution subtrees after a
 bounded initialization handoff.
 
-The OS A/B campaign above passed. Next integrate the fixed keeper role into
-trusted signed startup and atomically protect the production controller/monitor
-birth chain, not only a worker moved after fork. Preserve actual non-root
+The OS A/B campaign, signed keeper handoff and installed owner-restart
+prerequisites above passed. Next compose complete signed native execution,
+READY/recovery and inline admission/model behavior through that installed chain.
+Preserve atomic protection of the production controller/monitor birth chain,
+not only a worker moved after fork, and actual non-root
 `clone3(CLONE_INTO_CGROUP)` placement before the first controller birth, with no
 fork-then-migrate fallback or root-assisted permission workaround. Across
 Supervisor restart, validate exact retained identities before attempting the
