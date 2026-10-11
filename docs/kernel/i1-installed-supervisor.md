@@ -658,7 +658,7 @@ owner captured at acquisition, not merely each other. The privileged identity
 drift negative was not exercised locally. Foreign threads must be refused
 before dereferencing a context that the owning main thread may retire.
 
-The next business increment is one authenticated ordinary endpoint registry:
+The authenticated ordinary endpoint registry is one vertical business increment:
 register, revoke, latest read and exact request replay together, rather than a
 schema-only slice. Existing UDS authentication and `publishInProcessChannel`
 depend on StateOwner/Run CAS, so ordinary auth must privately derive its
@@ -700,6 +700,16 @@ It is appended only with a new operation, never for a read or exact replay.
 Historical process verification does not probe the old PID for liveness. This
 initial, single-version installation can bind its image to the one verified
 selected Supervisor; it does not qualify provenance across runtime upgrades.
+
+Commit `3e0b3c797140eed1fa08ef7dadfa30fb3185f978` passed all seven jobs in
+[run 38155548899](https://github.com/cogine-ai/cliq-agent/actions/runs/38155548899).
+The actual Linux installed business journey passed register/revoke, new-channel
+historical replay, current-owner refusal before replay and oversized-result
+refusal without occupying the request id; the component group passed 76/76
+with no skip. The preceding real-entry RED runs remain evidence of the missing
+role, input-validation and business behavior, not qualification failures to
+silently overwrite. Joined process-crash business cuts are still a separate
+gate; normal close/reopen and the lower-level VFS campaign do not replace them.
 
 SEA bundling, fixed helper locations, preload control and actual-image binding
 must be qualified together. Public admission is not a wrapper around internal

@@ -45,6 +45,41 @@ test('closed thread corpus rejects duplicate termination or any record after ter
   assert.throws(() => checkedThreadCalls([{ tid: 100, raw: exit + read }], 100), /terminal/);
 });
 
+test('explicit crash corpus joins every thread without turning interrupted writes into success', () => {
+  const killed = '1.000099 +++ killed by SIGKILL +++\n';
+  const interrupted = '1.000098 pwrite64(17</fixed/original>, "x", 1, 0) = ?\n';
+  const corpus = [{ tid: 100, raw: clone + interrupted + killed }, { tid: 101, raw: read + killed }];
+  assert.throws(() => checkedThreadCalls(corpus, 100), /terminal/);
+  const calls = checkedThreadCalls(corpus, 100, 'joined_sigkill');
+  assert.equal(calls.find(call => call.name === 'pwrite64')!.result, '?');
+  assert.throws(() => checkedThreadCalls([corpus[0]!], 100, 'joined_sigkill'), /created TID/);
+  assert.throws(() => checkedThreadCalls([{ tid: 100, raw: read + exit }], 100, 'joined_sigkill'), /owner.*SIGKILL/);
+  assert.throws(() => checkedThreadCalls([{ tid: 100, raw: read + killed + read }], 100, 'joined_sigkill'), /terminal/);
+});
+
+test('crash corpus still rejects unmatched or missing syscall completion and foreign termination', () => {
+  for (const raw of [read, '1.000098 pwrite64(17, "x", 1, 0 <unfinished ...>\n'
+    + '1.000099 +++ killed by SIGKILL +++\n', read + '1.000099 +++ killed by SIGTERM +++\n']) {
+    assert.throws(() => checkedThreadCalls([{ tid: 100, raw }], 100, 'joined_sigkill'));
+  }
+});
+
+test('unknown syscall results require a positive crash terminal and never form a successful marker', () => {
+  const interrupted = '1.000098 write(1, "{}\\n", 3) = ?\n';
+  assert.throws(() => checkedThreadCalls([{ tid: 100, raw: interrupted + exit }], 100), /interrupted/);
+  assert.throws(() => checkedThreadCalls([{ tid: 100, raw: interrupted + exit }], 100, 'joined_sigkill'), /interrupted/);
+  const raw = interrupted + '1.000099 +++ killed by SIGKILL +++\n';
+  const call = checkedThreadCalls([{ tid: 100, raw }], 100, 'joined_sigkill')[0]!;
+  assert.equal(isCredentialVfsTraceMarker(call, 'prepared', 'primary', 'normal'), false);
+  const unknownOpen = checkedThreadCalls([{ tid: 100, raw:
+    '1.000098 openat(AT_FDCWD, "/proc/self/stat", O_RDONLY|O_CLOEXEC) = ?\n'
+    + '1.000099 +++ killed by SIGKILL +++\n' }], 100, 'joined_sigkill')[0]!;
+  assert.equal(isCredentialVfsHousekeepingOpen(unknownOpen), false);
+  assert.throws(() => checkedThreadCalls([{ tid: 100, raw:
+    '1.000098 clone(child_stack=NULL, flags=CLONE_THREAD|CLONE_FILES) = ?\n'
+    + '1.000099 +++ killed by SIGKILL +++\n' }], 100, 'joined_sigkill'), /interrupted process birth/);
+});
+
 test('prepared marker accepts actual strace Unix-stream FD arrows without weakening delimiter checks', () => {
   const message = JSON.stringify({ protocol: 'cliq-credential-vfs-storage-v1',
     phase: 'prepared', action: 'primary', mode: 'normal' }) + '\n';

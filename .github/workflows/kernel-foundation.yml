@@ -43,7 +43,7 @@ jobs:
     # Component/OS facts only, not an installed I1 qualification. Standard
     # public-repository runner; never substitute a detached child manager.
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,6 +85,8 @@ jobs:
           scripts/kernel/testing/credential-authority-installed.test.ts
           scripts/kernel/testing/endpoint-authority-installed.test.ts
           scripts/kernel/testing/endpoint-authority-journey.test.ts
+          scripts/kernel/testing/endpoint-wal-proof.test.ts
+          scripts/kernel/testing/endpoint-authority-crash.test.ts
       - name: Qualify complete application image binding
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --import tsx scripts/kernel/qualify-supervisor-image.ts "$RUNNER_TEMP/cliq-supervisor-image"
@@ -127,6 +129,7 @@ jobs:
             ${{ runner.temp }}/cliq-installed-keeper/*.json
             ${{ runner.temp }}/cliq-secret-service/*.json
             ${{ runner.temp }}/cliq-installed-retirement/*.json
+            ${{ runner.temp }}/cliq-endpoint-crash-*/**
           if-no-files-found: warn
           retention-days: 7
 

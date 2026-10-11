@@ -238,7 +238,8 @@ type Call = { tid: number; start: bigint; end: bigint; name: string; args: strin
 function timestamp(text: string) {
   const [seconds, fraction] = text.split('.'); return BigInt(seconds!) * 1000000000n + BigInt(fraction!.padEnd(9, '0'));
 }
-function parseTrace(tid: number, raw: string): Call[] {
+type Termination = 'healthy' | 'joined_sigkill';
+function parseTrace(tid: number, raw: string, termination: Termination): Call[] {
   const calls: Call[] = []; let pending: { name: string; text: string; start: bigint } | undefined, terminated = false;
   for (const line of raw.split('\n').filter(Boolean)) {
     assert(!terminated, `record after terminal in TID ${tid}`);
@@ -247,7 +248,10 @@ function parseTrace(tid: number, raw: string): Call[] {
     if (text.startsWith('--- ')) { assert(!text.includes('detached')); continue; }
     if (text.startsWith('+++ ')) {
       assert.equal(pending, undefined, `incomplete syscall in TID ${tid}`);
-      assert.match(text, /^\+\+\+ exited with 0 \+\+\+$/u, `unexpected terminal in TID ${tid}`);
+      assert.match(text, termination === 'healthy' ? /^\+\+\+ exited with 0 \+\+\+$/u
+        : /^\+\+\+ (?:exited with 0|killed by SIGKILL) \+\+\+$/u, `unexpected terminal in TID ${tid}`);
+      if (calls.some(call => call.result.startsWith('?')))
+        assert(termination === 'joined_sigkill' && text === '+++ killed by SIGKILL +++', 'interrupted syscall requires positive SIGKILL terminal');
       terminated = true; continue;
     }
     const resumed = /^<\.\.\. ([a-z0-9_]+) resumed>(.*)$/u.exec(text);
@@ -285,7 +289,7 @@ function argumentsOf(text: string) {
   result.push(text.slice(begin).trim()); return result;
 }
 const fdNumber = (text: string | undefined) => text === undefined ? undefined : /^([0-9]+)(?:<.*>)?$/u.exec(text)?.[1];
-const success = (call: Call) => !call.result.startsWith('-1 ');
+const success = (call: Call) => !call.result.startsWith('-1 ') && !call.result.startsWith('?');
 export function isCredentialVfsTraceMarker(call: Call, phase: string, action: Action, mode: Mode) {
   if (call.name !== 'write' || !success(call)) return false;
   const args = argumentsOf(call.args); if (fdNumber(args[0]) !== '1' || !args[1]?.startsWith('"')) return false;
@@ -319,10 +323,17 @@ async function traceCorpus(home: string, action: 'primary' | 'reopen', ledger: F
 }
 // Pure closed-corpus check, also used by parser regression tests. No OS or
 // authority qualification follows from synthetic parser inputs.
-export function checkedThreadCalls(corpus: readonly { tid: number; raw: string }[], pid: number) {
+export function checkedThreadCalls(corpus: readonly { tid: number; raw: string }[], pid: number,
+  termination: Termination = 'healthy') {
   assert(corpus.some(item => item.tid === pid));
-  const calls = corpus.flatMap(item => parseTrace(item.tid, item.raw));
+  const calls = corpus.flatMap(item => parseTrace(item.tid, item.raw, termination));
+  // Only an explicit crash caller may accept killed threads. Bootstrap threads
+  // that joined during exec can have exited normally; the actual owner cannot.
+  if (termination === 'joined_sigkill') assert.match(corpus.find(item => item.tid === pid)!.raw,
+    /(?:^|\n)\d+\.\d{6,9} \+\+\+ killed by SIGKILL \+\+\+\n?$/u, 'owner must positively join SIGKILL');
   for (const call of calls) argumentsOf(call.args);
+  assert(!calls.some(call => ['clone', 'clone3', 'fork', 'vfork'].includes(call.name) && call.result.startsWith('?')),
+    'interrupted process birth has no complete thread closure');
   assert(!calls.some(call => ['fork', 'vfork'].includes(call.name) && success(call)),
     'closed producer must create only threads sharing its FD table');
   const reachable = new Set([pid]);
