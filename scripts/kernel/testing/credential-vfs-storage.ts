@@ -265,26 +265,42 @@ function parseTrace(tid: number, raw: string): Call[] {
   assert(terminated, `missing terminal in TID ${tid}`); return calls;
 }
 function argumentsOf(text: string) {
-  const result: string[] = []; let begin = 0, depth = 0, quoted = false, escaped = false;
+  const result: string[] = [], stack: string[] = [];
+  const closing: Record<string, string> = { ')': '(', '}': '{', ']': '[', '>': '<' };
+  let begin = 0, quoted = false, escaped = false;
   for (let index = 0; index < text.length; index++) {
     const byte = text[index]!;
     if (quoted) { if (escaped) escaped = false; else if (byte === '\\') escaped = true; else if (byte === '"') quoted = false; continue; }
     if (byte === '"') quoted = true;
-    else if ('({[<'.includes(byte)) depth++;
-    else if (')}]>'.includes(byte)) depth--;
-    else if (byte === ',' && depth === 0) { result.push(text.slice(begin, index).trim()); begin = index + 1; }
+    else if ('({[<'.includes(byte)) stack.push(byte);
+    else if (closing[byte]) {
+      if (byte === '>' && text[index - 1] === '=') continue; // strace in/out structure: {...} => {...}
+      // -yy renders socket peers inside the FD annotation as [local->peer].
+      // That arrow is not the closing delimiter of the outer <annotation>.
+      if (byte === '>' && text[index - 1] === '-' && stack.includes('<')) continue;
+      assert.equal(stack.pop(), closing[byte], 'ambiguous trace delimiters');
+    } else if (byte === ',' && stack.length === 0) { result.push(text.slice(begin, index).trim()); begin = index + 1; }
   }
-  assert.equal(quoted, false); assert.equal(depth, 0); result.push(text.slice(begin).trim()); return result;
+  assert.equal(quoted, false); assert.equal(stack.length, 0, 'incomplete trace delimiters');
+  result.push(text.slice(begin).trim()); return result;
 }
-const fdNumber = (text: string | undefined) => text === undefined ? undefined : /^([0-9]+)(?:<[^>]*>)?$/u.exec(text)?.[1];
+const fdNumber = (text: string | undefined) => text === undefined ? undefined : /^([0-9]+)(?:<.*>)?$/u.exec(text)?.[1];
 const success = (call: Call) => !call.result.startsWith('-1 ');
-function marker(call: Call, phase: string, action: Action, mode: Mode) {
+export function isCredentialVfsTraceMarker(call: Call, phase: string, action: Action, mode: Mode) {
   if (call.name !== 'write' || !success(call)) return false;
   const args = argumentsOf(call.args); if (fdNumber(args[0]) !== '1' || !args[1]?.startsWith('"')) return false;
   let text: string; try { text = JSON.parse(args[1]) as string; } catch { return false; }
   if (!text.endsWith('\n') || Number.parseInt(call.result, 10) !== Buffer.byteLength(text)) return false;
   let event: Event; try { event = structuredClone(parseJsonStrict(text.trim())) as Event; } catch { return false; }
   return event.protocol === 'cliq-credential-vfs-storage-v1' && event.phase === phase && event.action === action && event.mode === mode;
+}
+export function isCredentialVfsHousekeepingOpen(call: Call) {
+  if (!['open', 'openat', 'openat2'].includes(call.name) || !success(call)) return false;
+  const args = argumentsOf(call.args), pathname = args[call.name === 'open' ? 0 : 1]!;
+  // Recorded glibc CPU query only, not a general /sys or writable-file exception.
+  const cpuRead = call.name === 'openat' && args.length === 3 && /^AT_FDCWD(?:<.*>)?$/u.test(args[0]!)
+    && pathname === '"/sys/devices/system/cpu/online"' && args[2] === 'O_RDONLY|O_CLOEXEC';
+  return cpuRead || /^"(?:\/proc\/(?:self|thread-self|[0-9]+)\/(?:stat|status|maps)|\/dev\/(?:u?random))"$/u.test(pathname);
 }
 async function traceCorpus(home: string, action: 'primary' | 'reopen', ledger: Fixture, evidence: Record<string, unknown>) {
   const names = (await readdir(home)).filter(name => new RegExp(`^${action}\\.trace\\.[0-9]+$`, 'u').test(name));
@@ -306,6 +322,7 @@ async function traceCorpus(home: string, action: 'primary' | 'reopen', ledger: F
 export function checkedThreadCalls(corpus: readonly { tid: number; raw: string }[], pid: number) {
   assert(corpus.some(item => item.tid === pid));
   const calls = corpus.flatMap(item => parseTrace(item.tid, item.raw));
+  for (const call of calls) argumentsOf(call.args);
   assert(!calls.some(call => ['fork', 'vfork'].includes(call.name) && success(call)),
     'closed producer must create only threads sharing its FD table');
   const reachable = new Set([pid]);
@@ -325,7 +342,7 @@ async function traceEvidence(home: string, action: 'primary' | 'reopen', mode: M
   const corpus = await traceCorpus(home, action, ledger, evidence);
   const calls = checkedThreadCalls(corpus, pid);
   for (const cut of cuts) assert(cut.tids.every(tid => corpus.some(item => item.tid === tid)), 'an observed TID has no complete trace');
-  const prepared = calls.filter(call => call.tid === pid && marker(call, 'prepared', action, mode)); assert.equal(prepared.length, 1);
+  const prepared = calls.filter(call => call.tid === pid && isCredentialVfsTraceMarker(call, 'prepared', action, mode)); assert.equal(prepared.length, 1);
   const begin = prepared[0]!.start;
   const window = calls.filter(call => call.end >= begin).sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : a.tid - b.tid);
   const live = new Map<number, Role>();
@@ -340,7 +357,7 @@ async function traceEvidence(home: string, action: 'primary' | 'reopen', mode: M
       assert(!/authority\.(?:sqlite(?:-wal|-journal)?|lock)/u.test(pathname), `authority leaf reopen: ${call.text}`);
       for (const fd of live.keys()) assert(!new RegExp(`/proc/(?:self|thread-self|[0-9]+)/fd/${fd}(?:["/])`, 'u').test(pathname), `original FD reopen: ${call.text}`);
       if (success(call) && !call.args.includes('O_DIRECTORY')) {
-        assert(/^"(?:\/proc\/(?:self|thread-self|[0-9]+)\/(?:stat|status|maps)|\/dev\/(?:u?random))"$/u.test(pathname),
+        assert(isCredentialVfsHousekeepingOpen(call),
           `unbound regular-file open after prepared: ${call.text}`);
       }
     }
