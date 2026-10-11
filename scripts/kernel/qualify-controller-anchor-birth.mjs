@@ -356,7 +356,9 @@ async function job() {
     const compile = spawnSync('/usr/bin/cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
       ...paths.flatMap(value => ['-I', value]), path.join(repository, 'scripts/kernel/linux-fork-tracer.c'), '-o', module], { encoding: 'utf8', timeout: 30_000 });
     if (compile.error) throw compile.error; assert.equal(compile.status, 0, compile.stderr);
-    await chmod(module, 0o500); await chmod(stage, 0o711);
+    // Native self-image attestation read-opens every ancestor directory; mere
+    // traversal permission is insufficient. Only root can modify this stage.
+    await chmod(module, 0o500); await chmod(stage, 0o755);
     const nodeImage = await imageFact(node), controllerImage = await imageFact(path.join(options.installationRoot, 'cliq-linux-worker-controller'));
     const env = { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' }, stdio = ['ignore', 'inherit', 'inherit', 'ipc'];
     trace = ownChild(spawn(node, [script, 'helper'], { env, stdio }));
