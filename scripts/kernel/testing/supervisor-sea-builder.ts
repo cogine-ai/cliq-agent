@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, copyFile, readFile, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, copyFile, open, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { build } from 'esbuild';
 import { inject } from 'postject';
@@ -59,7 +60,16 @@ export async function buildSupervisorSeaImage(input: {
     execArgvExtension: 'none', disableExperimentalSEAWarning: true, assets: input.assets }),
   { flag: 'wx', mode: 0o600 });
   run(input.fixture, input.carrier, ['--experimental-sea-config', configuration]);
-  await copyFile(input.carrier, input.executable);
+  await copyFile(input.carrier, input.executable, constants.COPYFILE_EXCL);
+  // Root extraction preserves the official carrier's archived UID/GID, and
+  // Node 22 copyFile can copy them too. Own only this newly created image;
+  // never relax the fresh-package transfer oracle or chown the carrier tree.
+  const image = await open(input.executable, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = await image.stat();
+    assert(metadata.isFile() && metadata.nlink === 1, 'SEA output must be a new single-link regular image');
+    await image.chown(process.geteuid!(), process.getegid!());
+  } finally { await image.close(); }
   if (process.platform === 'darwin') run(input.fixture, 'codesign', ['--remove-signature', input.executable]);
   await inject(input.executable, 'NODE_SEA_BLOB', await readFile(blob),
     { sentinelFuse: 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2', machoSegmentName: 'NODE_SEA' });

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readFile, readdir, readlink, stat, statfs, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, readlink, stat, statfs, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,7 @@ import { SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js
 
 type InstalledFixture = {
   buildFixture: string; packageRoot: string; stateRoot: string; releaseKeysFile: string;
+  preloadLibrary: string; preloadMarker: string;
   keeperUnit: string; supervisorUnit: string; keeperUnitFile: string; supervisorUnitFile: string; reportFile: string;
 };
 type Ledger = {
@@ -74,9 +75,11 @@ async function readLedger(filename: string): Promise<Ledger> {
   const keeperUnit = `cliq-probe-${suffix}-installed-keeper.service`;
   const supervisorUnit = `cliq-probe-${suffix}-installed-supervisor.service`;
   assert.deepEqual(Object.keys(installed).sort(), ['buildFixture', 'keeperUnit', 'keeperUnitFile', 'packageRoot',
-    'releaseKeysFile', 'reportFile', 'stateRoot', 'supervisorUnit', 'supervisorUnitFile'].sort());
+    'preloadLibrary', 'preloadMarker', 'releaseKeysFile', 'reportFile', 'stateRoot', 'supervisorUnit', 'supervisorUnitFile'].sort());
   assert.equal(installed.buildFixture, path.join(ledger.fixture, 'installed-package-build'));
   assert.equal(installed.packageRoot, path.join(installed.buildFixture, 'package'));
+  assert.equal(installed.preloadLibrary, path.join(installed.buildFixture, 'installed-loader-preload.so'));
+  assert.equal(installed.preloadMarker, path.join(ledger.home, 'probe/installed-loader-preload.marker'));
   assert.equal(installed.stateRoot, path.join(ledger.home, 'probe/installed-state'));
   assert.equal(installed.releaseKeysFile, path.join(ledger.fixture, 'installed-release-keys.json'));
   assert.equal(installed.keeperUnit, keeperUnit); assert.equal(installed.supervisorUnit, supervisorUnit);
@@ -124,6 +127,77 @@ async function authorityAbsent(stateRoot: string) {
   return facts;
 }
 
+async function preloadMarkerAbsent(filename: string): Promise<boolean> {
+  return lstat(filename).then(() => false, (error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return true;
+    throw error;
+  });
+}
+
+async function positivePreloadControl(ledger: Ledger) {
+  const { installed } = ledger;
+  // The checksum-verified, unmodified carrier produced by the shared recipe,
+  // not the runner's Node 22 client or a different ELF/Node implementation.
+  const ordinaryNode = path.join(installed.buildFixture, `node-v${SUPERVISOR_SEA_NODE_VERSION}-linux-x64/bin/node`);
+  const carrier = await lstat(ordinaryNode);
+  assert(carrier.isFile() && !carrier.isSymbolicLink());
+  // The official tar retains iojs (1001) ownership under root extraction. The
+  // disposable UID must not own it; do not chown or alter the carrier tree.
+  assert.notEqual(carrier.uid, ledger.uid); assert.notEqual(carrier.gid, ledger.gid);
+  assert.equal(carrier.mode & 0o7777, 0o755); assert.equal(carrier.nlink, 1);
+  const directory = await lstat(path.dirname(installed.preloadMarker));
+  assert(directory.isDirectory() && !directory.isSymbolicLink());
+  assert.equal(directory.uid, ledger.uid); assert.equal(directory.gid, ledger.gid);
+  assert.equal(directory.mode & 0o7777, 0o700);
+  assert(await preloadMarkerAbsent(installed.preloadMarker), 'never adopt an existing preload marker');
+  const source = fileURLToPath(new URL('./testing/installed-loader-preload.c', import.meta.url));
+  const sourceMetadata = await lstat(source);
+  assert(sourceMetadata.isFile() && !sourceMetadata.isSymbolicLink());
+  assert(await preloadMarkerAbsent(installed.preloadLibrary), 'never replace an existing preload library');
+  const compilation = command('/usr/bin/cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
+    `-DCLIQ_INSTALLED_PRELOAD_MARKER=${JSON.stringify(installed.preloadMarker)}`, source, '-o', installed.preloadLibrary]);
+  assert.equal(compilation.status, 0, compilation.stderr);
+  const library = await open(installed.preloadLibrary, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = await library.stat();
+    assert(metadata.isFile()); assert.equal(metadata.uid, 0); assert.equal(metadata.gid, 0); assert.equal(metadata.nlink, 1);
+    await library.chmod(0o555);
+    assert.equal((await library.stat()).mode & 0o7777, 0o555);
+  } finally { await library.close(); }
+  // env execs the actual ordinary Node in place, preserving spawn's observed
+  // PID. Only that nonroot child receives LD_PRELOAD, not env or runuser/root.
+  const child = spawnSync('/usr/bin/env', ['-i', `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
+    `LD_PRELOAD=${installed.preloadLibrary}`, ordinaryNode, '--input-type=module', '-e',
+    'console.log(JSON.stringify({pid:process.pid,uid:process.getuid(),euid:process.geteuid(),gid:process.getgid(),egid:process.getegid(),nodeVersion:process.version}));'],
+  { uid: ledger.uid, gid: ledger.gid, cwd: ledger.home, env: environment, encoding: 'utf8', timeout: 30_000, maxBuffer: 4096 });
+  assert.equal(child.error, undefined, `ordinary Node: ${child.error}`);
+  assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr); assert.equal(child.stderr, '');
+  assert(Number.isSafeInteger(child.pid) && child.pid > 0);
+  const actual = parseJsonStrict(child.stdout.trim());
+  assert.deepEqual(actual, { pid: child.pid, uid: ledger.uid, euid: ledger.uid, gid: ledger.gid, egid: ledger.gid,
+    nodeVersion: `v${SUPERVISOR_SEA_NODE_VERSION}` });
+  const expected = `cliq-installed-loader-preload-v1\npid=${child.pid}\nuid=${ledger.uid}\n`;
+  const marker = await open(installed.preloadMarker, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let identity: { device: string; inode: string };
+  try {
+    const metadata = await marker.stat({ bigint: true });
+    assert(metadata.isFile()); assert.equal(metadata.uid, BigInt(ledger.uid)); assert.equal(metadata.gid, BigInt(ledger.gid));
+    assert.equal(metadata.mode & 0o7777n, 0o600n); assert.equal(metadata.nlink, 1n);
+    assert.equal(metadata.size, BigInt(Buffer.byteLength(expected)));
+    assert.equal(await marker.readFile('utf8'), expected);
+    // The child has joined. Recheck the held file and exact named inode before
+    // deleting this one validated marker; leave any changed identity for cleanup.
+    for (const observed of [await marker.stat({ bigint: true }), await lstat(installed.preloadMarker, { bigint: true })]) {
+      for (const key of ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(observed[key], metadata[key]);
+    }
+    identity = { device: metadata.dev.toString(), inode: metadata.ino.toString() };
+    await unlink(installed.preloadMarker);
+  } finally { await marker.close(); }
+  assert(await preloadMarkerAbsent(installed.preloadMarker));
+  return { ordinaryNode, nodeVersion: `v${SUPERVISOR_SEA_NODE_VERSION}`, pid: child.pid, uid: ledger.uid,
+    markerContent: expected, markerIdentity: identity, joined: true, markerRemoved: true };
+}
+
 async function installer(packageRoot: string, stateRoot: string, releaseKeysFile: string): Promise<void> {
   assert(process.geteuid!() > 0 && process.getegid!() > 0, 'installer must run as the disposable nonroot UID');
   assert(path.isAbsolute(packageRoot) && path.isAbsolute(stateRoot) && path.isAbsolute(releaseKeysFile));
@@ -162,10 +236,15 @@ async function campaign(ledgerFile: string): Promise<void> {
     return result.stdout.trim().split('\n').filter(Boolean).map(line => parseJsonStrict(line) as Record<string, unknown>);
   };
   let shown: Record<string, string> | undefined;
+  let preloadEnvironmentTouched = false, managerPreloadConfirmed = false, keeperStartAttempted = false, keeperImageObserved = false;
   try {
     await mkdir(installed.buildFixture, { mode: 0o755 }); // Exclusive: never adopt a build/package tree.
+    const stage = await lstat(installed.buildFixture);
+    assert(stage.isDirectory() && !stage.isSymbolicLink()); assert.equal(stage.uid, 0); assert.equal(stage.gid, 0);
+    assert.equal(stage.mode & 0o7777, 0o755);
     const { packageRoot, releaseKeys, bundle, contents } = await buildInstalledSupervisorPackage(installed.buildFixture);
     assert.equal(packageRoot, installed.packageRoot);
+    report.preloadPositiveControl = await positivePreloadControl(ledger);
     await writeFile(installed.releaseKeysFile, canonicalJsonBytes(releaseKeys), { flag: 'wx', mode: 0o444 });
     await transferPackage(packageRoot, ledger.uid, ledger.gid);
     const install = command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
@@ -198,6 +277,21 @@ async function campaign(ledgerFile: string): Promise<void> {
       if (unit === installed.supervisorUnit) assert(definition.includes(`Requires=${installed.keeperUnit}\nAfter=${installed.keeperUnit}\n`));
     }
     const reload = userCommand(['daemon-reload']); assert.equal(reload.status, 0, reload.stderr);
+    const beforeEnvironment = userCommand(['show-environment']);
+    assert.equal(beforeEnvironment.status, 0, beforeEnvironment.stderr);
+    assert(!beforeEnvironment.stdout.split('\n').some(line => line.startsWith('LD_PRELOAD=')), 'fresh manager already has LD_PRELOAD');
+    // Set the cleanup flag before the mutating command: a timeout may follow
+    // a committed environment change. Never mutate the original runner manager.
+    preloadEnvironmentTouched = true;
+    const setEnvironment = userCommand(['set-environment', `LD_PRELOAD=${installed.preloadLibrary}`]);
+    assert.equal(setEnvironment.status, 0, setEnvironment.stderr);
+    const injectedEnvironment = userCommand(['show-environment']);
+    assert.equal(injectedEnvironment.status, 0, injectedEnvironment.stderr);
+    assert.deepEqual(injectedEnvironment.stdout.split('\n').filter(line => line.startsWith('LD_PRELOAD=')),
+      [`LD_PRELOAD=${installed.preloadLibrary}`]);
+    managerPreloadConfirmed = true;
+    report.managerPreload = { library: installed.preloadLibrary, confirmed: true };
+    keeperStartAttempted = true;
     report.startCommand = userCommand(['start', installed.keeperUnit]);
     const deadline = Date.now() + 30_000;
     for (;;) {
@@ -219,6 +313,7 @@ async function campaign(ledgerFile: string): Promise<void> {
           (value as { message?: string }).message === 'expected a fixed installed Supervisor role');
         report.startupRefusal = { invocationId: shown.InvocationID, result: shown.Result,
           execMainCode: shown.ExecMainCode, execMainStatus: shown.ExecMainStatus, closedRoleError: closedRoleError ?? null };
+        keeperImageObserved = Boolean(closedRoleError) && Number(shown.ExecMainPID) > 0;
         throw new Error(`installed keeper exited before actual delegated readiness: ${JSON.stringify(report.startupRefusal)}`);
       }
       const pid = Number(shown.MainPID);
@@ -259,6 +354,7 @@ async function campaign(ledgerFile: string): Promise<void> {
             for (const controller of ['cpu', 'memory', 'pids']) assert(enabled.includes(controller));
             assert.deepEqual((await readdir(root, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name), ['keeper']);
             const confirmed = show(); assert.equal(confirmed.InvocationID, shown.InvocationID); assert.equal(confirmed.MainPID, shown.MainPID);
+            keeperImageObserved = true;
             report.qualified = true; report.result = { pid, processStartToken: `linux-proc-start-ticks:${fields[19]}`,
               actualImage, roots, enabled, invocationId: shown.InvocationID };
             break;
@@ -273,20 +369,53 @@ async function campaign(ledgerFile: string): Promise<void> {
     throw error;
   } finally {
     let observationError: unknown;
+    // Observe protection independently even when the actual keeper is RED.
+    // Qualification also needs real image startup, not merely a start attempt
+    // that could fail before exec; it never upgrades a keeper refusal to GREEN.
+    try {
+      const markerAbsent = await preloadMarkerAbsent(installed.preloadMarker);
+      report.protectedPreload = { marker: installed.preloadMarker, markerAbsent, keeperStartAttempted,
+        managerPreloadConfirmed, keeperImageObserved,
+        verified: Boolean(report.preloadPositiveControl) && managerPreloadConfirmed && keeperImageObserved && markerAbsent };
+      assert(markerAbsent, 'signed keeper initial ELF executed the injected preload library');
+      if (report.qualified) assert(managerPreloadConfirmed && keeperImageObserved && report.preloadPositiveControl,
+        'keeper qualification needs the actual loader positive control and manager injection');
+    } catch (error) {
+      observationError = error; report.qualified = false;
+      report.preloadObservationError = String((error as Error).stack ?? error).slice(0, 8192);
+    }
+    if (preloadEnvironmentTouched) {
+      try {
+        const unset = userCommand(['unset-environment', 'LD_PRELOAD']);
+        report.preloadEnvironmentCleanup = unset; assert.equal(unset.status, 0, unset.stderr);
+        const cleared = userCommand(['show-environment']); assert.equal(cleared.status, 0, cleared.stderr);
+        assert(!cleared.stdout.split('\n').some(line => line.startsWith('LD_PRELOAD=')), 'fresh manager retained LD_PRELOAD');
+        report.preloadEnvironmentCleared = true;
+      } catch (error) {
+        observationError ??= error; report.qualified = false;
+        report.preloadEnvironmentCleanupError = String((error as Error).stack ?? error).slice(0, 8192);
+      }
+    }
     if (shown && !report.journal) {
       try { report.journal = journal(shown.InvocationID); }
       catch (error) {
-        observationError = error; report.qualified = false;
+        observationError ??= error; report.qualified = false;
         report.journalError = String((error as Error).stack ?? error).slice(0, 8192);
       }
     }
-    const after = await authorityAbsent(installed.stateRoot);
-    report.authorityAfterKeeper = after;
-    if (!Object.values(after).every(Boolean)) { report.qualified = false; report.authorityViolation = true; }
+    let after: Record<string, boolean> | undefined;
+    try {
+      after = await authorityAbsent(installed.stateRoot);
+      report.authorityAfterKeeper = after;
+      if (!Object.values(after).every(Boolean)) { report.qualified = false; report.authorityViolation = true; }
+    } catch (error) {
+      observationError ??= error; report.qualified = false;
+      report.authorityObservationError = String((error as Error).stack ?? error).slice(0, 8192);
+    }
     await writeFile(installed.reportFile, JSON.stringify(report, null, 2) + '\n', { flag: 'wx', mode: 0o644 });
     console.log(`Actual installed keeper report: ${installed.reportFile}`);
-    assert(Object.values(after).every(Boolean), 'keeper must not acquire database/StateOwner/control authority');
     if (observationError) throw observationError;
+    assert(after && Object.values(after).every(Boolean), 'keeper must not acquire database/StateOwner/control authority');
   }
 }
 

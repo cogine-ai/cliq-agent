@@ -365,6 +365,22 @@ actual keeper lifetime/image, namespace and exact held anchor identity. Only
 the Supervisor/native execution owner creates or retires execution subtrees.
 The service dependency is one-way; Supervisor restart must not stop the anchor.
 
+Keeper retains a native-owned `O_PATH` pin to the initialization's original root
+for its entire healthy lifetime. A one-time private self-FD inventory rejects
+pre-existing cgroup `O_PATH` directories before creating that pin, including
+inherited descriptors in direct selected-image startup. All other cgroup
+directories use `O_RDONLY`; leaf and traversal descriptors retire before
+publishing readiness. No control operation can replace or reinitialize the pin.
+A bounded PID/FD ready locator only identifies where to observe this resource;
+it cannot certify the initialization phase. Supervisor verifies the source's
+actual procfs `fdinfo` flags/inode/mount identity and follows only the verified
+keeper's kernel descriptor entry, not a path returned by `readlink`. It binds
+the opened physical root to the actual cgroup parent and independently opened
+named root. Lifetime, credentials, selected image, namespaces and source/root
+bindings are rechecked around the cut. Unavailable procfs/FD access or changed
+identity refuses acquisition; neither ready metadata nor a missing root proves
+an old worker's death.
+
 Keep `LinuxWorkerInstallation.cgroupParent` as the held anchor-root seam;
 do not add a separately caller-selected controller parent. Internally,
 `openController(helper, cgroupRootFd)` creates the unique private controller
