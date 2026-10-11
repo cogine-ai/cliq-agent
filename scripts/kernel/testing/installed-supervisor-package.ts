@@ -15,9 +15,10 @@ import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '.
 import { buildSupervisorSeaImage, prepareSupervisorSeaCarrier } from './supervisor-sea-builder.js';
 
 /** Construct the same actual SEA/helper package for independent Linux startup
- * and user-manager qualifiers. Its unused opaque worker grants no execution,
- * admission/model, release-signature or complete I1 qualification. */
-export async function buildInstalledSupervisorPackage(fixture: string) {
+ * and user-manager qualifiers. Real worker images are installed, not launched:
+ * they do not qualify admission, execution, release signing or complete I1. */
+export async function buildInstalledSupervisorPackage(fixture: string,
+  variant: 'complete' | 'retirement-native-missing' = 'complete') {
   const repository = fileURLToPath(new URL('../../..', import.meta.url));
   const { nodeRoot, carrier } = await prepareSupervisorSeaCarrier(fixture);
   const keys = generateKeyPairSync('ed25519');
@@ -39,6 +40,23 @@ export async function buildInstalledSupervisorPackage(fixture: string) {
   assert.equal(compilation.error, undefined, `cc: ${compilation.error}`);
   assert.equal(compilation.status, 0, `cc: ${compilation.stderr}`);
   await chmod(helper, 0o500);
+  // Reuse the production recipe, outside the closed package tree. Its addon
+  // must use this SEA carrier's headers, not the client's ambient Node headers.
+  const workerRoot = path.join(fixture, 'worker-images');
+  const workers = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-worker.mjs'),
+    workerRoot, path.join(nodeRoot, 'include/node')],
+  { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+  assert.equal(workers.error, undefined, 'production worker image construction did not join');
+  assert.equal(workers.status, 0, `production worker image construction: ${workers.stderr}`);
+  const workerEntries = await Promise.all(([
+    ['linux_worker_native', 'platform_helper', 'linux-worker.node'],
+    ['linux_worker_controller', 'platform_helper', 'cliq-linux-worker-controller'],
+    ['linux_bubblewrap', 'platform_helper', 'cliq-linux-bubblewrap'],
+    ['linux_worker', 'worker', 'cliq-linux-worker'],
+    ['edit', 'tool_adapter', 'cliq-linux-edit'],
+  ] as const).filter(([entryId]) => variant !== 'retirement-native-missing' || entryId !== 'linux_worker_native')
+    .map(async ([entryId, role, filename]) => ({ entryId, role,
+    relativePath: `workers/${filename}`, executable: true, bytes: await readFile(path.join(workerRoot, filename)) })));
   const profile = policyProfile();
   const rootCore = { schemaVersion: 1, format: 'cliq-sandbox-root-profile-v1', protocol: 'cliq-fresh-empty-root-v1',
     filesystemKind: 'fresh_ephemeral_tmpfs', fixedDirectories: ['/home/cliq', '/tmp', '/work'], persistent: false, networkConfiguration: 'none' };
@@ -46,8 +64,7 @@ export async function buildInstalledSupervisorPackage(fixture: string) {
     { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true, bytes: await readFile(supervisorFile) },
     { entryId: STATE_OWNER_NATIVE_ENTRY_ID, role: 'platform_helper', relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH,
       executable: true, bytes: await readFile(helper) },
-    { entryId: 'unused-installed-worker', role: 'worker', relativePath: 'workers/worker', executable: true,
-      bytes: Buffer.from('opaque qualification-only worker; never exec or dlopen\n') },
+    ...workerEntries,
     { entryId: 'installed-policy', role: 'policy_engine', relativePath: 'profiles/policy.json', executable: false, bytes: canonicalJsonBytes(profile) },
     { entryId: 'default_https_trust_store', role: 'trust_store', relativePath: 'profiles/https-trust.pem', executable: false,
       bytes: Buffer.from(rootCertificates.join('\n')) },

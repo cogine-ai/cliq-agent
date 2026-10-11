@@ -21,6 +21,7 @@ import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './test
 import { qualifyInstalledInspectorSignal, type InstalledInspectorSignalReport } from './testing/installed-inspector-signal.js';
 import { assertInstalledReadExchanges, inspectInstalledOwnerHistory, installedReadClientScript } from './testing/installed-read-control.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
+import { invalidRetainedStartupFixtureScript, qualifyInstalledStartupRetirement } from './testing/installed-startup-retirement.js';
 import { SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
 
 type InstalledFixture = {
@@ -240,11 +241,13 @@ async function stageInstaller(installed: InstalledFixture) {
     externalImports: [...new Set(imports.map(item => item.path))].sort() };
 }
 
-async function campaign(ledgerFile: string): Promise<void> {
+async function campaign(ledgerFile: string, retirementRefusal = false): Promise<void> {
   assert.equal(process.geteuid!(), 0, 'only the frozen-ledger root orchestrator may stage this fixture');
   const ledger = await readLedger(ledgerFile), installed = ledger.installed;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false,
-    scope: 'actual signed installed keeper source, Supervisor original-pin acquisition and graceful/automatic owner restarts only; not Run, worker, admission or complete I1',
+    scope: retirementRefusal
+      ? 'independent invalid retained-state installed startup refusal; no admitted Run, READY, controller birth, death or I1 execution'
+      : 'actual signed installed keeper source, Supervisor original-pin acquisition and graceful/automatic owner restarts only; not Run, worker, admission or complete I1',
     embeddedNodeVersion: SUPERVISOR_SEA_NODE_VERSION, uid: ledger.uid, keeperUnit: installed.keeperUnit };
   const userCommand = (args: string[]) => command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
     `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
@@ -286,7 +289,8 @@ async function campaign(ledgerFile: string): Promise<void> {
     const stage = await lstat(installed.buildFixture);
     assert(stage.isDirectory() && !stage.isSymbolicLink()); assert.equal(stage.uid, 0); assert.equal(stage.gid, 0);
     assert.equal(stage.mode & 0o7777, 0o755);
-    const { packageRoot, releaseKeys, bundle, contents, carrier } = await buildInstalledSupervisorPackage(installed.buildFixture);
+    const { packageRoot, releaseKeys, bundle, contents, carrier } = await buildInstalledSupervisorPackage(installed.buildFixture,
+      retirementRefusal ? 'retirement-native-missing' : 'complete');
     assert.equal(packageRoot, installed.packageRoot);
     report.installer = await stageInstaller(installed);
     report.preloadPositiveControl = await positivePreloadControl(ledger);
@@ -503,6 +507,22 @@ async function campaign(ledgerFile: string): Promise<void> {
             await checkControl();
             report.supervisorReadPositive = { pid: supervisorPid, ownerEpoch: owner.ownerEpoch,
               supervisorInstanceId: owner.supervisorInstanceId, reconnects: 1 };
+            if (retirementRefusal) {
+              const refusal: Record<string, unknown> = {}; report.startupRetirementRefusal = refusal;
+              await qualifyInstalledStartupRetirement({ stateRoot: installed.stateRoot, uid: ledger.uid,
+                rootPath: roots[0]!.path, bundle, owner, report: refusal,
+                fixture: encoded => command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
+                  `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', process.execPath,
+                  '--input-type=module', '-e', invalidRetainedStartupFixtureScript, installed.stateRoot, encoded]),
+                start: () => userCommand(['start', installed.supervisorUnit]),
+                show: () => show(installed.supervisorUnit), stopAndJoin: stopAndJoinSupervisor,
+                journal: (invocationId, currentPid) => journal(invocationId, currentPid, installed.supervisorUnit),
+              });
+              const unchanged: Record<string, unknown> = {}; report.sourceAfterStartupRefusal = unchanged;
+              await qualifyInstalledAnchorSource({ ...sourceInput, report: unchanged }); assertKeeperPin(unchanged);
+              assert.equal(refusal.qualified, true); report.qualified = true;
+              break;
+            }
             const consumer: Record<string, unknown> = { diagnosticOnly: true }; report.consumer = consumer;
             await qualifyInstalledAnchorConsumer({ pid: supervisorPid, source: { ...sourceInput, report: sourcePublication }, report: consumer });
             assertKeeperPin(consumer.sourceAfter as Record<string, unknown>);
@@ -793,4 +813,5 @@ assert.equal(process.platform, 'linux', 'installed keeper qualification requires
 assert.equal(process.arch, 'x64', 'no installed keeper carrier qualified for this architecture');
 const [mode, ...args] = process.argv.slice(2);
 if (mode === '--campaign' && args.length === 1) await campaign(args[0]!);
-else throw new Error('expected the closed --campaign LEDGER mode');
+else if (mode === '--retirement-refusal' && args.length === 1) await campaign(args[0]!, true);
+else throw new Error('expected the closed --campaign LEDGER or --retirement-refusal LEDGER mode');

@@ -161,8 +161,12 @@ static gboolean read_item(Probe *p) {
   const char *session, *content_type;
   g_variant_get(reply, "((&o@ay@ay&s))", &session, &parameters, &bytes, &content_type);
   gsize count = 0; const guint8 *actual = g_variant_get_fixed_array(bytes, &count, 1);
-  if (strcmp(session, p->session) || g_variant_n_children(parameters) || strcmp(content_type, CONTENT_TYPE) || count != 32)
+  /* GNOME 40 returns text/plain even for stored binary bytes. MIME metadata is
+   * not secret authority: do not decode it or weaken the exact byte comparison. */
+  if (strcmp(session, p->session) || g_variant_n_children(parameters) || count != 32)
     return fail(p, "secret-envelope", NULL);
+  if (strcmp(content_type, CONTENT_TYPE) && strcmp(content_type, "text/plain"))
+    return fail(p, "secret-content-type", NULL);
   guint8 different = 0; for (gsize i = 0; i < 32; i++) different |= actual[i] ^ p->secret[i];
   if (different) return fail(p, "secret-comparison", NULL);
   p->readback = TRUE; p->owned = TRUE; return TRUE;

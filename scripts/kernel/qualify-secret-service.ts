@@ -67,8 +67,16 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(result.error, undefined, 'actual platform client did not join');
     return { status: result.status, signal: result.signal, stdout: result.stdout, stderr: result.stderr };
   };
-  const busOwner = () => command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`,
-    'call', 'org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'GetNameOwner', 's', 'org.freedesktop.secrets']);
+  const busLookup = (method: 'GetNameOwner' | 'NameHasOwner') => command('/usr/bin/busctl',
+    [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'call', 'org.freedesktop.DBus',
+      '/org/freedesktop/DBus', 'org.freedesktop.DBus', method, 's', 'org.freedesktop.secrets']);
+  const observeServiceAbsent = () => {
+    const result = busLookup('NameHasOwner');
+    assert.equal(result.status, 0, 'actual user bus did not observe the platform service name');
+    assert.equal(result.signal, null);
+    assert.equal(result.stdout.trim(), 'b false', 'platform service still owns its bus name');
+    return result;
+  };
   const secret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   let daemon: ReturnType<typeof spawn> | undefined;
   let daemonExit: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
@@ -105,7 +113,7 @@ async function campaign(filename: string): Promise<void> {
     const helper = await lstat(recipe.helper);
     assert(helper.isFile() && !helper.isSymbolicLink()); assert.equal(helper.uid, 0);
     assert.equal(helper.nlink, 1); assert.equal(helper.mode & 0o7777, 0o555);
-    const absent = busOwner(); assert.notEqual(absent.status, 0, 'fresh fixture must not adopt an existing Secret Service');
+    report.nameBefore = observeServiceAbsent();
     await mkdir(recipe.controlDirectory, { mode: 0o700 });
     await chown(recipe.controlDirectory, ledger.uid, ledger.gid);
     daemon = spawn(userArguments[0], [...userArguments[1], `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
@@ -117,9 +125,9 @@ async function campaign(filename: string): Promise<void> {
     daemon.stdin!.on('error', () => { report.passwordPipeFailed = true; });
     daemon.stdin!.end(password);
     const deadline = Date.now() + 10000;
-    let owner: ReturnType<typeof busOwner>;
+    let owner: ReturnType<typeof busLookup>;
     for (;;) {
-      owner = busOwner();
+      owner = busLookup('GetNameOwner');
       if (owner.status === 0) break;
       assert.equal(daemon.exitCode, null, 'actual platform daemon exited before owning its name');
       assert(Date.now() < deadline, 'actual platform daemon did not acquire its name'); await delay(20);
@@ -168,7 +176,7 @@ async function campaign(filename: string): Promise<void> {
           }
           report.daemonLifetimeGone = true;
         }
-        const gone = busOwner(); assert.notEqual(gone.status, 0, 'stopped platform service still owns its bus name');
+        report.nameAfter = observeServiceAbsent();
         report.serviceNameAbsent = true;
       } catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'platform prerequisite cleanup did not join'); }
     }

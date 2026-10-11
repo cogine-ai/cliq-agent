@@ -55,8 +55,8 @@ jobs:
       - run: npm ci
       - run: npm run build
         id: build
-      - name: Install the actual Secret Service platform prerequisite
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev
+      - name: Install actual platform and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap
       - name: Verify installed-state and native-retirement boundaries on Linux 22.04
         # These component tests also run in the 24.04 matrix. Keep the real
         # installed/native boundary on the qualified 22.04 baseline too;
@@ -95,6 +95,12 @@ jobs:
         run: |
           probe_node=$(realpath "$(command -v node)")
           sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --secrets "$probe_node" "$RUNNER_TEMP/cliq-secret-service"
+      - name: Reject unresolved installed preactivation before publishing the Store
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --installed-retirement-refusal "$probe_node" "$RUNNER_TEMP/cliq-installed-retirement"
       - name: Retain bounded component and lifecycle reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -106,6 +112,7 @@ jobs:
             ${{ runner.temp }}/cliq-installed-startup/report.json
             ${{ runner.temp }}/cliq-installed-keeper/*.json
             ${{ runner.temp }}/cliq-secret-service/*.json
+            ${{ runner.temp }}/cliq-installed-retirement/*.json
           if-no-files-found: warn
           retention-days: 7
 

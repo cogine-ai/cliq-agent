@@ -100,7 +100,7 @@ async function start(): Promise<void> {
   anchor.assertHeld();
   // Only this selected mode acquires authority. Genesis borrows these newly
   // held, verified descriptors, never the retired bootstrap's historical FDs.
-  store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys }, selected);
+  store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys }, selected, anchor);
   anchor.assertHeld();
   service = openInstalledControl(store, { serverBuild: 'cliq-installed-v1' }, report);
   containmentHealth = setInterval(() => {

@@ -12,11 +12,12 @@ export LC_ALL=C
 probe_campaign_kind=diagnostic
 case ${1:-} in
   --installed) probe_campaign_kind=installed; shift ;;
+  --installed-retirement-refusal) probe_campaign_kind=retirement; shift ;;
   --secrets) probe_campaign_kind=secrets; shift ;;
 esac
 readonly probe_campaign_kind
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--secrets] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -36,10 +37,10 @@ readonly probe_source="$probe_source_dir/systemd-user-probe.mjs"
 readonly probe_birth_source="$probe_source_dir/cliq-anchor-birth-probe.c"
 [[ -f "$probe_birth_source" && ! -L "$probe_birth_source" ]] || exit 2
 readonly probe_installed_driver="$probe_source_dir/qualify-installed-keeper.ts"
-[[ "$probe_campaign_kind" != installed || ( -f "$probe_installed_driver" && ! -L "$probe_installed_driver" ) ]] || exit 2
+[[ ( "$probe_campaign_kind" != installed && "$probe_campaign_kind" != retirement ) || ( -f "$probe_installed_driver" && ! -L "$probe_installed_driver" ) ]] || exit 2
 readonly probe_secret_driver="$probe_source_dir/qualify-secret-service.ts"
 readonly probe_secret_source="$probe_source_dir/cliq-secret-service-probe.c"
-if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = secrets ]]; then
+if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement || "$probe_campaign_kind" = secrets ]]; then
   probe_typescript_driver=$probe_installed_driver
   if [[ "$probe_campaign_kind" = secrets ]]; then
     probe_typescript_driver=$probe_secret_driver
@@ -327,7 +328,7 @@ const scenarios = ['A', 'B'].flatMap(layout => ['empty', 'live'].flatMap(mode =>
 const anchorUnit = `cliq-probe-${suffix}-anchor.service`;
 const anchor = { unit: anchorUnit, unitFile: `${home}/.config/systemd/user/${anchorUnit}`,
   directory: `${home}/probe/anchor`, readyFile: `${home}/probe/anchor/anchor.json` };
-const installed = mode === 'installed' ? {
+const installed = mode === 'installed' || mode === 'retirement' ? {
   buildFixture: `${fixture}/installed-package-build`, packageRoot: `${fixture}/installed-package-build/package`,
   preloadLibrary: `${fixture}/installed-package-build/installed-loader-preload.so`,
   preloadMarker: `${home}/probe/installed-loader-preload.marker`,
@@ -409,7 +410,7 @@ chown "$probe_uid:$probe_gid" "$probe_anchor_directory"
 printf '[Service]\nType=exec\nExecStart=%s %s anchor %s %s\nDelegate=cpu memory pids\nKillMode=control-group\nRestart=no\nTimeoutStopSec=2s\nEnvironment=NODE_OPTIONS=\n' \
   "$probe_node" "$probe_script" "$probe_anchor_directory" "$probe_anchor_unit" > "$probe_home/.config/systemd/user/$probe_anchor_unit"
 chmod 0444 "$probe_home/.config/systemd/user/$probe_anchor_unit"
-elif [[ "$probe_campaign_kind" = installed ]]; then
+elif [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement ]]; then
   # Registered in the immutable ledger before the account or either unit was
   # created. Only the Supervisor retries; its keeper must remain the same source.
   probe_units+=("$probe_installed_keeper_unit" "$probe_installed_supervisor_unit")
@@ -468,6 +469,8 @@ if [[ "$probe_campaign_kind" = diagnostic ]]; then
   "$probe_node" "$probe_script" campaign "$probe_ledger"
 elif [[ "$probe_campaign_kind" = installed ]]; then
   "$probe_node" --import "$probe_installed_loader" "$probe_installed_driver" --campaign "$probe_ledger"
+elif [[ "$probe_campaign_kind" = retirement ]]; then
+  "$probe_node" --import "$probe_installed_loader" "$probe_installed_driver" --retirement-refusal "$probe_ledger"
 else
   "$probe_node" --import "$probe_installed_loader" "$probe_secret_driver" --campaign "$probe_ledger"
 fi
