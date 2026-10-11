@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import { chmod, copyFile, lstat, mkdtemp, open, rm } from 'node:fs/promises';
+import { chmod, chown, copyFile, lstat, mkdtemp, open, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -189,7 +189,11 @@ async function helper() {
     assert.ok(self.cgroup !== expected.rootPath && !self.cgroup.startsWith(`${expected.rootPath}/`), 'helper must remain outside disposable cgroup');
     const stage = path.dirname(fileURLToPath(import.meta.url));
     for (const filename of [fileURLToPath(import.meta.url), path.join(stage, 'linux-fork-tracer.node')]) {
-      const stat = await lstat(filename); assert.ok(stat.isFile() && !stat.isSymbolicLink() && stat.uid === 0 && stat.nlink === 1 && (stat.mode & 0o222) === 0);
+      const stat = await lstat(filename);
+      if (!(stat.isFile() && !stat.isSymbolicLink() && stat.uid === 0 && stat.nlink === 1 && (stat.mode & 0o222) === 0)) {
+        assert.fail(`root-owned immutable staged file required: ${JSON.stringify({ filename, isFile: stat.isFile(), isSymlink: stat.isSymbolicLink(),
+          uid: stat.uid, gid: stat.gid, nlink: stat.nlink, mode: stat.mode.toString(8), dev: stat.dev, ino: stat.ino })}`);
+      }
     }
     tracer = createRequire(import.meta.url)(path.join(stage, 'linux-fork-tracer.node'));
     for (const method of ['arm', 'pollFork', 'release']) assert.equal(typeof tracer[method], 'function');
@@ -348,6 +352,8 @@ async function job() {
     const script = path.join(stage, 'qualify-controller-anchor-birth.mjs'), node = path.join(stage, 'node');
     await copyFile(fileURLToPath(import.meta.url), script, fs.constants.COPYFILE_EXCL);
     await copyFile(process.execPath, node, fs.constants.COPYFILE_EXCL);
+    // copyFile preserves source ownership; these exclusive stage copies must belong to root.
+    await chown(script, 0, 0); await chown(node, 0, 0);
     await chmod(script, 0o555); await chmod(node, 0o555);
     const includes = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-state-owner-native.mjs'), '--print-includes'], { encoding: 'utf8', timeout: 30_000 });
     if (includes.error) throw includes.error; assert.equal(includes.status, 0, includes.stderr);
