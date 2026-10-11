@@ -295,6 +295,7 @@ if (process.platform === 'linux') {
     `, binary], { encoding: 'utf8', timeout: 10000 });
     assert.equal(child.status, 0, child.stderr);
     const observed = JSON.parse(child.stdout.trim()) as ProcessExitObservation;
+    t.diagnostic(`actual process-exit observation: ${JSON.stringify(observed)}`);
     // Establish that the race really happened and resources really retired
     // before testing the production observation. No errno is injected: the
     // wrapped openat runs only after exact waitpid reaps the original lifetime.
@@ -303,7 +304,10 @@ if (process.platform === 'linux') {
     assert.match(observed.originalStartToken, /^linux-proc-start-ticks:[0-9]+$/);
     assert.equal(observed.readReached, 1, 'production sampling must already hold the actual proc directory');
     assert.equal(observed.reapedBySigkill, 1, 'the original child must really die and be exactly reaped');
-    assert.equal(observed.readErrno, osConstants.errno.ENOENT, 'Linux must produce the failed old-proc read itself');
+    // An old held-proc ENOENT/ESRCH can trigger one fresh cut, but is not
+    // itself death proof. Only the fresh open's own ENOENT establishes absence.
+    assert.ok([osConstants.errno.ENOENT, osConstants.errno.ESRCH].includes(observed.readErrno),
+      'Linux must produce ENOENT or ESRCH for the failed old-proc read itself');
     assert.equal(observed.freshErrno, osConstants.errno.ENOENT, 'an independent fresh open must prove kernel absence');
     assert.equal(observed.heldProcClosed, 1, 'sampling must actually retire its original proc descriptor');
     assert.equal(observed.retirementFailed, 0, 'real process disappearance is not an uncertain descriptor close');
