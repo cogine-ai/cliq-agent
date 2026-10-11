@@ -174,7 +174,10 @@ async function positivePreloadControl(ledger: Ledger) {
   assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr); assert.equal(child.stderr, '');
   assert(Number.isSafeInteger(child.pid) && child.pid > 0);
   const actual = parseJsonStrict(child.stdout.trim());
-  assert.deepEqual(actual, { pid: child.pid, uid: ledger.uid, euid: ledger.uid, gid: ledger.gid, egid: ledger.gid,
+  assert(actual !== null && typeof actual === 'object' && !Array.isArray(actual));
+  // The strict parser deliberately returns null-prototype records. Compare
+  // their exact own data, not that defensive representation's prototype.
+  assert.deepEqual({ ...actual }, { pid: child.pid, uid: ledger.uid, euid: ledger.uid, gid: ledger.gid, egid: ledger.gid,
     nodeVersion: `v${SUPERVISOR_SEA_NODE_VERSION}` });
   const expected = `cliq-installed-loader-preload-v1\npid=${child.pid}\nuid=${ledger.uid}\n`;
   const marker = await open(installed.preloadMarker, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -377,7 +380,10 @@ async function campaign(ledgerFile: string): Promise<void> {
       report.protectedPreload = { marker: installed.preloadMarker, markerAbsent, keeperStartAttempted,
         managerPreloadConfirmed, keeperImageObserved,
         verified: Boolean(report.preloadPositiveControl) && managerPreloadConfirmed && keeperImageObserved && markerAbsent };
-      assert(markerAbsent, 'signed keeper initial ELF executed the injected preload library');
+      // A failed positive control may leave its own marker. Do not replace
+      // that failure with a claim about a keeper that was never started.
+      if (report.preloadPositiveControl && managerPreloadConfirmed && keeperStartAttempted)
+        assert(markerAbsent, 'signed keeper initial ELF executed the injected preload library');
       if (report.qualified) assert(managerPreloadConfirmed && keeperImageObserved && report.preloadPositiveControl,
         'keeper qualification needs the actual loader positive control and manager injection');
     } catch (error) {
