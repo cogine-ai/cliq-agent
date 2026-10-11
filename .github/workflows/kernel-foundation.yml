@@ -84,6 +84,7 @@ jobs:
           scripts/kernel/testing/credential-authority-bridge.test.ts
           scripts/kernel/testing/credential-authority-installed.test.ts
           scripts/kernel/testing/endpoint-authority-installed.test.ts
+          scripts/kernel/testing/endpoint-authority-journey.test.ts
       - name: Qualify complete application image binding
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --import tsx scripts/kernel/qualify-supervisor-image.ts "$RUNNER_TEMP/cliq-supervisor-image"
