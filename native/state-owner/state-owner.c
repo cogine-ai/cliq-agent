@@ -521,6 +521,7 @@ static int observe_process(pid_t pid, char token[128]) {
 #include "source-staging.c"
 #include "worker-reservation.c"
 #include "source-root.c"
+#include "credential-authority.c"
 
 static napi_value process_start_token(napi_env env, napi_callback_info info) {
     (void)info;
@@ -572,6 +573,7 @@ static napi_value assert_prior_process_dead(napi_env env, napi_callback_info inf
 static napi_value initialize(napi_env env, napi_value exports) {
     const napi_property_descriptor methods[] = {
         {"acquireLock", NULL, acquire_lock, NULL, NULL, NULL, napi_default, NULL},
+        {"acquireCredentialScope", NULL, acquire_credential_scope, NULL, NULL, NULL, napi_default, NULL},
         {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},
         {"captureCurrentProcess", NULL, capture_current_process, NULL, NULL, NULL, napi_default, NULL},
         {"executeInstalledImage", NULL, execute_installed_image, NULL, NULL, NULL, napi_default, NULL},

@@ -16,18 +16,18 @@ static int injected = 0;
 static int test_owned_descriptors[256];
 static unsigned int test_owned_count = 0;
 
-static enum role retirement_role(void) {
+static enum credential_role retirement_role(void) {
   const char *requested = getenv("CLIQ_CREDENTIAL_VFS_RETIREMENT_ROLE");
   if (requested != NULL) {
     for (int role = ROOT; role < ROLE_COUNT; ++role) {
-      if (strcmp(requested, roles[role]) == 0) return (enum role)role;
+      if (strcmp(requested, roles[role]) == 0) return (enum credential_role)role;
     }
   }
   return ROLE_COUNT;
 }
 
 static int retirement_probe_close(int descriptor) {
-  enum role target = retirement_role();
+  enum credential_role target = retirement_role();
   struct stat actual;
   /* consume_close has already incremented closes and consumed its numeric FD.
    * This cannot fire for checked_close's temporary directory descriptors or

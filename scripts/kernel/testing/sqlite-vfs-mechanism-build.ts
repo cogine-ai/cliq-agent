@@ -35,8 +35,19 @@ async function buildFixedProbe(fixture: string, nodeRoot: string, sourceLeaf: st
   assert.equal(compiled.error, undefined); assert.equal(compiled.status, 0, compiled.stderr);
   await chmod(helper, 0o555);
   const bytes = await readFile(helper);
+  // A translation-unit hash alone does not cover its included fixed I/O body.
+  // Retain that original field for old trace readers; new evidence explicitly
+  // records every private source contributing to a credential helper.
+  const sources = [source, ...(sourceLeaf === 'credential-vfs-retirement-probe.c'
+    ? [fileURLToPath(new URL('credential-vfs-probe.c', import.meta.url))] : []),
+  ...(sourceLeaf.startsWith('credential-vfs-')
+    ? [fileURLToPath(new URL('../../../native/state-owner/credential-vfs.h', import.meta.url))] : [])];
+  const sourceDigests = await Promise.all(sources.map(async sourcePath => ({
+    path: path.relative(fileURLToPath(new URL('../../..', import.meta.url)), sourcePath),
+    sha256: createHash('sha256').update(await readFile(sourcePath)).digest('hex'),
+  })));
   return { helper, claim: { leaf: path.basename(helper), byteCount: bytes.length,
     sha256: createHash('sha256').update(bytes).digest('hex') },
-  construction: { headers: SQLITE_EXTENSION_HEADER_PINS, sourceSha256: createHash('sha256').update(await readFile(source)).digest('hex'),
+  construction: { headers: SQLITE_EXTENSION_HEADER_PINS, sourceSha256: createHash('sha256').update(await readFile(source)).digest('hex'), sourceDigests,
     compilerArguments: args, secondSqliteEngineLinked: false } };
 }

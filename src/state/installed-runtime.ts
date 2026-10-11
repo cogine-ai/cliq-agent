@@ -3,17 +3,20 @@ import { constants, type BigIntStats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, type FileHandle } from 'node:fs/promises';
 import { isMainThread } from 'node:worker_threads';
 import { Module } from 'node:module';
+import { isSea } from 'node:sea';
+import { DatabaseSync } from 'node:sqlite';
 
 import { KERNEL_CAS_DIRECTORY } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import { assertArtifactRef, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
+import { assertArtifactRef, identityHash, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 import type { NativeWorkerBinding, NativeWorkerImage } from '../sandbox/linux-worker.js';
-import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
+import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
+  stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
 
 export type HeldInstalledRuntime = Readonly<{
@@ -28,6 +31,65 @@ export type HeldInstalledKeeper = Readonly<{ assertHeld(): void; close(): void }
 /** Supervisor ownership of the verified keeper's original root, not admission
  * authority, a pathname substitute or a transferable numeric descriptor. */
 export type HeldInstalledAnchor = Readonly<{ assertHeld(): void; close(): void }>;
+/** Physical authority-store scope, not an authenticated channel or credential
+ * grant. Its SQL, data descriptors, URI and retirement never escape. */
+export type HeldCredentialAuthorityLock = Readonly<{ assertHeld(): void }>;
+type CredentialBinding = { selected: HeldInstalledRuntime; ownerPrincipalId: string; pid: number; processStartToken: string;
+  native: NativeStateOwner; scope: Readonly<{ generation: string; assertHeld(): void }>; generation: string; active: boolean };
+const credentialTokens = new WeakMap<HeldCredentialAuthorityLock, CredentialBinding>();
+
+function checkedCredentialToken(token: HeldCredentialAuthorityLock): CredentialBinding {
+  const held = credentialTokens.get(token);
+  if (!held || !held.active) throw new KernelStorageError('ARTIFACT_MISMATCH', 'credential authority token is invalid or its callback has ended');
+  if (held.pid !== process.pid || held.native.processStartToken() !== held.processStartToken ||
+      held.scope.generation !== held.generation)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'credential authority token belongs to another process or generation');
+  held.scope.assertHeld();
+  return held;
+}
+
+/** Only the verified installed producer can mint tokens. Keep both this
+ * function and its SQL private: a structural factory/native/owner argument
+ * must never become a second way to manufacture repository authority. */
+async function runHeldCredentialAuthority<T>(input: Readonly<{
+  selected: HeldInstalledRuntime; ownerPrincipalId: string; native: NativeStateOwner;
+  scope: Readonly<{ generation: string; assertHeld(): void }>;
+}>, operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T> {
+  const binding: CredentialBinding = { ...input, pid: process.pid, processStartToken: input.native.processStartToken(),
+    generation: input.scope.generation, active: true };
+  const token: HeldCredentialAuthorityLock = Object.freeze({ assertHeld() {
+    if (this !== token) throw new TypeError('invalid credential authority token receiver');
+    checkedCredentialToken(token);
+  } });
+  credentialTokens.set(token, binding);
+  let database: DatabaseSync | undefined;
+  let failed = false;
+  let failure: unknown;
+  let result: T;
+  try {
+    token.assertHeld();
+    database = new DatabaseSync('file:cliq-credential-authority?vfs=cliq-credential-vfs-v1', { allowExtension: false });
+    if (database.prepare('PRAGMA locking_mode=EXCLUSIVE').get()?.locking_mode !== 'exclusive')
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'credential authority requires exclusive pager mode');
+    database.exec('PRAGMA temp_store=MEMORY; PRAGMA mmap_size=0; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=0');
+    if (database.prepare('PRAGMA journal_mode=WAL').get()?.journal_mode !== 'wal')
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'credential authority requires fixed exclusive-mode WAL');
+    // Initialize the real transaction facility without inventing a schema,
+    // endpoint, platform observation or authenticated business authority.
+    database.exec('BEGIN IMMEDIATE; COMMIT');
+    token.assertHeld();
+    result = await operation(token);
+    token.assertHeld();
+  } catch (error) { failed = true; failure = error; }
+  finally {
+    binding.active = false;
+    try { database?.close(); }
+    catch (error) { throw new ResourceRetirementError('credential authority database did not retire',
+      new AggregateError(failed ? [failure, error] : [error])); }
+  }
+  if (failed) throw failure;
+  return result!;
+}
 
 type InstalledDirectoryIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
 /** Trusted startup observation only. No descriptor or independently supplied
@@ -49,8 +111,10 @@ type InstalledRuntimeBinding = {
   acquireAnchor(): Promise<HeldInstalledAnchor>;
   loadWorkerNative(): Promise<NativeWorkerBinding>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
+  credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T>;
 };
 const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
+let credentialScopeReserved = false;
 const heldInstalledAnchors = new WeakMap<HeldInstalledAnchor, { selected: HeldInstalledRuntime;
   withRoot(operation: (fd: number, rootPath: string) => void): void }>();
 
@@ -96,6 +160,23 @@ export function withHeldInstalledRuntime<T>(held: HeldInstalledRuntime,
   const binding = heldInstalledRuntimes.get(held);
   if (binding === undefined) mismatch('installed runtime is not a verified held selection');
   return binding.borrow(operation);
+}
+
+/** Ordinary same-user credential-store scope. Preoccupy the whole process
+ * before enqueue: recursion or a second factory cannot wait on its own tail.
+ * This token carries physical ownership, not an authentication decision. */
+export function withCredentialAuthorityLock<T>(held: HeldInstalledRuntime,
+  operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T> {
+  const binding = heldInstalledRuntimes.get(held);
+  if (!binding) mismatch('installed runtime is not a verified held selection');
+  healthy();
+  if (credentialScopeReserved) throw new TypeError('ordinary credential entry cannot be called while a scope is acquiring, active or draining');
+  if (typeof operation !== 'function') throw new TypeError('credential scope requires a callback');
+  credentialScopeReserved = true;
+  const release = () => { if (!retirementFailure) credentialScopeReserved = false; };
+  try {
+    return binding.credentialScope(operation).finally(release);
+  } catch (error) { release(); throw error; }
 }
 
 type InstalledRuntime = Readonly<{
@@ -593,6 +674,29 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         });
         heldInstalledRuntimes.set(selected, {
           factory: runtime,
+          credentialScope(operation) {
+            return enqueue(async () => {
+              if (!isMainThread || !isSea() || process.versions.node !== '24.21.0')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'credential authority requires the fixed signed installed backend');
+              const native = await loadSelectedNative();
+              const processImage = await native.observeCurrentProcess();
+              if (processImage.executableImageDigest !== supervisor.digest)
+                mismatch('credential authority is not running the signed selected application image');
+              const image = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID)!;
+              const rootIdentity = stateRootIdentityFromDescriptor(stateRoot, {
+                deviceId: state.info.dev.toString(), fileId: state.info.ino.toString(), ownerUid: Number(state.info.uid),
+              });
+              const ownerPrincipalId = identityHash('cliq-local-principal-v1', rootIdentity.identityDigest, 'linux', Number(effectiveUid()));
+              return withHeldCredentialNativeScope(native, {
+                image: image.handle, root: state.handle, rootIdentity: state.info, stateRoot,
+              }, async credential => {
+                await checkedRevalidate(); credential.assertHeld();
+                const result = await runHeldCredentialAuthority({ selected, ownerPrincipalId, native, scope: credential }, operation);
+                await checkedRevalidate(); credential.assertHeld();
+                return result;
+              });
+            }).catch(error => { rememberRetirement(error); throw error; });
+          },
           loadWorkerNative() {
             return enqueue(async () => {
               await checkedRevalidate();

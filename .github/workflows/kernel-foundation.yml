@@ -80,6 +80,9 @@ jobs:
           scripts/kernel/testing/credential-vfs-crash.test.ts
           scripts/kernel/testing/credential-vfs-retirement.test.ts
           scripts/kernel/testing/credential-vfs-storage.test.ts
+          scripts/kernel/testing/credential-authority-native.test.ts
+          scripts/kernel/testing/credential-authority-bridge.test.ts
+          scripts/kernel/testing/credential-authority-installed.test.ts
       - name: Qualify complete application image binding
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --import tsx scripts/kernel/qualify-supervisor-image.ts "$RUNNER_TEMP/cliq-supervisor-image"

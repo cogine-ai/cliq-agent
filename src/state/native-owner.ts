@@ -5,6 +5,7 @@ import path from 'node:path';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import { setImmediate } from 'node:timers/promises';
+import { DatabaseSync } from 'node:sqlite';
 
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, normalizeAbsolutePath } from '../kernel/identity.js';
@@ -389,9 +390,11 @@ type NativeCurrentProcess = Readonly<{
 type NativeInstalledKeeper = Readonly<{ assertHeld(): void; readyLocator(): Buffer; close(): void }>;
 type NativeInstalledAnchor = Readonly<{ assertHeld(): void;
   withRoot(operation: (fd: number, rootPath: string) => void): void; close(): void }>;
+type NativeCredentialScope = Readonly<{ generation: string; assertHeld(): void; close(): void }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
   captureCurrentProcess(): NativeCurrentProcess;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
+  acquireCredentialScope?(rootFd: number, stateRoot: string, root: readonly bigint[]): NativeCredentialScope;
   initializeInstalledKeeper?(stateRoot: string, bundleDigest: string, relativePath: string,
     image: readonly bigint[], root: readonly bigint[]): NativeInstalledKeeper;
   acquireInstalledAnchor?(stateRoot: string, bundleDigest: string, relativePath: string,
@@ -399,6 +402,78 @@ type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): Na
   executeInstalledImage?(fd: number, image: readonly bigint[], bootstrap: readonly bigint[], root: readonly bigint[],
     stateRoot: string, bundleDigest: string, relativePath: string, role: 'keeper' | 'supervisor'): never };
 const nativeBindings = new WeakMap<NativeStateOwner, NativeBinding>();
+// Byte-identical copies may dlopen as different images with different static
+// VFS state. Credential bootstrap must use the actual first loaded image.
+const loadedImageIdentities = new WeakMap<NativeStateOwner, BigIntStats>();
+
+/** Private credential bridge, not a descriptor getter or loader selector.
+ * The installed producer still owns and revalidates this signed FileHandle. */
+export async function assertHeldCredentialNativeImage(native: NativeStateOwner, image: FileHandle): Promise<void> {
+  const expected = loadedImageIdentities.get(native);
+  if (!expected) throw new KernelStorageError('ARTIFACT_MISMATCH', 'credential native image has no actual load provenance');
+  let actual: BigIntStats;
+  try { actual = await image.stat({ bigint: true }); }
+  catch { throw new KernelStorageError('ARTIFACT_MISMATCH', 'credential native image is no longer held'); }
+  if (!['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'].every(key =>
+    actual[key as keyof BigIntStats] === expected[key as keyof BigIntStats])) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'credential helper is not the physically loaded image; a fresh process is required');
+  }
+}
+
+/** Fixed same-image/same-engine bridge. The producer retains both originals;
+ * callers cannot select a data FD, VFS, extension entry, URI or SQLite engine. */
+export async function withHeldCredentialNativeScope<T>(native: NativeStateOwner, input: Readonly<{
+  image: FileHandle; root: FileHandle; rootIdentity: BigIntStats; stateRoot: string;
+}>, operation: (scope: NativeCredentialScope) => Promise<T>): Promise<T> {
+  const binding = nativeBindings.get(native);
+  if (!binding || typeof binding.acquireCredentialScope !== 'function')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed helper lacks credential scope acquisition');
+  if (process.versions.node !== '24.21.0')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'credential authority requires the fixed installed Node 24.21.0 backend');
+  await assertHeldCredentialNativeImage(native, input.image);
+  let owned: NativeCredentialScope;
+  const convert = (error: unknown): never => {
+    if (error instanceof KernelStorageError || error instanceof TypeError) throw error;
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('credential scope descriptors did not retire', error);
+    // Verified native reports this only after complete healthy acquisition
+    // cleanup. Contention is not corruption or a request to recover state.
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_CREDENTIAL_BUSY') throw error;
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'credential scope could not hold its original physical bindings', { cause: error });
+  };
+  try {
+    const root = input.rootIdentity;
+    owned = binding.acquireCredentialScope(input.root.fd, input.stateRoot, [root.dev, root.ino, root.uid, root.gid, root.mode]);
+  } catch (error) { return convert(error); }
+  let result: T;
+  let failed = false;
+  let failure: unknown;
+  try {
+    owned.assertHeld();
+    const bootstrap = new DatabaseSync(':memory:', { allowExtension: true });
+    try {
+      await assertHeldCredentialNativeImage(native, input.image);
+      // This optional entrypoint is provided by the fixed 24.21.0 backend;
+      // the repository's client-minimum Node typings predate that overload.
+      (bootstrap.loadExtension as (image: string, entry: string) => void).call(bootstrap,
+        `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${input.image.fd}`, 'sqlite3_cliqcredentialvfs_init');
+      bootstrap.enableLoadExtension(false);
+      owned.assertHeld();
+    } finally {
+      try { bootstrap.close(); }
+      catch (error) { throw new ResourceRetirementError('credential SQLite bootstrap did not retire', error); }
+    }
+    result = await operation(owned);
+  } catch (error) { failed = true; failure = error; }
+  // A failed database retirement is not permission to close guards beneath a
+  // potentially live pager. Native holds the context until a fresh process.
+  if (failure instanceof ResourceRetirementError) throw failure;
+  try { owned.close(); }
+  catch (error) { throw new ResourceRetirementError('credential native scope did not retire',
+    new AggregateError(failed ? [failure, error] : [error])); }
+  if (failed) throw failure;
+  return result!;
+}
 
 /** Private verified-installation bridge. The keeper owns only containment and
  * its independent image observation, never StateOwner or a caller-supplied FD. */
@@ -753,6 +828,7 @@ export async function loadHeldStateOwnerImage(file: FileHandle, bundle?: Runtime
   };
   loaded = { digest, implementation: Object.freeze(implementation) };
   nativeBindings.set(loaded.implementation, binding);
+  loadedImageIdentities.set(loaded.implementation, before);
   return loaded.implementation;
 }
 

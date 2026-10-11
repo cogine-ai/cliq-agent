@@ -600,6 +600,20 @@ restart observer encountered `SQLITE_BUSY` while reading its new owner epoch.
 The actual new systemd invocation was running, but its remaining observation
 was not completed and must be rerun after a focused observer regression fix.
 
+The focused fix treats only SQLite primary error code 5 as readiness pending;
+corrupt/invalid history still throws and the original deadline is unchanged.
+At `52a9227`, [run 38141222130](https://github.com/cogine-ai/cliq-agent/actions/runs/38141222130)
+passed all seven jobs. Actual Supervisor PIDs were `5845 -> 6207 -> 6581`, with
+distinct systemd invocation IDs and automatic `NRestarts=1`; the persistent
+keeper remained PID `5671`. The new successor history and retained-death
+observations completed, not just the readiness loop. The seven storage cuts
+and normal fresh-process reopen also passed: independently rehashed/replayed
+48 TID traces contained 16,119 calls and 23 physical `/proc` cuts. All four
+runner baselines matched before/after byte-for-byte (SHA-256
+`4b22170a87d407b768e0ca7a21c8298ffd10c48d1181cdc54ccb48c8b4574361`), with zero
+cleanup errors and campaign exits. This new evidence does not change the
+earlier failed run or expand those explicitly bounded storage claims.
+
 The next production increment keeps only the fixed extension headers as
 checksum-verified, offline build inputs; Node still supplies the sole SQLite
 engine. Endpoint/credential/revoke closed decoders validate canonical objects
@@ -619,6 +633,46 @@ not a new generic test framework. The native and SQLite entries must resolve to
 the same original signed helper image, not merely equal hashes from different
 inodes. The fixed signed Node 24.21.0 backend remains separate from the unchanged
 Node >=22.13 public client requirement.
+
+The implementation now uses the existing installed producer's one
+`withCredentialAuthorityLock(selected, callback)` entry, deriving its same-user
+principal from the original root instead of accepting a caller-selected owner.
+Token manufacturing and the database remain private to that producer; a
+structural factory/native/owner object cannot mint another token. Its private
+`runtime/kernel-global.lock` locator is acquired shared before the credentials
+directory or data files are opened, and is retired last. Future migration or
+rollback must reuse the canonical current-StateOwner order, not reacquire
+StateOwner through this ordinary entry. The common fixed I/O body is actually
+shared by the signed helper and conformance adapter, with included-source
+hashes retained in new construction evidence. SQLite file leases retain their
+exact context/generation; native strong references prevent GC from closing
+live resources. The private database disables extensions and uses exclusive
+heap-index WAL. Its initial real transaction creates no invented schema or
+authentication evidence. The signed Linux installed-producer test still needs
+the new CI result; local fixed-carrier/native results are not that qualification.
+Subsequent native uses require both real and effective UID/GID to equal the
+owner captured at acquisition, not merely each other. The privileged identity
+drift negative was not exercised locally. Foreign threads must be refused
+before dereferencing a context that the owning main thread may retire.
+
+The next business increment is one authenticated ordinary endpoint registry:
+register, revoke, latest read and exact request replay together, rather than a
+schema-only slice. Existing UDS authentication and `publishInProcessChannel`
+depend on StateOwner/Run CAS, so ordinary auth must privately derive its
+`in_process/cli` channel from the verified installed image's actual process
+observation. Retain the canonical root/principal/process/channel and signed
+trust closure in the authority database, never accept caller channel fields or
+write Run CAS. Endpoint records and operations use the existing closed RFC
+objects and two locked methods; the database remains private. Include the real
+signed ordinary endpoint entry in this capability: a qualification-only SEA
+does not make it user-reachable. Replay must retain the first channel and exact
+original command bytes, not regenerate `createdAt` or trust fields on retry.
+This needs no platform secret, network probe or fabricated grant, and still
+does not complete credential enrollment, broker redemption or installed I1.
+Endpoint event timestamps use real canonical wall samples and channel causal
+ordering, not an invented StateOwner epoch or copied time-fence ledger. They
+do not certify the Run time fence as healthy; credential expiry extension and
+redemption still require their existing high-water authority integration.
 
 SEA bundling, fixed helper locations, preload control and actual-image binding
 must be qualified together. Public admission is not a wrapper around internal
