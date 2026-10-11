@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
 import path from 'node:path';
 import { isSea } from 'node:sea';
@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { setImmediate } from 'node:timers/promises';
 
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting, identityHash, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
+import { digestOmitting, identityHash, normalizeAbsolutePath } from '../kernel/identity.js';
 import type { StateRootIdentityV1, WorkspaceGenerationIdentityV1 } from '../kernel/types.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { decodeWorkspaceGenerationIdentity } from './decoders.js';
@@ -567,54 +567,7 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
   const file = await open(STATE_OWNER_NATIVE_PATH, constants.O_RDONLY | constants.O_NOFOLLOW);
   let operationError: unknown;
   try {
-    const before = await file.stat({ bigint: true });
-    if (!before.isFile() || before.uid !== BigInt(process.geteuid!()) || before.nlink !== 1n ||
-        (before.mode & 0o7777n) !== 0o500n || before.size <= 0n || before.size > 16n * 1024n * 1024n) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper must be an owner-only 0500 regular file of at most 16 MiB');
-    }
-    const bytes = await file.readFile();
-    const after = await file.stat({ bigint: true });
-    const digest = sha256Bytes(bytes);
-    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
-        before.uid !== after.uid || before.mode !== after.mode || before.nlink !== after.nlink ||
-        before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs || BigInt(bytes.byteLength) !== after.size) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper changed while being read');
-    }
-    if (bundle) {
-      const entry = bundle.entries.find((candidate) => candidate.entryId === STATE_OWNER_NATIVE_ENTRY_ID);
-      if (!entry || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
-          entry.relativePath !== STATE_OWNER_NATIVE_RELATIVE_PATH || entry.digest !== digest || entry.byteCount !== bytes.byteLength) {
-        throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper does not match the signed RuntimeBundle');
-      }
-    }
-    if (loaded) {
-      if (loaded.digest !== digest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper changed within this process');
-      return loaded.implementation;
-    }
-    const nativeModule = new Module(STATE_OWNER_NATIVE_PATH);
-    process.dlopen(nativeModule, `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${file.fd}`);
-    const binding: NativeBinding = nativeModule.exports;
-    if (typeof binding.acquireLock !== 'function' || typeof binding.processStartToken !== 'function' ||
-        typeof binding.captureCurrentProcess !== 'function' || typeof binding.openWorkspaceRoot !== 'function') {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper has an unsupported interface');
-    }
-    const implementation: NativeStateOwner = {
-      acquireLock(stateRoot, createLayout) {
-        if (normalizeAbsolutePath(stateRoot) !== stateRoot) throw new TypeError('StateOwner root must be canonical');
-        const held = binding.acquireLock(stateRoot, createLayout);
-        try { return wrapLock(held, stateRoot); } catch (error) { held.close(); throw error; }
-      },
-      processStartToken: () => binding.processStartToken(),
-      observeCurrentProcess: () => observeCurrentProcess(binding),
-      openWorkspaceRoot(workspacePath) {
-        if (normalizeAbsolutePath(workspacePath) !== workspacePath) throw new TypeError('source workspace root must be canonical');
-        const root = Object.freeze(binding.openWorkspaceRoot(workspacePath));
-        workspaceRoots.set(root, workspacePath);
-        return root;
-      }
-    };
-    loaded = { digest, implementation: Object.freeze(implementation) };
-    return loaded.implementation;
+    return await loadHeldStateOwnerImage(file, bundle);
   } catch (error) {
     operationError = error;
     throw error;
@@ -623,6 +576,64 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
     catch (error) { throw new ResourceRetirementError('installed StateOwner image descriptor did not retire',
       operationError === undefined ? error : new AggregateError([operationError, error])); }
   }
+}
+
+/** Internal fixed-image bridge for the installed producer. The file is already
+ * held by its owning scope; this routine neither closes it nor exposes a
+ * descriptor/path selector through the installed public handle. */
+export async function loadHeldStateOwnerImage(file: FileHandle, bundle?: RuntimeBundleManifest): Promise<NativeStateOwner> {
+  const before = await file.stat({ bigint: true });
+  if (!before.isFile() || before.uid !== BigInt(process.geteuid!()) || before.nlink !== 1n ||
+      (before.mode & 0o7777n) !== 0o500n || before.size <= 0n || before.size > 16n * 1024n * 1024n) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper must be an owner-only 0500 regular file of at most 16 MiB');
+  }
+  const fd = file.fd;
+  // Installed files survive several borrows. Positional reads never consume
+  // their shared file offset, and a closed FileHandle cannot lend a reused fd.
+  const digest = await hashHeldProcessImage(fd, Number(before.size), () => {
+    if (file.fd !== fd) throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native image handle is closed');
+  });
+  const after = await file.stat({ bigint: true });
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+      before.uid !== after.uid || before.mode !== after.mode || before.nlink !== after.nlink ||
+      before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper changed while being read');
+  }
+  if (bundle) {
+    const entry = bundle.entries.find((candidate) => candidate.entryId === STATE_OWNER_NATIVE_ENTRY_ID);
+    if (!entry || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
+        entry.relativePath !== STATE_OWNER_NATIVE_RELATIVE_PATH || entry.digest !== digest || entry.byteCount !== Number(after.size)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper does not match the signed RuntimeBundle');
+    }
+  }
+  if (loaded) {
+    if (loaded.digest !== digest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper changed within this process');
+    return loaded.implementation;
+  }
+  const nativeModule = new Module(STATE_OWNER_NATIVE_PATH);
+  process.dlopen(nativeModule, `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${file.fd}`);
+  const binding: NativeBinding = nativeModule.exports;
+  if (typeof binding.acquireLock !== 'function' || typeof binding.processStartToken !== 'function' ||
+      typeof binding.captureCurrentProcess !== 'function' || typeof binding.openWorkspaceRoot !== 'function') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper has an unsupported interface');
+  }
+  const implementation: NativeStateOwner = {
+    acquireLock(stateRoot, createLayout) {
+      if (normalizeAbsolutePath(stateRoot) !== stateRoot) throw new TypeError('StateOwner root must be canonical');
+      const held = binding.acquireLock(stateRoot, createLayout);
+      try { return wrapLock(held, stateRoot); } catch (error) { held.close(); throw error; }
+    },
+    processStartToken: () => binding.processStartToken(),
+    observeCurrentProcess: () => observeCurrentProcess(binding),
+    openWorkspaceRoot(workspacePath) {
+      if (normalizeAbsolutePath(workspacePath) !== workspacePath) throw new TypeError('source workspace root must be canonical');
+      const root = Object.freeze(binding.openWorkspaceRoot(workspacePath));
+      workspaceRoots.set(root, workspacePath);
+      return root;
+    }
+  };
+  loaded = { digest, implementation: Object.freeze(implementation) };
+  return loaded.implementation;
 }
 
 export function assertStateOwnerLock(lock: HeldStateOwnerLock): void {

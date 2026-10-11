@@ -63,6 +63,7 @@ jobs:
           node --test --test-concurrency=1 --import tsx
           src/state/installed-runtime.test.ts
           src/state/installed-genesis.test.ts
+          src/state/installed-native-loader.test.ts
           src/state/installed-genesis-boundaries.test.ts
           src/state/genesis-schema-boundaries.test.ts
           src/state/supervisor-observation.test.ts

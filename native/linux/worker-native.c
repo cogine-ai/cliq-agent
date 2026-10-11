@@ -201,28 +201,38 @@ struct process_sample { bool absent; uid_t uid; char token[CLIQ_WORKER_TOKEN_BYT
 /* A zombie retains its original start token. Only kernel absence or a distinct
  * start lifetime is absence; cgroup.procs/populated cannot prove this. */
 static bool sample_process(struct controller *controller, pid_t pid, struct process_sample *sample, bool membership) {
-    memset(sample, 0, sizeof(*sample));
     char name[64], value[4096];
     int length = snprintf(name, sizeof(name), "/proc/%ld", (long)pid);
     if (length < 0 || (size_t)length >= sizeof(name)) return false;
-    int process = open(name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (process < 0) { sample->absent = errno == ENOENT; return sample->absent; }
-    struct stat identity; struct statfs filesystem;
-    bool valid = fstat(process, &identity) == 0 && fstatfs(process, &filesystem) == 0 && filesystem.f_type == PROC_SUPER_MAGIC &&
-        read_bounded(controller, process, "stat", value, sizeof(value)) &&
-        (!membership || read_bounded(controller, process, "cgroup", sample->cgroup, sizeof(sample->cgroup)));
-    if (!retire_descriptor(&process)) { valid = false; controller->retirement_failed = true; }
-    if (!valid) return false;
-    sample->uid = identity.st_uid;
-    char *cursor = strrchr(value, ')');
-    if (!cursor || cursor[1] != ' ') return false;
-    cursor += 2;
-    for (int field = 3; field < 22; field++) { cursor = strchr(cursor, ' '); if (!cursor) return false; cursor++; }
-    char *end = strchr(cursor, ' ');
-    if (!end || end == cursor || (size_t)(end - cursor) > 32) return false;
-    for (char *digit = cursor; digit < end; digit++) if (*digit < '0' || *digit > '9') return false;
-    length = snprintf(sample->token, sizeof(sample->token), "linux-proc-start-ticks:%.*s", (int)(end - cursor), cursor);
-    return length > 0 && (size_t)length < sizeof(sample->token);
+    for (unsigned int cut = 0; cut < 2; cut++) {
+        memset(sample, 0, sizeof(*sample));
+        int process = open(name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (process < 0) { sample->absent = errno == ENOENT; return sample->absent; }
+        struct stat identity; struct statfs filesystem;
+        bool directory_valid = fstat(process, &identity) == 0 && fstatfs(process, &filesystem) == 0 && filesystem.f_type == PROC_SUPER_MAGIC;
+        bool stat_read = directory_valid && read_bounded(controller, process, "stat", value, sizeof(value));
+        int stat_error = stat_read ? 0 : errno;
+        bool valid = stat_read && (!membership || read_bounded(controller, process, "cgroup", sample->cgroup, sizeof(sample->cgroup)));
+        if (!retire_descriptor(&process)) { controller->retirement_failed = true; return false; }
+        if (!valid) {
+            /* A reaped held proc subject may fail stat with ENOENT/ESRCH.
+             * Only a fresh open after successful retirement can prove absence. */
+            if (cut == 0 && directory_valid && !stat_read && (stat_error == ENOENT || stat_error == ESRCH) &&
+                !controller->retirement_failed && !atomic_load(&native_retirement_failed)) continue;
+            return false;
+        }
+        sample->uid = identity.st_uid;
+        char *cursor = strrchr(value, ')');
+        if (!cursor || cursor[1] != ' ') return false;
+        cursor += 2;
+        for (int field = 3; field < 22; field++) { cursor = strchr(cursor, ' '); if (!cursor) return false; cursor++; }
+        char *end = strchr(cursor, ' ');
+        if (!end || end == cursor || (size_t)(end - cursor) > 32) return false;
+        for (char *digit = cursor; digit < end; digit++) if (*digit < '0' || *digit > '9') return false;
+        length = snprintf(sample->token, sizeof(sample->token), "linux-proc-start-ticks:%.*s", (int)(end - cursor), cursor);
+        return length > 0 && (size_t)length < sizeof(sample->token);
+    }
+    return false;
 }
 
 static bool controller_placement(struct controller *controller, const char *token) {

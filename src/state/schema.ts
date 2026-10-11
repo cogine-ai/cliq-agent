@@ -649,8 +649,8 @@ export function applyKernelSchema(driver: SqliteDriver): void {
   }
 }
 
-export function readSchemaUserVersion(driver: SqliteDriver): number {
-  return requiredSafeInteger(pragmaScalar(driver, 'user_version'), 'user_version');
+export function readSchemaUserVersion(connection: SqliteConnection): number {
+  return requiredSafeInteger(pragmaScalar(connection, 'user_version'), 'user_version');
 }
 
 const SCHEMA_CATALOG_SQL = 'SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name';

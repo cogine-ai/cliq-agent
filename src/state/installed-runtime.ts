@@ -10,6 +10,8 @@ import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, ty
 import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
+import { loadHeldStateOwnerImage, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
+  type NativeStateOwner } from './native-owner.js';
 
 export type HeldInstalledRuntime = Readonly<{
   bundle: RuntimeBundleManifest;
@@ -28,6 +30,7 @@ export type InstalledRuntimeBorrow = Readonly<{
   casRoot: InstalledDirectoryIdentity;
   seed: readonly Readonly<{ artifactRef: string; byteCount: number; mediaType: string; schemaKind: string }>[];
   revalidate(): Promise<void>;
+  loadStateOwner(): Promise<NativeStateOwner>;
 }>;
 type InstalledRuntimeBinding = {
   borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T>;
@@ -520,6 +523,26 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   revalidations.push(pending);
                   // The borrow owns joining even a caller-unawaited check.
                   void pending.catch(() => undefined);
+                  return pending;
+                },
+                loadStateOwner(): Promise<NativeStateOwner> {
+                  if (!active) mismatch('installed runtime borrow has ended');
+                  const pending = (async () => {
+                    await checkedRevalidate();
+                    const entry = signed.bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID);
+                    const file = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID);
+                    if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
+                        entry.relativePath !== STATE_OWNER_NATIVE_RELATIVE_PATH || entry.byteCount <= 0 || entry.byteCount > TRUST_BYTES)
+                      mismatch('installed StateOwner requires its fixed signed native entry');
+                    const native = await loadHeldStateOwnerImage(file.handle, signed.bundle);
+                    await checkedRevalidate();
+                    return native;
+                  })();
+                  // The borrow owns joining even an unawaited loader. Its sole
+                  // file-owning Scope cannot close before this operation ends.
+                  const joined = pending.then(() => undefined);
+                  revalidations.push(joined);
+                  void joined.catch(() => undefined);
                   return pending;
                 },
               });

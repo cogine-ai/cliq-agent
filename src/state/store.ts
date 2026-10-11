@@ -15,6 +15,7 @@ import {
   identityHash,
   normalizeAbsolutePath,
   parseCanonicalTime,
+  requiredSafeInteger,
   sha256Bytes,
   unsignedDecimalId
 } from '../kernel/identity.js';
@@ -427,8 +428,52 @@ export class StateStore {
     return immutableSnapshot(observation);
   }
 
-  async readSupervisorStatus(_identity: AuthenticatedControlIdentity): Promise<SupervisorStatusV1> {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'Supervisor status requires a held verified installation');
+  async readSupervisorStatus(identity: AuthenticatedControlIdentity): Promise<SupervisorStatusV1> {
+    if (!this.installedRuntime || !this.runtimeAuthority)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'Supervisor status requires a held verified installation');
+    if (this.closed || this.closeRequested || this.released)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'StateStore is closing or closed');
+    const authenticated = { ...identity };
+    return withHeldInstalledRuntime(this.installedRuntime, async installed => {
+      await assertInstalledRootBinding(this.stateRoot, this.owner.filesystem, installed);
+      await validateControlChannelClosure(this.artifacts, this.owner, authenticated);
+      const cut = this.driver.readSnapshot(connection => {
+        try {
+          const owner = assertActiveStateOwner(connection, this.owner);
+          if (owner.runtimeBundleRef !== installed.bundleDigest ||
+              owner.runtimeBundleManifestDigest !== installed.bundle.manifestDigest)
+            throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed inventory differs from the active signed owner');
+          const counts = connection.prepare(`SELECT
+            COALESCE(SUM(status = 'queued'), 0) AS queued,
+            COALESCE(SUM(status = 'running'), 0) AS running,
+            COALESCE(SUM(status IN ('queued', 'running', 'waiting')), 0) AS nonterminal
+            FROM runs`).get<{ queued: unknown; running: unknown; nonterminal: unknown }>()!;
+          // Real installed admission/upgrade composition is not yet available.
+          // Do not infer pin compatibility from mutable rows or advertise an
+          // unverified zero count once nonterminal pins actually exist.
+          if (requiredSafeInteger(counts.nonterminal, 'nonterminal Run count') !== 0)
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Supervisor status requires trusted nonterminal pin observation');
+          return { supervisorInstanceId: owner.supervisorInstanceId,
+            stateSchemaVersion: readSchemaUserVersion(connection),
+            queuedRuns: requiredSafeInteger(counts.queued, 'queued Run count'),
+            runningRuns: requiredSafeInteger(counts.running, 'running Run count') };
+        } catch (cause) {
+          if (cause instanceof TypeError || cause instanceof SyntaxError)
+            throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained Supervisor status metadata is invalid', { cause });
+          throw cause;
+        }
+      });
+      await assertInstalledRootBinding(this.stateRoot, this.owner.filesystem, installed);
+      await validateControlChannelClosure(this.artifacts, this.owner, authenticated);
+      assertActiveStateOwner(this.driver, this.owner);
+      const summary = { schemaVersion: 1 as const, runtimeBundleRef: installed.bundleDigest,
+        bundleDigest: installed.bundleDigest, bundleVersion: installed.bundle.bundleVersion };
+      return immutableSnapshot({ method: 'supervisor.status' as const, health: 'degraded' as const,
+        supervisorInstanceId: cut.supervisorInstanceId,
+        queue: { queuedRuns: cut.queuedRuns, runningRuns: cut.runningRuns, capacity: 0 },
+        stateSchemaVersion: cut.stateSchemaVersion, activeRuntimeBundle: summary,
+        installedRuntimeBundles: [summary], incompatiblePinnedRunCount: 0 });
+    });
   }
 
   /** Internal authenticated transport, not an installed public protocol server. */
@@ -468,7 +513,7 @@ export class StateStore {
         runtimeAuthority.bundle.manifestDigest !== installed.bundle.manifestDigest)) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateStore requires the exact held installed root and signed bundle');
     }
-    const native = await loadNativeStateOwner(runtimeAuthority?.bundle);
+    const native = installed ? await installed.loadStateOwner() : await loadNativeStateOwner(runtimeAuthority?.bundle);
     if (runtimeAuthority) {
       const supervisor = runtimeAuthority.bundle.entries.find((entry) => entry.role === 'supervisor')!;
       if (supervisor.digest !== (await native.observeCurrentProcess()).executableImageDigest ||

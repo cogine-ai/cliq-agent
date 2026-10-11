@@ -287,6 +287,20 @@ tables alone do not establish a pristine schema: an extra trigger can otherwise
 write business state during owner insertion. Refusal preserves the unowned
 schema rather than repairing or adopting it. Successor acquisition is unchanged.
 
+Installed startup borrows the fixed signed native helper from the selected
+version's already-held descriptor, not an adjacent bootstrap path. Repeated
+loads use positional bounded reads and retain the same owning scope through
+every in-flight load, including an unawaited one. No helper path or descriptor
+selector is added to the public installed handle.
+
+The current installed control composition is read-only. Its status reads the
+actual owner, schema and queue cut and verified initial installation, but
+reports `degraded` with capacity zero. A nonterminal Run requires a trusted pin
+observation that this composition does not yet provide, so status refuses
+rather than inferring compatibility or reporting an unverified zero. Real
+inline admission and upgrade composition must precede that remaining behavior;
+the current startup qualifier is not their qualification or complete I1.
+
 Production controller HELLO-time placement and retained-reservation recovery
 passed 25 actual Linux campaign cases at `5b47b93` in
 [run 38094701623](https://github.com/cogine-ai/cliq-agent/actions/runs/38094701623).
