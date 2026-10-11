@@ -54,7 +54,7 @@ async function fdInfo(pid: number | 'self', descriptor: string) {
   return { flags: flags.toString(), mountId, inode };
 }
 
-async function descriptorInventory(pid: number) {
+export async function descriptorInventory(pid: number) {
   const read = async () => {
     const names = (await readdir(`/proc/${pid}/fd`)).sort();
     assert(names.length > 0 && names.length <= 4096, 'keeper descriptor inventory must be complete and bounded');

@@ -10,10 +10,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
-import { KERNEL_DATABASE_FILENAME } from '../../src/config.js';
+import { KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
 import { qualifyInstalledAnchorSource } from './testing/installed-anchor-source.js';
+import { qualifyInstalledAnchorConsumer } from './testing/installed-anchor-consumer.js';
+import { inspectInstalledOwner, installedReadClientScript } from './testing/installed-read-control.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
 
@@ -238,13 +240,13 @@ async function campaign(ledgerFile: string): Promise<void> {
   assert.equal(process.geteuid!(), 0, 'only the frozen-ledger root orchestrator may stage this fixture');
   const ledger = await readLedger(ledgerFile), installed = ledger.installed;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false,
-    scope: 'actual signed installed keeper startup/original source publication only; not Supervisor restart, Run, worker, admission or complete I1',
+    scope: 'actual signed installed keeper source publication and Supervisor original-pin acquisition only; not restart, Run, worker, admission or complete I1',
     embeddedNodeVersion: SUPERVISOR_SEA_NODE_VERSION, uid: ledger.uid, keeperUnit: installed.keeperUnit };
   const userCommand = (args: string[]) => command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
     `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
     `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ledger.uid}/bus`, '/usr/bin/systemctl', '--user', ...args]);
-  const show = () => {
-    const result = userCommand(['show', installed.keeperUnit, `--property=${propertyNames.join(',')}`, '--no-pager']);
+  const show = (unit = installed.keeperUnit) => {
+    const result = userCommand(['show', unit, `--property=${propertyNames.join(',')}`, '--no-pager']);
     assert.equal(result.status, 0, result.stderr);
     const values: Record<string, string> = {};
     for (const line of result.stdout.trim().split('\n')) {
@@ -256,7 +258,7 @@ async function campaign(ledgerFile: string): Promise<void> {
     return values;
   };
   let keeperStartedAt: number | undefined;
-  const journal = (invocationId: string, execMainPid: string) => {
+  const journal = (invocationId: string, execMainPid: string, unit = installed.keeperUnit) => {
     if (!/^[a-f0-9]{32}$/u.test(invocationId)) return [];
     assert(keeperStartedAt !== undefined);
     const matches = [`_UID=${ledger.uid}`, `_SYSTEMD_INVOCATION_ID=${invocationId}`];
@@ -265,13 +267,15 @@ async function campaign(ledgerFile: string): Promise<void> {
     // stderr to this actual ExecMainPID; no application-supplied PID is used.
     if (/^[1-9][0-9]*$/u.test(execMainPid) && Number.isSafeInteger(Number(execMainPid)))
       matches.push('+', `_UID=${ledger.uid}`, `_PID=${execMainPid}`, '_TRANSPORT=stdout');
-    matches.push('+', `_UID=${ledger.uid}`, `USER_UNIT=${installed.keeperUnit}`, `USER_INVOCATION_ID=${invocationId}`);
+    matches.push('+', `_UID=${ledger.uid}`, `USER_UNIT=${unit}`, `USER_INVOCATION_ID=${invocationId}`);
     const result = command('/usr/bin/journalctl', ['--no-pager', '--all', '--output=json', '--lines=80', '--boot=0',
       `--since=@${Math.floor(keeperStartedAt / 1000)}`, `--until=@${Math.ceil(Date.now() / 1000)}`, ...matches]);
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trim().split('\n').filter(Boolean).map(line => parseJsonStrict(line) as Record<string, unknown>);
   };
   let shown: Record<string, string> | undefined;
+  let supervisorStartAttempted = false;
+  let keeperAuthorityAfter: Record<string, boolean> | undefined;
   let preloadEnvironmentTouched = false, managerPreloadConfirmed = false, keeperStartAttempted = false, keeperImageObserved = false;
   try {
     await mkdir(installed.buildFixture, { mode: 0o755 }); // Exclusive: never adopt a build/package tree.
@@ -405,6 +409,73 @@ async function campaign(ledgerFile: string): Promise<void> {
               selectedMetadata: selected, root: roots[0]!, report: sourcePublication });
             const sourceConfirmed = show();
             assert.equal(sourceConfirmed.InvocationID, shown.InvocationID); assert.equal(sourceConfirmed.MainPID, shown.MainPID);
+            // Seal the keeper-only authority observation before the Supervisor
+            // legitimately opens StateOwner. Never delete a database to pass it.
+            keeperAuthorityAfter = await authorityAbsent(installed.stateRoot);
+            report.authorityAfterKeeper = keeperAuthorityAfter;
+            assert(Object.values(keeperAuthorityAfter).every(Boolean));
+            supervisorStartAttempted = true;
+            report.supervisorStartCommand = userCommand(['start', installed.supervisorUnit]);
+            const supervisorDeadline = Date.now() + 30_000;
+            const socketPath = path.join(installed.stateRoot, 'runtime/control-v1.sock');
+            let supervisorUnit: Record<string, string>;
+            for (;;) {
+              supervisorUnit = show(installed.supervisorUnit); report.supervisorUnit = supervisorUnit;
+              assert.equal(supervisorUnit.FragmentPath, installed.supervisorUnitFile);
+              assert.equal(supervisorUnit.LoadState, 'loaded'); assert.equal(supervisorUnit.Type, 'exec');
+              assert.equal(supervisorUnit.Delegate, 'yes'); assert.equal(supervisorUnit.KillMode, 'control-group');
+              assert.equal(supervisorUnit.Restart, 'no');
+              assert(!['failed', 'inactive'].includes(supervisorUnit.ActiveState!), 'actual Supervisor exited before UDS readiness');
+              const socket = await lstat(socketPath).catch((error: NodeJS.ErrnoException) => {
+                if (error.code === 'ENOENT') return undefined; throw error;
+              });
+              if (socket) { assert(socket.isSocket()); assert.equal(socket.uid, ledger.uid); break; }
+              assert(Date.now() < supervisorDeadline, 'actual Supervisor did not open its UDS');
+              await delay(20);
+            }
+            const supervisorPid = Number(supervisorUnit.MainPID);
+            assert(Number.isSafeInteger(supervisorPid) && supervisorPid > 0 && supervisorPid <= 0x7fffffff);
+            assert.equal(supervisorUnit.ExecMainPID, String(supervisorPid));
+            assert.match(supervisorUnit.InvocationID!, /^[a-f0-9]{32}$/u);
+            const owner = inspectInstalledOwner(installed.stateRoot);
+            assert(owner); assert.equal(owner.state, 'active'); assert.equal(owner.ownerEpoch, 1);
+            assert.equal(owner.runtimeBundleRef, selection.bundleDigest);
+            assert.equal(owner.runtimeBundleManifestDigest, bundle.manifestDigest);
+            assert.equal(owner.supervisorExecutableDigest, imageDigest);
+            const client = command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
+              `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', process.execPath,
+              '--input-type=module', '-e', installedReadClientScript, socketPath]);
+            report.supervisorReadClient = client; assert.equal(client.status, 0, client.stderr);
+            const exchanges = parseJsonStrict(client.stdout.trim()) as Array<{ hello: string; status: string }>;
+            assert.equal(exchanges.length, 2);
+            const summary = { schemaVersion: 1, runtimeBundleRef: selection.bundleDigest,
+              bundleDigest: selection.bundleDigest, bundleVersion: bundle.bundleVersion };
+            for (const exchange of exchanges) {
+              const hello = parseJsonStrict(exchange.hello) as Record<string, any>;
+              const status = parseJsonStrict(exchange.status) as Record<string, any>;
+              assert.equal(canonicalJsonBytes(hello).toString('utf8'), exchange.hello);
+              assert.equal(canonicalJsonBytes(status).toString('utf8'), exchange.status);
+              assert.equal(hello.protocolVersion, 1); assert.equal(hello.ok, true);
+              assert.equal(hello.result.method, 'control.hello'); assert.equal(hello.result.serverBuild, 'cliq-installed-v1');
+              assert.equal(hello.result.supervisorInstanceId, owner.supervisorInstanceId);
+              assert.deepEqual(canonicalJsonBytes(hello.result.activeRuntimeBundle), canonicalJsonBytes(summary));
+              assert.deepEqual(hello.result.enabledFeatureIds, ['supervisor.status']);
+              assert.equal(status.protocolVersion, 1); assert.equal(status.ok, true);
+              assert.deepEqual(canonicalJsonBytes(status.result), canonicalJsonBytes({ method: 'supervisor.status',
+                health: 'degraded', supervisorInstanceId: owner.supervisorInstanceId,
+                queue: { queuedRuns: 0, runningRuns: 0, capacity: 0 }, stateSchemaVersion: KERNEL_STATE_SCHEMA_VERSION,
+                activeRuntimeBundle: summary, installedRuntimeBundles: [summary], incompatiblePinnedRunCount: 0 }));
+            }
+            assert.deepEqual(inspectInstalledOwner(installed.stateRoot), owner);
+            report.supervisorReadPositive = { pid: supervisorPid, ownerEpoch: owner.ownerEpoch,
+              supervisorInstanceId: owner.supervisorInstanceId, reconnects: 1 };
+            const consumer: Record<string, unknown> = { diagnosticOnly: true }; report.consumer = consumer;
+            await qualifyInstalledAnchorConsumer({ pid: supervisorPid, source: { pid, startTicks: fields[19]!, uid: ledger.uid,
+              gid: ledger.gid, stateRoot: installed.stateRoot, bundleDigest: selection.bundleDigest,
+              selectedImage: expectedImage, selectedMetadata: selected, root: roots[0]!, report: sourcePublication }, report: consumer });
+            const finalSource = show(), finalSupervisor = show(installed.supervisorUnit);
+            assert.equal(finalSource.InvocationID, shown.InvocationID); assert.equal(finalSource.MainPID, shown.MainPID);
+            assert.equal(finalSupervisor.InvocationID, supervisorUnit.InvocationID); assert.equal(finalSupervisor.MainPID, supervisorUnit.MainPID);
             report.qualified = true;
             break;
           }
@@ -455,11 +526,20 @@ async function campaign(ledgerFile: string): Promise<void> {
         report.journalError = String((error as Error).stack ?? error).slice(0, 8192);
       }
     }
+    if (supervisorStartAttempted) {
+      try {
+        const supervisorUnit = show(installed.supervisorUnit);
+        report.supervisorJournal = journal(supervisorUnit.InvocationID!, supervisorUnit.ExecMainPID!, installed.supervisorUnit);
+      } catch (error) {
+        observationError ??= error; report.qualified = false;
+        report.supervisorJournalError = String((error as Error).stack ?? error).slice(0, 8192);
+      }
+    }
     let after: Record<string, boolean> | undefined;
     try {
-      after = await authorityAbsent(installed.stateRoot);
+      after = supervisorStartAttempted ? keeperAuthorityAfter : await authorityAbsent(installed.stateRoot);
       report.authorityAfterKeeper = after;
-      if (!Object.values(after).every(Boolean)) { report.qualified = false; report.authorityViolation = true; }
+      if (!after || !Object.values(after).every(Boolean)) { report.qualified = false; report.authorityViolation = true; }
     } catch (error) {
       observationError ??= error; report.qualified = false;
       report.authorityObservationError = String((error as Error).stack ?? error).slice(0, 8192);

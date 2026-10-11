@@ -5,7 +5,6 @@ import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
@@ -16,6 +15,7 @@ import { createInstalledRuntime } from '../../src/state/installed-runtime.js';
 import { STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../src/state/native-owner.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { qualifyInstalledInspectorSignal, type InstalledInspectorSignalReport } from './testing/installed-inspector-signal.js';
+import { inspectInstalledOwner, installedReadClientScript as clientScript } from './testing/installed-read-control.js';
 import { SUPERVISOR_SEA_CARRIER_CHECKSUMS, SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
 
 assert.equal(process.platform, 'linux', 'installed startup qualification requires a real Linux runner');
@@ -55,24 +55,7 @@ async function bounded<T>(pending: Promise<T>, milliseconds = 30_000): Promise<T
 }
 
 function inspectOwner(): StateOwnerRecordV1 | undefined {
-  // Read-only inspection cannot create a missing database or grant StateOwner.
-  const database = new DatabaseSync(path.join(stateRoot, KERNEL_DATABASE_FILENAME), { readOnly: true, allowExtension: false });
-  try {
-    const version = database.prepare('PRAGMA user_version').get();
-    assert.equal(version?.user_version, KERNEL_STATE_SCHEMA_VERSION);
-    const rows = database.prepare('SELECT owner_epoch, supervisor_instance_id, record_json, state, row_digest FROM state_owners').all();
-    assert(rows.length <= 1, 'this qualification starts exactly one real Supervisor');
-    if (!rows.length) return undefined;
-    const row = rows[0]!;
-    assert.equal(typeof row.record_json, 'string');
-    const owner = parseJsonStrict(row.record_json as string) as StateOwnerRecordV1;
-    assert.equal(owner.ownerEpoch, row.owner_epoch);
-    assert.equal(owner.supervisorInstanceId, row.supervisor_instance_id);
-    assert.equal(owner.state, row.state);
-    assert.equal(owner.rowDigest, row.row_digest);
-    assert.equal(owner.rowDigest, digestOmitting(owner, 'rowDigest'));
-    return owner;
-  } finally { database.close(); }
+  return inspectInstalledOwner(stateRoot);
 }
 
 async function casJson<T>(ref: string): Promise<T> {
@@ -89,55 +72,6 @@ async function casJson<T>(ref: string): Promise<T> {
   assert.deepEqual(canonicalJsonBytes(value), bytes);
   return value;
 }
-
-// Independent ordinary Node client. It controls only its real socket, never
-// installation paths, Store internals, keys or authority evidence.
-const helloBytes = canonicalJsonBytes({ protocolVersion: 1, method: 'control.hello',
-  clientBuild: 'installed-startup-qualification', controlSchemaRange: { min: 1, max: 1 },
-  headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds: ['supervisor.status'] }).toString('base64');
-const statusBytes = canonicalJsonBytes({ protocolVersion: 1, method: 'supervisor.status' }).toString('base64');
-const clientScript = `import assert from 'node:assert/strict';
-import net from 'node:net';
-const exchanges = [];
-for (let attempt = 0; attempt < 2; attempt++) {
-  const socket = net.createConnection(process.argv[1]);
-  let input = Buffer.alloc(0), waiter, error;
-  socket.on('data', chunk => {
-    try {
-      input = Buffer.concat([input, chunk]);
-      assert(input.length <= 1048580);
-      while (input.length >= 4) {
-        const length = input.readUInt32BE(0);
-        assert(length >= 1 && length <= 1048576);
-        if (input.length < 4 + length) break;
-        const json = new TextDecoder('utf-8', {fatal:true}).decode(input.subarray(4, 4 + length));
-        input = input.subarray(4 + length);
-        assert(waiter, 'unsolicited response frame');
-        const complete = waiter; waiter = undefined; complete.resolve(json);
-      }
-    } catch (failure) { error = failure; waiter?.reject(failure); socket.destroy(); }
-  });
-  socket.on('error', failure => { error = failure; waiter?.reject(failure); });
-  socket.on('close', () => { error ??= new Error('peer closed before response'); waiter?.reject(error); });
-  const closed = new Promise(resolve => socket.once('close', resolve));
-  try {
-    await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject); });
-    const request = async bytes => {
-      if (error) throw error;
-      assert(!waiter, 'one fixed request is outstanding at a time');
-      return await new Promise((resolve, reject) => {
-        waiter = {resolve,reject};
-        const header = Buffer.alloc(4); header.writeUInt32BE(bytes.length);
-        try { socket.write(Buffer.concat([header, bytes])); }
-        catch (failure) { waiter = undefined; reject(failure); }
-      });
-    };
-    const hello = await request(Buffer.from(${JSON.stringify(helloBytes)}, 'base64'));
-    const status = await request(Buffer.from(${JSON.stringify(statusBytes)}, 'base64'));
-    exchanges.push({hello,status});
-  } finally { socket.destroy(); await closed; }
-}
-console.log(JSON.stringify(exchanges));`;
 
 let supervisor: ChildProcess | undefined;
 let closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
