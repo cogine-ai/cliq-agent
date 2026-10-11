@@ -730,6 +730,29 @@ the pending-write overlay is only cut identification, never written evidence.
 This qualifies these register process-crash cuts, not power loss, revoke crash,
 credential enrollment, cross-version provenance or installed I1.
 
+The review regressions at `6e05dedd9f93fe0f95e8107506dfe6c16653c2d5`
+produced two genuine REDs in the real execution job of
+[run 38160358322](https://github.com/cogine-ai/cliq-agent/actions/runs/38160358322).
+The test-only syscall interposer changed only the final removal result for an
+exact HELLO-ready controller's original leaf. Both `EBUSY` and `ENOTEMPTY`
+incorrectly resolved close and admitted a fresh controller after the actual
+child had joined. An attempted leaf removal now records any failure as uncertain
+retirement; repeated close must reject and native sticky state must refuse a
+fresh controller before allocation. Deliberate retention of an incomplete
+worker birth or still-live known producer remains unchanged, and successor
+recovery still needs the original inode and independent death proof.
+
+The companion pre-spawn test reads the real signed sealed worker image before
+injecting one `EIO`. After the original controller and failed seal retire, it
+removes the fault and retries through the same live public execution, not a new
+Store or launcher. The old rejected image promise incorrectly replayed that
+error. The image owner now evicts only its own fully rejected, non-retirement
+attempt and preserves successful/in-flight sharing, retirement errors and all
+existing held/closed/native gates. Successful retry requires a fresh actual
+signed seal before worker birth, exactly one real edit/claim/budget consumption,
+and the same persisted recovery closure after reopening. Neither regression is
+an installed I1 or whole-worker death qualification.
+
 SEA bundling, fixed helper locations, preload control and actual-image binding
 must be qualified together. Public admission is not a wrapper around internal
 reference inputs. First model dispatch requires a trusted assembly/broker path;
