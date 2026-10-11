@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rename, rm } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { verifiedSqliteExtensionIncludes } from './sqlite-extension-headers.mjs';
 
 if (!['darwin', 'linux'].includes(process.platform)) {
   console.log('StateOwner native helper is unsupported on this platform; Kernel execution remains unavailable.');
@@ -35,10 +36,11 @@ async function libuvInclude() {
   throw new Error(`Matching libuv ${process.versions.uv} headers are required; provide their include directory as the second build argument.`);
 }
 const uvInclude = await libuvInclude();
+const sqliteInclude = await verifiedSqliteExtensionIncludes();
 // Fault-injection builds use the same header selection as the real helper.
 // This read-only query never stages or replaces a loaded native binary.
 if (printIncludes) {
-  console.log(JSON.stringify([include, uvInclude]));
+  console.log(JSON.stringify([sqliteInclude, include, uvInclude]));
   process.exit(0);
 }
 const output = path.join(repository, 'dist/native', `${process.platform}-${process.arch}`);
@@ -49,7 +51,8 @@ try {
   const flags = process.platform === 'darwin' ? ['-bundle', '-undefined', 'dynamic_lookup'] : ['-shared', '-fPIC'];
   const compiled = spawnSync('cc', [
     '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread', ...flags,
-    '-I', include, '-I', uvInclude, path.join(repository, 'native/state-owner/state-owner.c'), '-o', binary
+    '-I', sqliteInclude, '-I', include, '-I', uvInclude,
+    path.join(repository, 'native/state-owner/state-owner.c'), '-o', binary
   ], { stdio: 'inherit' });
   if (compiled.error) throw compiled.error;
   if (compiled.status !== 0) throw new Error('StateOwner native build failed; a C compiler and matching Node headers are required.');

@@ -6,6 +6,7 @@ import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { rootCertificates } from 'node:tls';
 import { fileURLToPath } from 'node:url';
+import { verifiedSqliteExtensionIncludes } from '../sqlite-extension-headers.mjs';
 
 import { KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
@@ -34,8 +35,10 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     assets: { 'release-trust-roots.json': rootAsset } });
   const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);
   await mkdir(path.dirname(helper), { recursive: true, mode: 0o700 });
+  const sqliteInclude = await verifiedSqliteExtensionIncludes();
   const compilation = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread', '-shared', '-fPIC',
-    '-I', path.join(nodeRoot, 'include/node'), path.join(repository, 'native/state-owner/state-owner.c'), '-o', helper],
+    '-I', sqliteInclude, '-I', path.join(nodeRoot, 'include/node'),
+    path.join(repository, 'native/state-owner/state-owner.c'), '-o', helper],
   { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
   assert.equal(compilation.error, undefined, `cc: ${compilation.error}`);
   assert.equal(compilation.status, 0, `cc: ${compilation.stderr}`);

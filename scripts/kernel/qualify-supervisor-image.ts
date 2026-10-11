@@ -7,6 +7,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, u
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { verifiedSqliteExtensionIncludes } from './sqlite-extension-headers.mjs';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { KERNEL_STATE_SCHEMA_VERSION } from '../../src/config.js';
 import { policyProfile, type RuntimeBundleManifest } from '../../src/policy/runtime-authority.js';
@@ -54,9 +55,11 @@ try {
   const installation = path.join(fixture, 'image');
   await mkdir(path.join(installation, path.dirname(STATE_OWNER_NATIVE_RELATIVE_PATH)), { recursive: true, mode: 0o700 });
   const helper = path.join(installation, STATE_OWNER_NATIVE_RELATIVE_PATH);
+  const sqliteInclude = await verifiedSqliteExtensionIncludes();
   run('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread',
     ...(process.platform === 'darwin' ? ['-bundle', '-undefined', 'dynamic_lookup'] : ['-shared', '-fPIC']),
-    '-I', path.join(nodeRoot, 'include/node'), path.join(repository, 'native/state-owner/state-owner.c'), '-o', helper]);
+    '-I', sqliteInclude, '-I', path.join(nodeRoot, 'include/node'),
+    path.join(repository, 'native/state-owner/state-owner.c'), '-o', helper]);
   await chmod(helper, 0o500);
   async function image(variant: string) {
     return buildSupervisorSeaImage({ fixture, carrier,
