@@ -29,6 +29,9 @@ test('SQLite path diagnostic CLI describes all eight closed cuts without claimin
   ]);
   assert.equal(described.preopenBarrier, 'test-only unique call-site insertion after production prepareDatabasePath');
   assert.equal(described.observerDescriptorCloseOrder, 'all SQLite connections close before extra DB descriptors');
+  assert.deepEqual(described.privateVfsMechanism.modes, ['unregistered', 'scoped', 'permanent', 'dual', 'tampered']);
+  assert.equal(described.privateVfsMechanism.physicalBindingQualified, false);
+  assert.equal(described.privateVfsMechanism.productionCredentialAuthorityQualified, false);
 });
 
 test('SQLite path diagnostic CLI rejects unknown modes instead of opening a caller-selected database', () => {

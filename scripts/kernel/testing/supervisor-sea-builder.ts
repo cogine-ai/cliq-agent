@@ -22,15 +22,19 @@ function run(fixture: string, executable: string, args: string[]) {
   return result;
 }
 
-export async function prepareSupervisorSeaCarrier(fixture: string) {
+export async function prepareSupervisorSeaCarrier(fixture: string, cachedArchive?: string) {
   const platform = `${process.platform}-${process.arch}`;
   const checksum = SUPERVISOR_SEA_CARRIER_CHECKSUMS[platform];
   assert(checksum, `no qualified SEA carrier for ${platform}`);
   const archiveName = `node-v${SUPERVISOR_SEA_NODE_VERSION}-${platform}.tar.xz`;
-  const response = await fetch(`https://nodejs.org/download/release/v${SUPERVISOR_SEA_NODE_VERSION}/${archiveName}`,
-    { signal: AbortSignal.timeout(60_000) });
-  assert(response.ok, `carrier download failed: ${response.status}`);
-  const archive = Buffer.from(await response.arrayBuffer());
+  // A read-only cache is still checked in full before fresh extraction; never
+  // reuse/adopt an already extracted executable or native-header directory.
+  const archive = cachedArchive ? await readFile(cachedArchive) : await (async () => {
+    const response = await fetch(`https://nodejs.org/download/release/v${SUPERVISOR_SEA_NODE_VERSION}/${archiveName}`,
+      { signal: AbortSignal.timeout(60_000) });
+    assert(response.ok, `carrier download failed: ${response.status}`);
+    return Buffer.from(await response.arrayBuffer());
+  })();
   assert.equal(createHash('sha256').update(archive).digest('hex'), checksum, 'official carrier checksum mismatch');
   const archivePath = path.join(fixture, archiveName);
   await writeFile(archivePath, archive, { flag: 'wx', mode: 0o600 });

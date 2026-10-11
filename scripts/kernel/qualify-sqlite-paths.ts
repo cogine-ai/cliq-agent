@@ -12,6 +12,7 @@ import { build } from 'esbuild';
 import { parseJsonStrict } from '../../src/kernel/json.js';
 import { buildSupervisorSeaImage, prepareSupervisorSeaCarrier,
   SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
+import { describeSqliteVfsMechanism, qualifySqliteVfsMechanism } from './testing/sqlite-vfs-mechanism.js';
 
 type PathKind = 'canonical' | 'held_parent';
 type Cut = 'normal' | 'parent_before_open' | 'parent_after_open' | 'leaf_before_open';
@@ -128,7 +129,7 @@ async function buildDiagnostic(ledger: Ledger) {
   const signature = sign(null, image, key.privateKey);
   assert(verify(null, image, key.publicKey, signature), 'final diagnostic image signature must verify before execution');
   const digest = createHash('sha256').update(image).digest('hex');
-  return { executable, digest, imageIdentity: identity(await lstat(executable, { bigint: true })),
+  return { executable, digest, carrier, imageIdentity: identity(await lstat(executable, { bigint: true })),
     construction: { diagnosticOnly: true, originalDriverSha256: createHash('sha256').update(original).digest('hex'),
       transformedDriverSha256: createHash('sha256').update(transformed).digest('hex'), uniquePreopenInsertionCount: matches,
       bundledInputSha256: createHash('sha256').update(await readFile(bundle)).digest('hex'),
@@ -427,7 +428,11 @@ async function campaign(filename: string) {
     } finally { await casesRoot.close(); }
     const results = report.results as Awaited<ReturnType<typeof runCase>>[];
     for (const selected of cases) results.push(await runCase(ledger, diagnostic, selected));
-    assert.equal(results.length, 8); report.completed = true;
+    assert.equal(results.length, 8);
+    report.privateVfsMechanism = await qualifySqliteVfsMechanism(ledger, diagnostic.carrier);
+    assert.equal((report.privateVfsMechanism as Record<string, unknown>).completed, true,
+      String((report.privateVfsMechanism as Record<string, unknown>).error));
+    report.completed = true;
   } catch (error) { report.error = String((error as Error).stack ?? error); process.exitCode = 1; }
   finally { await writeFile(ledger.sqlitePaths.reportFile, JSON.stringify(report, null, 2) + '\n', { flag: 'wx', mode: 0o644 }); }
   process.stdout.write(JSON.stringify({ diagnosticOnly: true, completed: report.completed,
@@ -436,7 +441,7 @@ async function campaign(filename: string) {
 
 function describe() {
   return { diagnosticOnly: true, productionCredentialAuthorityQualified: false, installedI1Qualified: false,
-    carrierVersion: SUPERVISOR_SEA_NODE_VERSION, cases,
+    carrierVersion: SUPERVISOR_SEA_NODE_VERSION, cases, privateVfsMechanism: describeSqliteVfsMechanism(),
     preopenBarrier: 'test-only unique call-site insertion after production prepareDatabasePath',
     observerDescriptorCloseOrder: 'all SQLite connections close before extra DB descriptors' };
 }

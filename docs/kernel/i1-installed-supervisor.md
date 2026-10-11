@@ -497,6 +497,41 @@ new boot still waits for recovery when the original death cannot be proved.
 
 ### Risks And Dependencies
 
+#### Credential SQLite Gate (A confirmed 2026-10-11)
+
+The actual eight-cut path diagnostic at `316b673` in
+[run 38120581076](https://github.com/cogine-ai/cliq-agent/actions/runs/38120581076)
+observed replacement-inode reads and DELETE/WAL commits for both canonical-path
+replacement before open and held-parent leaf replacement. Holding the parent
+descriptor alone does not protect the database leaf. After-open cuts refused
+read-only writes; that refusal does not prove zero filesystem I/O.
+
+The user approved keeping Node's bundled SQLite engine and first qualifying a
+fixed signed helper that registers a private, non-default VFS through that
+engine's supplied extension API table. Do not link a second SQLite engine or
+expose a generic extension/path/URI/FD selector. Authority databases must retain
+`allowExtension:false`; only the fixed verified bootstrap may load the helper.
+
+The test-only mechanism VFS always records its actual `xOpen` callback and
+returns `SQLITE_CANTOPEN`, with no database opened or SQL writes. Independent
+fresh processes test absent registration, ordinary extension unload, permanent
+SQLite-only code residency after bootstrap/held-image FD close, and dual N-API /
+SQLite entry points sharing hidden native state. A final diagnostic SEA embeds
+the fixed helper byte claim, is signed after construction, and runs under the
+existing fresh Linux UID. The root observer checks actual image bytes, proc
+lifetime, credentials, helper FD/mappings, callback events and final process join;
+tampered helper bytes refuse before either loading entry. This does not qualify
+descriptor-protected storage, WAL/locks/fsync, uncertain-close handling, release
+publication, credential authority or installed I1. Those remain required before
+real credential/TLS/broker composition; the path diagnostic remains unchanged.
+
+The same run also qualified the startup-retirement refusal at the actual
+installed boundary: moving abandoned resource retirement outside the initial
+installed borrow avoided self-wait, and unresolved native launch closure exited
+with `RECOVERY_REQUIRED` before publishing Store/control service. The successor
+ACTIVE row remained for recovery; it is not proof of a physical lock still held.
+All seven jobs passed and the four runner baselines were restored exactly.
+
 SEA bundling, fixed helper locations, preload control and actual-image binding
 must be qualified together. Public admission is not a wrapper around internal
 reference inputs. First model dispatch requires a trusted assembly/broker path;
