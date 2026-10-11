@@ -16,7 +16,7 @@ import { KernelStorageError } from './errors.js';
 import { createInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { readLatestStateOwner } from './state-owner.js';
-import { openStateStore, type StateStore } from './store.js';
+import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
 import { writeInstalledControlPackage } from './testing/installed-control-fixture.js';
 
 function ownerAt(stateRoot: string) {
@@ -133,6 +133,38 @@ if (process.platform === 'linux') test('a real signed initial installation acqui
   } finally {
     await store?.close();
     await selected?.close();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+if (process.platform === 'linux') test('installed Supervisor status reports real initial inventory and schema, without advertising execution readiness', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-status-')));
+  await chmod(fixture, 0o700);
+  const stateRoot = path.join(fixture, 'state');
+  let selected: HeldInstalledRuntime | undefined;
+  let store: StateStore | undefined;
+  try {
+    const signed = await writeInstalledControlPackage(path.join(fixture, 'package'));
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    const installed = await runtime.installInitial({ packageRoot: path.join(fixture, 'package'), stateRoot });
+    selected = await runtime.openSelected(stateRoot);
+    store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys: signed.releaseKeys }, selected);
+    const identity = await publishInProcessChannel(store);
+    const summary = { schemaVersion: 1, runtimeBundleRef: installed.bundleDigest,
+      bundleDigest: installed.bundleDigest, bundleVersion: signed.bundle.bundleVersion };
+    const owner = ownerAt(stateRoot);
+    assert.deepEqual(await store.readSupervisorStatus(identity), {
+      method: 'supervisor.status', health: 'degraded', supervisorInstanceId: owner.supervisorInstanceId,
+      queue: { queuedRuns: 0, runningRuns: 0, capacity: 0 }, stateSchemaVersion: 4,
+      activeRuntimeBundle: summary, installedRuntimeBundles: [summary], incompatiblePinnedRunCount: 0,
+    });
+    // This handle is a borrowed installation, not owned by StateStore. Its
+    // real closure must revoke inventory observations even while Store lives.
+    await selected.close();
+    await assert.rejects(store.readSupervisorStatus(identity),
+      error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
+  } finally {
+    await store?.close(); await selected?.close();
     await rm(fixture, { recursive: true, force: true });
   }
 });

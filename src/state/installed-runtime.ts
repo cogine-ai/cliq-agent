@@ -26,7 +26,7 @@ export type InstalledRuntimeBorrow = Readonly<{
   bundleDigest: string;
   stateRoot: InstalledDirectoryIdentity & Readonly<{ canonicalPath: string }>;
   casRoot: InstalledDirectoryIdentity;
-  seed: readonly Readonly<{ artifactRef: string; byteCount: number }>[];
+  seed: readonly Readonly<{ artifactRef: string; byteCount: number; mediaType: string; schemaKind: string }>[];
   revalidate(): Promise<void>;
 }>;
 type InstalledRuntimeBinding = {
@@ -281,6 +281,12 @@ async function checkPackageGraph(scope: Scope, root: Directory, bundle: RuntimeB
     await scope.assertDirectory(directory);
   }
 }
+async function checkSelectedVersion(scope: Scope, bundles: Directory, bundleDigest: string): Promise<void> {
+  await scope.assertDirectory(bundles);
+  const names = await readdir(childPath(bundles, '.'));
+  if (names.length !== 1 || names[0] !== bundleDigest) mismatch('initial installed runtime contains an unselected version or object');
+  await scope.assertDirectory(bundles);
+}
 async function verifyPackage(scope: Scope, root: Directory, releaseKeys: readonly ReleaseTrustKey[], expectedDigest?: string): Promise<VerifiedPackage> {
   const manifest = await scope.file(root, 'manifest.json', 0o400, undefined, expectedDigest);
   const manifestBytes = await readSmall(manifest);
@@ -441,6 +447,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         if (!selection || typeof selection !== 'object' || Array.isArray(selection) || !exactKeys(selection, ['schemaVersion', 'bundleDigest']) || selection.schemaVersion !== 1) mismatch('installed runtime selection has an invalid closed shape');
         try { assertArtifactRef(selection.bundleDigest); } catch (cause) { mismatch('installed runtime selection has an invalid complete bundle reference', cause); }
         active.digest = sha256Bytes(activeBytes);
+        await checkSelectedVersion(scope, bundles, selection.bundleDigest);
         const version = await scope.directory(bundles, selection.bundleDigest);
         const signed = await verifyPackage(scope, version, releaseKeys, selection.bundleDigest);
         const supervisor = signed.bundle.entries.find(entry => entry.role === 'supervisor')!;
@@ -454,7 +461,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         const revalidate = async () => {
           healthy(); await scope.assertDirectories();
           for (const file of [active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]) await verifyBytes(file);
-          await checkPackageGraph(scope, version, signed.bundle); await scope.assertDirectories();
+          await checkPackageGraph(scope, version, signed.bundle);
+          await checkSelectedVersion(scope, bundles, signed.bundleDigest); await scope.assertDirectories();
         };
         await revalidate();
         const checkedRevalidate = async () => {
@@ -475,8 +483,15 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           bundle: signed.bundle, bundleDigest: signed.bundleDigest,
           stateRoot: Object.freeze({ ...identity(state), canonicalPath: stateRoot }),
           casRoot: identity(casRoot),
-          seed: Object.freeze([...signed.roots].map(([artifactRef, bytes]) =>
-            Object.freeze({ artifactRef, byteCount: bytes.length }))
+          seed: Object.freeze([...signed.roots].map(([artifactRef, bytes]) => {
+            const role = signed.bundle.entries.find(entry => entry.digest === artifactRef)?.role;
+            const schemaKind = artifactRef === signed.bundleDigest ? 'cliq-runtime-bundle-v1' :
+              role === 'policy_engine' ? 'cliq-policy-engine-profile-v1' :
+              role === 'sandbox_root_profile' ? 'cliq-sandbox-root-profile-v1' :
+              role === 'trust_store' ? 'cliq-https-trust-store-v1' : mismatch('installed seed contains an unsupported object');
+            return Object.freeze({ artifactRef, byteCount: bytes.length,
+              mediaType: role === 'trust_store' ? 'application/octet-stream' : 'application/json', schemaKind });
+          })
             .sort((left, right) => left.artifactRef < right.artifactRef ? -1 : left.artifactRef > right.artifactRef ? 1 : 0)),
         });
         const selected: HeldInstalledRuntime = Object.freeze({

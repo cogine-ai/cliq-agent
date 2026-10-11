@@ -45,7 +45,8 @@ import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { withHeldInstalledRuntime, type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
+import type { SupervisorHelloV1, SupervisorStatusV1 } from './installed-control.js';
 import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
   decodePlatformProcessIdentity,
@@ -94,7 +95,7 @@ import {
 import { readRecoveryClosure } from './recovery-closure.js';
 import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, type BeginWorkerRecoveryInput } from './reducers/worker-recovery.js';
 import { readRun, readSession } from './rows.js';
-import { applyKernelSchema, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
+import { applyKernelSchema, assertPristineKernelSchema, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
 import { openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import {
   assertActiveStateOwner,
@@ -178,7 +179,7 @@ function assertFreshAuthorityDatabaseEmpty(connection: SqliteConnection | Sqlite
     if (Number(row?.count ?? 0) !== 0) {
       throw new KernelStorageError(
         'RECOVERY_REQUIRED',
-        `refusing fresh_empty genesis over non-empty authority table ${table}`
+        `refusing fresh genesis over non-empty authority table ${table}`
       );
     }
   }
@@ -388,7 +389,8 @@ export class StateStore {
     private readonly driver: SqliteDriver,
     readonly artifacts: ArtifactCatalog,
     private readonly owner: StateOwnerContext,
-    private readonly runtimeAuthority?: StateStoreRuntimeAuthority
+    private readonly runtimeAuthority?: StateStoreRuntimeAuthority,
+    private readonly installedRuntime?: HeldInstalledRuntime
   ) {}
 
   get ownerEpoch(): number {
@@ -400,6 +402,33 @@ export class StateStore {
       ref: this.owner.stateRootIdentityRef,
       digest: this.owner.stateRootIdentityDigest
     };
+  }
+
+  /** Signed owner observation, not an installation or execution-capacity claim. */
+  async readSupervisorHello(identity: AuthenticatedControlIdentity): Promise<SupervisorHelloV1> {
+    if (this.closed || this.closeRequested || this.released)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'StateStore is closing or closed');
+    await validateControlChannelClosure(this.artifacts, this.owner, identity);
+    const bundle = this.runtimeAuthority?.bundle;
+    if (bundle === undefined)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'public Supervisor observation requires signed runtime authority');
+    const completeRef = canonicalSha256(bundle);
+    const observation = this.driver.readSnapshot(connection => {
+      const owner = assertActiveStateOwner(connection, this.owner);
+      if (owner.runtimeBundleRef !== completeRef || owner.runtimeBundleManifestDigest !== bundle.manifestDigest)
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'Supervisor observation does not match its active signed owner');
+      return { supervisorInstanceId: owner.supervisorInstanceId,
+        activeRuntimeBundle: { schemaVersion: 1 as const, runtimeBundleRef: completeRef,
+          bundleDigest: completeRef, bundleVersion: bundle.bundleVersion },
+        headlessSchemaRange: bundle.headlessSchemaRange };
+    });
+    await validateControlChannelClosure(this.artifacts, this.owner, identity);
+    assertActiveStateOwner(this.driver, this.owner);
+    return immutableSnapshot(observation);
+  }
+
+  async readSupervisorStatus(_identity: AuthenticatedControlIdentity): Promise<SupervisorStatusV1> {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'Supervisor status requires a held verified installation');
   }
 
   /** Internal authenticated transport, not an installed public protocol server. */
@@ -419,18 +448,25 @@ export class StateStore {
   static async open(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority,
     installedRuntime?: HeldInstalledRuntime): Promise<StateStore> {
     if (installedRuntime !== undefined) {
-      return withHeldInstalledRuntime(installedRuntime, () => StateStore.openCore(stateRoot, runtimeAuthority));
+      return withHeldInstalledRuntime(installedRuntime,
+        installed => StateStore.openCore(stateRoot, runtimeAuthority, installed, installedRuntime));
     }
     return StateStore.openCore(stateRoot, runtimeAuthority);
   }
 
-  private static async openCore(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority): Promise<StateStore> {
+  private static async openCore(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority,
+    installed?: InstalledRuntimeBorrow, installedRuntime?: HeldInstalledRuntime): Promise<StateStore> {
     runtimeAuthority = runtimeAuthority === undefined ? undefined : immutableSnapshot(runtimeAuthority);
     if (process.platform !== 'darwin' && process.platform !== 'linux') {
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', `state store is unsupported on ${process.platform}`);
     }
     if (runtimeAuthority) {
       verifyRuntimeBundle(runtimeAuthority.bundle, runtimeAuthority.releaseKeys);
+    }
+    if (installed && (stateRoot !== installed.stateRoot.canonicalPath || runtimeAuthority === undefined ||
+        canonicalSha256(runtimeAuthority.bundle) !== installed.bundleDigest ||
+        runtimeAuthority.bundle.manifestDigest !== installed.bundle.manifestDigest)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateStore requires the exact held installed root and signed bundle');
     }
     const native = await loadNativeStateOwner(runtimeAuthority?.bundle);
     if (runtimeAuthority) {
@@ -458,6 +494,7 @@ export class StateStore {
     let driver: SqliteDriver | undefined;
     try {
       assertStateOwnerLock(heldLock);
+      if (installed) await assertInstalledRootBinding(stateRoot, heldLock, installed);
       driver = openSqliteDriver(databasePath);
       const preflightSchemaVersion = readSchemaUserVersion(driver);
       if (preflightSchemaVersion === 1) {
@@ -478,7 +515,7 @@ export class StateStore {
       const allowLayoutCreation = Number(ownerHistory?.count ?? 0) === 0;
       await ensurePrivateDirectory(casRoot, allowLayoutCreation);
       const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
-      const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts, native, heldLock, runtimeAuthority?.bundle);
+      const owner = await acquireOrBootstrapStateOwner(stateRoot, driver, artifacts, native, heldLock, runtimeAuthority?.bundle, installed);
       const ownerContext = await stateOwnerContextFromArtifacts(stateRoot, artifacts, owner, heldLock);
       // Close abandoned capture resources before publishing the successor
       // Store. Retained reservations replace neither source nor client: only
@@ -490,7 +527,7 @@ export class StateStore {
       await retireAbandonedPreactivations(driver, artifacts, ownerContext,
         runtimeAuthority?.execution && { ...runtimeAuthority.execution,
           runtimeAuthority: { bundle: runtimeAuthority.bundle, releaseKeys: runtimeAuthority.releaseKeys } });
-      return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority);
+      return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority, installedRuntime);
     } catch (error) {
       let failure = error;
       if (!(error instanceof ResourceRetirementError)) {
@@ -782,13 +819,68 @@ export async function openStateStore(stateRoot: string, runtimeAuthority?: State
   return StateStore.open(stateRoot, runtimeAuthority, installedRuntime);
 }
 
+async function assertInstalledRootBinding(stateRoot: string, heldLock: HeldStateOwnerLock, installed: InstalledRuntimeBorrow) {
+  try {
+    await installed.revalidate();
+    assertStateOwnerLock(heldLock);
+    if (installed.stateRoot.canonicalPath !== stateRoot ||
+        installed.stateRoot.deviceId !== heldLock.root.deviceId ||
+        installed.stateRoot.fileId !== heldLock.root.fileId || installed.stateRoot.ownerUid !== heldLock.root.ownerUid) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed StateRoot differs from the native owner lock root');
+    }
+    const info = await lstat(path.join(stateRoot, KERNEL_CAS_DIRECTORY), { bigint: true });
+    if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o7777n) !== 0o700n ||
+        info.uid !== BigInt(installed.casRoot.ownerUid) || unsignedDecimalId(info.dev) !== installed.casRoot.deviceId ||
+        unsignedDecimalId(info.ino) !== installed.casRoot.fileId) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed CAS differs from its held private directory');
+    }
+    assertStateOwnerLock(heldLock);
+    return info;
+  } catch (cause) {
+    if (cause instanceof KernelStorageError) throw cause;
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'held installed root validation failed', { cause });
+  }
+}
+
+/** Only genesis calls this with the producer's seed and its own staged objects;
+ * a client cannot supply the expected namespace or substitute a CAS locator. */
+async function assertInstalledGenesisNamespace(stateRoot: string, heldLock: HeldStateOwnerLock,
+  artifacts: ArtifactCatalog, installed: InstalledRuntimeBorrow, expectedArtifacts: readonly PublishedArtifact[]): Promise<void> {
+  try {
+    const expected = new Map<string, number>();
+    for (const artifact of expectedArtifacts) {
+      const prior = expected.get(artifact.ref);
+      if (prior !== undefined && prior !== artifact.byteLength)
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed genesis object has conflicting byte counts');
+      expected.set(artifact.ref, artifact.byteLength);
+    }
+    const assertNames = async () => {
+      const names = await readdir(path.join(stateRoot, KERNEL_CAS_DIRECTORY));
+      if (names.length !== expected.size || names.some(name => !expected.has(name)))
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed genesis CAS is not the exact held seed and staged objects');
+    };
+    await assertInstalledRootBinding(stateRoot, heldLock, installed);
+    await assertNames();
+    for (const [ref, byteCount] of expected) {
+      for await (const _chunk of artifacts.readChunks(ref, byteCount)) { /* Complete rehash and owned 0400/single-link checks. */ }
+    }
+    await assertInstalledRootBinding(stateRoot, heldLock, installed);
+    await assertNames();
+    assertStateOwnerLock(heldLock);
+  } catch (cause) {
+    if (cause instanceof KernelStorageError) throw cause;
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed genesis CAS validation failed', { cause });
+  }
+}
+
 async function acquireOrBootstrapStateOwner(
   stateRoot: string,
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   native: NativeStateOwner,
   heldLock: HeldStateOwnerLock,
-  runtimeBundle?: RuntimeBundleManifest
+  runtimeBundle?: RuntimeBundleManifest,
+  installed?: InstalledRuntimeBorrow
 ): Promise<Extract<StateOwnerRecordV1, { state: 'active' }>> {
   assertContiguousStateOwnerHistory(driver);
   const existingOwner = readActiveStateOwner(driver);
@@ -818,11 +910,15 @@ async function acquireOrBootstrapStateOwner(
   if (fence !== undefined) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence exists without state owner history');
   }
+  assertPristineKernelSchema(driver);
   assertFreshAuthorityDatabaseEmpty(driver);
 
   const casRoot = path.join(stateRoot, KERNEL_CAS_DIRECTORY);
-  const existingCasEntries = await readdir(casRoot);
-  if (existingCasEntries.length !== 0) {
+  const seedArtifacts: PublishedArtifact[] = installed?.seed.map(object => ({ ref: object.artifactRef,
+    byteLength: object.byteCount, mediaType: object.mediaType, schemaKind: object.schemaKind })) ?? [];
+  if (installed) {
+    await assertInstalledGenesisNamespace(stateRoot, heldLock, artifacts, installed, seedArtifacts);
+  } else if ((await readdir(casRoot)).length !== 0) {
     throw new KernelStorageError(
       'RECOVERY_REQUIRED',
       'refusing fresh_empty genesis over a non-empty CAS namespace'
@@ -834,6 +930,9 @@ async function acquireOrBootstrapStateOwner(
   const uid = requireEffectiveUid();
   const casInfo = await lstat(casRoot, { bigint: true });
   assertStateOwnerLock(heldLock);
+  const stateSchemaVersion = readSchemaUserVersion(driver);
+  if (stateSchemaVersion !== KERNEL_STATE_SCHEMA_VERSION)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'genesis state schema differs from the opened current schema');
 
   const stateRootIdentity = stateRootIdentityFromDescriptor(stateRoot, heldLock.root);
   const stateRootArtifact = await artifacts.publishCanonical(stateRootIdentity, 'cliq-state-root-identity-v1');
@@ -862,7 +961,7 @@ async function acquireOrBootstrapStateOwner(
     schemaVersion: 1,
     format: 'cliq-kernel-schema-manifest-v1',
     applicationId: KERNEL_SQLITE_APPLICATION_ID,
-    userVersion: KERNEL_STATE_SCHEMA_VERSION,
+    userVersion: stateSchemaVersion,
     schemaDigest,
     manifestDigest: ''
   };
@@ -875,14 +974,21 @@ async function acquireOrBootstrapStateOwner(
     schemaVersion: 1,
     format: 'cliq-kernel-empty-database-v1',
     applicationId: KERNEL_SQLITE_APPLICATION_ID,
-    userVersion: readSchemaUserVersion(driver),
+    userVersion: stateSchemaVersion,
     contentDigest: canonicalSha256({
       applicationId: KERNEL_SQLITE_APPLICATION_ID,
-      userVersion: KERNEL_STATE_SCHEMA_VERSION,
+      userVersion: stateSchemaVersion,
       tables: AUTHORITY_TABLES.length
     })
   };
   const databaseArtifact = await artifacts.publishCanonical(emptyDatabase, 'cliq-kernel-empty-database-v1');
+  const seedEntries = installed?.seed.map(({ artifactRef, byteCount }) => ({ artifactRef, byteCount })) ?? [];
+  let seedBytes = 0;
+  for (const { byteCount } of seedEntries) {
+    if (!Number.isSafeInteger(byteCount) || byteCount < 0 || byteCount > Number.MAX_SAFE_INTEGER - seedBytes)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed CAS seed byte count is not a safe integer');
+    seedBytes += byteCount;
+  }
 
   const casNamespace = {
     schemaVersion: 1,
@@ -896,10 +1002,10 @@ async function acquireOrBootstrapStateOwner(
     deviceId: unsignedDecimalId(casInfo.dev),
     directoryFileId: unsignedDecimalId(casInfo.ino),
     mode: 448,
-    entries: [] as Array<{ artifactRef: string; byteCount: number }>,
-    objectCount: 0,
-    totalBytes: 0,
-    rootDigest: canonicalSha256([]),
+    entries: seedEntries,
+    objectCount: seedEntries.length,
+    totalBytes: seedBytes,
+    rootDigest: canonicalSha256(seedEntries),
     manifestDigest: ''
   };
   casNamespace.manifestDigest = digestOmitting(casNamespace, 'manifestDigest');
@@ -908,7 +1014,8 @@ async function acquireOrBootstrapStateOwner(
   const generation: KernelGenerationIdentityV1 = {
     schemaVersion: 1,
     format: 'cliq-kernel-generation-identity-v1',
-    generationId: identityHash('cliq-kernel-generation-v1', stateRootIdentity.identityDigest, 'fresh_empty'),
+    generationId: installed ? identityHash('cliq-kernel-generation-v1', stateRootIdentity.identityDigest, 'fresh_installed', installed.bundleDigest) :
+      identityHash('cliq-kernel-generation-v1', stateRootIdentity.identityDigest, 'fresh_empty'),
     stateRootIdentityRef: stateRootArtifact.ref,
     stateRootIdentityDigest: stateRootIdentity.identityDigest,
     databaseImageRef: databaseArtifact.ref,
@@ -919,9 +1026,10 @@ async function acquireOrBootstrapStateOwner(
     casNamespaceManifestDigest: casNamespace.manifestDigest,
     casNamespaceId: casNamespace.namespaceId,
     casRootDigest: casNamespace.rootDigest,
-    stateSchemaVersion: readSchemaUserVersion(driver),
+    stateSchemaVersion,
     generationDigest: '',
-    origin: 'fresh_empty',
+    ...(installed ? { origin: 'fresh_installed' as const, runtimeBundleRef: installed.bundleDigest,
+      runtimeBundleManifestDigest: installed.bundle.manifestDigest } : { origin: 'fresh_empty' as const }),
     pristineSchemaManifestRef: schemaArtifact.ref,
     pristineSchemaManifestDigest: schemaManifest.manifestDigest,
     pristineSchemaDigest: schemaDigest
@@ -979,22 +1087,25 @@ async function acquireOrBootstrapStateOwner(
   };
   owner.rowDigest = digestOmitting(owner, 'rowDigest');
 
+  const genesisArtifacts = [stateRootArtifact, processArtifact, lockArtifact, schemaArtifact,
+    ...(runtimeBundle ? [runtimeArtifact] : []), databaseArtifact, casArtifact, generationArtifact, acquisitionArtifact];
+  const rootedArtifacts = [...seedArtifacts, ...genesisArtifacts];
+  if (installed) {
+    // The birth snapshot is acyclic: only the independently held seed appears
+    // in it, while this final publication cut also permits these exact objects.
+    await assertInstalledGenesisNamespace(stateRoot, heldLock, artifacts, installed, rootedArtifacts);
+  }
+
   driver.transaction((connection) => {
     assertStateOwnerLock(heldLock);
+    assertPristineKernelSchema(connection);
     assertFreshAuthorityDatabaseEmpty(connection);
+    const schemaNow = connection.prepare('PRAGMA user_version').get<{ user_version: unknown }>();
+    if (schemaNow?.user_version !== BigInt(stateSchemaVersion))
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'genesis state schema changed before owner publication');
     insertStateOwnerArtifacts(
       connection,
-      [
-        stateRootArtifact,
-        processArtifact,
-        lockArtifact,
-        schemaArtifact,
-        ...(runtimeBundle ? [runtimeArtifact] : []),
-        databaseArtifact,
-        casArtifact,
-        generationArtifact,
-        acquisitionArtifact
-      ],
+      rootedArtifacts,
       now
     );
     insertGenesisTimeFence(connection, 1, now);

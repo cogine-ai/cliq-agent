@@ -8945,6 +8945,10 @@ type RuntimeBundlePublicSummaryV1 = {
   bundleVersion: string
 }
 
+// Both runtimeBundleRef and bundleDigest name SHA-256 of the complete signed
+// canonical manifest, matching the installed bundle directory/selection.
+// The manifest's distinct self-omitting manifestDigest is not this public ref.
+
 type ControlMethodV1 =
   | 'control.hello'
   | 'session.create' | 'session.list' | 'session.get' | 'session.fork' | 'session.compact' | 'session.handoff.create'

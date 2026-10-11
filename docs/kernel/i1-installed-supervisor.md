@@ -280,6 +280,23 @@ requirement; restarts use existing successor acquisition rather than bootstrap
 again. Approval is a contract decision, not completed Linux installed-startup,
 migration/cutover, admission or execution qualification.
 
+The initial-owner gate additionally compares the actual SQLite catalog with
+the fixed DDL compiled by the same SQLite engine, both before genesis staging
+and inside its first transaction. Correct version numbers and empty business
+tables alone do not establish a pristine schema: an extra trigger can otherwise
+write business state during owner insertion. Refusal preserves the unowned
+schema rather than repairing or adopting it. Successor acquisition is unchanged.
+
+Production controller HELLO-time placement and retained-reservation recovery
+passed 25 actual Linux campaign cases at `5b47b93` in
+[run 38094701623](https://github.com/cogine-ai/cliq-agent/actions/runs/38094701623).
+The four real close-queue/retirement/prompt-closure regressions found in that
+run passed at `a036847` in
+[run 38095743801](https://github.com/cogine-ai/cliq-agent/actions/runs/38095743801);
+both Linux Node matrix jobs still failed the new installed-genesis positive
+case. These are component results, not first-fork-stop, installed SEA startup,
+persistent signed keeper, or complete I1 qualification.
+
 Publish immutable side-by-side directories under
 `runtime/bundles/<bundleDigest>/`, where `bundleDigest` is the complete signed
 manifest's ArtifactRef, not its distinct self-omitting `manifestDigest`.

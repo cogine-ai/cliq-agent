@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { constants as osConstants } from 'node:os';
 import { test, type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -37,6 +38,12 @@ type CloseFaultObservation = {
   next: { granted: boolean; code?: string; pid?: number; processStartToken?: string;
     queueCallsBefore: number; queueCallsAfter: number; rootReferences: number };
   nextCleanup: Settlement | null;
+};
+type ProcessExitObservation = {
+  pid: number; uid: number; originalStartToken: string;
+  readReached: number; reapedBySigkill: number; readErrno: number; freshErrno: number;
+  productionFreshCalls: number; productionFreshErrno: number; productionFreshAfterRetirement: number;
+  heldProcClosed: number; sampled: number; absent: number; retirementFailed: number; nativeSticky: number;
 };
 
 if (process.platform === 'linux') {
@@ -272,6 +279,41 @@ if (process.platform === 'linux') {
     assert.equal(observed.next.rootReferences, 1, 'refusal must precede duplication of the anchor root');
     assert.equal(observed.nextCleanup, null);
   });
+
+  test('native process retirement freshly observes kernel absence when its held proc subject is reaped before metadata read', async t => {
+    const { binary } = await faultFixture(t);
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { Module } from 'node:module';
+      const [binary] = process.argv.slice(1);
+      const module = new Module(binary); process.dlopen(module, binary);
+      // This approved test-only resource-sampling seam creates and exactly
+      // reaps a real disposable process. It creates no controller, scope,
+      // Run or recovery evidence and does not qualify worker birth/death.
+      const observation = module.exports.sampleReapedProcess();
+      console.log(JSON.stringify(observation));
+      // Natural exit: the actual child and every fixture-owned FD are joined.
+    `, binary], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(child.status, 0, child.stderr);
+    const observed = JSON.parse(child.stdout.trim()) as ProcessExitObservation;
+    // Establish that the race really happened and resources really retired
+    // before testing the production observation. No errno is injected: the
+    // wrapped openat runs only after exact waitpid reaps the original lifetime.
+    assert.ok(observed.pid > 0);
+    assert.equal(observed.uid, process.geteuid!());
+    assert.match(observed.originalStartToken, /^linux-proc-start-ticks:[0-9]+$/);
+    assert.equal(observed.readReached, 1, 'production sampling must already hold the actual proc directory');
+    assert.equal(observed.reapedBySigkill, 1, 'the original child must really die and be exactly reaped');
+    assert.equal(observed.readErrno, osConstants.errno.ENOENT, 'Linux must produce the failed old-proc read itself');
+    assert.equal(observed.freshErrno, osConstants.errno.ENOENT, 'an independent fresh open must prove kernel absence');
+    assert.equal(observed.heldProcClosed, 1, 'sampling must actually retire its original proc descriptor');
+    assert.equal(observed.retirementFailed, 0, 'real process disappearance is not an uncertain descriptor close');
+    assert.equal(observed.nativeSticky, 0, 'a fully joined subject must not poison the native image');
+    assert.equal(observed.productionFreshCalls, 1, 'production must take its own bounded fresh kernel cut before returning');
+    assert.equal(observed.productionFreshErrno, osConstants.errno.ENOENT, 'production must observe actual fresh absence, not reuse the old read errno');
+    assert.equal(observed.productionFreshAfterRetirement, 1, 'the old proc descriptor must really close before the fresh observation');
+    assert.equal(observed.sampled, 1, 'sampling must retry the disappearing proc subject at a fresh kernel cut');
+    assert.equal(observed.absent, 1, 'only the fresh kernel absence may establish the original lifetime is gone');
+  });
 } else {
   test('native Linux controller factory rejects unsupported platforms before allocating a controller', async t => {
     const { binary } = await faultFixture(t);
@@ -284,6 +326,7 @@ if (process.platform === 'linux') {
       assert.equal(module.exports.sealImage, undefined);
       assert.equal(module.exports.queueCalls, undefined);
       assert.equal(module.exports.resumeJoin, undefined);
+      assert.equal(module.exports.sampleReapedProcess, undefined);
     `, binary], { encoding: 'utf8', timeout: 10000 });
     assert.equal(child.status, 0, child.stderr);
   });

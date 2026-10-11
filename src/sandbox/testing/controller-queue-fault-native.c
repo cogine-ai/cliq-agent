@@ -1,6 +1,7 @@
 /* Test-only build of the actual native controller binding. Explicitly armed
  * faults affect only N-API queueing or reporting EIO after a real close.
- * Process/scopes and recovery evidence are never fabricated. */
+ * The process-exit probe reaps its own real child before the real proc read.
+ * Scopes, Runs and recovery evidence are never fabricated. */
 #define _GNU_SOURCE
 #define NAPI_VERSION 8
 #include <node_api.h>
@@ -9,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <sys/stat.h>
@@ -25,8 +27,18 @@ static int close_fault_opened[256];
 static dev_t close_fault_root_dev;
 static ino_t close_fault_root_ino;
 static char close_fault_sentinel[PATH_MAX];
+static struct {
+    pid_t pid;
+    dev_t device;
+    ino_t inode;
+    int held_fd, exit_fd, read_errno, fresh_calls, fresh_errno, wait_status, error;
+    char path[64];
+    bool triggered, reaped, proc_retired, fresh_after_retirement;
+} process_exit_probe;
 
 static int fault_close(int fd);
+static int probe_open(const char *name, int flags, ...);
+static int probe_openat(int directory, const char *name, int flags, ...);
 
 static napi_status fault_queue(napi_env env, napi_async_work work) {
     fault_queue_calls++;
@@ -35,6 +47,8 @@ static napi_status fault_queue(napi_env env, napi_async_work work) {
 }
 #define napi_queue_async_work fault_queue
 #define close fault_close
+#define open probe_open
+#define openat probe_openat
 #endif
 
 #undef NAPI_MODULE
@@ -42,13 +56,81 @@ static napi_status fault_queue(napi_env env, napi_async_work work) {
 #include "../../../native/linux/worker-native.c"
 #undef napi_queue_async_work
 #undef close
+#undef open
+#undef openat
 
 #if defined(__linux__)
+static void reap_process_exit_subject(void) {
+    int signaled = kill(process_exit_probe.pid, SIGKILL);
+    int signal_error = signaled != 0 ? errno : 0;
+    if (signal_error != 0) process_exit_probe.error = signal_error;
+    /* EOF also retires the disposable child if signaling failed. Consume
+     * this fixture-owned descriptor before close; never retry a reused FD. */
+    int exit_fd = process_exit_probe.exit_fd;
+    process_exit_probe.exit_fd = -1;
+    bool channel_retired = close(exit_fd) == 0;
+    if (!channel_retired) process_exit_probe.error = errno;
+    pid_t joined;
+    int options = signaled == 0 || signal_error == ESRCH || channel_retired ? 0 : WNOHANG;
+    do { joined = waitpid(process_exit_probe.pid, &process_exit_probe.wait_status, options); } while (joined < 0 && errno == EINTR);
+    process_exit_probe.reaped = joined == process_exit_probe.pid;
+    if (!process_exit_probe.reaped && process_exit_probe.error == 0) process_exit_probe.error = joined < 0 ? errno : EBUSY;
+}
+
+static int probe_open(const char *name, int flags, ...) {
+    mode_t mode = 0;
+    if ((flags & O_CREAT) != 0 || (flags & O_TMPFILE) == O_TMPFILE) {
+        va_list arguments;
+        va_start(arguments, flags);
+        mode = va_arg(arguments, mode_t);
+        va_end(arguments);
+    }
+    bool fresh = process_exit_probe.triggered && strcmp(name, process_exit_probe.path) == 0;
+    if (fresh) process_exit_probe.fresh_after_retirement = process_exit_probe.proc_retired;
+    int result = open(name, flags, mode);
+    int error = errno;
+    if (fresh) {
+        /* Record the production sampler's own fresh kernel cut, separately
+         * from the independent verification performed after it returns. */
+        process_exit_probe.fresh_calls++;
+        process_exit_probe.fresh_errno = result < 0 ? error : 0;
+    }
+    errno = error;
+    return result;
+}
+
+static int probe_openat(int directory, const char *name, int flags, ...) {
+    mode_t mode = 0;
+    if ((flags & O_CREAT) != 0 || (flags & O_TMPFILE) == O_TMPFILE) {
+        va_list arguments;
+        va_start(arguments, flags);
+        mode = va_arg(arguments, mode_t);
+        va_end(arguments);
+    }
+    struct stat held;
+    if (process_exit_probe.pid > 0 && !process_exit_probe.triggered && strcmp(name, "stat") == 0 &&
+        fstat(directory, &held) == 0 && held.st_dev == process_exit_probe.device && held.st_ino == process_exit_probe.inode) {
+        /* sample_process already opened and validated this actual proc FD.
+         * Reap only this fixture's exclusively owned child, then let Linux
+         * itself determine the read result. No errno/result is substituted. */
+        process_exit_probe.triggered = true;
+        process_exit_probe.held_fd = directory;
+        reap_process_exit_subject();
+        int result = openat(directory, name, flags, mode);
+        process_exit_probe.read_errno = result < 0 ? errno : 0;
+        return result;
+    }
+    return openat(directory, name, flags, mode);
+}
+
 static int fault_close(int fd) {
     struct stat identity;
     bool identified = fstat(fd, &identity) == 0;
     int status = close(fd);
     if (status != 0) return status;
+    if (process_exit_probe.triggered && fd == process_exit_probe.held_fd && identified &&
+        identity.st_dev == process_exit_probe.device && identity.st_ino == process_exit_probe.inode)
+        process_exit_probe.proc_retired = true;
     if (!identified || !S_ISDIR(identity.st_mode) || identity.st_dev != close_fault_root_dev ||
         identity.st_ino != close_fault_root_ino || !atomic_exchange(&close_fault_armed, false)) return 0;
     atomic_fetch_add(&close_fault_count, 1);
@@ -126,6 +208,77 @@ static napi_value queue_count(napi_env env, napi_callback_info info) {
     return result;
 }
 
+/* This approved test-only seam exercises the production proc sampler, not a
+ * controller/worker/death capability. Its subject is a real disposable child;
+ * no scope identity, durable fact or authority-bearing object is created. */
+static napi_value sample_reaped_process(napi_env env, napi_callback_info info) {
+    (void)info;
+    if (process_exit_probe.pid != 0 || fault_queue_calls != 0 || atomic_load(&close_fault_count) != 0)
+        return failure(env, "process-exit probe requires a fresh isolated test binding");
+    int channel[2];
+    if (pipe2(channel, O_CLOEXEC) != 0) return failure(env, "actual process-exit channel unavailable");
+    pid_t child = fork();
+    if (child < 0) {
+        int read_end = close(channel[0]), write_end = close(channel[1]);
+        return failure(env, read_end == 0 && write_end == 0 ? "actual process-exit subject could not be born" :
+            "failed process-exit birth channel could not retire");
+    }
+    if (child == 0) {
+        if (close(channel[1]) != 0) _exit(70);
+        char byte; ssize_t received;
+        do { received = read(channel[0], &byte, 1); } while (received < 0 && errno == EINTR);
+        _exit(received == 0 ? 0 : 70);
+    }
+    process_exit_probe.pid = child;
+    process_exit_probe.held_fd = -1;
+    process_exit_probe.exit_fd = channel[1];
+    if (close(channel[0]) != 0) process_exit_probe.error = errno;
+    char path[64], token[CLIQ_WORKER_TOKEN_BYTES];
+    struct stat identity;
+    int length = snprintf(path, sizeof(path), "/proc/%ld", (long)child);
+    bool initialized = length > 0 && (size_t)length < sizeof(path) && stat(path, &identity) == 0 &&
+        cliq_process_token(child, token);
+    if (initialized) {
+        process_exit_probe.device = identity.st_dev;
+        process_exit_probe.inode = identity.st_ino;
+        memcpy(process_exit_probe.path, path, (size_t)length + 1);
+    }
+    struct controller observer = {0};
+    struct process_sample sample = {0};
+    bool sampled = initialized && sample_process(&observer, child, &sample, false);
+    /* Failure to reach the production read must not abandon this real child.
+     * Never signal again after a wait attempt whose ownership is uncertain. */
+    if (!process_exit_probe.triggered) reap_process_exit_subject();
+    bool held_closed = false;
+    if (process_exit_probe.held_fd >= 0) {
+        struct stat remaining;
+        held_closed = fstat(process_exit_probe.held_fd, &remaining) != 0 && errno == EBADF;
+    }
+    int fresh = initialized ? open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int fresh_errno = fresh < 0 ? errno : 0;
+    if (fresh >= 0 && close(fresh) != 0) return failure(env, "fresh process probe descriptor could not retire");
+    if (!initialized || !process_exit_probe.reaped || process_exit_probe.error != 0)
+        return failure(env, "actual process-exit probe failed to establish and join its subject");
+    napi_value result;
+    if (napi_create_object(env, &result) != napi_ok) return NULL;
+    set_number(env, result, "pid", child);
+    set_number(env, result, "uid", identity.st_uid);
+    set_string(env, result, "originalStartToken", token);
+    set_number(env, result, "readReached", process_exit_probe.triggered);
+    set_number(env, result, "reapedBySigkill", WIFSIGNALED(process_exit_probe.wait_status) && WTERMSIG(process_exit_probe.wait_status) == SIGKILL);
+    set_number(env, result, "readErrno", process_exit_probe.read_errno);
+    set_number(env, result, "productionFreshCalls", process_exit_probe.fresh_calls);
+    set_number(env, result, "productionFreshErrno", process_exit_probe.fresh_errno);
+    set_number(env, result, "productionFreshAfterRetirement", process_exit_probe.fresh_after_retirement);
+    set_number(env, result, "freshErrno", fresh_errno);
+    set_number(env, result, "heldProcClosed", held_closed);
+    set_number(env, result, "sampled", sampled);
+    set_number(env, result, "absent", sample.absent);
+    set_number(env, result, "retirementFailed", observer.retirement_failed);
+    set_number(env, result, "nativeSticky", atomic_load(&native_retirement_failed));
+    return result;
+}
+
 /* Called only after the test freezes the unsuccessful close observation.
  * Resume the existing real join for that exact branded receiver so a RED
  * result does not abandon its owned FD or hang the cleanup hook. This does
@@ -152,6 +305,7 @@ NAPI_MODULE_INIT() {
         { "disarmCloseFault", NULL, disarm_close_fault, NULL, NULL, NULL, napi_default, NULL },
         { "closeFaultState", NULL, close_fault_state, NULL, NULL, NULL, napi_default, NULL },
         { "queueCalls", NULL, queue_count, NULL, NULL, NULL, napi_default, NULL },
+        { "sampleReapedProcess", NULL, sample_reaped_process, NULL, NULL, NULL, napi_default, NULL },
         { "resumeJoin", NULL, resume_join, NULL, NULL, NULL, napi_default, NULL }
     };
     if (napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok) return NULL;
