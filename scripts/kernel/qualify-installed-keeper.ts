@@ -10,12 +10,14 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
-import { KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../src/config.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
 import { qualifyInstalledAnchorSource } from './testing/installed-anchor-source.js';
 import { qualifyInstalledAnchorConsumer } from './testing/installed-anchor-consumer.js';
-import { inspectInstalledOwner, installedReadClientScript } from './testing/installed-read-control.js';
+import { qualifyInstalledGenesis } from './testing/installed-genesis.js';
+import { qualifyInstalledInspectorSignal, type InstalledInspectorSignalReport } from './testing/installed-inspector-signal.js';
+import { assertInstalledReadExchanges, inspectInstalledOwner, installedReadClientScript } from './testing/installed-read-control.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
 
@@ -282,7 +284,7 @@ async function campaign(ledgerFile: string): Promise<void> {
     const stage = await lstat(installed.buildFixture);
     assert(stage.isDirectory() && !stage.isSymbolicLink()); assert.equal(stage.uid, 0); assert.equal(stage.gid, 0);
     assert.equal(stage.mode & 0o7777, 0o755);
-    const { packageRoot, releaseKeys, bundle, contents } = await buildInstalledSupervisorPackage(installed.buildFixture);
+    const { packageRoot, releaseKeys, bundle, contents, carrier } = await buildInstalledSupervisorPackage(installed.buildFixture);
     assert.equal(packageRoot, installed.packageRoot);
     report.installer = await stageInstaller(installed);
     report.preloadPositiveControl = await positivePreloadControl(ledger);
@@ -437,36 +439,22 @@ async function campaign(ledgerFile: string): Promise<void> {
             assert(Number.isSafeInteger(supervisorPid) && supervisorPid > 0 && supervisorPid <= 0x7fffffff);
             assert.equal(supervisorUnit.ExecMainPID, String(supervisorPid));
             assert.match(supervisorUnit.InvocationID!, /^[a-f0-9]{32}$/u);
-            const owner = inspectInstalledOwner(installed.stateRoot);
-            assert(owner); assert.equal(owner.state, 'active'); assert.equal(owner.ownerEpoch, 1);
-            assert.equal(owner.runtimeBundleRef, selection.bundleDigest);
-            assert.equal(owner.runtimeBundleManifestDigest, bundle.manifestDigest);
-            assert.equal(owner.supervisorExecutableDigest, imageDigest);
-            const client = command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
-              `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', process.execPath,
-              '--input-type=module', '-e', installedReadClientScript, socketPath]);
-            report.supervisorReadClient = client; assert.equal(client.status, 0, client.stderr);
-            const exchanges = parseJsonStrict(client.stdout.trim()) as Array<{ hello: string; status: string }>;
-            assert.equal(exchanges.length, 2);
-            const summary = { schemaVersion: 1, runtimeBundleRef: selection.bundleDigest,
-              bundleDigest: selection.bundleDigest, bundleVersion: bundle.bundleVersion };
-            for (const exchange of exchanges) {
-              const hello = parseJsonStrict(exchange.hello) as Record<string, any>;
-              const status = parseJsonStrict(exchange.status) as Record<string, any>;
-              assert.equal(canonicalJsonBytes(hello).toString('utf8'), exchange.hello);
-              assert.equal(canonicalJsonBytes(status).toString('utf8'), exchange.status);
-              assert.equal(hello.protocolVersion, 1); assert.equal(hello.ok, true);
-              assert.equal(hello.result.method, 'control.hello'); assert.equal(hello.result.serverBuild, 'cliq-installed-v1');
-              assert.equal(hello.result.supervisorInstanceId, owner.supervisorInstanceId);
-              assert.deepEqual(canonicalJsonBytes(hello.result.activeRuntimeBundle), canonicalJsonBytes(summary));
-              assert.deepEqual(hello.result.enabledFeatureIds, ['supervisor.status']);
-              assert.equal(status.protocolVersion, 1); assert.equal(status.ok, true);
-              assert.deepEqual(canonicalJsonBytes(status.result), canonicalJsonBytes({ method: 'supervisor.status',
-                health: 'degraded', supervisorInstanceId: owner.supervisorInstanceId,
-                queue: { queuedRuns: 0, runningRuns: 0, capacity: 0 }, stateSchemaVersion: KERNEL_STATE_SCHEMA_VERSION,
-                activeRuntimeBundle: summary, installedRuntimeBundles: [summary], incompatiblePinnedRunCount: 0 }));
-            }
-            assert.deepEqual(inspectInstalledOwner(installed.stateRoot), owner);
+            const genesis: Record<string, unknown> = { diagnosticOnly: true }; report.genesis = genesis;
+            const { owner, identity } = await qualifyInstalledGenesis({ stateRoot: installed.stateRoot, pid: supervisorPid,
+              uid: ledger.uid, selectedImage: expectedImage, bundle, contents, report: genesis });
+            const checkControl = async (): Promise<void> => {
+              const currentUnit = show(installed.supervisorUnit);
+              assert.equal(currentUnit.InvocationID, supervisorUnit.InvocationID); assert.equal(currentUnit.MainPID, String(supervisorPid));
+              const client = command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
+                `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', process.execPath,
+                '--input-type=module', '-e', installedReadClientScript, socketPath]);
+              report.supervisorReadClient = client; assert.equal(client.status, 0, client.stderr);
+              assertInstalledReadExchanges(client.stdout, owner, bundle);
+              assert.deepEqual(inspectInstalledOwner(installed.stateRoot), owner);
+              const confirmedUnit = show(installed.supervisorUnit);
+              assert.equal(confirmedUnit.InvocationID, supervisorUnit.InvocationID); assert.equal(confirmedUnit.MainPID, String(supervisorPid));
+            };
+            await checkControl();
             report.supervisorReadPositive = { pid: supervisorPid, ownerEpoch: owner.ownerEpoch,
               supervisorInstanceId: owner.supervisorInstanceId, reconnects: 1 };
             const consumer: Record<string, unknown> = { diagnosticOnly: true }; report.consumer = consumer;
@@ -476,6 +464,127 @@ async function campaign(ledgerFile: string): Promise<void> {
             const finalSource = show(), finalSupervisor = show(installed.supervisorUnit);
             assert.equal(finalSource.InvocationID, shown.InvocationID); assert.equal(finalSource.MainPID, shown.MainPID);
             assert.equal(finalSupervisor.InvocationID, supervisorUnit.InvocationID); assert.equal(finalSupervisor.MainPID, supervisorUnit.MainPID);
+            const inspectorSignal: InstalledInspectorSignalReport = { diagnosticOnly: true };
+            report.inspectorSignal = inspectorSignal;
+            await qualifyInstalledInspectorSignal({ carrier, cwd: installed.buildFixture, pid: supervisorPid,
+              selectedImage: expectedImage, processStartToken: identity.processStartToken,
+              stderr: () => journal(supervisorUnit.InvocationID!, String(supervisorPid), installed.supervisorUnit)
+                .filter(record => record._UID === String(ledger.uid) && record._PID === String(supervisorPid) &&
+                  record._TRANSPORT === 'stdout' && typeof record.MESSAGE === 'string')
+                .map(record => record.MESSAGE).join('\n'), checkControl, report: inspectorSignal });
+            report.supervisorReadPositive = { pid: supervisorPid, ownerEpoch: owner.ownerEpoch,
+              supervisorInstanceId: owner.supervisorInstanceId, reconnects: 3 };
+            const stopSupervisor = userCommand(['stop', installed.supervisorUnit]);
+            report.supervisorStopCommand = stopSupervisor; assert.equal(stopSupervisor.status, 0, stopSupervisor.stderr);
+            const stoppedSupervisor = show(installed.supervisorUnit); report.supervisorStopped = stoppedSupervisor;
+            assert.equal(stoppedSupervisor.MainPID, '0'); assert.equal(stoppedSupervisor.ActiveState, 'inactive');
+            assert.equal(stoppedSupervisor.ExecMainPID, String(supervisorPid));
+            assert.equal(stoppedSupervisor.ExecMainCode, '1'); assert.equal(stoppedSupervisor.ExecMainStatus, '0');
+            assert.equal(stoppedSupervisor.Result, 'success');
+            const terminal = inspectInstalledOwner(installed.stateRoot);
+            assert(terminal?.state === 'terminal'); assert.equal(terminal.ownerEpoch, 1);
+            assert.equal(terminal.terminalReason, 'graceful_release');
+            await assert.rejects(lstat(socketPath), { code: 'ENOENT' });
+            const sourceAfterStop: Record<string, unknown> = { diagnosticOnly: true }; report.sourceAfterStop = sourceAfterStop;
+            await qualifyInstalledAnchorSource({ pid, startTicks: fields[19]!, uid: ledger.uid, gid: ledger.gid,
+              stateRoot: installed.stateRoot, bundleDigest: selection.bundleDigest, selectedImage: expectedImage,
+              selectedMetadata: selected, root: roots[0]!, report: sourceAfterStop });
+            const keeperAfterStop = show();
+            assert.equal(keeperAfterStop.InvocationID, shown.InvocationID); assert.equal(keeperAfterStop.MainPID, shown.MainPID);
+            // One real fault after the genuine positive: a legal FD locator
+            // which the complete actual source inventory proves unavailable.
+            // The physical named root remains intact, so fallback would fail
+            // this pre-StateOwner refusal rather than satisfy the test.
+            const invalidSource: Record<string, unknown> = { diagnosticOnly: true, qualified: false };
+            report.invalidSourceDescriptor = invalidSource;
+            const readyPath = path.join(installed.stateRoot, 'runtime/keeper.ready');
+            const ready = await open(readyPath, constants.O_RDWR | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+            try {
+              const readyInfo = await ready.stat({ bigint: true });
+              const expectedReady = sourceAfterStop.ready as { metadata: Record<string, string> };
+              const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
+              for (const key of imageFields) assert.equal(readyInfo[key].toString(), expectedReady.metadata[key]);
+              assert(readyInfo.isFile()); assert.equal(readyInfo.size, 40n); assert.equal(readyInfo.nlink, 1n);
+              assert.equal(readyInfo.uid, BigInt(ledger.uid)); assert.equal(readyInfo.gid, BigInt(ledger.gid));
+              assert.equal(readyInfo.mode & 0o7777n, 0o600n);
+              const original = await ready.readFile();
+              assert.equal(original.length, 40); assert.equal(original.toString('hex'), sourceAfterStop.readyBytes);
+              const checkReady = async () => {
+                const held = await ready.stat({ bigint: true }), named = await lstat(readyPath, { bigint: true });
+                for (const key of ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink'] as const) assert.equal(held[key], readyInfo[key]);
+                for (const key of imageFields) assert.equal(named[key], held[key]);
+                return Object.fromEntries(imageFields.map(key => [key, held[key].toString()]));
+              };
+              await checkReady();
+              const inventory = sourceAfterStop.afterInventory as { descriptors: Array<{ descriptor: string }> };
+              assert(!inventory.descriptors.some(value => value.descriptor === '2147483647'));
+              const corrupted = Buffer.from(original); corrupted.writeUInt32LE(0x7fffffff, 12);
+              const casPath = path.join(installed.stateRoot, KERNEL_CAS_DIRECTORY);
+              const casBefore = (await readdir(casPath)).sort();
+              const writeReady = async (bytes: Buffer) => {
+                await checkReady();
+                let written = 0;
+                while (written < bytes.length) {
+                  const result = await ready.write(bytes, written, bytes.length - written, written);
+                  assert(result.bytesWritten > 0); written += result.bytesWritten;
+                }
+                await ready.sync();
+                const observed = Buffer.alloc(40);
+                const result = await ready.read(observed, 0, 40, 0);
+                assert.equal(result.bytesRead, 40); assert.deepEqual(observed, bytes);
+                return await checkReady();
+              };
+              try {
+                invalidSource.faultedMetadata = await writeReady(corrupted);
+                invalidSource.originalBytes = original.toString('hex'); invalidSource.faultedBytes = corrupted.toString('hex');
+                invalidSource.startCommand = userCommand(['start', installed.supervisorUnit]);
+                const deadline = Date.now() + 30_000;
+                let refused: Record<string, string>;
+                for (;;) {
+                  refused = show(installed.supervisorUnit); invalidSource.unit = refused;
+                  if (['failed', 'inactive'].includes(refused.ActiveState!)) break;
+                  assert(Date.now() < deadline, 'faulted locator did not refuse before StateOwner'); await delay(20);
+                }
+                assert.equal(refused.ActiveState, 'failed'); assert.equal(refused.MainPID, '0');
+                assert.equal(refused.ExecMainCode, '1'); assert.equal(refused.ExecMainStatus, '1');
+                assert.equal(refused.Result, 'exit-code'); assert.match(refused.InvocationID!, /^[a-f0-9]{32}$/u);
+                assert.notEqual(refused.InvocationID, supervisorUnit.InvocationID);
+                assert.match(refused.ExecMainPID!, /^[1-9][0-9]*$/u); assert.notEqual(refused.ExecMainPID, String(supervisorPid));
+                let records: Record<string, unknown>[] = [];
+                let exactRefusal = false;
+                for (let attempt = 0; attempt < 20 && !exactRefusal; attempt++) {
+                  records = journal(refused.InvocationID!, refused.ExecMainPID!, installed.supervisorUnit);
+                  exactRefusal = records.some(record => {
+                    if (record._UID !== String(ledger.uid) || record._PID !== refused.ExecMainPID ||
+                      record._TRANSPORT !== 'stdout' || typeof record.MESSAGE !== 'string') return false;
+                    try {
+                      const value = parseJsonStrict(record.MESSAGE) as Record<string, unknown>;
+                      return value.diagnosticOnly === true && value.scope === 'installed-read-startup' &&
+                        value.code === 'ARTIFACT_MISMATCH' && value.message === 'installed keeper original source descriptor is unavailable';
+                    } catch { return false; }
+                  });
+                  if (!exactRefusal) await delay(50);
+                }
+                invalidSource.journal = records; invalidSource.exactRefusal = exactRefusal;
+                assert(exactRefusal, 'actual source-FD refusal must survive selected-image exec');
+                invalidSource.ownerAfter = inspectInstalledOwner(installed.stateRoot);
+                assert.deepEqual(invalidSource.ownerAfter, terminal, 'unavailable original FD must not acquire the next StateOwner');
+                assert.deepEqual((await readdir(casPath)).sort(), casBefore);
+                await assert.rejects(lstat(socketPath), { code: 'ENOENT' });
+              } finally {
+                invalidSource.restoredMetadata = await writeReady(original);
+                invalidSource.originalRestored = true;
+              }
+            } finally { await ready.close(); }
+            const sourceAfterRefusal: Record<string, unknown> = { diagnosticOnly: true }; report.sourceAfterRefusal = sourceAfterRefusal;
+            await qualifyInstalledAnchorSource({ pid, startTicks: fields[19]!, uid: ledger.uid, gid: ledger.gid,
+              stateRoot: installed.stateRoot, bundleDigest: selection.bundleDigest, selectedImage: expectedImage,
+              selectedMetadata: selected, root: roots[0]!, report: sourceAfterRefusal });
+            assert.deepEqual(sourceAfterRefusal.after, sourceAfterStop.before);
+            assert.deepEqual(sourceAfterRefusal.source, sourceAfterStop.source);
+            const keeperAfterRefusal = show();
+            assert.equal(keeperAfterRefusal.InvocationID, shown.InvocationID); assert.equal(keeperAfterRefusal.MainPID, shown.MainPID);
+            invalidSource.qualified = true;
             report.qualified = true;
             break;
           }

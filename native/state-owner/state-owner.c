@@ -576,6 +576,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
         {"captureCurrentProcess", NULL, capture_current_process, NULL, NULL, NULL, napi_default, NULL},
         {"executeInstalledImage", NULL, execute_installed_image, NULL, NULL, NULL, napi_default, NULL},
         {"initializeInstalledKeeper", NULL, initialize_installed_keeper, NULL, NULL, NULL, napi_default, NULL},
+        {"acquireInstalledAnchor", NULL, acquire_installed_anchor, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkspaceRoot", NULL, open_workspace_root, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok) return NULL;

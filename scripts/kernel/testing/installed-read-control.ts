@@ -7,6 +7,7 @@ import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { digestOmitting } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { StateOwnerRecordV1 } from '../../../src/kernel/types.js';
+import type { RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
 
 export function inspectInstalledOwner(stateRoot: string): StateOwnerRecordV1 | undefined {
   const database = new DatabaseSync(path.join(stateRoot, KERNEL_DATABASE_FILENAME), { readOnly: true, allowExtension: false });
@@ -23,6 +24,31 @@ export function inspectInstalledOwner(stateRoot: string): StateOwnerRecordV1 | u
     assert.equal(owner.rowDigest, digestOmitting(owner, 'rowDigest'));
     return owner;
   } finally { database.close(); }
+}
+
+export function assertInstalledReadExchanges(stdout: string, owner: StateOwnerRecordV1, bundle: RuntimeBundleManifest): void {
+  const exchanges = parseJsonStrict(stdout.trim()) as Array<{ hello: string; status: string }>;
+  assert.equal(exchanges.length, 2);
+  const summary = { schemaVersion: 1, runtimeBundleRef: owner.runtimeBundleRef,
+    bundleDigest: owner.runtimeBundleRef, bundleVersion: bundle.bundleVersion };
+  for (const exchange of exchanges) {
+    const hello = parseJsonStrict(exchange.hello) as Record<string, any>;
+    const status = parseJsonStrict(exchange.status) as Record<string, any>;
+    assert.equal(canonicalJsonBytes(hello).toString('utf8'), exchange.hello);
+    assert.equal(canonicalJsonBytes(status).toString('utf8'), exchange.status);
+    assert.equal(hello.protocolVersion, 1); assert.equal(status.protocolVersion, 1);
+    assert.equal(hello.ok, true); assert.equal(hello.result.method, 'control.hello');
+    assert.equal(hello.result.protocolVersion, 1); assert.equal(hello.result.serverBuild, 'cliq-installed-v1');
+    assert.deepEqual(canonicalJsonBytes(hello.result.controlSchemaRange), canonicalJsonBytes({ min: 1, max: 1 }));
+    assert.equal(hello.result.supervisorInstanceId, owner.supervisorInstanceId);
+    assert.deepEqual(canonicalJsonBytes(hello.result.activeRuntimeBundle), canonicalJsonBytes(summary));
+    assert.deepEqual(canonicalJsonBytes(hello.result.headlessSchemaRange), canonicalJsonBytes({ min: 1, max: 1 }));
+    assert.deepEqual(hello.result.enabledFeatureIds, ['supervisor.status']); assert.equal(status.ok, true);
+    assert.deepEqual(canonicalJsonBytes(status.result), canonicalJsonBytes({ method: 'supervisor.status', health: 'degraded',
+      supervisorInstanceId: owner.supervisorInstanceId, queue: { queuedRuns: 0, runningRuns: 0, capacity: 0 },
+      stateSchemaVersion: KERNEL_STATE_SCHEMA_VERSION, activeRuntimeBundle: summary, installedRuntimeBundles: [summary],
+      incompatiblePinnedRunCount: 0 }));
+  }
 }
 
 const helloBytes = canonicalJsonBytes({ protocolVersion: 1, method: 'control.hello',

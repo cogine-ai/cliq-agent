@@ -380,6 +380,16 @@ the unique original `O_PATH` root were unchanged. Only the absent
 `runtime/keeper.ready` locator caused RED; keeper database/control authority
 remained absent, with zero cleanup errors. This motivates publication only,
 not consumer, restart or death qualification.
+At `25f8b98`,
+[run 38112172131](https://github.com/cogine-ai/cliq-agent/actions/runs/38112172131)
+passed original-pin publication: the actual keeper's fixed 40-byte locator,
+source FD, image, lifetime, full credentials, namespaces, boot and root remained
+stable. Keeper database/control authority was observed absent before starting
+the actual selected Supervisor. Two authenticated read-only connections then
+preserved its epoch 1 owner; independent before/after consumer observations
+found no read-only original root FD. Only that missing consumer caused RED,
+with zero cleanup errors. Acquisition is now the implementation prerequisite;
+publication alone does not qualify handoff, restart, death or complete I1.
 
 The independent anchor service owns this delegated topology:
 

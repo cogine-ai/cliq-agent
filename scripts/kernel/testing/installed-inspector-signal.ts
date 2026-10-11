@@ -33,8 +33,8 @@ async function processIdentity(pid: number) {
   const raw = await readFile(`/proc/${pid}/stat`, 'utf8');
   assert(raw.startsWith(`${pid} (`));
   const fields = raw.slice(raw.lastIndexOf(')') + 2).trim().split(/\s+/u);
-  assert(fields.length >= 20 && fields[0] !== 'Z' && fields[0] !== 'X');
-  assert.match(fields[19]!, /^[0-9]+$/u);
+  assert(fields.length >= 20 && !['Z', 'X', 'x'].includes(fields[0]!));
+  assert.match(fields[19]!, /^(0|[1-9][0-9]*)$/u);
   const image = await stat(`/proc/${pid}/exe`, { bigint: true });
   assert(image.isFile());
   return { pid, processStartToken: `linux-proc-start-ticks:${fields[19]}`,
@@ -213,28 +213,28 @@ console.log(JSON.stringify({pid:process.pid,nodeVersion:process.version}));`;
 }
 
 export async function qualifyInstalledInspectorSignal(input: {
-  carrier: string; cwd: string; supervisor: ChildProcess; selectedImage: string; processStartToken: string;
+  carrier: string; cwd: string; pid: number; selectedImage: string; processStartToken: string;
   stderr: () => string; checkControl: () => Promise<void>; report: InstalledInspectorSignalReport;
 }): Promise<void> {
   assert.equal(process.platform, 'linux');
   await carrierControl(input.carrier, input.cwd, input.report);
   await input.checkControl();
-  const child = input.supervisor; assertAlive(child);
-  const before = await processIdentity(child.pid);
+  assert(Number.isSafeInteger(input.pid) && input.pid > 0 && input.pid <= 0x7fffffff);
+  const before = await processIdentity(input.pid);
   assert.equal(before.processStartToken, input.processStartToken); assert.equal(before.executable, input.selectedImage);
   const selected = await lstat(input.selectedImage, { bigint: true }); assert(selected.isFile());
   for (const [field, expected] of [['deviceId', selected.dev], ['fileId', selected.ino], ['byteCount', selected.size],
     ['mtimeNs', selected.mtimeNs], ['ctimeNs', selected.ctimeNs]] as const) assert.equal(before[field], expected.toString());
-  const beforeSignals = await signalObservation(child.pid), beforeListeners = await ownedTcpListeners(child.pid);
+  const beforeSignals = await signalObservation(input.pid), beforeListeners = await ownedTcpListeners(input.pid);
   const facts: Record<string, unknown> = { before, beforeSignals, beforeListeners, signalSent: false };
   input.report.installed = facts;
   // Send even on the unfixed image: retain the real listener RED, not a mask-only failure.
-  assertAlive(child); assert.deepEqual(await processIdentity(child.pid), before);
-  assert(child.kill('SIGUSR1'), 'installed signal must actually be sent'); facts.signalSent = true;
+  assert.deepEqual(await processIdentity(input.pid), before);
+  assert(process.kill(input.pid, 'SIGUSR1'), 'installed signal must actually be sent'); facts.signalSent = true;
   const deadline = Date.now() + timeout;
   for (;;) {
-    assertAlive(child); assert.deepEqual(await processIdentity(child.pid), before);
-    const signals = await signalObservation(child.pid), listeners = await ownedTcpListeners(child.pid);
+    assert.deepEqual(await processIdentity(input.pid), before);
+    const signals = await signalObservation(input.pid), listeners = await ownedTcpListeners(input.pid);
     facts.afterSignals = signals; facts.afterListeners = listeners; facts.stderr = input.stderr();
     const allBlocked = signals.tasks.every(task => hasSignal(task.blocked));
     const pending = hasSignal(signals.sharedPending);
@@ -253,8 +253,8 @@ export async function qualifyInstalledInspectorSignal(input: {
     await delay(10);
   }
   await input.checkControl();
-  assertAlive(child); assert.deepEqual(await processIdentity(child.pid), before);
-  const finalSignals = await signalObservation(child.pid), finalListeners = await ownedTcpListeners(child.pid);
+  assert.deepEqual(await processIdentity(input.pid), before);
+  const finalSignals = await signalObservation(input.pid), finalListeners = await ownedTcpListeners(input.pid);
   facts.finalSignals = finalSignals; facts.finalListeners = finalListeners; facts.stderr = input.stderr();
   assert(finalSignals.tasks.every(task => hasSignal(task.blocked) && !hasSignal(task.caught)));
   assert(hasSignal(finalSignals.sharedPending)); assert.deepEqual(finalListeners, []);

@@ -4,8 +4,8 @@ import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js'
 import { parseJsonStrict } from '../kernel/json.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { openInstalledControl, type InstalledControlService } from './installed-control.js';
-import { createInstalledRuntime, initializeInstalledKeeper, withHeldInstalledRuntime,
-  type HeldInstalledKeeper, type HeldInstalledRuntime } from './installed-runtime.js';
+import { acquireInstalledAnchor, createInstalledRuntime, initializeInstalledKeeper, withHeldInstalledRuntime,
+  type HeldInstalledAnchor, type HeldInstalledKeeper, type HeldInstalledRuntime } from './installed-runtime.js';
 import { joinResourceOperations } from './errors.js';
 import { openStateStore, type StateStore } from './store.js';
 
@@ -16,12 +16,13 @@ let selected: HeldInstalledRuntime | undefined;
 let store: StateStore | undefined;
 let service: InstalledControlService | undefined;
 let keeper: HeldInstalledKeeper | undefined;
-let keeperHealth: ReturnType<typeof setInterval> | undefined;
+let anchor: HeldInstalledAnchor | undefined;
+let containmentHealth: ReturnType<typeof setInterval> | undefined;
 let closing: Promise<void> | undefined;
 
 function close(): Promise<void> {
   return closing ??= (async () => {
-    clearInterval(keeperHealth);
+    clearInterval(containmentHealth);
     if (keeper) {
       // Independent native ownership: even uncertain anchor retirement must
       // join the selection's descriptors. The Supervisor's Store is different:
@@ -31,7 +32,9 @@ function close(): Promise<void> {
     }
     await service?.close();
     await store?.close();
-    await selected?.close();
+    // Store retirement must join before releasing containment. Afterwards both
+    // independent descriptor owners retire even if one close is uncertain.
+    await joinResourceOperations([Promise.resolve().then(() => anchor?.close()), selected?.close()] as const);
   })();
 }
 
@@ -86,15 +89,23 @@ async function start(): Promise<void> {
     keeper = await initializeInstalledKeeper(selected);
     // An FD alone does not keep Node alive. This referenced timer observes
     // native metadata, not full image/CAS hashing or another authority ledger.
-    keeperHealth = setInterval(() => {
+    containmentHealth = setInterval(() => {
       try { keeper!.assertHeld(); } catch (error) { void fail(error); }
     }, 1_000);
     return;
   }
+  // A stale/missing locator or keeper refuses before the first StateOwner
+  // transaction. Never reopen a named cgroup root as an acquisition fallback.
+  anchor = await acquireInstalledAnchor(selected);
+  anchor.assertHeld();
   // Only this selected mode acquires authority. Genesis borrows these newly
   // held, verified descriptors, never the retired bootstrap's historical FDs.
   store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys }, selected);
+  anchor.assertHeld();
   service = openInstalledControl(store, { serverBuild: 'cliq-installed-v1' }, report);
+  containmentHealth = setInterval(() => {
+    try { anchor!.assertHeld(); } catch (error) { void fail(error); }
+  }, 1_000);
 }
 
 const starting = start();

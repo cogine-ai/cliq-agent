@@ -37,8 +37,11 @@ static int installed_keeper_read(int directory, const char *name, char *value, s
     int file = openat(directory, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     if (file < 0) return 0;
     struct stat metadata;
+    struct statfs parent_filesystem, filesystem;
     size_t used = 0;
-    int valid = fstat(file, &metadata) == 0 && S_ISREG(metadata.st_mode);
+    int valid = fstat(file, &metadata) == 0 && S_ISREG(metadata.st_mode) &&
+        fstatfs(directory, &parent_filesystem) == 0 && fstatfs(file, &filesystem) == 0 &&
+        filesystem.f_type == parent_filesystem.f_type;
     while (valid && used < capacity - 1) {
         ssize_t bytes = read(file, value + used, capacity - 1 - used);
         if (bytes < 0 && errno == EINTR) continue;
@@ -103,7 +106,7 @@ static int installed_keeper_credentials(int process, uid_t uid, gid_t gid, int *
     return uid_matches && gid_matches;
 }
 
-static int installed_keeper_cmdline(int process, const char *target, const char *root, const char *bundle,
+static int installed_role_cmdline(int process, const char *target, const char *role, const char *root, const char *bundle,
     const uint64_t identity[5], int *retirement_failed) {
     char actual[PATH_MAX * 2 + 256], locator[96];
     int count = snprintf(locator, sizeof(locator), "%llu:%llu:%llu", (unsigned long long)identity[0],
@@ -111,7 +114,7 @@ static int installed_keeper_cmdline(int process, const char *target, const char 
     size_t length;
     if (count <= 0 || (size_t)count >= sizeof(locator) ||
         !installed_keeper_read(process, "cmdline", actual, sizeof(actual), &length, retirement_failed)) return 0;
-    const char *arguments[] = {target, "--installed-keeper", root, bundle, locator};
+    const char *arguments[] = {target, role, root, bundle, locator};
     size_t offset = 0;
     for (size_t i = 0; i < sizeof(arguments) / sizeof(arguments[0]); i++) {
         size_t bytes = strlen(arguments[i]) + 1;
@@ -255,7 +258,7 @@ static int installed_keeper_current(installed_keeper *keeper, int *retirement_fa
     char membership[PATH_MAX + 8], expected[PATH_MAX + 8];
     int length = snprintf(expected, sizeof(expected), "0::%s\n", keeper->membership);
     int valid = process >= 0 && installed_keeper_credentials(process, keeper->process.uid, keeper->process.gid, retirement_failed) &&
-        installed_keeper_cmdline(process, keeper->process.image_path, keeper->state_root, keeper->bundle,
+        installed_role_cmdline(process, keeper->process.image_path, "--installed-keeper", keeper->state_root, keeper->bundle,
             keeper->state_root_identity, retirement_failed) &&
         length > 0 && (size_t)length < sizeof(expected) &&
         installed_keeper_read(process, "cgroup", membership, sizeof(membership), NULL, retirement_failed) && strcmp(membership, expected) == 0;
@@ -432,7 +435,7 @@ static napi_value initialize_installed_keeper(napi_env env, napi_callback_info i
     if (length <= 0 || (size_t)length >= sizeof(target)) goto fail;
     process = installed_keeper_open_self(&retirement_failed);
     if (process < 0 || !installed_keeper_credentials(process, keeper->process.uid, keeper->process.gid, &retirement_failed) ||
-        !installed_keeper_cmdline(process, target, state_root, bundle, root_expected, &retirement_failed) ||
+        !installed_role_cmdline(process, target, "--installed-keeper", state_root, bundle, root_expected, &retirement_failed) ||
         observe_process_with_retirement(keeper->process.pid, keeper->process.start_token, &keeper->process.retirement_failed) != 1) goto fail;
     keeper->process.image_fd = open_process_image(keeper->process.pid, keeper->process.uid, keeper->process.gid,
         keeper->process.image_path, &keeper->process.image, &keeper->process.retirement_failed);
@@ -526,9 +529,429 @@ fail:
     free(keeper);
     return installed_keeper_error(env, error, retirement_failed);
 }
+
+/* A locator never grants authority. Only the fixed selected Supervisor may
+ * follow the verified keeper's kernel FD link to its original held root. */
+static const napi_type_tag installed_anchor_tag = {0x41ce3bd38ebf4b20ULL, 0x9a4a4a682fc12460ULL};
+
+typedef struct {
+    uint64_t flags, inode, mount;
+} installed_anchor_fd_info;
+
+typedef struct {
+    current_process_observation process;
+    int peer_process, peer_image, root_fd, source_fd, closed, retirement_failed;
+    pid_t peer_pid;
+    uint64_t peer_ticks, state_root_identity[5];
+    unsigned char boot[16];
+    installed_image_stat expected_image;
+    installed_anchor_fd_info source;
+    struct stat root, leaf, peer_directory, namespaces[5];
+    char state_root[PATH_MAX], bundle[65], target[PATH_MAX], target_relative[PATH_MAX];
+    char root_path[PATH_MAX], membership[PATH_MAX];
+} installed_anchor;
+
+/* Kernel numeric fields are bounded, canonical and never parsed via doubles. */
+static int installed_anchor_number(const char *text, unsigned int base, size_t maximum, int nonzero, uint64_t *value) {
+    size_t length = strlen(text);
+    uint64_t number = 0;
+    if (!length || length > maximum || (base == 10 && length > 1 && text[0] == '0')) return 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned int digit = (unsigned char)text[i] - '0';
+        if (digit >= base || number > (UINT64_MAX - digit) / base) return 0;
+        number = number * base + digit;
+    }
+    if (nonzero && !number) return 0;
+    *value = number;
+    return 1;
+}
+
+static int installed_anchor_start(int process, pid_t pid, uint64_t expected, int *retirement_failed) {
+    char text[4096], prefix[32];
+    int length = snprintf(prefix, sizeof(prefix), "%ld (", (long)pid);
+    if (length <= 0 || (size_t)length >= sizeof(prefix) ||
+        !installed_keeper_read(process, "stat", text, sizeof(text), NULL, retirement_failed) ||
+        strncmp(text, prefix, (size_t)length) != 0) return 0;
+    char *field = strrchr(text, ')');
+    if (!field || field[1] != ' ' || !field[2] || field[3] != ' ' ||
+        field[2] == 'Z' || field[2] == 'X' || field[2] == 'x') return 0;
+    field += 2;
+    for (int index = 3; index < 22; index++) {
+        field = strchr(field, ' ');
+        if (!field || !*++field) return 0;
+    }
+    char *end = strchr(field, ' ');
+    if (!end) return 0;
+    *end = '\0';
+    uint64_t ticks;
+    return installed_anchor_number(field, 10, 20, 1, &ticks) && ticks == expected;
+}
+
+static int installed_anchor_fdinfo(int process, int descriptor, installed_anchor_fd_info *result, int *retirement_failed) {
+    int directory = openat(process, "fdinfo", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct statfs filesystem;
+    char name[32], text[16384];
+    int length = snprintf(name, sizeof(name), "%d", descriptor);
+    int valid = directory >= 0 && fstatfs(directory, &filesystem) == 0 && filesystem.f_type == PROC_SUPER_MAGIC &&
+        length > 0 && (size_t)length < sizeof(name) &&
+        installed_keeper_read(directory, name, text, sizeof(text), NULL, retirement_failed);
+    retire_process_fd(&directory, retirement_failed);
+    if (!valid || *retirement_failed) return 0;
+    int flags = 0, inode = 0, mount = 0;
+    for (char *line = text; line && *line;) {
+        char *next = strchr(line, '\n');
+        if (!next) return 0;
+        *next++ = '\0';
+        const char *part = NULL;
+        int kind = 0;
+        if (strncmp(line, "flags:", 6) == 0) { kind = 1; part = line + 6; }
+        if (strncmp(line, "ino:", 4) == 0) { kind = 2; part = line + 4; }
+        if (strncmp(line, "mnt_id:", 7) == 0) { kind = 3; part = line + 7; }
+        if (part) {
+            if (*part != ' ' && *part != '\t') return 0;
+            while (*part == ' ' || *part == '\t') part++;
+            if (kind == 1) {
+                if (flags++ || part[0] != '0' || !part[1] ||
+                    !installed_anchor_number(part, 8, 12, 0, &result->flags) || result->flags > UINT32_MAX) return 0;
+            } else if (kind == 2) {
+                if (inode++ || !installed_anchor_number(part, 10, 20, 0, &result->inode)) return 0;
+            } else if (mount++ || !installed_anchor_number(part, 10, 20, 1, &result->mount)) return 0;
+        }
+        line = next;
+    }
+    return flags == 1 && inode == 1 && mount == 1;
+}
+
+static int installed_anchor_same_source(const installed_anchor_fd_info *first, const installed_anchor_fd_info *second) {
+    return first->flags == second->flags && first->inode == second->inode && first->mount == second->mount;
+}
+
+static int installed_anchor_namespaces(installed_anchor *anchor, int own_process, int capture, int *retirement_failed) {
+    const char *names[] = {"pid", "mnt", "cgroup", "user", "time"};
+    int own_directory = openat(own_process, "ns", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int peer_directory = openat(anchor->peer_process, "ns", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct statfs filesystem;
+    int valid = own_directory >= 0 && peer_directory >= 0 &&
+        fstatfs(own_directory, &filesystem) == 0 && filesystem.f_type == PROC_SUPER_MAGIC &&
+        fstatfs(peer_directory, &filesystem) == 0 && filesystem.f_type == PROC_SUPER_MAGIC;
+    for (size_t i = 0; valid && i < sizeof(names) / sizeof(names[0]); i++) {
+        /* These are intentional kernel namespace magic links, not paths from
+         * the locator. Their actual nsfs identities must match on both sides. */
+        int own = openat(own_directory, names[i], O_RDONLY | O_CLOEXEC);
+        int peer = openat(peer_directory, names[i], O_RDONLY | O_CLOEXEC);
+        struct stat self, other;
+        valid = own >= 0 && peer >= 0 && fstat(own, &self) == 0 && fstat(peer, &other) == 0 &&
+            S_ISREG(self.st_mode) && S_ISREG(other.st_mode) && same_inode(&self, &other) &&
+            fstatfs(own, &filesystem) == 0 && filesystem.f_type == NSFS_MAGIC &&
+            fstatfs(peer, &filesystem) == 0 && filesystem.f_type == NSFS_MAGIC &&
+            (capture || same_inode(&self, &anchor->namespaces[i]));
+        if (valid && capture) anchor->namespaces[i] = self;
+        retire_process_fd(&peer, retirement_failed);
+        retire_process_fd(&own, retirement_failed);
+        valid = valid && !*retirement_failed;
+    }
+    retire_process_fd(&peer_directory, retirement_failed);
+    retire_process_fd(&own_directory, retirement_failed);
+    return valid && !*retirement_failed;
+}
+
+static int installed_anchor_peer_image(installed_anchor *anchor, int *retirement_failed) {
+    char path[PATH_MAX];
+    ssize_t length = readlinkat(anchor->peer_process, "exe", path, sizeof(path) - 1);
+    if (length <= 0 || (size_t)length >= sizeof(path) - 1) return -1;
+    path[length] = '\0';
+    if (strcmp(path, anchor->target) != 0) return -1;
+    int image = openat(anchor->peer_process, "exe", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    struct stat metadata;
+    unsigned char elf[4];
+    ssize_t bytes = -1;
+    int valid = image >= 0 && fstat(image, &metadata) == 0 && installed_executable(&metadata) &&
+        installed_image_matches(&metadata, &anchor->expected_image);
+    if (valid) do { bytes = pread(image, elf, sizeof(elf), 0); } while (bytes < 0 && errno == EINTR);
+    if (!valid || bytes != (ssize_t)sizeof(elf) || memcmp(elf, "\177ELF", sizeof(elf)) != 0)
+        retire_process_fd(&image, retirement_failed);
+    if (*retirement_failed) retire_process_fd(&image, retirement_failed);
+    return image;
+}
+
+static int installed_anchor_peer_current(installed_anchor *anchor, int *retirement_failed) {
+    struct stat directory, held;
+    struct statfs filesystem;
+    int valid = fstat(anchor->peer_process, &directory) == 0 && same_inode(&directory, &anchor->peer_directory) &&
+        fstatfs(anchor->peer_process, &filesystem) == 0 && filesystem.f_type == PROC_SUPER_MAGIC &&
+        installed_anchor_start(anchor->peer_process, anchor->peer_pid, anchor->peer_ticks, retirement_failed) &&
+        installed_keeper_credentials(anchor->peer_process, anchor->process.uid, anchor->process.gid, retirement_failed) &&
+        installed_role_cmdline(anchor->peer_process, anchor->target, "--installed-keeper", anchor->state_root,
+            anchor->bundle, anchor->state_root_identity, retirement_failed) &&
+        fstat(anchor->peer_image, &held) == 0 && installed_executable(&held) && installed_image_matches(&held, &anchor->expected_image);
+    int image = valid ? installed_anchor_peer_image(anchor, retirement_failed) : -1;
+    valid = valid && image >= 0;
+    retire_process_fd(&image, retirement_failed);
+    return valid && !*retirement_failed &&
+        installed_anchor_start(anchor->peer_process, anchor->peer_pid, anchor->peer_ticks, retirement_failed);
+}
+
+static int installed_anchor_membership(installed_anchor *anchor, int capture, int *retirement_failed) {
+    char text[PATH_MAX + 8], root_path[PATH_MAX];
+    size_t length;
+    if (!installed_keeper_read(anchor->peer_process, "cgroup", text, sizeof(text), &length, retirement_failed) ||
+        length < 12 || memchr(text, '\0', length) || strncmp(text, "0::", 3) != 0 || text[length - 1] != '\n') return 0;
+    text[length - 1] = '\0';
+    const char *membership = text + 3;
+    if (!installed_path(membership, 1)) return 0;
+    for (const unsigned char *part = (const unsigned char *)membership; *part; part++)
+        if (*part < 32 || *part == 127) return 0;
+    char parent[PATH_MAX];
+    size_t size = strlen(membership);
+    if (size >= sizeof(parent) || size <= 7 || strcmp(membership + size - 7, "/keeper") != 0) return 0;
+    memcpy(parent, membership, size - 7); parent[size - 7] = '\0';
+    const char *unit = strrchr(parent, '/');
+    size_t unit_length = unit ? strlen(unit + 1) : 0;
+    if (unit_length <= 8 || strcmp(unit + 1 + unit_length - 8, ".service") != 0) return 0;
+    int count = snprintf(root_path, sizeof(root_path), "/sys/fs/cgroup%s", parent);
+    if (count <= 0 || (size_t)count >= sizeof(root_path)) return 0;
+    if (capture) {
+        memcpy(anchor->membership, membership, size + 1);
+        memcpy(anchor->root_path, root_path, (size_t)count + 1);
+        return 1;
+    }
+    return strcmp(anchor->membership, membership) == 0 && strcmp(anchor->root_path, root_path) == 0;
+}
+
+static int installed_anchor_root_current(installed_anchor *anchor, int own_process, int capture, int *retirement_failed) {
+    int named_root = open_root_with_retirement(anchor->root_path, retirement_failed), leaf = -1;
+    struct stat held, named;
+    installed_anchor_fd_info local, named_info;
+    int flags = fcntl(anchor->root_fd, F_GETFL);
+    int valid = flags >= 0 && !(flags & O_PATH) && (flags & O_ACCMODE) == O_RDONLY &&
+        installed_keeper_cgroup_identity(anchor->root_fd, anchor->process.uid, anchor->process.gid, &held, 1) &&
+        installed_keeper_same_directory(&anchor->root, &held) && named_root >= 0 &&
+        installed_keeper_cgroup_identity(named_root, anchor->process.uid, anchor->process.gid, &named, 1) &&
+        installed_keeper_same_directory(&anchor->root, &named) &&
+        own_process >= 0 && installed_anchor_fdinfo(own_process, anchor->root_fd, &local, retirement_failed) &&
+        local.inode == anchor->source.inode && local.inode == (uint64_t)held.st_ino && local.mount == anchor->source.mount &&
+        installed_anchor_fdinfo(own_process, named_root, &named_info, retirement_failed) &&
+        named_info.inode == local.inode && named_info.mount == local.mount &&
+        installed_keeper_domain(anchor->root_fd, retirement_failed) && installed_keeper_processes(anchor->root_fd, 0, retirement_failed) &&
+        installed_keeper_controllers(anchor->root_fd, "cgroup.controllers", retirement_failed) &&
+        installed_keeper_controllers(anchor->root_fd, "cgroup.subtree_control", retirement_failed);
+    if (valid) leaf = openat(anchor->root_fd, "keeper", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    valid = valid && leaf >= 0 && installed_keeper_cgroup_identity(leaf, anchor->process.uid, anchor->process.gid, &held, 1) &&
+        (capture || installed_keeper_same_directory(&anchor->leaf, &held)) &&
+        fstatat(anchor->root_fd, "keeper", &named, AT_SYMLINK_NOFOLLOW) == 0 && installed_keeper_same_directory(&held, &named) &&
+        installed_keeper_domain(leaf, retirement_failed) && installed_keeper_processes(leaf, anchor->peer_pid, retirement_failed) &&
+        installed_keeper_empty_subtree(leaf, retirement_failed) && installed_keeper_children(leaf, NULL, retirement_failed);
+    if (valid && capture) anchor->leaf = held;
+    retire_process_fd(&leaf, retirement_failed);
+    retire_process_fd(&named_root, retirement_failed);
+    return valid && !*retirement_failed;
+}
+
+static int installed_anchor_current(installed_anchor *anchor, int *retirement_failed) {
+    if (anchor->closed || anchor->retirement_failed || anchor->root_fd < 0 ||
+        current_process_is_held(&anchor->process) != 1) return 0;
+    int process = installed_keeper_open_self(retirement_failed), state = -1, image = -1;
+    struct stat held;
+    unsigned char boot[16];
+    installed_anchor_fd_info before, after;
+    int valid = process >= 0 && installed_keeper_credentials(process, anchor->process.uid, anchor->process.gid, retirement_failed) &&
+        installed_role_cmdline(process, anchor->target, "--installed-supervisor", anchor->state_root,
+            anchor->bundle, anchor->state_root_identity, retirement_failed) &&
+        installed_anchor_peer_current(anchor, retirement_failed) && installed_anchor_namespaces(anchor, process, 0, retirement_failed) &&
+        installed_keeper_boot(boot, retirement_failed) && memcmp(boot, anchor->boot, sizeof(boot)) == 0;
+    if (valid) state = open_root_with_retirement(anchor->state_root, retirement_failed);
+    valid = valid && state >= 0 && fstat(state, &held) == 0 && installed_root_matches(&held, anchor->state_root_identity);
+    if (valid) image = installed_open_image(state, anchor->target_relative, retirement_failed);
+    valid = valid && image >= 0 && fstat(image, &held) == 0 && installed_executable(&held) &&
+        installed_image_matches(&held, &anchor->expected_image) &&
+        installed_anchor_membership(anchor, 0, retirement_failed) &&
+        installed_anchor_fdinfo(anchor->peer_process, anchor->source_fd, &before, retirement_failed) &&
+        installed_anchor_same_source(&before, &anchor->source) && installed_anchor_root_current(anchor, process, 0, retirement_failed) &&
+        installed_anchor_fdinfo(anchor->peer_process, anchor->source_fd, &after, retirement_failed) &&
+        installed_anchor_same_source(&after, &before) && installed_anchor_peer_current(anchor, retirement_failed) &&
+        installed_anchor_namespaces(anchor, process, 0, retirement_failed) &&
+        installed_keeper_credentials(process, anchor->process.uid, anchor->process.gid, retirement_failed) &&
+        installed_role_cmdline(process, anchor->target, "--installed-supervisor", anchor->state_root,
+            anchor->bundle, anchor->state_root_identity, retirement_failed);
+    retire_process_fd(&image, retirement_failed);
+    retire_process_fd(&state, retirement_failed);
+    retire_process_fd(&process, retirement_failed);
+    return valid && !*retirement_failed && !atomic_load(&current_process_retirement_failed) &&
+        current_process_is_held(&anchor->process) == 1 &&
+        installed_anchor_start(anchor->peer_process, anchor->peer_pid, anchor->peer_ticks, retirement_failed) &&
+        !*retirement_failed && !atomic_load(&current_process_retirement_failed);
+}
+
+static int installed_anchor_close(installed_anchor *anchor) {
+    anchor->closed = 1;
+    if (!close_current_process_image(&anchor->process)) anchor->retirement_failed = 1;
+    retire_process_fd(&anchor->peer_image, &anchor->retirement_failed);
+    retire_process_fd(&anchor->peer_process, &anchor->retirement_failed);
+    retire_process_fd(&anchor->root_fd, &anchor->retirement_failed);
+    return !anchor->retirement_failed && !atomic_load(&current_process_retirement_failed);
+}
+
+static void installed_anchor_finalize(napi_env env, void *data, void *hint) {
+    (void)env; (void)hint;
+    installed_anchor *anchor = data;
+    installed_anchor_close(anchor);
+    free(anchor);
+}
+
+static napi_value installed_anchor_assert(napi_env env, napi_callback_info info) {
+    installed_anchor *anchor = unwrap_control(env, info, &installed_anchor_tag, "invalid installed anchor handle");
+    if (!anchor) return NULL;
+    if (syscall(SYS_gettid) != getpid()) return native_error(env, "installed anchor requires the process main thread");
+    int retirement_failed = 0;
+    if (!installed_anchor_current(anchor, &retirement_failed))
+        return installed_keeper_error(env, "installed anchor image, original source, namespaces, membership, or delegation changed", retirement_failed);
+    return undefined_result(env);
+}
+
+static napi_value installed_anchor_release(napi_env env, napi_callback_info info) {
+    installed_anchor *anchor = unwrap_control(env, info, &installed_anchor_tag, "invalid installed anchor handle");
+    if (!anchor) return NULL;
+    if (syscall(SYS_gettid) != getpid()) return native_error(env, "installed anchor requires the process main thread");
+    if (!installed_anchor_close(anchor)) return installed_keeper_error(env, "installed anchor close failed", 1);
+    return undefined_result(env);
+}
+
+static napi_value acquire_installed_anchor(napi_env env, napi_callback_info info) {
+    if (atomic_load(&current_process_retirement_failed)) return installed_keeper_error(env, "installed anchor retirement failed", 1);
+    if (syscall(SYS_gettid) != getpid()) return native_error(env, "installed anchor requires the process main thread");
+    if (geteuid() == 0 || getegid() == 0) return native_error(env, "installed anchor requires a nonroot process");
+    size_t argc = 7, locator_length;
+    napi_value args[7];
+    char state_root[PATH_MAX], bundle[65], relative[PATH_MAX];
+    installed_image_stat expected_image;
+    uint64_t expected_root[5];
+    bool is_buffer;
+    void *locator_data;
+    unsigned char locator[40];
+    if (napi_get_cb_info(env, info, &argc, args, NULL, NULL) != napi_ok || argc != 6 ||
+        !installed_string(env, args[0], state_root, sizeof(state_root)) || !installed_path(state_root, 1) ||
+        !installed_string(env, args[1], bundle, sizeof(bundle)) || strlen(bundle) != 64 || strspn(bundle, "0123456789abcdef") != 64 ||
+        !installed_string(env, args[2], relative, sizeof(relative)) || !installed_path(relative, 0) ||
+        !installed_stat_array(env, args[3], expected_image.field, 9, &expected_image.modified, &expected_image.changed) ||
+        !installed_stat_array(env, args[4], expected_root, 5, NULL, NULL) ||
+        napi_is_buffer(env, args[5], &is_buffer) != napi_ok || !is_buffer ||
+        napi_get_buffer_info(env, args[5], &locator_data, &locator_length) != napi_ok || locator_length != sizeof(locator))
+        return installed_keeper_error(env, "invalid fixed installed anchor input", 0);
+    memcpy(locator, locator_data, sizeof(locator));
+    uint64_t pid = 0, source_fd = 0, ticks = 0;
+    for (unsigned int i = 0; i < 4; i++) {
+        pid |= (uint64_t)locator[8 + i] << (8 * i);
+        source_fd |= (uint64_t)locator[12 + i] << (8 * i);
+    }
+    for (unsigned int i = 0; i < 8; i++) ticks |= (uint64_t)locator[16 + i] << (8 * i);
+    if (memcmp(locator, "cliq-ak1", 8) != 0 || pid == 0 || pid > INT_MAX || pid == (uint64_t)getpid() ||
+        source_fd < 3 || source_fd > INT_MAX || !ticks)
+        return installed_keeper_error(env, "invalid installed keeper source locator", 0);
+
+    installed_anchor *anchor = calloc(1, sizeof(*anchor));
+    if (!anchor) return installed_keeper_error(env, "installed anchor allocation failed", 0);
+    anchor->process.image_fd = anchor->peer_process = anchor->peer_image = anchor->root_fd = -1;
+    anchor->process.pid = getpid(); anchor->process.uid = geteuid(); anchor->process.gid = getegid();
+    anchor->peer_pid = (pid_t)pid; anchor->source_fd = (int)source_fd; anchor->peer_ticks = ticks;
+    anchor->expected_image = expected_image;
+    memcpy(anchor->boot, locator + 24, sizeof(anchor->boot));
+    memcpy(anchor->state_root, state_root, strlen(state_root) + 1);
+    memcpy(anchor->bundle, bundle, strlen(bundle) + 1);
+    memcpy(anchor->state_root_identity, expected_root, sizeof(expected_root));
+    int process = -1, proc = -1, state = -1, image = -1, source_directory = -1, retirement_failed = 0;
+    struct stat held;
+    struct statfs filesystem;
+    unsigned char boot[16];
+    char name[32], self[32];
+    const char *error = "installed anchor selected Supervisor or keeper identity is unavailable";
+    int length = snprintf(anchor->target_relative, sizeof(anchor->target_relative), "runtime/bundles/%s/%s", bundle, relative);
+    if (length <= 0 || (size_t)length >= sizeof(anchor->target_relative)) goto fail;
+    length = snprintf(anchor->target, sizeof(anchor->target), "%s/%s", state_root, anchor->target_relative);
+    if (length <= 0 || (size_t)length >= sizeof(anchor->target)) goto fail;
+    process = installed_keeper_open_self(&retirement_failed);
+    if (process < 0 || !installed_keeper_credentials(process, anchor->process.uid, anchor->process.gid, &retirement_failed) ||
+        !installed_role_cmdline(process, anchor->target, "--installed-supervisor", state_root, bundle, expected_root, &retirement_failed) ||
+        observe_process_with_retirement(anchor->process.pid, anchor->process.start_token, &anchor->process.retirement_failed) != 1) goto fail;
+    anchor->process.image_fd = open_process_image(anchor->process.pid, anchor->process.uid, anchor->process.gid,
+        anchor->process.image_path, &anchor->process.image, &anchor->process.retirement_failed);
+    if (anchor->process.image_fd < 0 || strcmp(anchor->process.image_path, anchor->target) != 0 ||
+        !installed_executable(&anchor->process.image) || !installed_image_matches(&anchor->process.image, &expected_image) ||
+        current_process_is_held(&anchor->process) != 1) goto fail;
+    proc = open("/proc", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    length = snprintf(name, sizeof(name), "%ld", (long)getpid());
+    ssize_t bytes = proc < 0 ? -1 : readlinkat(proc, "self", self, sizeof(self) - 1);
+    if (proc < 0 || fstatfs(proc, &filesystem) != 0 || filesystem.f_type != PROC_SUPER_MAGIC ||
+        length <= 0 || (size_t)length >= sizeof(name) || bytes <= 0 || (size_t)bytes >= sizeof(self) - 1) goto fail;
+    self[bytes] = '\0';
+    if (strcmp(name, self) != 0) goto fail;
+    length = snprintf(name, sizeof(name), "%ld", (long)anchor->peer_pid);
+    if (length <= 0 || (size_t)length >= sizeof(name)) goto fail;
+    anchor->peer_process = openat(proc, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (anchor->peer_process < 0 || fstat(anchor->peer_process, &anchor->peer_directory) != 0 ||
+        fstatfs(anchor->peer_process, &filesystem) != 0 || filesystem.f_type != PROC_SUPER_MAGIC ||
+        !installed_anchor_start(anchor->peer_process, anchor->peer_pid, ticks, &retirement_failed)) goto fail;
+    anchor->peer_image = installed_anchor_peer_image(anchor, &retirement_failed);
+    if (anchor->peer_image < 0 || !installed_anchor_peer_current(anchor, &retirement_failed) ||
+        !installed_anchor_namespaces(anchor, process, 1, &retirement_failed) ||
+        !installed_keeper_boot(boot, &retirement_failed) || memcmp(boot, anchor->boot, sizeof(boot)) != 0) goto fail;
+    state = open_root_with_retirement(state_root, &retirement_failed);
+    if (state < 0 || fstat(state, &held) != 0 || !installed_root_matches(&held, expected_root)) goto fail;
+    image = installed_open_image(state, anchor->target_relative, &retirement_failed);
+    if (image < 0 || fstat(image, &held) != 0 || !installed_executable(&held) || !installed_image_matches(&held, &expected_image)) goto fail;
+    error = "installed keeper original source descriptor is unavailable";
+    if (!installed_anchor_fdinfo(anchor->peer_process, anchor->source_fd, &anchor->source, &retirement_failed) ||
+        anchor->source.flags != (uint64_t)(O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)) goto fail;
+    source_directory = openat(anchor->peer_process, "fd", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    length = snprintf(name, sizeof(name), "%d", anchor->source_fd);
+    if (source_directory < 0 || fstatfs(source_directory, &filesystem) != 0 || filesystem.f_type != PROC_SUPER_MAGIC ||
+        length <= 0 || (size_t)length >= sizeof(name)) goto fail;
+    /* The only acquisition follows this genuine held procfs kernel FD link.
+     * In particular, no independently named cgroup path can supply root_fd. */
+    anchor->root_fd = openat(source_directory, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (anchor->root_fd < 0) goto fail;
+    error = "installed keeper original source root or delegation is unavailable";
+    if (!installed_keeper_cgroup_identity(anchor->root_fd, anchor->process.uid, anchor->process.gid, &anchor->root, 1) ||
+        (uint64_t)anchor->root.st_ino != anchor->source.inode ||
+        !installed_anchor_membership(anchor, 1, &retirement_failed) ||
+        !installed_anchor_root_current(anchor, process, 1, &retirement_failed)) goto fail;
+    installed_anchor_fd_info after;
+    if (!installed_anchor_fdinfo(anchor->peer_process, anchor->source_fd, &after, &retirement_failed) ||
+        !installed_anchor_same_source(&anchor->source, &after)) goto fail;
+    retire_process_fd(&source_directory, &retirement_failed);
+    retire_process_fd(&image, &retirement_failed);
+    retire_process_fd(&state, &retirement_failed);
+    retire_process_fd(&proc, &retirement_failed);
+    retire_process_fd(&process, &retirement_failed);
+    error = "installed anchor identity or original source changed during acquisition";
+    if (retirement_failed || !installed_anchor_current(anchor, &retirement_failed)) goto fail;
+    napi_value result;
+    const napi_property_descriptor methods[] = {
+        {"assertHeld", NULL, installed_anchor_assert, NULL, NULL, NULL, napi_default, NULL},
+        {"close", NULL, installed_anchor_release, NULL, NULL, NULL, napi_default, NULL}
+    };
+    error = "installed anchor handle construction failed";
+    if (napi_create_object(env, &result) != napi_ok || napi_define_properties(env, result, 2, methods) != napi_ok ||
+        napi_type_tag_object(env, result, &installed_anchor_tag) != napi_ok || napi_object_freeze(env, result) != napi_ok ||
+        !installed_anchor_current(anchor, &retirement_failed) ||
+        napi_wrap(env, result, anchor, installed_anchor_finalize, NULL, NULL) != napi_ok) goto fail;
+    return result;
+fail:
+    retire_process_fd(&source_directory, &retirement_failed);
+    retire_process_fd(&image, &retirement_failed);
+    retire_process_fd(&state, &retirement_failed);
+    retire_process_fd(&proc, &retirement_failed);
+    retire_process_fd(&process, &retirement_failed);
+    if (!installed_anchor_close(anchor)) retirement_failed = 1;
+    free(anchor);
+    return installed_keeper_error(env, error, retirement_failed);
+}
 #else
 static napi_value initialize_installed_keeper(napi_env env, napi_callback_info info) {
     (void)info;
     return native_error(env, "installed keeper requires Linux");
+}
+static napi_value acquire_installed_anchor(napi_env env, napi_callback_info info) {
+    (void)info;
+    return native_error(env, "installed anchor requires Linux");
 }
 #endif

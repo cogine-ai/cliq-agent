@@ -11,7 +11,7 @@ import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, ty
 import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
-import { executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
+import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
 
 export type HeldInstalledRuntime = Readonly<{
@@ -23,6 +23,9 @@ export type HeldInstalledRuntime = Readonly<{
 /** A continuously held original containment anchor, not execution authority or
  * a transferable descriptor/PID locator. */
 export type HeldInstalledKeeper = Readonly<{ assertHeld(): void; close(): void }>;
+/** Supervisor ownership of the verified keeper's original root, not admission
+ * authority, a pathname substitute or a transferable numeric descriptor. */
+export type HeldInstalledAnchor = Readonly<{ assertHeld(): void; close(): void }>;
 
 type InstalledDirectoryIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
 /** Trusted startup observation only. No descriptor or independently supplied
@@ -41,6 +44,7 @@ type InstalledRuntimeBinding = {
   borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T>;
   execute(role: 'keeper' | 'supervisor'): Promise<never>;
   initializeKeeper(): Promise<HeldInstalledKeeper>;
+  acquireAnchor(): Promise<HeldInstalledAnchor>;
 };
 const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
 
@@ -48,6 +52,12 @@ export function initializeInstalledKeeper(held: HeldInstalledRuntime): Promise<H
   const binding = heldInstalledRuntimes.get(held);
   if (binding === undefined) mismatch('installed runtime is not a verified held selection');
   return binding.initializeKeeper();
+}
+
+export function acquireInstalledAnchor(held: HeldInstalledRuntime): Promise<HeldInstalledAnchor> {
+  const binding = heldInstalledRuntimes.get(held);
+  if (binding === undefined) mismatch('installed runtime is not a verified held selection');
+  return binding.acquireAnchor();
 }
 
 /** Look up the producer's private brand before observing any caller property.
@@ -553,6 +563,47 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         });
         heldInstalledRuntimes.set(selected, {
           factory: runtime,
+          acquireAnchor(): Promise<HeldInstalledAnchor> {
+            return enqueue(async () => {
+              const native = await loadSelectedNative();
+              const file = signed.entries.get(supervisor.entryId)!;
+              let ready: InstalledFile;
+              try { ready = await scope.file(root, 'keeper.ready', 0o600, 40); }
+              catch (error) {
+                if (error instanceof ResourceRetirementError) throw error;
+                mismatch('installed keeper locator is unavailable', error);
+              }
+              if (ready.info.gid !== BigInt(process.getegid!())) mismatch('installed keeper locator has a different group');
+              const locator = await readSmall(ready);
+              ready.digest = sha256Bytes(locator);
+              const anchor = acquireHeldInstalledAnchor(native, {
+                stateRoot, root: state.info, image: file.info, bundleDigest: signed.bundleDigest,
+                relativePath: supervisor.relativePath, locator,
+              });
+              try {
+                await verifyBytes(ready); await checkedRevalidate();
+                await scope.retire(ready.handle);
+                healthy(); anchor.assertHeld();
+                const held: HeldInstalledAnchor = Object.freeze({
+                  assertHeld() {
+                    if (this !== held) throw new TypeError('invalid installed anchor handle');
+                    try { healthy(); anchor.assertHeld(); } catch (error) { rememberRetirement(error); throw error; }
+                  },
+                  close() {
+                    if (this !== held) throw new TypeError('invalid installed anchor handle');
+                    try { anchor.close(); } catch (error) { rememberRetirement(error); throw error; }
+                  },
+                });
+                return held;
+              } catch (error) {
+                rememberRetirement(error);
+                await joinResourceOperations([Promise.reject(error), Promise.resolve().then(() => {
+                  try { anchor.close(); } catch (failure) { rememberRetirement(failure); throw failure; }
+                })] as const);
+                throw error;
+              }
+            }).catch(error => { rememberRetirement(error); throw error; });
+          },
           initializeKeeper(): Promise<HeldInstalledKeeper> {
             return enqueue(async () => {
               const native = await loadSelectedNative();

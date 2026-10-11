@@ -78,10 +78,10 @@ jobs:
         run: |
           probe_node=$(realpath "$(command -v node)")
           sudo /bin/bash scripts/kernel/qualify-systemd-user.sh "$probe_node" "$RUNNER_TEMP/cliq-systemd-user"
-      - name: Qualify actual installed SEA image and read-only startup
+      - name: Qualify actual installed SEA closed-role and missing-keeper refusals
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --import tsx scripts/kernel/qualify-installed-startup.ts "$RUNNER_TEMP/cliq-installed-startup"
-      - name: Qualify actual signed installed keeper under its user manager
+      - name: Qualify signed keeper pin handoff, genesis, control and signal under the user manager
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
