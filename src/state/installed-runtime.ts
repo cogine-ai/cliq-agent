@@ -11,7 +11,7 @@ import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, ty
 import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
-import { executeHeldInstalledImage, loadHeldStateOwnerImage, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
+import { executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
 
 export type HeldInstalledRuntime = Readonly<{
@@ -20,6 +20,9 @@ export type HeldInstalledRuntime = Readonly<{
   assertHeld(): Promise<void>;
   close(): Promise<void>;
 }>;
+/** A continuously held original containment anchor, not execution authority or
+ * a transferable descriptor/PID locator. */
+export type HeldInstalledKeeper = Readonly<{ assertHeld(): void; close(): void }>;
 
 type InstalledDirectoryIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
 /** Trusted startup observation only. No descriptor or independently supplied
@@ -37,8 +40,15 @@ type InstalledRuntimeBinding = {
   factory: InstalledRuntime;
   borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T>;
   execute(role: 'keeper' | 'supervisor'): Promise<never>;
+  initializeKeeper(): Promise<HeldInstalledKeeper>;
 };
 const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
+
+export function initializeInstalledKeeper(held: HeldInstalledRuntime): Promise<HeldInstalledKeeper> {
+  const binding = heldInstalledRuntimes.get(held);
+  if (binding === undefined) mismatch('installed runtime is not a verified held selection');
+  return binding.initializeKeeper();
+}
 
 /** Look up the producer's private brand before observing any caller property.
  * Structural objects, proxies and clones cannot impersonate a held selection. */
@@ -543,6 +553,40 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         });
         heldInstalledRuntimes.set(selected, {
           factory: runtime,
+          initializeKeeper(): Promise<HeldInstalledKeeper> {
+            return enqueue(async () => {
+              const native = await loadSelectedNative();
+              const file = signed.entries.get(supervisor.entryId)!;
+              const keeper = initializeHeldInstalledKeeper(native, {
+                stateRoot, root: state.info, image: file.info, bundleDigest: signed.bundleDigest,
+                relativePath: supervisor.relativePath,
+              });
+              try {
+                await checkedRevalidate();
+                keeper.assertHeld();
+                const held: HeldInstalledKeeper = Object.freeze({
+                  assertHeld() {
+                    if (this !== held) throw new TypeError('invalid installed keeper handle');
+                    try { healthy(); keeper.assertHeld(); } catch (error) { rememberRetirement(error); throw error; }
+                  },
+                  close() {
+                    if (this !== held) throw new TypeError('invalid installed keeper handle');
+                    // Sticky uncertainty revokes new authority, not cleanup.
+                    try { keeper.close(); } catch (error) { rememberRetirement(error); throw error; }
+                  },
+                });
+                return held;
+              } catch (error) {
+                rememberRetirement(error);
+                // A minted native resource cannot escape a failed post-init
+                // installation check. Join retirement; uncertainty wins.
+                await joinResourceOperations([Promise.reject(error), Promise.resolve().then(() => {
+                  try { keeper.close(); } catch (failure) { rememberRetirement(failure); throw failure; }
+                })] as const);
+                throw error;
+              }
+            }).catch(error => { rememberRetirement(error); throw error; });
+          },
           execute(role): Promise<never> {
             if (closed) mismatch('installed runtime handle is closed');
             closed = true; // Consume synchronously; join existing borrows first.

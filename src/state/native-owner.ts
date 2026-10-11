@@ -386,12 +386,50 @@ type NativeCurrentProcess = Readonly<{
   imageFd: number; imageByteCount: number; imageIdentityKey: string;
   assertHeld(): void; close(): void;
 }>;
+type NativeInstalledKeeper = Readonly<{ assertHeld(): void; close(): void }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
   captureCurrentProcess(): NativeCurrentProcess;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
+  initializeInstalledKeeper?(stateRoot: string, bundleDigest: string, relativePath: string,
+    image: readonly bigint[], root: readonly bigint[]): NativeInstalledKeeper;
   executeInstalledImage?(fd: number, image: readonly bigint[], bootstrap: readonly bigint[], root: readonly bigint[],
     stateRoot: string, bundleDigest: string, relativePath: string, role: 'keeper' | 'supervisor'): never };
 const nativeBindings = new WeakMap<NativeStateOwner, NativeBinding>();
+
+/** Private verified-installation bridge. The keeper owns only containment and
+ * its independent image observation, never StateOwner or a caller-supplied FD. */
+export function initializeHeldInstalledKeeper(native: NativeStateOwner, input: Readonly<{
+  stateRoot: string; root: BigIntStats; image: BigIntStats; bundleDigest: string; relativePath: string;
+}>): NativeInstalledKeeper {
+  const binding = nativeBindings.get(native);
+  if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed keeper requires Linux');
+  if (!binding || typeof binding.initializeInstalledKeeper !== 'function')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed native helper lacks keeper initialization');
+  const failed = (error: unknown): never => {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('installed keeper descriptors did not retire', error);
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      (error as { message?: string } | null)?.message ?? 'installed native keeper refused its physical identity', { cause: error });
+  };
+  let owned: NativeInstalledKeeper;
+  try {
+    const image = input.image;
+    owned = binding.initializeInstalledKeeper(input.stateRoot, input.bundleDigest, input.relativePath,
+      [image.dev, image.ino, image.size, image.uid, image.gid, image.mode, image.nlink, image.mtimeNs, image.ctimeNs],
+      [input.root.dev, input.root.ino, input.root.uid, input.root.gid, input.root.mode]);
+  } catch (error) { failed(error); }
+  const handle: NativeInstalledKeeper = Object.freeze({
+    assertHeld() {
+      if (this !== handle) throw new TypeError('invalid installed keeper handle');
+      try { owned.assertHeld(); } catch (error) { failed(error); }
+    },
+    close() {
+      if (this !== handle) throw new TypeError('invalid installed keeper handle');
+      try { owned.close(); } catch (error) { failed(error); }
+    },
+  });
+  return handle;
+}
 
 /** Private installed-producer bridge, not a NativeStateOwner public operation.
  * Only the producer supplies these checked identities; C borrows the original

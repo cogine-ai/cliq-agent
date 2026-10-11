@@ -4,7 +4,9 @@ import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js'
 import { parseJsonStrict } from '../kernel/json.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { openInstalledControl, type InstalledControlService } from './installed-control.js';
-import { createInstalledRuntime, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { createInstalledRuntime, initializeInstalledKeeper, withHeldInstalledRuntime,
+  type HeldInstalledKeeper, type HeldInstalledRuntime } from './installed-runtime.js';
+import { joinResourceOperations } from './errors.js';
 import { openStateStore, type StateStore } from './store.js';
 
 // Hidden Linux SEA entry. Default CLI startup is unchanged. Release roots are
@@ -13,14 +15,29 @@ import { openStateStore, type StateStore } from './store.js';
 let selected: HeldInstalledRuntime | undefined;
 let store: StateStore | undefined;
 let service: InstalledControlService | undefined;
+let keeper: HeldInstalledKeeper | undefined;
+let keeperHealth: ReturnType<typeof setInterval> | undefined;
 let closing: Promise<void> | undefined;
 
 function close(): Promise<void> {
   return closing ??= (async () => {
+    clearInterval(keeperHealth);
+    if (keeper) {
+      // Independent native ownership: even uncertain anchor retirement must
+      // join the selection's descriptors. The Supervisor's Store is different:
+      // its failed close must retain StateOwner, preserving the existing order.
+      await joinResourceOperations([Promise.resolve().then(() => keeper!.close()), selected?.close()] as const);
+      return;
+    }
     await service?.close();
     await store?.close();
     await selected?.close();
   })();
+}
+
+async function fail(error: unknown): Promise<void> {
+  try { await close(); } catch (retirementError) { report(retirementError); process.exitCode = 1; return; }
+  report(error); process.exitCode = 1;
 }
 
 function report(error: unknown): void {
@@ -47,7 +64,7 @@ async function start(): Promise<void> {
     // SIGTERM handler. Exec is terminal, never a running-owner restart API.
     return runtime.executeSelected(selected, mode === '--bootstrap-keeper' ? 'keeper' : 'supervisor');
   }
-  if (mode !== '--installed-supervisor' || process.argv.length !== 6)
+  if ((mode !== '--installed-supervisor' && mode !== '--installed-keeper') || process.argv.length !== 6)
     throw new Error('expected a fixed installed Supervisor role');
   const stateRoot = normalizeAbsolutePath(process.argv[3]!);
   const bundleDigest = process.argv[4]!, rootLocator = process.argv[5]!;
@@ -65,6 +82,15 @@ async function start(): Promise<void> {
     if (`${installed.stateRoot.deviceId}:${installed.stateRoot.fileId}:${installed.stateRoot.ownerUid}` !== rootLocator)
       throw new Error('installed StateRoot differs from the pre-exec root');
   });
+  if (mode === '--installed-keeper') {
+    keeper = await initializeInstalledKeeper(selected);
+    // An FD alone does not keep Node alive. This referenced timer observes
+    // native metadata, not full image/CAS hashing or another authority ledger.
+    keeperHealth = setInterval(() => {
+      try { keeper!.assertHeld(); } catch (error) { void fail(error); }
+    }, 1_000);
+    return;
+  }
   // Only this selected mode acquires authority. Genesis borrows these newly
   // held, verified descriptors, never the retired bootstrap's historical FDs.
   store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys }, selected);
@@ -72,7 +98,4 @@ async function start(): Promise<void> {
 }
 
 const starting = start();
-void starting.catch(async error => {
-  try { await close(); } catch (retirementError) { report(retirementError); process.exitCode = 1; return; }
-  report(error); process.exitCode = 1;
-});
+void starting.catch(fail);

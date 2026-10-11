@@ -15,6 +15,7 @@ import type { PlatformProcessIdentityV1, StateOwnerAcquisitionEvidenceV1, StateO
 import { createInstalledRuntime } from '../../src/state/installed-runtime.js';
 import { STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../src/state/native-owner.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
+import { qualifyInstalledInspectorSignal, type InstalledInspectorSignalReport } from './testing/installed-inspector-signal.js';
 import { SUPERVISOR_SEA_CARRIER_CHECKSUMS, SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
 
 assert.equal(process.platform, 'linux', 'installed startup qualification requires a real Linux runner');
@@ -29,7 +30,8 @@ await chmod(fixture, 0o700);
 const stateRoot = path.join(fixture, 'state');
 const report: { diagnosticOnly: true; scope: string; nodeVersion: string; carrierArchiveDigest: string;
   bundleDigest?: string; manifestDigest?: string; supervisorImageDigest?: string; nativeHelperDigest?: string;
-  result?: unknown; startupRefusal?: unknown; keeperOutsideServiceRefusal?: unknown; cleanup?: unknown; error?: string } = {
+  result?: unknown; startupRefusal?: unknown; keeperOutsideServiceRefusal?: unknown;
+  inspectorSignal?: InstalledInspectorSignalReport; cleanup?: unknown; error?: string } = {
   diagnosticOnly: true, scope: 'actual SEA bootstrap-to-selected execution, image/helper/genesis and read-only control startup only; not systemd/keeper/worker/admission/model/I1',
   nodeVersion: SUPERVISOR_SEA_NODE_VERSION,
   carrierArchiveDigest: SUPERVISOR_SEA_CARRIER_CHECKSUMS['linux-x64']!,
@@ -156,7 +158,7 @@ async function stopSupervisor(): Promise<void> {
 }
 
 try {
-  const { packageRoot, releaseKeys, bundle, contents } = await buildInstalledSupervisorPackage(fixture);
+  const { packageRoot, releaseKeys, bundle, contents, carrier } = await buildInstalledSupervisorPackage(fixture);
   const manifestBytes = canonicalJsonBytes(bundle);
   const installed = await createInstalledRuntime({ releaseKeys }).installInitial({ packageRoot, stateRoot });
   assert.equal(installed.bundleDigest, canonicalSha256(bundle));
@@ -195,7 +197,7 @@ try {
   const keeperDiagnostics = keeperRefused.stderr.trim().split('\n').filter(Boolean).map(line => parseJsonStrict(line)) as
     { diagnosticOnly?: boolean; scope?: string; message?: string }[];
   assert(keeperDiagnostics.some(value => value.diagnosticOnly === true && value.scope === 'installed-read-startup' &&
-    value.message === 'expected a fixed installed Supervisor role'),
+    value.message === 'installed keeper requires its own empty delegated service root'),
   'keeper refusal diagnostic must survive terminal selected-image exec');
   for (const relative of [KERNEL_DATABASE_FILENAME, `${KERNEL_DATABASE_FILENAME}-wal`, `${KERNEL_DATABASE_FILENAME}-shm`,
     'runtime/state-owner.lock', 'runtime/control-v1.sock'])
@@ -274,30 +276,35 @@ try {
   assert.equal(namespace.manifestDigest, digestOmitting(namespace, 'manifestDigest'));
   assert.equal(generation.casNamespaceManifestDigest, namespace.manifestDigest);
   assert.equal(generation.casRootDigest, namespace.rootDigest);
-  const client = run(process.execPath, ['--input-type=module', '-e', clientScript, socketPath], cwd);
-  const exchanges = parseJsonStrict(client.stdout.trim()) as Array<{ hello: string; status: string }>;
-  assert.equal(exchanges.length, 2);
-  const summary = { schemaVersion: 1, runtimeBundleRef: installed.bundleDigest, bundleDigest: installed.bundleDigest, bundleVersion: bundle.bundleVersion };
-  for (const exchange of exchanges) {
-    const hello = parseJsonStrict(exchange.hello) as Record<string, any>;
-    const status = parseJsonStrict(exchange.status) as Record<string, any>;
-    assert.equal(canonicalJsonBytes(hello).toString('utf8'), exchange.hello);
-    assert.equal(canonicalJsonBytes(status).toString('utf8'), exchange.status);
-    assert.equal(hello.protocolVersion, 1); assert.equal(status.protocolVersion, 1);
-    assert.equal(hello.ok, true); assert.equal(hello.result.method, 'control.hello');
-    assert.equal(hello.result.protocolVersion, 1);
-    assert.equal(hello.result.serverBuild, 'cliq-installed-v1');
-    assert.deepEqual(canonicalJsonBytes(hello.result.controlSchemaRange), canonicalJsonBytes({ min: 1, max: 1 }));
-    assert.equal(hello.result.supervisorInstanceId, owner.supervisorInstanceId);
-    assert.deepEqual(canonicalJsonBytes(hello.result.activeRuntimeBundle), canonicalJsonBytes(summary));
-    assert.deepEqual(canonicalJsonBytes(hello.result.headlessSchemaRange), canonicalJsonBytes({ min: 1, max: 1 }));
-    assert.deepEqual(hello.result.enabledFeatureIds, ['supervisor.status']);
-    assert.equal(status.ok, true);
-    assert.deepEqual(canonicalJsonBytes(status.result), canonicalJsonBytes({ method: 'supervisor.status', health: 'degraded', supervisorInstanceId: owner.supervisorInstanceId,
-      queue: { queuedRuns: 0, runningRuns: 0, capacity: 0 }, stateSchemaVersion: KERNEL_STATE_SCHEMA_VERSION,
-      activeRuntimeBundle: summary, installedRuntimeBundles: [summary], incompatiblePinnedRunCount: 0 }));
-  }
-  assert.deepEqual(inspectOwner(), owner, 'read-only disconnect/reconnect cannot replace the actual owner');
+  const checkControl = async (): Promise<void> => {
+    const client = run(process.execPath, ['--input-type=module', '-e', clientScript, socketPath], cwd);
+    const exchanges = parseJsonStrict(client.stdout.trim()) as Array<{ hello: string; status: string }>;
+    assert.equal(exchanges.length, 2);
+    const summary = { schemaVersion: 1, runtimeBundleRef: installed.bundleDigest, bundleDigest: installed.bundleDigest, bundleVersion: bundle.bundleVersion };
+    for (const exchange of exchanges) {
+      const hello = parseJsonStrict(exchange.hello) as Record<string, any>;
+      const status = parseJsonStrict(exchange.status) as Record<string, any>;
+      assert.equal(canonicalJsonBytes(hello).toString('utf8'), exchange.hello);
+      assert.equal(canonicalJsonBytes(status).toString('utf8'), exchange.status);
+      assert.equal(hello.protocolVersion, 1); assert.equal(status.protocolVersion, 1);
+      assert.equal(hello.ok, true); assert.equal(hello.result.method, 'control.hello');
+      assert.equal(hello.result.protocolVersion, 1);
+      assert.equal(hello.result.serverBuild, 'cliq-installed-v1');
+      assert.deepEqual(canonicalJsonBytes(hello.result.controlSchemaRange), canonicalJsonBytes({ min: 1, max: 1 }));
+      assert.equal(hello.result.supervisorInstanceId, owner.supervisorInstanceId);
+      assert.deepEqual(canonicalJsonBytes(hello.result.activeRuntimeBundle), canonicalJsonBytes(summary));
+      assert.deepEqual(canonicalJsonBytes(hello.result.headlessSchemaRange), canonicalJsonBytes({ min: 1, max: 1 }));
+      assert.deepEqual(hello.result.enabledFeatureIds, ['supervisor.status']);
+      assert.equal(status.ok, true);
+      assert.deepEqual(canonicalJsonBytes(status.result), canonicalJsonBytes({ method: 'supervisor.status', health: 'degraded', supervisorInstanceId: owner.supervisorInstanceId,
+        queue: { queuedRuns: 0, runningRuns: 0, capacity: 0 }, stateSchemaVersion: KERNEL_STATE_SCHEMA_VERSION,
+        activeRuntimeBundle: summary, installedRuntimeBundles: [summary], incompatiblePinnedRunCount: 0 }));
+    }
+    assert.deepEqual(inspectOwner(), owner, 'read-only disconnect/reconnect cannot replace the actual owner');
+  };
+  report.inspectorSignal = { diagnosticOnly: true };
+  await qualifyInstalledInspectorSignal({ carrier, cwd, supervisor, selectedImage,
+    processStartToken: identity.processStartToken, stderr: () => stderr, checkControl, report: report.inspectorSignal });
   await stopSupervisor();
   assert.deepEqual(report.cleanup, { code: 0, signal: null, joined: true });
   const terminal = inspectOwner();
@@ -305,7 +312,7 @@ try {
   assert.equal(terminal.terminalReason, 'graceful_release');
   await assert.rejects(lstat(socketPath), { code: 'ENOENT' });
   report.result = { qualified: true, supervisorPid: identity.pid, processStartToken: identity.processStartToken,
-    ownerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId, reconnects: 1,
+    ownerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId, reconnects: 3,
     closedRoleRefusals: 2, actualSelectedPath: selectedImage, actualSelectedDevice: actualInfo.dev.toString(), actualSelectedInode: actualInfo.ino.toString() };
   console.log('Installed SEA bootstrap-to-selected execution/image/helper/genesis/read-only startup qualification passed; not a completed I1');
 } catch (error) {

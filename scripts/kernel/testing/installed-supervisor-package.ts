@@ -73,5 +73,5 @@ export async function buildInstalledSupervisorPackage(fixture: string) {
   bundle.signature = sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${bundle.manifestDigest}`), keys.privateKey).toString('base64');
   verifyRuntimeBundle(bundle, releaseKeys);
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
-  return { packageRoot, releaseKeys, bundle, contents };
+  return { packageRoot, releaseKeys, bundle, contents, carrier };
 }

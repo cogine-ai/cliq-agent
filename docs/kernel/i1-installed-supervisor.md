@@ -344,6 +344,16 @@ Do not use the worker's sealed memfd for this image: actual Supervisor image
 binding still requires its original filesystem identity and independent path.
 The systemd unit closes native-loader environment routes before the first ELF
 startup; native exec independently uses a fixed environment and FD whitelist.
+The terminal exec preserves only inherited standard streams 0–2, clearing
+their Node-set `CLOEXEC` flags after unsharing the descriptor table. Every
+descriptor at or above 3 remains close-on-exec; any terminal failure exits
+without returning to Node or finalizers. Actual startup diagnostics/read-only
+qualification passed at `4f583f2` in
+[run 38108002748](https://github.com/cogine-ai/cliq-agent/actions/runs/38108002748).
+The same run retained an exact signed keeper missing-role RED under the real
+user manager, verified first-loader preload protection, left database/lock/
+control authority absent, and reported zero cleanup errors. That RED is an
+implementation prerequisite, not persistent keeper qualification.
 SEA's ignored `NODE_OPTIONS` alone does not exclude `LD_PRELOAD` or alternate
 native library loading. There is no general spawn/import facade.
 
