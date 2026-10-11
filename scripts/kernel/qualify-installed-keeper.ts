@@ -1,4 +1,4 @@
-// Actual signed installed keeper startup under a disposable real user manager.
+// Actual signed installed keeper startup/source publication under a real user manager.
 // A refusal is RED, never qualification success or containment-death authority.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -13,6 +13,7 @@ import { build } from 'esbuild';
 import { KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
+import { qualifyInstalledAnchorSource } from './testing/installed-anchor-source.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
 
@@ -237,7 +238,7 @@ async function campaign(ledgerFile: string): Promise<void> {
   assert.equal(process.geteuid!(), 0, 'only the frozen-ledger root orchestrator may stage this fixture');
   const ledger = await readLedger(ledgerFile), installed = ledger.installed;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false,
-    scope: 'actual signed installed keeper startup only; not Supervisor restart, Run, worker, admission or complete I1',
+    scope: 'actual signed installed keeper startup/original source publication only; not Supervisor restart, Run, worker, admission or complete I1',
     embeddedNodeVersion: SUPERVISOR_SEA_NODE_VERSION, uid: ledger.uid, keeperUnit: installed.keeperUnit };
   const userCommand = (args: string[]) => command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
     `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
@@ -395,8 +396,16 @@ async function campaign(ledgerFile: string): Promise<void> {
             assert.deepEqual((await readdir(root, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name), ['keeper']);
             const confirmed = show(); assert.equal(confirmed.InvocationID, shown.InvocationID); assert.equal(confirmed.MainPID, shown.MainPID);
             keeperImageObserved = true;
-            report.qualified = true; report.result = { pid, processStartToken: `linux-proc-start-ticks:${fields[19]}`,
+            report.result = { pid, processStartToken: `linux-proc-start-ticks:${fields[19]}`,
               actualImage, roots, enabled, invocationId: shown.InvocationID };
+            const sourcePublication: Record<string, unknown> = { diagnosticOnly: true };
+            report.sourcePublication = sourcePublication;
+            await qualifyInstalledAnchorSource({ pid, startTicks: fields[19]!, uid: ledger.uid, gid: ledger.gid,
+              stateRoot: installed.stateRoot, bundleDigest: selection.bundleDigest, selectedImage: expectedImage,
+              selectedMetadata: selected, root: roots[0]!, report: sourcePublication });
+            const sourceConfirmed = show();
+            assert.equal(sourceConfirmed.InvocationID, shown.InvocationID); assert.equal(sourceConfirmed.MainPID, shown.MainPID);
+            report.qualified = true;
             break;
           }
         }

@@ -365,6 +365,13 @@ control and joined cleanup. Its independent signed keeper startup campaign
 passed under the real user manager, with database/lock/control authority
 absent and zero cleanup errors. This qualifies keeper initialization only,
 not original-pin handoff, continuity across Supervisor restart or complete I1.
+At `0c68acc`,
+[run 38110046172](https://github.com/cogine-ai/cliq-agent/actions/runs/38110046172)
+passed the actual signal regression: the ordinary carrier opened its PID-owned
+inspector, while the selected Supervisor retained `SIGUSR1` blocked and pending,
+had no PID-owned TCP listener or handler, preserved its lifetime/image and
+read-only UDS owner across reconnects, and gracefully released. Signed keeper
+initialization and scoped cleanup passed independently in the same run.
 
 The independent anchor service owns this delegated topology:
 
@@ -399,6 +406,15 @@ named root. Lifetime, credentials, selected image, namespaces and source/root
 bindings are rechecked around the cut. Unavailable procfs/FD access or changed
 identity refuses acquisition; neither ready metadata nor a missing root proves
 an old worker's death.
+
+Use the fixed private `runtime/keeper.ready` locator: exactly 40 bytes, with
+eight ASCII bytes `cliq-ak1`, little-endian uint32 PID and source FD, little-endian
+uint64 process start ticks, then 16 boot UUID bytes in canonical textual order
+without separators. Publish a same-principal single-link `0600` file through
+exclusive temporary creation, file fsync, atomic rename and runtime directory
+fsync. No JSON, root authority fields or additional ledger are involved.
+Its start/boot fields remain untrusted locators; acquisition must independently
+observe the actual same-lifetime source and original held physical root.
 
 Keep `LinuxWorkerInstallation.cgroupParent` as the held anchor-root seam;
 do not add a separately caller-selected controller parent. Internally,
