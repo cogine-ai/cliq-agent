@@ -391,6 +391,22 @@ found no read-only original root FD. Only that missing consumer caused RED,
 with zero cleanup errors. Acquisition is now the implementation prerequisite;
 publication alone does not qualify handoff, restart, death or complete I1.
 
+At `89e911f`,
+[run 38114526389](https://github.com/cogine-ai/cliq-agent/actions/runs/38114526389)
+passed the actual signed keeper-to-Supervisor original-pin handoff before the
+first StateOwner transaction. Keeper PID 4389/start ticks 14463 retained source
+FD 51 and cgroup root device 29/inode 10920; the selected Supervisor PID 4548
+held exactly one matching read-only root FD 57. Full `fresh_installed` genesis,
+three authenticated read/reconnect checks, inspector-signal closure and graceful
+epoch 1 release passed. A legal but absent original source FD in the real
+same-inode locator produced the exact native refusal, preserving the terminal
+owner record, CAS entry inventory and absent control socket. Original locator
+bytes were restored and the same physical source requalified; cleanup reported
+zero errors and the runner baseline was unchanged. Stopped-process verification
+uses the actual prior lifetime, not systemd's garbage-collected historical
+`ExecMain*` fields. This qualifies handoff, not continuity across Supervisor
+restart, worker execution, all-descendant death or complete I1.
+
 The independent anchor service owns this delegated topology:
 
 ```text

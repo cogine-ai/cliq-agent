@@ -4,26 +4,61 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
-import { digestOmitting } from '../../../src/kernel/identity.js';
+import { digestOmitting, parseCanonicalTime } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
-import type { StateOwnerRecordV1 } from '../../../src/kernel/types.js';
+import type { CanonicalTimeFenceV1, StateOwnerRecordV1 } from '../../../src/kernel/types.js';
 import type { RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
 
-export function inspectInstalledOwner(stateRoot: string): StateOwnerRecordV1 | undefined {
+const ownerKeys = ['schemaVersion', 'ownerEpoch', 'supervisorInstanceId', 'runtimeBundleRef', 'runtimeBundleManifestDigest',
+  'supervisorEntryId', 'supervisorEntryVersion', 'supervisorExecutableDigest', 'processIdentityRef', 'processIdentityDigest',
+  'stateLockIdentityRef', 'stateLockIdentityDigest', 'acquisitionEvidenceRef', 'acquisitionEvidenceDigest',
+  'instanceNonceDigest', 'acquiredAt', 'rowDigest', 'state', 'rowVersion'];
+const terminalKeys = ['releasedAt', 'terminalReason', 'transitionEvidenceRef', 'transitionEvidenceDigest'];
+
+export function inspectInstalledOwnerHistory(stateRoot: string) {
   const database = new DatabaseSync(path.join(stateRoot, KERNEL_DATABASE_FILENAME), { readOnly: true, allowExtension: false });
   try {
+    database.exec('BEGIN');
     assert.equal(database.prepare('PRAGMA user_version').get()?.user_version, KERNEL_STATE_SCHEMA_VERSION);
-    const rows = database.prepare('SELECT owner_epoch, supervisor_instance_id, record_json, state, row_digest FROM state_owners').all();
-    assert(rows.length <= 1, 'this qualification starts exactly one real Supervisor');
-    if (!rows.length) return undefined;
-    const row = rows[0]!;
-    assert.equal(typeof row.record_json, 'string');
-    const owner = parseJsonStrict(row.record_json as string) as StateOwnerRecordV1;
-    assert.equal(owner.ownerEpoch, row.owner_epoch); assert.equal(owner.supervisorInstanceId, row.supervisor_instance_id);
-    assert.equal(owner.state, row.state); assert.equal(owner.rowDigest, row.row_digest);
-    assert.equal(owner.rowDigest, digestOmitting(owner, 'rowDigest'));
-    return owner;
+    const rows = database.prepare('SELECT owner_epoch, supervisor_instance_id, record_json, state, row_digest FROM state_owners ORDER BY owner_epoch').all();
+    const owners = rows.map((row, index) => {
+      assert.equal(typeof row.record_json, 'string');
+      const owner = parseJsonStrict(row.record_json as string) as StateOwnerRecordV1;
+      assert.equal(owner.ownerEpoch, index + 1); assert.equal(owner.ownerEpoch, row.owner_epoch);
+      assert.equal(owner.supervisorInstanceId, row.supervisor_instance_id);
+      assert.equal(owner.state, row.state); assert.equal(owner.rowDigest, row.row_digest);
+      assert.equal(owner.rowDigest, digestOmitting(owner, 'rowDigest'));
+      assert.equal(owner.schemaVersion, 1); parseCanonicalTime(owner.acquiredAt);
+      assert.match(owner.instanceNonceDigest, /^[0-9a-f]{64}$/u);
+      assert.deepEqual(Object.keys(owner).sort(), [...ownerKeys, ...(owner.state === 'terminal' ? terminalKeys : [])].sort());
+      if (owner.state === 'active') {
+        assert.equal(index, rows.length - 1); assert.equal(owner.rowVersion, 1);
+      } else {
+        assert.equal(owner.state, 'terminal'); assert.equal(owner.rowVersion, 2); parseCanonicalTime(owner.releasedAt);
+        assert(['graceful_release', 'superseded_after_owner_death'].includes(owner.terminalReason));
+      }
+      return owner;
+    });
+    const fences = database.prepare('SELECT * FROM canonical_time_fence').all();
+    assert.equal(fences.length, owners.length ? 1 : 0);
+    let fence: CanonicalTimeFenceV1 | undefined;
+    if (owners.length) {
+      const row = fences[0]!; assert.equal(row.id, 1);
+      fence = { schemaVersion: 1, format: 'cliq-canonical-time-fence-v1', stateOwnerEpoch: row.state_owner_epoch as number,
+        lastAcceptedAt: row.last_accepted_at as string, observedWallClockAt: row.observed_wall_clock_at as string,
+        state: row.state as CanonicalTimeFenceV1['state'], updatedAt: row.updated_at as string, fenceDigest: row.fence_digest as string };
+      assert.equal(fence.stateOwnerEpoch, owners.length); assert.equal(fence.fenceDigest, digestOmitting(fence, 'fenceDigest'));
+      for (const value of [fence.lastAcceptedAt, fence.observedWallClockAt, fence.updatedAt]) parseCanonicalTime(value);
+      assert(['healthy', 'clock_regressed'].includes(fence.state)); assert.equal(fence.updatedAt, fence.lastAcceptedAt);
+      if (fence.state === 'healthy') assert.equal(fence.observedWallClockAt, fence.lastAcceptedAt);
+    }
+    database.exec('COMMIT');
+    return { owners, fence };
   } finally { database.close(); }
+}
+
+export function inspectInstalledOwner(stateRoot: string): StateOwnerRecordV1 | undefined {
+  return inspectInstalledOwnerHistory(stateRoot).owners.at(-1);
 }
 
 export function assertInstalledReadExchanges(stdout: string, owner: StateOwnerRecordV1, bundle: RuntimeBundleManifest): void {

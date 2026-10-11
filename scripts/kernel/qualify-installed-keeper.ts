@@ -13,11 +13,13 @@ import { build } from 'esbuild';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
+import type { StateOwnerRecordV1 } from '../../src/kernel/types.js';
 import { qualifyInstalledAnchorSource } from './testing/installed-anchor-source.js';
 import { qualifyInstalledAnchorConsumer } from './testing/installed-anchor-consumer.js';
 import { qualifyInstalledGenesis } from './testing/installed-genesis.js';
+import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './testing/installed-owner-history.js';
 import { qualifyInstalledInspectorSignal, type InstalledInspectorSignalReport } from './testing/installed-inspector-signal.js';
-import { assertInstalledReadExchanges, inspectInstalledOwner, installedReadClientScript } from './testing/installed-read-control.js';
+import { assertInstalledReadExchanges, inspectInstalledOwnerHistory, installedReadClientScript } from './testing/installed-read-control.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
 
@@ -43,7 +45,7 @@ const loaderVariables = ['LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT', 'LD_DEBUG'
   'NODE_REDIRECT_WARNINGS', 'NODE_REPL_EXTERNAL_MODULE', 'NODE_V8_COVERAGE', 'OPENSSL_CONF',
   'OPENSSL_CONF_INCLUDE', 'OPENSSL_MODULES', 'OPENSSL_ENGINES', 'SSL_CERT_DIR', 'SSL_CERT_FILE'];
 const propertyNames = ['LoadState', 'ActiveState', 'SubState', 'MainPID', 'ExecMainPID', 'ControlGroup',
-  'InvocationID', 'Result', 'ExecMainCode', 'ExecMainStatus', 'FragmentPath', 'Type', 'Delegate', 'KillMode', 'Restart'];
+  'InvocationID', 'Result', 'ExecMainCode', 'ExecMainStatus', 'FragmentPath', 'Type', 'Delegate', 'KillMode', 'Restart', 'NRestarts', 'ControlPID'];
 
 function command(executable: string, args: string[], milliseconds = 30_000) {
   const result = spawnSync(executable, args, { cwd: repository, env: environment,
@@ -242,7 +244,7 @@ async function campaign(ledgerFile: string): Promise<void> {
   assert.equal(process.geteuid!(), 0, 'only the frozen-ledger root orchestrator may stage this fixture');
   const ledger = await readLedger(ledgerFile), installed = ledger.installed;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false,
-    scope: 'actual signed installed keeper source publication and Supervisor original-pin acquisition only; not restart, Run, worker, admission or complete I1',
+    scope: 'actual signed installed keeper source, Supervisor original-pin acquisition and graceful/automatic owner restarts only; not Run, worker, admission or complete I1',
     embeddedNodeVersion: SUPERVISOR_SEA_NODE_VERSION, uid: ledger.uid, keeperUnit: installed.keeperUnit };
   const userCommand = (args: string[]) => command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
     `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
@@ -315,7 +317,9 @@ async function campaign(ledgerFile: string): Promise<void> {
       const definition = await readFile(filename, 'utf8');
       assert(definition.includes(`ExecStart=${installed.stateRoot}/runtime/bootstrap --bootstrap-${role}\n`));
       assert(definition.includes(`UnsetEnvironment=${loaderVariables.join(' ')}\n`));
-      assert(definition.includes('Type=exec\n') && definition.includes('Delegate=cpu memory pids\n') && definition.includes('Restart=no\n'));
+      assert(definition.includes('Type=exec\n') && definition.includes('Delegate=cpu memory pids\n'));
+      assert(definition.includes(`Restart=${role === 'keeper' ? 'no' : 'on-failure'}\n`));
+      if (role === 'supervisor') assert(definition.includes('RestartSec=2s\n'));
       assert(!definition.includes('PartOf=') && !definition.includes('BindsTo='));
       if (unit === installed.supervisorUnit) assert(definition.includes(`Requires=${installed.keeperUnit}\nAfter=${installed.keeperUnit}\n`));
     }
@@ -406,9 +410,16 @@ async function campaign(ledgerFile: string): Promise<void> {
               actualImage, roots, enabled, invocationId: shown.InvocationID };
             const sourcePublication: Record<string, unknown> = { diagnosticOnly: true };
             report.sourcePublication = sourcePublication;
-            await qualifyInstalledAnchorSource({ pid, startTicks: fields[19]!, uid: ledger.uid, gid: ledger.gid,
+            const sourceInput = { pid, startTicks: fields[19]!, uid: ledger.uid, gid: ledger.gid,
               stateRoot: installed.stateRoot, bundleDigest: selection.bundleDigest, selectedImage: expectedImage,
-              selectedMetadata: selected, root: roots[0]!, report: sourcePublication });
+              selectedMetadata: selected, root: roots[0]! };
+            await qualifyInstalledAnchorSource({ ...sourceInput, report: sourcePublication });
+            const assertKeeperPin = (observation: Record<string, unknown>) => {
+              assert.equal(observation.qualified, true); assert.deepEqual(observation.after, sourcePublication.before);
+              assert.deepEqual(observation.source, sourcePublication.source); assert.deepEqual(observation.locator, sourcePublication.locator);
+              assert.equal(observation.readyBytes, sourcePublication.readyBytes);
+              const current = show(); assert.equal(current.InvocationID, shown!.InvocationID); assert.equal(current.MainPID, shown!.MainPID);
+            };
             const sourceConfirmed = show();
             assert.equal(sourceConfirmed.InvocationID, shown.InvocationID); assert.equal(sourceConfirmed.MainPID, shown.MainPID);
             // Seal the keeper-only authority observation before the Supervisor
@@ -418,49 +429,84 @@ async function campaign(ledgerFile: string): Promise<void> {
             assert(Object.values(keeperAuthorityAfter).every(Boolean));
             supervisorStartAttempted = true;
             report.supervisorStartCommand = userCommand(['start', installed.supervisorUnit]);
-            const supervisorDeadline = Date.now() + 30_000;
+            assert.equal((report.supervisorStartCommand as { status: number }).status, 0);
             const socketPath = path.join(installed.stateRoot, 'runtime/control-v1.sock');
-            let supervisorUnit: Record<string, string>;
-            for (;;) {
-              supervisorUnit = show(installed.supervisorUnit); report.supervisorUnit = supervisorUnit;
-              assert.equal(supervisorUnit.FragmentPath, installed.supervisorUnitFile);
-              assert.equal(supervisorUnit.LoadState, 'loaded'); assert.equal(supervisorUnit.Type, 'exec');
-              assert.equal(supervisorUnit.Delegate, 'yes'); assert.equal(supervisorUnit.KillMode, 'control-group');
-              assert.equal(supervisorUnit.Restart, 'no');
-              assert(!['failed', 'inactive'].includes(supervisorUnit.ActiveState!), 'actual Supervisor exited before UDS readiness');
-              const socket = await lstat(socketPath).catch((error: NodeJS.ErrnoException) => {
-                if (error.code === 'ENOENT') return undefined; throw error;
-              });
-              if (socket) { assert(socket.isSocket()); assert.equal(socket.uid, ledger.uid); break; }
-              assert(Date.now() < supervisorDeadline, 'actual Supervisor did not open its UDS');
-              await delay(20);
-            }
+            const awaitSupervisor = async (epoch: number, observation: Record<string, unknown>, priorInvocation?: string) => {
+              const deadline = Date.now() + 30_000;
+              for (;;) {
+                const unit = show(installed.supervisorUnit); observation.unit = unit;
+                assert.equal(unit.FragmentPath, installed.supervisorUnitFile);
+                assert.equal(unit.LoadState, 'loaded'); assert.equal(unit.Type, 'exec');
+                assert.equal(unit.Delegate, 'yes'); assert.equal(unit.KillMode, 'control-group'); assert.equal(unit.Restart, 'on-failure');
+                assert(!['failed', 'inactive'].includes(unit.ActiveState!), 'actual Supervisor exited before UDS readiness');
+                const socket = await lstat(socketPath).catch((error: NodeJS.ErrnoException) => {
+                  if (error.code === 'ENOENT') return undefined; throw error;
+                });
+                if (socket && Number(unit.MainPID) > 0 && unit.InvocationID !== priorInvocation) {
+                  assert(socket.isSocket()); assert.equal(socket.uid, ledger.uid);
+                  const current = inspectInstalledOwnerHistory(installed.stateRoot).owners.at(-1);
+                  if (current?.state === 'active' && current.ownerEpoch === epoch) {
+                    assert.equal(unit.ExecMainPID, unit.MainPID); assert.match(unit.InvocationID!, /^[a-f0-9]{32}$/u);
+                    return unit;
+                  }
+                }
+                assert(Date.now() < deadline, 'actual Supervisor did not open its new owner UDS'); await delay(20);
+              }
+            };
+            const initialSupervisor: Record<string, unknown> = {}; report.supervisorInitial = initialSupervisor;
+            const supervisorUnit = await awaitSupervisor(1, initialSupervisor); report.supervisorUnit = supervisorUnit;
             const supervisorPid = Number(supervisorUnit.MainPID);
             assert(Number.isSafeInteger(supervisorPid) && supervisorPid > 0 && supervisorPid <= 0x7fffffff);
-            assert.equal(supervisorUnit.ExecMainPID, String(supervisorPid));
-            assert.match(supervisorUnit.InvocationID!, /^[a-f0-9]{32}$/u);
+            assert.equal(supervisorUnit.NRestarts, '0');
+            const supervisorControlGroup = supervisorUnit.ControlGroup!;
+            assert(supervisorControlGroup.startsWith('/') && supervisorControlGroup.endsWith(`/${installed.supervisorUnit}`));
+            const stopAndJoinSupervisor = async (observation: Record<string, unknown>) => {
+              const stop = userCommand(['stop', installed.supervisorUnit]); observation.stopCommand = stop;
+              assert.equal(stop.status, 0, stop.stderr);
+              const stopped = show(installed.supervisorUnit); observation.stoppedUnit = stopped;
+              assert.equal(stopped.MainPID, '0'); assert.equal(stopped.ControlPID, '0');
+              assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.SubState, 'dead');
+              // The real manager cancels auto-restart and joins the whole unit.
+              // Its historical PID fields may be gone after unit unloading.
+              const deadline = Date.now() + 30_000;
+              for (;;) {
+                const exists = await lstat(`/sys/fs/cgroup${supervisorControlGroup}`).then(() => true, (error: NodeJS.ErrnoException) => {
+                  if (error.code === 'ENOENT') return false; throw error;
+                });
+                if (!exists) break;
+                assert(Date.now() < deadline, 'stopped Supervisor service cgroup was not retired'); await delay(20);
+              }
+              const confirmed = show(installed.supervisorUnit);
+              assert.equal(confirmed.MainPID, '0'); assert.equal(confirmed.ControlPID, '0'); assert.equal(confirmed.ActiveState, 'inactive');
+              observation.serviceCgroupAbsent = true; observation.joined = true;
+              return stopped;
+            };
             const genesis: Record<string, unknown> = { diagnosticOnly: true }; report.genesis = genesis;
             const { owner, identity } = await qualifyInstalledGenesis({ stateRoot: installed.stateRoot, pid: supervisorPid,
               uid: ledger.uid, selectedImage: expectedImage, bundle, contents, report: genesis });
-            const checkControl = async (): Promise<void> => {
+            const readControl = async (unit: Record<string, string>, currentPid: number, currentOwner: StateOwnerRecordV1,
+              observation: Record<string, unknown>): Promise<void> => {
               const currentUnit = show(installed.supervisorUnit);
-              assert.equal(currentUnit.InvocationID, supervisorUnit.InvocationID); assert.equal(currentUnit.MainPID, String(supervisorPid));
+              assert.equal(currentUnit.InvocationID, unit.InvocationID); assert.equal(currentUnit.MainPID, String(currentPid));
+              const history = inspectInstalledOwnerHistory(installed.stateRoot); assert.deepEqual(history.owners.at(-1), currentOwner);
               const client = command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
                 `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', process.execPath,
                 '--input-type=module', '-e', installedReadClientScript, socketPath]);
-              report.supervisorReadClient = client; assert.equal(client.status, 0, client.stderr);
-              assertInstalledReadExchanges(client.stdout, owner, bundle);
-              assert.deepEqual(inspectInstalledOwner(installed.stateRoot), owner);
+              observation.readClient = client; assert.equal(client.status, 0, client.stderr);
+              assertInstalledReadExchanges(client.stdout, currentOwner, bundle);
+              const after = inspectInstalledOwnerHistory(installed.stateRoot);
+              assert.deepEqual(after.owners, history.owners);
               const confirmedUnit = show(installed.supervisorUnit);
-              assert.equal(confirmedUnit.InvocationID, supervisorUnit.InvocationID); assert.equal(confirmedUnit.MainPID, String(supervisorPid));
+              assert.equal(confirmedUnit.InvocationID, unit.InvocationID); assert.equal(confirmedUnit.MainPID, String(currentPid));
             };
+            const checkControl = () => readControl(supervisorUnit, supervisorPid, owner, report);
             await checkControl();
             report.supervisorReadPositive = { pid: supervisorPid, ownerEpoch: owner.ownerEpoch,
               supervisorInstanceId: owner.supervisorInstanceId, reconnects: 1 };
             const consumer: Record<string, unknown> = { diagnosticOnly: true }; report.consumer = consumer;
-            await qualifyInstalledAnchorConsumer({ pid: supervisorPid, source: { pid, startTicks: fields[19]!, uid: ledger.uid,
-              gid: ledger.gid, stateRoot: installed.stateRoot, bundleDigest: selection.bundleDigest,
-              selectedImage: expectedImage, selectedMetadata: selected, root: roots[0]!, report: sourcePublication }, report: consumer });
+            await qualifyInstalledAnchorConsumer({ pid: supervisorPid, source: { ...sourceInput, report: sourcePublication }, report: consumer });
+            assertKeeperPin(consumer.sourceAfter as Record<string, unknown>);
+            assert.deepEqual((consumer.sourceAfter as Record<string, unknown>).ready, sourcePublication.ready);
             const finalSource = show(), finalSupervisor = show(installed.supervisorUnit);
             assert.equal(finalSource.InvocationID, shown.InvocationID); assert.equal(finalSource.MainPID, shown.MainPID);
             assert.equal(finalSupervisor.InvocationID, supervisorUnit.InvocationID); assert.equal(finalSupervisor.MainPID, supervisorUnit.MainPID);
@@ -474,34 +520,95 @@ async function campaign(ledgerFile: string): Promise<void> {
                 .map(record => record.MESSAGE).join('\n'), checkControl, report: inspectorSignal });
             report.supervisorReadPositive = { pid: supervisorPid, ownerEpoch: owner.ownerEpoch,
               supervisorInstanceId: owner.supervisorInstanceId, reconnects: 3 };
-            const stopSupervisor = userCommand(['stop', installed.supervisorUnit]);
-            report.supervisorStopCommand = stopSupervisor; assert.equal(stopSupervisor.status, 0, stopSupervisor.stderr);
-            const stoppedSupervisor = show(installed.supervisorUnit); report.supervisorStopped = stoppedSupervisor;
-            assert.equal(stoppedSupervisor.MainPID, '0'); assert.equal(stoppedSupervisor.ActiveState, 'inactive');
-            assert.equal(stoppedSupervisor.Result, 'success');
-            // Inactive units may be unloaded, losing historical ExecMain*
-            // and InvocationID. Check the actual prior process lifetime instead.
-            const stoppedProcess = await readFile(`/proc/${supervisorPid}/stat`, 'utf8').catch((error: NodeJS.ErrnoException) => {
-              if (error.code === 'ENOENT' || error.code === 'ESRCH') return undefined; throw error;
-            });
-            if (stoppedProcess !== undefined) {
-              assert(stoppedProcess.startsWith(`${supervisorPid} (`));
-              const stoppedFields = stoppedProcess.slice(stoppedProcess.lastIndexOf(') ') + 2).trim().split(/\s+/u);
-              assert.match(stoppedFields[19]!, /^[1-9][0-9]*$/u);
-              assert.notEqual(`linux-proc-start-ticks:${stoppedFields[19]}`, identity.processStartToken);
-            }
-            report.supervisorStoppedProcess = { pid: supervisorPid, priorProcessStartToken: identity.processStartToken,
-              priorLifetimeGone: true, procStat: stoppedProcess ?? null };
-            const terminal = inspectInstalledOwner(installed.stateRoot);
-            assert(terminal?.state === 'terminal'); assert.equal(terminal.ownerEpoch, 1);
-            assert.equal(terminal.terminalReason, 'graceful_release');
+            const assertLifetimeGone = async (priorPid: number, priorStart: string, observation: Record<string, unknown>) => {
+              const raw = await readFile(`/proc/${priorPid}/stat`, 'utf8').catch((error: NodeJS.ErrnoException) => {
+                if (error.code === 'ENOENT' || error.code === 'ESRCH') return undefined; throw error;
+              });
+              if (raw !== undefined) {
+                assert(raw.startsWith(`${priorPid} (`));
+                const current = raw.slice(raw.lastIndexOf(')') + 2).trim().split(/\s+/u);
+                assert.match(current[19]!, /^(0|[1-9][0-9]*)$/u);
+                assert.notEqual(`linux-proc-start-ticks:${current[19]}`, priorStart);
+              }
+              observation.priorLifetime = { pid: priorPid, processStartToken: priorStart, gone: true, procStat: raw ?? null };
+            };
+            const assertReleasedIdentity = (terminal: StateOwnerRecordV1, active: StateOwnerRecordV1) => {
+              assert(terminal.state === 'terminal');
+              assert.deepEqual(canonicalJsonBytes(terminal), canonicalJsonBytes({ ...active, state: 'terminal', rowVersion: 2,
+                releasedAt: terminal.releasedAt, terminalReason: terminal.terminalReason,
+                transitionEvidenceRef: terminal.transitionEvidenceRef, transitionEvidenceDigest: terminal.transitionEvidenceDigest,
+                rowDigest: terminal.rowDigest }));
+            };
+            const qualifySuccessor = async (epoch: 2 | 3, unit: Record<string, string>, observation: Record<string, unknown>) => {
+              assert.equal(unit.ControlGroup, supervisorControlGroup);
+              const currentPid = Number(unit.MainPID);
+              assert(Number.isSafeInteger(currentPid) && currentPid > 0 && currentPid <= 0x7fffffff);
+              const links: Record<string, unknown> = {}; observation.ownerLinks = links;
+              const history = await qualifyInstalledOwnerLinks({ stateRoot: installed.stateRoot, uid: ledger.uid,
+                bundle, imageDigest, report: links });
+              assert.equal(history.owners.length, epoch);
+              const currentOwner = history.owners.at(-1)!; assert.equal(currentOwner.state, 'active');
+              const processObservation: Record<string, unknown> = {}; observation.processObservation = processObservation;
+              const currentIdentity = await qualifyInstalledOwnerProcess({ stateRoot: installed.stateRoot, uid: ledger.uid,
+                pid: currentPid, selectedImage: expectedImage, imageDigest }, currentOwner, processObservation);
+              await readControl(unit, currentPid, currentOwner, observation);
+              const acquired: Record<string, unknown> = {}; observation.consumer = acquired;
+              await qualifyInstalledAnchorConsumer({ pid: currentPid, source: { ...sourceInput, report: sourcePublication }, report: acquired });
+              const source = acquired.sourceAfter as Record<string, unknown>; assertKeeperPin(source);
+              assert.deepEqual(source.ready, sourcePublication.ready, 'manual/automatic restart must not republish the locator');
+              const confirmed = show(installed.supervisorUnit);
+              assert.equal(confirmed.InvocationID, unit.InvocationID); assert.equal(confirmed.MainPID, unit.MainPID);
+              return { pid: currentPid, owner: currentOwner, identity: currentIdentity, history };
+            };
+            const manual: Record<string, unknown> = { diagnosticOnly: true, qualified: false }; report.manualRestart = manual;
+            manual.command = userCommand(['restart', installed.supervisorUnit]);
+            assert.equal((manual.command as { status: number }).status, 0);
+            const manualUnit = await awaitSupervisor(2, manual, supervisorUnit.InvocationID);
+            assert.equal(manualUnit.NRestarts, '0');
+            await assertLifetimeGone(supervisorPid, identity.processStartToken, manual);
+            const second = await qualifySuccessor(2, manualUnit, manual);
+            assertReleasedIdentity(second.history.owners[0]!, owner);
+            manual.qualified = true;
+
+            const automatic: Record<string, unknown> = { diagnosticOnly: true, qualified: false }; report.automaticRestart = automatic;
+            // Bind the destructive signal to this fixture's still-current real
+            // MainPID, process lifetime and selected inode; never signal a guess.
+            const killStat = await readFile(`/proc/${second.pid}/stat`, 'utf8');
+            assert(killStat.startsWith(`${second.pid} (`));
+            const killFields = killStat.slice(killStat.lastIndexOf(')') + 2).trim().split(/\s+/u);
+            assert(!['Z', 'X', 'x'].includes(killFields[0]!));
+            assert.equal(`linux-proc-start-ticks:${killFields[19]}`, second.identity.processStartToken);
+            const killImage = await stat(`/proc/${second.pid}/exe`, { bigint: true });
+            assert.equal(await readlink(`/proc/${second.pid}/exe`), expectedImage);
+            for (const key of ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const) assert.equal(killImage[key], selected[key]);
+            const beforeKill = show(installed.supervisorUnit);
+            assert.equal(beforeKill.MainPID, String(second.pid)); assert.equal(beforeKill.InvocationID, manualUnit.InvocationID);
+            automatic.kill = { pid: second.pid, processStartToken: second.identity.processStartToken, invocationId: manualUnit.InvocationID, signal: 'SIGKILL' };
+            process.kill(second.pid, 'SIGKILL');
+            // No manual start/restart may rescue this real systemd restart.
+            const automaticUnit = await awaitSupervisor(3, automatic, manualUnit.InvocationID);
+            assert.equal(automaticUnit.NRestarts, '1');
+            await assertLifetimeGone(second.pid, second.identity.processStartToken, automatic);
+            const third = await qualifySuccessor(3, automaticUnit, automatic);
+            assert.deepEqual(third.history.owners[0], second.history.owners[0]);
+            assertReleasedIdentity(third.history.owners[1]!, second.owner);
+            automatic.qualified = true;
+
+            const stopped: Record<string, unknown> = {}; report.finalSupervisorStop = stopped;
+            const stoppedSupervisor = await stopAndJoinSupervisor(stopped); assert.equal(stoppedSupervisor.Result, 'success');
+            await assertLifetimeGone(third.pid, third.identity.processStartToken, stopped);
+            const releasedLinks: Record<string, unknown> = {}; stopped.ownerLinks = releasedLinks;
+            const terminalHistory = await qualifyInstalledOwnerLinks({ stateRoot: installed.stateRoot, uid: ledger.uid,
+              bundle, imageDigest, report: releasedLinks });
+            assert.equal(terminalHistory.owners.length, 3); assert(terminalHistory.owners.every(value => value.state === 'terminal'));
+            assert.deepEqual(terminalHistory.owners.slice(0, 2), third.history.owners.slice(0, 2));
+            const terminal = terminalHistory.owners[2]!;
+            assert(terminal.state === 'terminal'); assert.equal(terminal.terminalReason, 'graceful_release');
+            assertReleasedIdentity(terminal, third.owner);
             await assert.rejects(lstat(socketPath), { code: 'ENOENT' });
             const sourceAfterStop: Record<string, unknown> = { diagnosticOnly: true }; report.sourceAfterStop = sourceAfterStop;
-            await qualifyInstalledAnchorSource({ pid, startTicks: fields[19]!, uid: ledger.uid, gid: ledger.gid,
-              stateRoot: installed.stateRoot, bundleDigest: selection.bundleDigest, selectedImage: expectedImage,
-              selectedMetadata: selected, root: roots[0]!, report: sourceAfterStop });
-            const keeperAfterStop = show();
-            assert.equal(keeperAfterStop.InvocationID, shown.InvocationID); assert.equal(keeperAfterStop.MainPID, shown.MainPID);
+            await qualifyInstalledAnchorSource({ ...sourceInput, report: sourceAfterStop }); assertKeeperPin(sourceAfterStop);
+            assert.deepEqual(sourceAfterStop.ready, sourcePublication.ready);
             // One real fault after the genuine positive: a legal FD locator
             // which the complete actual source inventory proves unavailable.
             // The physical named root remains intact, so fallback would fail
@@ -545,22 +652,30 @@ async function campaign(ledgerFile: string): Promise<void> {
                 assert.equal(result.bytesRead, 40); assert.deepEqual(observed, bytes);
                 return await checkReady();
               };
+              let faultStartAttempted = false, faultAttemptsJoined = false;
               try {
                 invalidSource.faultedMetadata = await writeReady(corrupted);
                 invalidSource.originalBytes = original.toString('hex'); invalidSource.faultedBytes = corrupted.toString('hex');
+                faultStartAttempted = true;
                 invalidSource.startCommand = userCommand(['start', installed.supervisorUnit]);
                 const deadline = Date.now() + 30_000;
                 let refused: Record<string, string>;
                 for (;;) {
                   refused = show(installed.supervisorUnit); invalidSource.unit = refused;
-                  if (['failed', 'inactive'].includes(refused.ActiveState!)) break;
+                  // Capture the real reaped exit before the next attempt clears
+                  // ExecMain*. on-failure is normally still activating here.
+                  if (refused.MainPID === '0' && refused.Result === 'exit-code' &&
+                    refused.ExecMainCode === '1' && refused.ExecMainStatus === '1') break;
+                  assert.notEqual(refused.Result, 'start-limit-hit', 'start limiting is not the source-FD refusal');
                   assert(Date.now() < deadline, 'faulted locator did not refuse before StateOwner'); await delay(20);
                 }
-                assert.equal(refused.ActiveState, 'failed'); assert.equal(refused.MainPID, '0');
+                assert.equal(refused.MainPID, '0');
                 assert.equal(refused.ExecMainCode, '1'); assert.equal(refused.ExecMainStatus, '1');
                 assert.equal(refused.Result, 'exit-code'); assert.match(refused.InvocationID!, /^[a-f0-9]{32}$/u);
-                assert.notEqual(refused.InvocationID, supervisorUnit.InvocationID);
-                assert.match(refused.ExecMainPID!, /^[1-9][0-9]*$/u); assert.notEqual(refused.ExecMainPID, String(supervisorPid));
+                assert.notEqual(refused.InvocationID, automaticUnit.InvocationID);
+                assert.match(refused.ExecMainPID!, /^[1-9][0-9]*$/u);
+                const joined: Record<string, unknown> = {}; invalidSource.join = joined;
+                await stopAndJoinSupervisor(joined); faultAttemptsJoined = true;
                 let records: Record<string, unknown>[] = [];
                 let exactRefusal = false;
                 for (let attempt = 0; attempt < 20 && !exactRefusal; attempt++) {
@@ -578,23 +693,26 @@ async function campaign(ledgerFile: string): Promise<void> {
                 }
                 invalidSource.journal = records; invalidSource.exactRefusal = exactRefusal;
                 assert(exactRefusal, 'actual source-FD refusal must survive selected-image exec');
-                invalidSource.ownerAfter = inspectInstalledOwner(installed.stateRoot);
-                assert.deepEqual(invalidSource.ownerAfter, terminal, 'unavailable original FD must not acquire the next StateOwner');
+                invalidSource.historyAfter = inspectInstalledOwnerHistory(installed.stateRoot);
+                assert.deepEqual(invalidSource.historyAfter, terminalHistory, 'unavailable original FD must not change any owner history or fence');
                 assert.deepEqual((await readdir(casPath)).sort(), casBefore);
                 await assert.rejects(lstat(socketPath), { code: 'ENOENT' });
               } finally {
+                // Never restore a valid locator while on-failure can still run
+                // an attempt. A failed join leaves it faulted for ledger cleanup.
+                if (faultStartAttempted && !faultAttemptsJoined) {
+                  const joined: Record<string, unknown> = {}; invalidSource.errorPathJoin = joined;
+                  await stopAndJoinSupervisor(joined); faultAttemptsJoined = true;
+                }
                 invalidSource.restoredMetadata = await writeReady(original);
                 invalidSource.originalRestored = true;
               }
             } finally { await ready.close(); }
             const sourceAfterRefusal: Record<string, unknown> = { diagnosticOnly: true }; report.sourceAfterRefusal = sourceAfterRefusal;
-            await qualifyInstalledAnchorSource({ pid, startTicks: fields[19]!, uid: ledger.uid, gid: ledger.gid,
-              stateRoot: installed.stateRoot, bundleDigest: selection.bundleDigest, selectedImage: expectedImage,
-              selectedMetadata: selected, root: roots[0]!, report: sourceAfterRefusal });
-            assert.deepEqual(sourceAfterRefusal.after, sourceAfterStop.before);
-            assert.deepEqual(sourceAfterRefusal.source, sourceAfterStop.source);
-            const keeperAfterRefusal = show();
-            assert.equal(keeperAfterRefusal.InvocationID, shown.InvocationID); assert.equal(keeperAfterRefusal.MainPID, shown.MainPID);
+            await qualifyInstalledAnchorSource({ ...sourceInput, report: sourceAfterRefusal }); assertKeeperPin(sourceAfterRefusal);
+            assert.deepEqual(inspectInstalledOwnerHistory(installed.stateRoot), terminalHistory);
+            const afterRestoration = show(installed.supervisorUnit);
+            assert.equal(afterRestoration.MainPID, '0'); assert.equal(afterRestoration.ActiveState, 'inactive');
             invalidSource.qualified = true;
             report.qualified = true;
             break;

@@ -383,16 +383,20 @@ printf '[Service]\nType=exec\nExecStart=%s %s anchor %s %s\nDelegate=cpu memory 
 chmod 0444 "$probe_home/.config/systemd/user/$probe_anchor_unit"
 else
   # Registered in the immutable ledger before the account or either unit was
-  # created. The Supervisor is not started in this first keeper-only tracer.
+  # created. Only the Supervisor retries; its keeper must remain the same source.
   probe_units+=("$probe_installed_keeper_unit" "$probe_installed_supervisor_unit")
   for probe_installed_role in keeper supervisor; do
     if [[ "$probe_installed_role" = keeper ]]; then
       probe_unit=$probe_installed_keeper_unit
+      probe_installed_restart=no
+      probe_installed_burst=2
     else
       probe_unit=$probe_installed_supervisor_unit
+      probe_installed_restart=on-failure
+      probe_installed_burst=4
     fi
     {
-      printf '[Unit]\nStartLimitIntervalSec=30s\nStartLimitBurst=2\n'
+      printf '[Unit]\nStartLimitIntervalSec=30s\nStartLimitBurst=%s\n' "$probe_installed_burst"
       if [[ "$probe_installed_role" = supervisor ]]; then
         printf 'Requires=%s\nAfter=%s\n' "$probe_installed_keeper_unit" "$probe_installed_keeper_unit"
       fi
@@ -403,7 +407,7 @@ else
       # actual injection with positive controls remains required.
       # An env -i executable wrapper would itself start with those routes open.
       printf 'UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG LD_DEBUG_OUTPUT LD_PROFILE LD_PROFILE_OUTPUT LD_ORIGIN_PATH LD_TRACE_LOADED_OBJECTS LD_TRACE_PRELINKING LD_WARN LD_VERBOSE LD_BIND_NOW LD_BIND_NOT LD_DYNAMIC_WEAK LD_HWCAP_MASK LD_SHOW_AUXV LD_USE_LOAD_BIAS LD_ASSUME_KERNEL GCONV_PATH LOCPATH GLIBC_TUNABLES NODE_COMPILE_CACHE NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS NODE_ICU_DATA NODE_REDIRECT_WARNINGS NODE_REPL_EXTERNAL_MODULE NODE_V8_COVERAGE OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_MODULES OPENSSL_ENGINES SSL_CERT_DIR SSL_CERT_FILE\n'
-      printf 'Environment=PATH=/usr/bin:/bin LANG=C LC_ALL=C\nDelegate=cpu memory pids\nKillMode=control-group\nRestart=no\nTimeoutStopSec=2s\n'
+      printf 'Environment=PATH=/usr/bin:/bin LANG=C LC_ALL=C\nDelegate=cpu memory pids\nKillMode=control-group\nRestart=%s\nRestartSec=2s\nTimeoutStopSec=2s\n' "$probe_installed_restart"
     } > "$probe_home/.config/systemd/user/$probe_unit"
     chmod 0444 "$probe_home/.config/systemd/user/$probe_unit"
   done

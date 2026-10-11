@@ -81,7 +81,7 @@ jobs:
       - name: Qualify actual installed SEA closed-role and missing-keeper refusals
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --import tsx scripts/kernel/qualify-installed-startup.ts "$RUNNER_TEMP/cliq-installed-startup"
-      - name: Qualify signed keeper pin handoff, genesis, control and signal under the user manager
+      - name: Qualify signed keeper handoff, genesis and Supervisor restart under the user manager
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
