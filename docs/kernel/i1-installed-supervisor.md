@@ -407,6 +407,22 @@ uses the actual prior lifetime, not systemd's garbage-collected historical
 `ExecMain*` fields. This qualifies handoff, not continuity across Supervisor
 restart, worker execution, all-descendant death or complete I1.
 
+At `7905aaa`,
+[run 38116046535](https://github.com/cogine-ai/cliq-agent/actions/runs/38116046535)
+passed all seven jobs and extended the same installation through three real
+Supervisor lifetimes. Blocking manager restart gracefully released epoch 1 and
+acquired epoch 2; SIGKILL of that observed lifetime triggered the actual
+`Restart=on-failure` transition (`NRestarts=1`) and death-based epoch 3 takeover.
+Independent SQLite/CAS observations checked each acquisition/terminal evidence
+link, unchanged state-lock identity and canonical-time fencing. Every generation
+held exactly one matching original root pin while keeper PID 4594/start ticks
+49656, source FD 51, root device 29/inode 11240 and locator bytes remained
+continuous. Final graceful stop joined epoch 3. The absent-FD negative startup
+was joined before restoring its locator, preserving all three terminal owners,
+the fence, CAS inventory and absent control socket. Cleanup reported zero errors
+and exact runner-baseline restoration. This qualifies owner restart and original
+pin continuity, not Run admission, worker execution or complete I1.
+
 The independent anchor service owns this delegated topology:
 
 ```text

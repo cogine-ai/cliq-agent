@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Disposable actual-systemd-user lifecycle diagnostics. --installed instead
-# qualifies only the real signed installed keeper startup, not full I1 or
-# containment-death authority. Invoke with sudo, an absolute existing Node path
+# qualifies the real signed keeper/Supervisor owner chain, not full I1 or
+# containment-death authority. --secrets observes the actual platform prerequisite.
+# Invoke with sudo, an absolute existing Node path
 # and an optional new output directory. Do not run on a host
 # without an independently disposable test UID and actual systemd user manager.
 set -Eeuo pipefail
@@ -9,10 +10,13 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 
 probe_campaign_kind=diagnostic
-if [[ ${1:-} = --installed ]]; then probe_campaign_kind=installed; shift; fi
+case ${1:-} in
+  --installed) probe_campaign_kind=installed; shift ;;
+  --secrets) probe_campaign_kind=secrets; shift ;;
+esac
 readonly probe_campaign_kind
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--secrets] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -33,10 +37,17 @@ readonly probe_birth_source="$probe_source_dir/cliq-anchor-birth-probe.c"
 [[ -f "$probe_birth_source" && ! -L "$probe_birth_source" ]] || exit 2
 readonly probe_installed_driver="$probe_source_dir/qualify-installed-keeper.ts"
 [[ "$probe_campaign_kind" != installed || ( -f "$probe_installed_driver" && ! -L "$probe_installed_driver" ) ]] || exit 2
-if [[ "$probe_campaign_kind" = installed ]]; then
+readonly probe_secret_driver="$probe_source_dir/qualify-secret-service.ts"
+readonly probe_secret_source="$probe_source_dir/cliq-secret-service-probe.c"
+if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = secrets ]]; then
+  probe_typescript_driver=$probe_installed_driver
+  if [[ "$probe_campaign_kind" = secrets ]]; then
+    probe_typescript_driver=$probe_secret_driver
+    [[ -f "$probe_secret_driver" && ! -L "$probe_secret_driver" && -f "$probe_secret_source" && ! -L "$probe_secret_source" ]] || exit 2
+  fi
   probe_installed_loader=$("$probe_node" --input-type=module -e \
     'import { createRequire } from "node:module"; process.stdout.write(createRequire(process.argv[1]).resolve("tsx"));' \
-    "$probe_installed_driver")
+    "$probe_typescript_driver")
   [[ "$probe_installed_loader" = /* && -f "$probe_installed_loader" ]] || exit 2
   readonly probe_installed_loader
 fi
@@ -70,6 +81,7 @@ readonly probe_skel="$probe_fixture/empty-skel"
 readonly probe_mail="$probe_fixture/mail"
 readonly probe_script="$probe_fixture/systemd-user-probe.mjs"
 readonly probe_birth_helper="$probe_fixture/cliq-anchor-birth-probe"
+readonly probe_secret_helper="$probe_fixture/cliq-secret-service-probe"
 readonly probe_anchor_unit="cliq-probe-$probe_suffix-anchor.service"
 readonly probe_anchor_directory="$probe_home/probe/anchor"
 readonly probe_installed_keeper_unit="cliq-probe-$probe_suffix-installed-keeper.service"
@@ -303,6 +315,7 @@ readonly probe_dropin="$probe_dropin_directory/50-cliq-probe.conf"
 "$probe_node" --input-type=module - "$probe_ledger" "$probe_fixture" "$probe_fixture_identity" \
   "$probe_username" "$probe_uid" "$probe_gid" "$probe_runner_uid" "$probe_home" "$probe_dropin" "$probe_output" "$probe_birth_helper" "$probe_campaign_kind" <<'NODE'
 import { writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 const [file, fixture, fixtureIdentity, username, uidText, gidText, runnerText, home, dropin, output, birthHelper, mode] = process.argv.slice(2);
 const uid = Number(uidText), gid = Number(gidText), runnerUid = Number(runnerText);
 const suffix = fixture.slice(fixture.lastIndexOf('.') + 1);
@@ -326,8 +339,14 @@ const installed = mode === 'installed' ? {
   supervisorUnitFile: `${home}/.config/systemd/user/cliq-probe-${suffix}-installed-supervisor.service`,
   reportFile: `${output}/report.json`,
 } : undefined;
+const secretService = mode === 'secrets' ? {
+  helper: `${fixture}/cliq-secret-service-probe`,
+  controlDirectory: `${home}/probe/secret-service-control`,
+  generation: randomBytes(32).toString('hex'),
+  reportFile: `${output}/secret-service.json`,
+} : undefined;
 writeFileSync(file, JSON.stringify({ diagnosticOnly: true, fixture, fixtureIdentity, username,
-  uid, gid, runnerUid, home, dropin, birthHelper, anchor, scenarios, installed, reportFile: `${output}/systemd-user-probe.json` }, null, 2) + '\n',
+  uid, gid, runnerUid, home, dropin, birthHelper, anchor, scenarios, installed, secretService, reportFile: `${output}/systemd-user-probe.json` }, null, 2) + '\n',
   { flag: 'wx', mode: 0o444 });
 NODE
 probe_ledger_digest=$(sha256sum "$probe_ledger" | cut -d' ' -f1)
@@ -346,6 +365,15 @@ install -o root -g root -m 0444 -- "$probe_source" "$probe_script"
 if [[ "$probe_campaign_kind" = diagnostic ]]; then
 cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_birth_source" -o "$probe_birth_helper"
 chmod 0555 "$probe_birth_helper"
+fi
+if [[ "$probe_campaign_kind" = secrets ]]; then
+  [[ -x /usr/bin/gnome-keyring-daemon && -x /usr/bin/busctl ]] || {
+    printf 'actual GNOME Keyring daemon and user-bus inspection are required\n' >&2; exit 1;
+  }
+  unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR
+  read -r -a probe_gio_flags <<< "$(pkg-config --cflags --libs gio-2.0)"
+  cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_secret_source" -o "$probe_secret_helper" "${probe_gio_flags[@]}"
+  chmod 0555 "$probe_secret_helper"
 fi
 mkdir -m 0755 -- "$probe_home/.config" "$probe_home/.config/systemd" "$probe_home/.config/systemd/user"
 mkdir -m 0700 -- "$probe_home/probe"
@@ -381,7 +409,7 @@ chown "$probe_uid:$probe_gid" "$probe_anchor_directory"
 printf '[Service]\nType=exec\nExecStart=%s %s anchor %s %s\nDelegate=cpu memory pids\nKillMode=control-group\nRestart=no\nTimeoutStopSec=2s\nEnvironment=NODE_OPTIONS=\n' \
   "$probe_node" "$probe_script" "$probe_anchor_directory" "$probe_anchor_unit" > "$probe_home/.config/systemd/user/$probe_anchor_unit"
 chmod 0444 "$probe_home/.config/systemd/user/$probe_anchor_unit"
-else
+elif [[ "$probe_campaign_kind" = installed ]]; then
   # Registered in the immutable ledger before the account or either unit was
   # created. Only the Supervisor retries; its keeper must remain the same source.
   probe_units+=("$probe_installed_keeper_unit" "$probe_installed_supervisor_unit")
@@ -438,6 +466,8 @@ done
 }
 if [[ "$probe_campaign_kind" = diagnostic ]]; then
   "$probe_node" "$probe_script" campaign "$probe_ledger"
-else
+elif [[ "$probe_campaign_kind" = installed ]]; then
   "$probe_node" --import "$probe_installed_loader" "$probe_installed_driver" --campaign "$probe_ledger"
+else
+  "$probe_node" --import "$probe_installed_loader" "$probe_secret_driver" --campaign "$probe_ledger"
 fi
