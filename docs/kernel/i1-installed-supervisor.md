@@ -556,6 +556,29 @@ owner must prohibit it. A physical close error may already release its guard,
 so retaining the old lock file does not prove exclusion after replacement.
 Those remaining gates must pass before this candidate becomes production code.
 
+At `b51524a`, all seven jobs in
+[run 38135680253](https://github.com/cogine-ai/cliq-agent/actions/runs/38135680253)
+passed, including those actual fixed-carrier conformance tests on Ubuntu 22.04.
+The committed-WAL cut measures syncs immediately after UPDATE and before COMMIT;
+first-spill header sync cannot substitute for a commit sync. This still closes
+only the tested conformance gate, not the independent physical-I/O gate.
+
+The next closed experiment adds seven fresh-UID, signed-SEA storage cuts:
+normal/reopen, MAIN replacement before open, and parent/MAIN/WAL/journal/lock
+replacement after open. An independent root observer binds the original six
+descriptors and complete process credentials at barriers; all traced threads
+must show positive original MAIN/WAL I/O, no data reopen or replacement I/O,
+and the exact physical retirement order. Failed cases retain partial events,
+raw traces and cleanup results. These cuts are not full adversarial binding,
+production credential authority, installed I1 or power-loss qualification.
+
+A separate test-only helper injects a real close followed by exact numeric-FD
+reuse and an error at each of the six retirement positions. Every cut must
+consume that descriptor before the error, stop further retirement, reject
+reuse of the poisoned owner, and leave the reused descriptor untouched.
+This checks process-local fail-closed behavior, not physical lock survival:
+the real close may already have released the original guard.
+
 The same run also qualified the startup-retirement refusal at the actual
 installed boundary: moving abandoned resource retirement outside the initial
 installed borrow avoided self-wait, and unresolved native launch closure exited

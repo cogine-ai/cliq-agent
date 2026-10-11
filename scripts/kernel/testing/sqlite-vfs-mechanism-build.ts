@@ -21,6 +21,11 @@ export async function buildCredentialVfsProbe(fixture: string, nodeRoot: string)
   return buildFixedProbe(fixture, nodeRoot, 'credential-vfs-probe.c', 'credential-vfs-probe');
 }
 
+/** Fixed fault translation unit; the candidate itself has no fault controls. */
+export async function buildCredentialVfsRetirementProbe(fixture: string, nodeRoot: string) {
+  return buildFixedProbe(fixture, nodeRoot, 'credential-vfs-retirement-probe.c', 'credential-vfs-retirement-probe');
+}
+
 async function buildFixedProbe(fixture: string, nodeRoot: string, sourceLeaf: string, helperName: string) {
   const includes = path.join(fixture, 'sqlite-vfs-mechanism-headers');
   await mkdir(includes, { mode: 0o700 });

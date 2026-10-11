@@ -32,6 +32,15 @@ test('SQLite path diagnostic CLI describes all eight closed cuts without claimin
   assert.deepEqual(described.privateVfsMechanism.modes, ['unregistered', 'scoped', 'permanent', 'dual', 'tampered']);
   assert.equal(described.privateVfsMechanism.physicalBindingQualified, false);
   assert.equal(described.privateVfsMechanism.productionCredentialAuthorityQualified, false);
+  assert.deepEqual(described.privateVfsStorage.modes, ['normal', 'main_before_open', 'parent_after_open',
+    'main_after_open', 'wal_after_open', 'journal_after_open', 'lock_after_open']);
+  assert.equal(described.privateVfsStorage.completed, false);
+  assert.equal(described.privateVfsStorage.descriptorIoCutsQualified, false);
+  assert.equal(described.privateVfsStorage.physicalBindingQualified, false);
+  assert.equal(described.privateVfsStorage.replacementIoAbsenceQualified, false);
+  assert.equal(described.privateVfsStorage.powerLossDurabilityQualified, false);
+  assert.equal(described.privateVfsStorage.productionCredentialAuthorityQualified, false);
+  assert.equal(described.privateVfsStorage.installedI1Qualified, false);
 });
 
 test('SQLite path diagnostic CLI rejects unknown modes instead of opening a caller-selected database', () => {
