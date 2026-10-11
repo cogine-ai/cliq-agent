@@ -29,7 +29,7 @@ await chmod(fixture, 0o700);
 const stateRoot = path.join(fixture, 'state');
 const report: { diagnosticOnly: true; scope: string; nodeVersion: string; carrierArchiveDigest: string;
   bundleDigest?: string; manifestDigest?: string; supervisorImageDigest?: string; nativeHelperDigest?: string;
-  result?: unknown; startupRefusal?: unknown; cleanup?: unknown; error?: string } = {
+  result?: unknown; startupRefusal?: unknown; keeperOutsideServiceRefusal?: unknown; cleanup?: unknown; error?: string } = {
   diagnosticOnly: true, scope: 'actual SEA bootstrap-to-selected execution, image/helper/genesis and read-only control startup only; not systemd/keeper/worker/admission/model/I1',
   nodeVersion: SUPERVISOR_SEA_NODE_VERSION,
   carrierArchiveDigest: SUPERVISOR_SEA_CARRIER_CHECKSUMS['linux-x64']!,
@@ -184,6 +184,22 @@ try {
     await assert.rejects(lstat(path.join(stateRoot, KERNEL_DATABASE_FILENAME)), { code: 'ENOENT' });
     await assert.rejects(lstat(path.join(stateRoot, 'runtime/state-owner.lock')), { code: 'ENOENT' });
   }
+  // A bootstrap-to-selected refusal must retain its real stderr, not merely
+  // exit 1 after Node replaced closed standard descriptors with /dev/null.
+  // This process has no disposable authorized keeper service/delegation. It
+  // must refuse before StateOwner, regardless of the keeper's implementation.
+  const keeperRefused = spawnSync(bootstrap, ['--bootstrap-keeper'], { cwd, env: { PATH: process.env.PATH },
+    stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 30_000, maxBuffer: 128 * 1024 });
+  report.keeperOutsideServiceRefusal = { status: keeperRefused.status, signal: keeperRefused.signal, stderr: keeperRefused.stderr };
+  assert.equal(keeperRefused.error, undefined); assert.equal(keeperRefused.status, 1); assert.equal(keeperRefused.signal, null);
+  const keeperDiagnostics = keeperRefused.stderr.trim().split('\n').filter(Boolean).map(line => parseJsonStrict(line)) as
+    { diagnosticOnly?: boolean; scope?: string; message?: string }[];
+  assert(keeperDiagnostics.some(value => value.diagnosticOnly === true && value.scope === 'installed-read-startup' &&
+    value.message === 'expected a fixed installed Supervisor role'),
+  'keeper refusal diagnostic must survive terminal selected-image exec');
+  for (const relative of [KERNEL_DATABASE_FILENAME, `${KERNEL_DATABASE_FILENAME}-wal`, `${KERNEL_DATABASE_FILENAME}-shm`,
+    'runtime/state-owner.lock', 'runtime/control-v1.sock'])
+    await assert.rejects(lstat(path.join(stateRoot, relative)), { code: 'ENOENT' });
   supervisor = spawn(bootstrap, ['--bootstrap-supervisor'], { cwd, env: { PATH: process.env.PATH }, stdio: ['ignore', 'ignore', 'pipe'] });
   supervisor.once('error', error => { spawnError = error; });
   supervisor.stderr!.on('data', (bytes: Buffer) => { stderr = (stderr + bytes.toString('utf8')).slice(-128 * 1024); });

@@ -254,10 +254,19 @@ async function campaign(ledgerFile: string): Promise<void> {
     for (const name of propertyNames) assert(Object.hasOwn(values, name), `systemd omitted ${name}`);
     return values;
   };
-  const journal = (invocationId: string) => {
+  let keeperStartedAt: number | undefined;
+  const journal = (invocationId: string, execMainPid: string) => {
     if (!/^[a-f0-9]{32}$/u.test(invocationId)) return [];
-    const result = command('/usr/bin/journalctl', ['--no-pager', '--all', '--output=json', '--lines=80',
-      `_UID=${ledger.uid}`, `_SYSTEMD_INVOCATION_ID=${invocationId}`]);
+    assert(keeperStartedAt !== undefined);
+    const matches = [`_UID=${ledger.uid}`, `_SYSTEMD_INVOCATION_ID=${invocationId}`];
+    // A fast exit may remove the cgroup/invocation symlink before journald
+    // enriches the stream record. Its trusted sender credentials still bind
+    // stderr to this actual ExecMainPID; no application-supplied PID is used.
+    if (/^[1-9][0-9]*$/u.test(execMainPid) && Number.isSafeInteger(Number(execMainPid)))
+      matches.push('+', `_UID=${ledger.uid}`, `_PID=${execMainPid}`, '_TRANSPORT=stdout');
+    matches.push('+', `_UID=${ledger.uid}`, `USER_UNIT=${installed.keeperUnit}`, `USER_INVOCATION_ID=${invocationId}`);
+    const result = command('/usr/bin/journalctl', ['--no-pager', '--all', '--output=json', '--lines=80', '--boot=0',
+      `--since=@${Math.floor(keeperStartedAt / 1000)}`, `--until=@${Math.ceil(Date.now() / 1000)}`, ...matches]);
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trim().split('\n').filter(Boolean).map(line => parseJsonStrict(line) as Record<string, unknown>);
   };
@@ -319,6 +328,7 @@ async function campaign(ledgerFile: string): Promise<void> {
     managerPreloadConfirmed = true;
     report.managerPreload = { library: installed.preloadLibrary, confirmed: true };
     keeperStartAttempted = true;
+    keeperStartedAt = Date.now();
     report.startCommand = userCommand(['start', installed.keeperUnit]);
     const deadline = Date.now() + 30_000;
     for (;;) {
@@ -328,15 +338,18 @@ async function campaign(ledgerFile: string): Promise<void> {
       assert.equal(shown.Delegate, 'yes'); assert.equal(shown.KillMode, 'control-group'); assert.equal(shown.Restart, 'no');
       assert.match(shown.InvocationID!, /^[a-f0-9]{32}$/u, 'keeper must have a real systemd invocation');
       if (shown.ActiveState === 'failed' || shown.ActiveState === 'inactive') {
-        let records = journal(shown.InvocationID);
+        let records = journal(shown.InvocationID, shown.ExecMainPID!);
         for (let attempt = 0; attempt < 20 && !records.some(record => typeof record.MESSAGE === 'string' && record.MESSAGE.includes('expected a fixed installed Supervisor role')); attempt++) {
-          await delay(50); records = journal(shown.InvocationID);
+          await delay(50); records = journal(shown.InvocationID, shown.ExecMainPID!);
         }
         report.journal = records;
         const closedRoleError = records.flatMap(record => {
-          if (typeof record.MESSAGE !== 'string') return [];
+          if (record._UID !== String(ledger.uid) || record._PID !== shown!.ExecMainPID ||
+            record._TRANSPORT !== 'stdout' || typeof record.MESSAGE !== 'string') return [];
           try { return [parseJsonStrict(record.MESSAGE)]; } catch { return []; }
         }).find(value => value !== null && typeof value === 'object' &&
+          (value as { diagnosticOnly?: boolean; scope?: string }).diagnosticOnly === true &&
+          (value as { scope?: string }).scope === 'installed-read-startup' &&
           (value as { message?: string }).message === 'expected a fixed installed Supervisor role');
         report.startupRefusal = { invocationId: shown.InvocationID, result: shown.Result,
           execMainCode: shown.ExecMainCode, execMainStatus: shown.ExecMainStatus, closedRoleError: closedRoleError ?? null };
@@ -427,7 +440,7 @@ async function campaign(ledgerFile: string): Promise<void> {
       }
     }
     if (shown && !report.journal) {
-      try { report.journal = journal(shown.InvocationID); }
+      try { report.journal = journal(shown.InvocationID, shown.ExecMainPID!); }
       catch (error) {
         observationError ??= error; report.qualified = false;
         report.journalError = String((error as Error).stack ?? error).slice(0, 8192);
