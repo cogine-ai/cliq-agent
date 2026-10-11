@@ -73,6 +73,9 @@ jobs:
           src/sandbox/native-controller-close.test.ts
           scripts/kernel/qualify-sqlite-paths.test.ts
           scripts/kernel/testing/sqlite-vfs-mechanism.test.ts
+          scripts/kernel/testing/credential-vfs-probe.test.ts
+          scripts/kernel/testing/credential-vfs-lock.test.ts
+          scripts/kernel/testing/credential-vfs-crash.test.ts
       - name: Qualify complete application image binding
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --import tsx scripts/kernel/qualify-supervisor-image.ts "$RUNNER_TEMP/cliq-supervisor-image"

@@ -1,4 +1,4 @@
-// Test-only mechanism construction; never a credential VFS or production loader.
+// Closed test-only same-engine probe construction; never a production loader.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -13,6 +13,15 @@ const headers = {
 };
 
 export async function buildSqliteVfsMechanismHelper(fixture: string, nodeRoot: string) {
+  return buildFixedProbe(fixture, nodeRoot, 'sqlite-vfs-mechanism-probe.c', 'sqlite-vfs-mechanism');
+}
+
+/** Closed test-only candidate, not a production extension/FD/path loader. */
+export async function buildCredentialVfsProbe(fixture: string, nodeRoot: string) {
+  return buildFixedProbe(fixture, nodeRoot, 'credential-vfs-probe.c', 'credential-vfs-probe');
+}
+
+async function buildFixedProbe(fixture: string, nodeRoot: string, sourceLeaf: string, helperName: string) {
   const includes = path.join(fixture, 'sqlite-vfs-mechanism-headers');
   await mkdir(includes, { mode: 0o700 });
   for (const [name, digest] of Object.entries(headers)) {
@@ -23,8 +32,8 @@ export async function buildSqliteVfsMechanismHelper(fixture: string, nodeRoot: s
     assert.equal(createHash('sha256').update(bytes).digest('hex'), digest, `fixed ${name} checksum mismatch`);
     await writeFile(path.join(includes, name), bytes, { flag: 'wx', mode: 0o600 });
   }
-  const source = fileURLToPath(new URL('./sqlite-vfs-mechanism-probe.c', import.meta.url));
-  const helper = path.join(fixture, 'sqlite-vfs-mechanism.node');
+  const source = fileURLToPath(new URL(sourceLeaf, import.meta.url));
+  const helper = path.join(fixture, `${helperName}.node`);
   const args = ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-fPIC', '-fvisibility=hidden',
     ...(process.platform === 'darwin' ? ['-dynamiclib', '-undefined', 'dynamic_lookup'] : ['-shared']),
     '-I', path.join(nodeRoot, 'include/node'), '-I', includes, source, '-o', helper];

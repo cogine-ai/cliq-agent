@@ -525,6 +525,37 @@ descriptor-protected storage, WAL/locks/fsync, uncertain-close handling, release
 publication, credential authority or installed I1. Those remain required before
 real credential/TLS/broker composition; the path diagnostic remains unchanged.
 
+At `4837d38`, all seven jobs in
+[run 38124807405](https://github.com/cogine-ai/cliq-agent/actions/runs/38124807405)
+passed. The five fresh-process mechanism cases completed with exact image/helper
+observations and process joins: absent/scoped/tampered cases had no callbacks,
+while permanent SQLite-only and dual-entry cases each invoked the retained code
+twice after the bootstrap and helper FD closed. Every case created no database
+or sidecars. All four runner baselines were restored byte-for-byte with zero
+cleanup errors. This closes only the same-engine registration/loading gate;
+descriptor I/O, recovery, lock/retirement and credential authority remain open.
+
+The next candidate stays test-only and keeps a single Node SQLite engine. It
+holds fixed MAIN/WAL/journal descriptors, uses EXCLUSIVE-mode WAL with a heap
+index (no SHM/mmap), and retires journals by truncating and syncing the original
+descriptor rather than unlinking or reopening a leaf. Real contender tests
+first exposed lock-name and partial-closure replacement gaps; one nonblocking
+guard on each original data inode now prevents a second private helper from
+sharing any surviving inode. Logical pager locks remain separate so the
+physical guards do not conceal a hot journal from recovery.
+
+Local fixed-carrier component tests passed empty and nonempty DELETE genesis,
+commit/rollback/reopen, four independent-process contention cuts, and joined
+SIGKILL recovery for a genuine hot DELETE journal, uncommitted WAL spill and
+FULL-sync committed WAL. Recovery preserves all expected rows and original
+sidecar inodes. Build and all 1,861 portable tests passed. These are candidate
+conformance results, not signed-install/fresh-UID syscall qualification, power
+loss durability, uncertain-retirement exclusion or credential authority. Any
+same-process duplicate FD close can release POSIX inode guards; the closed
+owner must prohibit it. A physical close error may already release its guard,
+so retaining the old lock file does not prove exclusion after replacement.
+Those remaining gates must pass before this candidate becomes production code.
+
 The same run also qualified the startup-retirement refusal at the actual
 installed boundary: moving abandoned resource retirement outside the initial
 installed borrow avoided self-wait, and unresolved native launch closure exited
