@@ -71,6 +71,8 @@ jobs:
           src/state/supervisor-observation.test.ts
           src/state/installed-control.test.ts
           src/sandbox/native-controller-close.test.ts
+          scripts/kernel/sqlite-extension-headers.test.ts
+          scripts/kernel/testing/installed-read-control.test.ts
           scripts/kernel/qualify-sqlite-paths.test.ts
           scripts/kernel/testing/sqlite-vfs-mechanism.test.ts
           scripts/kernel/testing/credential-vfs-probe.test.ts

@@ -19,7 +19,7 @@ import { qualifyInstalledAnchorConsumer } from './testing/installed-anchor-consu
 import { qualifyInstalledGenesis } from './testing/installed-genesis.js';
 import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './testing/installed-owner-history.js';
 import { qualifyInstalledInspectorSignal, type InstalledInspectorSignalReport } from './testing/installed-inspector-signal.js';
-import { assertInstalledReadExchanges, inspectInstalledOwnerHistory, installedReadClientScript } from './testing/installed-read-control.js';
+import { assertInstalledReadExchanges, inspectInstalledOwner, inspectInstalledOwnerHistory, installedReadClientScript } from './testing/installed-read-control.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { invalidRetainedStartupFixtureScript, qualifyInstalledStartupRetirement } from './testing/installed-startup-retirement.js';
 import { SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
@@ -448,7 +448,7 @@ async function campaign(ledgerFile: string, retirementRefusal = false): Promise<
                 });
                 if (socket && Number(unit.MainPID) > 0 && unit.InvocationID !== priorInvocation) {
                   assert(socket.isSocket()); assert.equal(socket.uid, ledger.uid);
-                  const current = inspectInstalledOwnerHistory(installed.stateRoot).owners.at(-1);
+                  const current = inspectInstalledOwner(installed.stateRoot);
                   if (current?.state === 'active' && current.ownerEpoch === epoch) {
                     assert.equal(unit.ExecMainPID, unit.MainPID); assert.match(unit.InvocationID!, /^[a-f0-9]{32}$/u);
                     return unit;

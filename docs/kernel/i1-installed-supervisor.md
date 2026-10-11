@@ -586,6 +586,40 @@ with `RECOVERY_REQUIRED` before publishing Store/control service. The successor
 ACTIVE row remained for recovery; it is not proof of a physical lock still held.
 All seven jobs passed and the four runner baselines were restored exactly.
 
+At `592d727`, the seven signed-SEA, fresh-UID storage cuts and the fresh normal
+reopen completed in
+[run 38139345280](https://github.com/cogine-ai/cliq-agent/actions/runs/38139345280).
+The independent observer recorded original MAIN/WAL I/O, no I/O to the fixed
+replacement objects, exact healthy descriptor retirement, and joined owners
+and tracers. Only `descriptorIoCutsQualified` and the explicitly seven-cut
+`replacementIoAbsenceQualified` claim became true; full physical binding,
+production credential authority, installed I1 and power-loss claims remain
+false. All four runner baselines were restored byte-for-byte with zero cleanup
+errors. This run was not fully green: the separate installed-keeper automatic
+restart observer encountered `SQLITE_BUSY` while reading its new owner epoch.
+The actual new systemd invocation was running, but its remaining observation
+was not completed and must be rerun after a focused observer regression fix.
+
+The next production increment keeps only the fixed extension headers as
+checksum-verified, offline build inputs; Node still supplies the sole SQLite
+engine. Endpoint/credential/revoke closed decoders validate canonical objects
+and embedded digest equations, not registration, authenticated transport,
+current authority history, platform-store observations or redemption. The
+descriptor-backed lock/token and private metadata implementation must establish
+those respective facts before a broker can use any credential.
+
+Implement that as one vertical increment: the verified original StateRoot holds
+the Kernel global gate shared, then the exclusive credential lock. Ordinary
+auth does not acquire StateOwner or the containment anchor. Each scope mints one
+private process/environment/thread/generation-bound token; locked methods never
+reacquire it. A fully closed SQLite lease and positively retired native scope
+permit the next generation; old tokens remain invalid and uncertain retirement
+poisons reuse. Share only the descriptor I/O actually reused with the probe,
+not a new generic test framework. The native and SQLite entries must resolve to
+the same original signed helper image, not merely equal hashes from different
+inodes. The fixed signed Node 24.21.0 backend remains separate from the unchanged
+Node >=22.13 public client requirement.
+
 SEA bundling, fixed helper locations, preload control and actual-image binding
 must be qualified together. Public admission is not a wrapper around internal
 reference inputs. First model dispatch requires a trusted assembly/broker path;

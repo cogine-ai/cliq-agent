@@ -57,8 +57,17 @@ export function inspectInstalledOwnerHistory(stateRoot: string) {
   } finally { database.close(); }
 }
 
+/** One readiness observation, not a successful owner/death/recovery proof.
+ * A live startup writer may briefly hold the rollback-journal schema lock;
+ * the caller's existing deadline/poll loop owns waiting, never this reader. */
 export function inspectInstalledOwner(stateRoot: string): StateOwnerRecordV1 | undefined {
-  return inspectInstalledOwnerHistory(stateRoot).owners.at(-1);
+  try { return inspectInstalledOwnerHistory(stateRoot).owners.at(-1); }
+  catch (error) {
+    const sqlite = error as Error & { code?: unknown; errcode?: unknown };
+    if (error instanceof Error && sqlite.code === 'ERR_SQLITE_ERROR' && typeof sqlite.errcode === 'number'
+      && (sqlite.errcode & 0xff) === 5) return undefined;
+    throw error;
+  }
 }
 
 export function assertInstalledReadExchanges(stdout: string, owner: StateOwnerRecordV1, bundle: RuntimeBundleManifest): void {
