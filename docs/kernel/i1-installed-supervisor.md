@@ -694,6 +694,13 @@ is created. The first regression must fail through the actual signed bootstrap
 entry before extending the fixed native role; Linux-only positive behavior is
 not replaced by a local macOS test skip.
 
+The retained closure includes the exact root, principal, process and channel,
+plus the verified signed bundle and raw trust-store bytes, in credential SQLite.
+It is appended only with a new operation, never for a read or exact replay.
+Historical process verification does not probe the old PID for liveness. This
+initial, single-version installation can bind its image to the one verified
+selected Supervisor; it does not qualify provenance across runtime upgrades.
+
 SEA bundling, fixed helper locations, preload control and actual-image binding
 must be qualified together. Public admission is not a wrapper around internal
 reference inputs. First model dispatch requires a trusted assembly/broker path;

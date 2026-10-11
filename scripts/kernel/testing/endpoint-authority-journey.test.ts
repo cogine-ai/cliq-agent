@@ -93,7 +93,7 @@ if (process.platform === 'linux') test('installed endpoint registration survives
         assert.equal(response.stdout, `${canonicalJsonBytes(value).toString('utf8')}\n`);
         return { value: value[field], bytes: response.stdout };
       };
-      const refusal = (request: EndpointRequest, code: 'REQUEST_ID_CONFLICT' | 'STATE_TRANSITION_INVALID') => {
+      const refusal = (request: EndpointRequest, code: 'INVALID_REQUEST' | 'REQUEST_ID_CONFLICT' | 'STATE_TRANSITION_INVALID') => {
         const response = invoke(request);
         assert.equal(response.error, undefined); assert.equal(response.signal, null);
         assert.equal(response.status, 1); assert.equal(response.stdout, '');
@@ -114,6 +114,13 @@ if (process.platform === 'linux') test('installed endpoint registration survives
       assert.equal(active.sourceRequestDigest, registerRequest.commandCore.commandDigest);
       assert.equal(active.expectedRegistrationArtifactRef, canonicalSha256(registration));
       assert.equal(active.recordDigest, registered.resultRecordDigest);
+      const otherOwner = identityHash('cliq-endpoint-journey-other-owner-v1');
+      assert.notEqual(otherOwner, ownerPrincipalId);
+      const foreignRegistration = { ...registration, ownerPrincipalId: otherOwner, registrationDigest: '' };
+      foreignRegistration.registrationDigest = digestOmitting(foreignRegistration, 'registrationDigest');
+      refusal({ ...registerRequest, commandCore: registerCore(foreignRegistration) }, 'INVALID_REQUEST');
+      assert.deepEqual(decodeEndpointAuthorityRecord(success(readRequest, 'record').value), active,
+        'fresh principal binding must precede request-id replay and leave the endpoint unchanged');
       // Every invoke is a fresh verified process and freshly authenticated
       // channel. Exact bytes include the first operation's retained provenance.
       assert.equal(success(registerRequest, 'operation').bytes, registeredResponse.bytes);
@@ -127,6 +134,37 @@ if (process.platform === 'linux') test('installed endpoint registration survives
       assert.notEqual(alreadyRegistered.channelIdentityDigest, registered.channelIdentityDigest);
       assert.deepEqual(decodeEndpointAuthorityRecord(success(readRequest, 'record').value), active,
         'a different identical registration request must not append another record revision');
+
+      const oversizedRegistration = { ...registration, endpointRegistrationId: 'e'.repeat(530 * 1024), registrationDigest: '' };
+      oversizedRegistration.registrationDigest = digestOmitting(oversizedRegistration, 'registrationDigest');
+      const oversizedRequest = { ...registerRequest, requestId: '019a0011-0000-7000-8000-000000000016',
+        commandCore: registerCore(oversizedRegistration) } as const;
+      assert(canonicalJsonBytes(oversizedRequest).length < 1024 * 1024,
+        'the complete request must fit the installed entry input bound');
+      assert(Buffer.byteLength(oversizedRegistration.endpointRegistrationId) * 2 > 1024 * 1024,
+        'the RFC record repeats the id outside and inside registration, exceeding the retained result bound');
+      refusal(oversizedRequest, 'INVALID_REQUEST');
+      assert.equal(success({ schemaVersion: 1, kind: 'read',
+        endpointRegistrationId: oversizedRegistration.endpointRegistrationId }, 'record').value, null,
+        'an oversized result must not leave an endpoint record');
+      assert.deepEqual(decodeEndpointAuthorityRecord(success(readRequest, 'record').value), active,
+        'an oversized result must not change the existing endpoint');
+      assert.equal(success(registerRequest, 'operation').bytes, registeredResponse.bytes);
+      assert.deepEqual(await snapshotCas(stateRoot), casBefore, 'oversized endpoint refusal must leave Run CAS unchanged');
+      const boundedRegistration = { ...registration, endpointRegistrationId: 'installed-journey-bounded-endpoint', registrationDigest: '' };
+      boundedRegistration.registrationDigest = digestOmitting(boundedRegistration, 'registrationDigest');
+      const boundedRequest = { ...oversizedRequest, commandCore: registerCore(boundedRegistration) } as const;
+      const boundedResponse = success(boundedRequest, 'operation');
+      const boundedOperation = decodeEndpointAuthorityOperation(boundedResponse.value);
+      assert.equal(boundedOperation.disposition, 'registered');
+      assert.equal(boundedOperation.committedAuthorityRevision, 1);
+      assert.deepEqual(boundedOperation.commandCore, boundedRequest.commandCore);
+      const boundedRecord = decodeEndpointAuthorityRecord(success({ schemaVersion: 1, kind: 'read',
+        endpointRegistrationId: boundedRegistration.endpointRegistrationId }, 'record').value);
+      assert.equal(boundedRecord.recordDigest, boundedOperation.resultRecordDigest);
+      assert.deepEqual(boundedRecord.registration, boundedRegistration);
+      assert.equal(success(boundedRequest, 'operation').bytes, boundedResponse.bytes,
+        'the refused request id must remain available for a valid commit and its exact replay');
 
       const changed = { ...registration, createdAt: '2026-10-11T00:00:00.001Z', registrationDigest: '' };
       changed.registrationDigest = digestOmitting(changed, 'registrationDigest');

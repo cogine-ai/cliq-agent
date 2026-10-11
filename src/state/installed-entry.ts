@@ -1,12 +1,13 @@
 import path from 'node:path';
 import { getAsset, isSea } from 'node:sea';
-import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js';
+import { assertArtifactRef, assertRequestId, normalizeAbsolutePath } from '../kernel/identity.js';
 import { canonicalJsonBytes, normalizeCanonicalText } from '../kernel/canonical.js';
+import { decodeEndpointAuthorityCommandCore, type EndpointAuthorityCommandCoreV1 } from '../kernel/credential-authority.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { openInstalledControl, type InstalledControlService } from './installed-control.js';
 import { acquireInstalledAnchor, createInstalledRuntime, initializeInstalledKeeper, withHeldInstalledRuntime,
-  readEndpointAuthority, withCredentialAuthorityLock,
+  commitEndpointAuthority, readEndpointAuthority, withCredentialAuthorityLock,
   type HeldInstalledAnchor, type HeldInstalledKeeper, type HeldInstalledRuntime } from './installed-runtime.js';
 import { joinResourceOperations, KernelStorageError } from './errors.js';
 import { exactKeys } from '../policy/runtime-authority.js';
@@ -54,7 +55,10 @@ function report(error: unknown): void {
 
 /** Hidden secret-free endpoint integration only. Read one bounded strict JSON
  * request from stdin; neither argv nor input can supply identity or channel. */
-async function readEndpointRequest(): Promise<{ schemaVersion: 1; kind: 'read'; endpointRegistrationId: string }> {
+type EndpointRequest =
+  | { schemaVersion: 1; kind: 'read'; endpointRegistrationId: string }
+  | { schemaVersion: 1; kind: 'commit'; requestId: string; commandCore: EndpointAuthorityCommandCoreV1 };
+async function readEndpointRequest(): Promise<EndpointRequest> {
   const chunks: Buffer[] = [];
   let byteCount = 0;
   const timer = setTimeout(() => process.stdin.destroy(new KernelStorageError('INVALID_REQUEST', 'endpoint request input timed out')), 5000);
@@ -65,8 +69,13 @@ async function readEndpointRequest(): Promise<{ schemaVersion: 1; kind: 'read'; 
       chunks.push(bytes);
     }
     const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) as Record<string, unknown>;
-    if (!value || typeof value !== 'object' || Array.isArray(value) || !exactKeys(value, ['schemaVersion', 'kind', 'endpointRegistrationId']) ||
-        value.schemaVersion !== 1 || value.kind !== 'read' || typeof value.endpointRegistrationId !== 'string' ||
+    if (!value || typeof value !== 'object' || Array.isArray(value) || value.schemaVersion !== 1)
+      throw new KernelStorageError('INVALID_REQUEST', 'expected a closed secret-free endpoint request');
+    if (value.kind === 'commit' && exactKeys(value, ['schemaVersion', 'kind', 'requestId', 'commandCore']) && typeof value.requestId === 'string') {
+      assertRequestId(value.requestId);
+      return { schemaVersion: 1, kind: 'commit', requestId: value.requestId, commandCore: decodeEndpointAuthorityCommandCore(value.commandCore) };
+    }
+    if (!exactKeys(value, ['schemaVersion', 'kind', 'endpointRegistrationId']) || value.kind !== 'read' || typeof value.endpointRegistrationId !== 'string' ||
         !value.endpointRegistrationId || normalizeCanonicalText(value.endpointRegistrationId) !== value.endpointRegistrationId)
       throw new KernelStorageError('INVALID_REQUEST', 'expected a closed secret-free endpoint read request');
     return value as { schemaVersion: 1; kind: 'read'; endpointRegistrationId: string };
@@ -114,9 +123,11 @@ async function start(): Promise<void> {
   });
   if (mode === '--installed-endpoint') {
     const request = await readEndpointRequest();
-    const record = await withCredentialAuthorityLock(selected, async token => readEndpointAuthority(token, request.endpointRegistrationId));
+    const response = await withCredentialAuthorityLock(selected, async token => request.kind === 'read'
+      ? { schemaVersion: 1, record: readEndpointAuthority(token, request.endpointRegistrationId) }
+      : { schemaVersion: 1, operation: commitEndpointAuthority(token, request.requestId, request.commandCore) });
     await close();
-    console.log(canonicalJsonBytes({ schemaVersion: 1, record }).toString('utf8'));
+    console.log(canonicalJsonBytes(response).toString('utf8'));
     return;
   }
   if (mode === '--installed-keeper') {
