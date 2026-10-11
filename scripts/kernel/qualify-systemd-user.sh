@@ -318,6 +318,7 @@ const installed = mode === 'installed' ? {
   buildFixture: `${fixture}/installed-package-build`, packageRoot: `${fixture}/installed-package-build/package`,
   preloadLibrary: `${fixture}/installed-package-build/installed-loader-preload.so`,
   preloadMarker: `${home}/probe/installed-loader-preload.marker`,
+  installerEntry: `${fixture}/installed-package-build/installed-runtime-installer.mjs`,
   stateRoot: `${home}/probe/installed-state`, releaseKeysFile: `${fixture}/installed-release-keys.json`,
   keeperUnit: `cliq-probe-${suffix}-installed-keeper.service`,
   supervisorUnit: `cliq-probe-${suffix}-installed-supervisor.service`,

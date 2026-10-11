@@ -8,18 +8,17 @@ import { lstat, mkdir, open, readFile, readdir, readlink, stat, statfs, unlink, 
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
 
 import { KERNEL_DATABASE_FILENAME } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
-import type { ReleaseTrustKey } from '../../src/policy/runtime-authority.js';
-import { createInstalledRuntime } from '../../src/state/installed-runtime.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
 
 type InstalledFixture = {
   buildFixture: string; packageRoot: string; stateRoot: string; releaseKeysFile: string;
-  preloadLibrary: string; preloadMarker: string;
+  preloadLibrary: string; preloadMarker: string; installerEntry: string;
   keeperUnit: string; supervisorUnit: string; keeperUnitFile: string; supervisorUnitFile: string; reportFile: string;
 };
 type Ledger = {
@@ -27,7 +26,6 @@ type Ledger = {
   uid: number; gid: number; runnerUid: number; home: string; installed: InstalledFixture;
 };
 const repository = fileURLToPath(new URL('../..', import.meta.url));
-const self = fileURLToPath(import.meta.url);
 const environment = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' };
 // Known loading inputs for the fixed glibc 2.35 / Node 24.21 carrier and its
 // OpenSSL. Matching unit text is not hostile-manager qualification; actual
@@ -74,12 +72,13 @@ async function readLedger(filename: string): Promise<Ledger> {
   assert(installed && typeof installed === 'object');
   const keeperUnit = `cliq-probe-${suffix}-installed-keeper.service`;
   const supervisorUnit = `cliq-probe-${suffix}-installed-supervisor.service`;
-  assert.deepEqual(Object.keys(installed).sort(), ['buildFixture', 'keeperUnit', 'keeperUnitFile', 'packageRoot',
+  assert.deepEqual(Object.keys(installed).sort(), ['buildFixture', 'installerEntry', 'keeperUnit', 'keeperUnitFile', 'packageRoot',
     'preloadLibrary', 'preloadMarker', 'releaseKeysFile', 'reportFile', 'stateRoot', 'supervisorUnit', 'supervisorUnitFile'].sort());
   assert.equal(installed.buildFixture, path.join(ledger.fixture, 'installed-package-build'));
   assert.equal(installed.packageRoot, path.join(installed.buildFixture, 'package'));
   assert.equal(installed.preloadLibrary, path.join(installed.buildFixture, 'installed-loader-preload.so'));
   assert.equal(installed.preloadMarker, path.join(ledger.home, 'probe/installed-loader-preload.marker'));
+  assert.equal(installed.installerEntry, path.join(installed.buildFixture, 'installed-runtime-installer.mjs'));
   assert.equal(installed.stateRoot, path.join(ledger.home, 'probe/installed-state'));
   assert.equal(installed.releaseKeysFile, path.join(ledger.fixture, 'installed-release-keys.json'));
   assert.equal(installed.keeperUnit, keeperUnit); assert.equal(installed.supervisorUnit, supervisorUnit);
@@ -201,13 +200,37 @@ async function positivePreloadControl(ledger: Ledger) {
     markerContent: expected, markerIdentity: identity, joined: true, markerRemoved: true };
 }
 
-async function installer(packageRoot: string, stateRoot: string, releaseKeysFile: string): Promise<void> {
-  assert(process.geteuid!() > 0 && process.getegid!() > 0, 'installer must run as the disposable nonroot UID');
-  assert(path.isAbsolute(packageRoot) && path.isAbsolute(stateRoot) && path.isAbsolute(releaseKeysFile));
-  const releaseKeys = parseJsonStrict(await readFile(releaseKeysFile, 'utf8')) as ReleaseTrustKey[];
-  const selected = await createInstalledRuntime({ releaseKeys }).installInitial({ packageRoot, stateRoot });
-  assert(Object.values(await authorityAbsent(stateRoot)).every(Boolean), 'installation cannot acquire StateOwner');
-  console.log(JSON.stringify({ bundleDigest: selected.bundleDigest }));
+async function stageInstaller(installed: InstalledFixture) {
+  // The disposable UID never needs permission to traverse the checkout or its
+  // tsx tree. Bundle only this real installer; preserve its ordinary ESM URLs.
+  const result = await build({ entryPoints: [fileURLToPath(new URL('./testing/installed-runtime-installer.ts', import.meta.url))],
+    outfile: installed.installerEntry, bundle: true, platform: 'node', format: 'esm', target: 'node22.13',
+    metafile: true, write: false });
+  const imports = Object.values(result.metafile!.outputs).flatMap(output => output.imports);
+  assert(imports.every(item => item.external && item.path.startsWith('node:')),
+    'staged installer must have no runtime JavaScript filesystem dependency');
+  assert.equal(result.outputFiles!.length, 1);
+  const output = result.outputFiles![0]!;
+  assert.equal(output.path, installed.installerEntry);
+  assert(output.contents.byteLength > 0 && output.contents.byteLength <= 16 * 1024 * 1024);
+  const file = await open(installed.installerEntry,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    const before = await file.stat({ bigint: true });
+    assert(before.isFile()); assert.equal(before.uid, 0n); assert.equal(before.gid, 0n);
+    assert.equal(before.nlink, 1n); assert.equal(before.mode & 0o7777n, 0o600n); assert.equal(before.size, 0n);
+    await file.writeFile(output.contents);
+    await file.chmod(0o444);
+    const held = await file.stat({ bigint: true });
+    assert(held.isFile()); assert.equal(held.dev, before.dev); assert.equal(held.ino, before.ino);
+    assert.equal(held.uid, 0n); assert.equal(held.gid, 0n); assert.equal(held.nlink, 1n);
+    assert.equal(held.mode & 0o7777n, 0o444n); assert.equal(held.size, BigInt(output.contents.byteLength));
+    const named = await lstat(installed.installerEntry, { bigint: true });
+    for (const key of ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const)
+      assert.equal(named[key], held[key]);
+  } finally { await file.close(); }
+  return { path: installed.installerEntry, byteCount: output.contents.byteLength,
+    externalImports: [...new Set(imports.map(item => item.path))].sort() };
 }
 
 async function campaign(ledgerFile: string): Promise<void> {
@@ -247,12 +270,13 @@ async function campaign(ledgerFile: string): Promise<void> {
     assert.equal(stage.mode & 0o7777, 0o755);
     const { packageRoot, releaseKeys, bundle, contents } = await buildInstalledSupervisorPackage(installed.buildFixture);
     assert.equal(packageRoot, installed.packageRoot);
+    report.installer = await stageInstaller(installed);
     report.preloadPositiveControl = await positivePreloadControl(ledger);
     await writeFile(installed.releaseKeysFile, canonicalJsonBytes(releaseKeys), { flag: 'wx', mode: 0o444 });
     await transferPackage(packageRoot, ledger.uid, ledger.gid);
     const install = command('/usr/sbin/runuser', ['--user', ledger.username, '--', '/usr/bin/env', '-i',
       `HOME=${ledger.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', process.execPath,
-      '--import', import.meta.resolve('tsx'), self, '--install', packageRoot, installed.stateRoot, installed.releaseKeysFile]);
+      installed.installerEntry, packageRoot, installed.stateRoot, installed.releaseKeysFile]);
     report.installation = install;
     assert.equal(install.status, 0, install.stderr);
     const selection = parseJsonStrict(install.stdout.trim()) as { bundleDigest: string };
@@ -428,6 +452,5 @@ async function campaign(ledgerFile: string): Promise<void> {
 assert.equal(process.platform, 'linux', 'installed keeper qualification requires a real Linux runner');
 assert.equal(process.arch, 'x64', 'no installed keeper carrier qualified for this architecture');
 const [mode, ...args] = process.argv.slice(2);
-if (mode === '--install' && args.length === 3) await installer(args[0]!, args[1]!, args[2]!);
-else if (mode === '--campaign' && args.length === 1) await campaign(args[0]!);
-else throw new Error('expected the closed --campaign LEDGER or --install PACKAGE STATE_ROOT RELEASE_KEYS mode');
+if (mode === '--campaign' && args.length === 1) await campaign(args[0]!);
+else throw new Error('expected the closed --campaign LEDGER mode');
