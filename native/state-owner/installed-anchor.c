@@ -1,5 +1,5 @@
 /* The fixed selected keeper role owns only its native image and the original
- * delegated root pin. It never acquires StateOwner or exports a descriptor. */
+ * delegated root pin. It never acquires StateOwner or transfers its root pin. */
 #ifdef __linux__
 #include <dirent.h>
 
@@ -306,6 +306,87 @@ static napi_value installed_keeper_assert(napi_env env, napi_callback_info info)
     return undefined_result(env);
 }
 
+/* Read only the kernel's fixed boot UUID, then retire every temporary before
+ * constructing a locator. UUID bytes follow textual order, not UUID_LE. */
+static int installed_keeper_boot(unsigned char uuid[16], int *retirement_failed) {
+    int directory = open_root_with_retirement("/proc/sys/kernel/random", retirement_failed), file = -1;
+    struct stat metadata;
+    struct statfs filesystem;
+    int valid = directory >= 0 && fstatfs(directory, &filesystem) == 0 && filesystem.f_type == PROC_SUPER_MAGIC;
+    if (valid) file = openat(directory, "boot_id", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    valid = valid && file >= 0 && fstat(file, &metadata) == 0 && S_ISREG(metadata.st_mode) &&
+        fstatfs(file, &filesystem) == 0 && filesystem.f_type == PROC_SUPER_MAGIC;
+    char text[37];
+    size_t used = 0;
+    while (valid && used < sizeof(text)) {
+        ssize_t bytes = read(file, text + used, sizeof(text) - used);
+        if (bytes < 0 && errno == EINTR) continue;
+        if (bytes < 0) { valid = 0; break; }
+        if (bytes == 0) break;
+        used += (size_t)bytes;
+    }
+    if (valid && used == sizeof(text)) {
+        char extra;
+        ssize_t bytes;
+        do { bytes = read(file, &extra, 1); } while (bytes < 0 && errno == EINTR);
+        if (bytes != 0) valid = 0;
+    }
+    retire_process_fd(&file, retirement_failed);
+    retire_process_fd(&directory, retirement_failed);
+    if (!valid || *retirement_failed || used != sizeof(text) || text[36] != '\n') return 0;
+    unsigned int digits = 0;
+    for (size_t i = 0; i < 36; i++) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) { if (text[i] != '-') return 0; continue; }
+        int nibble = text[i] >= '0' && text[i] <= '9' ? text[i] - '0' :
+            text[i] >= 'a' && text[i] <= 'f' ? text[i] - 'a' + 10 : -1;
+        if (nibble < 0) return 0;
+        if (digits % 2 == 0) uuid[digits / 2] = (unsigned char)(nibble << 4);
+        else uuid[digits / 2] |= (unsigned char)nibble;
+        digits++;
+    }
+    return digits == 32;
+}
+
+/* Private publication bytes locate a still-owned original pin; they never
+ * transfer it or certify its authority to a consumer. No caller input. */
+static napi_value installed_keeper_ready_locator(napi_env env, napi_callback_info info) {
+    installed_keeper *keeper = unwrap_control(env, info, &installed_keeper_tag, "invalid installed keeper handle");
+    if (!keeper) return NULL;
+    if (syscall(SYS_gettid) != getpid()) return native_error(env, "installed keeper requires the process main thread");
+    int retirement_failed = 0;
+    if (!installed_keeper_current(keeper, &retirement_failed))
+        return installed_keeper_error(env, "installed keeper source is unavailable for publication", retirement_failed);
+    uint64_t pid = (uint64_t)keeper->process.pid, descriptor = (uint64_t)keeper->root_pin, ticks = 0;
+    const char prefix[] = "linux-proc-start-ticks:";
+    const char *part = keeper->process.start_token;
+    if (pid == 0 || pid > INT_MAX || descriptor < 3 || descriptor > INT_MAX ||
+        strncmp(part, prefix, sizeof(prefix) - 1) != 0)
+        return installed_keeper_error(env, "installed keeper source locator is invalid", retirement_failed);
+    part += sizeof(prefix) - 1;
+    if (*part < '1' || *part > '9')
+        return installed_keeper_error(env, "installed keeper start ticks are invalid", retirement_failed);
+    for (; *part; part++) {
+        if (*part < '0' || *part > '9' || ticks > (UINT64_MAX - (uint64_t)(*part - '0')) / 10)
+            return installed_keeper_error(env, "installed keeper start ticks are invalid", retirement_failed);
+        ticks = ticks * 10 + (uint64_t)(*part - '0');
+    }
+    unsigned char locator[40];
+    if (!installed_keeper_boot(locator + 24, &retirement_failed))
+        return installed_keeper_error(env, "installed keeper actual boot identity is unavailable", retirement_failed);
+    memcpy(locator, "cliq-ak1", 8);
+    for (unsigned int i = 0; i < 4; i++) {
+        locator[8 + i] = (unsigned char)(pid >> (8 * i));
+        locator[12 + i] = (unsigned char)(descriptor >> (8 * i));
+    }
+    for (unsigned int i = 0; i < 8; i++) locator[16 + i] = (unsigned char)(ticks >> (8 * i));
+    napi_value result;
+    if (napi_create_buffer_copy(env, sizeof(locator), locator, NULL, &result) != napi_ok)
+        return installed_keeper_error(env, "installed keeper locator buffer construction failed", retirement_failed);
+    if (!installed_keeper_current(keeper, &retirement_failed))
+        return installed_keeper_error(env, "installed keeper source changed during publication", retirement_failed);
+    return result;
+}
+
 static napi_value installed_keeper_release(napi_env env, napi_callback_info info) {
     installed_keeper *keeper = unwrap_control(env, info, &installed_keeper_tag, "invalid installed keeper handle");
     if (!keeper) return NULL;
@@ -426,10 +507,11 @@ static napi_value initialize_installed_keeper(napi_env env, napi_callback_info i
     napi_value result;
     const napi_property_descriptor methods[] = {
         {"assertHeld", NULL, installed_keeper_assert, NULL, NULL, NULL, napi_default, NULL},
+        {"readyLocator", NULL, installed_keeper_ready_locator, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, installed_keeper_release, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "installed keeper handle construction failed";
-    if (napi_create_object(env, &result) != napi_ok || napi_define_properties(env, result, 2, methods) != napi_ok ||
+    if (napi_create_object(env, &result) != napi_ok || napi_define_properties(env, result, 3, methods) != napi_ok ||
         napi_type_tag_object(env, result, &installed_keeper_tag) != napi_ok || napi_object_freeze(env, result) != napi_ok ||
         atomic_load(&current_process_retirement_failed) ||
         napi_wrap(env, result, keeper, installed_keeper_finalize, NULL, NULL) != napi_ok) goto fail;

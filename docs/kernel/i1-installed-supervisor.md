@@ -372,6 +372,14 @@ inspector, while the selected Supervisor retained `SIGUSR1` blocked and pending,
 had no PID-owned TCP listener or handler, preserved its lifetime/image and
 read-only UDS owner across reconnects, and gracefully released. Signed keeper
 initialization and scoped cleanup passed independently in the same run.
+At `b83f086`,
+[run 38111228450](https://github.com/cogine-ai/cliq-agent/actions/runs/38111228450)
+closed the original-pin source observation before and after the actual keeper
+publication test: image/lifetime, full credentials, five namespaces, boot and
+the unique original `O_PATH` root were unchanged. Only the absent
+`runtime/keeper.ready` locator caused RED; keeper database/control authority
+remained absent, with zero cleanup errors. This motivates publication only,
+not consumer, restart or death qualification.
 
 The independent anchor service owns this delegated topology:
 

@@ -564,6 +564,28 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               try {
                 await checkedRevalidate();
                 keeper.assertHeld();
+                // Only a private locator for the native-owned original pin;
+                // neither these bytes nor the file carry execution authority.
+                const locator = keeper.readyLocator();
+                if (!Buffer.isBuffer(locator) || locator.length !== 40) mismatch('installed keeper returned an invalid locator');
+                const temporary = `.tmp-keeper-${randomBytes(16).toString('hex')}`;
+                await writeChunks(scope, root, temporary, bytesSource(locator), 0o600);
+                const ready = await scope.file(root, temporary, 0o600, 40, sha256Bytes(locator));
+                if (ready.info.gid !== BigInt(process.getegid!())) mismatch('installed keeper locator has a different group');
+                await verifyBytes(ready);
+                keeper.assertHeld(); await scope.assertDirectories();
+                await rename(childPath(root, temporary), childPath(root, 'keeper.ready'));
+                // A legitimate rename may change ctime. Keep the original FD
+                // and bind all other fields before freezing its new full stat.
+                const published = await ready.handle.stat({ bigint: true });
+                if (!['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs']
+                  .every(key => ready.info[key as keyof BigIntStats] === published[key as keyof BigIntStats]))
+                  mismatch('installed keeper locator changed during publication');
+                ready.name = 'keeper.ready'; ready.info = published;
+                await root.handle.sync(); await scope.assertDirectories();
+                await verifyBytes(ready);
+                await scope.retire(ready.handle);
+                healthy(); keeper.assertHeld();
                 const held: HeldInstalledKeeper = Object.freeze({
                   assertHeld() {
                     if (this !== held) throw new TypeError('invalid installed keeper handle');

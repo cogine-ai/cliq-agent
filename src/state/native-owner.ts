@@ -386,7 +386,7 @@ type NativeCurrentProcess = Readonly<{
   imageFd: number; imageByteCount: number; imageIdentityKey: string;
   assertHeld(): void; close(): void;
 }>;
-type NativeInstalledKeeper = Readonly<{ assertHeld(): void; close(): void }>;
+type NativeInstalledKeeper = Readonly<{ assertHeld(): void; readyLocator(): Buffer; close(): void }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
   captureCurrentProcess(): NativeCurrentProcess;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
@@ -422,6 +422,10 @@ export function initializeHeldInstalledKeeper(native: NativeStateOwner, input: R
     assertHeld() {
       if (this !== handle) throw new TypeError('invalid installed keeper handle');
       try { owned.assertHeld(); } catch (error) { failed(error); }
+    },
+    readyLocator() {
+      if (this !== handle) throw new TypeError('invalid installed keeper handle');
+      try { return owned.readyLocator(); } catch (error) { return failed(error); }
     },
     close() {
       if (this !== handle) throw new TypeError('invalid installed keeper handle');
