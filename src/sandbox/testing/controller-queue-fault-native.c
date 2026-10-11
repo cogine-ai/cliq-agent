@@ -1,5 +1,6 @@
 /* Test-only build of the actual native controller binding. Explicitly armed
- * faults affect only N-API queueing or reporting EIO after a real close.
+ * faults affect only N-API queueing, reporting EIO after a real close, or
+ * one exact owned controller leaf's final unlinkat result.
  * The process-exit probe reaps its own real child before the real proc read.
  * Scopes, Runs and recovery evidence are never fabricated. */
 #define _GNU_SOURCE
@@ -9,6 +10,7 @@
 #if defined(__linux__)
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -27,6 +29,13 @@ static int close_fault_opened[256];
 static dev_t close_fault_root_dev;
 static ino_t close_fault_root_ino;
 static char close_fault_sentinel[PATH_MAX];
+static atomic_bool leaf_removal_fault_armed;
+static atomic_uint leaf_removal_fault_count;
+static struct controller *leaf_removal_fault_controller;
+static int leaf_removal_fault_error;
+static dev_t leaf_removal_fault_parent_dev, leaf_removal_fault_leaf_dev;
+static ino_t leaf_removal_fault_parent_ino, leaf_removal_fault_leaf_ino;
+static char leaf_removal_fault_name[64], leaf_removal_fault_path[PATH_MAX];
 static struct {
     pid_t pid;
     dev_t device;
@@ -39,6 +48,7 @@ static struct {
 static int fault_close(int fd);
 static int probe_open(const char *name, int flags, ...);
 static int probe_openat(int directory, const char *name, int flags, ...);
+static int fault_unlinkat(int directory, const char *name, int flags);
 
 static napi_status fault_queue(napi_env env, napi_async_work work) {
     fault_queue_calls++;
@@ -49,6 +59,7 @@ static napi_status fault_queue(napi_env env, napi_async_work work) {
 #define close fault_close
 #define open probe_open
 #define openat probe_openat
+#define unlinkat fault_unlinkat
 #endif
 
 #undef NAPI_MODULE
@@ -58,8 +69,29 @@ static napi_status fault_queue(napi_env env, napi_async_work work) {
 #undef close
 #undef open
 #undef openat
+#undef unlinkat
 
 #if defined(__linux__)
+static int fault_unlinkat(int directory, const char *name, int flags) {
+    int original_errno = errno;
+    struct stat parent, leaf;
+    if (atomic_load_explicit(&leaf_removal_fault_armed, memory_order_acquire) && flags == AT_REMOVEDIR && name &&
+        strcmp(name, leaf_removal_fault_name) == 0 && fstat(directory, &parent) == 0 && S_ISDIR(parent.st_mode) &&
+        parent.st_dev == leaf_removal_fault_parent_dev && parent.st_ino == leaf_removal_fault_parent_ino &&
+        fstatat(directory, name, &leaf, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(leaf.st_mode) &&
+        leaf.st_dev == leaf_removal_fault_leaf_dev && leaf.st_ino == leaf_removal_fault_leaf_ino &&
+        atomic_exchange_explicit(&leaf_removal_fault_armed, false, memory_order_acq_rel)) {
+        /* Production already established its real empty cgroup and joined
+         * child before this final removal. Change only this syscall result;
+         * do not remove the leaf or manufacture any lifecycle observation. */
+        atomic_fetch_add_explicit(&leaf_removal_fault_count, 1, memory_order_release);
+        errno = leaf_removal_fault_error;
+        return -1;
+    }
+    errno = original_errno;
+    return unlinkat(directory, name, flags);
+}
+
 static void reap_process_exit_subject(void) {
     int signaled = kill(process_exit_probe.pid, SIGKILL);
     int signal_error = signaled != 0 ? errno : 0;
@@ -201,6 +233,90 @@ static napi_value close_fault_state(napi_env env, napi_callback_info info) {
     return result;
 }
 
+static napi_value arm_leaf_removal_fault(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2];
+    uint64_t error;
+    struct controller *controller;
+    if (napi_get_cb_info(env, info, &argc, args, NULL, NULL) != napi_ok || argc != 2 ||
+        !tagged(env, args[0], &CONTROLLER_TAG, (void **)&controller) || !number(env, args[1], &error) ||
+        (error != EBUSY && error != ENOTEMPTY) || leaf_removal_fault_controller || controller->closed ||
+        !controller->ready || controller->pid <= 0 || !controller->token[0] || controller->cleanup_queued ||
+        controller->cleanup_done || controller->constructor_failed || controller->retirement_failed ||
+        !controller->leaf_owned || !controller->leaf_initialized || !anchor_current(controller) ||
+        strlen(controller->leaf_name) != 43 || strncmp(controller->leaf_name, "controller-", 11) != 0)
+        return failure(env, "invalid actual controller-leaf removal fault");
+    for (size_t index = 11; index < 43; index++) {
+        char digit = controller->leaf_name[index];
+        if (!((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f')))
+            return failure(env, "invalid owned controller-leaf name");
+    }
+    int length = snprintf(leaf_removal_fault_path, sizeof(leaf_removal_fault_path), "%s/controllers/%s",
+        controller->root_path, controller->leaf_name);
+    if (length < 0 || (size_t)length >= sizeof(leaf_removal_fault_path))
+        return failure(env, "actual controller-leaf path is unavailable");
+    /* Capture only the genuine HELLO-ready receiver's existing identities.
+     * Metadata stays immutable after this one arm; the atomic flag alone is
+     * shared with the production join worker. Each errno uses a fresh process. */
+    leaf_removal_fault_parent_dev = controller->parent_identity.st_dev;
+    leaf_removal_fault_parent_ino = controller->parent_identity.st_ino;
+    leaf_removal_fault_leaf_dev = controller->leaf_identity.st_dev;
+    leaf_removal_fault_leaf_ino = controller->leaf_identity.st_ino;
+    memcpy(leaf_removal_fault_name, controller->leaf_name, 44);
+    leaf_removal_fault_error = (int)error;
+    leaf_removal_fault_controller = controller;
+    atomic_store_explicit(&leaf_removal_fault_armed, true, memory_order_release);
+    return undefined(env);
+}
+
+static napi_value disarm_leaf_removal_fault(napi_env env, napi_callback_info info) {
+    (void)info;
+    atomic_store_explicit(&leaf_removal_fault_armed, false, memory_order_release);
+    return undefined(env);
+}
+
+static void set_identity(napi_env env, napi_value object, const char *name, uintmax_t identity) {
+    char value[32];
+    snprintf(value, sizeof(value), "%" PRIuMAX, identity);
+    set_string(env, object, name, value);
+}
+
+static napi_value leaf_removal_fault_state(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1], result, observed;
+    struct controller *controller;
+    if (napi_get_cb_info(env, info, &argc, args, NULL, NULL) != napi_ok || argc != 1 ||
+        !tagged(env, args[0], &CONTROLLER_TAG, (void **)&controller) || controller != leaf_removal_fault_controller ||
+        controller->parent_identity.st_dev != leaf_removal_fault_parent_dev ||
+        controller->parent_identity.st_ino != leaf_removal_fault_parent_ino ||
+        controller->leaf_identity.st_dev != leaf_removal_fault_leaf_dev ||
+        controller->leaf_identity.st_ino != leaf_removal_fault_leaf_ino || strcmp(controller->leaf_name, leaf_removal_fault_name) != 0)
+        return failure(env, "invalid controller-leaf fault observation receiver");
+    if (napi_create_object(env, &result) != napi_ok) return NULL;
+    set_number(env, result, "armed", atomic_load_explicit(&leaf_removal_fault_armed, memory_order_acquire));
+    set_number(env, result, "matched", atomic_load_explicit(&leaf_removal_fault_count, memory_order_acquire));
+    set_number(env, result, "error", leaf_removal_fault_error);
+    set_string(env, result, "leafName", leaf_removal_fault_name);
+    set_string(env, result, "leafPath", leaf_removal_fault_path);
+    set_identity(env, result, "parentDev", (uintmax_t)leaf_removal_fault_parent_dev);
+    set_identity(env, result, "parentIno", (uintmax_t)leaf_removal_fault_parent_ino);
+    set_identity(env, result, "leafDev", (uintmax_t)leaf_removal_fault_leaf_dev);
+    set_identity(env, result, "leafIno", (uintmax_t)leaf_removal_fault_leaf_ino);
+    set_number(env, result, "pid", controller->pid);
+    set_number(env, result, "cleanupDone", controller->cleanup_done);
+    /* cleanup_done is published only by main-thread completion after the
+     * actual join worker returns. Until then its lifecycle fields are neither
+     * safe to read nor a completed observation; report null, not false proof. */
+    if ((controller->cleanup_done ? napi_get_boolean(env, controller->reaped, &observed) :
+        napi_get_null(env, &observed)) != napi_ok ||
+        napi_set_named_property(env, result, "childReaped", observed) != napi_ok) return NULL;
+    if ((controller->cleanup_done ? napi_get_boolean(env, controller->retirement_failed, &observed) :
+        napi_get_null(env, &observed)) != napi_ok ||
+        napi_set_named_property(env, result, "retirementFailed", observed) != napi_ok) return NULL;
+    set_number(env, result, "nativeSticky", atomic_load(&native_retirement_failed));
+    return result;
+}
+
 static napi_value queue_count(napi_env env, napi_callback_info info) {
     (void)info;
     napi_value result;
@@ -304,6 +420,9 @@ NAPI_MODULE_INIT() {
         { "setCloseFault", NULL, set_close_fault, NULL, NULL, NULL, napi_default, NULL },
         { "disarmCloseFault", NULL, disarm_close_fault, NULL, NULL, NULL, napi_default, NULL },
         { "closeFaultState", NULL, close_fault_state, NULL, NULL, NULL, napi_default, NULL },
+        { "armLeafRemovalFault", NULL, arm_leaf_removal_fault, NULL, NULL, NULL, napi_default, NULL },
+        { "disarmLeafRemovalFault", NULL, disarm_leaf_removal_fault, NULL, NULL, NULL, napi_default, NULL },
+        { "leafRemovalFaultState", NULL, leaf_removal_fault_state, NULL, NULL, NULL, napi_default, NULL },
         { "queueCalls", NULL, queue_count, NULL, NULL, NULL, napi_default, NULL },
         { "sampleReapedProcess", NULL, sample_reaped_process, NULL, NULL, NULL, napi_default, NULL },
         { "resumeJoin", NULL, resume_join, NULL, NULL, NULL, napi_default, NULL }

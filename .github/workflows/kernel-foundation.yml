@@ -337,7 +337,33 @@ jobs:
           node_path=$(realpath "$(command -v node)")
           sudo --preserve-env=CLIQ_I1_INSTALLATION,CLIQ_I1_CGROUP_PARENT,CLIQ_I1_STATE_VOLUME \
             "$node_path" scripts/kernel/qualify-controller-anchor-birth.mjs
+      - name: Refuse failed retirement of the exact real controller leaf
+        id: leaf_retirement
+        # Test-only syscall-result interposer; genuine controller HELLO and
+        # exact child join, not installed I1 or whole-worker death evidence.
+        env:
+          CLIQ_I1_INSTALLATION: ${{ steps.images.outputs.installation }}
+          CLIQ_I1_CGROUP_PARENT: ${{ steps.fixture.outputs.parent }}
+        shell: bash
+        run: |
+          runner_uid=$(id -u)
+          runner_gid=$(id -g)
+          runner_home=$HOME
+          runner_path=$PATH
+          node_path=$(command -v node)
+          sudo --preserve-env=CLIQ_I1_INSTALLATION,CLIQ_I1_CGROUP_PARENT \
+            env CLIQ_RUNNER_UID="$runner_uid" CLIQ_RUNNER_GID="$runner_gid" \
+              CLIQ_RUNNER_HOME="$runner_home" CLIQ_RUNNER_PATH="$runner_path" CLIQ_NODE_PATH="$node_path" \
+            /bin/bash -c '
+              printf "%s\n" "$$" > "$CLIQ_I1_CGROUP_PARENT/supervisor/cgroup.procs"
+              exec /usr/bin/setpriv --reuid="$CLIQ_RUNNER_UID" --regid="$CLIQ_RUNNER_GID" --clear-groups \
+                /usr/bin/env HOME="$CLIQ_RUNNER_HOME" PATH="$CLIQ_RUNNER_PATH" \
+                "$CLIQ_NODE_PATH" scripts/kernel/testing/controller-leaf-retirement.mjs
+            '
       - name: Exercise actual StateStore and native lifecycle
+        # Keep the independent image/StateStore regression observable even
+        # when the preceding leaf-retirement regression demonstrates a bug.
+        if: ${{ !cancelled() && (success() || steps.leaf_retirement.outcome == 'failure') }}
         env:
           CLIQ_I1_INSTALLATION: ${{ steps.images.outputs.installation }}
           CLIQ_I1_CGROUP_PARENT: ${{ steps.fixture.outputs.parent }}

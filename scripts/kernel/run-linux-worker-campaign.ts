@@ -658,7 +658,10 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
   const primary = Object.assign(new Error(`campaign actual worker image read failed ${created ? 'after READY before identity' : 'before spawn'}`), { code: 'EIO' });
   type ReadyScope = { path: string; cgroupId: string; pidNamespaceId: string; workerPid: number; workerToken: string;
     initPid: number; initToken: string; members: { pid: number; token: string }[] };
-  let injected: { launch: WorkerLaunch; controllerPid: number; controllerToken: string; physicalScope?: ReadyScope } | undefined;
+  type SealedImage = { fd: number; device: string; inode: string };
+  let injected: { launch: WorkerLaunch; controllerPid: number; controllerToken: string; physicalScope?: ReadyScope;
+    sealedImage?: SealedImage } | undefined;
+  let freshImage: (SealedImage & { launchId: string; digest: string }) | undefined;
   let probing = false, faults = 0;
   let operationFailure: { error: unknown } | undefined;
   let successorOpeningFailed = false;
@@ -749,7 +752,8 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
                       workerPid: physicalScope!.workerPid, fault: 'escaping_symlink_then_image_EIO' }));
                   } finally { fs.closeSync(root); }
                 }
-                assert.ok(count > 0); injected = { launch, controllerPid, controllerToken, ...(physicalScope ? { physicalScope } : {}) }; faults++;
+                assert.ok(count > 0); injected = { launch, controllerPid, controllerToken, ...(physicalScope ? { physicalScope } : {}),
+                  ...(!created ? { sealedImage: { fd, device: String(held.dev), inode: String(held.ino) } } : {}) }; faults++;
                 throw primary;
               }
             }
@@ -797,13 +801,75 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
       for (const member of fault.physicalScope.members) await assert.rejects(access(`/proc/${member.pid}`), { code: 'ENOENT' });
     }
     await assert.rejects(access(`/proc/${fault.controllerPid}`), { code: 'ENOENT' });
-    await store.close();
-    try { store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
-    catch (error) { successorOpeningFailed = true; throw error; }
-    const reopened = await checkpointBytes(store, fixture.runId);
-    assertQueuedReadyCut(reopened, before);
-    const retry = await store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
-    await bounded(retry.executeCurrentTool({ expectedRunRevision: reopened.closure.run.revision }));
+    let retry = execution;
+    if (created) {
+      await store.close();
+      try { store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+      catch (error) { successorOpeningFailed = true; throw error; }
+      retry = await store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
+    } else {
+      // The original image read failed before birth and its seal really retired.
+      // Keep the same public execution owner: a new Store would silently replace
+      // its launcher and fail to exercise recovery from that transient read.
+      assert.ok(fault.sealedImage);
+      try {
+        const remaining = fs.fstatSync(fault.sealedImage.fd, { bigint: true });
+        assert.ok(String(remaining.dev) !== fault.sealedImage.device || String(remaining.ino) !== fault.sealedImage.inode,
+          'the failed original seal must retire before a legal fresh attempt');
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EBADF') throw error; }
+      fs.readSync = ((...args: unknown[]) => {
+        const count = Reflect.apply(originalRead, fs, args) as number;
+        if (!freshImage && !probing && count > 0) {
+          probing = true;
+          try {
+            const fd = args[0] as number, held = fs.fstatSync(fd, { bigint: true });
+            if (held.isFile() && held.size === BigInt(workerImage.byteCount) &&
+                fs.readlinkSync(`/proc/self/fd/${fd}`) === '/memfd:cliq-runtime-image (deleted)') {
+              const hash = createHash('sha256'), chunk = Buffer.alloc(Math.min(64 * 1024, workerImage.byteCount));
+              for (let offset = 0; offset < workerImage.byteCount;) {
+                const length = originalRead(fd, chunk, 0, Math.min(chunk.length, workerImage.byteCount - offset), offset);
+                assert.ok(length > 0); hash.update(chunk.subarray(0, length)); offset += length;
+              }
+              const digest = hash.digest('hex');
+              if (digest === workerImage.digest) {
+                const launches = inspection.readSnapshot(connection => connection.prepare(
+                  'SELECT launch_id FROM worker_launches WHERE run_id=? AND retired_at IS NULL')
+                  .all<{ launch_id: string }>(fixture.runId).map(row => readRequiredWorkerLaunch(connection, row.launch_id)));
+                assert.equal(launches.length, 1); const launch = launches[0]!;
+                assert.equal(launch.phase, 'reserved'); assert.notEqual(launch.launchId, fault.launch.launchId);
+                assert.equal(launch.workerIdentityDigest, undefined); assert.equal(launch.processContainmentRef, undefined);
+                const plan = frozenArtifact<ProcessContainmentPlanV1>(fixture.stateRoot, launch.containmentPlanRef);
+                assert.equal(plan.backend.kind, 'linux');
+                if (plan.backend.kind !== 'linux') throw new Error('fresh image lacks its actual Linux reservation');
+                const scopePath = plan.backend.cgroupPath;
+                assert.throws(() => fs.lstatSync(scopePath), { code: 'ENOENT' },
+                  'observe the real fresh seal before worker birth, not a later executable observation');
+                const after = fs.fstatSync(fd, { bigint: true });
+                for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], held[field]);
+                assert.ok(String(held.dev) !== fault.sealedImage!.device || String(held.ino) !== fault.sealedImage!.inode,
+                  'a legal retry must validate a new actual seal, not reuse the retired image');
+                freshImage = { fd, device: String(held.dev), inode: String(held.ino), launchId: launch.launchId, digest };
+              }
+            }
+          } finally { probing = false; }
+        }
+        return count;
+      }) as typeof fs.readSync;
+      syncBuiltinESMExports();
+    }
+    const retryCut = await checkpointBytes(store, fixture.runId);
+    assertQueuedReadyCut(retryCut, before);
+    if (!created) console.log(JSON.stringify({ scenario: 'actual-transient-image-same-execution-retry', phase: 'retry',
+      runId: fixture.runId, failedLaunchId: fault.launch.launchId, supervisorInstanceId: fault.launch.supervisorInstanceId,
+      firstFailureCode: primary.code, actualReadFaults: faults, expectedRunRevision: retryCut.closure.run.revision,
+      failedSealedImage: fault.sealedImage, faultRemoved: true,
+      note: 'same live public execution; original controller joined and seal retired; retry has no injected read failure' }));
+    try {
+      await assert.doesNotReject(bounded(retry.executeCurrentTool({ expectedRunRevision: retryCut.closure.run.revision })),
+        created ? 'the real successor must execute after preactivation retirement' :
+          'the same live execution must recover after the actual transient image read, not replay its cached rejection');
+    } finally { fs.readSync = originalRead; syncBuiltinESMExports(); }
+    if (!created) assert.ok(freshImage, 'successful retry must include a fresh actual signed seal/hash before birth');
     const after = await checkpointBytes(store, fixture.runId);
     assert.equal(after.closure.run.id, before.closure.run.id); assert.equal(after.closure.run.status, 'queued');
     assert.equal(after.closure.run.leaseEpoch, before.closure.run.leaseEpoch + 1);
@@ -823,6 +889,11 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
     assert.deepEqual(originalFacts, fault.launch, 'retirement must retain every original reservation binding');
     const replacement = replacements[0]!;
     assert.equal(replacement.phase, 'retired');
+    if (!created) {
+      assert.equal(replacement.launchId, freshImage!.launchId);
+      assert.equal(replacement.supervisorInstanceId, fault.launch.supervisorInstanceId,
+        'same-launcher retry must retain its live StateOwner, not silently reopen the Store');
+    }
     assert.notEqual(replacement.launchId, old.launchId); assert.notEqual(replacement.spawnNonceDigest, old.spawnNonceDigest);
     assert.notEqual(replacement.activationNonceDigest, old.activationNonceDigest); assert.notEqual(replacement.workspaceGenerationRef, old.workspaceGenerationRef);
     const proof = await store.artifacts.readCanonical<ProcessContainmentNoSpawnEvidenceV1 | ProcessContainmentDeathEvidenceV1>(old.retirementEvidenceRef);
@@ -851,10 +922,19 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
       if (proof.kind !== 'containment_plan_quiescent' || proof.backend.kind !== 'linux') throw new Error('unattempted worker retirement lacks exact Linux no-spawn evidence');
       assert.equal(proof.backend.matchingLaunchNonceProcessCount, 0);
     }
+    if (!created) {
+      // Reopen only after the same live execution has finished the real tool.
+      // Persistence coverage cannot substitute a new launcher's fresh cache.
+      await store.close();
+      try { store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+      catch (error) { successorOpeningFailed = true; throw error; }
+      assert.deepEqual(await checkpointBytes(store, fixture.runId), after);
+    }
     console.log(JSON.stringify({ scenario: `actual-${boundary.replaceAll('_', '-')}-retirement-and-retry`, runId: fixture.runId,
       oldLaunchId: old.launchId, newLaunchId: replacement.launchId, oldGenerationRef: old.workspaceGenerationRef,
       newGenerationRef: replacement.workspaceGenerationRef,
       ...(fault.physicalScope ? { actualWorkerPid: fault.physicalScope.workerPid, actualWorkerStartToken: fault.physicalScope.workerToken } : {}),
+      ...(!created ? { retryScope: 'same_live_execution', failedSealedImage: fault.sealedImage, freshSealedImage: freshImage } : {}),
       actualReadFaults: faults, nativeEffectCount: 1, permanentToolClaims: 1 }));
   } catch (error) { operationFailure = { error }; throw error; }
   finally {
