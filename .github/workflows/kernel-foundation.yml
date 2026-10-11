@@ -284,6 +284,19 @@ jobs:
           CLIQ_I1_FOREIGN_INSTALLATION: ${{ steps.images.outputs.foreign_installation }}
           CLIQ_I1_CGROUP_PARENT: ${{ steps.fixture.outputs.parent }}
         run: node --import tsx scripts/kernel/check-linux-worker-installation.ts "$CLIQ_I1_INSTALLATION" "$CLIQ_I1_FOREIGN_INSTALLATION" "$CLIQ_I1_CGROUP_PARENT"
+      - name: Observe the actual first controller fork in its protected anchor
+        # Test-only independent root tracer; offline campaign prefix, not the
+        # installed signed Supervisor I1 or a durable worker death witness.
+        # Stay outside the disposable cgroup and move only the owned child.
+        env:
+          CLIQ_I1_INSTALLATION: ${{ steps.images.outputs.installation }}
+          CLIQ_I1_CGROUP_PARENT: ${{ steps.fixture.outputs.parent }}
+          CLIQ_I1_STATE_VOLUME: ${{ steps.fixture.outputs.volume }}
+        shell: bash
+        run: |
+          node_path=$(realpath "$(command -v node)")
+          sudo --preserve-env=CLIQ_I1_INSTALLATION,CLIQ_I1_CGROUP_PARENT,CLIQ_I1_STATE_VOLUME \
+            "$node_path" scripts/kernel/qualify-controller-anchor-birth.mjs
       - name: Exercise actual StateStore and native lifecycle
         env:
           CLIQ_I1_INSTALLATION: ${{ steps.images.outputs.installation }}
