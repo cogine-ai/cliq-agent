@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { constants, type BigIntStats } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
 import path from 'node:path';
@@ -388,7 +388,34 @@ type NativeCurrentProcess = Readonly<{
 }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
   captureCurrentProcess(): NativeCurrentProcess;
-  openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot };
+  openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
+  executeInstalledImage?(fd: number, image: readonly bigint[], bootstrap: readonly bigint[], root: readonly bigint[],
+    stateRoot: string, bundleDigest: string, relativePath: string, role: 'keeper' | 'supervisor'): never };
+const nativeBindings = new WeakMap<NativeStateOwner, NativeBinding>();
+
+/** Private installed-producer bridge, not a NativeStateOwner public operation.
+ * Only the producer supplies these checked identities; C borrows the original
+ * FileHandle and independently binds both filesystem images before exec. */
+export function executeHeldInstalledImage(native: NativeStateOwner, file: FileHandle, input: Readonly<{
+  stateRoot: string; root: BigIntStats; bootstrap: BigIntStats; image: BigIntStats;
+  bundleDigest: string; relativePath: string; role: 'keeper' | 'supervisor';
+}>): never {
+  const binding = nativeBindings.get(native);
+  if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed execution requires Linux');
+  if (!binding || typeof binding.executeInstalledImage !== 'function')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed native helper lacks fixed-role execution');
+  const imageTuple = (info: BigIntStats) => [info.dev, info.ino, info.size, info.uid, info.gid, info.mode, info.nlink, info.mtimeNs, info.ctimeNs];
+  try {
+    binding.executeInstalledImage(file.fd, imageTuple(input.image), imageTuple(input.bootstrap),
+      [input.root.dev, input.root.ino, input.root.uid, input.root.gid, input.root.mode],
+      input.stateRoot, input.bundleDigest, input.relativePath, input.role);
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('installed native execution descriptors did not retire', error);
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed native execution refused its bootstrap or selected image', { cause: error });
+  }
+  throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed native execution unexpectedly returned');
+}
 
 /** One canonical projection for bootstrap and native filesystem consumers.
  * This derives bytes only; the caller must hold and validate the native lock. */
@@ -633,6 +660,7 @@ export async function loadHeldStateOwnerImage(file: FileHandle, bundle?: Runtime
     }
   };
   loaded = { digest, implementation: Object.freeze(implementation) };
+  nativeBindings.set(loaded.implementation, binding);
   return loaded.implementation;
 }
 

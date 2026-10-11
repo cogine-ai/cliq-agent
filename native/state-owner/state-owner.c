@@ -515,6 +515,7 @@ static int observe_process(pid_t pid, char token[128]) {
 }
 
 #include "control-socket.c"
+#include "installed-exec.c"
 #include "generation-tree.c"
 #include "source-staging.c"
 #include "worker-reservation.c"
@@ -572,6 +573,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
         {"acquireLock", NULL, acquire_lock, NULL, NULL, NULL, napi_default, NULL},
         {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},
         {"captureCurrentProcess", NULL, capture_current_process, NULL, NULL, NULL, napi_default, NULL},
+        {"executeInstalledImage", NULL, execute_installed_image, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkspaceRoot", NULL, open_workspace_root, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok) return NULL;

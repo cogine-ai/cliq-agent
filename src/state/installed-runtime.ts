@@ -1,6 +1,7 @@
 import { createHash, randomBytes, X509Certificate } from 'node:crypto';
 import { constants, type BigIntStats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, type FileHandle } from 'node:fs/promises';
+import { isMainThread } from 'node:worker_threads';
 
 import { KERNEL_CAS_DIRECTORY } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
@@ -10,7 +11,7 @@ import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, ty
 import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
-import { loadHeldStateOwnerImage, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
+import { executeHeldInstalledImage, loadHeldStateOwnerImage, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
 
 export type HeldInstalledRuntime = Readonly<{
@@ -33,7 +34,9 @@ export type InstalledRuntimeBorrow = Readonly<{
   loadStateOwner(): Promise<NativeStateOwner>;
 }>;
 type InstalledRuntimeBinding = {
+  factory: InstalledRuntime;
   borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T>;
+  execute(role: 'keeper' | 'supervisor'): Promise<never>;
 };
 const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
 
@@ -49,6 +52,9 @@ export function withHeldInstalledRuntime<T>(held: HeldInstalledRuntime,
 type InstalledRuntime = Readonly<{
   installInitial(target: { packageRoot: string; stateRoot: string }): Promise<{ bundleDigest: string; manifestDigest: string }>;
   openSelected(stateRoot: string): Promise<HeldInstalledRuntime>;
+  /** Bootstrap-only terminal operation. No StateOwner/control/worker may have
+   * been acquired; the signed entry point enforces this fixed startup order. */
+  executeSelected(held: HeldInstalledRuntime, role: 'keeper' | 'supervisor'): Promise<never>;
 }>;
 type Directory = { handle: FileHandle; info: BigIntStats; parent?: Directory; name: string; private: boolean };
 type InstalledFile = { handle: FileHandle; info: BigIntStats; parent: Directory; name: string; digest?: string };
@@ -106,6 +112,10 @@ class Scope {
   private closePromise?: Promise<void>;
 
   own(handle: FileHandle): FileHandle { this.handles.add(handle); return handle; }
+  take(handle: FileHandle): FileHandle {
+    if (this.closePromise || !this.handles.delete(handle)) mismatch('installed execution image is not owned by its live scope');
+    return handle;
+  }
   async retire(handle: FileHandle): Promise<void> {
     if (!this.handles.delete(handle)) return;
     try { await handle.close(); }
@@ -376,6 +386,17 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
       typeof key.keyId !== 'string' || !key.keyId || typeof key.publicKeyPem !== 'string' || !key.publicKeyPem) ||
       new Set(releaseKeys.map(key => key.keyId)).size !== releaseKeys.length) mismatch('installed runtime requires fixed unambiguous trusted composition keys');
   const runtime: InstalledRuntime = Object.freeze({
+    executeSelected(this: InstalledRuntime, held: HeldInstalledRuntime, role: 'keeper' | 'supervisor'): Promise<never> {
+      // Reject receiver/brand/factory/primitive role before touching a caller
+      // property, queue, or descriptor. Invalid calls do not consume a handle.
+      if (this !== runtime) mismatch('installed runtime factory receiver is not its trusted instance');
+      const binding = heldInstalledRuntimes.get(held);
+      if (!binding || binding.factory !== runtime) mismatch('installed execution requires this factory\'s genuine held selection');
+      if (role !== 'keeper' && role !== 'supervisor') mismatch('installed execution requires a fixed primitive role');
+      if (!isMainThread) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed execution requires the main thread');
+      healthy();
+      return binding.execute(role);
+    },
     async installInitial(this: InstalledRuntime, target: { packageRoot: string; stateRoot: string }) {
       supportedPlatform();
       if (this !== runtime) mismatch('installed runtime factory receiver is not its trusted instance');
@@ -473,6 +494,17 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           try { await revalidate(); }
           catch (error) { rememberRetirement(error); poisoned = error; throw error; }
         };
+        const loadSelectedNative = async (): Promise<NativeStateOwner> => {
+          await checkedRevalidate();
+          const entry = signed.bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID);
+          const file = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID);
+          if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
+              entry.relativePath !== STATE_OWNER_NATIVE_RELATIVE_PATH || entry.byteCount <= 0 || entry.byteCount > TRUST_BYTES)
+            mismatch('installed StateOwner requires its fixed signed native entry');
+          const native = await loadHeldStateOwnerImage(file.handle, signed.bundle);
+          await checkedRevalidate();
+          return native;
+        };
         const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
           if (closed) mismatch('installed runtime handle is closed');
           const pending = tail.then(operation);
@@ -510,6 +542,48 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           },
         });
         heldInstalledRuntimes.set(selected, {
+          factory: runtime,
+          execute(role): Promise<never> {
+            if (closed) mismatch('installed runtime handle is closed');
+            closed = true; // Consume synchronously; join existing borrows first.
+            const pending = tail.then(async (): Promise<never> => {
+              let image: FileHandle | undefined;
+              let failure: unknown;
+              try {
+                const native = await loadSelectedNative();
+                const file = signed.entries.get(supervisor.entryId)!;
+                // The original FileHandle stays strongly owned by this terminal
+                // operation. C borrows it; no numeric-fd ownership handoff.
+                image = scope.take(file.handle);
+                await scope.close();
+                executeHeldInstalledImage(native, image, {
+                  stateRoot, root: state.info, bootstrap: bootstrap.info,
+                  image: file.info, bundleDigest: signed.bundleDigest,
+                  relativePath: supervisor.relativePath, role,
+                });
+              } catch (error) { rememberRetirement(error); failure = error; }
+              const retireImage = async () => {
+                const owned = image; image = undefined; // Never retry a numeric fd.
+                if (!owned) return;
+                try { await owned.close(); }
+                catch (cause) {
+                  const error = new ResourceRetirementError('installed execution image descriptor did not retire',
+                    new AggregateError([failure, cause]));
+                  rememberRetirement(error); throw error;
+                }
+              };
+              // Pre-terminal refusal still joins every known descriptor. A
+              // retirement failure wins over an ordinary validation error.
+              await joinResourceOperations([Promise.reject(failure), scope.close(), retireImage()] as const);
+              throw new Error('installed terminal execution unexpectedly returned');
+            });
+            tail = pending.then(() => undefined, () => undefined);
+            closePromise = pending.then(() => undefined, error => {
+              if (error instanceof ResourceRetirementError) throw error;
+            });
+            void closePromise.catch(() => undefined);
+            return pending;
+          },
           borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T> {
             return enqueue(async () => {
               await checkedRevalidate();
@@ -527,17 +601,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 },
                 loadStateOwner(): Promise<NativeStateOwner> {
                   if (!active) mismatch('installed runtime borrow has ended');
-                  const pending = (async () => {
-                    await checkedRevalidate();
-                    const entry = signed.bundle.entries.find(entry => entry.entryId === STATE_OWNER_NATIVE_ENTRY_ID);
-                    const file = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID);
-                    if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
-                        entry.relativePath !== STATE_OWNER_NATIVE_RELATIVE_PATH || entry.byteCount <= 0 || entry.byteCount > TRUST_BYTES)
-                      mismatch('installed StateOwner requires its fixed signed native entry');
-                    const native = await loadHeldStateOwnerImage(file.handle, signed.bundle);
-                    await checkedRevalidate();
-                    return native;
-                  })();
+                  const pending = loadSelectedNative();
                   // The borrow owns joining even an unawaited loader. Its sole
                   // file-owning Scope cannot close before this operation ends.
                   const joined = pending.then(() => undefined);

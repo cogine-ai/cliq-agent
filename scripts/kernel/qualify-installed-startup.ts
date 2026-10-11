@@ -222,6 +222,22 @@ try {
   const cwd = path.join(fixture, 'unrelated-cwd'); await mkdir(cwd, { mode: 0o700 });
   report.bundleDigest = installed.bundleDigest; report.manifestDigest = bundle.manifestDigest;
   report.supervisorImageDigest = sha256Bytes(contents[0]!.bytes); report.nativeHelperDigest = sha256Bytes(contents[1]!.bytes);
+  const rootInfo = await lstat(stateRoot, { bigint: true });
+  const rootLocator = `${rootInfo.dev}:${rootInfo.ino}:${rootInfo.uid}`;
+  for (const [args, message] of [
+    [[], 'expected a fixed installed Supervisor role'],
+    [['--installed-supervisor', stateRoot, installed.bundleDigest, rootLocator], 'installed Supervisor differs from the fixed selected image'],
+  ] as const) {
+    // Actual SEA refusals: neither the removed no-argument bootstrap path nor
+    // forged selected-role locators may acquire even the first StateOwner.
+    const refused = spawnSync(bootstrap, [...args], { cwd, env: { PATH: process.env.PATH },
+      encoding: 'utf8', timeout: 30_000, maxBuffer: 128 * 1024 });
+    assert.equal(refused.error, undefined); assert.equal(refused.status, 1); assert.equal(refused.signal, null);
+    const diagnostics = refused.stderr.trim().split('\n').map(line => parseJsonStrict(line)) as { message?: string }[];
+    assert(diagnostics.some(value => value.message === message), 'refusal must come from the actual closed role boundary');
+    await assert.rejects(lstat(path.join(stateRoot, KERNEL_DATABASE_FILENAME)), { code: 'ENOENT' });
+    await assert.rejects(lstat(path.join(stateRoot, 'runtime/state-owner.lock')), { code: 'ENOENT' });
+  }
   supervisor = spawn(bootstrap, ['--bootstrap-supervisor'], { cwd, env: { PATH: process.env.PATH }, stdio: ['ignore', 'ignore', 'pipe'] });
   supervisor.once('error', error => { spawnError = error; });
   supervisor.stderr!.on('data', (bytes: Buffer) => { stderr = (stderr + bytes.toString('utf8')).slice(-128 * 1024); });
@@ -327,8 +343,9 @@ try {
   assert.equal(terminal.terminalReason, 'graceful_release');
   await assert.rejects(lstat(socketPath), { code: 'ENOENT' });
   report.result = { qualified: true, supervisorPid: identity.pid, processStartToken: identity.processStartToken,
-    ownerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId, reconnects: 1 };
-  console.log('Installed SEA image/helper/genesis/read-only startup qualification passed; not a completed I1');
+    ownerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId, reconnects: 1,
+    closedRoleRefusals: 2, actualSelectedPath: selectedImage, actualSelectedDevice: actualInfo.dev.toString(), actualSelectedInode: actualInfo.ino.toString() };
+  console.log('Installed SEA bootstrap-to-selected execution/image/helper/genesis/read-only startup qualification passed; not a completed I1');
 } catch (error) {
   report.error = String((error as Error).stack ?? error).slice(0, 16_384);
   throw error;
