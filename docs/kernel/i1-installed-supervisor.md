@@ -648,8 +648,11 @@ hashes retained in new construction evidence. SQLite file leases retain their
 exact context/generation; native strong references prevent GC from closing
 live resources. The private database disables extensions and uses exclusive
 heap-index WAL. Its initial real transaction creates no invented schema or
-authentication evidence. The signed Linux installed-producer test still needs
-the new CI result; local fixed-carrier/native results are not that qualification.
+authentication evidence. Commit `cfb222ab8756e94b4d327231e5b21158874f9e3a`
+passed all seven jobs in [run 38144227438](https://github.com/cogine-ai/cliq-agent/actions/runs/38144227438),
+including the actual signed Linux installed-producer scope test. That test is
+not the production ordinary endpoint entry or credential/auth qualification;
+local fixed-carrier/native results do not establish Linux qualification.
 Subsequent native uses require both real and effective UID/GID to equal the
 owner captured at acquisition, not merely each other. The privileged identity
 drift negative was not exercised locally. Foreign threads must be refused
@@ -673,6 +676,23 @@ Endpoint event timestamps use real canonical wall samples and channel causal
 ordering, not an invented StateOwner epoch or copied time-fence ledger. They
 do not certify the Run time fence as healthy; credential expiry extension and
 redemption still require their existing high-water authority integration.
+
+The hidden endpoint entry accepts the exact original RFC command core. Its
+owner field is only an assertion checked against the freshly authenticated
+producer's principal, never an identity source. Only `registrationKind='user'`
+is accepted until a real signed bundled-default endpoint producer exists.
+A new register request for a revoked id is refused; the original register
+request still replays its immutable historical operation. Revoked revisions
+retain the original registration source/time and add the separate revocation
+source/time. Once terminal, a later revoke is an `already_revoked` no-op even
+when its expected revision describes the earlier active record. This policy
+does not alter or reactivate an already-admitted binding. Every retained
+operation resolves its historical result revision and first channel closure,
+not merely its hashes or the current latest record. New mutations use actual
+wall samples with live-channel causal checks; no artificial high-water ledger
+is created. The first regression must fail through the actual signed bootstrap
+entry before extending the fixed native role; Linux-only positive behavior is
+not replaced by a local macOS test skip.
 
 SEA bundling, fixed helper locations, preload control and actual-image binding
 must be qualified together. Public admission is not a wrapper around internal
