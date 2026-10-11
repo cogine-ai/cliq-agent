@@ -210,6 +210,13 @@ done:
     /* This is a terminal FD whitelist, not a per-FD successful-close proof.
      * After unsharing/changing the table, never resume Node or run finalizers. */
     if (syscall(SYS_close_range, 3u, UINT_MAX, CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC) != 0) _exit(70);
+    /* Node marks even inherited stdio CLOEXEC. Preserve only the fixed 0..2
+     * streams in this unshared terminal table; otherwise the selected Node
+     * silently replaces them with /dev/null and loses startup diagnostics. */
+    for (int fd = 0; fd <= 2; fd++) {
+        int flags = fcntl(fd, F_GETFD);
+        if (flags < 0 || fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) != 0) _exit(70);
+    }
     syscall(SYS_execveat, image_fd, "", arguments, environment, AT_EMPTY_PATH);
     _exit(70);
 }
