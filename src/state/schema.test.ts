@@ -12,6 +12,32 @@ import {
 } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 
+test('schema version is readable within the same read-only WAL snapshot as owner state', async () => {
+  const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-schema-read-cut-'));
+  const databasePath = path.join(stateRoot, 'kernel.sqlite3');
+  const reader = openSqliteDriver(databasePath);
+  const writer = openSqliteDriver(databasePath);
+  try {
+    applyKernelSchema(reader);
+    reader.exec('PRAGMA journal_mode=WAL');
+    const version = reader.readSnapshot(connection => {
+      // Capture a real database cut before the concurrent writer commits.
+      connection.prepare('SELECT count(*) FROM state_owners').get();
+      assert.equal(readSchemaUserVersion(connection), 4);
+      writer.transaction(other => other.exec('PRAGMA user_version=5'));
+      assert.equal(readSchemaUserVersion(connection), 4);
+      assert.throws(() => connection.exec('PRAGMA user_version=6'), /connection settings are reserved/);
+      return readSchemaUserVersion(connection);
+    });
+    assert.equal(version, 4);
+    assert.equal(reader.readSnapshot(readSchemaUserVersion), 5);
+    assert.equal(readSchemaUserVersion(writer), 5);
+  } finally {
+    writer.close(); reader.close();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test('applyKernelSchema includes pre-admission source inspection in the authority layout', async () => {
   const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-m1-schema-'));
   await chmod(stateRoot, 0o700);

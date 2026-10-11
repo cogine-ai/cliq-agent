@@ -280,7 +280,7 @@ try {
     .map(bytes => ({ artifactRef: sha256Bytes(bytes), byteCount: bytes.byteLength }))
     .sort((left, right) => left.artifactRef < right.artifactRef ? -1 : left.artifactRef > right.artifactRef ? 1 : 0);
   assert.equal(seed.length, 4); assert.equal(namespace.snapshotBoundary, 'generation_birth');
-  assert.deepEqual(namespace.entries, seed); assert.equal(namespace.objectCount, seed.length);
+  assert.deepEqual(canonicalJsonBytes(namespace.entries), canonicalJsonBytes(seed)); assert.equal(namespace.objectCount, seed.length);
   assert.equal(namespace.totalBytes, seed.reduce((total, entry) => total + entry.byteCount, 0));
   assert.equal(namespace.rootDigest, canonicalSha256(seed));
   assert.equal(namespace.manifestDigest, digestOmitting(namespace, 'manifestDigest'));
@@ -299,15 +299,15 @@ try {
     assert.equal(hello.ok, true); assert.equal(hello.result.method, 'control.hello');
     assert.equal(hello.result.protocolVersion, 1);
     assert.equal(hello.result.serverBuild, 'installed-sea-read-qualification');
-    assert.deepEqual(hello.result.controlSchemaRange, { min: 1, max: 1 });
+    assert.deepEqual(canonicalJsonBytes(hello.result.controlSchemaRange), canonicalJsonBytes({ min: 1, max: 1 }));
     assert.equal(hello.result.supervisorInstanceId, owner.supervisorInstanceId);
-    assert.deepEqual(hello.result.activeRuntimeBundle, summary);
-    assert.deepEqual(hello.result.headlessSchemaRange, { min: 1, max: 1 });
+    assert.deepEqual(canonicalJsonBytes(hello.result.activeRuntimeBundle), canonicalJsonBytes(summary));
+    assert.deepEqual(canonicalJsonBytes(hello.result.headlessSchemaRange), canonicalJsonBytes({ min: 1, max: 1 }));
     assert.deepEqual(hello.result.enabledFeatureIds, ['supervisor.status']);
     assert.equal(status.ok, true);
-    assert.deepEqual(status.result, { method: 'supervisor.status', health: 'degraded', supervisorInstanceId: owner.supervisorInstanceId,
+    assert.deepEqual(canonicalJsonBytes(status.result), canonicalJsonBytes({ method: 'supervisor.status', health: 'degraded', supervisorInstanceId: owner.supervisorInstanceId,
       queue: { queuedRuns: 0, runningRuns: 0, capacity: 0 }, stateSchemaVersion: KERNEL_STATE_SCHEMA_VERSION,
-      activeRuntimeBundle: summary, installedRuntimeBundles: [summary], incompatiblePinnedRunCount: 0 });
+      activeRuntimeBundle: summary, installedRuntimeBundles: [summary], incompatiblePinnedRunCount: 0 }));
   }
   assert.deepEqual(inspectOwner(), owner, 'read-only disconnect/reconnect cannot replace the actual owner');
   await stopSupervisor();
