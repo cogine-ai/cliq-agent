@@ -30,3 +30,26 @@ if (process.platform === 'linux') test('signed installed endpoint read works wit
       await assert.rejects(lstat(path.join(stateRoot, relative)), { code: 'ENOENT' });
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });
+
+if (process.platform === 'linux') test('signed endpoint entry rejects malformed ids before creating credential authority files', { timeout: 180000 }, async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-endpoint-invalid-')));
+  try {
+    const signed = await buildInstalledSupervisorPackage(fixture);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    for (const [index, endpointRegistrationId] of ['', 'e\u0301', 'canary\u0000private', '\ud800'].entries()) {
+      const stateRoot = path.join(fixture, `state-${index}`);
+      await runtime.installInitial({ packageRoot: signed.packageRoot, stateRoot });
+      const response = spawnSync(path.join(stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], {
+        input: JSON.stringify({ schemaVersion: 1, kind: 'read', endpointRegistrationId }),
+        encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL', maxBuffer: 65536,
+        env: { PATH: process.env.PATH }, cwd: fixture,
+      });
+      assert.equal(response.error, undefined); assert.equal(response.signal, null);
+      assert.equal(response.status, 1, response.stderr);
+      assert.equal(response.stdout, '');
+      assert.equal(JSON.parse(response.stderr).code, 'INVALID_REQUEST');
+      assert.equal(response.stderr.includes('canary'), false);
+      await assert.rejects(lstat(path.join(stateRoot, 'credentials')), { code: 'ENOENT' });
+    }
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});

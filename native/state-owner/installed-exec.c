@@ -125,7 +125,7 @@ static napi_value execute_installed_image(napi_env env, napi_callback_info info)
         strspn(bundle, "0123456789abcdef") != 64 ||
         !installed_string(env, args[6], relative, sizeof(relative)) || !installed_path(relative, 0) ||
         !installed_string(env, args[7], role, sizeof(role)) ||
-        (strcmp(role, "keeper") != 0 && strcmp(role, "supervisor") != 0))
+        (strcmp(role, "keeper") != 0 && strcmp(role, "supervisor") != 0 && strcmp(role, "endpoint") != 0))
         return installed_exec_error(env, "invalid fixed installed image exec input", 0);
 
     char bootstrap_path[PATH_MAX], target_path[PATH_MAX], target_relative[PATH_MAX], root_locator[96];
@@ -204,7 +204,8 @@ done:
     if (!valid || retirement_failed || atomic_load(&current_process_retirement_failed))
         return installed_exec_error(env, "installed exec final process, root, or held image identity changed", retirement_failed);
 
-    char *const arguments[] = {target_path, strcmp(role, "keeper") == 0 ? "--installed-keeper" : "--installed-supervisor",
+    char *const arguments[] = {target_path, strcmp(role, "keeper") == 0 ? "--installed-keeper" :
+        strcmp(role, "endpoint") == 0 ? "--installed-endpoint" : "--installed-supervisor",
         root_path, bundle, root_locator, NULL};
     char *const environment[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
     /* This is a terminal FD whitelist, not a per-FD successful-close proof.

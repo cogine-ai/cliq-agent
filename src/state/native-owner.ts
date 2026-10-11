@@ -400,7 +400,7 @@ type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): Na
   acquireInstalledAnchor?(stateRoot: string, bundleDigest: string, relativePath: string,
     image: readonly bigint[], root: readonly bigint[], locator: Buffer): NativeInstalledAnchor;
   executeInstalledImage?(fd: number, image: readonly bigint[], bootstrap: readonly bigint[], root: readonly bigint[],
-    stateRoot: string, bundleDigest: string, relativePath: string, role: 'keeper' | 'supervisor'): never };
+    stateRoot: string, bundleDigest: string, relativePath: string, role: 'keeper' | 'supervisor' | 'endpoint'): never };
 const nativeBindings = new WeakMap<NativeStateOwner, NativeBinding>();
 // Byte-identical copies may dlopen as different images with different static
 // VFS state. Credential bootstrap must use the actual first loaded image.
@@ -565,7 +565,7 @@ export function acquireHeldInstalledAnchor(native: NativeStateOwner, input: Read
  * FileHandle and independently binds both filesystem images before exec. */
 export function executeHeldInstalledImage(native: NativeStateOwner, file: FileHandle, input: Readonly<{
   stateRoot: string; root: BigIntStats; bootstrap: BigIntStats; image: BigIntStats;
-  bundleDigest: string; relativePath: string; role: 'keeper' | 'supervisor';
+  bundleDigest: string; relativePath: string; role: 'keeper' | 'supervisor' | 'endpoint';
 }>): never {
   const binding = nativeBindings.get(native);
   if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed execution requires Linux');

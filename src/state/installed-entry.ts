@@ -1,12 +1,15 @@
 import path from 'node:path';
 import { getAsset, isSea } from 'node:sea';
 import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js';
+import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { openInstalledControl, type InstalledControlService } from './installed-control.js';
 import { acquireInstalledAnchor, createInstalledRuntime, initializeInstalledKeeper, withHeldInstalledRuntime,
+  readEndpointAuthority, withCredentialAuthorityLock,
   type HeldInstalledAnchor, type HeldInstalledKeeper, type HeldInstalledRuntime } from './installed-runtime.js';
-import { joinResourceOperations } from './errors.js';
+import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { exactKeys } from '../policy/runtime-authority.js';
 import { openStateStore, type StateStore } from './store.js';
 
 // Hidden Linux SEA entry. Default CLI startup is unchanged. Release roots are
@@ -49,6 +52,26 @@ function report(error: unknown): void {
     code: failure?.code, path: failure?.path, message: failure?.message ?? String(error) }));
 }
 
+/** Hidden secret-free endpoint integration only. Read one bounded strict JSON
+ * request from stdin; neither argv nor input can supply identity or channel. */
+async function readEndpointRequest(): Promise<{ schemaVersion: 1; kind: 'read'; endpointRegistrationId: string }> {
+  const chunks: Buffer[] = [];
+  let byteCount = 0;
+  const timer = setTimeout(() => process.stdin.destroy(new KernelStorageError('INVALID_REQUEST', 'endpoint request input timed out')), 5000);
+  try {
+    for await (const chunk of process.stdin) {
+      const bytes = Buffer.from(chunk); byteCount += bytes.length;
+      if (byteCount > 1_048_576) throw new KernelStorageError('INVALID_REQUEST', 'endpoint request exceeds its byte bound');
+      chunks.push(bytes);
+    }
+    const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) as Record<string, unknown>;
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !exactKeys(value, ['schemaVersion', 'kind', 'endpointRegistrationId']) ||
+        value.schemaVersion !== 1 || value.kind !== 'read' || typeof value.endpointRegistrationId !== 'string')
+      throw new KernelStorageError('INVALID_REQUEST', 'expected a closed secret-free endpoint read request');
+    return value as { schemaVersion: 1; kind: 'read'; endpointRegistrationId: string };
+  } finally { clearTimeout(timer); }
+}
+
 async function start(): Promise<void> {
   if (!isSea() || process.platform !== 'linux') throw new Error('expected the installed Linux SEA');
   const executable = normalizeAbsolutePath(process.execPath);
@@ -58,16 +81,16 @@ async function start(): Promise<void> {
     .decode(getAsset('release-trust-roots.json'))) as ReleaseTrustKey[];
   const runtime = createInstalledRuntime({ releaseKeys });
   const mode = process.argv[2];
-  if (mode === '--bootstrap-supervisor' || mode === '--bootstrap-keeper') {
+  if (mode === '--bootstrap-supervisor' || mode === '--bootstrap-keeper' || mode === '--bootstrap-endpoint') {
     const runtimeRoot = path.dirname(executable);
     if (process.argv.length !== 3 || path.basename(executable) !== 'bootstrap' || path.basename(runtimeRoot) !== 'runtime')
       throw new Error('expected only a fixed role at StateRoot/runtime/bootstrap');
     selected = await runtime.openSelected(path.dirname(runtimeRoot));
     // Bootstrap has no StateOwner, Store, control/worker handles or graceful
     // SIGTERM handler. Exec is terminal, never a running-owner restart API.
-    return runtime.executeSelected(selected, mode === '--bootstrap-keeper' ? 'keeper' : 'supervisor');
+    return runtime.executeSelected(selected, mode === '--bootstrap-keeper' ? 'keeper' : mode === '--bootstrap-endpoint' ? 'endpoint' : 'supervisor');
   }
-  if ((mode !== '--installed-supervisor' && mode !== '--installed-keeper') || process.argv.length !== 6)
+  if ((mode !== '--installed-supervisor' && mode !== '--installed-keeper' && mode !== '--installed-endpoint') || process.argv.length !== 6)
     throw new Error('expected a fixed installed Supervisor role');
   const stateRoot = normalizeAbsolutePath(process.argv[3]!);
   const bundleDigest = process.argv[4]!, rootLocator = process.argv[5]!;
@@ -85,6 +108,13 @@ async function start(): Promise<void> {
     if (`${installed.stateRoot.deviceId}:${installed.stateRoot.fileId}:${installed.stateRoot.ownerUid}` !== rootLocator)
       throw new Error('installed StateRoot differs from the pre-exec root');
   });
+  if (mode === '--installed-endpoint') {
+    const request = await readEndpointRequest();
+    const record = await withCredentialAuthorityLock(selected, async token => readEndpointAuthority(token, request.endpointRegistrationId));
+    await close();
+    console.log(canonicalJsonBytes({ schemaVersion: 1, record }).toString('utf8'));
+    return;
+  }
   if (mode === '--installed-keeper') {
     keeper = await initializeInstalledKeeper(selected);
     // An FD alone does not keep Node alive. This referenced timer observes

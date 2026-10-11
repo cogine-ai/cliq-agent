@@ -7,7 +7,8 @@ import { isSea } from 'node:sea';
 import { DatabaseSync } from 'node:sqlite';
 
 import { KERNEL_CAS_DIRECTORY } from '../config.js';
-import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
+import { decodeEndpointAuthorityRecord, type EndpointAuthorityRecordV1 } from '../kernel/credential-authority.js';
 import { assertArtifactRef, identityHash, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
@@ -35,7 +36,8 @@ export type HeldInstalledAnchor = Readonly<{ assertHeld(): void; close(): void }
  * grant. Its SQL, data descriptors, URI and retirement never escape. */
 export type HeldCredentialAuthorityLock = Readonly<{ assertHeld(): void }>;
 type CredentialBinding = { selected: HeldInstalledRuntime; ownerPrincipalId: string; pid: number; processStartToken: string;
-  native: NativeStateOwner; scope: Readonly<{ generation: string; assertHeld(): void }>; generation: string; active: boolean };
+  native: NativeStateOwner; scope: Readonly<{ generation: string; assertHeld(): void }>; generation: string; active: boolean;
+  database?: DatabaseSync };
 const credentialTokens = new WeakMap<HeldCredentialAuthorityLock, CredentialBinding>();
 
 function checkedCredentialToken(token: HeldCredentialAuthorityLock): CredentialBinding {
@@ -46,6 +48,31 @@ function checkedCredentialToken(token: HeldCredentialAuthorityLock): CredentialB
     throw new KernelStorageError('RECOVERY_REQUIRED', 'credential authority token belongs to another process or generation');
   held.scope.assertHeld();
   return held;
+}
+
+/** Locked same-principal lookup. A caller id never selects a different owner;
+ * neither SQL nor the physical store lifetime escapes the installed producer. */
+export function readEndpointAuthority(token: HeldCredentialAuthorityLock, endpointRegistrationId: string): EndpointAuthorityRecordV1 | null {
+  const held = checkedCredentialToken(token);
+  if (typeof endpointRegistrationId !== 'string' || !endpointRegistrationId ||
+      normalizeCanonicalText(endpointRegistrationId) !== endpointRegistrationId || Buffer.byteLength(endpointRegistrationId) > SMALL_BYTES)
+    throw new KernelStorageError('INVALID_REQUEST', 'endpoint id must be bounded nonempty canonical text');
+  try {
+    const database = held.database!;
+    // A physical scope alone still creates no endpoint schema or business row.
+    if (!database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name='endpoint_records'").get()) return null;
+    const row = database.prepare(`SELECT authority_revision, record_json FROM endpoint_records
+      WHERE owner_principal_id=? AND endpoint_registration_id=? ORDER BY authority_revision DESC LIMIT 1`)
+      .get(held.ownerPrincipalId, endpointRegistrationId);
+    if (!row) return null;
+    if (typeof row.record_json !== 'string' || Buffer.byteLength(row.record_json) > SMALL_BYTES)
+      throw new TypeError('endpoint record bytes are invalid');
+    const record = decodeEndpointAuthorityRecord(checkCanonicalBytes(Buffer.from(row.record_json)));
+    if (record.ownerPrincipalId !== held.ownerPrincipalId || record.endpointRegistrationId !== endpointRegistrationId ||
+        record.authorityRevision !== row.authority_revision) throw new TypeError('endpoint record lookup identity differs');
+    held.scope.assertHeld();
+    return immutableSnapshot(record);
+  } catch (cause) { throw new KernelStorageError('RECOVERY_REQUIRED', 'retained endpoint authority could not be verified', { cause }); }
 }
 
 /** Only the verified installed producer can mint tokens. Keep both this
@@ -77,12 +104,14 @@ async function runHeldCredentialAuthority<T>(input: Readonly<{
     // Initialize the real transaction facility without inventing a schema,
     // endpoint, platform observation or authenticated business authority.
     database.exec('BEGIN IMMEDIATE; COMMIT');
+    binding.database = database;
     token.assertHeld();
     result = await operation(token);
     token.assertHeld();
   } catch (error) { failed = true; failure = error; }
   finally {
     binding.active = false;
+    binding.database = undefined;
     try { database?.close(); }
     catch (error) { throw new ResourceRetirementError('credential authority database did not retire',
       new AggregateError(failed ? [failure, error] : [error])); }
@@ -106,7 +135,7 @@ export type InstalledRuntimeBorrow = Readonly<{
 type InstalledRuntimeBinding = {
   factory: InstalledRuntime;
   borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T>;
-  execute(role: 'keeper' | 'supervisor'): Promise<never>;
+  execute(role: 'keeper' | 'supervisor' | 'endpoint'): Promise<never>;
   initializeKeeper(): Promise<HeldInstalledKeeper>;
   acquireAnchor(): Promise<HeldInstalledAnchor>;
   loadWorkerNative(): Promise<NativeWorkerBinding>;
@@ -184,7 +213,7 @@ type InstalledRuntime = Readonly<{
   openSelected(stateRoot: string): Promise<HeldInstalledRuntime>;
   /** Bootstrap-only terminal operation. No StateOwner/control/worker may have
    * been acquired; the signed entry point enforces this fixed startup order. */
-  executeSelected(held: HeldInstalledRuntime, role: 'keeper' | 'supervisor'): Promise<never>;
+  executeSelected(held: HeldInstalledRuntime, role: 'keeper' | 'supervisor' | 'endpoint'): Promise<never>;
 }>;
 type Directory = { handle: FileHandle; info: BigIntStats; parent?: Directory; name: string; private: boolean };
 type InstalledFile = { handle: FileHandle; info: BigIntStats; parent: Directory; name: string; digest?: string };
@@ -516,13 +545,13 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
       typeof key.keyId !== 'string' || !key.keyId || typeof key.publicKeyPem !== 'string' || !key.publicKeyPem) ||
       new Set(releaseKeys.map(key => key.keyId)).size !== releaseKeys.length) mismatch('installed runtime requires fixed unambiguous trusted composition keys');
   const runtime: InstalledRuntime = Object.freeze({
-    executeSelected(this: InstalledRuntime, held: HeldInstalledRuntime, role: 'keeper' | 'supervisor'): Promise<never> {
+    executeSelected(this: InstalledRuntime, held: HeldInstalledRuntime, role: 'keeper' | 'supervisor' | 'endpoint'): Promise<never> {
       // Reject receiver/brand/factory/primitive role before touching a caller
       // property, queue, or descriptor. Invalid calls do not consume a handle.
       if (this !== runtime) mismatch('installed runtime factory receiver is not its trusted instance');
       const binding = heldInstalledRuntimes.get(held);
       if (!binding || binding.factory !== runtime) mismatch('installed execution requires this factory\'s genuine held selection');
-      if (role !== 'keeper' && role !== 'supervisor') mismatch('installed execution requires a fixed primitive role');
+      if (role !== 'keeper' && role !== 'supervisor' && role !== 'endpoint') mismatch('installed execution requires a fixed primitive role');
       if (!isMainThread) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed execution requires the main thread');
       healthy();
       return binding.execute(role);
