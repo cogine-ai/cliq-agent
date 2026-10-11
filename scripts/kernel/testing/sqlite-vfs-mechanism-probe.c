@@ -42,7 +42,10 @@ static int diagnostic_open(sqlite3_vfs *vfs, sqlite3_filename name,
   if ((flags & SQLITE_OPEN_MAIN_DB) != 0) {
     atomic_fetch_add_explicit(&main_opens, 1, memory_order_relaxed);
   }
-  (void)write(STDERR_FILENO, marker, sizeof(marker) - 1);
+  ssize_t written = write(STDERR_FILENO, marker, sizeof(marker) - 1);
+  if (written != (ssize_t)(sizeof(marker) - 1)) {
+    return SQLITE_IOERR_WRITE;
+  }
   return SQLITE_CANTOPEN;
 }
 

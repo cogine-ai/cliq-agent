@@ -8,14 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { buildSqliteVfsMechanismHelper } from './sqlite-vfs-mechanism-build.js';
 import { prepareSupervisorSeaCarrier } from './supervisor-sea-builder.js';
 
-test('fixed Node engine selects a private VFS with independent SQLite-only, scoped and dual loaders', { timeout: 180000 }, async () => {
+test('fixed Node engine selects a private VFS across loader lifetimes and refuses lost diagnostic evidence', { timeout: 180000 }, async () => {
   const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-vfs-mechanism-test-'));
   try {
     const carrier = await prepareSupervisorSeaCarrier(fixture, process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE);
     const built = await buildSqliteVfsMechanismHelper(fixture, carrier.nodeRoot);
-    for (const mode of ['permanent', 'scoped', 'dual']) {
+    for (const mode of ['permanent', 'scoped', 'dual', 'marker_failure']) {
       const target = path.join(fixture, `never-created-${mode}.sqlite`);
-      const child = spawnSync(carrier.carrier, ['-e', `
+      const child = spawnSync(carrier.carrier, ['--no-warnings', '-e', `
       const assert = require('node:assert/strict');
       const {DatabaseSync} = require('node:sqlite');
       const mode = ${JSON.stringify(mode)};
@@ -41,10 +41,16 @@ test('fixed Node engine selects a private VFS with independent SQLite-only, scop
         assert.equal(native.observe().totalOpens, 0);
       }
       bootstrap.close();
+      // A failed evidence pipe is not a successful diagnostic callback.
+      if (mode === 'marker_failure') require('node:fs').closeSync(2);
       // Only the dual case loads N-API; doing so in either SQLite-only case would mask unload bugs.
       if (mode === 'scoped') assert.throws(() => new DatabaseSync(uri, {allowExtension:false}), /no such vfs/);
-      else assert.throws(() => new DatabaseSync(uri, {allowExtension:false}), error =>
-        error.code === 'ERR_SQLITE_ERROR' && error.errcode === 14 && /unable to open database/.test(error.message));
+      else assert.throws(() => new DatabaseSync(uri, {allowExtension:false}), error => {
+        if (mode === 'marker_failure') require('node:fs').writeSync(1,
+          JSON.stringify({code:error.code, errcode:error.errcode}) + '\\n');
+        return error.code === 'ERR_SQLITE_ERROR' && (mode === 'marker_failure' ? error.errcode === 778
+          : error.errcode === 14 && /unable to open database/.test(error.message));
+      });
       const ordinary = new DatabaseSync(':memory:', {allowExtension:false});
       assert.equal(ordinary.prepare('SELECT 17 AS value').get().value, 17);
       assert.throws(() => ordinary.enableLoadExtension(true), /disabled at database creation/);
@@ -57,8 +63,11 @@ test('fixed Node engine selects a private VFS with independent SQLite-only, scop
       ordinary.close();
     `], { cwd: fixture, encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
       assert.equal(child.error, undefined); assert.equal(child.signal, null);
-      assert.equal(child.status, 0, child.stderr);
-      assert.equal(child.stderr.split('\n').filter(line => line === 'CLIQ_SQLITE_VFS_MECHANISM_OPEN').length, mode === 'scoped' ? 0 : 1);
+      assert.equal(child.status, 0, child.stderr + child.stdout);
+      if (mode === 'marker_failure') assert.deepEqual(JSON.parse(child.stdout), {code:'ERR_SQLITE_ERROR', errcode:778});
+      else assert.equal(child.stdout, '');
+      assert.equal(child.stderr.split('\n').filter(line => line === 'CLIQ_SQLITE_VFS_MECHANISM_OPEN').length,
+        mode === 'scoped' || mode === 'marker_failure' ? 0 : 1);
     }
     assert(!(await readdir(fixture)).some(name => name.startsWith('never-created-')));
   } finally { await rm(fixture, { recursive: true, force: true }); }
