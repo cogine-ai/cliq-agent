@@ -271,8 +271,8 @@ static void retire_controller_leaf(struct controller *controller) {
     }
     if (unlinkat(controller->controller_parent, controller->leaf_name, AT_REMOVEDIR) != 0) {
         /* The kernel refuses a concurrently populated or nonempty directory.
-         * Retaining it is not a whole-worker death or resource-join claim. */
-        if (errno != EBUSY && errno != ENOTEMPTY) controller->retirement_failed = true;
+         * An attempted but incomplete retirement cannot resolve this join. */
+        controller->retirement_failed = true;
         return;
     }
 }

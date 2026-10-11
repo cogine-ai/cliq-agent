@@ -485,7 +485,12 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
           if (await hashHeld(sealed.descriptor(), entry.byteCount, receiver) !== entry.digest) mismatch('sealed installed image differs from its signed digest');
           return sealed;
         } catch (error) { retireImage(sealed); throw error; }
-      })();
+      })().catch(error => {
+        // A transient failure owns no image after cleanup; keep uncertain
+        // retirement observable by closeInstallation instead of erasing it.
+        if (!(error instanceof ResourceRetirementError) && installed.get(entryId) === opening) installed.delete(entryId);
+        throw error;
+      });
       installed.set(entryId, opening);
       return opening;
     }
