@@ -57,7 +57,9 @@ export async function buildSupervisorSeaImage(input: {
   const blob = path.join(input.fixture, `${input.variant}.blob`);
   const configuration = path.join(input.fixture, `${input.variant}-sea.json`);
   await writeFile(configuration, JSON.stringify({ main, output: blob, useSnapshot: false, useCodeCache: false,
-    execArgvExtension: 'none', disableExperimentalSEAWarning: true, assets: input.assets }),
+    // Signed image policy: closing NODE_OPTIONS does not close Node's native
+    // SIGUSR1 debugger route. No caller-provided CLI/environment extension.
+    execArgv: ['--disable-sigusr1'], execArgvExtension: 'none', disableExperimentalSEAWarning: true, assets: input.assets }),
   { flag: 'wx', mode: 0o600 });
   run(input.fixture, input.carrier, ['--experimental-sea-config', configuration]);
   await copyFile(input.carrier, input.executable, constants.COPYFILE_EXCL);

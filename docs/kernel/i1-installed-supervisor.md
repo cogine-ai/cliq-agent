@@ -356,6 +356,15 @@ control authority absent, and reported zero cleanup errors. That RED is an
 implementation prerequisite, not persistent keeper qualification.
 SEA's ignored `NODE_OPTIONS` alone does not exclude `LD_PRELOAD` or alternate
 native library loading. There is no general spawn/import facade.
+The signed SEA recipe also fixes `--disable-sigusr1` with argument extension
+disabled: the actual installed PID otherwise opens Node's native inspector on
+`SIGUSR1`, outside the v1 UDS interface. At `eee85d4`,
+[run 38109331091](https://github.com/cogine-ai/cliq-agent/actions/runs/38109331091)
+retained that exact PID-owned listener/HTTP RED with a same-carrier positive
+control and joined cleanup. Its independent signed keeper startup campaign
+passed under the real user manager, with database/lock/control authority
+absent and zero cleanup errors. This qualifies keeper initialization only,
+not original-pin handoff, continuity across Supervisor restart or complete I1.
 
 The independent anchor service owns this delegated topology:
 
