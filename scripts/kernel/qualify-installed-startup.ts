@@ -1,24 +1,21 @@
 // Real Linux bootstrap-to-selected SEA/read-only startup, not systemd/keeper/worker/I1.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
-import { rootCertificates } from 'node:tls';
-import { fileURLToPath } from 'node:url';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { digestOmitting, sha256Bytes } from '../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
 import type { PlatformProcessIdentityV1, StateOwnerAcquisitionEvidenceV1, StateOwnerRecordV1 } from '../../src/kernel/types.js';
-import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../../src/policy/runtime-authority.js';
 import { createInstalledRuntime } from '../../src/state/installed-runtime.js';
-import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../src/state/native-owner.js';
-import { buildSupervisorSeaImage, prepareSupervisorSeaCarrier,
-  SUPERVISOR_SEA_CARRIER_CHECKSUMS, SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
+import { STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../src/state/native-owner.js';
+import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
+import { SUPERVISOR_SEA_CARRIER_CHECKSUMS, SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
 
 assert.equal(process.platform, 'linux', 'installed startup qualification requires a real Linux runner');
 assert.equal(process.arch, 'x64', 'no installed startup carrier qualified for this architecture');
@@ -29,7 +26,6 @@ if (process.argv[2]) {
 }
 const fixture = await realpath(process.argv[2] ?? await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-startup-')));
 await chmod(fixture, 0o700);
-const repository = fileURLToPath(new URL('../..', import.meta.url));
 const stateRoot = path.join(fixture, 'state');
 const report: { diagnosticOnly: true; scope: string; nodeVersion: string; carrierArchiveDigest: string;
   bundleDigest?: string; manifestDigest?: string; supervisorImageDigest?: string; nativeHelperDigest?: string;
@@ -160,58 +156,8 @@ async function stopSupervisor(): Promise<void> {
 }
 
 try {
-  const { nodeRoot, carrier } = await prepareSupervisorSeaCarrier(fixture);
-  const keys = generateKeyPairSync('ed25519');
-  const releaseKeys = [{ keyId: 'explicit-installed-startup-test-root',
-    publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
-  const rootAsset = path.join(fixture, 'explicit-test-root.json');
-  await writeFile(rootAsset, canonicalJsonBytes(releaseKeys), { flag: 'wx', mode: 0o400 });
-  const packageRoot = path.join(fixture, 'package');
-  await mkdir(packageRoot, { mode: 0o700 });
-  const supervisorFile = await buildSupervisorSeaImage({ fixture, carrier,
-    entryPoint: path.join(repository, 'src/state/testing/installed-supervisor-sea-child.ts'),
-    executable: path.join(packageRoot, 'supervisor'), variant: 'installed-supervisor',
-    assets: { 'explicit-test-root.json': rootAsset } });
-  const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);
-  await mkdir(path.dirname(helper), { recursive: true, mode: 0o700 });
-  run('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread', '-shared', '-fPIC',
-    '-I', path.join(nodeRoot, 'include/node'), path.join(repository, 'native/state-owner/state-owner.c'), '-o', helper]);
-  await chmod(helper, 0o500);
-  const profile = policyProfile();
-  const rootCore = { schemaVersion: 1, format: 'cliq-sandbox-root-profile-v1', protocol: 'cliq-fresh-empty-root-v1',
-    filesystemKind: 'fresh_ephemeral_tmpfs', fixedDirectories: ['/home/cliq', '/tmp', '/work'], persistent: false, networkConfiguration: 'none' };
-  const contents = [
-    { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true, bytes: await readFile(supervisorFile) },
-    { entryId: STATE_OWNER_NATIVE_ENTRY_ID, role: 'platform_helper', relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH,
-      executable: true, bytes: await readFile(helper) },
-    { entryId: 'unused-installed-worker', role: 'worker', relativePath: 'workers/worker', executable: true,
-      bytes: Buffer.from('opaque qualification-only worker; never exec or dlopen\n') },
-    { entryId: 'installed-policy', role: 'policy_engine', relativePath: 'profiles/policy.json', executable: false, bytes: canonicalJsonBytes(profile) },
-    { entryId: 'default_https_trust_store', role: 'trust_store', relativePath: 'profiles/https-trust.pem', executable: false,
-      bytes: Buffer.from(rootCertificates.join('\n')) },
-    { entryId: 'installed-empty-root', role: 'sandbox_root_profile', relativePath: 'profiles/empty-root.json', executable: false,
-      bytes: canonicalJsonBytes({ ...rootCore, profileDigest: canonicalSha256(rootCore) }) },
-  ];
-  for (const entry of contents.slice(2)) {
-    const filename = path.join(packageRoot, entry.relativePath);
-    await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
-    await writeFile(filename, entry.bytes, { flag: 'wx', mode: entry.executable ? 0o500 : 0o400 });
-  }
-  const bundle: RuntimeBundleManifest = {
-    schemaVersion: 1, bundleVersion: 'installed-sea-read-qualification-v1',
-    controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
-    stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
-    entries: contents.map(({ bytes, ...entry }) => ({ ...entry, version: '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
-    structuredArtifacts: [{ kind: 'policy_engine_profile', artifactId: 'installed-policy', rootEntryId: 'installed-policy',
-      artifactRef: canonicalSha256(profile), semanticDigest: profile.profileDigest, memberRefs: [] }],
-    guestToolchainManifestRefs: [], publisherKeyId: releaseKeys[0]!.keyId, manifestDigest: '', signature: '',
-  };
-  const { signature: _signature, manifestDigest: _digest, ...core } = bundle;
-  bundle.manifestDigest = canonicalSha256(core);
-  bundle.signature = sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${bundle.manifestDigest}`), keys.privateKey).toString('base64');
-  verifyRuntimeBundle(bundle, releaseKeys);
+  const { packageRoot, releaseKeys, bundle, contents } = await buildInstalledSupervisorPackage(fixture);
   const manifestBytes = canonicalJsonBytes(bundle);
-  await writeFile(path.join(packageRoot, 'manifest.json'), manifestBytes, { flag: 'wx', mode: 0o400 });
   const installed = await createInstalledRuntime({ releaseKeys }).installInitial({ packageRoot, stateRoot });
   assert.equal(installed.bundleDigest, canonicalSha256(bundle));
   const bootstrap = path.join(stateRoot, 'runtime/bootstrap');
@@ -324,7 +270,7 @@ try {
     assert.equal(hello.protocolVersion, 1); assert.equal(status.protocolVersion, 1);
     assert.equal(hello.ok, true); assert.equal(hello.result.method, 'control.hello');
     assert.equal(hello.result.protocolVersion, 1);
-    assert.equal(hello.result.serverBuild, 'installed-sea-read-qualification');
+    assert.equal(hello.result.serverBuild, 'cliq-installed-v1');
     assert.deepEqual(canonicalJsonBytes(hello.result.controlSchemaRange), canonicalJsonBytes({ min: 1, max: 1 }));
     assert.equal(hello.result.supervisorInstanceId, owner.supervisorInstanceId);
     assert.deepEqual(canonicalJsonBytes(hello.result.activeRuntimeBundle), canonicalJsonBytes(summary));

@@ -81,6 +81,12 @@ jobs:
       - name: Qualify actual installed SEA image and read-only startup
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --import tsx scripts/kernel/qualify-installed-startup.ts "$RUNNER_TEMP/cliq-installed-startup"
+      - name: Qualify actual signed installed keeper under its user manager
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --installed "$probe_node" "$RUNNER_TEMP/cliq-installed-keeper"
       - name: Retain bounded component and lifecycle reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -90,6 +96,7 @@ jobs:
             ${{ runner.temp }}/cliq-supervisor-image/report.json
             ${{ runner.temp }}/cliq-systemd-user/*.json
             ${{ runner.temp }}/cliq-installed-startup/report.json
+            ${{ runner.temp }}/cliq-installed-keeper/*.json
           if-no-files-found: warn
           retention-days: 7
 

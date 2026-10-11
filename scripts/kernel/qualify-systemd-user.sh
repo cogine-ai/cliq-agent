@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# Disposable actual-systemd-user lifecycle diagnostics, NOT installed Supervisor
-# qualification or containment-death authority. Invoke with sudo, an absolute
-# existing Node path and an optional new output directory. Do not run on a host
+# Disposable actual-systemd-user lifecycle diagnostics. --installed instead
+# qualifies only the real signed installed keeper startup, not full I1 or
+# containment-death authority. Invoke with sudo, an absolute existing Node path
+# and an optional new output directory. Do not run on a host
 # without an independently disposable test UID and actual systemd user manager.
 set -Eeuo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 
+probe_campaign_kind=diagnostic
+if [[ ${1:-} = --installed ]]; then probe_campaign_kind=installed; shift; fi
+readonly probe_campaign_kind
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -27,6 +31,15 @@ readonly probe_source="$probe_source_dir/systemd-user-probe.mjs"
 [[ -f "$probe_source" && ! -L "$probe_source" ]] || exit 2
 readonly probe_birth_source="$probe_source_dir/cliq-anchor-birth-probe.c"
 [[ -f "$probe_birth_source" && ! -L "$probe_birth_source" ]] || exit 2
+readonly probe_installed_driver="$probe_source_dir/qualify-installed-keeper.ts"
+[[ "$probe_campaign_kind" != installed || ( -f "$probe_installed_driver" && ! -L "$probe_installed_driver" ) ]] || exit 2
+if [[ "$probe_campaign_kind" = installed ]]; then
+  probe_installed_loader=$("$probe_node" --input-type=module -e \
+    'import { createRequire } from "node:module"; process.stdout.write(createRequire(process.argv[1]).resolve("tsx"));' \
+    "$probe_installed_driver")
+  [[ "$probe_installed_loader" = /* && -f "$probe_installed_loader" ]] || exit 2
+  readonly probe_installed_loader
+fi
 [[ $(stat -f -c '%t' /sys/fs/cgroup) = 63677270 ]] || {
   printf 'actual unified cgroup v2 is required\n' >&2; exit 2;
 }
@@ -45,7 +58,10 @@ else
   chmod 0755 "$probe_output"
 fi
 readonly probe_fixture=$(mktemp -d /var/tmp/cliq-systemd-probe.XXXXXX)
-chmod 0711 "$probe_fixture"
+# Native actual-image inspection read-opens every ancestor. This root-owned
+# stage is readable, never writable, by the disposable UID; private trees below
+# it retain 0700. Do not make the package or StateRoot public to bypass checks.
+chmod 0755 "$probe_fixture"
 readonly probe_fixture_identity=$(stat -c '%d:%i:%u' "$probe_fixture")
 readonly probe_suffix=${probe_fixture##*.}
 readonly probe_username="cliq-probe-${probe_suffix,,}"
@@ -56,6 +72,9 @@ readonly probe_script="$probe_fixture/systemd-user-probe.mjs"
 readonly probe_birth_helper="$probe_fixture/cliq-anchor-birth-probe"
 readonly probe_anchor_unit="cliq-probe-$probe_suffix-anchor.service"
 readonly probe_anchor_directory="$probe_home/probe/anchor"
+readonly probe_installed_keeper_unit="cliq-probe-$probe_suffix-installed-keeper.service"
+readonly probe_installed_supervisor_unit="cliq-probe-$probe_suffix-installed-supervisor.service"
+readonly probe_installed_state="$probe_home/probe/installed-state"
 readonly probe_ledger="$probe_fixture/ownership-ledger.json"
 readonly probe_before="$probe_output/runner-baseline-before.json"
 readonly probe_after="$probe_output/runner-baseline-after.json"
@@ -236,7 +255,7 @@ probe_cleanup() {
   fi
   printf '{"diagnosticOnly":true,"cleanupErrors":%s,"campaignExitStatus":%s}\n' \
     "$probe_cleanup_errors" "$original_status" > "$probe_output/cleanup.json"
-  printf 'OS lifecycle diagnostic output: %s\n' "$probe_output"
+  printf 'Systemd qualification output (%s): %s\n' "$probe_campaign_kind" "$probe_output"
   if [[ "$original_status" = 0 && "$probe_cleanup_errors" != 0 ]]; then original_status=1; fi
   exit "$original_status"
 }
@@ -282,9 +301,9 @@ readonly probe_dropin="$probe_dropin_directory/50-cliq-probe.conf"
 # Root-owned write-once ledger/config. It cannot be replaced through the new
 # user's home; cleanup uses its frozen hash and the in-process exact identities.
 "$probe_node" --input-type=module - "$probe_ledger" "$probe_fixture" "$probe_fixture_identity" \
-  "$probe_username" "$probe_uid" "$probe_gid" "$probe_runner_uid" "$probe_home" "$probe_dropin" "$probe_output" "$probe_birth_helper" <<'NODE'
+  "$probe_username" "$probe_uid" "$probe_gid" "$probe_runner_uid" "$probe_home" "$probe_dropin" "$probe_output" "$probe_birth_helper" "$probe_campaign_kind" <<'NODE'
 import { writeFileSync } from 'node:fs';
-const [file, fixture, fixtureIdentity, username, uidText, gidText, runnerText, home, dropin, output, birthHelper] = process.argv.slice(2);
+const [file, fixture, fixtureIdentity, username, uidText, gidText, runnerText, home, dropin, output, birthHelper, mode] = process.argv.slice(2);
 const uid = Number(uidText), gid = Number(gidText), runnerUid = Number(runnerText);
 const suffix = fixture.slice(fixture.lastIndexOf('.') + 1);
 const scenarios = ['A', 'B'].flatMap(layout => ['empty', 'live'].flatMap(mode => ['manual', 'automatic'].map(restart => {
@@ -295,8 +314,17 @@ const scenarios = ['A', 'B'].flatMap(layout => ['empty', 'live'].flatMap(mode =>
 const anchorUnit = `cliq-probe-${suffix}-anchor.service`;
 const anchor = { unit: anchorUnit, unitFile: `${home}/.config/systemd/user/${anchorUnit}`,
   directory: `${home}/probe/anchor`, readyFile: `${home}/probe/anchor/anchor.json` };
+const installed = mode === 'installed' ? {
+  buildFixture: `${fixture}/installed-package-build`, packageRoot: `${fixture}/installed-package-build/package`,
+  stateRoot: `${home}/probe/installed-state`, releaseKeysFile: `${fixture}/installed-release-keys.json`,
+  keeperUnit: `cliq-probe-${suffix}-installed-keeper.service`,
+  supervisorUnit: `cliq-probe-${suffix}-installed-supervisor.service`,
+  keeperUnitFile: `${home}/.config/systemd/user/cliq-probe-${suffix}-installed-keeper.service`,
+  supervisorUnitFile: `${home}/.config/systemd/user/cliq-probe-${suffix}-installed-supervisor.service`,
+  reportFile: `${output}/report.json`,
+} : undefined;
 writeFileSync(file, JSON.stringify({ diagnosticOnly: true, fixture, fixtureIdentity, username,
-  uid, gid, runnerUid, home, dropin, birthHelper, anchor, scenarios, reportFile: `${output}/systemd-user-probe.json` }, null, 2) + '\n',
+  uid, gid, runnerUid, home, dropin, birthHelper, anchor, scenarios, installed, reportFile: `${output}/systemd-user-probe.json` }, null, 2) + '\n',
   { flag: 'wx', mode: 0o444 });
 NODE
 probe_ledger_digest=$(sha256sum "$probe_ledger" | cut -d' ' -f1)
@@ -312,11 +340,14 @@ useradd --create-home --no-user-group --no-log-init -K "MAIL_DIR=$probe_mail" --
 probe_created=1
 [[ $(id -u "$probe_username") = "$probe_uid" && $(id -g "$probe_username") = "$probe_gid" ]] || exit 1
 install -o root -g root -m 0444 -- "$probe_source" "$probe_script"
+if [[ "$probe_campaign_kind" = diagnostic ]]; then
 cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_birth_source" -o "$probe_birth_helper"
 chmod 0555 "$probe_birth_helper"
+fi
 mkdir -m 0755 -- "$probe_home/.config" "$probe_home/.config/systemd" "$probe_home/.config/systemd/user"
 mkdir -m 0700 -- "$probe_home/probe"
 chown "$probe_uid:$probe_gid" "$probe_home/probe"
+if [[ "$probe_campaign_kind" = diagnostic ]]; then
 for probe_layout in A B; do
   if [[ "$probe_layout" = B ]]; then probe_prefix=anchor-; else probe_prefix=''; fi
   for probe_mode in empty live; do
@@ -347,6 +378,33 @@ chown "$probe_uid:$probe_gid" "$probe_anchor_directory"
 printf '[Service]\nType=exec\nExecStart=%s %s anchor %s %s\nDelegate=cpu memory pids\nKillMode=control-group\nRestart=no\nTimeoutStopSec=2s\nEnvironment=NODE_OPTIONS=\n' \
   "$probe_node" "$probe_script" "$probe_anchor_directory" "$probe_anchor_unit" > "$probe_home/.config/systemd/user/$probe_anchor_unit"
 chmod 0444 "$probe_home/.config/systemd/user/$probe_anchor_unit"
+else
+  # Registered in the immutable ledger before the account or either unit was
+  # created. The Supervisor is not started in this first keeper-only tracer.
+  probe_units+=("$probe_installed_keeper_unit" "$probe_installed_supervisor_unit")
+  for probe_installed_role in keeper supervisor; do
+    if [[ "$probe_installed_role" = keeper ]]; then
+      probe_unit=$probe_installed_keeper_unit
+    else
+      probe_unit=$probe_installed_supervisor_unit
+    fi
+    {
+      printf '[Unit]\nStartLimitIntervalSec=30s\nStartLimitBurst=2\n'
+      if [[ "$probe_installed_role" = supervisor ]]; then
+        printf 'Requires=%s\nAfter=%s\n' "$probe_installed_keeper_unit" "$probe_installed_keeper_unit"
+      fi
+      printf '[Service]\nType=exec\nExecStart=%s/runtime/bootstrap --bootstrap-%s\n' \
+        "$probe_installed_state" "$probe_installed_role"
+      # Remove known loading inputs for the fixed glibc/Node/OpenSSL carrier
+      # before ELF startup. Unit text is not hostile-manager qualification;
+      # actual injection with positive controls remains required.
+      # An env -i executable wrapper would itself start with those routes open.
+      printf 'UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG LD_DEBUG_OUTPUT LD_PROFILE LD_PROFILE_OUTPUT LD_ORIGIN_PATH LD_TRACE_LOADED_OBJECTS LD_TRACE_PRELINKING LD_WARN LD_VERBOSE LD_BIND_NOW LD_BIND_NOT LD_DYNAMIC_WEAK LD_HWCAP_MASK LD_SHOW_AUXV LD_USE_LOAD_BIAS LD_ASSUME_KERNEL GCONV_PATH LOCPATH GLIBC_TUNABLES NODE_COMPILE_CACHE NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS NODE_ICU_DATA NODE_REDIRECT_WARNINGS NODE_REPL_EXTERNAL_MODULE NODE_V8_COVERAGE OPENSSL_CONF OPENSSL_CONF_INCLUDE OPENSSL_MODULES OPENSSL_ENGINES SSL_CERT_DIR SSL_CERT_FILE\n'
+      printf 'Environment=PATH=/usr/bin:/bin LANG=C LC_ALL=C\nDelegate=cpu memory pids\nKillMode=control-group\nRestart=no\nTimeoutStopSec=2s\n'
+    } > "$probe_home/.config/systemd/user/$probe_unit"
+    chmod 0444 "$probe_home/.config/systemd/user/$probe_unit"
+  done
+fi
 readonly probe_units
 mkdir -m 0755 -- "$probe_dropin_directory"
 probe_dropin_created=1
@@ -371,4 +429,8 @@ done
 [[ -S "/run/user/$probe_uid/bus" ]] || {
   printf 'actual user bus unavailable; no dbus-run-session/child fallback\n' >&2; exit 1;
 }
-"$probe_node" "$probe_script" campaign "$probe_ledger"
+if [[ "$probe_campaign_kind" = diagnostic ]]; then
+  "$probe_node" "$probe_script" campaign "$probe_ledger"
+else
+  "$probe_node" --import "$probe_installed_loader" "$probe_installed_driver" --campaign "$probe_ledger"
+fi

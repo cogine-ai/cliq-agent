@@ -1,15 +1,15 @@
 import path from 'node:path';
 import { getAsset, isSea } from 'node:sea';
-import { assertArtifactRef, normalizeAbsolutePath } from '../../kernel/identity.js';
-import { parseJsonStrict } from '../../kernel/json.js';
-import type { ReleaseTrustKey } from '../../policy/runtime-authority.js';
-import { openInstalledControl, type InstalledControlService } from '../installed-control.js';
-import { createInstalledRuntime, withHeldInstalledRuntime, type HeldInstalledRuntime } from '../installed-runtime.js';
-import { openStateStore, type StateStore } from '../store.js';
+import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js';
+import { parseJsonStrict } from '../kernel/json.js';
+import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
+import { openInstalledControl, type InstalledControlService } from './installed-control.js';
+import { createInstalledRuntime, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { openStateStore, type StateStore } from './store.js';
 
-// Test composition of actual bootstrap/selected exec/Store/control only. It
-// does not claim systemd, keeper, worker or complete I1.
-// The detached signed manifest is read only by the real installed producer.
+// Hidden Linux SEA entry. Default CLI startup is unchanged. Release roots are
+// embedded at image construction, never selected by argv/environment/control.
+// Admission and execution are not enabled by this read-only composition.
 let selected: HeldInstalledRuntime | undefined;
 let store: StateStore | undefined;
 let service: InstalledControlService | undefined;
@@ -32,10 +32,10 @@ function report(error: unknown): void {
 async function start(): Promise<void> {
   if (!isSea() || process.platform !== 'linux') throw new Error('expected the installed Linux SEA');
   const executable = normalizeAbsolutePath(process.execPath);
-  // This ephemeral public test root is part of the signed application image.
+  // These fixed release roots are part of the signed application image.
   // No argv, environment, client or detached manifest can replace it.
   const releaseKeys = parseJsonStrict(new TextDecoder('utf-8', { fatal: true })
-    .decode(getAsset('explicit-test-root.json'))) as ReleaseTrustKey[];
+    .decode(getAsset('release-trust-roots.json'))) as ReleaseTrustKey[];
   const runtime = createInstalledRuntime({ releaseKeys });
   const mode = process.argv[2];
   if (mode === '--bootstrap-supervisor' || mode === '--bootstrap-keeper') {
@@ -68,7 +68,7 @@ async function start(): Promise<void> {
   // Only this selected mode acquires authority. Genesis borrows these newly
   // held, verified descriptors, never the retired bootstrap's historical FDs.
   store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys }, selected);
-  service = openInstalledControl(store, { serverBuild: 'installed-sea-read-qualification' }, report);
+  service = openInstalledControl(store, { serverBuild: 'cliq-installed-v1' }, report);
 }
 
 const starting = start();

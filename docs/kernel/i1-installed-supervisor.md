@@ -311,6 +311,18 @@ both Linux Node matrix jobs still failed the new installed-genesis positive
 case. These are component results, not first-fork-stop, installed SEA startup,
 persistent signed keeper, or complete I1 qualification.
 
+At `6512543`, [run 38102710091](https://github.com/cogine-ai/cliq-agent/actions/runs/38102710091)
+passed the actual bootstrap-to-selected SEA inode exec, signed held helper,
+`fresh_installed` genesis, read-only UDS/reconnect and graceful release, plus
+32 focused Linux boundaries. Its independent OS tracer observed the first
+native controller clone in the protected leaf before user-space setup, joined
+the tracer before same-lifetime HELLO/image verification, and retired the
+controller; all 25 existing real worker campaign cases and scoped cleanup also
+passed. These remain separate component qualifications: the SEA used the test
+composition, while the first-fork campaign used its explicit offline prefix.
+Neither proves a persistent signed keeper/systemd installed execution chain,
+public admission, a provider request or complete I1.
+
 Publish immutable side-by-side directories under
 `runtime/bundles/<bundleDigest>/`, where `bundleDigest` is the complete signed
 manifest's ArtifactRef, not its distinct self-omitting `manifestDigest`.
