@@ -1,8 +1,8 @@
-// Real Linux SEA installation/read-only startup, not systemd/keeper/worker/I1.
+// Real Linux bootstrap-to-selected SEA/read-only startup, not systemd/keeper/worker/I1.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -34,7 +34,7 @@ const stateRoot = path.join(fixture, 'state');
 const report: { diagnosticOnly: true; scope: string; nodeVersion: string; carrierArchiveDigest: string;
   bundleDigest?: string; manifestDigest?: string; supervisorImageDigest?: string; nativeHelperDigest?: string;
   result?: unknown; startupRefusal?: unknown; cleanup?: unknown; error?: string } = {
-  diagnosticOnly: true, scope: 'actual SEA installation, image/helper/genesis and read-only control startup only; not systemd/keeper/worker/admission/model/I1',
+  diagnosticOnly: true, scope: 'actual SEA bootstrap-to-selected execution, image/helper/genesis and read-only control startup only; not systemd/keeper/worker/admission/model/I1',
   nodeVersion: SUPERVISOR_SEA_NODE_VERSION,
   carrierArchiveDigest: SUPERVISOR_SEA_CARRIER_CHECKSUMS['linux-x64']!,
 };
@@ -222,7 +222,7 @@ try {
   const cwd = path.join(fixture, 'unrelated-cwd'); await mkdir(cwd, { mode: 0o700 });
   report.bundleDigest = installed.bundleDigest; report.manifestDigest = bundle.manifestDigest;
   report.supervisorImageDigest = sha256Bytes(contents[0]!.bytes); report.nativeHelperDigest = sha256Bytes(contents[1]!.bytes);
-  supervisor = spawn(bootstrap, [], { cwd, env: { PATH: process.env.PATH }, stdio: ['ignore', 'ignore', 'pipe'] });
+  supervisor = spawn(bootstrap, ['--bootstrap-supervisor'], { cwd, env: { PATH: process.env.PATH }, stdio: ['ignore', 'ignore', 'pipe'] });
   supervisor.once('error', error => { spawnError = error; });
   supervisor.stderr!.on('data', (bytes: Buffer) => { stderr = (stderr + bytes.toString('utf8')).slice(-128 * 1024); });
   closed = new Promise(resolve => supervisor!.once('close', (code, signal) => resolve({ code, signal })));
@@ -234,12 +234,12 @@ try {
       const exit = await closed;
       const diagnostics = stderr.split('\n').flatMap(line => { try { return [parseJsonStrict(line)]; } catch { return []; } });
       const refusal = diagnostics.find(value => value !== null && typeof value === 'object'
-        && (value as { code?: string }).code === 'ENOENT') as { path?: string } | undefined;
-      report.startupRefusal = { ...exit, stderr, intendedHelperPath: wrongHelper };
+        && (value as { message?: string }).message === 'expected only the installed Linux SEA bootstrap, without arguments');
+      report.startupRefusal = { ...exit, stderr };
       if (refusal) {
-        assert.equal(refusal.path, wrongHelper, 'RED must be the actual fixed SEA helper lookup, not a fixture failure');
+        assert.deepEqual(exit, { code: 1, signal: null }, 'RED must be the real unsupported bootstrap mode, not a fixture failure');
         await assert.rejects(lstat(path.join(stateRoot, KERNEL_DATABASE_FILENAME)), { code: 'ENOENT' });
-        report.startupRefusal = { ...exit, intendedHelperPath: wrongHelper, authorityDatabaseAbsent: true, stderr };
+        report.startupRefusal = { ...exit, cause: 'unsupported bootstrap-supervisor mode', authorityDatabaseAbsent: true, stderr };
       }
       throw new Error(`installed SEA startup exited before actual UDS readiness: ${JSON.stringify(report.startupRefusal)}`);
     }
@@ -260,6 +260,16 @@ try {
   const procFields = procStat.slice(procStat.lastIndexOf(')') + 2).trim().split(/\s+/u);
   assert.notEqual(procFields[0], 'Z'); assert.match(procFields[19]!, /^[0-9]+$/u);
   assert.equal(identity.processStartToken, `linux-proc-start-ticks:${procFields[19]}`);
+  const selectedImage = path.join(stateRoot, 'runtime/bundles', installed.bundleDigest, 'supervisor');
+  const selectedInfo = await lstat(selectedImage, { bigint: true });
+  const bootstrapInfo = await lstat(bootstrap, { bigint: true });
+  const actualImage = `/proc/${supervisor.pid}/exe`;
+  assert.equal(await readlink(actualImage), selectedImage, 'actual process must execute the immutable selected image, not bootstrap');
+  const actualInfo = await stat(actualImage, { bigint: true });
+  for (const key of ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const)
+    assert.equal(actualInfo[key], selectedInfo[key]);
+  assert(actualInfo.dev !== bootstrapInfo.dev || actualInfo.ino !== bootstrapInfo.ino,
+    'identical signed bytes do not prove that bootstrap actually executed the selected inode');
   assert.equal(identity.executableImageDigest, createHash('sha256').update(await readFile(`/proc/${supervisor.pid}/exe`)).digest('hex'));
   assert.equal(identity.executableImageDigest, report.supervisorImageDigest);
   const acquisition = await casJson<StateOwnerAcquisitionEvidenceV1>(owner.acquisitionEvidenceRef);
