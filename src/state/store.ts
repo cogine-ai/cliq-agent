@@ -370,6 +370,25 @@ async function readStateOwnerProcess(artifacts: ArtifactCatalog, owner: StateOwn
 const unretiredStateStoreOpenings = new Set<Readonly<{
   lock: HeldStateOwnerLock; driver: SqliteDriver | undefined; failure: ResourceRetirementError;
 }>>();
+
+function failStateStoreOpening(lock: HeldStateOwnerLock, driver: SqliteDriver | undefined, error: unknown): never {
+  let failure = error;
+  if (!(error instanceof ResourceRetirementError)) {
+    try {
+      // SQLite must close before the flock; a failed close proves neither
+      // database retirement nor permission to release the actual owner.
+      driver?.close();
+      lock.close();
+    } catch (cause) {
+      failure = new ResourceRetirementError('StateStore opening resources did not retire',
+        new AggregateError([error, cause]));
+    }
+  }
+  if (failure instanceof ResourceRetirementError)
+    unretiredStateStoreOpenings.add(Object.freeze({ lock, driver, failure }));
+  throw failure;
+}
+
 // A rejected close can outlive the caller too. GC is not a successful join;
 // release this strong owner only after the exact close actually succeeds.
 const unretiredStateStoreClosings = new Set<StateStore>();
@@ -495,11 +514,34 @@ export class StateStore {
   static async open(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority,
     installedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor): Promise<StateStore> {
     if (installedAnchor !== undefined) withInstalledWorkerRoot(installedRuntime!, installedAnchor, () => {});
-    if (installedRuntime !== undefined) {
-      return withHeldInstalledRuntime(installedRuntime,
-        installed => StateStore.openCore(stateRoot, runtimeAuthority, installed, installedRuntime, installedAnchor));
+    let opening: StateStore | undefined;
+    try {
+      const store = installedRuntime !== undefined
+        ? await withHeldInstalledRuntime(installedRuntime, async installed => {
+          // Own the constructed resources before the borrow joins its tracked
+          // checks: that join can reject after openCore has returned.
+          opening = await StateStore.openCore(stateRoot, runtimeAuthority, installed, installedRuntime, installedAnchor);
+          return opening;
+        }) : await StateStore.openCore(stateRoot, runtimeAuthority);
+      opening = store;
+      // Worker loaders enqueue on the same installed handle. Join the initial
+      // borrow first, then retire old native resources before publishing Store.
+      const authority = store.runtimeAuthority;
+      await retireAbandonedPreactivations(store.driver, store.artifacts, store.owner,
+        authority?.execution && { ...authority.execution,
+          runtimeAuthority: { bundle: authority.bundle, releaseKeys: authority.releaseKeys } },
+        store.installedRuntime, store.installedAnchor);
+      return store;
+    } catch (error) {
+      if (opening !== undefined) {
+        // A rejected borrow has not established retirement of retained native
+        // resources. Validation failure is not permission to release the flock.
+        failStateStoreOpening(opening.owner.filesystem, opening.driver,
+          error instanceof ResourceRetirementError ? error
+            : new ResourceRetirementError('StateStore opening validation did not complete retirement', error));
+      }
+      throw error; // openCore already owns cleanup when no Store was constructed.
     }
-    return StateStore.openCore(stateRoot, runtimeAuthority);
   }
 
   private static async openCore(stateRoot: string, runtimeAuthority?: StateStoreRuntimeAuthority,
@@ -573,27 +615,9 @@ export class StateStore {
       await retireAbandonedSourceInspections(driver, artifacts, ownerContext,
         runtimeAuthority?.sourceInspection && { bundle: runtimeAuthority.bundle,
           releaseKeys: runtimeAuthority.releaseKeys, sandboxProfile: runtimeAuthority.sourceInspection.sandboxProfile });
-      await retireAbandonedPreactivations(driver, artifacts, ownerContext,
-        runtimeAuthority?.execution && { ...runtimeAuthority.execution,
-          runtimeAuthority: { bundle: runtimeAuthority.bundle, releaseKeys: runtimeAuthority.releaseKeys } },
-        installedRuntime, installedAnchor);
       return new StateStore(stateRoot, driver, artifacts, ownerContext, runtimeAuthority, installedRuntime, installedAnchor);
     } catch (error) {
-      let failure = error;
-      if (!(error instanceof ResourceRetirementError)) {
-        try {
-          // A failed SQLite close must retain the flock, rather than free the
-          // native owner while database resource retirement is unproven.
-          driver?.close();
-          heldLock.close();
-        } catch (cause) {
-          failure = new ResourceRetirementError('StateStore opening resources did not retire',
-            new AggregateError([error, cause]));
-        }
-      }
-      if (failure instanceof ResourceRetirementError)
-        unretiredStateStoreOpenings.add(Object.freeze({ lock: heldLock, driver, failure }));
-      throw failure;
+      failStateStoreOpening(heldLock, driver, error);
     }
   }
 

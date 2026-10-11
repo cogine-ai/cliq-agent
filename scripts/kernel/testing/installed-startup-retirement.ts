@@ -157,8 +157,11 @@ export async function qualifyInstalledStartupRetirement(input: {
     const joinedReport: Record<string, unknown> = {}; input.report.join = joinedReport;
     await input.stopAndJoin(joinedReport); joined = true;
     input.report.historyAfterJoin = inspectInstalledOwnerHistory(input.stateRoot);
+    const lifetimeAvailable = /^[a-f0-9]{32}$/u.test(captured.InvocationID ?? '') &&
+      /^[1-9][0-9]*$/u.test(captured.ExecMainPID ?? '');
+    input.report.journalObservation = lifetimeAvailable ? 'exact_lifetime_query' : 'not_queried_missing_lifetime_identity';
     let records: Record<string, unknown>[] = [], exact = false;
-    for (let attempt = 0; attempt < 20 && !exact; attempt++) {
+    for (let attempt = 0; lifetimeAvailable && attempt < 20 && !exact; attempt++) {
       records = input.journal(captured.InvocationID!, captured.ExecMainPID!);
       exact = records.some(record => {
         if (record._UID !== String(input.uid) || record._PID !== captured.ExecMainPID ||

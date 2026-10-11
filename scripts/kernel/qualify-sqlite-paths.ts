@@ -107,7 +107,7 @@ async function buildDiagnostic(ledger: Ledger) {
   const built = await build({ entryPoints: [fileURLToPath(new URL('./testing/sqlite-path-probe.ts', import.meta.url))],
     outfile: bundle, bundle: true, format: 'cjs', platform: 'node', target: 'node24.21', metafile: true,
     plugins: [{ name: 'unique-diagnostic-preopen-barrier', setup(builder) {
-      builder.onLoad({ filter: /sqlite-driver\.ts$/u }, async input => {
+      builder.onLoad({ filter: /sqlite-driver\.ts$/ }, async input => {
         assert.equal(input.path, sourcePath); assert.equal(await readFile(input.path, 'utf8'), original);
         matches++; return { contents: transformed, loader: 'ts', resolveDir: path.dirname(sourcePath) };
       });
