@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Disposable actual-systemd-user lifecycle diagnostics. --installed instead
 # qualifies the real signed keeper/Supervisor owner chain, not full I1 or
-# containment-death authority. --secrets observes the actual platform prerequisite.
+# containment-death authority. --secrets observes credential-platform and SQLite
+# path prerequisites without qualifying production credential authority.
 # Invoke with sudo, an absolute existing Node path
 # and an optional new output directory. Do not run on a host
 # without an independently disposable test UID and actual systemd user manager.
@@ -40,11 +41,13 @@ readonly probe_installed_driver="$probe_source_dir/qualify-installed-keeper.ts"
 [[ ( "$probe_campaign_kind" != installed && "$probe_campaign_kind" != retirement ) || ( -f "$probe_installed_driver" && ! -L "$probe_installed_driver" ) ]] || exit 2
 readonly probe_secret_driver="$probe_source_dir/qualify-secret-service.ts"
 readonly probe_secret_source="$probe_source_dir/cliq-secret-service-probe.c"
+readonly probe_sqlite_driver="$probe_source_dir/qualify-sqlite-paths.ts"
 if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement || "$probe_campaign_kind" = secrets ]]; then
   probe_typescript_driver=$probe_installed_driver
   if [[ "$probe_campaign_kind" = secrets ]]; then
     probe_typescript_driver=$probe_secret_driver
     [[ -f "$probe_secret_driver" && ! -L "$probe_secret_driver" && -f "$probe_secret_source" && ! -L "$probe_secret_source" ]] || exit 2
+    [[ -f "$probe_sqlite_driver" && ! -L "$probe_sqlite_driver" ]] || exit 2
   fi
   probe_installed_loader=$("$probe_node" --input-type=module -e \
     'import { createRequire } from "node:module"; process.stdout.write(createRequire(process.argv[1]).resolve("tsx"));' \
@@ -346,8 +349,13 @@ const secretService = mode === 'secrets' ? {
   generation: randomBytes(32).toString('hex'),
   reportFile: `${output}/secret-service.json`,
 } : undefined;
+const sqlitePaths = mode === 'secrets' ? {
+  buildFixture: `${fixture}/sqlite-path-build`, caseRoot: `${home}/probe/sqlite-path-cases`,
+  reportFile: `${output}/sqlite-paths.json`,
+} : undefined;
 writeFileSync(file, JSON.stringify({ diagnosticOnly: true, fixture, fixtureIdentity, username,
-  uid, gid, runnerUid, home, dropin, birthHelper, anchor, scenarios, installed, secretService, reportFile: `${output}/systemd-user-probe.json` }, null, 2) + '\n',
+  uid, gid, runnerUid, home, dropin, birthHelper, anchor, scenarios, installed, secretService, sqlitePaths,
+  reportFile: `${output}/systemd-user-probe.json` }, null, 2) + '\n',
   { flag: 'wx', mode: 0o444 });
 NODE
 probe_ledger_digest=$(sha256sum "$probe_ledger" | cut -d' ' -f1)
@@ -358,7 +366,7 @@ mkdir -m 0755 -- "$probe_skel"
 # CREATE_MAIL_SPOOL is a useradd default, not a -K login.defs option. Keep
 # any enabled spool inside the already ledger-scoped disposable fixture.
 mkdir -m 0700 -- "$probe_mail"
-useradd --create-home --no-user-group --no-log-init -K "MAIL_DIR=$probe_mail" --uid "$probe_uid" --gid "$probe_gid" \
+useradd --create-home --no-user-group --no-log-init -K HOME_MODE=0700 -K "MAIL_DIR=$probe_mail" --uid "$probe_uid" --gid "$probe_gid" \
   --skel "$probe_skel" --home-dir "$probe_home" --shell /usr/sbin/nologin "$probe_username"
 probe_created=1
 [[ $(id -u "$probe_username") = "$probe_uid" && $(id -g "$probe_username") = "$probe_gid" ]] || exit 1
@@ -368,8 +376,8 @@ cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_birth_source" -o "$probe_birth_hel
 chmod 0555 "$probe_birth_helper"
 fi
 if [[ "$probe_campaign_kind" = secrets ]]; then
-  [[ -x /usr/bin/gnome-keyring-daemon && -x /usr/bin/busctl ]] || {
-    printf 'actual GNOME Keyring daemon and user-bus inspection are required\n' >&2; exit 1;
+  [[ -x /usr/bin/gnome-keyring-daemon && -x /usr/bin/busctl && -x /usr/bin/strace ]] || {
+    printf 'actual GNOME Keyring daemon, user-bus inspection and SQLite tracer are required\n' >&2; exit 1;
   }
   unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR
   read -r -a probe_gio_flags <<< "$(pkg-config --cflags --libs gio-2.0)"
@@ -473,4 +481,5 @@ elif [[ "$probe_campaign_kind" = retirement ]]; then
   "$probe_node" --import "$probe_installed_loader" "$probe_installed_driver" --retirement-refusal "$probe_ledger"
 else
   "$probe_node" --import "$probe_installed_loader" "$probe_secret_driver" --campaign "$probe_ledger"
+  "$probe_node" --import "$probe_installed_loader" "$probe_sqlite_driver" --campaign "$probe_ledger"
 fi

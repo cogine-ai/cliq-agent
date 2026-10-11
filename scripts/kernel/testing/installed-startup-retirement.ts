@@ -17,6 +17,7 @@ import { inspectInstalledOwnerHistory } from './installed-read-control.js';
 import { qualifyInstalledOwnerLinks, readInstalledCasJson } from './installed-owner-history.js';
 
 type CommandResult = { status: number | null; stdout: string; stderr: string };
+const equalJson = (actual: unknown, expected: unknown) => assert.deepEqual(canonicalJsonBytes(actual), canonicalJsonBytes(expected));
 
 /** Runs as the exact disposable UID. These deliberately invalid, orphaned
  * rows are test fixture bytes, never a repository mutation/admission receipt.
@@ -129,8 +130,8 @@ export async function qualifyInstalledStartupRetirement(input: {
   const observation = parseJsonStrict(prepared.stdout.trim()) as Record<string, unknown>;
   assert.equal(observation.scope, 'invalid-orphaned-retained-startup-fixture');
   assert.equal(observation.admittedRuns, 0); assert.equal(observation.readyEvidence, false); assert.equal(observation.deathEvidence, false);
-  assert.equal(observation.planRef, fixture.planRef); assert.deepEqual(observation.launch, fixture.launch);
-  assert.deepEqual(await readInstalledCasJson({ stateRoot: input.stateRoot, uid: input.uid }, fixture.planRef),
+  assert.equal(observation.planRef, fixture.planRef); equalJson(observation.launch, fixture.launch);
+  equalJson(await readInstalledCasJson({ stateRoot: input.stateRoot, uid: input.uid }, fixture.planRef),
     decodeWorkerContainmentPlan(JSON.parse(Buffer.from(fixture.planBytes, 'base64').toString('utf8'))));
   const socket = path.join(input.stateRoot, 'runtime/control-v1.sock');
   await assert.rejects(lstat(socket), { code: 'ENOENT' });
@@ -190,7 +191,7 @@ export async function qualifyInstalledStartupRetirement(input: {
       assert.equal(rows.length, 1);
       assert.equal(rows[0]!.launch_id, fixture.launch.launchId); assert.equal(rows[0]!.run_id, fixture.launch.runId);
       assert.equal(rows[0]!.phase, 'reserved'); assert.equal(rows[0]!.retired_at, null);
-      assert.deepEqual(parseJsonStrict(rows[0]!.row_json as string), fixture.launch);
+      equalJson(parseJsonStrict(rows[0]!.row_json as string), fixture.launch);
       for (const table of ['runs', 'run_journal', 'workspace_generations'])
         assert.equal(database.prepare(`SELECT count(*) AS count FROM ${table}`).get()!.count, 0);
     } finally { database.close(); }

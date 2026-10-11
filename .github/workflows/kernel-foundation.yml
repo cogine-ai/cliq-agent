@@ -56,7 +56,7 @@ jobs:
       - run: npm run build
         id: build
       - name: Install actual platform and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
       - name: Verify installed-state and native-retirement boundaries on Linux 22.04
         # These component tests also run in the 24.04 matrix. Keep the real
         # installed/native boundary on the qualified 22.04 baseline too;
@@ -71,6 +71,7 @@ jobs:
           src/state/supervisor-observation.test.ts
           src/state/installed-control.test.ts
           src/sandbox/native-controller-close.test.ts
+          scripts/kernel/qualify-sqlite-paths.test.ts
       - name: Qualify complete application image binding
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --import tsx scripts/kernel/qualify-supervisor-image.ts "$RUNNER_TEMP/cliq-supervisor-image"
@@ -89,7 +90,7 @@ jobs:
         run: |
           probe_node=$(realpath "$(command -v node)")
           sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --installed "$probe_node" "$RUNNER_TEMP/cliq-installed-keeper"
-      - name: Observe real Secret Service cross-process roundtrip and retirement
+      - name: Observe real credential platform and SQLite path prerequisites
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
