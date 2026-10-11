@@ -54,9 +54,11 @@ function checkedCredentialToken(token: HeldCredentialAuthorityLock): CredentialB
  * neither SQL nor the physical store lifetime escapes the installed producer. */
 export function readEndpointAuthority(token: HeldCredentialAuthorityLock, endpointRegistrationId: string): EndpointAuthorityRecordV1 | null {
   const held = checkedCredentialToken(token);
-  if (typeof endpointRegistrationId !== 'string' || !endpointRegistrationId ||
-      normalizeCanonicalText(endpointRegistrationId) !== endpointRegistrationId || Buffer.byteLength(endpointRegistrationId) > SMALL_BYTES)
-    throw new KernelStorageError('INVALID_REQUEST', 'endpoint id must be bounded nonempty canonical text');
+  try {
+    if (typeof endpointRegistrationId !== 'string' || !endpointRegistrationId ||
+        normalizeCanonicalText(endpointRegistrationId) !== endpointRegistrationId || Buffer.byteLength(endpointRegistrationId) > SMALL_BYTES)
+      throw new TypeError('invalid endpoint id');
+  } catch (cause) { throw new KernelStorageError('INVALID_REQUEST', 'endpoint id must be bounded nonempty canonical text', { cause }); }
   try {
     const database = held.database!;
     // A physical scope alone still creates no endpoint schema or business row.

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { getAsset, isSea } from 'node:sea';
 import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js';
-import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { canonicalJsonBytes, normalizeCanonicalText } from '../kernel/canonical.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { openInstalledControl, type InstalledControlService } from './installed-control.js';
@@ -66,9 +66,13 @@ async function readEndpointRequest(): Promise<{ schemaVersion: 1; kind: 'read'; 
     }
     const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) as Record<string, unknown>;
     if (!value || typeof value !== 'object' || Array.isArray(value) || !exactKeys(value, ['schemaVersion', 'kind', 'endpointRegistrationId']) ||
-        value.schemaVersion !== 1 || value.kind !== 'read' || typeof value.endpointRegistrationId !== 'string')
+        value.schemaVersion !== 1 || value.kind !== 'read' || typeof value.endpointRegistrationId !== 'string' ||
+        !value.endpointRegistrationId || normalizeCanonicalText(value.endpointRegistrationId) !== value.endpointRegistrationId)
       throw new KernelStorageError('INVALID_REQUEST', 'expected a closed secret-free endpoint read request');
     return value as { schemaVersion: 1; kind: 'read'; endpointRegistrationId: string };
+  } catch (cause) {
+    if (cause instanceof KernelStorageError) throw cause;
+    throw new KernelStorageError('INVALID_REQUEST', 'endpoint request input is invalid', { cause });
   } finally { clearTimeout(timer); }
 }
 
