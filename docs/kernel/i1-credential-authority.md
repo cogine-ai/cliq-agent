@@ -106,6 +106,8 @@ Identity, channel, subject, core hashes and platform selectors are producer-owne
   and against `intendedAuthorityRevision - 1` on replay; changed intent conflicts.
   A new rotation cannot reuse any committed generation's submission id within
   that grant. Exact replay and uncommitted frozen-core retries retain their id.
+  Expansion reserves the final safe authority revision for terminal revocation;
+  exhausted rotation capacity must never produce an unrevocable active grant.
 - `{schemaVersion:1,kind:'revoke',requestId,credentialGrantId,
   expectedAuthorityRevision}` derives its target digest privately. It returns
   `{schemaVersion:1,operation}` for the original revoke receipt, whose cleanup

@@ -791,7 +791,14 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                       const failure = new ResourceRetirementError('credential platform resources did not retire', error);
                       rememberRetirement(failure); throw failure;
                     }
-                    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential platform rejected an operation');
+                    // Only fixed native status codes survive. Remote/native
+                    // messages, payloads and stacks never become receipt data.
+                    const value = error as { code?: unknown; platformCode?: unknown } | null;
+                    const platformCode = value?.code === 'ERR_CLIQ_CREDENTIAL_PLATFORM' &&
+                      (value.platformCode === 'delete_denied' || value.platformCode === 'delete_failed')
+                      ? value.platformCode : 'platform_store_unavailable';
+                    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential platform rejected an operation',
+                      { cause: Object.freeze({ platformCode }) });
                   });
                   platformJobs.add(job);
                   void job.finally(() => platformJobs.delete(job)).catch(() => {});

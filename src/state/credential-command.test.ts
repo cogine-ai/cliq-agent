@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { decodeCredentialWriteRequest, type CredentialWriteRequest } from './store.js';
+import { decodeCredentialRevokeRequest, type CredentialRevokeRequest } from './store.js';
 
 // Shape-only metadata examples: neither decoding nor these values establishes
 // installed authentication, producer lifetime, platform storage or authority.
@@ -98,4 +99,60 @@ test('decoded credential write metadata retains an immutable copy without freezi
     assert.throws(() => Object.defineProperty(retained, 'unknown', { value: true }), TypeError);
     assert.deepEqual(retained, expected);
   }
+});
+
+const revoke = { schemaVersion: 1, kind: 'revoke', requestId: '019a0012-0000-7000-8000-0000000000b1',
+  credentialGrantId: 'grant', expectedAuthorityRevision: 2 } satisfies CredentialRevokeRequest;
+
+test('credential revoke metadata accepts the exact shape and a maximum safe terminal revision', () => {
+  for (const value of [revoke, { ...revoke, expectedAuthorityRevision: 1 },
+    { ...revoke, expectedAuthorityRevision: Number.MAX_SAFE_INTEGER }, { ...revoke, credentialGrantId: 'é'.repeat(128) }])
+    assert.deepEqual(decodeCredentialRevokeRequest(value), value);
+  assert.deepEqual(decodeCredentialRevokeRequest(Object.assign(Object.create(null), revoke)), revoke);
+});
+
+test('credential revoke rejects missing, foreign and caller-authored authority members', () => {
+  for (const value of [undefined, null, false, 1, 'revoke', [], new Date(), Object.create({ ...revoke })])
+    assert.throws(() => decodeCredentialRevokeRequest(value), TypeError);
+  for (const key of Object.keys(revoke)) {
+    const missing: Record<string, unknown> = { ...revoke }; delete missing[key];
+    assert.throws(() => decodeCredentialRevokeRequest(missing), TypeError, `missing revoke.${key}`);
+  }
+  for (const schemaVersion of [undefined, null, '1', 0, 2])
+    assert.throws(() => decodeCredentialRevokeRequest({ ...revoke, schemaVersion }), TypeError);
+  for (const kind of [undefined, null, 'enroll', 'rotate', 'read', 'cleanup', 'REVOKE'])
+    assert.throws(() => decodeCredentialRevokeRequest({ ...revoke, kind }), TypeError);
+  for (const key of ['ownerPrincipalId', 'principalId', 'credentialTargetDigest', 'targetDigest', 'platformItem', 'item',
+    'channelIdentityRef', 'channelIdentityDigest', 'processIdentity', 'pid', 'commandCore', 'commandDigest',
+    'externalSubject', 'secret', 'expiresAt', 'purpose', 'endpointRegistrationId', 'secretSubmissionId', 'unknown'])
+    assert.throws(() => decodeCredentialRevokeRequest({ ...revoke, [key]: 'not-authority' }), TypeError, `revoke.${key}`);
+  assert.throws(() => decodeCredentialRevokeRequest({ ...revoke, [Symbol('unknown')]: true }), TypeError);
+  assert.throws(() => decodeCredentialRevokeRequest(Object.defineProperty({ ...revoke }, 'unknown', { value: true })), TypeError);
+});
+
+test('credential revoke retains the write command canonical id and UUIDv7 bounds', () => {
+  for (const key of ['requestId', 'credentialGrantId']) {
+    for (const invalid of [undefined, null, 1, '', 'nul\0id', 'e\u0301', '\ud800', '\udc00', 'é'.repeat(129)])
+      assert.throws(() => decodeCredentialRevokeRequest({ ...revoke, [key]: invalid }), TypeError, `revoke.${key}`);
+  }
+  for (const requestId of ['019a0012-0000-4000-8000-0000000000b1', '019a0012-0000-7000-c000-0000000000b1',
+    '019A0012-0000-7000-8000-0000000000B1', '019a00120000700080000000000000b1', 'not-a-uuid'])
+    assert.throws(() => decodeCredentialRevokeRequest({ ...revoke, requestId }), TypeError, requestId);
+});
+
+test('credential revoke expected revision is a positive safe integer without an active-exhaustion gate', () => {
+  for (const expectedAuthorityRevision of [undefined, null, false, '1', 0, -0, -1, 1.5, NaN, Infinity,
+    Number.MAX_SAFE_INTEGER + 1, 1n])
+    assert.throws(() => decodeCredentialRevokeRequest({ ...revoke, expectedAuthorityRevision }), TypeError);
+});
+
+test('credential revoke metadata is copied and frozen without retaining or freezing its caller', () => {
+  const caller: Record<string, unknown> = { ...revoke }, expected = { ...caller };
+  const retained = decodeCredentialRevokeRequest(caller);
+  assert.notEqual(retained, caller); assert.deepEqual(caller, expected); assert.equal(Object.isFrozen(caller), false);
+  caller.credentialGrantId = 'changed'; caller.requestId = enroll.requestId; caller.expectedAuthorityRevision = 3; caller.kind = 'read';
+  assert.deepEqual(retained, expected); assert.equal(Object.isFrozen(retained), true);
+  assert.throws(() => { (retained as { credentialGrantId: string }).credentialGrantId = 'changed'; }, TypeError);
+  assert.throws(() => Object.defineProperty(retained, 'unknown', { value: true }), TypeError);
+  assert.deepEqual(retained, expected);
 });
