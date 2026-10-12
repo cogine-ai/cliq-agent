@@ -1,4 +1,4 @@
-// One actual signed installed enroll/read/rotate/exact-replay tracer. This is not the complete
+// One actual signed installed enroll/read/rotate/revoke/exact-replay tracer. This is not the complete
 // credential lifecycle, crash qualification, broker redemption or installed I1.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -10,7 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
-import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRecord, decodeEndpointAuthorityOperation,
+import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRecord, decodeCredentialAuthorityRevokeOperation, decodeEndpointAuthorityOperation,
   type EndpointRegistrationV1 } from '../../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
@@ -101,7 +101,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'one genuine signed installed enroll/read/rotate/exact replay with actual user-manager autostart and independent Secret Service byte comparisons; not revoke, orphan retry, crash, broker or I1' };
+    scope: 'one genuine signed installed enroll/read/rotate/exact replay and unavailable-store revoke with actual user-manager autostart and independent Secret Service byte comparisons; not successful cleanup, orphan retry, crash, broker or I1' };
   const userPrefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', `HOME=${ledger.home}`,
     'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
     `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ledger.uid}/bus`];
@@ -601,6 +601,59 @@ async function campaign(filename: string): Promise<void> {
     report.servicesAfterReplay = inactive(); noStore();
     report.exactReplay = { originalOperationMatched: true, rotatedOperationMatched: true, latestRotatedRecordMatched: true,
       secretInputPipeUnwrittenAndUnended: true, authLauncherJoined: true, secretServiceOwnerAbsent: true };
+
+    report.phase = 'revoke_without_services_or_secret_input';
+    const revokeMetadata = { schemaVersion: 1, kind: 'revoke', requestId: '019a0012-0000-7000-8000-000000000025',
+      credentialGrantId: metadata.credentialGrantId, expectedAuthorityRevision: 2 };
+    const revokeBytes = canonicalJsonBytes(revokeMetadata);
+    const revoked = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+      ['--bootstrap-credential', revokeBytes.toString('base64url')]);
+    const revocation = decodeCredentialAuthorityRevokeOperation(success(revoked, 'operation'));
+    assert.equal(revocation.requestId, revokeMetadata.requestId); assert.equal(revocation.credentialGrantId, metadata.credentialGrantId);
+    assert.equal(revocation.ownerPrincipalId, ownerPrincipalId); assert.equal(revocation.disposition, 'revoked');
+    assert.equal(revocation.commandCore.expectedAuthorityRevision, 2); assert.equal(revocation.committedAuthorityRevision, 3);
+    assert.equal(revocation.credentialTargetDigest, rotatedOperation.credentialTargetDigest);
+    assert.deepEqual(revocation.platformItem, rotatedRecord.platformItem);
+    if (revocation.cleanupPhase !== 'cleanup_failed') throw new Error('unavailable actual store must retain a failed cleanup receipt');
+    assert.equal(revocation.cleanupErrorCode, 'platform_store_unavailable');
+    assert(parseCanonicalTime(revocation.metadataCommittedAt) >= parseCanonicalTime(rotatedRecord.createdAt));
+    assert(parseCanonicalTime(revocation.cleanupFinishedAt) >= parseCanonicalTime(revocation.metadataCommittedAt));
+    const revokedRecord = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record'));
+    const { recordDigest: _activeDigest, ...activeBody } = rotatedRecord;
+    const { recordDigest: _revokedDigest, ...revokedBody } = revokedRecord;
+    assert.deepEqual(revokedBody, { ...activeBody, state: 'revoked', authorityRevision: 3,
+      revokedAt: revocation.metadataCommittedAt, revokedByRequestId: revokeMetadata.requestId,
+      revokedByRequestDigest: revocation.requestDigest }, 'terminal revoke must preserve the exact generation and immutable target');
+    assert.equal(revocation.revokedRecordDigest, revokedRecord.recordDigest);
+    report.revocation = revocation; report.revokedRecord = revokedRecord;
+    report.servicesAfterRevoke = inactive(); noStore();
+    for (const [originalMetadata, originalOperation] of [[metadata, operation], [rotateMetadata, rotatedOperation]] as const) {
+      const historical = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+        ['--bootstrap-credential', canonicalJsonBytes(originalMetadata).toString('base64url')]);
+      assert.deepEqual(decodeCredentialAuthorityOperation(success(historical, 'operation')), originalOperation,
+        'terminal revoke must not rewrite or block historical committed replay');
+      assert.equal(historical.stdout, `${canonicalJsonBytes({ schemaVersion: 1, operation: originalOperation }).toString('utf8')}\n`);
+    }
+    report.phase = 'revoke_retry_without_store';
+    const retry = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+      ['--bootstrap-credential', revokeBytes.toString('base64url')]);
+    const retriedRevocation = decodeCredentialAuthorityRevokeOperation(success(retry, 'operation'));
+    const receiptIdentity = (value: ReturnType<typeof decodeCredentialAuthorityRevokeOperation>) => {
+      const { operationDigest: _digest, cleanupPhase: _phase, cleanupEvidenceDigest: _evidence,
+        cleanupErrorCode: _error, cleanupFinishedAt: _finished, ...identity } = value; return identity;
+    };
+    assert.deepEqual(receiptIdentity(retriedRevocation), receiptIdentity(revocation),
+      'cleanup retry must retain the original revoke identity, core, channel, metadata commit and result');
+    if (retriedRevocation.cleanupPhase !== 'cleanup_failed') throw new Error('absent actual store must keep cleanup failed on retry');
+    assert.equal(retriedRevocation.cleanupErrorCode, 'platform_store_unavailable');
+    assert(parseCanonicalTime(retriedRevocation.cleanupFinishedAt) >= parseCanonicalTime(revocation.metadataCommittedAt));
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record')), revokedRecord);
+    report.servicesAfterRevokeRetry = inactive(); noStore();
+    report.revocationRetry = retriedRevocation;
+    report.terminalRevoke = { metadataRemainsRevoked: true, originalReceiptIdentityMatched: true,
+      historicalOperationsMatched: true, secretInputPipeUnwrittenAndUnended: true, secretServiceOwnerAbsent: true };
     report.phase = 'complete'; report.qualified = true;
   } catch (error) { primary = error; }
   finally {

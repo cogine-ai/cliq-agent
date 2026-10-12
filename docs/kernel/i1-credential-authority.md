@@ -267,6 +267,14 @@ the original revoke identity, not a new enrollment attempt. Historical revoke
 receipt identity is immutable; cleanup status may advance, not freeze failed
 cleanup bytes as the final replay result.
 
+The same cleanup-observation column retains either the existing actual native
+observation or a closed failure projection: `{schemaVersion:1,
+kind:'cleanup_failure',selector,stage,errorCode}`. Stage is only
+`platform_load|delete_known|result_validation`; code is the RFC's three cleanup
+codes. Hash the complete canonical stored observation for the receipt. A failed
+load does not invent a bus/service/item observation, and resource-retirement
+uncertainty propagates instead of becoming an ordinary failed-cleanup receipt.
+
 #### Schema and files
 
 Credential schema extension is one transactional v1-to-v2 change preserving
