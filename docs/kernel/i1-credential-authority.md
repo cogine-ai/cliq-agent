@@ -365,6 +365,29 @@ transient/crash paths. No Secret Service keyring files are treated as CAS or
 included in this SQLite/CAS corpus; the platform store is the intended secret
 owner.
 
+Run [38305329871](https://github.com/cogine-ai/cliq-agent/actions/runs/38305329871)
+additionally observed permanent same-request intent conflict before input,
+real locked-store refusal, metadata read/revoke with both installed roles down,
+and receipt-preserving cleanup after a genuine unlock/restart. Its complete
+journey was **not qualified**: an attempted missing-alias fixture lost its
+precondition. [GNOME 40.0](https://github.com/GNOME/gnome-keyring/blob/40.0/daemon/dbus/gkd-secret-service.c)
+reloads the default alias for each new client and falls back to `login` when
+the stored identifier is empty. Same-connection absence therefore cannot
+prove a fresh auth client has no default. The corrected fixture tests an
+actually observed non-durable session default instead, not missing-alias
+qualification, and restores only the original or the exact fixture-owned
+session alias. Production checks are not relaxed to match the fixture.
+
+The real post-`secret_stored`, retired-scope producer pause remains blocked:
+both the proposed native helper and the narrower standard-tool metadata-only
+owned pause implementation were stopped by the platform safety check. Their
+incomplete/unintegrated work is recoverably kept outside this patch. No test
+hook, fabricated NativeProof, process-memory inspection or alternate authority
+is introduced to get around that constraint. Live-producer/finalizer/clock and
+remaining crash qualification must stay explicitly incomplete until genuine,
+permitted evidence is available; this is not another product choice or a
+reason to publish a partial capability PR.
+
 ### Risks And Dependencies
 
 Order: synchronize RFC/WP contracts; one real public tracer bullet; implement

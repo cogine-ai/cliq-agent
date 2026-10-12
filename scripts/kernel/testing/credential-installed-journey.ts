@@ -936,17 +936,23 @@ async function campaign(filename: string): Promise<void> {
     // These are actual adversarial store preconditions, not fabricated native
     // observations or SQL authority. The administrative helper cannot run on
     // an ordinary account's vault and never reads or creates credential items.
-    const storeFixture = (action: 'lock' | 'alias-remove' | 'alias-restore', collection?: string) => {
+    const storeFixture = (action: 'lock' | 'alias-session' | 'alias-restore', collection?: string) => {
       const result = command(recipe.storeFixture, [action, ...(collection ? [collection] : [])]);
       assert.equal(result.status, 0, 'actual disposable store precondition did not complete');
       const value = parseJsonStrict(result.stdout.trim()) as Record<string, unknown>;
-      const flag = action === 'lock' ? 'locked' : action === 'alias-remove' ? 'defaultAliasAbsent' : 'defaultAliasMatched';
+      const flag = action === 'lock' ? 'locked' : action === 'alias-session' ? 'defaultAliasSession' : 'defaultAliasMatched';
       assert.deepEqual(Object.keys(value).sort(), ['diagnosticOnly', 'action', 'collection', flag, 'connectionClosed'].sort());
       assert.equal(value.diagnosticOnly, true); assert.equal(value.action, action);
       assert.equal(value[flag], true); assert.equal(value.connectionClosed, true);
-      assert.equal(value.collection, restored.collection); return value;
+      if (action === 'alias-session') {
+        assert.equal(typeof value.collection, 'string'); assert.notEqual(value.collection, restored.collection);
+        assert.match(value.collection as string, /^\/org\/freedesktop\/secrets\/collection\/[A-Za-z0-9_]+$/u);
+      } else assert.equal(value.collection, restored.collection);
+      return value;
     };
     const platformWriteRefused = (result: ReturnType<typeof credential>) => {
+      report.platformRefusalDiagnostic = { diagnosticOnly: true, actualExitStatus: result.status,
+        stdoutPresent: result.stdout.length > 0 };
       assert.equal(result.status, 1); assert.equal(result.stdout, '');
       const line = result.stderr.trim().split('\n').at(-1); assert(line && Buffer.byteLength(line) <= 2048);
       const value = parseJsonStrict(line) as Record<string, unknown>;
@@ -1010,19 +1016,33 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(unlockedRevoke.cleanupPhase, 'cleanup_complete');
     assert.deepEqual(receiptIdentity(unlockedRevoke), receiptIdentity(lockedRevoke)); assert.deepEqual(observe('list').items, []);
     assert.deepEqual(inactive(), report.servicesBeforeLockedRevoke);
-    report.phase = 'missing_default_alias'; report.missingDefaultAlias = storeFixture('alias-remove');
+    report.phase = 'nondurable_default_alias'; report.nondurableDefaultAlias = storeFixture('alias-session');
+    let aliasPrimary: unknown;
     try {
       assert.equal(serviceOwner(), unlockedAgain.nameOwner);
-      const missingAliasRequest = { ...negativeMetadata, requestId: '019a0012-0000-7000-8000-000000000035',
+      const alias = command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'call',
+        unlockedAgain.nameOwner, '/org/freedesktop/secrets', 'org.freedesktop.Secret.Service', 'ReadAlias', 's', 'default']);
+      assert.equal(alias.status, 0);
+      const locator = /^o "(\/[A-Za-z0-9_/]*)"$/u.exec(alias.stdout.trim()); assert(locator);
+      const session = command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'call',
+        unlockedAgain.nameOwner, '/org/freedesktop/secrets', 'org.freedesktop.Secret.Service', 'ReadAlias', 's', 'session']);
+      assert.equal(session.status, 0);
+      const sessionLocator = /^o "(\/[A-Za-z0-9_/]*)"$/u.exec(session.stdout.trim()); assert(sessionLocator);
+      report.defaultAliasBeforeAuth = { diagnosticOnly: true, collection: locator[1], sessionCollection: sessionLocator[1], nameOwner: serviceOwner() };
+      assert.notEqual(locator[1], '/'); assert.equal(locator[1], sessionLocator[1],
+        'nondurable alias must remain the actual session collection in a fresh connection');
+      const nondurableRequest = { ...negativeMetadata, requestId: '019a0012-0000-7000-8000-000000000035',
         credentialGrantId: '019a0012-0000-7000-8000-000000000036', secretSubmissionId: '019a0012-0000-7000-8000-000000000135' };
-      platformWriteRefused(credential(missingAliasRequest, negativeSecret));
-      assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: missingAliasRequest.credentialGrantId }), 'record'), null);
+      platformWriteRefused(credential(nondurableRequest, negativeSecret));
+      assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: nondurableRequest.credentialGrantId }), 'record'), null);
       assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
         credentialGrantId: negativeMetadata.credentialGrantId }), 'record')), negativeRevoked);
       assert.equal(serviceOwner(), unlockedAgain.nameOwner);
-      report.missingAliasRefusal = { noNewAuthority: true, revokedRecordUnchanged: true };
-    } finally {
-      report.defaultAliasRestored = storeFixture('alias-restore', unlockedAgain.collection);
+      report.nondurableAliasRefusal = { noNewAuthority: true, revokedRecordUnchanged: true, missingAliasQualified: false };
+    } catch (error) { aliasPrimary = error; throw error; }
+    finally {
+      try { report.defaultAliasRestored = storeFixture('alias-restore', unlockedAgain.collection); }
+      catch (error) { throw new AggregateError([aliasPrimary, error].filter(Boolean), 'actual alias test and restoration failed'); }
     }
     assert.deepEqual(observe('list').items, []); report.servicesAfterStoreNegatives = stopRoles();
     report.phase = 'complete'; report.qualified = true;
@@ -1044,10 +1064,17 @@ async function campaign(filename: string): Promise<void> {
       report.qualified = false;
       // Assertion messages and causes may contain compared data. Retain only
       // source-owned frame locations, never their arbitrary message/stack text.
-      const stack = primary instanceof Error ? primary.stack ?? '' : '';
-      report.error = { diagnosticOnly: true, kind: 'credential_journey_failed', sourceFrames: [...stack.matchAll(
-        /\b(credential-installed-journey|credential-write-crash|credential-secret-scan|credential-secret-corpus)\.ts:([1-9][0-9]*):([1-9][0-9]*)/gu)]
-        .slice(0, 8).map(match => ({ file: `${match[1]}.ts`, line: Number(match[2]), column: Number(match[3]) })) };
+      const sourceFrames: { file: string; line: number; column: number }[] = [], pending = [primary];
+      for (let visited = 0; pending.length && visited < 8 && sourceFrames.length < 8; visited++) {
+        const error = pending.shift(); if (!(error instanceof Error)) continue;
+        for (const match of (error.stack ?? '').matchAll(
+          /\b(credential-installed-journey|credential-write-crash|credential-secret-scan|credential-secret-corpus)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+          sourceFrames.push({ file: `${match[1]}.ts`, line: Number(match[2]), column: Number(match[3]) });
+          if (sourceFrames.length === 8) break;
+        }
+        if (error instanceof AggregateError && Array.isArray(error.errors)) pending.unshift(...error.errors.slice(0, 4));
+      }
+      report.error = { diagnosticOnly: true, kind: 'credential_journey_failed', sourceFrames };
     }
     let publicationBytes: Buffer, scannedBytes: Buffer | undefined;
     try {

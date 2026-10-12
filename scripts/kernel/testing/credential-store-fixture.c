@@ -137,22 +137,37 @@ static gboolean fixture_current(Probe *p, Fixture *fixture) {
   fixture->bus_pid = pid; fixture->bus_ticks = bus_ticks; fixture->service_ticks = service_ticks; return TRUE;
 }
 
+static gboolean fixture_member(Probe *p, const char *target, gboolean locked, char **observed_target) {
+  g_autoptr(GVariant) collections = property(p, ROOT, SECRET_IFACE "Service", "Collections", "ao");
+  if (!collections || g_variant_n_children(collections) > 1024) return fail(p, "fixture-collection-inventory", NULL);
+  guint matches = 0; const char *observed = NULL;
+  for (gsize index = 0; index < g_variant_n_children(collections); index++) {
+    const char *actual; g_variant_get_child(collections, index, "&o", &actual);
+    if (!strcmp(actual, target)) { matches++; observed = actual; }
+  }
+  g_autoptr(GVariant) state = property(p, target, SECRET_IFACE "Collection", "Locked", "b");
+  if (matches != 1 || !state || g_variant_get_boolean(state) != locked) return fail(p, "fixture-collection-state", NULL);
+  *observed_target = g_strdup(observed); return TRUE;
+}
+
 static gboolean fixture_collection(Probe *p, gboolean locked) {
   g_autoptr(GVariant) session = call(p, p->owner, ROOT, SECRET_IFACE "Service", "ReadAlias", g_variant_new("(s)", "session"), "(o)");
   if (!session) return FALSE;
   const char *temporary; g_variant_get(session, "(&o)", &temporary);
   if (!object_path(p->collection) || !strcmp(p->collection, "/org/freedesktop/secrets/collection/session") ||
       !strcmp(p->collection, temporary)) return fail(p, "fixture-durable-collection", NULL);
-  g_autoptr(GVariant) collections = property(p, ROOT, SECRET_IFACE "Service", "Collections", "ao");
-  if (!collections || g_variant_n_children(collections) > 1024) return fail(p, "fixture-collection-inventory", NULL);
-  guint matches = 0; const char *observed = NULL;
-  for (gsize index = 0; index < g_variant_n_children(collections); index++) {
-    const char *actual; g_variant_get_child(collections, index, "&o", &actual);
-    if (!strcmp(actual, p->collection)) { matches++; observed = actual; }
-  }
-  g_autoptr(GVariant) state = property(p, p->collection, SECRET_IFACE "Collection", "Locked", "b");
-  if (matches != 1 || !state || g_variant_get_boolean(state) != locked) return fail(p, "fixture-collection-state", NULL);
-  char *actual = g_strdup(observed); g_free(p->collection); p->collection = actual; return TRUE;
+  char *actual = NULL;
+  if (!fixture_member(p, p->collection, locked, &actual)) return FALSE;
+  g_free(p->collection); p->collection = actual; return TRUE;
+}
+
+static gboolean fixture_session(Probe *p, const char *expected, char **observed) {
+  g_autoptr(GVariant) reply = call(p, p->owner, ROOT, SECRET_IFACE "Service", "ReadAlias", g_variant_new("(s)", "session"), "(o)");
+  if (!reply) return FALSE;
+  const char *actual; g_variant_get(reply, "(&o)", &actual);
+  if (!object_path(actual) || !strcmp(actual, p->collection) || (expected && strcmp(actual, expected)))
+    return fail(p, "fixture-session-alias", NULL);
+  return fixture_member(p, actual, FALSE, observed);
 }
 
 static gboolean fixture_alias(Probe *p, const char *expected) {
@@ -160,6 +175,17 @@ static gboolean fixture_alias(Probe *p, const char *expected) {
   if (!reply) return FALSE;
   const char *actual; g_variant_get(reply, "(&o)", &actual);
   return !strcmp(actual, expected) || fail(p, "fixture-default-alias", NULL);
+}
+
+static gboolean fixture_restore_ready(Probe *p, gboolean *change) {
+  g_autoptr(GVariant) reply = call(p, p->owner, ROOT, SECRET_IFACE "Service", "ReadAlias", g_variant_new("(s)", "default"), "(o)");
+  if (!reply) return FALSE;
+  const char *actual; g_variant_get(reply, "(&o)", &actual);
+  if (!strcmp(actual, "/")) { *change = TRUE; return TRUE; }
+  if (!strcmp(actual, p->collection)) { *change = FALSE; return TRUE; }
+  char *session = NULL;
+  if (!fixture_session(p, actual, &session)) return FALSE;
+  g_free(session); *change = TRUE; return TRUE;
 }
 
 static gboolean fixture_lock(Probe *p) {
@@ -179,24 +205,34 @@ static gboolean fixture_lock(Probe *p) {
 int main(int argc, char **argv) {
   Probe p = { .runtime_fd = -1, .uid = getuid() }; Fixture fixture = { .home_fd = -1 };
   gboolean locking = argc == 2 && !strcmp(argv[1], "lock");
-  gboolean removing = argc == 2 && !strcmp(argv[1], "alias-remove");
+  gboolean alias_session = argc == 2 && !strcmp(argv[1], "alias-session");
   gboolean restoring = argc == 3 && !strcmp(argv[1], "alias-restore");
+  gboolean change_alias = TRUE; char *session = NULL;
   if (unsetenv("G_DBUS_DEBUG")) { fail(&p, "disable-payload-debug", NULL); goto done; }
-  if ((!locking && !removing && !restoring) || !p.uid || geteuid() != p.uid || (restoring && !object_path(argv[2]))) {
+  if ((!locking && !alias_session && !restoring) || !p.uid || geteuid() != p.uid || (restoring && !object_path(argv[2]))) {
     fail(&p, "fixture-arguments", NULL); goto done;
   }
   if (!fixture_home(&p, &fixture) || !connect_bus(&p) || !fixture_current(&p, &fixture)) goto done;
   if (restoring) {
     p.collection = g_strdup(argv[2]);
-    if (!fixture_collection(&p, FALSE) || !fixture_alias(&p, "/")) goto done;
+    if (!fixture_collection(&p, FALSE) || !fixture_restore_ready(&p, &change_alias)) goto done;
   } else if (!default_collection(&p)) goto done;
+  if (alias_session && !fixture_session(&p, NULL, &session)) goto done;
   if (!fixture_current(&p, &fixture)) goto done;
   if (locking) {
     if (!fixture_lock(&p)) goto done;
   } else {
-    g_autoptr(GVariant) changed = call(&p, p.owner, ROOT, SECRET_IFACE "Service", "SetAlias",
-      g_variant_new("(so)", "default", removing ? "/" : p.collection), "()");
-    if (!changed || !fixture_alias(&p, removing ? "/" : p.collection) || !fixture_collection(&p, FALSE)) goto done;
+    if (change_alias) {
+      g_autoptr(GVariant) changed = call(&p, p.owner, ROOT, SECRET_IFACE "Service", "SetAlias",
+        g_variant_new("(so)", "default", alias_session ? session : p.collection), "()");
+      if (!changed) goto done;
+    }
+    if (!fixture_alias(&p, alias_session ? session : p.collection) || !fixture_collection(&p, FALSE)) goto done;
+    if (alias_session) {
+      char *confirmed = NULL;
+      if (!fixture_session(&p, session, &confirmed)) goto done;
+      g_free(session); session = confirmed;
+    }
   }
   if (!fixture_current(&p, &fixture)) goto done;
 done:
@@ -208,9 +244,9 @@ done:
   }
   fixture_close(&p, &p.runtime_fd); fixture_close(&p, &fixture.home_fd);
   if (!p.failed && (printf("{\"diagnosticOnly\":true,\"action\":\"%s\",\"collection\":\"%s\",\"%s\":true,\"connectionClosed\":true}\n",
-      locking ? "lock" : removing ? "alias-remove" : "alias-restore", p.collection,
-      locking ? "locked" : removing ? "defaultAliasAbsent" : "defaultAliasMatched") < 0 || fflush(stdout)))
+      locking ? "lock" : alias_session ? "alias-session" : "alias-restore", alias_session ? session : p.collection,
+      locking ? "locked" : alias_session ? "defaultAliasSession" : "defaultAliasMatched") < 0 || fflush(stdout)))
     fail(&p, "fixture-report-output", NULL);
-  g_free(p.owner); g_free(p.unique); g_free(p.collection);
+  g_free(p.owner); g_free(p.unique); g_free(p.collection); g_free(session);
   return p.failed ? 1 : 0;
 }
