@@ -114,7 +114,26 @@ async function campaign(filename: string): Promise<void> {
   };
   const success = (result: ReturnType<typeof command>, field: string): unknown => {
     // Do not print/store a secret-bearing command's arbitrary stderr/stdout on
-    // refusal. Only successful closed metadata becomes an observation.
+    // refusal. A diagnostic may only select one fixed source-owned reason;
+    // unknown message/path/stack bytes never become a retained observation.
+    if (result.status !== 0) {
+      const line = result.stderr.trim().split('\n').at(-1);
+      if (line && Buffer.byteLength(line) <= 2048) try {
+        const value = parseJsonStrict(line) as Record<string, unknown>;
+        assert.equal(value.diagnosticOnly, true); assert.equal(value.scope, 'installed-read-startup');
+        const reasons = ['installed service dependencies differ from the fixed profiles',
+          'installed service effective configuration drifted; explicit installation remediation is required',
+          'installed credential platform rejected an operation',
+          'installed credential services are not in a current running invocation',
+          'installed keeper did not publish its bounded startup locator',
+          'installed Supervisor startup did not reach authenticated readiness',
+          'installed Supervisor refused the authenticated credential operation',
+          'installed Supervisor hello is incompatible with credential finalization',
+          'credential store did not complete a fresh secret round-trip'];
+        const reason = reasons.find(candidate => candidate === value.message);
+        report.entryRefusal = { diagnosticOnly: true, reason: reason ?? 'unclassified_closed_entry_refusal' };
+      } catch { report.entryDiagnosticUnavailable = true; }
+    }
     assert.equal(result.status, 0, `actual signed entry refused during ${String(report.phase)}`);
     const value = parseJsonStrict(result.stdout.trim()) as Record<string, unknown>;
     assert.deepEqual(Object.keys(value).sort(), [field, 'schemaVersion'].sort()); assert.equal(value.schemaVersion, 1);
