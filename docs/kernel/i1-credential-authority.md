@@ -96,6 +96,27 @@ Identity, channel, subject, core hashes and platform selectors are producer-owne
   intent, not an externally generated subject or command core. Success returns
   `{schemaVersion:1,operation}` for the committed original operation. The first
   pre-input history check and the post-input lock-held race check are distinct.
+- `{schemaVersion:1,kind:'rotate',requestId,credentialGrantId,
+  expectedAuthorityRevision,secretSubmissionId,expiresAt?}` derives owner,
+  purpose and the immutable endpoint/handle from validated active history.
+  It returns the same committed-operation envelope. Omitted expiry inherits
+  the expected active revision's expiry; it never silently removes a deadline.
+  Retry and historical replay interpret omission against that retained revision,
+  not a later latest record. Expected revision is compared before secret input
+  and against `intendedAuthorityRevision - 1` on replay; changed intent conflicts.
+- `{schemaVersion:1,kind:'revoke',requestId,credentialGrantId,
+  expectedAuthorityRevision}` derives its target digest privately. It returns
+  `{schemaVersion:1,operation}` for the original revoke receipt, whose cleanup
+  fields may advance after metadata commits. Pending-only enrollment has no
+  committed revision to revoke; an active grant with a live rotation may still
+  be revoked without aborting or deleting that producer's pending item.
+- `{schemaVersion:1,kind:'cleanup',requestId}` names an existing enroll, rotate
+  or revoke request, never a new cleanup identity. It returns that operation
+  envelope after the owning cleanup phase. Live/unknown producers refuse;
+  current latest active items remain protected. Aborted and superseded items
+  use their exact creating-operation selectors, and absence/deletion reflects
+  only the fresh observed cut, not a promise that a late remote create can
+  never arrive. No cleanup ledger hides these known items from later sweeps.
 
 Ordinary auth does not install/reload/repair units. Missing profiles or drift
 produce remediation; a successful manager job/socket existence alone is not

@@ -1,4 +1,4 @@
-// One actual signed installation/enrollment tracer. This is not the complete
+// One actual signed installed enroll/read/exact-replay tracer. This is not the complete
 // credential lifecycle, crash qualification, broker redemption or installed I1.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -101,7 +101,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'one genuine signed installed enroll/read with actual user-manager autostart and independent Secret Service byte comparison; not replay, rotation, revoke, crash, broker or I1' };
+    scope: 'one genuine signed installed enroll/read/exact replay with actual user-manager autostart and independent Secret Service byte comparison; not rotation, revoke, crash, broker or I1' };
   const userPrefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', `HOME=${ledger.home}`,
     'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
     `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ledger.uid}/bus`];
@@ -111,6 +111,117 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(result.error, undefined, 'actual disposable-user command did not join');
     assert.equal(result.signal, null, 'actual disposable-user command was signaled');
     return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+  };
+  // Fixture cleanup facts only, never production producer-death evidence.
+  const processFact = async (pid: number) => {
+    try {
+      const raw = await readFile(`/proc/${pid}/stat`, 'utf8');
+      assert(raw.startsWith(`${pid} (`) && raw.length <= 8192);
+      const fields = raw.slice(raw.lastIndexOf(')') + 2).trim().split(/\s+/u);
+      assert(fields.length > 19); assert.match(fields[19]!, /^[1-9][0-9]*$/u);
+      const status = await readFile(`/proc/${pid}/status`, 'utf8');
+      const uid = status.match(/^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/mu);
+      assert(uid, 'fixture process UID must be observed');
+      const confirmed = await readFile(`/proc/${pid}/stat`, 'utf8');
+      assert(confirmed.startsWith(`${pid} (`));
+      const fresh = confirmed.slice(confirmed.lastIndexOf(')') + 2).trim().split(/\s+/u);
+      assert.equal(fresh[19], fields[19], 'fixture process changed during identity observation');
+      return { pid, parent: Number(fields[1]), group: Number(fields[2]), session: Number(fields[3]),
+        start: fields[19]!, uids: uid.slice(1).map(Number) };
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  };
+  const waitGone = async (original: NonNullable<Awaited<ReturnType<typeof processFact>>>) => {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const current = await processFact(original.pid);
+      if (!current || current.start !== original.start) return;
+      assert(Date.now() < deadline, 'original fixture process lifetime did not retire'); await delay(20);
+    }
+  };
+  const openInputCommand = async (executable: string, args: string[]) => {
+    const child = spawn('/usr/sbin/runuser', [...userPrefix, executable, ...args],
+      { env: environment, cwd: ledger.home, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const streams = [child.stdin, child.stdout, child.stderr] as const;
+    const streamsClosed = Promise.all(streams.map(stream => new Promise<void>(resolve => stream.once('close', resolve))));
+    const stdout: Buffer[] = [], stderr: Buffer[] = [];
+    let capturedBytes = 0, finished = false, spawnFailed = false, outputExceeded = false;
+    let launcher: Awaited<ReturnType<typeof processFact>>, auth: Awaited<ReturnType<typeof processFact>>;
+    const joined = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+      child.once('close', (code, signal) => { finished = true; resolve({ code, signal }); });
+    });
+    child.once('error', () => { spawnFailed = true; }); child.stdin.on('error', () => {});
+    const capture = (chunks: Buffer[], bytes: Buffer) => {
+      if (outputExceeded || capturedBytes + bytes.length > 256 * 1024) { outputExceeded = true; return; }
+      capturedBytes += bytes.length; chunks.push(bytes);
+    };
+    child.stdout.on('data', (bytes: Buffer) => capture(stdout, bytes));
+    child.stderr.on('data', (bytes: Buffer) => capture(stderr, bytes));
+    const bounded = async <T>(pending: Promise<T>, milliseconds: number): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try { return await Promise.race([pending, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('owned open-input fixture did not join')), milliseconds);
+      })]); } finally { clearTimeout(timer); }
+    };
+    let primary: unknown;
+    try {
+      const deadline = Date.now() + 30000;
+      while (!finished) {
+        assert(!spawnFailed, 'actual open-input signed entry did not spawn');
+        assert(!outputExceeded, 'actual open-input signed entry exceeded its output bound');
+        assert(Date.now() < deadline, 'committed replay waited for open secret input or unavailable services');
+        if (child.pid) {
+          const current = await processFact(child.pid);
+          if (!launcher && current?.parent === process.pid && current.group === child.pid && current.session === child.pid) launcher = current;
+          if (current && launcher?.start === current.start) {
+            const children = await readFile(`/proc/${child.pid}/task/${child.pid}/children`, 'utf8').catch((error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT') return ''; throw error;
+            });
+            const pids = children.trim() ? children.trim().split(/\s+/u).map(Number) : [];
+            assert(pids.length <= 1, 'trusted runuser must own only the signed auth child');
+            if (pids[0]) {
+              const observed = await processFact(pids[0]);
+              if (observed?.parent === child.pid) auth = observed;
+            }
+          }
+        }
+        await Promise.race([joined, delay(20)]);
+      }
+      const exit = await joined;
+      assert(!spawnFailed && !outputExceeded, 'actual open-input signed entry failed');
+      assert.equal(exit.signal, null, 'actual open-input signed entry was signaled');
+      assert.equal(child.stdin.writableEnded, false, 'fixture must never end or write the secret-input pipe');
+      assert.equal(child.stdin.writableLength, 0);
+      return { status: exit.code, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8') };
+    } catch (error) { primary = error; throw error; }
+    finally {
+      const failures: unknown[] = [];
+      if (!finished) {
+        let authSignaled = false;
+        try {
+          const currentAuth = auth && await processFact(auth.pid);
+          if (currentAuth && auth && currentAuth.start === auth.start) {
+            assert.deepEqual(currentAuth.uids, auth.uids); process.kill(currentAuth.pid, 'SIGKILL'); authSignaled = true;
+          }
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') failures.push(error); }
+        // Let the trusted launcher reap its auth child before a group fallback.
+        if (authSignaled) { try { await bounded(joined, 5000); } catch {} }
+        if (!finished) {
+          try {
+            const current = child.pid === undefined ? undefined : await processFact(child.pid);
+            if (!launcher && current?.parent === process.pid && current.group === child.pid && current.session === child.pid) launcher = current;
+            if (launcher && current?.start === launcher.start && current.group === launcher.pid && current.session === launcher.pid)
+              process.kill(-launcher.pid, 'SIGKILL');
+            else if (current) throw new Error('owned launcher identity unavailable for safe group retirement');
+          } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') failures.push(error); }
+        }
+        try { await bounded(joined, 5000); } catch (error) { failures.push(error); }
+        if (auth) { try { await waitGone(auth); } catch (error) { failures.push(error); } }
+      }
+      // The pipe remains open until a result or timeout is decided above.
+      for (const stream of streams) stream.destroy();
+      try { await bounded(streamsClosed, 5000); } catch (error) { failures.push(error); }
+      if (failures.length) throw new AggregateError([primary, ...failures].filter(Boolean), 'owned open-input fixture retirement failed');
+    }
   };
   const success = (result: ReturnType<typeof command>, field: string): unknown => {
     // Do not print/store a secret-bearing command's arbitrary stderr/stdout on
@@ -170,6 +281,33 @@ async function campaign(filename: string): Promise<void> {
   const secret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   let daemon: ReturnType<typeof spawn> | undefined;
   let daemonExit: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
+  let daemonClosing: Promise<void> | undefined;
+  let daemonFact: Awaited<ReturnType<typeof processFact>>, daemonLauncher: Awaited<ReturnType<typeof processFact>>;
+  const stopDaemon = (actualPid?: number): Promise<void> => daemonClosing ??= (async () => {
+    if (!daemon || !daemonExit) return;
+    if (actualPid !== undefined) {
+      assert(daemonFact && daemonLauncher); assert.equal(actualPid, daemonFact.pid);
+      assert.equal(daemon.exitCode, null); assert.equal(daemon.signalCode, null);
+    }
+    if (daemon.exitCode === null && daemon.signalCode === null) {
+      if (daemonFact) {
+        const current = await processFact(daemonFact.pid), launcher = await processFact(daemon.pid!);
+        assert(current && launcher && daemonLauncher, 'actual fixture daemon identity is unavailable');
+        assert.equal(current.start, daemonFact.start); assert.deepEqual(current.uids, daemonFact.uids);
+        assert.equal(current.parent, daemonLauncher.pid); assert.equal(launcher.start, daemonLauncher.start);
+        assert.equal(await readlink(`/proc/${current.pid}/exe`), '/usr/bin/gnome-keyring-daemon');
+        process.kill(current.pid, 'SIGTERM');
+      } else daemon.kill('SIGTERM');
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      report.daemonExit = await Promise.race([daemonExit, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('actual fixture Secret Service daemon did not join')), 10000);
+      })]);
+      if (daemonFact) await waitGone(daemonFact);
+      report.daemonJoined = true;
+    } finally { clearTimeout(timer); }
+  })();
   let primary: unknown;
   try {
     await mkdir(recipe.buildFixture, { mode: 0o755 });
@@ -202,6 +340,10 @@ async function campaign(filename: string): Promise<void> {
       assert.equal(daemon.exitCode, null); assert(Date.now() < deadline, 'actual platform service did not acquire its name'); await delay(20);
     }
     const before = observe('list'); report.platformBefore = before; assert.deepEqual(before.items, []);
+    daemonLauncher = await processFact(daemon.pid!); daemonFact = await processFact(before.servicePid);
+    assert(daemonLauncher && daemonFact, 'fixture Secret Service process identity must be observed');
+    assert.equal(daemonLauncher.parent, process.pid); assert(daemonLauncher.uids.every(uid => uid === 0));
+    assert.equal(daemonFact.parent, daemonLauncher.pid); assert(daemonFact.uids.every(uid => uid === ledger.uid));
     assert.equal(await readlink(`/proc/${before.servicePid}/exe`), '/usr/bin/gnome-keyring-daemon');
     const daemonImage = await stat(`/proc/${before.servicePid}/exe`, { bigint: true });
     const daemonNamed = await lstat('/usr/bin/gnome-keyring-daemon', { bigint: true });
@@ -355,22 +497,38 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(await readFile(readyPath), readyBytes);
     const readyAfter = await lstat(readyPath, { bigint: true });
     for (const key of imageFields) assert.equal(readyAfter[key], ready[key]);
+
+    report.phase = 'exact_replay_without_services_or_secret_input';
+    const stopped = command('/usr/bin/systemctl', ['--user', 'stop', setup.supervisorUnit, setup.keeperUnit]);
+    assert.equal(stopped.status, 0, 'actual installed services must stop before replay');
+    const inactive = () => [setup.supervisorUnit, setup.keeperUnit].map(unit => {
+      const current = show(unit); assert.equal(current.ActiveState, 'inactive'); assert.equal(current.MainPID, '0');
+      return { unit, activeState: current.ActiveState, mainPid: current.MainPID };
+    });
+    report.servicesBeforeReplay = inactive();
+    await stopDaemon(compared.servicePid);
+    const noStore = () => {
+      const owned = serviceName(); assert.equal(owned.status, 0); assert.equal(owned.stdout.trim(), 'b false');
+    };
+    noStore();
+    const replayBytes = canonicalJsonBytes(metadata);
+    const replay = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+      ['--bootstrap-credential', replayBytes.toString('base64url')]);
+    const replayed = decodeCredentialAuthorityOperation(success(replay, 'operation'));
+    assert.deepEqual(replayed, operation, 'new-process replay must retain the original committed result and provenance');
+    assert.equal(replay.stdout, `${canonicalJsonBytes({ schemaVersion: 1, operation }).toString('utf8')}\n`);
+    const reread = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record'));
+    assert.deepEqual(reread, record, 'read without services must retain exact committed metadata');
+    report.servicesAfterReplay = inactive(); noStore();
+    report.exactReplay = { originalOperationMatched: true, originalRecordMatched: true,
+      secretInputPipeUnwrittenAndUnended: true, authLauncherJoined: true, secretServiceOwnerAbsent: true };
     report.phase = 'complete'; report.qualified = true;
   } catch (error) { primary = error; }
   finally {
     secret.fill(0); password.fill(0);
-    if (daemon && daemonExit) {
-      try {
-        if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGTERM');
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          report.daemonExit = await Promise.race([daemonExit, new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('actual fixture Secret Service daemon did not join')), 10000);
-          })]);
-        } finally { clearTimeout(timer); }
-        report.daemonJoined = true;
-      } catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'fixture platform daemon retirement failed'); }
-    }
+    try { await stopDaemon(); }
+    catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'fixture platform daemon retirement failed'); }
     if (primary) { report.qualified = false; report.error = String((primary as Error).stack ?? primary).slice(0, 8192); }
     await writeFile(recipe.reportFile, JSON.stringify(report, null, 2) + '\n', { flag: 'wx', mode: 0o644 });
     console.log(`Actual installed credential journey report: ${recipe.reportFile}`);
