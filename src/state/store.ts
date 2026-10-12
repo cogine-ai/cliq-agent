@@ -173,27 +173,33 @@ export function readCredentialAuthority(token: HeldCredentialAuthorityLock, cred
   return latest && immutableSnapshot(latest);
 }
 
-export type CredentialEnrollRequest = Readonly<{ schemaVersion: 1; kind: 'enroll'; requestId: string;
-  credentialGrantId: string; purpose: CredentialPurpose; endpointRegistrationId: string; secretSubmissionId: string; expiresAt?: string }>;
-export function decodeCredentialEnrollRequest(input: unknown): CredentialEnrollRequest {
+export type CredentialWriteRequest = Readonly<{ schemaVersion: 1; requestId: string;
+  credentialGrantId: string; secretSubmissionId: string; expiresAt?: string } & (
+  | { kind: 'enroll'; purpose: CredentialPurpose; endpointRegistrationId: string }
+  | { kind: 'rotate'; expectedAuthorityRevision: number })>;
+export function decodeCredentialWriteRequest(input: unknown): CredentialWriteRequest {
   const value = input as Record<string, unknown>;
-  const keys = ['schemaVersion', 'kind', 'requestId', 'credentialGrantId', 'purpose', 'endpointRegistrationId', 'secretSubmissionId'];
+  const keys = ['schemaVersion', 'kind', 'requestId', 'credentialGrantId', 'secretSubmissionId',
+    ...(value?.kind === 'enroll' ? ['purpose', 'endpointRegistrationId'] : ['expectedAuthorityRevision'])];
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      ![Object.prototype, null].includes(Object.getPrototypeOf(value)) || value.schemaVersion !== 1 || value.kind !== 'enroll' ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value)) || value.schemaVersion !== 1 || !['enroll', 'rotate'].includes(value.kind as string) ||
       Reflect.ownKeys(value).some(key => typeof key !== 'string' || ![...keys, 'expiresAt'].includes(key)) ||
-      keys.some(key => !Object.hasOwn(value, key))) throw new TypeError('invalid credential enrollment metadata');
-  for (const key of ['requestId', 'credentialGrantId', 'endpointRegistrationId', 'secretSubmissionId']) {
+      keys.some(key => !Object.hasOwn(value, key))) throw new TypeError('invalid credential write metadata');
+  for (const key of ['requestId', 'credentialGrantId', 'secretSubmissionId', ...(value.kind === 'enroll' ? ['endpointRegistrationId'] : [])]) {
     const text = value[key];
     if (typeof text !== 'string' || !text || text.includes('\0') || normalizeCanonicalText(text) !== text ||
-        Buffer.byteLength(text) > (key === 'endpointRegistrationId' ? 4096 : 256)) throw new TypeError('invalid credential enrollment id');
+        Buffer.byteLength(text) > (key === 'endpointRegistrationId' ? 4096 : 256)) throw new TypeError('invalid credential write id');
   }
   assertRequestId(value.requestId as string);
-  if (!['model_endpoint', 'dependency_registry', 'mcp_streamable_http'].includes(value.purpose as string)) throw new TypeError('invalid credential purpose');
+  if (value.kind === 'enroll') {
+    if (!['model_endpoint', 'dependency_registry', 'mcp_streamable_http'].includes(value.purpose as string)) throw new TypeError('invalid credential purpose');
+  } else if (!Number.isSafeInteger(value.expectedAuthorityRevision) || (value.expectedAuthorityRevision as number) < 1 ||
+      (value.expectedAuthorityRevision as number) >= Number.MAX_SAFE_INTEGER) throw new TypeError('invalid credential expected revision');
   if (Object.hasOwn(value, 'expiresAt')) {
     if (typeof value.expiresAt !== 'string') throw new TypeError('invalid credential expiry');
     parseCanonicalTime(value.expiresAt);
   }
-  return immutableSnapshot(value as CredentialEnrollRequest);
+  return immutableSnapshot(value as CredentialWriteRequest);
 }
 
 type CredentialFact = { operation: CredentialAuthorityOperationV1; observation?: SecretServiceObservation };
@@ -278,7 +284,9 @@ function readCredentialFacts(held: CredentialBinding, requestId: string): Creden
       throw new TypeError('credential preparation precedes its frozen subject');
     if (operation.phase === 'prepared') {
       if (operation.attempt !== (previous?.attempt ?? 0) + 1 || (previous && previous.phase !== 'aborted') ||
-          (prepared && !canonicalJsonBytes(prepared.commandCore).equals(canonicalJsonBytes(operation.commandCore))))
+          (prepared && (!canonicalJsonBytes(prepared.commandCore).equals(canonicalJsonBytes(operation.commandCore)) ||
+            prepared.intendedAuthorityRevision !== operation.intendedAuthorityRevision ||
+            prepared.intendedSecretGeneration !== operation.intendedSecretGeneration)))
         throw new TypeError('credential attempts are not contiguous frozen-core attempts');
       prepared = operation;
     } else {
@@ -349,7 +357,7 @@ function readCredentialHistory(held: CredentialBinding, grantId: string, resultR
     throw new TypeError('credential committed operation has no authority result');
   return { latest, result };
 }
-function checkCredentialReplay(held: CredentialBinding, request: CredentialEnrollRequest): CredentialAuthorityOperationV1 | undefined {
+function checkCredentialReplay(held: CredentialBinding, request: CredentialWriteRequest): CredentialAuthorityOperationV1 | undefined {
   ensureEndpointSchema(held.database!);
   if (credentialSchemaVersion(held.database!) === 1) return undefined;
   if (held.database!.prepare('SELECT 1 FROM credential_revoke_operations WHERE owner_principal_id=? AND request_id=?').get(held.ownerPrincipalId, request.requestId))
@@ -357,9 +365,20 @@ function checkCredentialReplay(held: CredentialBinding, request: CredentialEnrol
   const facts = readCredentialFacts(held, request.requestId), operation = facts.at(-1)?.operation;
   if (!operation) return undefined;
   const core = operation.commandCore, endpoint = credentialEndpoint(held, core);
-  if (core.kind !== request.kind || core.credentialGrantId !== request.credentialGrantId || core.purpose !== request.purpose ||
-      endpoint.endpointRegistrationId !== request.endpointRegistrationId || core.secretSubmissionId !== request.secretSubmissionId || core.expiresAt !== request.expiresAt)
+  if (core.kind !== request.kind || core.credentialGrantId !== request.credentialGrantId || core.secretSubmissionId !== request.secretSubmissionId)
     throw new KernelStorageError('REQUEST_ID_CONFLICT', 'credential request already names different intent');
+  let expiresAt = request.expiresAt;
+  if (request.kind === 'enroll') {
+    if (core.purpose !== request.purpose || endpoint.endpointRegistrationId !== request.endpointRegistrationId)
+      throw new KernelStorageError('REQUEST_ID_CONFLICT', 'credential request already names different intent');
+  } else {
+    if (request.expectedAuthorityRevision !== operation.intendedAuthorityRevision - 1)
+      throw new KernelStorageError('REQUEST_ID_CONFLICT', 'credential request already names different intent');
+    const original = readCredentialHistory(held, operation.credentialGrantId, request.expectedAuthorityRevision).result;
+    if (!original || original.state !== 'active') throw new TypeError('credential rotation has no original active revision');
+    expiresAt ??= original.expiresAt;
+  }
+  if (core.expiresAt !== expiresAt) throw new KernelStorageError('REQUEST_ID_CONFLICT', 'credential request already names different intent');
   if (operation.phase === 'committed') {
     const history = readCredentialHistory(held, operation.credentialGrantId, operation.committedAuthorityRevision);
     if (!history.result) throw new TypeError('credential replay has no historical result');
@@ -387,7 +406,7 @@ function retainCredentialObjects(held: CredentialBinding, extra: readonly [strin
     } else held.database!.prepare('INSERT INTO retained_objects(artifact_ref,bytes) VALUES (?,?)').run(ref, bytes);
   }
 }
-function commitCredentialEnrollment(held: CredentialBinding, operation: CredentialAuthorityOperationV1, now: string): CredentialAuthorityOperationV1 {
+function commitCredentialWrite(held: CredentialBinding, operation: CredentialAuthorityOperationV1, now: string): CredentialAuthorityOperationV1 {
   const core = operation.commandCore;
   const handle = { ownerPrincipalId: held.ownerPrincipalId, credentialGrantId: core.credentialGrantId, credentialServiceRevision: 1,
     purpose: core.purpose, endpointRegistrationRef: core.endpointRegistrationRef, endpointIdentityDigest: core.endpointIdentityDigest,
@@ -408,31 +427,46 @@ function commitCredentialEnrollment(held: CredentialBinding, operation: Credenti
   });
   return immutableSnapshot(committed);
 }
-function prepareCredentialEnrollment(held: CredentialBinding, request: CredentialEnrollRequest): CredentialAuthorityOperationV1 {
-  ensureCredentialSchema(held.database!);
-  if (checkCredentialReplay(held, request)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential already committed during preparation');
-  if (readCredentialHistory(held, request.credentialGrantId).latest)
-    throw new KernelStorageError('REVISION_CONFLICT', 'credential id is already enrolled');
-  const pending = held.database!.prepare(`SELECT 1 FROM credential_operation_facts AS f WHERE owner_principal_id=?
+/** Repeated before input and at preparation. No subject, phase or secret is
+ * produced by this read, and a rotation never derives its target from argv. */
+function credentialWriteIntent(held: CredentialBinding, request: CredentialWriteRequest) {
+  const previous = credentialSchemaVersion(held.database!) === 1 ? undefined : readCredentialHistory(held, request.credentialGrantId).latest;
+  if (request.kind === 'enroll' && previous) throw new KernelStorageError('REVISION_CONFLICT', 'credential id is already enrolled');
+  if (request.kind === 'rotate' && (!previous || previous.state !== 'active' || previous.authorityRevision !== request.expectedAuthorityRevision))
+    throw new KernelStorageError('REVISION_CONFLICT', 'credential rotation requires its expected current active revision');
+  if (previous && (previous.authorityRevision >= Number.MAX_SAFE_INTEGER || previous.secretGeneration >= Number.MAX_SAFE_INTEGER))
+    throw new KernelStorageError('REVISION_CONFLICT', 'credential revision or generation is exhausted');
+  const originalEndpoint = previous && credentialEndpoint(held, credentialCreatingOperation(held, previous).commandCore);
+  const endpointId = request.kind === 'enroll' ? request.endpointRegistrationId : originalEndpoint!.endpointRegistrationId;
+  const purpose = request.kind === 'enroll' ? request.purpose : previous!.purpose;
+  const endpoint = readEndpointHistory(held, endpointId).at(-1);
+  if (!endpoint || endpoint.state !== 'active' || !endpoint.registration.purposes.includes(purpose) ||
+      (previous && (endpoint.expectedRegistrationArtifactRef !== previous.endpointRegistrationRef ||
+        endpoint.registration.endpointIdentityDigest !== previous.endpointIdentityDigest || endpoint.registration.tlsPolicyDigest !== previous.tlsPolicyDigest)))
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential requires a current active endpoint of its purpose');
+  const pending = credentialSchemaVersion(held.database!) !== 1 && held.database!.prepare(`SELECT 1 FROM credential_operation_facts AS f WHERE owner_principal_id=?
     AND credential_grant_id=? AND phase_rank=0 AND NOT EXISTS(SELECT 1 FROM credential_operation_facts AS t
       WHERE t.owner_principal_id=f.owner_principal_id AND t.request_id=f.request_id AND t.attempt=f.attempt AND t.phase_rank=2) LIMIT 1`)
     .get(held.ownerPrincipalId, request.credentialGrantId);
   if (pending) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential has a pending producer');
-  const endpoints = readEndpointHistory(held, request.endpointRegistrationId), endpoint = endpoints.at(-1);
-  if (!endpoint || endpoint.state !== 'active' || !endpoint.registration.purposes.includes(request.purpose))
-    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential requires a current active endpoint of its purpose');
+  return { previous, endpoint, purpose, expiresAt: request.expiresAt ?? (request.kind === 'rotate' ? previous!.expiresAt : undefined) };
+}
+function prepareCredentialWrite(held: CredentialBinding, request: CredentialWriteRequest): CredentialAuthorityOperationV1 {
+  ensureCredentialSchema(held.database!);
+  if (checkCredentialReplay(held, request)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential already committed during preparation');
+  const { previous, endpoint, purpose, expiresAt } = credentialWriteIntent(held, request);
   const now = sampleCanonicalNow();
-  if (parseCanonicalTime(now) < parseCanonicalTime(endpoint.createdAt) || parseCanonicalTime(now) < parseCanonicalTime(held.channelIdentity.openedAt) ||
-      (request.expiresAt && parseCanonicalTime(request.expiresAt) <= parseCanonicalTime(now)))
+  if ([endpoint.createdAt, held.channelIdentity.openedAt, ...(previous ? [previous.createdAt] : [])].some(time => parseCanonicalTime(time) > parseCanonicalTime(now)) ||
+      (expiresAt && parseCanonicalTime(expiresAt) <= parseCanonicalTime(now)))
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential preparation time or expiry is invalid');
   const subjectBody = { schemaVersion: 1 as const, format: 'cliq-credential-external-subject-v1' as const,
     endpointIdentityDigest: endpoint.registration.endpointIdentityDigest,
     subject: { kind: 'opaque_generation' as const, opaqueSubjectId: randomBytes(32).toString('base64url'),
       scopes: ['endpoint_exact_only'] as ['endpoint_exact_only'], audiences: [] as [] }, observedAt: now };
   const externalSubject = { ...subjectBody, subjectDigest: canonicalSha256(subjectBody) };
-  const target = { credentialGrantId: request.credentialGrantId, ownerPrincipalId: held.ownerPrincipalId, purpose: request.purpose,
+  const target = { credentialGrantId: request.credentialGrantId, ownerPrincipalId: held.ownerPrincipalId, purpose,
     endpointRegistrationRef: endpoint.expectedRegistrationArtifactRef, endpointIdentityDigest: endpoint.registration.endpointIdentityDigest,
-    tlsPolicyDigest: endpoint.registration.tlsPolicyDigest, ...(request.expiresAt ? { expiresAt: request.expiresAt } : {}),
+    tlsPolicyDigest: endpoint.registration.tlsPolicyDigest, ...(expiresAt ? { expiresAt } : {}),
     externalSubjectDigest: externalSubject.subjectDigest };
   const coreBody = { schemaVersion: 1 as const, ...target, kind: request.kind, secretSubmissionId: request.secretSubmissionId,
     externalSubject, credentialTargetDigest: canonicalSha256(target) };
@@ -441,7 +475,8 @@ function prepareCredentialEnrollment(held: CredentialBinding, request: Credentia
     requestId: request.requestId, requestDigest: core.commandDigest, channelIdentityRef: canonicalSha256(held.channelIdentity),
     channelIdentityDigest: held.channelIdentity.channelIdentityDigest, commandCore: core, attempt: 1 as const, ownerPrincipalId: held.ownerPrincipalId,
     kind: core.kind, credentialGrantId: core.credentialGrantId, credentialTargetDigest: core.credentialTargetDigest,
-    intendedAuthorityRevision: 1, intendedSecretGeneration: 1, intendedExternalSubjectDigest: core.externalSubjectDigest,
+    intendedAuthorityRevision: (previous?.authorityRevision ?? 0) + 1, intendedSecretGeneration: (previous?.secretGeneration ?? 0) + 1,
+    intendedExternalSubjectDigest: core.externalSubjectDigest,
     platformItem: { kind: 'linux_secret_service' as const, schema: 'org.freedesktop.Secret.Generic' as const,
       collection: 'default' as const, itemId: identityHash('cliq-credential-platform-item-v1', randomBytes(32).toString('base64url')) },
     createdAt: now, phase: 'prepared' as const };
@@ -475,10 +510,12 @@ async function readCredentialSecret(): Promise<Buffer> {
 }
 /** Complete fixed installed business action. Input and phase writers are owned
  * here, not exposed as injectable callbacks/factories or public phase methods. */
-export async function enrollCredentialAuthority(selected: HeldInstalledRuntime, request: CredentialEnrollRequest): Promise<CredentialAuthorityOperationV1> {
+export async function writeCredentialAuthority(selected: HeldInstalledRuntime, request: CredentialWriteRequest): Promise<CredentialAuthorityOperationV1> {
   const replay = await withCredentialAuthorityLock(selected, async token => {
-    const held = checkedCredentialToken(token); request = decodeCredentialEnrollRequest(request);
-    return checkCredentialReplay(held, request);
+    const held = checkedCredentialToken(token); request = decodeCredentialWriteRequest(request);
+    const existing = checkCredentialReplay(held, request);
+    if (!existing) credentialWriteIntent(held, request);
+    return existing;
   });
   if (replay) return replay;
   let client = await ensureInstalledCredentialSupervisor(selected);
@@ -492,7 +529,7 @@ export async function enrollCredentialAuthority(selected: HeldInstalledRuntime, 
     const operation = await withCredentialAuthorityLock(selected, async token => {
       const held = checkedCredentialToken(token), raced = checkCredentialReplay(held, request);
       if (raced) return raced;
-      const prepared = prepareCredentialEnrollment(held, request);
+      const prepared = prepareCredentialWrite(held, request);
       let observation: SecretServiceObservation;
       try {
         observation = decodeSecretServiceObservation(await platform.secretService({ kind: 'create_compare',
@@ -515,8 +552,27 @@ export async function enrollCredentialAuthority(selected: HeldInstalledRuntime, 
     });
     if (operation.phase === 'committed') return operation;
     // This call starts only after both pager and native scope have retired.
-    return await client.finalize({ protocolVersion: 1, method: 'credential.finalize', requestId: operation.requestId,
+    const committed = await client.finalize({ protocolVersion: 1, method: 'credential.finalize', requestId: operation.requestId,
       operationId: operation.operationId, attempt: operation.attempt, commandDigest: operation.requestDigest });
+    if (committed.kind === 'rotate') {
+      // Publication is authoritative before cleanup acquires another scope.
+      // A failed delete cannot roll back or rewrite this committed result;
+      // the retained creating operation keeps the old item sweepable.
+      try {
+        await withCredentialAuthorityLock(selected, async token => {
+          const held = checkedCredentialToken(token), history = readCredentialHistory(held, committed.credentialGrantId,
+            committed.intendedAuthorityRevision - 1), previous = history.result;
+          if (!previous || previous.state !== 'active') throw new TypeError('rotation cleanup has no original active revision');
+          if (history.latest?.state === 'active' && canonicalJsonBytes(history.latest.platformItem).equals(canonicalJsonBytes(previous.platformItem))) return;
+          const selector = credentialSelector(held, credentialCreatingOperation(held, previous));
+          const observed = decodeSecretServiceObservation(await platform.secretService({ kind: 'delete_known', selector }));
+          if (!['deleted', 'absent'].includes(observed.kind) || observed.bus.uid !== held.rootIdentity.ownerUid ||
+              !canonicalJsonBytes(observed.selector).equals(canonicalJsonBytes(selector))) throw new TypeError('rotation cleanup observation differs');
+          token.assertHeld();
+        });
+      } catch (error) { if (error instanceof ResourceRetirementError) throw error; }
+    }
+    return committed;
   } finally { secret?.fill(0); await client.close(); }
 }
 
@@ -1189,9 +1245,14 @@ export class StateStore {
         token.assertHeld();
         const core = operation.commandCore, registration = credentialEndpoint(held, core);
         const endpoint = readEndpointHistory(held, registration.endpointRegistrationId).at(-1);
+        const latest = readCredentialHistory(held, operation.credentialGrantId).latest;
         if (!endpoint || endpoint.state !== 'active' || endpoint.expectedRegistrationArtifactRef !== core.endpointRegistrationRef ||
-            core.kind !== 'enroll' || readCredentialHistory(held, operation.credentialGrantId).latest)
-          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential endpoint or enrollment revision changed');
+            operation.intendedAuthorityRevision !== (latest?.authorityRevision ?? 0) + 1 ||
+            operation.intendedSecretGeneration !== (latest?.secretGeneration ?? 0) + 1 ||
+            (core.kind === 'enroll' ? !!latest : !latest || latest.state !== 'active' || core.purpose !== latest.purpose ||
+              core.endpointRegistrationRef !== latest.endpointRegistrationRef || core.endpointIdentityDigest !== latest.endpointIdentityDigest ||
+              core.tlsPolicyDigest !== latest.tlsPolicyDigest))
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential endpoint or intended revision changed');
         // All async closure/platform work is finished. No await, externally
         // supplied callback, D-Bus or CAS operation occurs until readback.
         const cut = heldOwner.driver.transaction(connection => {
@@ -1212,11 +1273,11 @@ export class StateStore {
         // Regression survives this refusal: its transaction already committed.
         if (cut.status !== 'healthy') throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence refuses credential expansion');
         const nowMs = parseCanonicalTime(cut.now);
-        if ([endpoint.createdAt, registration.createdAt, operation.createdAt, core.externalSubject.observedAt,
+        if ([endpoint.createdAt, registration.createdAt, ...(latest ? [latest.createdAt] : []), operation.createdAt, core.externalSubject.observedAt,
           original.channel.openedAt, cut.channelOpenedAt].some(time => parseCanonicalTime(time) > nowMs) ||
             (core.expiresAt && parseCanonicalTime(core.expiresAt) <= nowMs))
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential expansion time or expiry is not causal');
-        return commitCredentialEnrollment(held, operation, cut.now);
+        return commitCredentialWrite(held, operation, cut.now);
       });
     })();
     const joined = task.catch(error => {

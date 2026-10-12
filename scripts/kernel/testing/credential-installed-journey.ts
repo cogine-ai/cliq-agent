@@ -553,6 +553,24 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(await processCut(setup.supervisorUnit, 'supervisor'), supervisor);
     assert.deepEqual(await readFile(readyPath), readyBytes);
 
+    report.phase = 'committed_submission_reuse';
+    const reused = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
+      canonicalJsonBytes({ ...rotateMetadata, requestId: '019a0012-0000-7000-8000-000000000024',
+        expectedAuthorityRevision: 2, secretSubmissionId: metadata.secretSubmissionId }).toString('base64url')]);
+    assert.equal(reused.status, 1, 'a new rotation must not reuse any committed generation submission id');
+    let submissionRefused = false;
+    const refusalLine = reused.stderr.trim().split('\n').at(-1);
+    if (refusalLine && Buffer.byteLength(refusalLine) <= 2048) try {
+      const refusal = parseJsonStrict(refusalLine) as Record<string, unknown>;
+      submissionRefused = refusal.diagnosticOnly === true && refusal.scope === 'installed-read-startup' &&
+        refusal.code === 'INVALID_REQUEST' && refusal.message === 'credential rotation requires a fresh secret submission id';
+    } catch { /* Never retain arbitrary secret-command output or parser diagnostics. */ }
+    assert(submissionRefused, 'submission reuse must return only the fixed input-refusal diagnostic');
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record')), rotatedRecord);
+    assert.deepEqual(observe('list').items, afterRotate.items);
+    report.committedSubmissionReuseRefused = { fixedInputRefusal: true, secretInputPipeUnwrittenAndUnended: true };
+
     report.phase = 'exact_replay_without_services_or_secret_input';
     const stopped = command('/usr/bin/systemctl', ['--user', 'stop', setup.supervisorUnit, setup.keeperUnit]);
     assert.equal(stopped.status, 0, 'actual installed services must stop before replay');
