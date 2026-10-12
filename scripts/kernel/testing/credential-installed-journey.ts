@@ -1,5 +1,5 @@
-// One actual signed installed enroll/read/rotate/revoke/explicit-cleanup tracer. This is not the complete
-// credential lifecycle, crash qualification, broker redemption or installed I1.
+// Actual signed credential journey plus one joined prepared-SIGKILL retry.
+// Not the complete crash campaign, attempt cap, live-producer proof or installed I1.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -16,6 +16,7 @@ import { digestOmitting, identityHash, parseCanonicalTime } from '../../../src/k
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { installedReadClientScript } from './installed-read-control.js';
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
+import { crashFirstPreparedCredentialWrite } from './credential-write-crash.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string;
   releaseKeysFile: string; controlDirectory: string; observer: string; reportFile: string };
@@ -101,7 +102,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'one genuine signed installed enroll/read/rotate/exact replay, unavailable-store revoke, restored-store cleanup retry and explicit cleanup with actual user-manager autostart and independent Secret Service byte comparisons; not orphan retry, crash, broker or I1' };
+    scope: 'genuine signed credential journey, explicit cleanup and one first-prepared SIGKILL/same-core retry with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, attempt cap, live-producer presence, broker or I1' };
   const userPrefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', `HOME=${ledger.home}`,
     'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
     `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ledger.uid}/bus`];
@@ -292,7 +293,8 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(result.status, 0, 'actual fixture Secret Service owner must be observed');
     const owner = result.stdout.trim().match(/^s "(:[0-9]+\.[0-9]+)"$/u); assert(owner); return owner[1]!;
   };
-  const secret = randomBytes(32), rotatedSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
+  const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
+    password = Buffer.from(randomBytes(32).toString('hex'));
   let daemon: ReturnType<typeof spawn> | undefined;
   let daemonExit: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
   let daemonClosing: Promise<void> | undefined;
@@ -522,6 +524,71 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(await readFile(readyPath), readyBytes);
     const readyAfter = await lstat(readyPath, { bigint: true });
     for (const key of imageFields) assert.equal(readyAfter[key], ready[key]);
+
+    report.phase = 'orphan_first_prepared_sigkill';
+    const orphanMetadata = { schemaVersion: 1, kind: 'enroll', requestId: '019a0012-0000-7000-8000-000000000027',
+      credentialGrantId: 'credential-journey-orphan-grant', purpose: 'model_endpoint',
+      endpointRegistrationId: registration.endpointRegistrationId, secretSubmissionId: 'credential-journey-orphan-submission',
+      expiresAt: metadata.expiresAt } as const;
+    assert(!abandonedSecret.equals(resubmittedSecret), 'fixture retry must submit different input bytes');
+    const selectedEntry = signed.bundle.entries.find(entry => entry.role === 'supervisor' && entry.relativePath === 'supervisor');
+    assert(selectedEntry);
+    const preparedCut = await crashFirstPreparedCredentialWrite({ fixture: ledger.fixture, username: ledger.username,
+      uid: ledger.uid, gid: ledger.gid, home: ledger.home, stateRoot: recipe.stateRoot,
+      ownerPrincipalId: record.ownerPrincipalId, selectedImage: expectedImage, selectedImageDigest: selectedEntry.digest,
+      request: orphanMetadata, secret: abandonedSecret });
+    report.orphanPreparedCut = preparedCut;
+    const prepared = preparedCut.prepared;
+    assert.equal(prepared.intendedAuthorityRevision, 1); assert.equal(prepared.intendedSecretGeneration, 1);
+    assert.equal(prepared.commandCore.purpose, record.purpose);
+    assert.equal(prepared.commandCore.endpointRegistrationRef, record.endpointRegistrationRef);
+    assert.equal(prepared.commandCore.endpointIdentityDigest, record.endpointIdentityDigest);
+    assert.equal(prepared.commandCore.tlsPolicyDigest, record.tlsPolicyDigest);
+    report.phase = 'orphan_read_does_not_promote';
+    assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: orphanMetadata.credentialGrantId }), 'record'), null,
+      'ordinary read must not promote the joined prepared orphan');
+    assert.deepEqual(observe('list').items, after.items, 'prepared cut must precede an actual platform item');
+    report.phase = 'orphan_automatic_same_request_retry';
+    const recovered = decodeCredentialAuthorityOperation(success(credential(orphanMetadata, resubmittedSecret), 'operation'));
+    assert.equal(recovered.phase, 'committed'); assert.equal(recovered.attempt, 2);
+    assert.equal(recovered.requestId, orphanMetadata.requestId); assert.equal(recovered.credentialGrantId, orphanMetadata.credentialGrantId);
+    assert.deepEqual(recovered.commandCore, prepared.commandCore, 'automatic retry must freeze the complete original core and subject');
+    for (const key of ['ownerPrincipalId', 'kind', 'requestDigest', 'credentialTargetDigest', 'intendedAuthorityRevision',
+      'intendedSecretGeneration', 'intendedExternalSubjectDigest'] as const) assert.equal(recovered[key], prepared[key]);
+    assert.notEqual(recovered.operationId, prepared.operationId); assert.notEqual(recovered.channelIdentityRef, prepared.channelIdentityRef);
+    assert.notEqual(recovered.channelIdentityDigest, prepared.channelIdentityDigest);
+    assert.notDeepEqual(recovered.platformItem, prepared.platformItem, 'replacement producer requires a fresh planned item');
+    assert.equal(recovered.committedAuthorityRevision, 1); assert(parseCanonicalTime(recovered.createdAt) >= parseCanonicalTime(prepared.createdAt));
+    const orphanRecord = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: orphanMetadata.credentialGrantId }), 'record'));
+    assert.equal(orphanRecord.state, 'active'); assert.equal(orphanRecord.authorityRevision, 1); assert.equal(orphanRecord.secretGeneration, 1);
+    assert.deepEqual(orphanRecord.platformItem, recovered.platformItem); assert.deepEqual(orphanRecord.externalSubject, prepared.commandCore.externalSubject);
+    if (orphanRecord.platformItem.kind !== 'linux_secret_service') throw new Error('Linux orphan retry must use Secret Service');
+    const orphanInventory = observe('list'); assert.equal(orphanInventory.items.length, 2);
+    assert(orphanInventory.items.includes(compared.item!));
+    assert.equal(orphanInventory.nameOwner, before.nameOwner); assert.equal(orphanInventory.servicePid, before.servicePid);
+    assert.equal(orphanInventory.collection, before.collection);
+    const orphanItems = orphanInventory.items.filter(item => item !== compared.item); assert.equal(orphanItems.length, 1);
+    const orphanCompared = observe('compare', orphanItems[0]!, orphanRecord.platformItem.itemId, resubmittedSecret);
+    assert.equal(orphanCompared.readback, true); assert.equal(orphanCompared.logicalItemIdMatched, true);
+    assert.equal(orphanCompared.item, orphanItems[0]); assert.equal(orphanCompared.nameOwner, before.nameOwner);
+    assert.equal(orphanCompared.servicePid, before.servicePid);
+    report.orphanRecoveredOperation = recovered; report.orphanRecoveredRecord = orphanRecord; report.orphanPlatformReadback = orphanCompared;
+    report.phase = 'revoke_recovered_fixture_grant';
+    const orphanRevocation = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'revoke',
+      requestId: '019a0012-0000-7000-8000-000000000028', credentialGrantId: orphanMetadata.credentialGrantId,
+      expectedAuthorityRevision: 1 }), 'operation'));
+    assert.equal(orphanRevocation.disposition, 'revoked'); assert.equal(orphanRevocation.cleanupPhase, 'cleanup_complete');
+    assert.equal(orphanRevocation.committedAuthorityRevision, 2); assert.deepEqual(orphanRevocation.platformItem, orphanRecord.platformItem);
+    assert.deepEqual(observe('list').items, after.items, 'recovered fixture revoke must restore the original inventory');
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record')), record, 'orphan workflow must not modify the original grant');
+    assert.deepEqual(await processCut(setup.keeperUnit, 'keeper'), keeper);
+    assert.deepEqual(await processCut(setup.supervisorUnit, 'supervisor'), supervisor);
+    report.orphanFixtureRevocation = orphanRevocation;
+    report.preparedOrphanRetry = { firstActualPreparedCutJoined: true, readDidNotPromote: true, frozenCoreAndSubjectMatched: true,
+      attemptTwoCommitted: true, actualLatestSecretReadbackMatched: true, originalInventoryRestored: true,
+      attemptCapQualified: false, liveProducerPresenceQualified: false, fullCrashCampaignQualified: false };
 
     report.phase = 'cleanup_current_active_refusal';
     const activeCleanup = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
@@ -766,7 +833,7 @@ async function campaign(filename: string): Promise<void> {
     report.phase = 'complete'; report.qualified = true;
   } catch (error) { primary = error; }
   finally {
-    secret.fill(0); rotatedSecret.fill(0); password.fill(0);
+    secret.fill(0); rotatedSecret.fill(0); abandonedSecret.fill(0); resubmittedSecret.fill(0); password.fill(0);
     try { await stopDaemon(); }
     catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'fixture platform daemon retirement failed'); }
     if (primary) { report.qualified = false; report.error = String((primary as Error).stack ?? primary).slice(0, 8192); }
