@@ -43,7 +43,9 @@ jobs:
     # Component/OS facts only, not an installed I1 qualification. Standard
     # public-repository runner; never substitute a detached child manager.
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    # The existing component baseline plus the full installed credential
+    # journey exceed 15 minutes; each process/operation remains separately bounded.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:

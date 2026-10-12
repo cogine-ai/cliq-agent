@@ -1,5 +1,5 @@
 // Actual signed credential journey plus one joined prepared-SIGKILL retry.
-// Not the complete crash campaign, attempt cap, live-producer proof or installed I1.
+// Not the complete crash campaign, live-producer/clock proof or installed I1.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -16,7 +16,7 @@ import { digestOmitting, identityHash, parseCanonicalTime } from '../../../src/k
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { installedReadClientScript } from './installed-read-control.js';
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
-import { crashFirstPreparedCredentialWrite } from './credential-write-crash.js';
+import { crashPreparedCredentialWrite, inspectPreparedCredentialCrashFacts } from './credential-write-crash.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string;
   releaseKeysFile: string; controlDirectory: string; observer: string; reportFile: string };
@@ -102,7 +102,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'genuine signed credential journey, explicit cleanup and one first-prepared SIGKILL/same-core retry with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, attempt cap, live-producer presence, broker or I1' };
+    scope: 'genuine signed credential journey, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, live-producer presence, clock regression, broker or I1' };
   const userPrefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', `HOME=${ledger.home}`,
     'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
     `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ledger.uid}/bus`];
@@ -295,6 +295,7 @@ async function campaign(filename: string): Promise<void> {
   };
   const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
     password = Buffer.from(randomBytes(32).toString('hex'));
+  const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
   let daemon: ReturnType<typeof spawn> | undefined;
   let daemonExit: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
   let daemonClosing: Promise<void> | undefined;
@@ -533,7 +534,7 @@ async function campaign(filename: string): Promise<void> {
     assert(!abandonedSecret.equals(resubmittedSecret), 'fixture retry must submit different input bytes');
     const selectedEntry = signed.bundle.entries.find(entry => entry.role === 'supervisor' && entry.relativePath === 'supervisor');
     assert(selectedEntry);
-    const preparedCut = await crashFirstPreparedCredentialWrite({ fixture: ledger.fixture, username: ledger.username,
+    const preparedCut = await crashPreparedCredentialWrite({ fixture: ledger.fixture, username: ledger.username,
       uid: ledger.uid, gid: ledger.gid, home: ledger.home, stateRoot: recipe.stateRoot,
       ownerPrincipalId: record.ownerPrincipalId, selectedImage: expectedImage, selectedImageDigest: selectedEntry.digest,
       request: orphanMetadata, secret: abandonedSecret });
@@ -589,6 +590,64 @@ async function campaign(filename: string): Promise<void> {
     report.preparedOrphanRetry = { firstActualPreparedCutJoined: true, readDidNotPromote: true, frozenCoreAndSubjectMatched: true,
       attemptTwoCommitted: true, actualLatestSecretReadbackMatched: true, originalInventoryRestored: true,
       attemptCapQualified: false, liveProducerPresenceQualified: false, fullCrashCampaignQualified: false };
+
+    const capMetadata = { ...orphanMetadata, requestId: '019a0012-0000-7000-8000-000000000029',
+      credentialGrantId: 'credential-journey-attempt-cap-grant', secretSubmissionId: 'credential-journey-attempt-cap-submission' } as const;
+    const capCuts: Awaited<ReturnType<typeof crashPreparedCredentialWrite>>[] = [];
+    report.attemptCapCuts = capCuts;
+    for (const expectedAttempt of [1, 2, 3] as const) {
+      report.phase = `attempt_cap_prepared_${expectedAttempt}_sigkill`;
+      const cut = await crashPreparedCredentialWrite({ fixture: ledger.fixture, username: ledger.username,
+        uid: ledger.uid, gid: ledger.gid, home: ledger.home, stateRoot: recipe.stateRoot,
+        ownerPrincipalId: record.ownerPrincipalId, selectedImage: expectedImage, selectedImageDigest: selectedEntry.digest,
+        request: capMetadata, secret: capSecrets[expectedAttempt - 1]!, expectedAttempt, previous: capCuts.at(-1) });
+      capCuts.push(cut);
+      assert.equal(cut.prepared.attempt, expectedAttempt); assert.equal(cut.prepared.intendedAuthorityRevision, 1);
+      assert.equal(cut.prepared.intendedSecretGeneration, 1);
+      assert.deepEqual(cut.prepared.commandCore, capCuts[0]!.prepared.commandCore);
+      assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: capMetadata.credentialGrantId }), 'record'), null);
+      assert.deepEqual(observe('list').items, after.items, 'prepared-only cap attempts must never create an actual item');
+    }
+    const thirdCut = capCuts[2]!;
+    const capCommand = canonicalJsonBytes(capMetadata).toString('base64url');
+    const exhaustedRefusal = (result: Awaited<ReturnType<typeof openInputCommand>>) => {
+      assert.equal(result.status, 1, 'a fourth attempt must be refused before secret input');
+      assert.equal(result.stdout, '', 'exhaustion must not publish an operation');
+      let confirmed = false;
+      const line = result.stderr.trim().split('\n').at(-1);
+      if (line && Buffer.byteLength(line) <= 2048) try {
+        const refusal = parseJsonStrict(line) as Record<string, unknown>;
+        confirmed = refusal.diagnosticOnly === true && refusal.scope === 'installed-read-startup' &&
+          refusal.code === 'STATE_TRANSITION_INVALID' &&
+          refusal.message === 'credential request exhausted its three attempts; a new request id is required' &&
+          Object.keys(refusal).every(key => ['diagnosticOnly', 'scope', 'code', 'path', 'message'].includes(key));
+      } catch { /* No arbitrary output becomes the bounded closed-refusal evidence. */ }
+      assert(confirmed, 'only the exact exhaustion refusal qualifies the cap, not generic contention or failure');
+    };
+    report.phase = 'attempt_cap_fourth_refused';
+    exhaustedRefusal(await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential', capCommand]));
+    const exhaustedFacts = await inspectPreparedCredentialCrashFacts(thirdCut);
+    assert.equal(exhaustedFacts.length, 6); assert(exhaustedFacts.length <= 9);
+    assert.deepEqual(exhaustedFacts.slice(0, thirdCut.facts.length), thirdCut.facts, 'recovery must not rewrite any original fact');
+    assert(exhaustedFacts.every(fact => fact.attempt <= 3));
+    const terminalThird = exhaustedFacts.at(-1)!;
+    assert.equal(terminalThird.attempt, 3); assert.equal(terminalThird.phase, 'aborted');
+    assert.equal(terminalThird.abortReason, 'recovered_orphan');
+    assert.deepEqual(terminalThird.commandCore, thirdCut.prepared.commandCore);
+    assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: capMetadata.credentialGrantId }), 'record'), null);
+    assert.deepEqual(observe('list').items, after.items);
+    report.phase = 'attempt_cap_repeated_refusal';
+    exhaustedRefusal(await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential', capCommand]));
+    assert.deepEqual(await inspectPreparedCredentialCrashFacts(thirdCut), exhaustedFacts, 'exhausted replay must not spend another fact or attempt');
+    assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: capMetadata.credentialGrantId }), 'record'), null);
+    const capInventory = observe('list'); assert.deepEqual(capInventory.items, after.items);
+    assert.equal(capInventory.nameOwner, before.nameOwner); assert.equal(capInventory.servicePid, before.servicePid);
+    assert.deepEqual(await processCut(setup.keeperUnit, 'keeper'), keeper);
+    assert.deepEqual(await processCut(setup.supervisorUnit, 'supervisor'), supervisor);
+    report.attemptCap = { threeRealPreparedCutsJoined: true, completeCoreFrozen: true, previousFactsUnchanged: true,
+      thirdDeadProducerRecoveredToAborted: true, exactFourthRefusal: true, exactRepeatedRefusal: true,
+      noAttemptFourInActualSnapshot: true, originalInventoryUnchanged: true, secretInputPipeUnwrittenAndUnended: true,
+      offlinePlatformZeroCallsQualified: false, liveProducerPresenceQualified: false, fullCrashCampaignQualified: false };
 
     report.phase = 'cleanup_current_active_refusal';
     const activeCleanup = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
@@ -834,6 +893,7 @@ async function campaign(filename: string): Promise<void> {
   } catch (error) { primary = error; }
   finally {
     secret.fill(0); rotatedSecret.fill(0); abandonedSecret.fill(0); resubmittedSecret.fill(0); password.fill(0);
+    for (const bytes of capSecrets) bytes.fill(0);
     try { await stopDaemon(); }
     catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'fixture platform daemon retirement failed'); }
     if (primary) { report.qualified = false; report.error = String((primary as Error).stack ?? primary).slice(0, 8192); }

@@ -115,12 +115,14 @@ async function snapshotFacts(directory: string, main: Buffer, wal: Buffer, reque
 
 export type PreparedCredentialCrashInput = Readonly<{ fixture: string; username: string; uid: number; gid: number; home: string;
   stateRoot: string; ownerPrincipalId: string; selectedImage: string; selectedImageDigest: string;
-  request: CredentialWriteRequest; secret: Buffer }>;
+  request: CredentialWriteRequest; secret: Buffer; expectedAttempt?: 1 | 2 | 3;
+  previous?: Readonly<{ prepared: CredentialAuthorityOperationV1; facts: readonly CredentialAuthorityOperationV1[] }> }>;
 
 /** Caller is the existing root-owned disposable-user ledger campaign. Inputs
  * are its fixed paths/UID/signed selection, not accepted production evidence.
- * Warm v2 with genuine business commands before using this first-request cut. */
-export async function crashFirstPreparedCredentialWrite(input: PreparedCredentialCrashInput) {
+ * Warm v2 with genuine business commands first. Later cuts use the previous
+ * actual copied history only for cut identification, never production proof. */
+export async function crashPreparedCredentialWrite(input: PreparedCredentialCrashInput) {
   assert.equal(process.platform, 'linux'); assert.equal(process.geteuid!(), 0);
   assert(input.uid > 0 && Number.isSafeInteger(input.uid) && input.gid === input.uid);
   assert.match(input.fixture, /^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+$/u);
@@ -134,6 +136,15 @@ export async function crashFirstPreparedCredentialWrite(input: PreparedCredentia
   const fixture = await lstat(input.fixture); assert(fixture.isDirectory() && !fixture.isSymbolicLink() && fixture.uid === 0);
   const requestBytes = canonicalJsonBytes(input.request); assert(requestBytes.length <= 65536);
   assert(input.secret.length > 0 && input.secret.length <= 65536);
+  const expectedAttempt = input.expectedAttempt ?? 1;
+  assert([1, 2, 3].includes(expectedAttempt));
+  assert.equal(Boolean(input.previous), expectedAttempt !== 1);
+  if (input.previous) {
+    assert.equal(input.previous.prepared.phase, 'prepared'); assert.equal(input.previous.prepared.attempt, expectedAttempt - 1);
+    assert.equal(input.previous.prepared.requestId, input.request.requestId);
+    assert.equal(input.previous.prepared.credentialGrantId, input.request.credentialGrantId);
+    assert.deepEqual(input.previous.facts.at(-1), input.previous.prepared);
+  }
   const main = path.join(input.stateRoot, 'credentials/authority.sqlite'), wal = `${main}-wal`;
   const mainIdentity = physical(await lstat(main, { bigint: true })), walIdentity = physical(await lstat(wal, { bigint: true }));
   for (const identity of [mainIdentity, walIdentity]) {
@@ -152,7 +163,8 @@ export async function crashFirstPreparedCredentialWrite(input: PreparedCredentia
   await chmod(evidence, 0o755);
   const traces = path.join(evidence, 'trace'); await mkdir(traces, { mode: 0o700 }); await chown(traces, input.uid, input.gid);
   const baselineMain = await actualBytes(main, mainIdentity), baselineWal = await actualBytes(wal, walIdentity);
-  assert.deepEqual(await snapshotFacts(evidence, baselineMain, baselineWal, input.request.requestId), [], 'cut target must be a new request');
+  const baselineFacts = (await snapshotFacts(evidence, baselineMain, baselineWal, input.request.requestId)).map(fact => fact.operation);
+  assert.deepEqual(baselineFacts, input.previous?.facts ?? [], 'copied cut prefix must remain exactly unchanged');
   const baseline = inspectWal(baselineWal);
   const prefix = path.join(traces, 'auth.trace');
   // No read/write/send/recv payload tracing, input digest, fake errno/retval or
@@ -228,7 +240,7 @@ export async function crashFirstPreparedCredentialWrite(input: PreparedCredentia
   try {
     const deadline = performance.now() + 120000;
     const tracedWal = [...Buffer.from(wal)].map(byte => `\\x${byte.toString(16).padStart(2, '0')}`).join('');
-    let cut: { prepared: CredentialAuthorityOperationV1; sampledAt: number; enteredAt: number;
+    let cut: { prepared: CredentialAuthorityOperationV1; facts: CredentialAuthorityOperationV1[]; sampledAt: number; enteredAt: number;
       delayedEvent: string; observed: NonNullable<ReturnType<typeof inspectWal>>; actualMainSha256: string; actualWalSha256: string } | undefined;
     while (performance.now() < deadline) {
       assert(!spawnFailed && !closed, 'owned credential writer exited before its prepared cut');
@@ -250,9 +262,32 @@ export async function crashFirstPreparedCredentialWrite(input: PreparedCredentia
       const actualMain = await actualBytes(main, mainIdentity);
       const facts = await snapshotFacts(evidence, actualMain, actualWal, input.request.requestId);
       if (!facts.length) { await delay(20); continue; }
-      assert.equal(facts.length, 1, 'new request must be paused before a platform/terminal fact');
-      const { operation: prepared, producer } = facts[0]!;
-      assert.equal(prepared.phase, 'prepared'); assert.equal(prepared.attempt, 1);
+      const operations = facts.map(fact => fact.operation);
+      assert.deepEqual(operations.slice(0, baselineFacts.length), baselineFacts, 'retry must not rewrite earlier facts');
+      const { operation: prepared, producer } = facts.at(-1)!;
+      // Automatic recovery genuinely commits the previous abort before the
+      // next preparation. Its fsync is not the requested prepared-N cut.
+      if (prepared.attempt < expectedAttempt && prepared.phase !== 'committed') { await delay(20); continue; }
+      assert.equal(prepared.phase, 'prepared'); assert.equal(prepared.attempt, expectedAttempt);
+      assert.equal(facts.length, (expectedAttempt - 1) * 2 + 1, 'prepared-only cuts must have one original preparation/abort per earlier attempt');
+      for (let index = 0; index < expectedAttempt - 1; index++) {
+        const preparation = operations[index * 2]!, abort = operations[index * 2 + 1]!;
+        assert.equal(preparation.phase, 'prepared'); assert.equal(preparation.attempt, index + 1);
+        assert.equal(abort.phase, 'aborted'); assert.equal(abort.attempt, index + 1);
+        assert.equal(abort.abortReason, 'recovered_orphan');
+        const { phase: _preparedPhase, operationDigest: _preparedDigest, ...original } = preparation;
+        const { phase: _abortPhase, operationDigest: _abortDigest, abortReason: _reason, finishedAt: _finished, ...retained } = abort;
+        assert.deepEqual(retained, original, 'orphan abort may not rewrite its original operation identity');
+      }
+      if (input.previous) {
+        assert.deepEqual(prepared.commandCore, input.previous.prepared.commandCore, 'retry must retain the original complete frozen core');
+        for (const key of ['intendedAuthorityRevision', 'intendedSecretGeneration', 'intendedExternalSubjectDigest'] as const)
+          assert.equal(prepared[key], input.previous.prepared[key]);
+        assert.notEqual(prepared.operationId, input.previous.prepared.operationId);
+        assert.notEqual(prepared.channelIdentityRef, input.previous.prepared.channelIdentityRef);
+        assert.notEqual(prepared.channelIdentityDigest, input.previous.prepared.channelIdentityDigest);
+        assert.notDeepEqual(prepared.platformItem, input.previous.prepared.platformItem);
+      }
       assert.equal(prepared.kind, input.request.kind); assert.equal(prepared.ownerPrincipalId, input.ownerPrincipalId);
       assert.equal(prepared.credentialGrantId, input.request.credentialGrantId);
       assert.equal(prepared.commandCore.secretSubmissionId, input.request.secretSubmissionId);
@@ -264,7 +299,7 @@ export async function crashFirstPreparedCredentialWrite(input: PreparedCredentia
       assert((await actualBytes(wal, walIdentity)).equals(actualWal));
       assert((await actualBytes(main, mainIdentity)).equals(actualMain));
       assert(Date.now() - enteredAt < delayMs - 250, 'identified prepared cut escaped its OS pause');
-      cut = { prepared, sampledAt, enteredAt, delayedEvent: line, observed,
+      cut = { prepared, facts: operations, sampledAt, enteredAt, delayedEvent: line, observed,
         actualMainSha256: hash(actualMain), actualWalSha256: hash(actualWal) };
       process.kill(auth.pid, 'SIGKILL'); break;
     }
@@ -286,7 +321,8 @@ export async function crashFirstPreparedCredentialWrite(input: PreparedCredentia
     }
     checkedThreadCalls(corpus, auth.pid, 'joined_sigkill');
     assert(corpus.every(item => !item.raw.includes(' detached ')), 'a detached thread is not a positive join');
-    return { diagnosticOnly: true as const, phase: 'prepared' as const, ...cut, originalMain: mainIdentity, originalWal: walIdentity,
+    return { diagnosticOnly: true as const, phase: 'prepared' as const, ...cut, stateRoot: input.stateRoot,
+      originalMain: mainIdentity, originalWal: walIdentity,
       image, imageDigest: input.selectedImageDigest, auth: { pid: auth.pid, start: auth.start, uid: input.uid },
       baseline, baselineWalSha256: hash(baselineWal), metadataSha256: hash(requestBytes), launcherJoined: true as const,
       authLifetimeGone: true as const, tids: corpus.map(({ tid, sha256 }) => ({ tid, sha256 })), evidence };
@@ -313,4 +349,20 @@ export async function crashFirstPreparedCredentialWrite(input: PreparedCredentia
     try { await bounded(streamsClosed, 5000); } catch (error) { failures.push(error); }
     if (failures.length) throw new AggregateError([primary, ...failures].filter(Boolean), 'owned credential crash fixture retirement failed');
   }
+}
+
+/** Diagnostic copy only, reused after a real refusal to detect a fourth fact.
+ * It does not observe producer death or grant an authentication decision. */
+export async function inspectPreparedCredentialCrashFacts(cut: Awaited<ReturnType<typeof crashPreparedCredentialWrite>>) {
+  assert.equal(process.platform, 'linux'); assert.equal(process.geteuid!(), 0);
+  assert.match(cut.stateRoot, /^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+\/home\/probe\/credential-state$/u);
+  const root = await lstat(cut.stateRoot, { bigint: true });
+  assert(root.isDirectory() && root.uid === BigInt(cut.auth.uid) && (root.mode & 0o7777n) === 0o700n);
+  const evidence = await lstat(cut.evidence); assert(evidence.isDirectory() && !evidence.isSymbolicLink() && evidence.uid === 0);
+  const main = path.join(cut.stateRoot, 'credentials/authority.sqlite'), wal = `${main}-wal`;
+  const actualMain = await actualBytes(main, cut.originalMain), actualWal = await actualBytes(wal, cut.originalWal);
+  const facts = (await snapshotFacts(cut.evidence, actualMain, actualWal, cut.prepared.requestId)).map(fact => fact.operation);
+  assert((await actualBytes(main, cut.originalMain)).equals(actualMain));
+  assert((await actualBytes(wal, cut.originalWal)).equals(actualWal));
+  return facts;
 }
