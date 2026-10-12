@@ -270,7 +270,10 @@ async function campaign(filename: string): Promise<void> {
       credentialGrantId: 'credential-journey-grant', purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
       secretSubmissionId: 'credential-journey-submission' };
     report.phase = 'enroll';
-    const operation = decodeCredentialAuthorityOperation(success(credential(metadata, secret), 'operation'));
+    const enrolled = credential(metadata, secret);
+    if (enrolled.status !== 0) report.servicesAtEnrollmentRefusal = {
+      diagnosticOnly: true, keeper: show(setup.keeperUnit), supervisor: show(setup.supervisorUnit) };
+    const operation = decodeCredentialAuthorityOperation(success(enrolled, 'operation'));
     assert.equal(operation.phase, 'committed'); assert.equal(operation.kind, 'enroll'); assert.equal(operation.attempt, 1);
     assert.equal(operation.requestId, metadata.requestId); assert.equal(operation.credentialGrantId, metadata.credentialGrantId);
     assert.equal(operation.ownerPrincipalId, ownerPrincipalId); assert.equal(operation.commandCore.secretSubmissionId, metadata.secretSubmissionId);
