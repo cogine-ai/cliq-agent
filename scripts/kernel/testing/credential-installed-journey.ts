@@ -1,4 +1,4 @@
-// One actual signed installed enroll/read/rotate/revoke/exact-replay tracer. This is not the complete
+// One actual signed installed enroll/read/rotate/revoke/cleanup-retry tracer. This is not the complete
 // credential lifecycle, crash qualification, broker redemption or installed I1.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -101,7 +101,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'one genuine signed installed enroll/read/rotate/exact replay and unavailable-store revoke with actual user-manager autostart and independent Secret Service byte comparisons; not successful cleanup, orphan retry, crash, broker or I1' };
+    scope: 'one genuine signed installed enroll/read/rotate/exact replay, unavailable-store revoke and restored-store cleanup retry with actual user-manager autostart and independent Secret Service byte comparisons; not orphan retry, crash, broker or I1' };
   const userPrefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', `HOME=${ledger.home}`,
     'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
     `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ledger.uid}/bus`];
@@ -278,6 +278,14 @@ async function campaign(filename: string): Promise<void> {
     for (const named of value.items) assert.match(named, new RegExp(`^${value.collection}/[A-Za-z0-9_]+$`, 'u'));
     return value;
   };
+  const serviceName = () => command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'call',
+    'org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'NameHasOwner', 's', 'org.freedesktop.secrets']);
+  const serviceOwner = () => {
+    const result = command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'call',
+      'org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'GetNameOwner', 's', 'org.freedesktop.secrets']);
+    assert.equal(result.status, 0, 'actual fixture Secret Service owner must be observed');
+    const owner = result.stdout.trim().match(/^s "(:[0-9]+\.[0-9]+)"$/u); assert(owner); return owner[1]!;
+  };
   const secret = randomBytes(32), rotatedSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   let daemon: ReturnType<typeof spawn> | undefined;
   let daemonExit: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
@@ -308,6 +316,36 @@ async function campaign(filename: string): Promise<void> {
       report.daemonJoined = true;
     } finally { clearTimeout(timer); }
   })();
+  const startDaemon = async (): Promise<Observation> => {
+    if (daemon) {
+      assert(daemonClosing, 'fixture restart requires the original daemon join'); await daemonClosing;
+      assert(daemon.exitCode !== null || daemon.signalCode !== null);
+      if (daemonFact) await waitGone(daemonFact);
+    }
+    daemonClosing = undefined; daemonFact = undefined; daemonLauncher = undefined; report.daemonJoined = false;
+    daemon = spawn('/usr/sbin/runuser', [...userPrefix, '/usr/bin/gnome-keyring-daemon', '--foreground', '--components=secrets',
+      '--unlock', `--control-directory=${recipe.controlDirectory}`], { env: environment, stdio: ['pipe', 'ignore', 'ignore'] });
+    daemonExit = new Promise(resolve => daemon!.once('close', (code, signal) => resolve({ code, signal })));
+    daemon.on('error', () => { report.daemonSpawnFailed = true; });
+    daemon.stdin!.on('error', () => { report.passwordPipeFailed = true; }); daemon.stdin!.end(password);
+    const deadline = Date.now() + 10000;
+    for (;;) {
+      const owned = serviceName(); assert.equal(owned.status, 0);
+      if (owned.stdout.trim() === 'b true') break;
+      assert.equal(daemon.exitCode, null); assert(Date.now() < deadline, 'actual platform service did not acquire its name'); await delay(20);
+    }
+    const owner = serviceOwner(), observation = observe('list'); assert.equal(observation.nameOwner, owner);
+    daemonLauncher = await processFact(daemon.pid!); daemonFact = await processFact(observation.servicePid);
+    assert(daemonLauncher && daemonFact, 'fixture Secret Service process identity must be observed');
+    assert.equal(daemonLauncher.parent, process.pid); assert(daemonLauncher.uids.every(uid => uid === 0));
+    assert.equal(daemonFact.parent, daemonLauncher.pid); assert(daemonFact.uids.every(uid => uid === ledger.uid));
+    assert.equal(await readlink(`/proc/${observation.servicePid}/exe`), '/usr/bin/gnome-keyring-daemon');
+    const actual = await stat(`/proc/${observation.servicePid}/exe`, { bigint: true });
+    const named = await lstat('/usr/bin/gnome-keyring-daemon', { bigint: true });
+    for (const key of imageFields) assert.equal(actual[key], named[key]);
+    assert.equal(serviceOwner(), owner);
+    return observation;
+  };
   let primary: unknown;
   try {
     await mkdir(recipe.buildFixture, { mode: 0o755 });
@@ -321,33 +359,13 @@ async function campaign(filename: string): Promise<void> {
     const bundleDigest = (parseJsonStrict(install.stdout.trim()) as { bundleDigest: string }).bundleDigest;
     assert.equal(bundleDigest, canonicalSha256(signed.bundle)); report.bundleDigest = bundleDigest;
     const expectedImage = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
-    const serviceName = () => command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'call',
-      'org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'NameHasOwner', 's', 'org.freedesktop.secrets']);
     const absent = serviceName(); assert.equal(absent.status, 0); assert.equal(absent.stdout.trim(), 'b false');
     const helper = await lstat(recipe.observer);
     assert(helper.isFile() && !helper.isSymbolicLink()); assert.equal(helper.uid, 0);
     assert.equal(helper.nlink, 1); assert.equal(helper.mode & 0o7777, 0o555);
     await mkdir(recipe.controlDirectory, { mode: 0o700 }); await chown(recipe.controlDirectory, ledger.uid, ledger.gid);
-    daemon = spawn('/usr/sbin/runuser', [...userPrefix, '/usr/bin/gnome-keyring-daemon', '--foreground', '--components=secrets',
-      '--unlock', `--control-directory=${recipe.controlDirectory}`], { env: environment, stdio: ['pipe', 'ignore', 'ignore'] });
-    daemonExit = new Promise(resolve => daemon!.once('close', (code, signal) => resolve({ code, signal })));
-    daemon.on('error', () => { report.daemonSpawnFailed = true; });
-    daemon.stdin!.on('error', () => { report.passwordPipeFailed = true; }); daemon.stdin!.end(password);
-    const deadline = Date.now() + 10000;
-    for (;;) {
-      const owned = serviceName(); assert.equal(owned.status, 0);
-      if (owned.stdout.trim() === 'b true') break;
-      assert.equal(daemon.exitCode, null); assert(Date.now() < deadline, 'actual platform service did not acquire its name'); await delay(20);
-    }
-    const before = observe('list'); report.platformBefore = before; assert.deepEqual(before.items, []);
-    daemonLauncher = await processFact(daemon.pid!); daemonFact = await processFact(before.servicePid);
-    assert(daemonLauncher && daemonFact, 'fixture Secret Service process identity must be observed');
-    assert.equal(daemonLauncher.parent, process.pid); assert(daemonLauncher.uids.every(uid => uid === 0));
-    assert.equal(daemonFact.parent, daemonLauncher.pid); assert(daemonFact.uids.every(uid => uid === ledger.uid));
-    assert.equal(await readlink(`/proc/${before.servicePid}/exe`), '/usr/bin/gnome-keyring-daemon');
-    const daemonImage = await stat(`/proc/${before.servicePid}/exe`, { bigint: true });
-    const daemonNamed = await lstat('/usr/bin/gnome-keyring-daemon', { bigint: true });
-    for (const key of imageFields) assert.equal(daemonImage[key], daemonNamed[key]);
+    const before = await startDaemon(); report.platformBefore = before; assert.deepEqual(before.items, []);
+    const originalDaemon = daemonFact; assert(originalDaemon);
 
     const root = await lstat(recipe.stateRoot, { bigint: true });
     assert(root.isDirectory()); assert.equal(root.uid, BigInt(ledger.uid)); assert.equal(root.mode & 0o7777n, 0o700n);
@@ -654,6 +672,41 @@ async function campaign(filename: string): Promise<void> {
     report.revocationRetry = retriedRevocation;
     report.terminalRevoke = { metadataRemainsRevoked: true, originalReceiptIdentityMatched: true,
       historicalOperationsMatched: true, secretInputPipeUnwrittenAndUnended: true, secretServiceOwnerAbsent: true };
+
+    report.phase = 'restore_fixture_secret_service';
+    const restored = await startDaemon();
+    assert.notEqual(restored.nameOwner, before.nameOwner); assert.equal(restored.collection, before.collection);
+    assert(daemonFact && (daemonFact.pid !== originalDaemon.pid || daemonFact.start !== originalDaemon.start),
+      'restored fixture daemon must be a new positively observed lifetime');
+    assert.equal(restored.items.length, 1);
+    const restoredCompared = observe('compare', restored.items[0]!, rotatedRecord.platformItem.itemId, rotatedSecret);
+    assert.equal(restoredCompared.readback, true); assert.equal(restoredCompared.logicalItemIdMatched, true);
+    assert.equal(restoredCompared.item, restored.items[0]); assert.equal(restoredCompared.nameOwner, restored.nameOwner);
+    assert.equal(restoredCompared.servicePid, restored.servicePid); assert.equal(restoredCompared.collection, restored.collection);
+    report.platformRestored = restored; report.platformRestoredReadback = restoredCompared;
+    report.servicesBeforeCleanup = inactive();
+    report.phase = 'revoke_retry_with_restored_store';
+    const cleanup = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+      ['--bootstrap-credential', revokeBytes.toString('base64url')]);
+    const completedRevocation = decodeCredentialAuthorityRevokeOperation(success(cleanup, 'operation'));
+    assert.equal(completedRevocation.cleanupPhase, 'cleanup_complete');
+    assert.deepEqual(receiptIdentity(completedRevocation), receiptIdentity(revocation));
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record')), revokedRecord);
+    const cleared = observe('list'); assert.deepEqual(cleared.items, []);
+    assert.equal(cleared.nameOwner, restored.nameOwner); assert.equal(cleared.servicePid, restored.servicePid);
+    assert.equal(cleared.collection, restored.collection);
+    report.cleanupComplete = completedRevocation; report.platformAfterCleanup = cleared;
+    report.phase = 'completed_revoke_exact_replay';
+    const completedReplay = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+      ['--bootstrap-credential', revokeBytes.toString('base64url')]);
+    assert.deepEqual(decodeCredentialAuthorityRevokeOperation(success(completedReplay, 'operation')), completedRevocation,
+      'completed cleanup replay must not regenerate receipt cleanup fields');
+    assert.equal(completedReplay.stdout, `${canonicalJsonBytes({ schemaVersion: 1, operation: completedRevocation }).toString('utf8')}\n`);
+    assert.deepEqual(observe('list').items, []); assert.equal(serviceOwner(), restored.nameOwner);
+    report.servicesAfterCompletedReplay = inactive();
+    report.successfulCleanupRetry = { originalReceiptIdentityMatched: true, revokedRecordUnchanged: true,
+      actualInventoryEmpty: true, completedReceiptExactReplay: true, secretInputPipeUnwrittenAndUnended: true };
     report.phase = 'complete'; report.qualified = true;
   } catch (error) { primary = error; }
   finally {
