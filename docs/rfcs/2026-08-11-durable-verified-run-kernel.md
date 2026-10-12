@@ -181,7 +181,30 @@ type LocalControlChannelIdentityV1 = {
 
 Every durable `*At`, deadline, expiry, and retry timestamp is exactly a valid UTC Gregorian instant encoded `YYYY-MM-DDTHH:mm:ss.sssZ`: four-digit year `1970..9999`, fixed separators and three decimal digits, no offset spelling, leap second, `24:00`, omitted fraction, or alternate normalization. Parsing produces one nonnegative safe-integer Unix millisecond; comparison and duration addition use only that integer with checked safe-integer arithmetic, then re-encode the same fixed form. A malformed/overflowing time is rejected before hashing or state access.
 
-The state database has one `CanonicalTimeFenceV1` singleton under the StateOwner gate. A healthy authoritative transaction samples wall UTC, requires it not precede `lastAcceptedAt`, uses that sample as its sole `now`, and advances the fence in the same transaction; in-process deadlines additionally use a monotonic clock anchored to that accepted sample. Startup and every heartbeat/dispatch compare wall UTC to the retained high-water. If it regresses, one fenced transaction records `clock_regressed`; all new admission, lease renewal, capability/grant redemption, productive dispatch, retry, and authority expiry extension stop, and active external release gates are revoked/quiesced. Recovery may return to `healthy` only after wall UTC reaches/exceeds the retained high-water under a current owner epoch. It never rewrites an old timestamp or treats reboot/rollback as elapsed-time credit. Thus clock rollback can pause work but cannot prolong usable authority.
+The state database has one `CanonicalTimeFenceV1` singleton under the StateOwner gate. A healthy authoritative Run-repository transaction samples wall UTC, requires it not precede `lastAcceptedAt`, uses that sample as its sole `now`, and advances the fence in the same transaction; in-process deadlines additionally use a monotonic clock anchored to that accepted sample. Startup and every heartbeat/dispatch compare wall UTC to the retained high-water. If it regresses, one fenced transaction records `clock_regressed`; all new admission, lease renewal, capability/grant redemption, productive dispatch, retry, and authority expiry extension stop, and active external release gates are revoked/quiesced. Recovery may return to `healthy` only after wall UTC reaches/exceeds the retained high-water under a current owner epoch. It never rewrites an old timestamp or treats reboot/rollback as elapsed-time credit. Thus clock rollback can pause work but cannot prolong usable authority.
+
+The separate external credential store never creates or copies another time
+fence. Its narrow Supervisor finalizer holds the current StateOwner plus the
+global/credential scopes, validates the original live auth producer and exact
+`secret_stored` cut, then performs one non-reentrant synchronous section: commit
+the existing healthy canonical fence at C first, and without await, externally
+supplied/reentrant JavaScript callbacks, platform I/O or CAS publication
+atomically commit the active credential revision
+and committed operation in credential SQLite using C. C must not precede the
+endpoint, prepared operation, subject or original/current channel causal times;
+reject rather than taking their maximum as an invented canonical now. This is
+ordered publication, not cross-database atomicity: a prefix-only crash leaves a
+conservative high-water and no new credential, while an active commit followed
+by a lost response is historical replay. A failed second commit cannot be
+completed by a client or cached time ticket. Local preparation, abort, revoke
+and cleanup timestamps are non-expanding causal audit, not fence-health proof;
+they cannot activate a grant or extend expiry. See the
+[installed credential contract](../kernel/i1-credential-authority.md).
+Fixed private transaction closures and native SQLite VFS callbacks remain
+inside the owned synchronous section. Before it, actual metadata-only platform
+revalidation checks the named item, default alias/collection, same-user service
+owner and unlocked state; historical `secret_stored` is not current availability
+proof and the Supervisor never calls `GetSecret`.
 
 `LocalPrincipalIdentityV1.identityDigest` omits itself, and `principalId = H('cliq-local-principal-v1',stateRootIdentityDigest,platform,effectiveUid)`. The exact StateRoot owner uid must equal the trusted process effective uid. In-process CLI/TUI/JSONL derives it from the signed process identity. Caller JSON can never supply/override principal or channel fields.
 
@@ -2537,7 +2560,7 @@ The credential service identity `(ownerPrincipalId,credentialGrantId,credentialH
 
 The concrete credential authority is closed. On macOS it stores secret bytes only in the login Keychain under service `ai.cogine.cliq.credentials.v1`; on Linux it stores them only in the default freedesktop Secret Service collection under schema `org.freedesktop.Secret.Generic`. Kernel Cut has no plaintext-file, environment-variable, SQLite/CAS, process-environment, or custom command fallback. If the same-user platform store is unavailable, locked, or cannot round-trip a newly entered secret, enrollment fails before any binding becomes active; billable remote providers/dependency endpoints/HTTP MCP remain unavailable until the user repairs that store. Secret-free metadata and `CredentialAuthorityOperationV1` live in a separate descriptor-protected `${stateRoot}/credentials/authority.sqlite` (`0700` directory, `0600` database/WAL/SHM) behind one same-user exclusive lock. The Run database never writes it.
 
-The internal authority API has one lock-aware form, `withCredentialAuthorityLock`, which returns an unforgeable process-local held-lock token. Ordinary `cliq auth` operations acquire it once; migration/rollback acquire it only after the earlier locks in the canonical global order and pass the same token through endpoint/credential operation, record revalidation, platform-item read, marker replacement/rematerialization, and authority publication. Every locked repository method requires that token and **never reacquires or releases** the underlying lock; calling an ordinary auto-locking entry point while a token is held is rejected as a programming error. Token owner/process/lock-generation are checked, callbacks cannot escape the token, and crash releases only the OS lock—not any uncommitted authority state. This prevents both self-deadlock and a rotate/revoke race across cutover.
+The internal authority API has one lock-aware form, `withCredentialAuthorityLock`, which returns an unforgeable process-local held-lock token. Each ordinary local `cliq auth` owning phase acquires it once; migration/rollback acquire it only after the earlier locks in the canonical global order and pass the same token through endpoint/credential operation, record revalidation, platform-item read, marker replacement/rematerialization, and authority publication. Every locked repository method requires that token and **never reacquires or releases** the underlying lock; calling an ordinary auto-locking entry point while a token is held is rejected as a programming error. Token owner/process/lock-generation are checked, callbacks cannot escape the token, and crash releases only the OS lock—not any uncommitted authority state. The installed narrow finalizer is a different owning process: local auth fully retires its preparation scope before RPC, and Supervisor acquires its own fresh global/credential scope while reusing its already-held StateOwner; no token crosses the transport or authorizes inverted acquisition. This prevents both self-deadlock and a rotate/revoke race across cutover.
 
 `CredentialAuthorityRecordV1` revisions are append-only and exactly one latest revision exists per grant id. Its endpoint ref/identity/TLS/owner/purpose must equal one active `EndpointAuthorityRecordV1` and that row's deterministic expected artifact ref before `prepared` may commit. A combined `cliq auth` command registers the secret-free endpoint first, then performs credential enrollment; a crash may leave a harmless replayable endpoint row but never an active credential without it. `credentialHandleIdentityDigest = SHA-256(JCS({ownerPrincipalId,credentialGrantId,credentialServiceRevision,purpose,endpointRegistrationRef,endpointIdentityDigest,tlsPolicyDigest}))`; `recordDigest` omits itself. Target fields and `credentialServiceRevision` are immutable for the id. Rotation increments `authorityRevision` and `secretGeneration`, selects a fresh platform item, and preserves the handle digest/target, while the newly authenticated or opaque external subject is part of that new revision; target change creates a new grant id. Credential revocation uses the separate secret-free `CredentialAuthorityRevokeOperationV1`: its command/request/operation digests use the same omission/idempotency rules, require the expected current target digest/revision, and in one metadata transaction append the terminal `revoked` revision plus `cleanupPhase='metadata_committed'`. Same request bytes replay, different bytes conflict, and a later request receives `already_revoked` without another record revision. Only after that commit may it delete the named platform item, moving to `cleanup_complete` on positive absence/deletion or `cleanup_failed` with the closed error and a SHA-256 digest of the secret-free platform observation stored in `authority.sqlite`; the external authority never needs a Run-CAS write. Startup resumes an indeterminate deletion idempotently. Redemption is denied from metadata commit onward even if cleanup is delayed or permanently fails. Expiry/revocation never moves backward.
 
@@ -2545,7 +2568,27 @@ Enrollment/rotation is request-idempotent and crash ordered. `CredentialAuthorit
 
 Credential revocation has no enrollment/rotation attempt: its `operationId = H(ownerPrincipalId,requestId,requestDigest)`. Cleanup transitions retain that same operation identity; retrying an indeterminate deletion never creates a new attempt or restores authority.
 
-Startup never promotes an incomplete operation without the original secret bytes: it deletes any planned item it can identify and appends `aborted(recovered_orphan)`. The same request/digest may create only the next contiguous attempt when the caller (or still-raw legacy preflight) supplies a secret again; concurrent retries join it. Because no prior authority committed and no secret commitment is retained, that resubmission is explicitly **latest-secret-wins** for the fresh attempt—there is no unenforceable promise that it equals the abandoned bytes. The input buffer is discarded immediately after platform-store write/compare; a committed replay, digest conflict, or terminal attempt discards it without platform access. After attempt 3 aborts, that request is terminal and a new request id is required. An unreachable superseded item is removed by a lock-held sweep only when no active metadata revision names it. Crash after active commit is therefore recoverable; crash before it grants no authority, repeated crashes are bounded, and deterministic legacy entry ids can resume through their recorded attempt. No log, error, telemetry, shell history, artifact, or response echoes the secret.
+Opaque subject production freezes the complete 256-bit candidate and its
+observation time before command hashing/prepared. Round-trip validation does
+not regenerate it. Same-core uncommitted attempts share that intended generation
+and candidate; only the committed generation acquires it, and every later
+committed generation uses a new candidate. If competing publication changes
+the intended revision/generation, the old request is refused rather than
+repurposed; a new request/core is required. Linux `platformItem.itemId` is a
+fresh logical item identity fixed in prepared and bound by closed secret-free
+platform attributes, not the CreateItem reply's object path. Lookup/delete
+revalidates the complete attributes, unique match, actual default-collection
+membership and same-user service owner; the object path is only a locator.
+Revoke/cleanup reconstruct attributes from the retained creating enroll/rotate
+operation id, never substitute their own revoke operation id.
+Creation success with a lost reply therefore leaves an identifiable planned
+item, not an untracked orphan. Reads never abort a live pending producer; new
+enroll/rotate/retry and orphan-cleanup actions join/refuse live or unknown
+attempts, and orphan cleanup requires positive original-process death/lifetime
+replacement before aborting it. Terminal revoke may win the lock but does not
+abort or delete a live producer's pending item.
+
+Startup never promotes an incomplete operation: after positive original-producer death it deletes any planned item it can identify and appends `aborted(recovered_orphan)`. The same request/digest may create only the next contiguous attempt when the caller (or still-raw legacy preflight) supplies a secret again; concurrent retries join/refuse the live attempt. Because no prior authority committed and no secret commitment is retained, that resubmission is explicitly **latest-secret-wins** for the fresh attempt—there is no unenforceable promise that it equals the abandoned bytes. The input buffer is discarded immediately after platform-store write/compare; a committed replay, digest conflict, or terminal attempt discards it without platform access. After attempt 3 aborts, that request is terminal and a new request id is required. An unreachable superseded item is removed by a lock-held sweep only when no current latest active authority record names it; immutable historical active revisions do not confer usable secret authority or prevent cleanup. Crash after active commit is therefore recoverable; crash before it grants no authority, repeated crashes are bounded, and deterministic legacy entry ids can resume through their recorded attempt. No log, error, telemetry, shell history, artifact, or response echoes the secret.
 
 Legacy `~/.cliq/auth.json` is a release-gated credential migration, not a normal Session backup. Before general state import, the new binary locks the legacy auth store and records exact `LegacyAuthStoreObservationV1`: either one held same-owner regular-file/link-count-one/no-follow descriptor or descriptor-relative no-follow `ENOENT`. A present file must use the current recognized provider-auth schema; its supported HTTPS targets normalize into `EndpointRegistrationV1`, its non-secret fields enter `LegacyAuthNonSecretProjectionV1`, and its secret-bearing entries perform deterministic credential enrollment as above. An absent store produces an empty projection/ready record set without creating a file. This preflight leaves the original raw file or exact absence unchanged while legacy remains authoritative; general migration/backup excludes auth bytes and records only the observation, non-secret projection, and secret-free credential-ready manifest. It never copies raw legacy keys into CAS, SQLite, archives, logs, or rollback backups.
 
@@ -8485,7 +8528,39 @@ Every `requestId`, admission key, id, ref, integer, enum, and payload has a sche
 
 There is intentionally no general `artifact.put` write oracle. Client-originated objective, Session summary, input, approval, exact-risk abandonment acknowledgement, and admission/delivery options use their method-specific bounded inline schemas. A reconciliation probe accepts no caller evidence bytes. The Supervisor canonicalizes and publishes allowed inputs to CAS only after authentication, trust/policy validation, and size checks; the exact canonical inline bytes are part of request/admission digests. Internal adapters may pass already verified refs across the application-service boundary, but public JSONL/RPC clients never write the state directory or need a private CAS API.
 
-Raw credential enrollment is intentionally outside this JSON control protocol. Local `cliq auth`/endpoint enrollment uses only the section 5 `CredentialAuthorityOperationV1` state machine and supported platform store under its exclusive per-user lock, then returns opaque `credentialGrantId`/`endpointRegistrationId`; it never writes Run SQLite/CAS, and JSONL/RPC/TUI cannot submit raw secrets. The Supervisor can only validate and redeem those ids through the latest `CredentialAuthorityRecordV1` plus immutable endpoint/binding artifacts. This is a separate secret-store authority, not a hidden Run lifecycle surface; missing/unavailable enrollment returns `AUTHORIZATION_REQUIRED` with a local CLI remediation command. Kernel migration invokes the same idempotent authority before backing up any legacy auth marker and never copies raw legacy keys.
+Raw credential enrollment is intentionally outside this JSON control protocol.
+Local `cliq auth`/endpoint enrollment uses the section 5 operation state machine
+and supported platform store; it never writes Run SQLite/CAS, and JSONL/RPC/TUI
+cannot submit raw secrets. For enroll/rotate/expiry expansion, auth first starts
+or connects the correctly installed Supervisor outside the credential lock,
+then prepares/writes/round-trips the secret locally and fully retires that
+scope before sending `credential.finalize`. This narrow secret-free request
+names only the original operation id, attempt and command digest, in the normal
+bounded protocol/request-correlation envelope. It supplies no identity, time,
+platform path, subject, secret or verified boolean. The Supervisor reads the
+exact secret_stored history from its own private credential scope and freshly
+matches its genuine UDS peer to the original prepared in-process auth producer's
+root/principal/uid/PID/start-token/selected signed image, not to a historical
+artifact ref or same-uid assertion. Only that original lifetime may finalize an
+uncommitted attempt. The final fresh check/C sample is the explicit request's
+authorization cut, not a promise to pin a peer alive until physical COMMIT.
+Subsequent death may leave an already-accepted in-flight commit; startup never
+promotes an orphan. The sole expansion path is the ordered canonical-time
+prefix plus credential active/committed transaction above, preserving the first
+local auth channel. The Supervisor does not write prepared/secret_stored, read
+raw platform secrets, return a usable time ticket or create a second request
+ledger. Auth returns opaque credential/endpoint ids; new authenticated channels
+may read/exactly replay committed history without the old producer or a secret.
+Read, revoke and cleanup remain independent of Supervisor availability.
+Supervisor validation/redemption still uses the latest credential record plus
+immutable endpoint/binding artifacts. This is a separate secret-store authority,
+not another Run lifecycle; unavailable enrollment returns authorization-required
+with local remediation. Kernel migration must reuse the same idempotent
+authority before backing up a legacy auth marker and never copy raw legacy
+keys. Already-held global-exclusive/credential cutover tokens cannot call the
+ordinary remote finalizer; that later integration needs an explicit owning
+held-token path, not temporarily released cutover locks or recursive RPC. The
+installed credential increment does not qualify migration finalization.
 
 Wire source selectors are requests, not authoritative projection entries. An optional `readGrantId` names a user-owned registered grant, not an artifact ref. The Supervisor maps every include to exact `SourceIncludeAuthorizationV1`: no grant is accepted only for descriptor-proven tracked/nonignored bytes; ignored bytes atomically consume the exact read-scope grant into its receipt-bound branch. Excludes carry no grant. Repository config can add requested selectors but cannot provide or choose an authorization ref.
 

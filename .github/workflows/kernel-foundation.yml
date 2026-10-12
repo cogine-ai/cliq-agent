@@ -84,6 +84,7 @@ jobs:
           scripts/kernel/testing/credential-authority-bridge.test.ts
           scripts/kernel/testing/credential-authority-installed.test.ts
           scripts/kernel/testing/endpoint-authority-installed.test.ts
+          scripts/kernel/testing/credential-authority-journey.test.ts
           scripts/kernel/testing/endpoint-authority-journey.test.ts
           scripts/kernel/testing/endpoint-wal-proof.test.ts
           scripts/kernel/testing/endpoint-authority-crash.test.ts
