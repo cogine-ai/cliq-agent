@@ -1,4 +1,4 @@
-// One actual signed installed enroll/read/exact-replay tracer. This is not the complete
+// One actual signed installed enroll/read/rotate/exact-replay tracer. This is not the complete
 // credential lifecycle, crash qualification, broker redemption or installed I1.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -101,7 +101,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'one genuine signed installed enroll/read/exact replay with actual user-manager autostart and independent Secret Service byte comparison; not rotation, revoke, crash, broker or I1' };
+    scope: 'one genuine signed installed enroll/read/rotate/exact replay with actual user-manager autostart and independent Secret Service byte comparisons; not revoke, orphan retry, crash, broker or I1' };
   const userPrefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', `HOME=${ledger.home}`,
     'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
     `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ledger.uid}/bus`];
@@ -278,7 +278,7 @@ async function campaign(filename: string): Promise<void> {
     for (const named of value.items) assert.match(named, new RegExp(`^${value.collection}/[A-Za-z0-9_]+$`, 'u'));
     return value;
   };
-  const secret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
+  const secret = randomBytes(32), rotatedSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   let daemon: ReturnType<typeof spawn> | undefined;
   let daemonExit: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
   let daemonClosing: Promise<void> | undefined;
@@ -410,7 +410,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(endpointOperation.disposition, 'registered');
     const metadata = { schemaVersion: 1, kind: 'enroll', requestId: '019a0012-0000-7000-8000-000000000022',
       credentialGrantId: 'credential-journey-grant', purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
-      secretSubmissionId: 'credential-journey-submission' };
+      secretSubmissionId: 'credential-journey-submission', expiresAt: '2099-01-01T00:00:00.000Z' };
     report.phase = 'enroll';
     const enrolled = credential(metadata, secret);
     const operation = decodeCredentialAuthorityOperation(success(enrolled, 'operation'));
@@ -424,6 +424,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(record.state, 'active'); assert.equal(record.authorityRevision, 1); assert.equal(record.secretGeneration, 1);
     assert.equal(record.credentialGrantId, metadata.credentialGrantId); assert.equal(record.ownerPrincipalId, ownerPrincipalId);
     assert.equal(record.purpose, metadata.purpose); assert.equal(record.endpointRegistrationRef, canonicalSha256(registration));
+    assert.equal(record.expiresAt, metadata.expiresAt);
     assert.equal(record.endpointIdentityDigest, registration.endpointIdentityDigest); assert.equal(record.tlsPolicyDigest, registration.tlsPolicyDigest);
     assert.deepEqual(record.platformItem, operation.platformItem); assert.deepEqual(record.externalSubject, operation.commandCore.externalSubject);
     assert.equal(record.externalSubjectDigest, operation.intendedExternalSubjectDigest); assert.equal(record.externalSubject.subject.kind, 'opaque_generation');
@@ -498,6 +499,60 @@ async function campaign(filename: string): Promise<void> {
     const readyAfter = await lstat(readyPath, { bigint: true });
     for (const key of imageFields) assert.equal(readyAfter[key], ready[key]);
 
+    report.phase = 'rotate';
+    const rotateMetadata = { schemaVersion: 1, kind: 'rotate', requestId: '019a0012-0000-7000-8000-000000000023',
+      credentialGrantId: metadata.credentialGrantId, expectedAuthorityRevision: 1, secretSubmissionId: 'credential-journey-rotation-submission' };
+    const rotatedOperation = decodeCredentialAuthorityOperation(success(credential(rotateMetadata, rotatedSecret), 'operation'));
+    assert.equal(rotatedOperation.phase, 'committed'); assert.equal(rotatedOperation.kind, 'rotate'); assert.equal(rotatedOperation.attempt, 1);
+    assert.equal(rotatedOperation.requestId, rotateMetadata.requestId); assert.equal(rotatedOperation.credentialGrantId, metadata.credentialGrantId);
+    assert.equal(rotatedOperation.ownerPrincipalId, ownerPrincipalId);
+    assert.equal(rotatedOperation.commandCore.secretSubmissionId, rotateMetadata.secretSubmissionId);
+    assert.equal(rotatedOperation.intendedAuthorityRevision, 2); assert.equal(rotatedOperation.intendedSecretGeneration, 2);
+    assert.equal(rotatedOperation.committedAuthorityRevision, 2); assert.notEqual(rotatedOperation.operationId, operation.operationId);
+    assert.notEqual(rotatedOperation.credentialTargetDigest, operation.credentialTargetDigest);
+    report.rotatedOperation = rotatedOperation;
+    report.phase = 'read_rotated';
+    const rotatedRecord = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record'));
+    assert.equal(rotatedRecord.state, 'active'); assert.equal(rotatedRecord.authorityRevision, 2); assert.equal(rotatedRecord.secretGeneration, 2);
+    for (const key of ['credentialGrantId', 'ownerPrincipalId', 'credentialServiceRevision', 'credentialHandleIdentityDigest',
+      'purpose', 'endpointRegistrationRef', 'endpointIdentityDigest', 'tlsPolicyDigest', 'expiresAt'] as const)
+      assert.equal(rotatedRecord[key], record[key], `rotation must preserve ${key}`);
+    assert.equal(rotatedOperation.commandCore.purpose, record.purpose);
+    assert.equal(rotatedOperation.commandCore.endpointRegistrationRef, record.endpointRegistrationRef);
+    assert.equal(rotatedOperation.commandCore.endpointIdentityDigest, record.endpointIdentityDigest);
+    assert.equal(rotatedOperation.commandCore.tlsPolicyDigest, record.tlsPolicyDigest);
+    assert.equal(rotatedOperation.commandCore.expiresAt, record.expiresAt);
+    assert.deepEqual(rotatedRecord.platformItem, rotatedOperation.platformItem);
+    assert.deepEqual(rotatedRecord.externalSubject, rotatedOperation.commandCore.externalSubject);
+    assert.equal(rotatedRecord.externalSubjectDigest, rotatedOperation.intendedExternalSubjectDigest);
+    assert.notEqual(rotatedRecord.externalSubjectDigest, record.externalSubjectDigest);
+    const oldSubject = record.externalSubject.subject, newSubject = rotatedRecord.externalSubject.subject;
+    if (oldSubject.kind !== 'opaque_generation' || newSubject.kind !== 'opaque_generation')
+      throw new Error('installed rotation must produce a fresh opaque generation');
+    assert.notEqual(newSubject.opaqueSubjectId, oldSubject.opaqueSubjectId);
+    assert.deepEqual(newSubject.scopes, ['endpoint_exact_only']); assert.deepEqual(newSubject.audiences, []);
+    assert.equal(rotatedRecord.createdAt, rotatedOperation.finishedAt);
+    for (const time of [record.createdAt, rotatedOperation.createdAt, rotatedRecord.externalSubject.observedAt])
+      assert(parseCanonicalTime(rotatedRecord.createdAt) >= parseCanonicalTime(time));
+    assert.equal(rotatedRecord.platformItem.kind, 'linux_secret_service');
+    if (rotatedRecord.platformItem.kind !== 'linux_secret_service') throw new Error('Linux rotation must use Secret Service');
+    assert.notEqual(rotatedRecord.platformItem.itemId, record.platformItem.itemId);
+    assert(!rotatedRecord.platformItem.itemId.startsWith('/'), 'rotated item identity must remain logical');
+    report.rotatedRecord = rotatedRecord;
+    report.phase = 'actual_rotated_platform';
+    const afterRotate = observe('list'); assert.equal(afterRotate.items.length, 1);
+    assert.equal(afterRotate.nameOwner, before.nameOwner); assert.equal(afterRotate.servicePid, before.servicePid);
+    assert.equal(afterRotate.collection, before.collection); assert.notEqual(afterRotate.items[0], compared.item);
+    const rotatedCompared = observe('compare', afterRotate.items[0]!, rotatedRecord.platformItem.itemId, rotatedSecret);
+    assert.equal(rotatedCompared.readback, true); assert.equal(rotatedCompared.logicalItemIdMatched, true);
+    assert.equal(rotatedCompared.item, afterRotate.items[0]); assert.equal(rotatedCompared.nameOwner, before.nameOwner);
+    assert.equal(rotatedCompared.servicePid, before.servicePid);
+    report.platformAfterRotate = afterRotate; report.platformRotateReadback = rotatedCompared;
+    assert.deepEqual(await processCut(setup.keeperUnit, 'keeper'), keeper);
+    assert.deepEqual(await processCut(setup.supervisorUnit, 'supervisor'), supervisor);
+    assert.deepEqual(await readFile(readyPath), readyBytes);
+
     report.phase = 'exact_replay_without_services_or_secret_input';
     const stopped = command('/usr/bin/systemctl', ['--user', 'stop', setup.supervisorUnit, setup.keeperUnit]);
     assert.equal(stopped.status, 0, 'actual installed services must stop before replay');
@@ -517,16 +572,21 @@ async function campaign(filename: string): Promise<void> {
     const replayed = decodeCredentialAuthorityOperation(success(replay, 'operation'));
     assert.deepEqual(replayed, operation, 'new-process replay must retain the original committed result and provenance');
     assert.equal(replay.stdout, `${canonicalJsonBytes({ schemaVersion: 1, operation }).toString('utf8')}\n`);
+    const rotateReplay = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+      ['--bootstrap-credential', canonicalJsonBytes(rotateMetadata).toString('base64url')]);
+    assert.deepEqual(decodeCredentialAuthorityOperation(success(rotateReplay, 'operation')), rotatedOperation,
+      'rotation replay must retain its original committed result and provenance without new input');
+    assert.equal(rotateReplay.stdout, `${canonicalJsonBytes({ schemaVersion: 1, operation: rotatedOperation }).toString('utf8')}\n`);
     const reread = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
       credentialGrantId: metadata.credentialGrantId }), 'record'));
-    assert.deepEqual(reread, record, 'read without services must retain exact committed metadata');
+    assert.deepEqual(reread, rotatedRecord, 'read without services must retain exact latest rotated metadata');
     report.servicesAfterReplay = inactive(); noStore();
-    report.exactReplay = { originalOperationMatched: true, originalRecordMatched: true,
+    report.exactReplay = { originalOperationMatched: true, rotatedOperationMatched: true, latestRotatedRecordMatched: true,
       secretInputPipeUnwrittenAndUnended: true, authLauncherJoined: true, secretServiceOwnerAbsent: true };
     report.phase = 'complete'; report.qualified = true;
   } catch (error) { primary = error; }
   finally {
-    secret.fill(0); password.fill(0);
+    secret.fill(0); rotatedSecret.fill(0); password.fill(0);
     try { await stopDaemon(); }
     catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'fixture platform daemon retirement failed'); }
     if (primary) { report.qualified = false; report.error = String((primary as Error).stack ?? primary).slice(0, 8192); }

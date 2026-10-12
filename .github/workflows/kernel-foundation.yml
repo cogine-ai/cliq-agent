@@ -60,7 +60,7 @@ jobs:
       - name: Bound the genuine native credential worker queue
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --test --import tsx scripts/kernel/testing/credential-platform-queue.test.ts
-      - name: Qualify first signed credential enrollment with Supervisor autostart
+      - name: Exercise signed credential commands and Supervisor autostart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
