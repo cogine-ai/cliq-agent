@@ -10,7 +10,7 @@ import { KERNEL_CAS_DIRECTORY } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
 import { decodeEndpointAuthorityCommandCore, decodeEndpointAuthorityOperation, decodeEndpointAuthorityRecord,
   type EndpointAuthorityCommandCoreV1, type EndpointAuthorityOperationV1, type EndpointAuthorityRecordV1,
-  type EndpointRegistrationV1 } from '../kernel/credential-authority.js';
+  type EndpointRegistrationV1, type CredentialAuthorityRecordV1 } from '../kernel/credential-authority.js';
 import { assertArtifactRef, assertRequestId, digestOmitting, encodeCanonicalTime, identityHash,
   normalizeAbsolutePath, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import type { LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, PlatformProcessIdentityV1, StateRootIdentityV1 } from '../kernel/types.js';
@@ -59,6 +59,21 @@ function checkedCredentialToken(token: HeldCredentialAuthorityLock): CredentialB
     throw new KernelStorageError('RECOVERY_REQUIRED', 'credential authority token belongs to another process or generation');
   held.scope.assertHeld();
   return held;
+}
+
+/** An authenticated v1 store contains endpoints only. Verify its exact format
+ * before returning absence; an unknown schema must never look credential-free.
+ * This metadata read does not load a platform store or acquire StateOwner. */
+export function readCredentialAuthority(token: HeldCredentialAuthorityLock, credentialGrantId: string): CredentialAuthorityRecordV1 | null {
+  const held = checkedCredentialToken(token);
+  try {
+    if (typeof credentialGrantId !== 'string' || !credentialGrantId ||
+        normalizeCanonicalText(credentialGrantId) !== credentialGrantId || Buffer.byteLength(credentialGrantId) > SMALL_BYTES)
+      throw new TypeError('invalid credential id');
+  } catch (cause) { throw new KernelStorageError('INVALID_REQUEST', 'credential id must be bounded nonempty canonical text', { cause }); }
+  ensureEndpointSchema(held.database!);
+  held.scope.assertHeld();
+  return null;
 }
 
 /** Locked same-principal lookup. A caller id never selects a different owner;
@@ -382,7 +397,7 @@ export type InstalledRuntimeBorrow = Readonly<{
 type InstalledRuntimeBinding = {
   factory: InstalledRuntime;
   borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T>;
-  execute(role: 'keeper' | 'supervisor' | 'endpoint'): Promise<never>;
+  execute(role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): Promise<never>;
   initializeKeeper(): Promise<HeldInstalledKeeper>;
   acquireAnchor(): Promise<HeldInstalledAnchor>;
   loadWorkerNative(): Promise<NativeWorkerBinding>;
@@ -460,7 +475,7 @@ type InstalledRuntime = Readonly<{
   openSelected(stateRoot: string): Promise<HeldInstalledRuntime>;
   /** Bootstrap-only terminal operation. No StateOwner/control/worker may have
    * been acquired; the signed entry point enforces this fixed startup order. */
-  executeSelected(held: HeldInstalledRuntime, role: 'keeper' | 'supervisor' | 'endpoint'): Promise<never>;
+  executeSelected(held: HeldInstalledRuntime, role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): Promise<never>;
 }>;
 type Directory = { handle: FileHandle; info: BigIntStats; parent?: Directory; name: string; private: boolean };
 type InstalledFile = { handle: FileHandle; info: BigIntStats; parent: Directory; name: string; digest?: string };
@@ -792,16 +807,18 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
       typeof key.keyId !== 'string' || !key.keyId || typeof key.publicKeyPem !== 'string' || !key.publicKeyPem) ||
       new Set(releaseKeys.map(key => key.keyId)).size !== releaseKeys.length) mismatch('installed runtime requires fixed unambiguous trusted composition keys');
   const runtime: InstalledRuntime = Object.freeze({
-    executeSelected(this: InstalledRuntime, held: HeldInstalledRuntime, role: 'keeper' | 'supervisor' | 'endpoint'): Promise<never> {
+    executeSelected(this: InstalledRuntime, held: HeldInstalledRuntime, role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): Promise<never> {
       // Reject receiver/brand/factory/primitive role before touching a caller
       // property, queue, or descriptor. Invalid calls do not consume a handle.
       if (this !== runtime) mismatch('installed runtime factory receiver is not its trusted instance');
       const binding = heldInstalledRuntimes.get(held);
       if (!binding || binding.factory !== runtime) mismatch('installed execution requires this factory\'s genuine held selection');
-      if (role !== 'keeper' && role !== 'supervisor' && role !== 'endpoint') mismatch('installed execution requires a fixed primitive role');
+      if (role !== 'keeper' && role !== 'supervisor' && role !== 'endpoint' && role !== 'credential') mismatch('installed execution requires a fixed primitive role');
+      if (role === 'credential' ? typeof command !== 'string' || !command.length || command.length > 87382 || !/^[A-Za-z0-9_-]+$/u.test(command)
+        : command !== undefined) mismatch('installed execution requires bounded credential metadata only for the fixed credential role');
       if (!isMainThread) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed execution requires the main thread');
       healthy();
-      return binding.execute(role);
+      return binding.execute(role, command);
     },
     async installInitial(this: InstalledRuntime, target: { packageRoot: string; stateRoot: string }) {
       supportedPlatform();
@@ -1156,7 +1173,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
             }).catch(error => { rememberRetirement(error); throw error; });
           },
-          execute(role): Promise<never> {
+          execute(role, command): Promise<never> {
             if (closed) mismatch('installed runtime handle is closed');
             closed = true; // Consume synchronously; join existing borrows first.
             const pending = tail.then(async (): Promise<never> => {
@@ -1172,7 +1189,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 executeHeldInstalledImage(native, image, {
                   stateRoot, root: state.info, bootstrap: bootstrap.info,
                   image: file.info, bundleDigest: signed.bundleDigest,
-                  relativePath: supervisor.relativePath, role,
+                  relativePath: supervisor.relativePath, role, command,
                 });
               } catch (error) { rememberRetirement(error); failure = error; }
               const retireImage = async () => {
