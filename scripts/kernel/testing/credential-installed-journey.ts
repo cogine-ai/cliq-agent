@@ -128,7 +128,13 @@ async function campaign(filename: string): Promise<void> {
       assert.equal(fresh[19], fields[19], 'fixture process changed during identity observation');
       return { pid, parent: Number(fields[1]), group: Number(fields[2]), session: Number(fields[3]),
         start: fields[19]!, uids: uid.slice(1).map(Number) };
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    } catch (error) {
+      // A short-lived owned fixture process may exit after /proc was opened.
+      // ENOENT and ESRCH both mean this diagnostic read has no current fact;
+      // production producer death is still decided by its native observer.
+      if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return undefined;
+      throw error;
+    }
   };
   const waitGone = async (original: NonNullable<Awaited<ReturnType<typeof processFact>>>) => {
     const deadline = Date.now() + 5000;
