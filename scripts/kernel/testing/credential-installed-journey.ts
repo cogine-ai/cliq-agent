@@ -190,6 +190,21 @@ async function campaign(filename: string): Promise<void> {
     report.phase = 'install_services';
     const setupResponse = credential({ schemaVersion: 1, kind: 'install_services' });
     report.setupExitStatus = setupResponse.status;
+    // Setup has no secret input. Retain only the signed entry's bounded closed
+    // diagnostic, never arbitrary subprocess output or a later secret's error.
+    if (setupResponse.status !== 0) {
+      const line = setupResponse.stderr.trim().split('\n').at(-1);
+      if (line && Buffer.byteLength(line) <= 2048) {
+        try {
+          const diagnostic = parseJsonStrict(line) as Record<string, unknown>;
+          assert.equal(diagnostic.diagnosticOnly, true); assert.equal(diagnostic.scope, 'installed-read-startup');
+          assert(Object.keys(diagnostic).every(key => ['diagnosticOnly', 'scope', 'code', 'path', 'message'].includes(key)));
+          assert.equal(typeof diagnostic.message, 'string'); assert((diagnostic.message as string).length <= 1024);
+          assert(diagnostic.code === undefined || typeof diagnostic.code === 'string' && /^[A-Z_]{1,80}$/u.test(diagnostic.code));
+          report.setupDiagnostic = { code: diagnostic.code, message: diagnostic.message };
+        } catch { report.setupDiagnosticUnavailable = true; }
+      }
+    }
     assert.equal(setupResponse.status, 0, 'signed install_services must install production profiles before enrollment');
     const setup = parseJsonStrict(setupResponse.stdout.trim()) as { schemaVersion: number; keeperUnit: string; supervisorUnit: string };
     assert.deepEqual(Object.keys(setup).sort(), ['keeperUnit', 'schemaVersion', 'supervisorUnit']); assert.equal(setup.schemaVersion, 1);

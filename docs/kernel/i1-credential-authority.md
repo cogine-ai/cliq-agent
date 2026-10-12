@@ -97,6 +97,13 @@ readiness. Bind the actual connected server process to its current manager
 invocation and selected image, then use the existing current-owner hello and
 finalizer feature. No new client-side epoch/time authority is required.
 
+The native platform operation's selected 30-second monotonic budget starts at
+submission, including waiting in Node's shared worker queue. While the main
+loop is responsive, expiry cancels queued work without waiting for an available
+worker. Completion joins every worker/watchdog/timer owner before publishing a
+result or releasing copied input; this is an operation budget, not canonical
+authority time or a guarantee about a stalled main loop.
+
 #### Local preparation and private platform identity
 
 1. Authenticate the fixed signed auth producer and read existing request
@@ -134,7 +141,7 @@ revoke/cleanup reconstruct its attributes from that retained creating operation,
 never substitute the revoke operation id.
 CreateItem success followed by a lost reply remains recoverable by that id.
 The `secret_stored` fact retains one bounded, self-hashed, secret-free native
-platform observation in that same fact row: complete attributes digest and
+platform observation in that same fact row: complete fixed attribute selector and
 creating operation/logical id, actual bus GUID/socket/runtime/lifetime, service
 unique owner/uid/lifetime and default collection/item locators. A unique bus
 name alone can be reused after bus restart. Finalization freshly compares that
