@@ -85,6 +85,9 @@ Identity, channel, subject, core hashes and platform selectors are producer-owne
   returning `{schemaVersion:1,keeperUnit,supervisorUnit}`. It creates only the
   fixed installation-bound same-user profiles and reloads their manager. It
   does not start services or replace incompatible/user-edited profiles.
+  Both fixed roles explicitly use working directory `/`; effective-property
+  checks do not mistake the user manager's implicit passwd-home default for
+  an empty setting or accept arbitrary working-directory drift.
 - `{schemaVersion:1,kind:'enroll',requestId,credentialGrantId,purpose,
   endpointRegistrationId,secretSubmissionId,expiresAt?}` contains stable user
   intent, not an externally generated subject or command core. Success returns

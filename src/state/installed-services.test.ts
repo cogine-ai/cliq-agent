@@ -22,3 +22,11 @@ test('service setup rejects an unverified selection before observing its caller 
   const selected = Object.defineProperty({}, 'bundle', { get() { throw new Error('caller property must not be observed'); } });
   await assert.rejects(installServices(selected as Parameters<typeof installServices>[0]), { code: 'ARTIFACT_MISMATCH' });
 });
+
+test('installed roles select a fixed working directory instead of an implicit user-manager home', () => {
+  const profiles = installedServiceProfiles('/home/cliq/state', 'a'.repeat(64));
+  for (const profile of [profiles.keeper, profiles.supervisor]) {
+    assert.equal(profile.text.split('\n').filter(line => line.startsWith('WorkingDirectory=')).length, 1);
+    assert(profile.text.includes('WorkingDirectory=/\n'));
+  }
+});

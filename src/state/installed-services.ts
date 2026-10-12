@@ -56,7 +56,7 @@ export function installedServiceProfiles(stateRoot: string, rootIdentityDigest: 
     args: Object.freeze([executable, `--bootstrap-${role}`]), flags: Object.freeze([...flags]), text:
       `[Unit]\nDescription=Cliq installed ${role}\nStartLimitIntervalSec=30s\nStartLimitBurst=${role === 'keeper' ? 2 : 4}\n` +
       (role === 'supervisor' ? `Requires=${keeper}\nAfter=${keeper}\n` : '') +
-      `[Service]\nType=exec\nExecStart=${word} --bootstrap-${role}\n` +
+      `[Service]\nType=exec\nWorkingDirectory=/\nExecStart=${word} --bootstrap-${role}\n` +
       `UnsetEnvironment=${loaderVariables.join(' ')}\nEnvironment=${fixedEnvironment.join(' ')}\n` +
       `UMask=0077\nSlice=app.slice\nDelegate=cpu memory pids\nKillMode=control-group\nRestart=${role === 'keeper' ? 'no' : 'on-failure'}\n` +
       'RestartSec=2s\nTimeoutStartSec=30s\nTimeoutStopSec=2s\n' });
@@ -174,7 +174,7 @@ function checkEffectiveUnit(observation: UserManagerObservation, profile: Profil
       unit.RestartUSec !== '2000000' || unit.TimeoutStartUSec !== '30000000' || unit.TimeoutStopUSec !== '2000000' || unit.UMask !== 0o077 ||
       !equalStrings(unit.Environment, fixedEnvironment) || !equalStrings(unit.UnsetEnvironment, loaderVariables) ||
       unit.EnvironmentFiles.length || unit.PassEnvironment.length || unit.User || unit.Group || unit.DynamicUser || unit.PAMName ||
-      unit.WorkingDirectory || unit.RootDirectory || unit.RootImage ||
+      unit.WorkingDirectory !== '/' || unit.RootDirectory || unit.RootImage ||
       [unit.ExecCondition, unit.ExecStartPre, unit.ExecStartPost, unit.ExecReload, unit.ExecStop, unit.ExecStopPost,
         unit.Requisite, unit.Wants, unit.BindsTo, unit.PartOf, unit.OnFailure, unit.OnSuccess].some(values => values.length))
     refuse('installed service effective configuration drifted; explicit installation remediation is required');

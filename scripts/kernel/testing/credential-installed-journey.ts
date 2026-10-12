@@ -27,7 +27,7 @@ type Observation = { clientPid: number; busUniqueName: string; nameOwner: string
 const environment = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 const properties = ['LoadState', 'ActiveState', 'SubState', 'MainPID', 'ExecMainPID', 'ControlGroup',
-  'InvocationID', 'FragmentPath', 'Type', 'Delegate', 'KillMode', 'Restart', 'NRestarts'] as const;
+  'InvocationID', 'FragmentPath', 'Type', 'WorkingDirectory', 'Delegate', 'KillMode', 'Restart', 'NRestarts'] as const;
 
 async function readLedger(filename: string): Promise<Ledger> {
   const held = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -209,33 +209,6 @@ async function campaign(filename: string): Promise<void> {
           report.setupDiagnostic = { code: diagnostic.code, message: diagnostic.message };
         } catch { report.setupDiagnosticUnavailable = true; }
       }
-      // Only this fixture's two exact installed profiles are eligible. This
-      // read-only diagnostic neither qualifies setup nor relaxes its refusal.
-      try {
-        const passwd = command('/usr/bin/getent', ['passwd', ledger.username], undefined, 10000);
-        assert.equal(passwd.status, 0); assert(Buffer.byteLength(passwd.stdout) <= 8192);
-        const fields = passwd.stdout.trim().split(':'); assert.equal(fields.length, 7);
-        assert.equal(fields[0], ledger.username); assert.equal(Number(fields[2]), ledger.uid); assert.equal(Number(fields[3]), ledger.gid);
-        const passwdHome = fields[5]!; assert(path.isAbsolute(passwdHome) && !passwdHome.includes('\n'));
-        const directory = path.join(ledger.home, '.config/systemd/user'), info = await lstat(directory);
-        assert(info.isDirectory() && !info.isSymbolicLink()); assert.equal(info.uid, ledger.uid);
-        const fixedNames = new Set([`cliq-${rootDigest}-keeper.service`, `cliq-${rootDigest}-supervisor.service`]);
-        const names = (await readdir(directory)).filter(name => fixedNames.has(name)).sort(); assert(names.length <= 2);
-        const units: Array<{ unit: string; status: number | null; workingDirectory?: string; matchesUserManagerDefault?: boolean }> = [];
-        for (const unit of names) {
-          const profile = await lstat(path.join(directory, unit));
-          assert(profile.isFile() && !profile.isSymbolicLink()); assert.equal(profile.uid, ledger.uid); assert.equal(profile.nlink, 1);
-          const observed = command('/usr/bin/systemctl', ['--user', 'show', unit, '--property=WorkingDirectory', '--value', '--no-pager'], undefined, 10000);
-          const entry: typeof units[number] = { unit, status: observed.status };
-          if (observed.status === 0) {
-            assert(Buffer.byteLength(observed.stdout) <= 4096 && observed.stdout.endsWith('\n'));
-            const workingDirectory = observed.stdout.slice(0, -1); assert(!/[\x00\r\n]/u.test(workingDirectory));
-            entry.workingDirectory = workingDirectory; entry.matchesUserManagerDefault = workingDirectory === `!${passwdHome}`;
-          }
-          units.push(entry);
-        }
-        report.setupWorkingDirectory = { diagnosticOnly: true, passwdHome, passwdHomeMatchesFixture: passwdHome === ledger.home, units };
-      } catch { report.setupWorkingDirectoryUnavailable = true; }
     }
     assert.equal(setupResponse.status, 0, 'signed install_services must install production profiles before enrollment');
     const setup = parseJsonStrict(setupResponse.stdout.trim()) as { schemaVersion: number; keeperUnit: string; supervisorUnit: string };
@@ -248,6 +221,7 @@ async function campaign(filename: string): Promise<void> {
       assert(profile.isFile() && !profile.isSymbolicLink()); assert.equal(profile.uid, ledger.uid); assert.equal(profile.nlink, 1);
       assert.equal(profile.mode & 0o022, 0); assert((await readFile(filename, 'utf8')).includes(`ExecStart=${recipe.stateRoot}/runtime/bootstrap --bootstrap-${role}\n`));
       const inactive = show(unit); assert.equal(inactive.FragmentPath, filename);
+      assert.equal(inactive.WorkingDirectory, '/');
       assert.equal(inactive.ActiveState, 'inactive'); assert.equal(inactive.MainPID, '0');
       report[`${role}Before`] = inactive;
     }
@@ -299,6 +273,7 @@ async function campaign(filename: string): Promise<void> {
       const current = show(unit); assert.equal(current.ActiveState, 'active'); assert.equal(current.SubState, 'running');
       assert.equal(current.ExecMainPID, current.MainPID); assert.match(current.InvocationID!, /^[a-f0-9]{32}$/u);
       assert.equal(current.Type, 'exec'); assert.equal(current.Delegate, 'yes'); assert.equal(current.KillMode, 'control-group');
+      assert.equal(current.WorkingDirectory, '/');
       assert.equal(current.Restart, role === 'keeper' ? 'no' : 'on-failure'); assert.equal(current.NRestarts, '0');
       const pid = Number(current.MainPID); assert(Number.isSafeInteger(pid) && pid > 0);
       assert.equal(await readlink(`/proc/${pid}/exe`), expectedImage);
