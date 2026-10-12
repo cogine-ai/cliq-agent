@@ -1,4 +1,4 @@
-// One actual signed installed enroll/read/rotate/revoke/cleanup-retry tracer. This is not the complete
+// One actual signed installed enroll/read/rotate/revoke/explicit-cleanup tracer. This is not the complete
 // credential lifecycle, crash qualification, broker redemption or installed I1.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -101,7 +101,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'one genuine signed installed enroll/read/rotate/exact replay, unavailable-store revoke and restored-store cleanup retry with actual user-manager autostart and independent Secret Service byte comparisons; not orphan retry, crash, broker or I1' };
+    scope: 'one genuine signed installed enroll/read/rotate/exact replay, unavailable-store revoke, restored-store cleanup retry and explicit cleanup with actual user-manager autostart and independent Secret Service byte comparisons; not orphan retry, crash, broker or I1' };
   const userPrefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', `HOME=${ledger.home}`,
     'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
     `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ledger.uid}/bus`];
@@ -523,6 +523,30 @@ async function campaign(filename: string): Promise<void> {
     const readyAfter = await lstat(readyPath, { bigint: true });
     for (const key of imageFields) assert.equal(readyAfter[key], ready[key]);
 
+    report.phase = 'cleanup_current_active_refusal';
+    const activeCleanup = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
+      canonicalJsonBytes({ schemaVersion: 1, kind: 'cleanup', requestId: metadata.requestId }).toString('base64url')]);
+    assert.equal(activeCleanup.status, 1, 'explicit cleanup must refuse the current active generation');
+    assert(activeCleanup.stdout.length === 0, 'active cleanup refusal must not return a result envelope');
+    let activeRefused = false;
+    const activeRefusalLine = activeCleanup.stderr.trim().split('\n').at(-1);
+    if (activeRefusalLine && Buffer.byteLength(activeRefusalLine) <= 2048) try {
+      const refusal = parseJsonStrict(activeRefusalLine) as Record<string, unknown>;
+      activeRefused = refusal.diagnosticOnly === true && refusal.scope === 'installed-read-startup' &&
+        refusal.code === 'STATE_TRANSITION_INVALID' && typeof refusal.message === 'string' && refusal.message.length <= 1024 &&
+        Object.keys(refusal).every(key => ['diagnosticOnly', 'scope', 'code', 'path', 'message'].includes(key));
+    } catch { /* Only the closed refusal code is retained, never arbitrary output. */ }
+    assert(activeRefused, 'active cleanup must return the closed state-transition refusal without secret input');
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record')), record);
+    const protectedInventory = observe('list'); assert.deepEqual(protectedInventory.items, after.items);
+    assert.equal(protectedInventory.nameOwner, before.nameOwner); assert.equal(protectedInventory.servicePid, before.servicePid);
+    assert.equal(protectedInventory.collection, before.collection);
+    assert.deepEqual(await processCut(setup.keeperUnit, 'keeper'), keeper);
+    assert.deepEqual(await processCut(setup.supervisorUnit, 'supervisor'), supervisor);
+    report.activeCleanupRefusal = { diagnosticOnly: true, code: 'STATE_TRANSITION_INVALID', metadataUnchanged: true,
+      actualInventoryUnchanged: true, secretInputPipeUnwrittenAndUnended: true };
+
     report.phase = 'rotate';
     const rotateMetadata = { schemaVersion: 1, kind: 'rotate', requestId: '019a0012-0000-7000-8000-000000000023',
       credentialGrantId: metadata.credentialGrantId, expectedAuthorityRevision: 1, secretSubmissionId: 'credential-journey-rotation-submission' };
@@ -713,6 +737,32 @@ async function campaign(filename: string): Promise<void> {
     report.servicesAfterCompletedReplay = inactive();
     report.successfulCleanupRetry = { originalReceiptIdentityMatched: true, revokedRecordUnchanged: true,
       actualInventoryEmpty: true, completedReceiptExactReplay: true, secretInputPipeUnwrittenAndUnended: true };
+
+    report.phase = 'explicit_completed_revoke_cleanup';
+    const explicitRevoke = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
+      canonicalJsonBytes({ schemaVersion: 1, kind: 'cleanup', requestId: revokeMetadata.requestId }).toString('base64url')]);
+    assert.deepEqual(decodeCredentialAuthorityRevokeOperation(success(explicitRevoke, 'operation')), completedRevocation,
+      'explicit cleanup must retain the exact completed revoke receipt');
+    assert.equal(explicitRevoke.stdout, `${canonicalJsonBytes({ schemaVersion: 1, operation: completedRevocation }).toString('utf8')}\n`);
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record')), revokedRecord);
+    assert.deepEqual(observe('list').items, []); assert.equal(serviceOwner(), restored.nameOwner);
+    assert.deepEqual(inactive(), report.servicesBeforeCleanup);
+    for (const [requestId, originalOperation] of [[metadata.requestId, operation], [rotateMetadata.requestId, rotatedOperation]] as const) {
+      report.phase = originalOperation.kind === 'enroll' ? 'explicit_superseded_enroll_cleanup' : 'explicit_revoked_rotate_cleanup';
+      const explicit = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
+        canonicalJsonBytes({ schemaVersion: 1, kind: 'cleanup', requestId }).toString('base64url')]);
+      assert.deepEqual(decodeCredentialAuthorityOperation(success(explicit, 'operation')), originalOperation,
+        'explicit cleanup must not rewrite the original committed credential operation');
+      assert.equal(explicit.stdout, `${canonicalJsonBytes({ schemaVersion: 1, operation: originalOperation }).toString('utf8')}\n`);
+      assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+        credentialGrantId: metadata.credentialGrantId }), 'record')), revokedRecord);
+      assert.deepEqual(observe('list').items, []); assert.equal(serviceOwner(), restored.nameOwner);
+      assert.deepEqual(inactive(), report.servicesBeforeCleanup);
+    }
+    report.explicitCleanup = { completedRevokeReceiptMatched: true, originalCommittedOperationsMatched: true,
+      revokedRecordUnchanged: true, actualInventoryEmpty: true, servicesRemainInactive: true,
+      secretInputPipeUnwrittenAndUnended: true };
     report.phase = 'complete'; report.qualified = true;
   } catch (error) { primary = error; }
   finally {
