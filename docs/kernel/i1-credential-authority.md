@@ -378,6 +378,33 @@ actually observed non-durable session default instead, not missing-alias
 qualification, and restores only the original or the exact fixture-owned
 session alias. Production checks are not relaxed to match the fixture.
 
+Commit `b2dade2d8594bf9be881740e11f9f63bb1330823` passed that corrected
+focused journey in
+[run 38308638275](https://github.com/cogine-ai/cliq-agent/actions/runs/38308638275).
+Fresh independent clients observed the actual session collection as default;
+signed auth refused without new authority or changing the terminal record,
+and restoration selected the original `login` collection. The same report
+retains locked-store and permanent-intent refusals, 231 scanned files and
+1209 joined/closed scan streams without detected generated-secret bytes.
+The six other checks passed; the later broad component step was interrupted
+by the next schema-regression submission, so this is not an all-seven-check
+claim for that commit or proof of missing-alias/owner drift.
+
+The signed schema regression at `73ca35d8682a452948bf34f4453eaa8dca87e481`
+in [run 38310358784](https://github.com/cogine-ai/cliq-agent/actions/runs/38310358784)
+observed a genuine RED after successful initial v1 read: an extra legal
+`sqlitex` table was accepted, and version zero containing that table incorrectly
+ran schema genesis. `LIKE 'sqlite_%'` used a wildcard underscore rather than an
+exact internal-table prefix. The one-line `GLOB 'sqlite_*'` correction is paired
+with v0/v1 signed-entry negatives and a genuine v2 journey negative; portable
+success cannot qualify those three Linux checks. The RED run was stopped only after its
+schema test finished and the failure was retained; it is not a full campaign.
+
+CI schedules the credential journey and independent component baseline in
+parallel on the same free standard Ubuntu 22.04 runner label, retaining their
+own reports. No production-operation deadline or qualification assertion is
+relaxed to fit a serialized job budget.
+
 The real post-`secret_stored`, retired-scope producer pause remains blocked:
 both the proposed native helper and the narrower standard-tool metadata-only
 owned pause implementation were stopped by the platform safety check. Their

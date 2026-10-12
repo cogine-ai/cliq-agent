@@ -1080,7 +1080,7 @@ function endpointTransaction<T>(database: DatabaseSync, operation: () => T): T {
 
 function ensureEndpointSchema(database: DatabaseSync): void {
   const version = database.prepare('PRAGMA user_version').get()?.user_version;
-  const names = database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row => row.name).sort();
+  const names = database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*'").all().map(row => row.name).sort();
   if (version === 1 && JSON.stringify(names) === JSON.stringify(['endpoint_operations', 'endpoint_records', 'retained_objects'])) return;
   if (version === 2 && JSON.stringify(names) === JSON.stringify(['credential_operation_facts', 'credential_records', 'credential_revoke_operations',
     'endpoint_operations', 'endpoint_records', 'retained_objects'])) return;
