@@ -46,6 +46,7 @@ readonly probe_secret_source="$probe_source_dir/cliq-secret-service-probe.c"
 readonly probe_sqlite_driver="$probe_source_dir/qualify-sqlite-paths.ts"
 readonly probe_credential_driver="$probe_source_dir/testing/credential-installed-journey.ts"
 readonly probe_credential_source="$probe_source_dir/testing/credential-journey-observer.c"
+readonly probe_credential_store_source="$probe_source_dir/testing/credential-store-fixture.c"
 if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement || "$probe_campaign_kind" = secrets || "$probe_campaign_kind" = credentials ]]; then
   probe_typescript_driver=$probe_installed_driver
   if [[ "$probe_campaign_kind" = secrets ]]; then
@@ -56,6 +57,7 @@ if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement 
   if [[ "$probe_campaign_kind" = credentials ]]; then
     probe_typescript_driver=$probe_credential_driver
     [[ -f "$probe_credential_driver" && ! -L "$probe_credential_driver" && -f "$probe_credential_source" && ! -L "$probe_credential_source" ]] || exit 2
+    [[ -f "$probe_credential_store_source" && ! -L "$probe_credential_store_source" ]] || exit 2
   fi
   probe_installed_loader=$("$probe_node" --input-type=module -e \
     'import { createRequire } from "node:module"; process.stdout.write(createRequire(process.argv[1]).resolve("tsx"));' \
@@ -366,7 +368,8 @@ const credentials = mode === 'credentials' ? {
   installerEntry: `${fixture}/credential-package-build/installed-runtime-installer.mjs`,
   stateRoot: `${home}/probe/credential-state`, releaseKeysFile: `${fixture}/credential-release-keys.json`,
   controlDirectory: `${home}/probe/credential-secret-service-control`,
-  observer: `${fixture}/cliq-credential-journey-observer`, reportFile: `${output}/credential-journey.json`,
+  observer: `${fixture}/cliq-credential-journey-observer`, storeFixture: `${fixture}/cliq-credential-store-fixture`,
+  reportFile: `${output}/credential-journey.json`,
 } : undefined;
 writeFileSync(file, JSON.stringify({ diagnosticOnly: true, fixture, fixtureIdentity, username,
   uid, gid, runnerUid, home, dropin, birthHelper, anchor, scenarios, installed, secretService, sqlitePaths, credentials,
@@ -407,6 +410,8 @@ if [[ "$probe_campaign_kind" = credentials ]]; then
   read -r -a probe_gio_flags <<< "$(pkg-config --cflags --libs gio-2.0)"
   cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_credential_source" -o "$probe_fixture/cliq-credential-journey-observer" "${probe_gio_flags[@]}"
   chmod 0555 "$probe_fixture/cliq-credential-journey-observer"
+  cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_credential_store_source" -o "$probe_fixture/cliq-credential-store-fixture" "${probe_gio_flags[@]}"
+  chmod 0555 "$probe_fixture/cliq-credential-store-fixture"
 fi
 mkdir -m 0755 -- "$probe_home/.config" "$probe_home/.config/systemd" "$probe_home/.config/systemd/user"
 if [[ "$probe_campaign_kind" = credentials ]]; then

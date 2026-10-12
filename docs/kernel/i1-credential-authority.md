@@ -347,10 +347,23 @@ signed installed entry, actual user manager and actual GNOME Secret Service:
 
 This is positive evidence for those specific cuts, not full qualification of
 every acceptance criterion. Live-producer scope retirement, finalizer/clock and
-other crash cuts, actual locked/ambiguous/owner/alias drift, and complete
-SQLite/CAS/output/trace secret scanning remain separate proof obligations.
+other crash cuts and actual locked/ambiguous/owner/alias drift remain separate
+proof obligations.
 Generic refusal, portable tests or a successful schema/adapter probe cannot
 substitute for them. No complete capability PR is published on partial proof.
+
+Commit `6088093a420bfd0cc08c1da6d5062d9fd2215ebf` also passed the focused
+credential journey in
+[run 38302749082](https://github.com/cogine-ai/cliq-agent/actions/runs/38302749082).
+Its final stable cut scans both original SQLite databases and copied logical
+TEXT/BLOB values, every fixed flat CAS object/name, command output, the report
+and all four joined trace corpora. The retained report records 204 files,
+66 logical rows and 936 closed scan streams, with no forbidden generated-secret
+bytes or selected encodings found and no copied scan needles/tails retained.
+This is not secure erasure of all VM/native copies or coverage of unexercised
+transient/crash paths. No Secret Service keyring files are treated as CAS or
+included in this SQLite/CAS corpus; the platform store is the intended secret
+owner.
 
 ### Risks And Dependencies
 

@@ -21,7 +21,7 @@ import { createCredentialSecretScanner } from './credential-secret-scan.js';
 import { scanCredentialSecretCorpus } from './credential-secret-corpus.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string;
-  releaseKeysFile: string; controlDirectory: string; observer: string; reportFile: string };
+  releaseKeysFile: string; controlDirectory: string; observer: string; storeFixture: string; reportFile: string };
 type Ledger = { diagnosticOnly: true; fixture: string; fixtureIdentity: string; username: string;
   uid: number; gid: number; runnerUid: number; home: string; credentials: Recipe };
 type Observation = { clientPid: number; busUniqueName: string; nameOwner: string; serviceUid: number;
@@ -54,7 +54,7 @@ async function readLedger(filename: string): Promise<Ledger> {
   assert.equal(ledger.home, path.join(ledger.fixture, 'home'));
   const recipe = ledger.credentials;
   assert.deepEqual(Object.keys(recipe).sort(), ['buildFixture', 'controlDirectory', 'installerEntry', 'observer',
-    'packageRoot', 'releaseKeysFile', 'reportFile', 'stateRoot'].sort());
+    'packageRoot', 'releaseKeysFile', 'reportFile', 'stateRoot', 'storeFixture'].sort());
   assert.equal(recipe.buildFixture, path.join(ledger.fixture, 'credential-package-build'));
   assert.equal(recipe.packageRoot, path.join(recipe.buildFixture, 'package'));
   assert.equal(recipe.installerEntry, path.join(recipe.buildFixture, 'installed-runtime-installer.mjs'));
@@ -62,6 +62,7 @@ async function readLedger(filename: string): Promise<Ledger> {
   assert.equal(recipe.releaseKeysFile, path.join(ledger.fixture, 'credential-release-keys.json'));
   assert.equal(recipe.controlDirectory, path.join(ledger.home, 'probe/credential-secret-service-control'));
   assert.equal(recipe.observer, path.join(ledger.fixture, 'cliq-credential-journey-observer'));
+  assert.equal(recipe.storeFixture, path.join(ledger.fixture, 'cliq-credential-store-fixture'));
   assert(path.isAbsolute(recipe.reportFile) && path.basename(recipe.reportFile) === 'credential-journey.json');
   const output = await lstat(path.dirname(recipe.reportFile));
   assert(output.isDirectory() && !output.isSymbolicLink()); assert.equal(output.uid, 0);
@@ -106,9 +107,9 @@ async function campaign(filename: string): Promise<void> {
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
     scope: 'genuine signed credential journey, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, live-producer presence, clock regression, broker or I1' };
   const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
-    password = Buffer.from(randomBytes(32).toString('hex'));
+    negativeSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
-  const scanner = createCredentialSecretScanner([secret, rotatedSecret, abandonedSecret, resubmittedSecret, ...capSecrets, password],
+  const scanner = createCredentialSecretScanner([secret, rotatedSecret, abandonedSecret, resubmittedSecret, ...capSecrets, negativeSecret, password],
     { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
   const evidenceDirs: string[] = [];
   const scanBytes = (bytes: Uint8Array) => {
@@ -392,9 +393,11 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(bundleDigest, canonicalSha256(signed.bundle)); report.bundleDigest = bundleDigest;
     const expectedImage = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
     const absent = serviceName(); assert.equal(absent.status, 0); assert.equal(absent.stdout.trim(), 'b false');
-    const helper = await lstat(recipe.observer);
-    assert(helper.isFile() && !helper.isSymbolicLink()); assert.equal(helper.uid, 0);
-    assert.equal(helper.nlink, 1); assert.equal(helper.mode & 0o7777, 0o555);
+    for (const filename of [recipe.observer, recipe.storeFixture]) {
+      const helper = await lstat(filename);
+      assert(helper.isFile() && !helper.isSymbolicLink()); assert.equal(helper.uid, 0);
+      assert.equal(helper.nlink, 1); assert.equal(helper.mode & 0o7777, 0o555);
+    }
     await mkdir(recipe.controlDirectory, { mode: 0o700 }); await chown(recipe.controlDirectory, ledger.uid, ledger.gid);
     const before = await startDaemon(); report.platformBefore = before; assert.deepEqual(before.items, []);
     const originalDaemon = daemonFact; assert(originalDaemon);
@@ -800,6 +803,21 @@ async function campaign(filename: string): Promise<void> {
     report.servicesAfterReplay = inactive(); noStore();
     report.exactReplay = { originalOperationMatched: true, rotatedOperationMatched: true, latestRotatedRecordMatched: true,
       secretInputPipeUnwrittenAndUnended: true, authLauncherJoined: true, secretServiceOwnerAbsent: true };
+    report.phase = 'permanent_request_intent_conflict';
+    for (let repeated = 0; repeated < 2; repeated++) {
+      const conflict = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
+        canonicalJsonBytes({ ...metadata, expiresAt: '2098-01-01T00:00:00.000Z' }).toString('base64url')]);
+      assert.equal(conflict.status, 1); assert.equal(conflict.stdout, '');
+      const line = conflict.stderr.trim().split('\n').at(-1); assert(line && Buffer.byteLength(line) <= 2048);
+      const refusal = parseJsonStrict(line) as Record<string, unknown>;
+      assert.equal(refusal.diagnosticOnly, true); assert.equal(refusal.scope, 'installed-read-startup');
+      assert.equal(refusal.code, 'REQUEST_ID_CONFLICT'); assert.equal(refusal.message, 'credential request already names different intent');
+      assert.deepEqual(inactive(), report.servicesBeforeReplay); noStore();
+      assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+        credentialGrantId: metadata.credentialGrantId }), 'record')), rotatedRecord);
+    }
+    report.permanentIntentConflict = { exactRepeatedRefusal: true, latestRecordUnchanged: true,
+      servicesRemainInactive: true, secretServiceOwnerAbsent: true, secretInputPipeUnwrittenAndUnended: true };
 
     report.phase = 'revoke_without_services_or_secret_input';
     const revokeMetadata = { schemaVersion: 1, kind: 'revoke', requestId: '019a0012-0000-7000-8000-000000000025',
@@ -914,10 +932,103 @@ async function campaign(filename: string): Promise<void> {
     report.explicitCleanup = { completedRevokeReceiptMatched: true, originalCommittedOperationsMatched: true,
       revokedRecordUnchanged: true, actualInventoryEmpty: true, servicesRemainInactive: true,
       secretInputPipeUnwrittenAndUnended: true };
+
+    // These are actual adversarial store preconditions, not fabricated native
+    // observations or SQL authority. The administrative helper cannot run on
+    // an ordinary account's vault and never reads or creates credential items.
+    const storeFixture = (action: 'lock' | 'alias-remove' | 'alias-restore', collection?: string) => {
+      const result = command(recipe.storeFixture, [action, ...(collection ? [collection] : [])]);
+      assert.equal(result.status, 0, 'actual disposable store precondition did not complete');
+      const value = parseJsonStrict(result.stdout.trim()) as Record<string, unknown>;
+      const flag = action === 'lock' ? 'locked' : action === 'alias-remove' ? 'defaultAliasAbsent' : 'defaultAliasMatched';
+      assert.deepEqual(Object.keys(value).sort(), ['diagnosticOnly', 'action', 'collection', flag, 'connectionClosed'].sort());
+      assert.equal(value.diagnosticOnly, true); assert.equal(value.action, action);
+      assert.equal(value[flag], true); assert.equal(value.connectionClosed, true);
+      assert.equal(value.collection, restored.collection); return value;
+    };
+    const platformWriteRefused = (result: ReturnType<typeof credential>) => {
+      assert.equal(result.status, 1); assert.equal(result.stdout, '');
+      const line = result.stderr.trim().split('\n').at(-1); assert(line && Buffer.byteLength(line) <= 2048);
+      const value = parseJsonStrict(line) as Record<string, unknown>;
+      assert.equal(value.diagnosticOnly, true); assert.equal(value.scope, 'installed-read-startup');
+      assert.equal(value.code, 'RECOVERY_REQUIRED');
+      assert.equal(value.message, 'credential store did not complete a fresh secret round-trip');
+    };
+    const stopRoles = () => {
+      assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', setup.supervisorUnit, setup.keeperUnit]).status, 0);
+      return inactive();
+    };
+    report.phase = 'locked_store_setup';
+    const negativeMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000030',
+      credentialGrantId: '019a0012-0000-7000-8000-000000000031', secretSubmissionId: '019a0012-0000-7000-8000-000000000130' };
+    const negativeOperation = decodeCredentialAuthorityOperation(success(credential(negativeMetadata, negativeSecret), 'operation'));
+    assert.equal(negativeOperation.phase, 'committed'); assert.equal(negativeOperation.attempt, 1);
+    assert.equal(negativeOperation.requestId, negativeMetadata.requestId);
+    const negativeRecord = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: negativeMetadata.credentialGrantId }), 'record'));
+    assert.equal(negativeRecord.credentialGrantId, negativeMetadata.credentialGrantId);
+    assert.equal(negativeRecord.state, 'active'); assert.equal(negativeRecord.authorityRevision, 1);
+    const negativeItem = negativeRecord.platformItem; assert(negativeItem.kind === 'linux_secret_service');
+    const negativeBefore = observe('list'); assert.equal(negativeBefore.items.length, 1);
+    assert.equal(negativeBefore.nameOwner, restored.nameOwner); assert.equal(negativeBefore.collection, restored.collection);
+    assert.equal(observe('compare', negativeBefore.items[0]!, negativeItem.itemId, negativeSecret).readback, true);
+    report.servicesBeforeLockedStore = stopRoles();
+    report.phase = 'locked_store'; report.lockedStore = storeFixture('lock');
+    assert.equal(serviceOwner(), negativeBefore.nameOwner);
+    const lockedItems = command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'get-property',
+      negativeBefore.nameOwner, negativeBefore.collection, 'org.freedesktop.Secret.Collection', 'Items']);
+    assert.equal(lockedItems.status, 0);
+    assert.equal(lockedItems.stdout.trim(), `ao 1 "${negativeBefore.items[0]}"`);
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: negativeMetadata.credentialGrantId }), 'record')), negativeRecord);
+    assert.deepEqual(inactive(), report.servicesBeforeLockedStore);
+    const lockedRequest = { ...negativeMetadata, requestId: '019a0012-0000-7000-8000-000000000032',
+      credentialGrantId: '019a0012-0000-7000-8000-000000000033', secretSubmissionId: '019a0012-0000-7000-8000-000000000132' };
+    platformWriteRefused(credential(lockedRequest, negativeSecret));
+    assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: lockedRequest.credentialGrantId }), 'record'), null);
+    report.servicesBeforeLockedRevoke = stopRoles();
+    const negativeRevoke = { schemaVersion: 1, kind: 'revoke', requestId: '019a0012-0000-7000-8000-000000000034',
+      credentialGrantId: negativeMetadata.credentialGrantId, expectedAuthorityRevision: 1 };
+    const lockedRevoke = decodeCredentialAuthorityRevokeOperation(success(credential(negativeRevoke), 'operation'));
+    assert.equal(lockedRevoke.cleanupPhase, 'cleanup_failed');
+    const negativeRevoked = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: negativeMetadata.credentialGrantId }), 'record'));
+    assert.equal(negativeRevoked.state, 'revoked'); assert.equal(negativeRevoked.authorityRevision, 2);
+    assert.equal(negativeRevoked.secretGeneration, 1);
+    assert.deepEqual(inactive(), report.servicesBeforeLockedRevoke); assert.equal(serviceOwner(), negativeBefore.nameOwner);
+    const retainedLockedItems = command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'get-property',
+      negativeBefore.nameOwner, negativeBefore.collection, 'org.freedesktop.Secret.Collection', 'Items']);
+    assert.equal(retainedLockedItems.status, 0); assert.equal(retainedLockedItems.stdout, lockedItems.stdout);
+    report.lockedStoreRefusal = { noNewAuthority: true, originalReadUnchanged: true, originalItemStillPresent: true,
+      terminalRevokeWithoutSupervisor: true, revokedRevision: 2, cleanupFailed: true };
+    report.phase = 'locked_store_restore';
+    await stopDaemon(negativeBefore.servicePid);
+    const unlockedAgain = await startDaemon(); assert.equal(unlockedAgain.items.length, 1);
+    assert.notEqual(unlockedAgain.nameOwner, negativeBefore.nameOwner);
+    assert.equal(observe('compare', unlockedAgain.items[0]!, negativeItem.itemId, negativeSecret).readback, true);
+    const unlockedRevoke = decodeCredentialAuthorityRevokeOperation(success(credential(negativeRevoke), 'operation'));
+    assert.equal(unlockedRevoke.cleanupPhase, 'cleanup_complete');
+    assert.deepEqual(receiptIdentity(unlockedRevoke), receiptIdentity(lockedRevoke)); assert.deepEqual(observe('list').items, []);
+    assert.deepEqual(inactive(), report.servicesBeforeLockedRevoke);
+    report.phase = 'missing_default_alias'; report.missingDefaultAlias = storeFixture('alias-remove');
+    try {
+      assert.equal(serviceOwner(), unlockedAgain.nameOwner);
+      const missingAliasRequest = { ...negativeMetadata, requestId: '019a0012-0000-7000-8000-000000000035',
+        credentialGrantId: '019a0012-0000-7000-8000-000000000036', secretSubmissionId: '019a0012-0000-7000-8000-000000000135' };
+      platformWriteRefused(credential(missingAliasRequest, negativeSecret));
+      assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: missingAliasRequest.credentialGrantId }), 'record'), null);
+      assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+        credentialGrantId: negativeMetadata.credentialGrantId }), 'record')), negativeRevoked);
+      assert.equal(serviceOwner(), unlockedAgain.nameOwner);
+      report.missingAliasRefusal = { noNewAuthority: true, revokedRecordUnchanged: true };
+    } finally {
+      report.defaultAliasRestored = storeFixture('alias-restore', unlockedAgain.collection);
+    }
+    assert.deepEqual(observe('list').items, []); report.servicesAfterStoreNegatives = stopRoles();
     report.phase = 'complete'; report.qualified = true;
   } catch (error) { primary = error; }
   finally {
-    secret.fill(0); rotatedSecret.fill(0); abandonedSecret.fill(0); resubmittedSecret.fill(0); password.fill(0);
+    secret.fill(0); rotatedSecret.fill(0); abandonedSecret.fill(0); resubmittedSecret.fill(0); negativeSecret.fill(0); password.fill(0);
     for (const bytes of capSecrets) bytes.fill(0);
     try { await stopDaemon(); }
     catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'fixture platform daemon retirement failed'); }
