@@ -4,7 +4,7 @@
 
 ### Verdict
 
-READY for implementation, not qualified or complete. The owner approved option A
+Implementation and qualification in progress, not qualified or complete. The owner approved option A
 on 2026-10-12: enroll/rotate may automatically start or connect the installed
 Supervisor; only its existing canonical-time authority may finalize expansion.
 Read, historical replay, revoke and cleanup remain independent. This is one
@@ -324,6 +324,33 @@ secret-free raw commit/platform/process evidence. Local macOS portable success
 does not qualify Linux, broker, power loss or complete I1.
 The first metadata-only tracer checks exact CAS bytes and absence of Run-owner
 side effects. It does not yet prove zero platform calls or the complete journey.
+
+#### Retained genuine Linux progress
+
+Commit `cf29744d4d2c4e62c4fae13e19c0328ac13a4ae1` passed all seven checks in
+[run 38299252622](https://github.com/cogine-ai/cliq-agent/actions/runs/38299252622)
+on the existing free standard runners. Its credential journey uses the real
+signed installed entry, actual user manager and actual GNOME Secret Service:
+
+- Enroll/read/rotate preserve exact historical replay; replay accepts an
+  unwritten, unended input pipe with Supervisor/keeper and Secret Service down.
+- Terminal revoke commits independently of those services; failed cleanup can
+  retry against a genuinely restarted persistent store without rewriting the
+  original receipt identity. Explicit superseded/revoked cleanup preserves
+  original operations, while the current active item remains protected.
+- A real prepared writer is SIGKILLed and fully joined, then the same request
+  commits attempt two with its complete frozen core and a fresh producer/item.
+  Three separately observed prepared writers can be killed and joined; the
+  fourth and repeated request produce the exact exhaustion refusal before
+  secret input. The copied actual history has no fourth attempt and preserves
+  all earlier facts.
+
+This is positive evidence for those specific cuts, not full qualification of
+every acceptance criterion. Live-producer scope retirement, finalizer/clock and
+other crash cuts, actual locked/ambiguous/owner/alias drift, and complete
+SQLite/CAS/output/trace secret scanning remain separate proof obligations.
+Generic refusal, portable tests or a successful schema/adapter probe cannot
+substitute for them. No complete capability PR is published on partial proof.
 
 ### Risks And Dependencies
 

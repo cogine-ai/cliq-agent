@@ -1,0 +1,134 @@
+// Test-private byte qualification only: no filesystem, hashing, persistence,
+// process evidence or authority decisions. Callers retain ownership of input.
+export type CredentialSecretScanCode = 'INVALID_INPUT' | 'LIMIT_EXCEEDED' | 'SECRET_DETECTED' | 'CLOSED';
+const messages: Record<CredentialSecretScanCode, string> = {
+  INVALID_INPUT: 'credential secret scan input is invalid',
+  LIMIT_EXCEEDED: 'credential secret scan exceeded its bound',
+  SECRET_DETECTED: 'credential secret scan detected forbidden bytes',
+  CLOSED: 'credential secret scan is closed',
+};
+export class CredentialSecretScanError extends Error {
+  constructor(readonly code: CredentialSecretScanCode) {
+    super(messages[code]); this.name = 'CredentialSecretScanError';
+  }
+}
+export type CredentialSecretScanLimits = Readonly<{ maxBytes: number; maxStreams: number }>;
+export type CredentialSecretScanStats = Readonly<{
+  bytesScanned: number; chunksScanned: number; streamsOpened: number; streamsClosed: number;
+  needleCount: number; retainedNeedleBytes: number; retainedTailBytes: number;
+  matched: boolean; limitExceeded: boolean; closed: boolean;
+}>;
+export type CredentialSecretScanStream = Readonly<{ scan(bytes: Uint8Array): void; close(): void }>;
+export type CredentialSecretScanner = Readonly<{
+  openStream(): CredentialSecretScanStream; stats(): CredentialSecretScanStats; close(): void;
+}>;
+const maxSecretBytes = 65536, maxSecretCount = 32, maxChunkBytes = 8 * 1024 * 1024;
+function invalid(): never { throw new CredentialSecretScanError('INVALID_INPUT'); }
+function bytesInput(input: unknown): Uint8Array {
+  try {
+    if (!(input instanceof Uint8Array) || !ArrayBuffer.isView(input) || input.buffer instanceof SharedArrayBuffer) invalid();
+    // Construction rejects detached/out-of-bounds views before they can be
+    // mistaken for an empty chunk or throw an uncontrolled native message.
+    return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  } catch { return invalid(); }
+}
+function checkedLimits(input: CredentialSecretScanLimits): CredentialSecretScanLimits {
+  try {
+    if (!input || typeof input !== 'object' || Reflect.ownKeys(input).length !== 2) invalid();
+    const bytes = Object.getOwnPropertyDescriptor(input, 'maxBytes'), streams = Object.getOwnPropertyDescriptor(input, 'maxStreams');
+    if (!bytes || !streams || !('value' in bytes) || !('value' in streams) ||
+        !Number.isSafeInteger(bytes.value) || bytes.value <= 0 || bytes.value > 1024 * 1024 * 1024 ||
+        !Number.isSafeInteger(streams.value) || streams.value <= 0 || streams.value > 8192) invalid();
+    return { maxBytes: bytes.value as number, maxStreams: streams.value as number };
+  } catch { return invalid(); }
+}
+function appendNeedles(needles: Buffer[], input: Uint8Array): void {
+  const raw = Buffer.from(input); needles.push(raw);
+  const hex = raw.toString('hex'), base64 = raw.toString('base64');
+  const url = base64.replaceAll('+', '-').replaceAll('/', '_');
+  const decimal = [...raw];
+  try {
+    for (const encoded of [hex, hex.toUpperCase(), base64, base64.replace(/=+$/u, ''), url, url.replace(/=+$/u, ''),
+      JSON.stringify(decimal), `[${decimal.join(', ')}]`, JSON.stringify(decimal, null, 2),
+      decimal.map(byte => `\\x${byte.toString(16).padStart(2, '0')}`).join(''),
+      decimal.map(byte => `\\x${byte.toString(16).padStart(2, '0').toUpperCase()}`).join('')]) {
+      needles.push(Buffer.from(encoded, 'ascii'));
+    }
+  } finally { decimal.fill(0); }
+}
+
+/** One budget covers the corpus; overlap belongs to each independent stream.
+ * At most 32 nonempty inputs/64 KiB combined, 1 GiB corpus/8192 streams,
+ * and 8 MiB per chunk. JSON array needles cover compact, spaced and two-space
+ * pretty printing; this is not a promise about arbitrary secret encodings.
+ * Failure retires all copied needles/tails. Only counts/booleans escape.
+ * Buffer wiping cannot promise erasure of VM/native copies owned elsewhere. */
+export function createCredentialSecretScanner(secrets: readonly Uint8Array[], inputLimits: CredentialSecretScanLimits): CredentialSecretScanner {
+  const limits = checkedLimits(inputLimits);
+  const needles: Buffer[] = [];
+  try {
+    if (!Array.isArray(secrets) || secrets.length === 0 || secrets.length > maxSecretCount) invalid();
+    let total = 0;
+    for (let index = 0; index < secrets.length; index++) {
+      const entry = Object.getOwnPropertyDescriptor(secrets, String(index));
+      if (!entry || !('value' in entry)) invalid();
+      const bytes = bytesInput(entry.value);
+      if (!bytes.byteLength || bytes.byteLength > maxSecretBytes || (total += bytes.byteLength) > maxSecretBytes) invalid();
+      appendNeedles(needles, bytes);
+    }
+  } catch {
+    for (const needle of needles) needle.fill(0);
+    return invalid();
+  }
+  const needleCount = needles.length, overlap = Math.max(...needles.map(needle => needle.length)) - 1;
+  type StreamState = { tail: Buffer; closed: boolean };
+  const streams = new Set<StreamState>();
+  let bytesScanned = 0, chunksScanned = 0, streamsOpened = 0, streamsClosed = 0;
+  let matched = false, limitExceeded = false, closed = false;
+  const closeStream = (stream: StreamState) => {
+    if (stream.closed) return;
+    stream.tail.fill(0); stream.tail = Buffer.alloc(0); stream.closed = true;
+    streams.delete(stream); streamsClosed++;
+  };
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    for (const stream of streams) closeStream(stream);
+    for (const needle of needles) needle.fill(0);
+    needles.length = 0;
+  };
+  const fail = (code: CredentialSecretScanCode): never => {
+    if (code === 'SECRET_DETECTED') matched = true;
+    if (code === 'LIMIT_EXCEEDED') limitExceeded = true;
+    close(); throw new CredentialSecretScanError(code);
+  };
+  const stats = (): CredentialSecretScanStats => Object.freeze({ bytesScanned, chunksScanned, streamsOpened, streamsClosed,
+    needleCount, retainedNeedleBytes: needles.reduce((sum, needle) => sum + needle.length, 0),
+    retainedTailBytes: [...streams].reduce((sum, stream) => sum + stream.tail.length, 0), matched, limitExceeded, closed });
+  const openStream = (): CredentialSecretScanStream => {
+    if (closed) throw new CredentialSecretScanError('CLOSED');
+    if (streamsOpened >= limits.maxStreams) fail('LIMIT_EXCEEDED');
+    const stream: StreamState = { tail: Buffer.alloc(0), closed: false };
+    streams.add(stream); streamsOpened++;
+    return Object.freeze({ close: () => closeStream(stream), scan(input: Uint8Array) {
+      if (closed || stream.closed) throw new CredentialSecretScanError('CLOSED');
+      let bytes: Uint8Array;
+      try { bytes = bytesInput(input); } catch { return fail('INVALID_INPUT'); }
+      if (bytes.byteLength === 0) return;
+      if (bytes.byteLength > maxChunkBytes || bytes.byteLength > limits.maxBytes - bytesScanned) fail('LIMIT_EXCEEDED');
+      let joined: Buffer | undefined;
+      try {
+        joined = Buffer.alloc(stream.tail.length + bytes.byteLength);
+        stream.tail.copy(joined); joined.set(bytes, stream.tail.length);
+        bytesScanned += bytes.byteLength; chunksScanned++;
+        if (needles.some(needle => joined!.includes(needle))) fail('SECRET_DETECTED');
+        const tail = Buffer.from(joined.subarray(Math.max(0, joined.length - overlap)));
+        stream.tail.fill(0); stream.tail = tail;
+      } catch (error) {
+        if (error instanceof CredentialSecretScanError) throw error;
+        return fail('INVALID_INPUT');
+      } finally { joined?.fill(0); }
+    } });
+  };
+  return Object.freeze({ openStream, stats, close });
+}

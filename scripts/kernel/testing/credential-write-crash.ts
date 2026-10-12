@@ -17,6 +17,7 @@ import type { CredentialWriteRequest } from '../../../src/state/store.js';
 import { decodeControlChannel, decodePlatformProcessIdentity } from '../../../src/state/decoders.js';
 import { checkedThreadCalls } from './credential-vfs-storage.js';
 import { inspectWal } from './endpoint-wal-proof.js';
+import type { CredentialSecretScanner } from './credential-secret-scan.js';
 
 const dataLimit = 4 * 1024 * 1024, traceLimit = 8 * 1024 * 1024, delayMs = 2000;
 type Physical = { dev: string; ino: string; size: string; uid: string; gid: string; mode: string;
@@ -115,7 +116,7 @@ async function snapshotFacts(directory: string, main: Buffer, wal: Buffer, reque
 
 export type PreparedCredentialCrashInput = Readonly<{ fixture: string; username: string; uid: number; gid: number; home: string;
   stateRoot: string; ownerPrincipalId: string; selectedImage: string; selectedImageDigest: string;
-  request: CredentialWriteRequest; secret: Buffer; expectedAttempt?: 1 | 2 | 3;
+  request: CredentialWriteRequest; secret: Buffer; scanner: CredentialSecretScanner; expectedAttempt?: 1 | 2 | 3;
   previous?: Readonly<{ prepared: CredentialAuthorityOperationV1; facts: readonly CredentialAuthorityOperationV1[] }> }>;
 
 /** Caller is the existing root-owned disposable-user ledger campaign. Inputs
@@ -167,25 +168,36 @@ export async function crashPreparedCredentialWrite(input: PreparedCredentialCras
   assert.deepEqual(baselineFacts, input.previous?.facts ?? [], 'copied cut prefix must remain exactly unchanged');
   const baseline = inspectWal(baselineWal);
   const prefix = path.join(traces, 'auth.trace');
+  // Allocate all fallible scan guards before starting an owned process.
+  const outputScans: ReturnType<typeof input.scanner.openStream>[] = [];
+  try { for (let index = 0; index < 3; index++) outputScans.push(input.scanner.openStream()); }
+  catch (error) { for (const scan of outputScans) scan.close(); throw error; }
+  const polledTraceScan = outputScans[2]!; let previousTraceBytes = Buffer.alloc(0);
   // No read/write/send/recv payload tracing, input digest, fake errno/retval or
   // memory/register writes. Only actual credential WAL writes can carry data.
-  const launcher = spawn('/usr/sbin/runuser', ['--user', input.username, '--', '/usr/bin/env', '-i',
+  const launcher = (() => { try { return spawn('/usr/sbin/runuser', ['--user', input.username, '--', '/usr/bin/env', '-i',
     `HOME=${input.home}`, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${input.uid}`,
     `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${input.uid}/bus`, '/usr/bin/strace', '-ff', '-ttt', '-yy', '-xx',
     '-s', '65536', '-o', prefix, '-e', 'trace=pwrite64,fsync,fdatasync,clone,clone3,execve,execveat',
     '-e', 'inject=fsync:delay_exit=2s', path.join(input.stateRoot, 'runtime/bootstrap'),
     '--bootstrap-credential', requestBytes.toString('base64url')],
   { cwd: input.home, env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
-    detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    detached: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    catch (error) { for (const scan of outputScans) scan.close(); throw error; }
+  })();
   const streams = [launcher.stdin, launcher.stdout, launcher.stderr] as const;
   const streamsClosed = Promise.all(streams.map(stream => new Promise<void>(resolve => stream.once('close', resolve))));
-  let closed = false, spawnFailed = false, outputBytes = 0, stdoutBytes = 0, outputExceeded = false;
+  let closed = false, spawnFailed = false, outputBytes = 0, stdoutBytes = 0, outputExceeded = false, scanFailure: unknown;
   let containOutput: () => void = () => {};
   const joined = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
     launcher.once('close', (code, signal) => { closed = true; resolve({ code, signal }); });
   });
   launcher.once('error', () => { spawnFailed = true; }); launcher.stdin.on('error', () => {});
-  for (const stream of [launcher.stdout, launcher.stderr]) stream.on('data', (bytes: Buffer) => {
+  for (const [index, stream] of [launcher.stdout, launcher.stderr].entries()) stream.on('data', (bytes: Buffer) => {
+    if (!scanFailure) {
+      try { outputScans[index]!.scan(bytes); }
+      catch (error) { scanFailure = error; containOutput(); }
+    }
     outputBytes += bytes.length;
     if (stream === launcher.stdout) stdoutBytes += bytes.length;
     if (outputBytes > 65536 && !outputExceeded) { outputExceeded = true; containOutput(); }
@@ -243,6 +255,7 @@ export async function crashPreparedCredentialWrite(input: PreparedCredentialCras
     let cut: { prepared: CredentialAuthorityOperationV1; facts: CredentialAuthorityOperationV1[]; sampledAt: number; enteredAt: number;
       delayedEvent: string; observed: NonNullable<ReturnType<typeof inspectWal>>; actualMainSha256: string; actualWalSha256: string } | undefined;
     while (performance.now() < deadline) {
+      if (scanFailure) throw scanFailure;
       assert(!spawnFailed && !closed, 'owned credential writer exited before its prepared cut');
       assert(!outputExceeded, 'owned credential writer output exceeded its bound');
       await discover();
@@ -251,7 +264,12 @@ export async function crashPreparedCredentialWrite(input: PreparedCredentialCras
       const info = await lstat(filename).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error; });
       if (!info) { await delay(20); continue; }
       assert(info.isFile() && !info.isSymbolicLink() && info.uid === input.uid && info.nlink === 1 && info.size <= traceLimit);
-      const raw = await readFile(filename, 'utf8'); assert(Buffer.byteLength(raw) <= traceLimit);
+      const traceBytes = await readFile(filename); assert(traceBytes.length <= traceLimit);
+      assert(traceBytes.length >= previousTraceBytes.length && traceBytes.subarray(0, previousTraceBytes.length).equals(previousTraceBytes),
+        'owned trace must remain append-only while the writer is live');
+      polledTraceScan.scan(traceBytes.subarray(previousTraceBytes.length));
+      previousTraceBytes.fill(0); previousTraceBytes = traceBytes;
+      const raw = traceBytes.toString('utf8');
       const line = raw.split('\n').filter(Boolean).at(-1)!;
       const event = /^(\d+\.\d{6,9}) fsync\((\d+)<([^>]+)>\)\s+= 0 \(DELAYED\)$/u.exec(line);
       if (!event || event[3] !== tracedWal) { await delay(20); continue; }
@@ -308,6 +326,7 @@ export async function crashPreparedCredentialWrite(input: PreparedCredentialCras
     assert(!watchdogFired, 'forced watchdog cleanup is not a qualified prepared cut');
     assert(!outputExceeded, 'an output-bound failure is not a qualified prepared cut');
     assert.equal(stdoutBytes, 0, 'prepared writer must not publish a response before the crash');
+    if (scanFailure) throw scanFailure;
     assert.equal(exit.signal, null); assert.equal(exit.code, 128 + 9, 'runuser must join the tracer and killed auth');
     await waitGone(auth); await waitGone(tracer); await waitGone(ownedLauncher);
     const names = await readdir(traces); assert(names.length > 0 && names.length <= 64);
@@ -317,6 +336,7 @@ export async function crashPreparedCredentialWrite(input: PreparedCredentialCras
       const filename = path.join(traces, name), info = await lstat(filename);
       assert(info.isFile() && !info.isSymbolicLink() && info.uid === input.uid && info.nlink === 1);
       const bytes = await readFile(filename); total += bytes.length; assert(total <= traceLimit);
+      const scan = input.scanner.openStream(); try { scan.scan(bytes); } finally { scan.close(); }
       corpus.push({ tid: Number(name.split('.').at(-1)), raw: bytes.toString('utf8'), sha256: hash(bytes) });
     }
     checkedThreadCalls(corpus, auth.pid, 'joined_sigkill');
@@ -347,6 +367,9 @@ export async function crashPreparedCredentialWrite(input: PreparedCredentialCras
     }
     for (const stream of streams) stream.destroy();
     try { await bounded(streamsClosed, 5000); } catch (error) { failures.push(error); }
+    for (const scan of outputScans) scan.close();
+    polledTraceScan.close(); previousTraceBytes.fill(0);
+    if (scanFailure && primary !== scanFailure) failures.push(scanFailure);
     if (failures.length) throw new AggregateError([primary, ...failures].filter(Boolean), 'owned credential crash fixture retirement failed');
   }
 }

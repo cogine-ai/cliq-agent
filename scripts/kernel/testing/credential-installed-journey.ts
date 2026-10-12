@@ -17,6 +17,8 @@ import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { installedReadClientScript } from './installed-read-control.js';
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
 import { crashPreparedCredentialWrite, inspectPreparedCredentialCrashFacts } from './credential-write-crash.js';
+import { createCredentialSecretScanner } from './credential-secret-scan.js';
+import { scanCredentialSecretCorpus } from './credential-secret-corpus.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string;
   releaseKeysFile: string; controlDirectory: string; observer: string; reportFile: string };
@@ -103,15 +105,26 @@ async function campaign(filename: string): Promise<void> {
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
     scope: 'genuine signed credential journey, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, live-producer presence, clock regression, broker or I1' };
+  const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
+    password = Buffer.from(randomBytes(32).toString('hex'));
+  const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
+  const scanner = createCredentialSecretScanner([secret, rotatedSecret, abandonedSecret, resubmittedSecret, ...capSecrets, password],
+    { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
+  const evidenceDirs: string[] = [];
+  const scanBytes = (bytes: Uint8Array) => {
+    const stream = scanner.openStream(); try { stream.scan(bytes); } finally { stream.close(); }
+  };
   const userPrefix = ['--user', ledger.username, '--', '/usr/bin/env', '-i', `HOME=${ledger.home}`,
     'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C', `XDG_RUNTIME_DIR=/run/user/${ledger.uid}`,
     `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${ledger.uid}/bus`];
   const command = (executable: string, args: string[], input?: Buffer, timeout = 30000) => {
     const result = spawnSync('/usr/sbin/runuser', [...userPrefix, executable, ...args],
-      { env: environment, cwd: ledger.home, encoding: 'utf8', timeout, killSignal: 'SIGKILL', maxBuffer: 256 * 1024, input });
+      { env: environment, cwd: ledger.home, timeout, killSignal: 'SIGKILL', maxBuffer: 256 * 1024, input });
+    assert(Buffer.isBuffer(result.stdout) && Buffer.isBuffer(result.stderr), 'actual disposable-user command has no joined output');
+    scanBytes(result.stdout); scanBytes(result.stderr);
     assert.equal(result.error, undefined, 'actual disposable-user command did not join');
     assert.equal(result.signal, null, 'actual disposable-user command was signaled');
-    return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+    return { status: result.status, stdout: result.stdout.toString('utf8'), stderr: result.stderr.toString('utf8') };
   };
   // Fixture cleanup facts only, never production producer-death evidence.
   const processFact = async (pid: number) => {
@@ -146,23 +159,32 @@ async function campaign(filename: string): Promise<void> {
     }
   };
   const openInputCommand = async (executable: string, args: string[]) => {
-    const child = spawn('/usr/sbin/runuser', [...userPrefix, executable, ...args],
-      { env: environment, cwd: ledger.home, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const outputScans: ReturnType<typeof scanner.openStream>[] = [];
+    try { for (let index = 0; index < 2; index++) outputScans.push(scanner.openStream()); }
+    catch (error) { for (const scan of outputScans) scan.close(); throw error; }
+    const child = (() => {
+      try { return spawn('/usr/sbin/runuser', [...userPrefix, executable, ...args],
+        { env: environment, cwd: ledger.home, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
+      catch (error) { for (const scan of outputScans) scan.close(); throw error; }
+    })();
     const streams = [child.stdin, child.stdout, child.stderr] as const;
     const streamsClosed = Promise.all(streams.map(stream => new Promise<void>(resolve => stream.once('close', resolve))));
     const stdout: Buffer[] = [], stderr: Buffer[] = [];
+    let scanFailure: unknown;
     let capturedBytes = 0, finished = false, spawnFailed = false, outputExceeded = false;
     let launcher: Awaited<ReturnType<typeof processFact>>, auth: Awaited<ReturnType<typeof processFact>>;
     const joined = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
       child.once('close', (code, signal) => { finished = true; resolve({ code, signal }); });
     });
     child.once('error', () => { spawnFailed = true; }); child.stdin.on('error', () => {});
-    const capture = (chunks: Buffer[], bytes: Buffer) => {
+    const capture = (chunks: Buffer[], bytes: Buffer, index: number) => {
+      if (scanFailure) return;
+      try { outputScans[index]!.scan(bytes); } catch (error) { scanFailure = error; return; }
       if (outputExceeded || capturedBytes + bytes.length > 256 * 1024) { outputExceeded = true; return; }
       capturedBytes += bytes.length; chunks.push(bytes);
     };
-    child.stdout.on('data', (bytes: Buffer) => capture(stdout, bytes));
-    child.stderr.on('data', (bytes: Buffer) => capture(stderr, bytes));
+    child.stdout.on('data', (bytes: Buffer) => capture(stdout, bytes, 0));
+    child.stderr.on('data', (bytes: Buffer) => capture(stderr, bytes, 1));
     const bounded = async <T>(pending: Promise<T>, milliseconds: number): Promise<T> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try { return await Promise.race([pending, new Promise<never>((_, reject) => {
@@ -173,6 +195,7 @@ async function campaign(filename: string): Promise<void> {
     try {
       const deadline = Date.now() + 30000;
       while (!finished) {
+        if (scanFailure) throw scanFailure;
         assert(!spawnFailed, 'actual open-input signed entry did not spawn');
         assert(!outputExceeded, 'actual open-input signed entry exceeded its output bound');
         assert(Date.now() < deadline, 'committed replay waited for open secret input or unavailable services');
@@ -194,6 +217,7 @@ async function campaign(filename: string): Promise<void> {
         await Promise.race([joined, delay(20)]);
       }
       const exit = await joined;
+      if (scanFailure) throw scanFailure;
       assert(!spawnFailed && !outputExceeded, 'actual open-input signed entry failed');
       assert.equal(exit.signal, null, 'actual open-input signed entry was signaled');
       assert.equal(child.stdin.writableEnded, false, 'fixture must never end or write the secret-input pipe');
@@ -227,6 +251,8 @@ async function campaign(filename: string): Promise<void> {
       // The pipe remains open until a result or timeout is decided above.
       for (const stream of streams) stream.destroy();
       try { await bounded(streamsClosed, 5000); } catch (error) { failures.push(error); }
+      for (const stream of outputScans) stream.close();
+      if (scanFailure && primary !== scanFailure) failures.push(scanFailure);
       if (failures.length) throw new AggregateError([primary, ...failures].filter(Boolean), 'owned open-input fixture retirement failed');
     }
   };
@@ -293,9 +319,6 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(result.status, 0, 'actual fixture Secret Service owner must be observed');
     const owner = result.stdout.trim().match(/^s "(:[0-9]+\.[0-9]+)"$/u); assert(owner); return owner[1]!;
   };
-  const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
-    password = Buffer.from(randomBytes(32).toString('hex'));
-  const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
   let daemon: ReturnType<typeof spawn> | undefined;
   let daemonExit: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
   let daemonClosing: Promise<void> | undefined;
@@ -537,7 +560,8 @@ async function campaign(filename: string): Promise<void> {
     const preparedCut = await crashPreparedCredentialWrite({ fixture: ledger.fixture, username: ledger.username,
       uid: ledger.uid, gid: ledger.gid, home: ledger.home, stateRoot: recipe.stateRoot,
       ownerPrincipalId: record.ownerPrincipalId, selectedImage: expectedImage, selectedImageDigest: selectedEntry.digest,
-      request: orphanMetadata, secret: abandonedSecret });
+      request: orphanMetadata, secret: abandonedSecret, scanner });
+    evidenceDirs.push(preparedCut.evidence);
     report.orphanPreparedCut = preparedCut;
     const prepared = preparedCut.prepared;
     assert.equal(prepared.intendedAuthorityRevision, 1); assert.equal(prepared.intendedSecretGeneration, 1);
@@ -600,7 +624,8 @@ async function campaign(filename: string): Promise<void> {
       const cut = await crashPreparedCredentialWrite({ fixture: ledger.fixture, username: ledger.username,
         uid: ledger.uid, gid: ledger.gid, home: ledger.home, stateRoot: recipe.stateRoot,
         ownerPrincipalId: record.ownerPrincipalId, selectedImage: expectedImage, selectedImageDigest: selectedEntry.digest,
-        request: capMetadata, secret: capSecrets[expectedAttempt - 1]!, expectedAttempt, previous: capCuts.at(-1) });
+        request: capMetadata, secret: capSecrets[expectedAttempt - 1]!, expectedAttempt, previous: capCuts.at(-1), scanner });
+      evidenceDirs.push(cut.evidence);
       capCuts.push(cut);
       assert.equal(cut.prepared.attempt, expectedAttempt); assert.equal(cut.prepared.intendedAuthorityRevision, 1);
       assert.equal(cut.prepared.intendedSecretGeneration, 1);
@@ -896,11 +921,46 @@ async function campaign(filename: string): Promise<void> {
     for (const bytes of capSecrets) bytes.fill(0);
     try { await stopDaemon(); }
     catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'fixture platform daemon retirement failed'); }
-    if (primary) { report.qualified = false; report.error = String((primary as Error).stack ?? primary).slice(0, 8192); }
-    await writeFile(recipe.reportFile, JSON.stringify(report, null, 2) + '\n', { flag: 'wx', mode: 0o644 });
-    console.log(`Actual installed credential journey report: ${recipe.reportFile}`);
+    if (!primary) {
+      report.phase = 'secret_corpus';
+      try {
+        const corpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs, scanner });
+        assert.equal(corpus.sqliteDatabasesScanned, 2); assert.equal(corpus.evidenceDirectoriesScanned, 4);
+        report.secretCorpus = corpus; report.phase = 'complete';
+      } catch (error) { primary = error; }
+    }
+    if (primary) {
+      report.qualified = false;
+      // Assertion messages and causes may contain compared data. Retain only
+      // source-owned frame locations, never their arbitrary message/stack text.
+      const stack = primary instanceof Error ? primary.stack ?? '' : '';
+      report.error = { diagnosticOnly: true, kind: 'credential_journey_failed', sourceFrames: [...stack.matchAll(
+        /\b(credential-installed-journey|credential-write-crash|credential-secret-scan|credential-secret-corpus)\.ts:([1-9][0-9]*):([1-9][0-9]*)/gu)]
+        .slice(0, 8).map(match => ({ file: `${match[1]}.ts`, line: Number(match[2]), column: Number(match[3]) })) };
+    }
+    let publicationBytes: Buffer, scannedBytes: Buffer | undefined;
+    try {
+      scannedBytes = Buffer.from(JSON.stringify(report, null, 2) + '\n'); scanBytes(scannedBytes);
+      scanner.close();
+      report.secretOutputScan = scanner.stats();
+      publicationBytes = Buffer.from(JSON.stringify(report, null, 2) + '\n');
+    } catch {
+      scanner.close(); report.qualified = false;
+      // A tainted/oversized report is discarded before any publication.
+      publicationBytes = Buffer.from(JSON.stringify({ diagnosticOnly: true, qualified: false,
+        phase: 'secret_scan_or_report_failure', scope: report.scope, secretOutputScan: scanner.stats() }) + '\n',
+      'utf8');
+      primary ??= new Error('credential journey secret scan did not qualify');
+    } finally { scannedBytes?.fill(0); }
+    try {
+      // One create-only write: a write failure never retries an unknown or
+      // partially published outcome, and never overwrites an older report.
+      await writeFile(recipe.reportFile, publicationBytes, { flag: 'wx', mode: 0o644 });
+      console.log(`Actual installed credential journey report: ${recipe.reportFile}`);
+    } catch { primary ??= new Error('credential journey report publication failed'); }
+    finally { publicationBytes.fill(0); }
   }
-  if (primary) throw primary;
+  if (primary) throw new Error('actual installed credential journey failed; see the closed diagnostic report');
 }
 
 assert.equal(process.platform, 'linux', 'installed credential journey requires Linux');

@@ -62,6 +62,12 @@ jobs:
       - name: Bound the genuine native credential worker queue
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --test --import tsx scripts/kernel/testing/credential-platform-queue.test.ts
+      - name: Verify the bounded secret scan before collecting credential artifacts
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: >-
+          node --test --import tsx
+          scripts/kernel/testing/credential-secret-scan.test.ts
+          scripts/kernel/testing/credential-secret-corpus.test.ts
       - name: Exercise signed credential commands and Supervisor autostart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
