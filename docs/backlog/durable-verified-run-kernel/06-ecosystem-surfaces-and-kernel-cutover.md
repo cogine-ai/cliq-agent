@@ -1157,7 +1157,44 @@ Implementation notes:
 
    That database stores `EndpointAuthorityRecordV1` as the sole external endpoint mapping and `EndpointAuthorityOperationV1` as its closed register/revoke replay boundary. Its inline registration is the canonical RFC object, row id/owner match it, `expectedRegistrationArtifactRef` is the content-addressed ref of those exact JCS bytes, and record/command/operation digests use the RFC omission equations. Every operation retains the authenticated first-commit `channelIdentityRef/channelIdentityDigest`, closed-decodes it for the same owner, and keeps it outside the command/request digest; replay through a later authenticated channel returns the retained operation without changing provenance. One metadata transaction appends operation plus registered/revoked revision or exact `already_registered|already_revoked` no-op; same request bytes replay, different bytes conflict. The same endpoint id can never change target/TLS/purpose, and revocation records both request id/digest monotonically. A credential operation may prepare only against an active endpoint row whose expected ref/identity/TLS/owner/purpose match. The Supervisor later publishes the exact inline bytes through WP01 CAS and requires the resulting ref equal the expected ref before it publishes any binding; the external authority itself never writes Run CAS. A combined CLI command may commit the secret-free endpoint first and then the credential operation, so a crash leaves at most a harmless replayable endpoint row—not an unbound active credential.
 
-   Enrollment/rotation follows the exact RFC operation state machine and secret-free command core. The inline `CredentialExternalSubjectV1` rehashes with `subjectDigest` omitted. A provider-verifiable secret records its provider namespace, account-subject digest, and unique byte-sorted scopes/audiences from the fixed read-only validation query; a provider without that query gets a fresh 256-bit opaque subject restricted to `endpoint_exact_only`, never reused across generations. Target digest binds grant/owner/purpose/endpoint identity/TLS/expiry plus the external-subject digest; command digest is JCS with itself omitted and equals request digest; raw secret bytes are deliberately excluded. Enroll/rotate/revoke operation artifacts repeat the authenticated first-commit channel pair outside that digest, and replay never substitutes the current channel. For contiguous attempt 1..3, append `prepared`, write a fresh generated platform item, round-trip/compare it only in memory, validate the exact subject or generate/compare the opaque subject, append `secret_stored`, then atomically append the active authority revision plus `committed`. Rotation increments authority revision and secret generation without changing target/handle identity and deletes the old item only after commit; a target change gets a new grant id. Startup deletes items named by incomplete operations and appends `aborted(recovered_orphan)` rather than promoting them. The same request/core may create only the next attempt; because no prior authority committed and no secret commitment is retained, resubmission is explicitly latest-secret-wins for that attempt. Committed replay returns the original result and discards supplied bytes without platform access; changing a **committed** secret requires new request/submission ids and rotation. Attempt 3 is terminal. Credential revoke uses its separate no-secret command/operation: the expected current revision/target and request digest atomically append the revoked record plus `metadata_committed`; redemption is denied immediately, same bytes replay, different bytes conflict, and a later request is `already_revoked`. Platform-item deletion then reaches exact positive `cleanup_complete` or closed evidenced `cleanup_failed`; crash resumes idempotently and cleanup failure never reactivates authority. `recordDigest`/`operationDigest` omit themselves. The broker rechecks the latest active record and immutable endpoint/binding before each redemption; raw bytes exist only in the platform-store read and trusted broker injection.
+   Enrollment/rotation follows the exact RFC operation state machine and
+   secret-free command core. The inline `CredentialExternalSubjectV1` rehashes
+   with `subjectDigest` omitted. A provider-verifiable secret records its provider
+   namespace, account-subject digest, and unique byte-sorted scopes/audiences from
+   the fixed read-only validation query; a provider without that query gets a
+   fresh 256-bit opaque subject restricted to `endpoint_exact_only`, frozen
+   before core hashing/prepared and never reused for a later committed generation.
+   Target digest binds grant/owner/purpose/endpoint identity/TLS/expiry plus the
+   external-subject digest; command digest is JCS with itself omitted and equals
+   request digest; raw secret bytes are deliberately excluded. Enroll/rotate/revoke
+   operation artifacts repeat the authenticated first-commit channel pair outside
+   that digest, and replay never substitutes the current channel. For contiguous
+   attempt 1..3, append `prepared`, write a fresh logical-identity-bound platform
+   item, round-trip/compare it only in memory, validate the exact subject or bind
+   that successful opaque roundtrip to the already-frozen subject, then append
+   `secret_stored`. The narrow finalizer below atomically appends the active
+   authority revision plus `committed` after the sole canonical-time prefix.
+   Rotation increments authority revision and secret generation without changing
+   target/handle identity and deletes the old item only after commit; a target
+   change gets a new grant id. Startup never promotes incomplete operations;
+   only after positive original-producer death may recovery delete their exact
+   planned items and append `aborted(recovered_orphan)`. Live/unknown producers
+   are not aborted by reads or retries. The same request/core may create only the
+   next attempt if its intended revision/generation is unchanged; because no
+   prior authority committed and no secret commitment is retained, resubmission
+   is explicitly latest-secret-wins for that attempt. Committed replay returns
+   the original result without reading supplied bytes or accessing the platform
+   store; changing a **committed** secret requires new request/submission ids and
+   rotation. Attempt 3 is terminal. Credential revoke uses its separate no-secret
+   command/operation: the expected current revision/target and request digest
+   atomically append the revoked record plus `metadata_committed`; redemption is
+   denied immediately, same bytes replay, different bytes conflict, and a later
+   request is `already_revoked`. Platform-item deletion then reaches exact positive
+   `cleanup_complete` or closed evidenced `cleanup_failed`; crash resumes
+   idempotently and cleanup failure never reactivates authority. `recordDigest`/
+   `operationDigest` omit themselves. The broker rechecks the latest active record
+   and immutable endpoint/binding before each redemption; raw bytes exist only in
+   the platform-store read and trusted broker injection.
 
    Credential revocation has no enrollment/rotation attempt: `operationId = H(ownerPrincipalId,requestId,requestDigest)`. Its cleanup transitions retain that identity; retrying an indeterminate deletion never creates another attempt or restores authority.
 
