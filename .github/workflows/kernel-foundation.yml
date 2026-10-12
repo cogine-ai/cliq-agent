@@ -112,6 +112,12 @@ jobs:
         run: |
           probe_node=$(realpath "$(command -v node)")
           sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --secrets "$probe_node" "$RUNNER_TEMP/cliq-secret-service"
+      - name: Qualify first signed credential enrollment with Supervisor autostart
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --credentials "$probe_node" "$RUNNER_TEMP/cliq-credential-journey"
       - name: Reject unresolved installed preactivation before publishing the Store
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -129,6 +135,7 @@ jobs:
             ${{ runner.temp }}/cliq-installed-startup/report.json
             ${{ runner.temp }}/cliq-installed-keeper/*.json
             ${{ runner.temp }}/cliq-secret-service/*.json
+            ${{ runner.temp }}/cliq-credential-journey/*.json
             ${{ runner.temp }}/cliq-installed-retirement/*.json
             ${{ runner.temp }}/cliq-endpoint-crash-*/**
           if-no-files-found: warn

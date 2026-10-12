@@ -71,6 +71,32 @@ missing/incompatible installation or user manager yields explicit remediation.
 No sudo, qualifier invocation, temporary delegated cgroup, or unmanaged
 background-fork fallback. Do not start a manager for read/revoke/cleanup.
 
+#### Installed command seam
+
+Integration invokes the same fixed signed `runtime/bootstrap
+--bootstrap-credential <metadata>` entry as local auth. Metadata is at most
+65536 bytes of strict canonical UTF-8 JSON, encoded as canonical unpadded
+base64url; raw secret bytes use fd 0 only and are never part of that envelope.
+Identity, channel, subject, core hashes and platform selectors are producer-owned.
+
+- `{schemaVersion:1,kind:'read',credentialGrantId}` returns
+  `{schemaVersion:1,record}` with latest committed metadata or null.
+- `{schemaVersion:1,kind:'install_services'}` is explicit installation setup,
+  returning `{schemaVersion:1,keeperUnit,supervisorUnit}`. It creates only the
+  fixed installation-bound same-user profiles and reloads their manager. It
+  does not start services or replace incompatible/user-edited profiles.
+- `{schemaVersion:1,kind:'enroll',requestId,credentialGrantId,purpose,
+  endpointRegistrationId,secretSubmissionId,expiresAt?}` contains stable user
+  intent, not an externally generated subject or command core. Success returns
+  `{schemaVersion:1,operation}` for the committed original operation. The first
+  pre-input history check and the post-input lock-held race check are distinct.
+
+Ordinary auth does not install/reload/repair units. Missing profiles or drift
+produce remediation; a successful manager job/socket existence alone is not
+readiness. Bind the actual connected server process to its current manager
+invocation and selected image, then use the existing current-owner hello and
+finalizer feature. No new client-side epoch/time authority is required.
+
 #### Local preparation and private platform identity
 
 1. Authenticate the fixed signed auth producer and read existing request
