@@ -68,6 +68,9 @@ jobs:
           node --test --import tsx
           scripts/kernel/testing/credential-secret-scan.test.ts
           scripts/kernel/testing/credential-secret-corpus.test.ts
+      - name: Reject unsupported credential schemas through the signed entry
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node --test --import tsx scripts/kernel/testing/credential-authority-journey.test.ts
       - name: Exercise signed credential commands and Supervisor autostart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -111,7 +114,6 @@ jobs:
           scripts/kernel/testing/credential-authority-bridge.test.ts
           scripts/kernel/testing/credential-authority-installed.test.ts
           scripts/kernel/testing/endpoint-authority-installed.test.ts
-          scripts/kernel/testing/credential-authority-journey.test.ts
           scripts/kernel/testing/endpoint-authority-journey.test.ts
           scripts/kernel/testing/endpoint-wal-proof.test.ts
           scripts/kernel/testing/endpoint-authority-crash.test.ts

@@ -1045,6 +1045,40 @@ async function campaign(filename: string): Promise<void> {
       catch (error) { throw new AggregateError([aliasPrimary, error].filter(Boolean), 'actual alias test and restoration failed'); }
     }
     assert.deepEqual(observe('list').items, []); report.servicesAfterStoreNegatives = stopRoles();
+    report.phase = 'unknown_credential_schema';
+    // Corrupt only this disposable, fully closed v2 fixture. This does not
+    // seed valid authority: the same signed read must reject an extra legal
+    // user table, and removing it must preserve the actual committed history.
+    const schemaCommand = (change: 'add' | 'remove') => {
+      const result = command(process.execPath, ['--no-warnings', '-e', `
+        const { DatabaseSync } = require('node:sqlite');
+        const database = new DatabaseSync(${JSON.stringify(path.join(recipe.stateRoot, 'credentials/authority.sqlite'))});
+        try {
+          if (database.prepare('PRAGMA user_version').get().user_version !== 2) throw new Error('expected actual v2 fixture');
+          database.exec(${JSON.stringify(change === 'add' ? 'CREATE TABLE sqlitex(value TEXT) STRICT' : 'DROP TABLE sqlitex')});
+          const present = database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name='sqlitex'").all().length;
+          if (present !== ${change === 'add' ? 1 : 0}) throw new Error('actual extra table state differs');
+        } finally { database.close(); }
+      `]);
+      assert.equal(result.status, 0, 'disposable schema precondition did not complete'); assert.equal(result.stdout, '');
+    };
+    schemaCommand('add');
+    let schemaPrimary: unknown;
+    try {
+      const refused = credential({ schemaVersion: 1, kind: 'read', credentialGrantId: negativeMetadata.credentialGrantId });
+      assert.equal(refused.status, 1); assert.equal(refused.stdout, '');
+      const line = refused.stderr.trim().split('\n').at(-1); assert(line && Buffer.byteLength(line) <= 2048);
+      assert.deepEqual(parseJsonStrict(line), { diagnosticOnly: true, scope: 'installed-read-startup',
+        code: 'RECOVERY_REQUIRED', message: 'endpoint authority schema is not supported' });
+      assert.deepEqual(inactive(), report.servicesAfterStoreNegatives);
+      report.unknownV2SchemaRefusal = { noReturnedAuthority: true, servicesRemainInactive: true };
+    } catch (error) { schemaPrimary = error; throw error; }
+    finally {
+      try { schemaCommand('remove'); }
+      catch (error) { throw new AggregateError([schemaPrimary, error].filter(Boolean), 'actual schema test and restoration failed'); }
+    }
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: negativeMetadata.credentialGrantId }), 'record')), negativeRevoked);
     report.phase = 'complete'; report.qualified = true;
   } catch (error) { primary = error; }
   finally {
