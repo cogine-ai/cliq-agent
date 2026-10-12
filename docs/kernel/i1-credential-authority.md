@@ -104,6 +104,8 @@ Identity, channel, subject, core hashes and platform selectors are producer-owne
   Retry and historical replay interpret omission against that retained revision,
   not a later latest record. Expected revision is compared before secret input
   and against `intendedAuthorityRevision - 1` on replay; changed intent conflicts.
+  A new rotation cannot reuse any committed generation's submission id within
+  that grant. Exact replay and uncommitted frozen-core retries retain their id.
 - `{schemaVersion:1,kind:'revoke',requestId,credentialGrantId,
   expectedAuthorityRevision}` derives its target digest privately. It returns
   `{schemaVersion:1,operation}` for the original revoke receipt, whose cleanup

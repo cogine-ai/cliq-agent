@@ -434,6 +434,12 @@ function credentialWriteIntent(held: CredentialBinding, request: CredentialWrite
   if (request.kind === 'enroll' && previous) throw new KernelStorageError('REVISION_CONFLICT', 'credential id is already enrolled');
   if (request.kind === 'rotate' && (!previous || previous.state !== 'active' || previous.authorityRevision !== request.expectedAuthorityRevision))
     throw new KernelStorageError('REVISION_CONFLICT', 'credential rotation requires its expected current active revision');
+  if (request.kind === 'rotate' && held.database!.prepare(`SELECT 1 FROM credential_operation_facts
+    WHERE owner_principal_id=? AND credential_grant_id=? AND phase_rank=2
+      AND json_extract(operation_json,'$.phase')='committed'
+      AND json_extract(operation_json,'$.commandCore.secretSubmissionId')=? LIMIT 1`)
+    .get(held.ownerPrincipalId, request.credentialGrantId, request.secretSubmissionId))
+    throw new KernelStorageError('INVALID_REQUEST', 'credential rotation requires a fresh secret submission id');
   if (previous && (previous.authorityRevision >= Number.MAX_SAFE_INTEGER || previous.secretGeneration >= Number.MAX_SAFE_INTEGER))
     throw new KernelStorageError('REVISION_CONFLICT', 'credential revision or generation is exhausted');
   const originalEndpoint = previous && credentialEndpoint(held, credentialCreatingOperation(held, previous).commandCore);
