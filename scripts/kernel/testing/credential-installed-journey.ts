@@ -271,8 +271,6 @@ async function campaign(filename: string): Promise<void> {
       secretSubmissionId: 'credential-journey-submission' };
     report.phase = 'enroll';
     const enrolled = credential(metadata, secret);
-    if (enrolled.status !== 0) report.servicesAtEnrollmentRefusal = {
-      diagnosticOnly: true, keeper: show(setup.keeperUnit), supervisor: show(setup.supervisorUnit) };
     const operation = decodeCredentialAuthorityOperation(success(enrolled, 'operation'));
     assert.equal(operation.phase, 'committed'); assert.equal(operation.kind, 'enroll'); assert.equal(operation.attempt, 1);
     assert.equal(operation.requestId, metadata.requestId); assert.equal(operation.credentialGrantId, metadata.credentialGrantId);
@@ -322,6 +320,11 @@ async function campaign(filename: string): Promise<void> {
       return { unit: current, processStartToken: `linux-proc-start-ticks:${fields[19]}` };
     };
     const keeper = await processCut(setup.keeperUnit, 'keeper'), supervisor = await processCut(setup.supervisorUnit, 'supervisor');
+    // Running units retain their real references. Inactive LoadUnit/show calls
+    // alone do not pin both units against the manager's garbage collection.
+    assert(keeper.unit.Before.split(' ').includes(setup.supervisorUnit));
+    assert(supervisor.unit.After.split(' ').includes(setup.keeperUnit));
+    assert(!keeper.unit.Requires.split(' ').includes(setup.supervisorUnit));
     report.keeper = keeper; report.supervisor = supervisor;
     const readyPath = path.join(recipe.stateRoot, 'runtime/keeper.ready'), ready = await lstat(readyPath, { bigint: true });
     assert(ready.isFile() && !ready.isSymbolicLink()); assert.equal(ready.uid, BigInt(ledger.uid));

@@ -181,11 +181,13 @@ function checkEffectiveUnit(observation: UserManagerObservation, profile: Profil
   // Only systemd's ordinary initialization/shutdown dependencies may accompany
   // the fixed Supervisor→keeper edge. The explicit '/' working directory adds
   // ordering after the perpetual root mount, not permission to start a mount.
+  // Loading Supervisor also mirrors its After=keeper as keeper.Before=Supervisor.
   const required = ['app.slice', ...(profile.role === 'supervisor' ? [profiles.keeper.unit] : [])];
+  const before = ['shutdown.target', ...(profile.role === 'keeper' ? [profiles.supervisor.unit] : [])];
   if (!required.every(name => unit.Requires.includes(name) && unit.After.includes(name)) ||
       unit.Requires.some(name => ![...required, 'sysinit.target', 'basic.target'].includes(name)) ||
       unit.After.some(name => ![...required, '-.mount', 'sysinit.target', 'basic.target', 'systemd-journald.socket'].includes(name)) ||
-      unit.Before.some(name => name !== 'shutdown.target') || unit.Conflicts.some(name => name !== 'shutdown.target'))
+      unit.Before.some(name => !before.includes(name)) || unit.Conflicts.some(name => name !== 'shutdown.target'))
     refuse('installed service dependencies differ from the fixed profiles');
   return unit;
 }

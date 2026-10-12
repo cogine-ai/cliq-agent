@@ -88,6 +88,9 @@ Identity, channel, subject, core hashes and platform selectors are producer-owne
   Both fixed roles explicitly use working directory `/`; effective-property
   checks do not mistake the user manager's implicit passwd-home default for
   an empty setting or accept arbitrary working-directory drift.
+  After both profiles load, the effective keeper `Before` may contain only
+  shutdown ordering and this installation's exact Supervisor (the mirror of
+  its fixed `After=keeper`); this does not authorize any extra startup dependency.
 - `{schemaVersion:1,kind:'enroll',requestId,credentialGrantId,purpose,
   endpointRegistrationId,secretSubmissionId,expiresAt?}` contains stable user
   intent, not an externally generated subject or command core. Success returns
