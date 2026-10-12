@@ -27,7 +27,8 @@ type Observation = { clientPid: number; busUniqueName: string; nameOwner: string
 const environment = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 const properties = ['LoadState', 'ActiveState', 'SubState', 'MainPID', 'ExecMainPID', 'ControlGroup',
-  'InvocationID', 'FragmentPath', 'Type', 'WorkingDirectory', 'Delegate', 'KillMode', 'Restart', 'NRestarts'] as const;
+  'InvocationID', 'FragmentPath', 'Type', 'WorkingDirectory', 'Delegate', 'KillMode', 'Restart', 'NRestarts',
+  'Slice', 'Requires', 'After', 'Before', 'Conflicts'] as const;
 
 async function readLedger(filename: string): Promise<Ledger> {
   const held = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -209,36 +210,6 @@ async function campaign(filename: string): Promise<void> {
           report.setupDiagnostic = { code: diagnostic.code, message: diagnostic.message };
         } catch { report.setupDiagnosticUnavailable = true; }
       }
-      // Read only the fixed fixture profiles' dependency sets. No environment,
-      // command payload or secret input is part of this setup-only probe.
-      try {
-        const dependencies: Record<string, Record<string, string>> = {};
-        const units = ['keeper', 'supervisor'].map(role => `cliq-${rootDigest}-${role}.service`);
-        for (const unit of units) {
-          const profile = await lstat(path.join(ledger.home, '.config/systemd/user', unit));
-          assert(profile.isFile() && !profile.isSymbolicLink()); assert.equal(profile.uid, ledger.uid); assert.equal(profile.nlink, 1);
-        }
-        // Loading both existing units (not starting them) includes the
-        // reciprocal Before edge of the fixed Supervisor After keeper pair.
-        const loaded = command('/usr/bin/systemctl', ['--user', 'show', ...units, '--property=Id', '--no-pager'], undefined, 10000);
-        assert.equal(loaded.status, 0);
-        for (const role of ['keeper', 'supervisor']) {
-          const unit = `cliq-${rootDigest}-${role}.service`, filename = path.join(ledger.home, '.config/systemd/user', unit);
-          const profile = await lstat(filename);
-          assert(profile.isFile() && !profile.isSymbolicLink()); assert.equal(profile.uid, ledger.uid); assert.equal(profile.nlink, 1);
-          const observed = command('/usr/bin/systemctl', ['--user', 'show', unit,
-            '--property=Requires,After,Before,Conflicts,Slice', '--no-pager'], undefined, 10000);
-          assert.equal(observed.status, 0); assert(Buffer.byteLength(observed.stdout) <= 16384);
-          const fields: Record<string, string> = {};
-          for (const line of observed.stdout.trim().split('\n')) {
-            const separator = line.indexOf('='); assert(separator > 0);
-            const key = line.slice(0, separator); assert(['Requires', 'After', 'Before', 'Conflicts', 'Slice'].includes(key));
-            assert(!Object.hasOwn(fields, key)); fields[key] = line.slice(separator + 1);
-          }
-          assert.equal(Object.keys(fields).length, 5); dependencies[unit] = fields;
-        }
-        report.setupDependencies = { diagnosticOnly: true, units: dependencies };
-      } catch { report.setupDependenciesUnavailable = true; }
     }
     assert.equal(setupResponse.status, 0, 'signed install_services must install production profiles before enrollment');
     const setup = parseJsonStrict(setupResponse.stdout.trim()) as { schemaVersion: number; keeperUnit: string; supervisorUnit: string };
@@ -252,6 +223,8 @@ async function campaign(filename: string): Promise<void> {
       assert.equal(profile.mode & 0o022, 0); assert((await readFile(filename, 'utf8')).includes(`ExecStart=${recipe.stateRoot}/runtime/bootstrap --bootstrap-${role}\n`));
       const inactive = show(unit); assert.equal(inactive.FragmentPath, filename);
       assert.equal(inactive.WorkingDirectory, '/');
+      assert.equal(inactive.Slice, 'app.slice'); assert(inactive.After.split(' ').includes('-.mount'));
+      assert(!inactive.Requires.split(' ').includes('-.mount'), 'fixed roles must not acquire a root-mount startup dependency');
       assert.equal(inactive.ActiveState, 'inactive'); assert.equal(inactive.MainPID, '0');
       report[`${role}Before`] = inactive;
     }
