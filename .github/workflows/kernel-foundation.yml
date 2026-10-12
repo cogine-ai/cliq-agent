@@ -57,7 +57,17 @@ jobs:
         id: build
       - name: Install actual platform and worker build prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
+      - name: Bound the genuine native credential worker queue
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node --test --import tsx scripts/kernel/testing/credential-platform-queue.test.ts
+      - name: Qualify first signed credential enrollment with Supervisor autostart
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --credentials "$probe_node" "$RUNNER_TEMP/cliq-credential-journey"
       - name: Verify installed-state and native-retirement boundaries on Linux 22.04
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # These component tests also run in the 24.04 matrix. Keep the real
         # installed/native boundary on the qualified 22.04 baseline too;
         # they do not substitute for the systemd installed execution chain.
@@ -84,7 +94,6 @@ jobs:
           scripts/kernel/testing/credential-authority-native.test.ts
           scripts/kernel/testing/credential-authority-bridge.test.ts
           scripts/kernel/testing/credential-authority-installed.test.ts
-          scripts/kernel/testing/credential-platform-queue.test.ts
           scripts/kernel/testing/endpoint-authority-installed.test.ts
           scripts/kernel/testing/credential-authority-journey.test.ts
           scripts/kernel/testing/endpoint-authority-journey.test.ts
@@ -114,12 +123,6 @@ jobs:
         run: |
           probe_node=$(realpath "$(command -v node)")
           sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --secrets "$probe_node" "$RUNNER_TEMP/cliq-secret-service"
-      - name: Qualify first signed credential enrollment with Supervisor autostart
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: |
-          probe_node=$(realpath "$(command -v node)")
-          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --credentials "$probe_node" "$RUNNER_TEMP/cliq-credential-journey"
       - name: Reject unresolved installed preactivation before publishing the Store
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash

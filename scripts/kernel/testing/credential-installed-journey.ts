@@ -187,6 +187,11 @@ async function campaign(filename: string): Promise<void> {
     const daemonNamed = await lstat('/usr/bin/gnome-keyring-daemon', { bigint: true });
     for (const key of imageFields) assert.equal(daemonImage[key], daemonNamed[key]);
 
+    const root = await lstat(recipe.stateRoot, { bigint: true });
+    assert(root.isDirectory()); assert.equal(root.uid, BigInt(ledger.uid)); assert.equal(root.mode & 0o7777n, 0o700n);
+    const rootDigest = canonicalSha256({ schemaVersion: 1, format: 'cliq-state-root-identity-v1', platform: 'linux',
+      canonicalAbsolutePath: recipe.stateRoot, ownerUid: ledger.uid, deviceId: root.dev.toString(), directoryFileId: root.ino.toString(),
+      mode: 448, openedNoFollow: true, layoutVersion: 1 });
     report.phase = 'install_services';
     const setupResponse = credential({ schemaVersion: 1, kind: 'install_services' });
     report.setupExitStatus = setupResponse.status;
@@ -204,6 +209,33 @@ async function campaign(filename: string): Promise<void> {
           report.setupDiagnostic = { code: diagnostic.code, message: diagnostic.message };
         } catch { report.setupDiagnosticUnavailable = true; }
       }
+      // Only this fixture's two exact installed profiles are eligible. This
+      // read-only diagnostic neither qualifies setup nor relaxes its refusal.
+      try {
+        const passwd = command('/usr/bin/getent', ['passwd', ledger.username], undefined, 10000);
+        assert.equal(passwd.status, 0); assert(Buffer.byteLength(passwd.stdout) <= 8192);
+        const fields = passwd.stdout.trim().split(':'); assert.equal(fields.length, 7);
+        assert.equal(fields[0], ledger.username); assert.equal(Number(fields[2]), ledger.uid); assert.equal(Number(fields[3]), ledger.gid);
+        const passwdHome = fields[5]!; assert(path.isAbsolute(passwdHome) && !passwdHome.includes('\n'));
+        const directory = path.join(ledger.home, '.config/systemd/user'), info = await lstat(directory);
+        assert(info.isDirectory() && !info.isSymbolicLink()); assert.equal(info.uid, ledger.uid);
+        const fixedNames = new Set([`cliq-${rootDigest}-keeper.service`, `cliq-${rootDigest}-supervisor.service`]);
+        const names = (await readdir(directory)).filter(name => fixedNames.has(name)).sort(); assert(names.length <= 2);
+        const units: Array<{ unit: string; status: number | null; workingDirectory?: string; matchesUserManagerDefault?: boolean }> = [];
+        for (const unit of names) {
+          const profile = await lstat(path.join(directory, unit));
+          assert(profile.isFile() && !profile.isSymbolicLink()); assert.equal(profile.uid, ledger.uid); assert.equal(profile.nlink, 1);
+          const observed = command('/usr/bin/systemctl', ['--user', 'show', unit, '--property=WorkingDirectory', '--value', '--no-pager'], undefined, 10000);
+          const entry: typeof units[number] = { unit, status: observed.status };
+          if (observed.status === 0) {
+            assert(Buffer.byteLength(observed.stdout) <= 4096 && observed.stdout.endsWith('\n'));
+            const workingDirectory = observed.stdout.slice(0, -1); assert(!/[\x00\r\n]/u.test(workingDirectory));
+            entry.workingDirectory = workingDirectory; entry.matchesUserManagerDefault = workingDirectory === `!${passwdHome}`;
+          }
+          units.push(entry);
+        }
+        report.setupWorkingDirectory = { diagnosticOnly: true, passwdHome, passwdHomeMatchesFixture: passwdHome === ledger.home, units };
+      } catch { report.setupWorkingDirectoryUnavailable = true; }
     }
     assert.equal(setupResponse.status, 0, 'signed install_services must install production profiles before enrollment');
     const setup = parseJsonStrict(setupResponse.stdout.trim()) as { schemaVersion: number; keeperUnit: string; supervisorUnit: string };
@@ -220,11 +252,6 @@ async function campaign(filename: string): Promise<void> {
       report[`${role}Before`] = inactive;
     }
     report.phase = 'endpoint_register';
-    const root = await lstat(recipe.stateRoot, { bigint: true });
-    assert(root.isDirectory()); assert.equal(root.uid, BigInt(ledger.uid)); assert.equal(root.mode & 0o7777n, 0o700n);
-    const rootDigest = canonicalSha256({ schemaVersion: 1, format: 'cliq-state-root-identity-v1', platform: 'linux',
-      canonicalAbsolutePath: recipe.stateRoot, ownerUid: ledger.uid, deviceId: root.dev.toString(), directoryFileId: root.ino.toString(),
-      mode: 448, openedNoFollow: true, layoutVersion: 1 });
     const ownerPrincipalId = identityHash('cliq-local-principal-v1', rootDigest, 'linux', ledger.uid);
     const trust = signed.bundle.entries.find(entry => entry.entryId === 'default_https_trust_store')!;
     const registration: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
