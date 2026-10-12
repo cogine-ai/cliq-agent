@@ -38,14 +38,12 @@ jobs:
       - run: npm run build
       - run: npm test
 
-  linux-supervisor-preflight:
-    name: Linux Supervisor image and actual user-manager diagnostics
-    # Component/OS facts only, not an installed I1 qualification. Standard
-    # public-repository runner; never substitute a detached child manager.
+  linux-credential-authority:
+    name: Linux installed credential authority diagnostics
+    # The real credential journey and independent component baseline run in
+    # parallel on free standard runners. This is not complete installed I1.
     runs-on: ubuntu-22.04
-    # The existing component baseline plus the full installed credential
-    # journey exceed 15 minutes; each process/operation remains separately bounded.
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,7 +75,7 @@ jobs:
         run: |
           probe_node=$(realpath "$(command -v node)")
           sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --credentials "$probe_node" "$RUNNER_TEMP/cliq-credential-journey"
-      - name: Retain the bounded credential feedback before broader qualification
+      - name: Retain the bounded credential feedback
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -85,6 +83,26 @@ jobs:
           path: ${{ runner.temp }}/cliq-credential-journey/*.json
           if-no-files-found: warn
           retention-days: 7
+
+  linux-supervisor-preflight:
+    name: Linux Supervisor image and actual user-manager diagnostics
+    # Component/OS facts only, not an installed I1 qualification. Standard
+    # public-repository runner; never substitute a detached child manager.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        id: build
+      - name: Install actual platform and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
       - name: Verify installed-state and native-retirement boundaries on Linux 22.04
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # These component tests also run in the 24.04 matrix. Keep the real
@@ -158,7 +176,6 @@ jobs:
             ${{ runner.temp }}/cliq-installed-startup/report.json
             ${{ runner.temp }}/cliq-installed-keeper/*.json
             ${{ runner.temp }}/cliq-secret-service/*.json
-            ${{ runner.temp }}/cliq-credential-journey/*.json
             ${{ runner.temp }}/cliq-installed-retirement/*.json
             ${{ runner.temp }}/cliq-endpoint-crash-*/**
           if-no-files-found: warn
