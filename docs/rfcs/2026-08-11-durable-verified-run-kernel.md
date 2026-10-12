@@ -2521,6 +2521,10 @@ Rule precedence is deterministic: first matching builtin deny, then other deny, 
 
 Every Journal/Broker `grantRef` resolves only to `OperationGrantV1`; policy decisions, approval text, verifier templates, or opaque authorization rows are not substitutes. `grantDigest = SHA-256(JCS(grant with grantDigest omitted))`; `grantId` is unique for `(runId,opId,requestDigest,subject,issuedAt)`. Every principal-owned `AuthorizationGrantV1` additionally retains the authenticated `channelIdentityRef/channelIdentityDigest` that created it; storage rehashes that exact principal/client artifact and the matching `control_requests` row before consumption. The Run/principal/policy/frontier/op/request/target and subject fields must byte-match the current immutable request, tool/model/verifier/MCP/delivery/dependency plan, and originating batch/index. For policy provenance, storage decodes and revalidates the exact channel evidence, requires its precedence result is `allow`, and requires grant action class/rule ids/request/target/policy/frontier/op plus evidence ref/digest to equal it byte-for-byte. `decisionDigest = SHA-256(JCS({policyRef,channelEvidenceRef,channelEvidenceDigest,actionClass,requestDigest,targetDigest,matchedRuleIds,effectiveDisposition:'allow'}))`; checking only a coarse mode or reparsing a command is forbidden. A user grant's `decisionRef` decodes only to the exact committed allow `ApprovalDecisionV1` for the current WaitingSubject/request/frontier, its channel-evidence pair equals the decoded subject and grant provenance, and the grant expiry equals its `grantExpiresAt`; a decision ref cannot cross a wait, parser result, or target. A verifier-template `decisionRef` decodes instead to the exact consumed `AuthorizationConsumptionReceiptV1` that created the template, and a candidate grant requires that template, candidate ordinal, and result source. A model grant derives only from the exact Run assembly/model frontier and authorizes no non-model target. A scriptless dependency grant derives from the exact immutable dependency policy/plan; a script-bearing one uses only `dependency_install_scripts_template` provenance and requires the exact template/policy/plan plus a previously unused candidate ordinal in `0..maxCandidateGenerations-1`. `maxDispatchedAttempts` is `1..5` and no greater than the assembly/tool/verifier/plan bound, except the approval-only `delivery_plan` parent grant is exactly `0` because it performs no I/O. `maxLaunches` is required only for `mcp_server_launch` (`1..3`) and forbidden otherwise.
 
+For `model_call`, the assembly's endpoint branch fixes the target artifact: `registered` requires `targetRef = assembly.provider.endpoint.endpointRegistrationRef` and `targetDigest = EndpointRegistrationV1.registrationDigest`; `local_zero_cost` requires `targetRef = assembly.provider.endpoint.localProvenanceRef` and `targetDigest = LocalZeroCostProvenanceV1.provenanceDigest`. Each target is closed-decoded and rehashed under its existing owner, purpose, endpoint and authority rules. An endpoint identity digest, URL or the target artifact's content-addressed ref cannot substitute for that semantic digest. This mapping adds no target type or authority; the broker's fresh credential or managed-local boundary validation remains independently required.
+
+The model grant producer copies `assembly.retry.model.maxDispatchedAttempts`. This bounds retained `dispatch_claimed` uses, not the Journal attempt ordinal: failures before claim may advance the contiguous ordinal beyond that bound without consuming dispatch capacity. Both the exact grant's use count and the same operation's assembly-wide dispatch count are checked; replacement grants never reset the latter or its frozen backoff.
+
 Delivery approval never supplies a stale frontier grant to a path operation. It mints one `delivery_plan` parent grant bound to the approval frontier and exact complete operation-set digest, with `expiresAt = Run.deadlineAt` regardless of a shorter ordinary approval TTL. As each immutable forward/abort operation becomes current, the state reducer derives a fresh `publication_path` grant whose `frontierRef`, sequence/index/id/request/target and `opId` match that exact path frontier and whose provenance names the parent grant plus allow `DeliveryDecisionItem`; its expiry equals the parent's. The parent authorizes derivation only; it is never accepted by `claimDispatch`. A changed plan/branch/index/decision, expired parent, or child expiry beyond the parent cannot derive a grant. This avoids mid-plan reapproval while keeping authority bounded by the already-approved immutable plan and absolute Run deadline. Usage is derived from immutable Journal attempts or matching MCP lifecycle rows that name the exact grant—there is no resettable counter artifact. Other grants have `expiresAt <= Run.deadlineAt`, no renewal or target substitution is legal, and a replacement grant is a new artifact. Both dispatch gates validate this entire closure, current use count, expiry, stop/deadline, and exact frontier; post-dispatch evidence may describe reality but cannot reuse the grant for I/O.
 
 `EndpointRegistrationV1` is the only registered remote target. `purposes` and SPKI pins are nonempty, unique, and byte-sorted; the HTTPS host is lower-case IDNA ASCII without userinfo/trailing dot, port is explicit `1..65535`, and `basePath` is an absolute normalized path with no query, fragment, backslash, encoded separator, or dot segment. Server name follows the same host normalization. Kernel Cut accepts only the Cliq-signed RuntimeBundle entry `entryId='default_https_trust_store', role='trust_store', executable=false`; the TLS fields repeat that bundle ref/manifest digest, the entry's CAS content ref/digest, and no user/custom/system-ambient CA path is accepted. SPKI pins may only narrow that retained trust root. `tlsPolicyDigest = SHA-256(JCS(tls))`, `endpointIdentityDigest = SHA-256(JCS({target,tlsPolicyDigest}))`, and `registrationDigest = SHA-256(JCS(registration with registrationDigest omitted))`. A ref may serve a purpose only when its owner/purpose/identity/TLS fields match exactly; bundled defaults are immutable registrations created for the same local principal, not ambient URLs.
@@ -2538,6 +2542,8 @@ The internal authority API has one lock-aware form, `withCredentialAuthorityLock
 `CredentialAuthorityRecordV1` revisions are append-only and exactly one latest revision exists per grant id. Its endpoint ref/identity/TLS/owner/purpose must equal one active `EndpointAuthorityRecordV1` and that row's deterministic expected artifact ref before `prepared` may commit. A combined `cliq auth` command registers the secret-free endpoint first, then performs credential enrollment; a crash may leave a harmless replayable endpoint row but never an active credential without it. `credentialHandleIdentityDigest = SHA-256(JCS({ownerPrincipalId,credentialGrantId,credentialServiceRevision,purpose,endpointRegistrationRef,endpointIdentityDigest,tlsPolicyDigest}))`; `recordDigest` omits itself. Target fields and `credentialServiceRevision` are immutable for the id. Rotation increments `authorityRevision` and `secretGeneration`, selects a fresh platform item, and preserves the handle digest/target, while the newly authenticated or opaque external subject is part of that new revision; target change creates a new grant id. Credential revocation uses the separate secret-free `CredentialAuthorityRevokeOperationV1`: its command/request/operation digests use the same omission/idempotency rules, require the expected current target digest/revision, and in one metadata transaction append the terminal `revoked` revision plus `cleanupPhase='metadata_committed'`. Same request bytes replay, different bytes conflict, and a later request receives `already_revoked` without another record revision. Only after that commit may it delete the named platform item, moving to `cleanup_complete` on positive absence/deletion or `cleanup_failed` with the closed error and a SHA-256 digest of the secret-free platform observation stored in `authority.sqlite`; the external authority never needs a Run-CAS write. Startup resumes an indeterminate deletion idempotently. Redemption is denied from metadata commit onward even if cleanup is delayed or permanently fails. Expiry/revocation never moves backward.
 
 Enrollment/rotation is request-idempotent and crash ordered. `CredentialAuthorityCommandCoreV1` is the complete persisted secret-free command: its inline external subject rehashes to `externalSubjectDigest`; `credentialTargetDigest = SHA-256(JCS({credentialGrantId,ownerPrincipalId,purpose,endpointRegistrationRef,endpointIdentityDigest,tlsPolicyDigest,expiresAt,externalSubjectDigest}))`; `commandDigest = SHA-256(JCS(commandCore with commandDigest omitted))`; and `requestDigest = commandDigest`. Operation owner/kind/grant/target/subject fields must repeat the core, and `intendedAuthorityRevision`/`intendedSecretGeneration` are exactly one greater than the latest row for rotation or both one for enrollment. Every enroll/rotate/revoke operation also retains the first-commit authenticated `channelIdentityRef/channelIdentityDigest`, closed-decodes it for the same owner, and keeps it outside the command/request digest so later-channel replay cannot rewrite provenance or create a false request conflict. Raw secret bytes are deliberately excluded and never hashed/persisted. `operationId = H(ownerPrincipalId,requestId,requestDigest,attempt)`, attempts are contiguous `1..3`, and at most one nonterminal attempt exists. Under the lock, append `prepared`; write a fresh generated platform item; read it back through the same-user store and compare in memory; run the fixed read-only provider subject/scopes validator or generate the one-generation opaque subject; require equality with the command; append `secret_stored`; then in one metadata transaction append the active authority revision and `committed` operation. Only after commit may rotation delete the superseded item. `operationDigest` omits itself, request-id+different-digest conflict is permanent, and a committed replay returns the same grant/revision **without reading, comparing, or storing newly submitted secret bytes**. Changing a committed secret requires a new request/secret-submission id and `rotate`.
+
+Credential revocation has no enrollment/rotation attempt: its `operationId = H(ownerPrincipalId,requestId,requestDigest)`. Cleanup transitions retain that same operation identity; retrying an indeterminate deletion never creates a new attempt or restores authority.
 
 Startup never promotes an incomplete operation without the original secret bytes: it deletes any planned item it can identify and appends `aborted(recovered_orphan)`. The same request/digest may create only the next contiguous attempt when the caller (or still-raw legacy preflight) supplies a secret again; concurrent retries join it. Because no prior authority committed and no secret commitment is retained, that resubmission is explicitly **latest-secret-wins** for the fresh attempt—there is no unenforceable promise that it equals the abandoned bytes. The input buffer is discarded immediately after platform-store write/compare; a committed replay, digest conflict, or terminal attempt discards it without platform access. After attempt 3 aborts, that request is terminal and a new request id is required. An unreachable superseded item is removed by a lock-held sweep only when no active metadata revision names it. Crash after active commit is therefore recoverable; crash before it grants no authority, repeated crashes are bounded, and deterministic legacy entry ids can resume through their recorded attempt. No log, error, telemetry, shell history, artifact, or response echoes the secret.
 
@@ -4365,6 +4371,16 @@ It does not own a workflow graph, role scheduler, distributed queue, or cloud wo
 
 ### 9.1 Lease, Activation, And Process Containment
 
+The signed `sandbox_root_profile` entry is the closed, acyclic
+`SandboxRootProfileV1` recipe below. Its complete canonical bytes hash to the
+entry digest; `profileDigest` independently omits only itself. Installation
+decodes and imports that recipe, not a `SandboxProfileV1` permission/resource
+policy. The retained `SandboxRootImageV1` is derived afterward: fixed Supervisor
+code verifies that exact signed entry and CAS recipe, copies its static fields,
+then adds the bundle/entry bindings and actual owner UID before computing its
+own omission digest. The signed recipe has no bundle/image/UID back-reference;
+no file can be required to contain its own complete-byte digest.
+
 #### Pre-admission Source Inspection
 
 `run.submit` may need trusted Git inspection before a Run or its initial
@@ -4753,6 +4769,17 @@ type ProcessContainmentOwner =
       targetRef: ArtifactRef
       supervisorInstanceId: string
     }
+
+type SandboxRootProfileV1 = {
+  schemaVersion: 1
+  format: 'cliq-sandbox-root-profile-v1'
+  protocol: 'cliq-fresh-empty-root-v1'
+  filesystemKind: 'fresh_ephemeral_tmpfs'
+  fixedDirectories: ['/home/cliq', '/tmp', '/work']
+  persistent: false
+  networkConfiguration: 'none'
+  profileDigest: string
+}
 
 type SandboxRootImageV1 = {
   schemaVersion: 1
@@ -5486,11 +5513,29 @@ Every pre-spawn `containmentPlanRef` resolves to `ProcessContainmentPlanV1`; `pl
 
 `PlatformProcessIdentityV1.identityDigest`, `StateRootIdentityV1.identityDigest`, and `StateLockIdentityV1.identityDigest` each omit themselves under JCS. A process identity is a bounded current platform observation: positive safe-integer PID, platform-native start token normalized as NFC ASCII, same-user uid, and the executable-image digest of that native observed process. Executable expectations are consumer-specific: StateOwner and Supervisor-inspector consumers require equality with the exact selected signed Supervisor entry; a UDS-peer consumer instead binds the independently observed client executable image and must not substitute the Supervisor image. A state-root identity is produced only by opening the configured absolute root component-by-component with no-follow semantics and `fstat`ing the held same-user `0700` directory descriptor; its NFC absolute path contains no `.`/`..`/empty component, its device and directory-file ids are unsigned decimal strings, and its owner equals the effective uid. The ref rehashes to the exact artifact and its digest; replacement, rename, owner/mode change, or descriptor/path disagreement is a different state root and blocks authority rather than following it. A lock identity comes from `fstat` of the held no-follow same-user regular `${stateRoot}/runtime/state-owner.lock` descriptor: its state-root ref/digest must equal that exact held parent descriptor, canonical relative path, unsigned-decimal device/file ids, uid, literal `0600`, and link count one. Caller paths, PID without start token, a root opened by path after validation, or a reopened/replaced lock file are invalid.
 
-`state_owners` stores only exact `StateOwnerRecordV1`. `ownerEpoch` is a positive safe integer, unique, contiguous, and strictly increasing; `rowDigest = SHA-256(JCS(row with rowDigest omitted))`. Every record's process, root/lock, and acquisition ref/digest decode the exact types above. `StateOwnerAcquisitionEvidenceV1.evidenceDigest` omits itself under JCS and every common identity equals its resulting row. `genesis` is legal only for epoch one with an empty owner table and exact `KernelGenerationIdentityV1`; its state-root ref/digest equals the lock, its database/CAS identities equal the opened generation, and its `fresh_empty|migrated_candidate` origin validates. `acquire_after_graceful_release` requires no active row, the latest row terminal with `graceful_release`, exact row/transition digests, and `ownerEpoch=priorOwnerEpoch+1`. `takeover_after_owner_death` requires the sole active predecessor to become the exact referenced `superseded_after_owner_death` terminal row in the same transaction and the acquisition evidence to reference that death transition; its successor fields and new row are byte-identical.
+`state_owners` stores only exact `StateOwnerRecordV1`. `ownerEpoch` is a positive safe integer, unique, contiguous, and strictly increasing; `rowDigest = SHA-256(JCS(row with rowDigest omitted))`. Every record's process, root/lock, and acquisition ref/digest decode the exact types above. `StateOwnerAcquisitionEvidenceV1.evidenceDigest` omits itself under JCS and every common identity equals its resulting row. `genesis` is legal only for epoch one with an empty owner table and exact `KernelGenerationIdentityV1`; its state-root ref/digest equals the lock, its database/CAS identities equal the opened generation, and its `fresh_empty|fresh_installed|migrated_candidate` origin validates. `acquire_after_graceful_release` requires no active row, the latest row terminal with `graceful_release`, exact row/transition digests, and `ownerEpoch=priorOwnerEpoch+1`. `takeover_after_owner_death` requires the sole active predecessor to become the exact referenced `superseded_after_owner_death` terminal row in the same transaction and the acquisition evidence to reference that death transition; its successor fields and new row are byte-identical.
 
 Every terminal transition references exact `StateOwnerTransitionEvidenceV1`; its digest omits itself under JCS, and prior epoch/instance/process/lock equal the active row. The bootstrap first acquires that exact same-user OS lock. While holding it, `superseded_after_owner_death` requires the bounded platform inspector to observe the decoded prior PID/start-token identity absent or mismatched, and the evidence's successor epoch/instance/bundle/process/nonce must equal the active row appended in the **same SQLite transaction** that terminalizes the prior row; both rows/evidence repeat the same root/lock identity. `successorOwnerEpoch=priorOwnerEpoch+1`. A graceful owner evidence repeats its own process identity, terminalizes only its own active row, then releases the exact descriptor lock; its transaction appends no successor. A later clean startup uses `acquire_after_graceful_release`, never genesis or a fabricated death. Terminal reason and evidence kind must match.
 
-The universal owner gate has exactly three bootstrap/acquisition entrypoints, all while the caller holds and revalidates the decoded OS root/lock descriptor. `bootstrapStateOwner` requires an empty owner table plus one exact selected, as-yet-unowned `KernelGenerationIdentityV1` and atomically registers the prewritten content-addressed root/lock/process/acquisition object metadata with active epoch one. `fresh_empty` validates the fixed empty database/CAS closure; `migrated_candidate` validates the exact candidate/image/CAS/migration closure and is legal only after its matching Kernel authority marker is durable. Fresh bootstrap occurs before any ordinary Kernel mutation; migrated bootstrap is the first Kernel repository transaction after cutover authority publication and before admission/control release. `acquireStateOwnerAfterGracefulRelease` requires the latest exact graceful terminal row and atomically registers the new process/acquisition objects plus epoch `n+1`. `takeoverStateOwner` requires the sole active predecessor plus positive exact process-death observation and atomically registers transition/new-process/acquisition objects, terminalizes `n`, and appends active `n+1`. These transactions may write only the named artifact metadata and state-owner rows; they cannot mutate Run/Session/Journal/broker state or release capability. Content-addressed object bytes may be staged before the transaction but are unrooted and non-authoritative until it commits. Every other **Kernel repository** write requires the existing active row's exact process and held lock. The sole non-repository authority transition after graceful terminalization is section 16.3's already-staged, digest-bound legacy marker rename while that same process still holds every rollback lock; it cannot write SQLite/CAS or change the prepared bytes. At most one active row exists; OS-lock loss or row mismatch gates all writes immediately. Startup never resets/reuses an epoch, and rows/evidence are GC roots. A stale process cannot regain authority by presenting old bytes.
+The universal owner gate has exactly three bootstrap/acquisition entrypoints, all while the caller holds and revalidates the decoded OS root/lock descriptor. `bootstrapStateOwner` requires an empty owner table plus one exact selected, as-yet-unowned `KernelGenerationIdentityV1` and atomically registers the prewritten content-addressed root/lock/process/acquisition object metadata with active epoch one. `fresh_empty` validates the fixed empty database/CAS closure; `fresh_installed` validates the same empty business database plus the exact signed installation seed closure below; `migrated_candidate` validates the exact candidate/image/CAS/migration closure and is legal only after its matching Kernel authority marker is durable. Fresh bootstrap occurs before any ordinary Kernel mutation; migrated bootstrap is the first Kernel repository transaction after cutover authority publication and before admission/control release. `acquireStateOwnerAfterGracefulRelease` requires the latest exact graceful terminal row and atomically registers the new process/acquisition objects plus epoch `n+1`. `takeoverStateOwner` requires the sole active predecessor plus positive exact process-death observation and atomically registers transition/new-process/acquisition objects, terminalizes `n`, and appends active `n+1`. These transactions may write only the named artifact metadata and state-owner rows; they cannot mutate Run/Session/Journal/broker state or release capability. Content-addressed object bytes may be staged before the transaction but are unrooted and non-authoritative until it commits. Every other **Kernel repository** write requires the existing active row's exact process and held lock. The sole non-repository authority transition after graceful terminalization is section 16.3's already-staged, digest-bound legacy marker rename while that same process still holds every rollback lock; it cannot write SQLite/CAS or change the prepared bytes. At most one active row exists; OS-lock loss or row mismatch gates all writes immediately. Startup never resets/reuses an epoch, and rows/evidence are GC roots. A stale process cannot regain authority by presenting old bytes.
+
+`fresh_installed` is a genesis source, not a fourth acquisition operation. Trusted
+installed startup must continuously hold and revalidate the verified initial
+installation for the exact StateRoot held by the OS owner lock. Its selected
+signed manifest and complete imported structured-root/member closure are the
+all-and-only CAS seed before genesis artifacts are staged; every object is
+rehashed and counted, and all business/authority tables are empty. The resulting
+generation's `runtimeBundleRef` and `runtimeBundleManifestDigest` equal both the
+held installation and epoch-one acquisition. Immediately before that same
+first StateOwner transaction, the CAS may contain only that unchanged seed plus
+the specifically staged genesis objects; the transaction registers their exact
+metadata together with epoch one. A caller-supplied artifact list, path, boolean,
+structural lookalike or verified installation for a different StateRoot cannot
+authorize this source. The installer does not open the database or acquire StateOwner. Missing,
+extra or changed seed objects, a replaced/closed installation or a different held
+StateRoot fail closed. Ordinary `fresh_empty` still requires an empty CAS; later
+clean acquisition never reinterprets a grown namespace as a new installed seed.
+This source adds no ledger, Run authority or execution permission.
 
 Every `inspectorIdentityRef` decodes only to `SupervisorInspectorIdentityV1`; `identityDigest = SHA-256(JCS(identity with identityDigest omitted))`, and the evidence repeats that digest. The referenced signed RuntimeBundle manifest must contain exactly the named executable entry with role `supervisor` and matching version/digest; its complete signed manifest rehashes to the named ref/digest. `supervisorInstanceId`, current `stateOwnerEpoch`, RuntimeBundle/entry, process identity, lock identity, and instance nonce must equal the sole active `StateOwnerRecordV1` held throughout the evidence transaction. The identity is published only after that active row commits while the process holds the exact OS lock; it becomes historical when ownership changes and cannot justify a later observation. Evidence digests omit themselves under JCS; `inspectorSupervisorInstanceId` must equal the **current** state-owning Supervisor and the decoded identity's instance, while the original spawner remains bound independently through the plan owner, WorkerLaunch/AdminOperation, and nonces. Observation time must be within the state transaction's bounded freshness window (default/max 5s). No PID exit, timeout, worker assertion, stale inspector identity, or schema-valid artifact with mismatched plan/nonce/owner/bundle is proof.
 
@@ -8906,6 +8951,10 @@ type RuntimeBundlePublicSummaryV1 = {
   bundleVersion: string
 }
 
+// Both runtimeBundleRef and bundleDigest name SHA-256 of the complete signed
+// canonical manifest, matching the installed bundle directory/selection.
+// The manifest's distinct self-omitting manifestDigest is not this public ref.
+
 type ControlMethodV1 =
   | 'control.hello'
   | 'session.create' | 'session.list' | 'session.get' | 'session.fork' | 'session.compact' | 'session.handoff.create'
@@ -9772,7 +9821,7 @@ type KernelGenerationIdentityV1 = {
   casNamespaceManifestDigest: string
   casNamespaceId: string
   casRootDigest: string
-  stateSchemaVersion: 1
+  stateSchemaVersion: number
   generationDigest: string
 } & (
   | {
@@ -9780,6 +9829,19 @@ type KernelGenerationIdentityV1 = {
       pristineSchemaManifestRef: ArtifactRef
       pristineSchemaManifestDigest: string
       pristineSchemaDigest: string
+      runtimeBundleRef?: never
+      runtimeBundleManifestDigest?: never
+      candidateRef?: never
+      candidateDigest?: never
+      migrationId?: never
+    }
+  | {
+      origin: 'fresh_installed'
+      pristineSchemaManifestRef: ArtifactRef
+      pristineSchemaManifestDigest: string
+      pristineSchemaDigest: string
+      runtimeBundleRef: ArtifactRef
+      runtimeBundleManifestDigest: string
       candidateRef?: never
       candidateDigest?: never
       migrationId?: never
@@ -9792,6 +9854,8 @@ type KernelGenerationIdentityV1 = {
       pristineSchemaManifestRef?: never
       pristineSchemaManifestDigest?: never
       pristineSchemaDigest?: never
+      runtimeBundleRef?: never
+      runtimeBundleManifestDigest?: never
   }
 )
 
@@ -10510,8 +10574,10 @@ identity's root ref/digest, `0600` regular file, link count, device/file id,
 size, and content digest equal the original continuously held
 ProviderAuthStore descriptor; for an absent source, no auth-file identity may
 exist. Ready and inventory manifests repeat the exact observation rather than
-inventing an empty file. A fresh Kernel generation
-identity requires the fixed empty schema image and empty private CAS namespace.
+inventing an empty file. Both fresh Kernel generation sources require the fixed
+empty business database/schema image. `fresh_empty` requires an empty private
+CAS namespace; `fresh_installed` instead requires only the exact held signed
+installation seed described in section 9.1, not arbitrary existing CAS objects.
 A migrated identity requires an exact `KernelCandidateManifestV1`; migration
 id, candidate generation id, database identity/content, CAS namespace/root,
 and installed schema version match byte-for-byte.
@@ -10558,7 +10624,11 @@ claim that an active append-only namespace can never grow. A
 `generation_birth` snapshot covers exactly the candidate/fresh generation's
 payload objects immediately before the authority marker or first StateOwner
 transaction; the held publication gate requires a final all-and-only scan at
-that boundary. After that authority transition, ordinary Run publication may
+that boundary. For `fresh_installed`, its entries describe the all-and-only
+installation seed before genesis objects are staged; the final scan additionally
+permits only the specifically staged genesis objects named by that transaction,
+which cannot occur in their own acyclic birth snapshot. After that authority
+transition, ordinary Run publication may
 append objects to the same generation namespace. Revalidating the historical
 birth snapshot rehashes every listed entry but does not classify later objects
 as extraneous. A `rollback_final` snapshot is different: global no-write proof
@@ -10587,14 +10657,24 @@ equal the decoded database identity/content fields, and
 and generation identities require `snapshotBoundary='generation_birth'` and
 repeat those six values byte-for-byte; no adapter,
 directory name, WAL timestamp, SQLite row count, or partial CAS scan may supply
-one independently. A `fresh_empty` generation additionally requires
-`pristineSchemaManifestRef|Digest` equal its decoded database image's exact
+one independently. A `fresh_empty` or `fresh_installed` generation additionally
+requires `pristineSchemaManifestRef|Digest` equal its decoded database image's exact
 schema-manifest pair and `pristineSchemaDigest` equal both decoded artifacts'
-`schemaDigest`. A `migrated_candidate` forbids those three pristine fields and
+`schemaDigest`. Only `fresh_installed` requires `runtimeBundleRef` and
+`runtimeBundleManifestDigest`, which bind its held signed installation and
+epoch-one acquisition; the other origins forbid both fields. A
+`migrated_candidate` forbids those three pristine fields and
 instead requires its candidate's decoded database image to carry the same
 signed schema manifest/digest; the candidate's literal installed/state schema
 version equals that manifest. No generation may splice a schema digest from a
 different RuntimeBundle entry or image.
+
+`KernelGenerationIdentityV1.stateSchemaVersion` is a positive safe integer equal
+to the actual opened state schema and its validated schema identity, not the
+artifact structure's literal `schemaVersion=1`. The current implementation's
+state schema is version 4; emitting 1 merely because this is a V1 artifact is
+invalid. This distinction does not change the separate migration/schema-profile
+types or qualify their unimplemented image/cutover closure.
 
 Rollback archives are a second, acyclic snapshot closure rather than a reuse
 of the admission-time generation identity. After `rollback_draining` is

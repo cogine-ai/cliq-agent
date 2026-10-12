@@ -9,9 +9,14 @@
 #if defined(__linux__)
 #include "worker-common.h"
 #include "worker-reservation.h"
+#include <linux/magic.h>
+#include <linux/sched.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <sys/mman.h>
+#include <sys/random.h>
+#include <sys/statfs.h>
 #include <sys/wait.h>
 #include <time.h>
 
@@ -19,9 +24,17 @@ static const napi_type_tag IMAGE_TAG = { UINT64_C(0x671ca1bc736f4411), UINT64_C(
 static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0x875a7b5a31bc4112), UINT64_C(0xbf12ad50275ed149) };
 static const napi_type_tag SCOPE_TAG = { UINT64_C(0x00d75ac01fa14d87), UINT64_C(0x9b1c5a0256e81d29) };
 
+/* The fixed loaded native image owns this uncertainty across controllers and
+ * N-API environments. A new receiver cannot erase an unjoined resource. */
+static atomic_bool native_retirement_failed;
+
 struct image { int fd; };
 struct native_scope;
 struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, ready, cleanup_queued, env_closing, reaped, cleanup_done;
+    int anchor_root, controller_parent, controller_leaf, input_fd, child_socket, transfer[4];
+    struct stat root_identity, parent_identity, leaf_identity;
+    char root_path[PATH_MAX], leaf_name[64];
+    bool leaf_owned, leaf_initialized, constructor_failed, retirement_failed;
     unsigned int next_scope, pending; char token[CLIQ_WORKER_TOKEN_BYTES]; unsigned int references;
     struct native_scope *scopes, *pending_scope;
     struct cliq_worker_packet retained, reservation, reservation_inspection;
@@ -73,27 +86,219 @@ static void set_string(napi_env env, napi_value object, const char *name, const 
     napi_value property; napi_create_string_utf8(env, value, NAPI_AUTO_LENGTH, &property); napi_set_named_property(env, object, name, property);
 }
 
+/* Consume before close: an uncertain close is never retried on a reused FD. */
+static bool retire_descriptor(int *descriptor) {
+    int owned = *descriptor; *descriptor = -1;
+    if (owned < 0 || close(owned) == 0) return true;
+    atomic_store(&native_retirement_failed, true);
+    return false;
+}
+
+static bool same_directory(const struct stat *expected, const struct stat *actual) {
+    return S_ISDIR(actual->st_mode) && expected->st_dev == actual->st_dev && expected->st_ino == actual->st_ino &&
+        expected->st_uid == actual->st_uid && expected->st_gid == actual->st_gid && expected->st_mode == actual->st_mode;
+}
+
+static bool private_cgroup(int directory, struct stat *identity) {
+    struct statfs filesystem;
+    return fstat(directory, identity) == 0 && S_ISDIR(identity->st_mode) && identity->st_uid == geteuid() &&
+        identity->st_gid == getegid() && (identity->st_mode & 07777) == 0700 &&
+        fstatfs(directory, &filesystem) == 0 && filesystem.f_type == CGROUP2_SUPER_MAGIC;
+}
+
+static bool read_bounded(struct controller *controller, int directory, const char *name, char *buffer, size_t capacity) {
+    int file = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (file < 0) return false;
+    size_t used = 0; bool valid = true;
+    while (used < capacity - 1) {
+        ssize_t bytes = read(file, buffer + used, capacity - 1 - used);
+        if (bytes < 0 && errno == EINTR) continue;
+        if (bytes < 0) { valid = false; break; }
+        if (bytes == 0) break;
+        used += (size_t)bytes;
+    }
+    if (valid && used == capacity - 1) {
+        char extra; ssize_t bytes;
+        do { bytes = read(file, &extra, 1); } while (bytes < 0 && errno == EINTR);
+        if (bytes != 0) { if (bytes > 0) errno = EOVERFLOW; valid = false; }
+    }
+    int error = errno;
+    if (!retire_descriptor(&file)) { error = errno; valid = false; controller->retirement_failed = true; }
+    buffer[used] = '\0'; errno = error; return valid;
+}
+
+static bool blank_control(const char *value) {
+    for (; *value; value++) if (*value != ' ' && *value != '\t' && *value != '\n') return false;
+    return true;
+}
+
+static bool domain_without_internal_processes(struct controller *controller, int directory, bool leaf) {
+    char value[512];
+    if (!read_bounded(controller, directory, "cgroup.type", value, sizeof(value)) || strcmp(value, "domain\n") != 0 ||
+        !read_bounded(controller, directory, "cgroup.procs", value, sizeof(value)) || !blank_control(value)) return false;
+    return !leaf || (read_bounded(controller, directory, "cgroup.subtree_control", value, sizeof(value)) && blank_control(value));
+}
+
+static bool anchor_current(struct controller *controller) {
+    struct stat current, named;
+    return private_cgroup(controller->anchor_root, &current) && same_directory(&controller->root_identity, &current) &&
+        lstat(controller->root_path, &named) == 0 && same_directory(&controller->root_identity, &named) &&
+        private_cgroup(controller->controller_parent, &current) && same_directory(&controller->parent_identity, &current) &&
+        fstatat(controller->anchor_root, "controllers", &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+        same_directory(&controller->parent_identity, &named) &&
+        private_cgroup(controller->controller_leaf, &current) && same_directory(&controller->leaf_identity, &current) &&
+        fstatat(controller->controller_parent, controller->leaf_name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+        same_directory(&controller->leaf_identity, &named);
+}
+
+static bool create_controller_leaf(struct controller *controller, int root) {
+    controller->anchor_root = fcntl(root, F_DUPFD_CLOEXEC, 4);
+    if (controller->anchor_root < 0 || !private_cgroup(controller->anchor_root, &controller->root_identity)) return false;
+    char descriptor[64];
+    int length = snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", controller->anchor_root);
+    if (length < 0 || (size_t)length >= sizeof(descriptor)) return false;
+    ssize_t bytes = readlink(descriptor, controller->root_path, sizeof(controller->root_path) - 1);
+    if (bytes <= 0 || (size_t)bytes >= sizeof(controller->root_path) - 1) return false;
+    controller->root_path[bytes] = '\0';
+    const char *mount = "/sys/fs/cgroup/";
+    struct stat named;
+    if (strncmp(controller->root_path, mount, strlen(mount)) != 0 || strchr(controller->root_path, '\n') ||
+        lstat(controller->root_path, &named) != 0 || !same_directory(&controller->root_identity, &named) ||
+        !domain_without_internal_processes(controller, controller->anchor_root, false)) return false;
+    if (mkdirat(controller->anchor_root, "controllers", 0700) != 0 && errno != EEXIST) return false;
+    controller->controller_parent = openat(controller->anchor_root, "controllers", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (controller->controller_parent < 0 || !private_cgroup(controller->controller_parent, &controller->parent_identity) ||
+        !domain_without_internal_processes(controller, controller->controller_parent, false)) return false;
+    for (unsigned int attempt = 0; attempt < 16; attempt++) {
+        unsigned char random[16]; size_t used = 0;
+        while (used < sizeof(random)) {
+            ssize_t count = getrandom(random + used, sizeof(random) - used, 0);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) return false;
+            used += (size_t)count;
+        }
+        static const char digits[] = "0123456789abcdef";
+        memcpy(controller->leaf_name, "controller-", 11);
+        for (size_t i = 0; i < sizeof(random); i++) {
+            controller->leaf_name[11 + i * 2] = digits[random[i] >> 4];
+            controller->leaf_name[12 + i * 2] = digits[random[i] & 15];
+        }
+        controller->leaf_name[43] = '\0';
+        if (mkdirat(controller->controller_parent, controller->leaf_name, 0700) == 0) { controller->leaf_owned = true; break; }
+        if (errno != EEXIST) return false;
+    }
+    if (!controller->leaf_owned) return false;
+    controller->controller_leaf = openat(controller->controller_parent, controller->leaf_name,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (controller->controller_leaf < 0 || !private_cgroup(controller->controller_leaf, &controller->leaf_identity) ||
+        !domain_without_internal_processes(controller, controller->controller_leaf, true)) return false;
+    controller->leaf_initialized = true;
+    return anchor_current(controller);
+}
+
+struct process_sample { bool absent; uid_t uid; char token[CLIQ_WORKER_TOKEN_BYTES], cgroup[PATH_MAX + 8]; };
+
+/* A zombie retains its original start token. Only kernel absence or a distinct
+ * start lifetime is absence; cgroup.procs/populated cannot prove this. */
+static bool sample_process(struct controller *controller, pid_t pid, struct process_sample *sample, bool membership) {
+    char name[64], value[4096];
+    int length = snprintf(name, sizeof(name), "/proc/%ld", (long)pid);
+    if (length < 0 || (size_t)length >= sizeof(name)) return false;
+    for (unsigned int cut = 0; cut < 2; cut++) {
+        memset(sample, 0, sizeof(*sample));
+        int process = open(name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (process < 0) { sample->absent = errno == ENOENT; return sample->absent; }
+        struct stat identity; struct statfs filesystem;
+        bool directory_valid = fstat(process, &identity) == 0 && fstatfs(process, &filesystem) == 0 && filesystem.f_type == PROC_SUPER_MAGIC;
+        bool stat_read = directory_valid && read_bounded(controller, process, "stat", value, sizeof(value));
+        int stat_error = stat_read ? 0 : errno;
+        bool valid = stat_read && (!membership || read_bounded(controller, process, "cgroup", sample->cgroup, sizeof(sample->cgroup)));
+        if (!retire_descriptor(&process)) { controller->retirement_failed = true; return false; }
+        if (!valid) {
+            /* A reaped held proc subject may fail stat with ENOENT/ESRCH.
+             * Only a fresh open after successful retirement can prove absence. */
+            if (cut == 0 && directory_valid && !stat_read && (stat_error == ENOENT || stat_error == ESRCH) &&
+                !controller->retirement_failed && !atomic_load(&native_retirement_failed)) continue;
+            return false;
+        }
+        sample->uid = identity.st_uid;
+        char *cursor = strrchr(value, ')');
+        if (!cursor || cursor[1] != ' ') return false;
+        cursor += 2;
+        for (int field = 3; field < 22; field++) { cursor = strchr(cursor, ' '); if (!cursor) return false; cursor++; }
+        char *end = strchr(cursor, ' ');
+        if (!end || end == cursor || (size_t)(end - cursor) > 32) return false;
+        for (char *digit = cursor; digit < end; digit++) if (*digit < '0' || *digit > '9') return false;
+        length = snprintf(sample->token, sizeof(sample->token), "linux-proc-start-ticks:%.*s", (int)(end - cursor), cursor);
+        return length > 0 && (size_t)length < sizeof(sample->token);
+    }
+    return false;
+}
+
+static bool controller_placement(struct controller *controller, const char *token) {
+    struct process_sample first, last;
+    char expected[PATH_MAX + 8];
+    int length = snprintf(expected, sizeof(expected), "0::%s/controllers/%s\n", controller->root_path + strlen("/sys/fs/cgroup"), controller->leaf_name);
+    return length > 0 && (size_t)length < sizeof(expected) && sample_process(controller, controller->pid, &first, true) && !first.absent &&
+        first.uid == geteuid() && strcmp(first.token, token) == 0 && strcmp(first.cgroup, expected) == 0 &&
+        anchor_current(controller) && sample_process(controller, controller->pid, &last, true) && !last.absent &&
+        last.uid == first.uid && strcmp(last.token, first.token) == 0 && strcmp(last.cgroup, first.cgroup) == 0;
+}
+
+static void retire_controller_leaf(struct controller *controller) {
+    if (!controller->leaf_owned) return;
+    if (!controller->leaf_initialized || !anchor_current(controller)) { controller->retirement_failed = true; return; }
+    for (struct native_scope *scope = controller->scopes; scope; scope = scope->next) {
+        /* A request without READY may already have forked a birth monitor.
+         * Keep its original protected inode; no new ledger or guessed proof. */
+        if (!scope->ready) return;
+        int64_t producers[] = { scope->identity.monitor_pid, scope->identity.namespace_init_pid, scope->identity.pid };
+        const char *tokens[] = { scope->identity.monitor_start_token, scope->identity.init_native_start_token, scope->identity.start_token };
+        for (size_t i = 0; i < 3; i++) {
+            if (producers[i] <= 0 || producers[i] > INT32_MAX || !*tokens[i]) return;
+            struct process_sample current;
+            if (!sample_process(controller, (pid_t)producers[i], &current, false)) { controller->retirement_failed = true; return; }
+            if (!current.absent && strcmp(current.token, tokens[i]) == 0) return;
+        }
+    }
+    char value[512];
+    if (!read_bounded(controller, controller->controller_leaf, "cgroup.events", value, sizeof(value))) { controller->retirement_failed = true; return; }
+    bool empty = strncmp(value, "populated 0\n", 12) == 0 || strstr(value, "\npopulated 0\n") != NULL;
+    bool populated = strncmp(value, "populated 1\n", 12) == 0 || strstr(value, "\npopulated 1\n") != NULL;
+    if (!empty) { if (!populated) controller->retirement_failed = true; return; }
+    if (!domain_without_internal_processes(controller, controller->controller_leaf, true) || !anchor_current(controller)) {
+        controller->retirement_failed = true; return;
+    }
+    if (unlinkat(controller->controller_parent, controller->leaf_name, AT_REMOVEDIR) != 0) {
+        /* The kernel refuses a concurrently populated or nonempty directory.
+         * An attempted but incomplete retirement cannot resolve this join. */
+        controller->retirement_failed = true;
+        return;
+    }
+}
+
 static void controller_release(struct controller *controller) {
     if (--controller->references == 0) free(controller);
 }
 
 static void scope_release_memory(struct native_scope *scope) {
     if (--scope->references != 0) return;
-    if (scope->image_fd >= 0) close(scope->image_fd);
+    if (!retire_descriptor(&scope->image_fd)) scope->controller->retirement_failed = true;
     controller_release(scope->controller); free(scope);
 }
 
 static void revoke_controller(struct controller *controller) {
     if (controller->closed) return;
     controller->closed = true;
-    shutdown(controller->socket, SHUT_RDWR);
-    close(controller->socket); controller->socket = -1;
+    if (controller->socket >= 0 && shutdown(controller->socket, SHUT_RDWR) != 0 && errno != ENOTCONN)
+        controller->retirement_failed = true;
+    if (!retire_descriptor(&controller->socket)) controller->retirement_failed = true;
 }
 
 static void reap_controller(napi_env env, void *data) {
     (void)env;
     struct controller *controller = data;
-    if (controller->pid <= 0) { controller->reaped = true; return; }
+    if (controller->pid <= 0) { controller->reaped = true; retire_controller_leaf(controller); return; }
     /* Channel revocation happened on the main thread before this join. This
      * worker never reads a shared/reused FD and reaps only its exact child. */
     kill(controller->pid, SIGTERM);
@@ -115,15 +320,16 @@ static void reap_controller(napi_env env, void *data) {
         reaped = result == controller->pid || (result < 0 && errno == ECHILD);
     }
     controller->reaped = reaped;
+    if (reaped) retire_controller_leaf(controller);
 }
 
 static void settle_controller_close(napi_env env, struct controller *controller) {
     if (!controller->env_closing && controller->close_deferred) {
-        if (controller->reaped) napi_resolve_deferred(env, controller->close_deferred, undefined(env));
+        if (controller->reaped && !controller->retirement_failed) napi_resolve_deferred(env, controller->close_deferred, undefined(env));
         else {
             napi_value code, message, error;
             napi_create_string_utf8(env, "RECOVERY_REQUIRED", NAPI_AUTO_LENGTH, &code);
-            napi_create_string_utf8(env, "native controller join failed", NAPI_AUTO_LENGTH, &message);
+            napi_create_string_utf8(env, "native controller resource join failed", NAPI_AUTO_LENGTH, &message);
             napi_create_error(env, code, message, &error); napi_reject_deferred(env, controller->close_deferred, error);
         }
     }
@@ -137,11 +343,14 @@ static void cleanup_complete(napi_env env, napi_status status, void *data) {
          * published when joining the trusted controller was unavailable. */
         controller->reaped = false;
     }
-    if (controller->stdout_fd >= 0) { close(controller->stdout_fd); controller->stdout_fd = -1; }
-    if (controller->stderr_fd >= 0) { close(controller->stderr_fd); controller->stderr_fd = -1; }
+    int *resources[] = { &controller->stdout_fd, &controller->stderr_fd, &controller->input_fd, &controller->child_socket,
+        &controller->controller_leaf, &controller->controller_parent, &controller->anchor_root,
+        &controller->transfer[0], &controller->transfer[1], &controller->transfer[2], &controller->transfer[3] };
+    for (size_t i = 0; i < sizeof(resources) / sizeof(resources[0]); i++)
+        if (!retire_descriptor(resources[i])) controller->retirement_failed = true;
     while (controller->scopes) {
         struct native_scope *scope = controller->scopes; controller->scopes = scope->next;
-        if (scope->image_fd >= 0) { close(scope->image_fd); scope->image_fd = -1; }
+        if (!retire_descriptor(&scope->image_fd)) controller->retirement_failed = true;
         scope_release_memory(scope);
     }
     if (controller->close_promise) { napi_delete_reference(env, controller->close_promise); controller->close_promise = NULL; }
@@ -150,6 +359,7 @@ static void cleanup_complete(napi_env env, napi_status status, void *data) {
     /* Only this main-thread completion publishes fully joined resources.
      * The worker's reaped result must not be read before this callback. */
     controller->cleanup_done = true;
+    if (!controller->reaped || controller->retirement_failed) atomic_store(&native_retirement_failed, true);
     settle_controller_close(env, controller);
     controller_release(controller);
 }
@@ -173,6 +383,8 @@ static void cleanup_hook(napi_async_cleanup_hook_handle handle, void *data) {
 static bool begin_request(struct controller *controller, struct native_scope *scope,
                           const struct cliq_worker_packet *request, const int *fds, size_t count) {
     if (controller->closed || !controller->ready || controller->pending != 0) return false;
+    if (atomic_load(&native_retirement_failed) && request->command != CLIQ_STOP_SCOPE &&
+        request->command != CLIQ_TERMINATE_RETAINED && request->command != CLIQ_INSPECT_RESERVATION) return false;
     controller->pending = request->command; controller->pending_scope = scope;
     if (cliq_send(controller->socket, request, fds, count)) return true;
     (void)close_controller(controller); return false;
@@ -349,6 +561,7 @@ static napi_value scope_inspect(napi_env env, napi_callback_info info) {
     return result;
 }
 static napi_value scope_activate(napi_env env, napi_callback_info info) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 1; napi_value args[1], self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, args, &self, NULL);
     if (argc != 1 || !tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->ready || scope->invocation || scope->stopped || scope->released || scope->controller->closed)
@@ -363,6 +576,7 @@ static napi_value scope_activate(napi_env env, napi_callback_info info) {
 }
 
 static napi_value scope_poll_activated(napi_env env, napi_callback_info info) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || scope->controller->closed || scope->invocation || !scope->released)
@@ -378,6 +592,7 @@ static napi_value scope_poll_activated(napi_env env, napi_callback_info info) {
 }
 
 static napi_value scope_release(napi_env env, napi_callback_info info) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->ready || !scope->invocation || scope->stopped || scope->released || scope->controller->closed)
@@ -443,7 +658,10 @@ static napi_value scope_poll_stopped(napi_env env, napi_callback_info info) {
             if (child == scope || child->parent == scope) {
                 if (!child->stopped) child->identity.observed_at_ms = response.observed_at_ms;
                 child->stopped = true; child->identity.populated = 0; child->identity.init_reaped = 1; child->identity.remaining_descendants = 0;
-                if (child->image_fd >= 0) { close(child->image_fd); child->image_fd = -1; }
+                if (!retire_descriptor(&child->image_fd)) {
+                    scope->controller->retirement_failed = true;
+                    (void)close_controller(scope->controller); return failure(env, "native scope image retirement failed");
+                }
             }
         }
     }
@@ -451,6 +669,7 @@ static napi_value scope_poll_stopped(napi_env env, napi_callback_info info) {
 }
 
 static napi_value scope_poll_ready(napi_env env, napi_callback_info info) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
     if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || scope->controller->closed) return failure(env, "invalid native blocked scope");
@@ -473,6 +692,7 @@ static napi_value scope_poll_ready(napi_env env, napi_callback_info info) {
 }
 
 static napi_value create_scope(napi_env env, napi_callback_info info, bool invocation) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t expected = invocation ? 7 : 6;
     size_t argc = expected; napi_value args[7], self; struct controller *controller;
     napi_get_cb_info(env, info, &argc, args, &self, NULL);
@@ -703,101 +923,99 @@ static napi_value controller_close(napi_env env, napi_callback_info info) {
     }
     if (controller->cleanup_done) { settle_controller_close(env, controller); return promise; }
     napi_create_reference(env, promise, 1, &controller->close_promise);
-    if (!close_controller(controller)) return failure(env, "controller join could not be queued");
+    if (!close_controller(controller)) {
+        /* No work was submitted. Reject this attempt, retain actual ownership
+         * and let a later close queue the same join. Never cache an unsettled
+         * promise or confuse queue failure with uncertain descriptor close. */
+        napi_delete_reference(env, controller->close_promise); controller->close_promise = NULL;
+        settle_controller_close(env, controller);
+    }
     return promise;
+}
+
+static napi_value controller_pid(napi_env env, napi_callback_info info) {
+    size_t argc = 0; napi_value self, result; struct controller *controller;
+    napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
+    if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+        napi_create_double(env, (double)controller->pid, &result) != napi_ok) return failure(env, "controller PID unavailable");
+    return result;
+}
+
+static napi_value controller_token(napi_env env, napi_callback_info info) {
+    size_t argc = 0; napi_value self, result; struct controller *controller;
+    napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
+    if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+        napi_create_string_utf8(env, controller->token, NAPI_AUTO_LENGTH, &result) != napi_ok)
+        return failure(env, "controller start lifetime unavailable");
+    return result;
 }
 
 static napi_value controller_poll_ready(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct controller *controller;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
-    if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->closed) return failure(env, "invalid starting controller");
+    if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller)) return failure(env, "invalid starting controller");
+    /* Revocation is main-thread-only and precedes queueing cleanup. Do not
+     * read worker-written retirement state once that join is in flight. */
+    if (controller->closed) return failure(env, "invalid starting controller");
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
+    if (controller->constructor_failed || controller->retirement_failed) {
+        (void)close_controller(controller); return failure(env, "native atomic controller construction failed; no fallback");
+    }
     int observed = 1;
     if (!controller->ready) {
         struct cliq_worker_packet hello;
         observed = poll_response(controller, NULL, CLIQ_CONTROLLER_HELLO, &hello);
         if (observed < 0) return failure(env, "native controller identity unavailable");
         if (observed == 1) {
-            if (hello.pid != controller->pid || !cliq_process_token(controller->pid, controller->token) ||
-                strcmp(controller->token, hello.start_token) != 0) {
+            if (hello.pid != controller->pid || !controller_placement(controller, hello.start_token)) {
+                controller->retirement_failed = true;
                 (void)close_controller(controller); return failure(env, "native controller identity changed");
             }
-            controller->ready = true; set_string(env, self, "processStartToken", controller->token);
+            memcpy(controller->token, hello.start_token, sizeof(controller->token)); controller->ready = true;
         }
     }
     napi_value result; napi_get_boolean(env, observed == 1, &result); return result;
 }
 
-static napi_value open_controller(napi_env env, napi_callback_info info) {
-    size_t argc = 1; napi_value args[1]; struct image *helper;
-    napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-    if (argc != 1 || !tagged(env, args[0], &IMAGE_TAG, (void **)&helper)) return failure(env, "controller requires the sealed installed helper");
+static bool prepare_controller_io(struct controller *controller) {
     int sockets[2];
-    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0) return failure(env, "native channel unavailable");
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0) return false;
+    controller->socket = sockets[0]; controller->child_socket = sockets[1];
     /* Closed stdin and bounded private captured outputs, never inherited host
      * streams. Fixed trusted images emit no productive tool bytes here. */
-    int input = open("/dev/null", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    int output = memfd_create("cliq-captured-stdout", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    int error = memfd_create("cliq-captured-stderr", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (input < 0 || output < 0 || error < 0 || ftruncate(output, 1048576) != 0 || ftruncate(error, 1048576) != 0 ||
-        fcntl(output, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SEAL) != 0 || fcntl(error, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SEAL) != 0) {
-        if (input >= 0) close(input);
-        if (output >= 0) close(output);
-        if (error >= 0) close(error);
-        close(sockets[0]); close(sockets[1]); return failure(env, "bounded captured stdio unavailable");
+    controller->input_fd = open("/dev/null", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    controller->stdout_fd = memfd_create("cliq-captured-stdout", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    controller->stderr_fd = memfd_create("cliq-captured-stderr", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (controller->input_fd < 0 || controller->stdout_fd < 0 || controller->stderr_fd < 0 ||
+        ftruncate(controller->stdout_fd, 1048576) != 0 || ftruncate(controller->stderr_fd, 1048576) != 0 ||
+        fcntl(controller->stdout_fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SEAL) != 0 ||
+        fcntl(controller->stderr_fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SEAL) != 0) return false;
+    int source[] = { controller->input_fd, controller->stdout_fd, controller->stderr_fd, controller->child_socket };
+    for (size_t i = 0; i < 4; i++) {
+        controller->transfer[i] = fcntl(source[i], F_DUPFD_CLOEXEC, 20);
+        if (controller->transfer[i] < 0) return false;
     }
-    int inherited[4] = { -1, -1, -1, -1 };
-    inherited[0] = fcntl(input, F_DUPFD_CLOEXEC, 20);
-    inherited[1] = fcntl(output, F_DUPFD_CLOEXEC, 20);
-    inherited[2] = fcntl(error, F_DUPFD_CLOEXEC, 20);
-    inherited[3] = fcntl(sockets[1], F_DUPFD_CLOEXEC, 20);
-    if (inherited[0] < 0 || inherited[1] < 0 || inherited[2] < 0 || inherited[3] < 0) {
-        for (size_t i = 0; i < 4; i++) if (inherited[i] >= 0) close(inherited[i]);
-        close(input); close(output); close(error); close(sockets[0]); close(sockets[1]); return failure(env, "captured stdio descriptor transfer failed");
-    }
+    int flags = fcntl(controller->socket, F_GETFL);
+    return flags >= 0 && fcntl(controller->socket, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+static napi_value open_controller(napi_env env, napi_callback_info info) {
+    if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
+    size_t argc = 2; napi_value args[2]; struct image *helper; uint64_t root;
+    napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (argc != 2 || !tagged(env, args[0], &IMAGE_TAG, (void **)&helper) || helper->fd < 0 ||
+        !number(env, args[1], &root) || root > INT32_MAX) return failure(env, "controller requires the sealed helper and held anchor root");
     struct controller *controller = calloc(1, sizeof(*controller));
-    napi_value resource;
-    if (!controller) {
-        for (size_t i = 0; i < 4; i++) close(inherited[i]);
-        close(input); close(output); close(error); close(sockets[0]); close(sockets[1]); return failure(env, "controller allocation failed");
-    }
-    controller->env = env; controller->socket = sockets[0]; controller->stdout_fd = output; controller->stderr_fd = error;
+    if (!controller) return failure(env, "controller allocation failed");
+    controller->env = env;
+    controller->socket = controller->stdout_fd = controller->stderr_fd = controller->input_fd = controller->child_socket = -1;
+    controller->anchor_root = controller->controller_parent = controller->controller_leaf = -1;
+    for (size_t i = 0; i < 4; i++) controller->transfer[i] = -1;
     controller->references = 1; controller->next_scope = 1; controller->pending = CLIQ_CONTROLLER_HELLO;
-    if (fcntl(sockets[0], F_SETFL, fcntl(sockets[0], F_GETFL) | O_NONBLOCK) != 0 ||
-        napi_create_string_utf8(env, "cliq-controller-join", NAPI_AUTO_LENGTH, &resource) != napi_ok ||
-        napi_create_async_work(env, NULL, resource, reap_controller, cleanup_complete, controller, &controller->cleanup_work) != napi_ok ||
-        napi_add_async_cleanup_hook(env, cleanup_hook, controller, &controller->cleanup_hook) != napi_ok) {
-        if (controller->cleanup_work) napi_delete_async_work(env, controller->cleanup_work);
-        for (size_t i = 0; i < 4; i++) close(inherited[i]);
-        close(input); close(output); close(error); close(sockets[0]); close(sockets[1]); free(controller);
-        return failure(env, "controller asynchronous lifetime is unavailable");
-    }
-    controller->references++; /* Async cleanup hook owns the join until done. */
-    pid_t child = fork();
-    if (child < 0) {
-        for (size_t i = 0; i < 4; i++) close(inherited[i]);
-        close(input); close(sockets[1]); (void)close_controller(controller); controller_release(controller);
-        return failure(env, "controller spawn failed");
-    }
-    if (child == 0) {
-        close(sockets[0]);
-        int executable = fcntl(helper->fd, F_DUPFD_CLOEXEC, 20);
-        if (executable < 0 || dup2(inherited[0], 0) < 0 || dup2(inherited[1], 1) < 0 ||
-            dup2(inherited[2], 2) < 0 || dup2(inherited[3], 3) < 0) _exit(70);
-        if (!cliq_close_range(4, (unsigned int)executable - 1) || !cliq_close_range((unsigned int)executable + 1, UINT_MAX)) _exit(70);
-        char *const arguments[] = { "cliq-linux-worker-controller", NULL };
-        char *const environment[] = { "LANG=C", "LC_ALL=C", NULL };
-        fexecve(executable, arguments, environment); _exit(70);
-    }
-    for (size_t i = 0; i < 4; i++) close(inherited[i]);
-    close(input); close(sockets[1]);
-    controller->pid = child;
-    napi_value result;
-    if (napi_create_object(env, &result) != napi_ok || napi_wrap(env, result, controller, finalize_controller, NULL, NULL) != napi_ok) {
-        (void)close_controller(controller); controller_release(controller); return failure(env, "controller receiver unavailable");
-    }
-    if (napi_type_tag_object(env, result, &CONTROLLER_TAG) != napi_ok) { (void)close_controller(controller); return failure(env, "controller receiver could not be branded"); }
-    set_number(env, result, "pid", child); set_string(env, result, "processStartToken", "");
+    napi_value result, resource;
     napi_property_descriptor properties[] = {
+        { "pid", NULL, NULL, controller_pid, NULL, NULL, napi_default, NULL },
+        { "processStartToken", NULL, NULL, controller_token, NULL, NULL, napi_default, NULL },
         { "pollReady", NULL, controller_poll_ready, NULL, NULL, NULL, napi_default, NULL },
         { "bindReservation", NULL, controller_bind_reservation, NULL, NULL, NULL, napi_default, NULL },
         { "pollBound", NULL, controller_poll_bound, NULL, NULL, NULL, napi_default, NULL },
@@ -809,7 +1027,50 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "pollRetained", NULL, poll_retained, NULL, NULL, NULL, napi_default, NULL },
         { "close", NULL, controller_close, NULL, NULL, NULL, napi_default, NULL }
     };
-    napi_define_properties(env, result, sizeof(properties) / sizeof(properties[0]), properties); return result;
+    /* All receiver allocation/branding and async ownership precede the first
+     * child. Subsequent construction failures return this joinable receiver;
+     * the public wrapper rejects pollReady and awaits its exact close. */
+    if (napi_create_object(env, &result) != napi_ok || napi_type_tag_object(env, result, &CONTROLLER_TAG) != napi_ok ||
+        napi_define_properties(env, result, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok ||
+        napi_create_string_utf8(env, "cliq-controller-join", NAPI_AUTO_LENGTH, &resource) != napi_ok ||
+        napi_create_async_work(env, NULL, resource, reap_controller, cleanup_complete, controller, &controller->cleanup_work) != napi_ok ||
+        napi_add_async_cleanup_hook(env, cleanup_hook, controller, &controller->cleanup_hook) != napi_ok ||
+        napi_wrap(env, result, controller, finalize_controller, NULL, NULL) != napi_ok) {
+        if (controller->cleanup_hook) {
+            if (napi_remove_async_cleanup_hook(controller->cleanup_hook) != napi_ok)
+                return failure(env, "controller asynchronous ownership could not retire");
+            controller->cleanup_hook = NULL;
+        }
+        if (controller->cleanup_work) napi_delete_async_work(env, controller->cleanup_work);
+        free(controller);
+        return failure(env, "controller asynchronous lifetime is unavailable");
+    }
+    controller->references++; /* Async cleanup hook owns the join until done. */
+    if (!create_controller_leaf(controller, (int)root) || !prepare_controller_io(controller)) {
+        controller->constructor_failed = true; (void)close_controller(controller); return result;
+    }
+    struct clone_args birth;
+    memset(&birth, 0, sizeof(birth)); birth.flags = CLONE_INTO_CGROUP; birth.exit_signal = SIGCHLD;
+    birth.cgroup = (uint64_t)controller->controller_leaf;
+    pid_t child = (pid_t)syscall(SYS_clone3, &birth, sizeof(birth));
+    if (child < 0) {
+        controller->constructor_failed = true; (void)close_controller(controller); return result;
+    }
+    if (child == 0) {
+        int executable = fcntl(helper->fd, F_DUPFD_CLOEXEC, 20);
+        if (executable < 0 || dup2(controller->transfer[0], 0) < 0 || dup2(controller->transfer[1], 1) < 0 ||
+            dup2(controller->transfer[2], 2) < 0 || dup2(controller->transfer[3], 3) < 0) _exit(70);
+        if (!cliq_close_range(4, (unsigned int)executable - 1) || !cliq_close_range((unsigned int)executable + 1, UINT_MAX)) _exit(70);
+        char *const arguments[] = { "cliq-linux-worker-controller", NULL };
+        char *const environment[] = { "LANG=C", "LC_ALL=C", NULL };
+        fexecve(executable, arguments, environment); _exit(70);
+    }
+    controller->pid = child;
+    for (size_t i = 0; i < 4; i++) if (!retire_descriptor(&controller->transfer[i])) controller->retirement_failed = true;
+    if (!retire_descriptor(&controller->input_fd)) controller->retirement_failed = true;
+    if (!retire_descriptor(&controller->child_socket)) controller->retirement_failed = true;
+    if (controller->retirement_failed) (void)close_controller(controller);
+    return result;
 }
 
 static napi_value initialize(napi_env env, napi_value exports) {
@@ -818,7 +1079,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
         { "sealImageBuffer", NULL, seal_input, NULL, NULL, NULL, napi_default, NULL },
         { "openController", NULL, open_controller, NULL, NULL, NULL, napi_default, NULL }
     };
-    napi_define_properties(env, exports, 3, properties); set_number(env, exports, "interfaceVersion", 2); return exports;
+    napi_define_properties(env, exports, 3, properties); set_number(env, exports, "interfaceVersion", 3); return exports;
 }
 #else
 static napi_value unsupported(napi_env env, napi_callback_info info) {

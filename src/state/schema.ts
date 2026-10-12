@@ -1,10 +1,14 @@
+import { DatabaseSync } from 'node:sqlite';
+
 import {
   KERNEL_SQLITE_APPLICATION_ID,
   KERNEL_SQLITE_BUSY_TIMEOUT_MS,
   KERNEL_STATE_SCHEMA_VERSION
 } from '../config.js';
 import { requiredSafeInteger } from '../kernel/identity.js';
-import type { SqliteDriver } from './sqlite-driver.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
+import { KernelStorageError } from './errors.js';
+import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 
 export const KERNEL_SCHEMA_V1_SQL = `
 CREATE TABLE canonical_time_fence (
@@ -591,7 +595,7 @@ const REQUIRED_TABLES = [
   'admin_operations'
 ] as const;
 
-function pragmaScalar(driver: SqliteDriver, name: string): unknown {
+function pragmaScalar(driver: SqliteConnection, name: string): unknown {
   const row = driver.prepare(`PRAGMA ${name}`).get();
   if (typeof row !== 'object' || row === null) return undefined;
   return Object.values(row)[0];
@@ -645,6 +649,31 @@ export function applyKernelSchema(driver: SqliteDriver): void {
   }
 }
 
-export function readSchemaUserVersion(driver: SqliteDriver): number {
-  return requiredSafeInteger(pragmaScalar(driver, 'user_version'), 'user_version');
+export function readSchemaUserVersion(connection: SqliteConnection): number {
+  const row = connection.prepare('SELECT user_version FROM pragma_user_version').get<{ user_version: unknown }>();
+  return requiredSafeInteger(row?.user_version, 'user_version');
+}
+
+const SCHEMA_CATALOG_SQL = 'SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name';
+let pristineCatalogDigest: string | undefined;
+
+/** Genesis only: version/table presence cannot attest an unowned database.
+ * Compile the fixed DDL with this same SQLite engine so its catalog-normalized
+ * table/index/trigger definitions, not a hand-maintained allowlist, are exact.
+ * Root pages and runtime data are deliberately outside the schema identity. */
+export function assertPristineKernelSchema(connection: SqliteConnection): void {
+  if (pristineCatalogDigest === undefined) {
+    const expected = new DatabaseSync(':memory:');
+    let digest: string;
+    try {
+      expected.exec(KERNEL_SCHEMA_SQL);
+      digest = canonicalSha256(expected.prepare(SCHEMA_CATALOG_SQL).all());
+    } finally { expected.close(); }
+    pristineCatalogDigest = digest;
+  }
+  if (requiredSafeInteger(pragmaScalar(connection, 'application_id'), 'application_id') !== KERNEL_SQLITE_APPLICATION_ID ||
+      requiredSafeInteger(pragmaScalar(connection, 'user_version'), 'user_version') !== KERNEL_STATE_SCHEMA_VERSION ||
+      canonicalSha256(connection.prepare(SCHEMA_CATALOG_SQL).all()) !== pristineCatalogDigest) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'fresh genesis requires the exact pristine kernel schema');
+  }
 }

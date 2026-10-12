@@ -7,19 +7,17 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, u
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build } from 'esbuild';
-import { inject } from 'postject';
+import { verifiedSqliteExtensionIncludes } from './sqlite-extension-headers.mjs';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { KERNEL_STATE_SCHEMA_VERSION } from '../../src/config.js';
 import { policyProfile, type RuntimeBundleManifest } from '../../src/policy/runtime-authority.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../src/state/native-owner.js';
+import { buildSupervisorSeaImage, prepareSupervisorSeaCarrier,
+  SUPERVISOR_SEA_CARRIER_CHECKSUMS, SUPERVISOR_SEA_NODE_VERSION } from './testing/supervisor-sea-builder.js';
 
-const version = '24.21.0';
+const version = SUPERVISOR_SEA_NODE_VERSION;
 const platform = `${process.platform}-${process.arch}`;
-const checksums: Record<string, string> = {
-  'linux-x64': 'fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6',
-  'darwin-arm64': '6239d4cf92d864487ec8cd3615038f7b67e7f58b77b21cd2f09ea9fbd68065fe',
-};
+const checksums = SUPERVISOR_SEA_CARRIER_CHECKSUMS;
 assert(checksums[platform], `no qualified SEA carrier for ${platform}`);
 assert(process.argv.length <= 3, 'expected at most one new absolute output directory');
 const output = process.argv[2] ? path.resolve(process.argv[2]) : await mkdtemp(path.join(os.tmpdir(), 'cliq-supervisor-image-'));
@@ -48,17 +46,7 @@ async function bytesIdentity(filename: string) {
   return { digest: createHash('sha256').update(bytes).digest('hex'), byteCount: bytes.length };
 }
 try {
-  const archiveName = `node-v${version}-${platform}.tar.xz`;
-  const response = await fetch(`https://nodejs.org/download/release/v${version}/${archiveName}`, { signal: AbortSignal.timeout(60_000) });
-  assert(response.ok, `carrier download failed: ${response.status}`);
-  const archive = Buffer.from(await response.arrayBuffer());
-  assert.equal(createHash('sha256').update(archive).digest('hex'), checksums[platform], 'official carrier checksum mismatch');
-  const archivePath = path.join(fixture, archiveName);
-  await writeFile(archivePath, archive, { flag: 'wx', mode: 0o600 });
-  run('tar', ['-xJf', archivePath, '-C', fixture]);
-  const nodeRoot = path.join(fixture, `node-v${version}-${platform}`);
-  const carrier = path.join(nodeRoot, 'bin/node');
-  assert.equal(run(carrier, ['--version']).stdout.trim(), `v${version}`);
+  const { nodeRoot, carrier } = await prepareSupervisorSeaCarrier(fixture);
   const keys = generateKeyPairSync('ed25519');
   const releaseKeys = [{ keyId: 'explicit-sea-component-test-only',
     publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
@@ -67,34 +55,17 @@ try {
   const installation = path.join(fixture, 'image');
   await mkdir(path.join(installation, path.dirname(STATE_OWNER_NATIVE_RELATIVE_PATH)), { recursive: true, mode: 0o700 });
   const helper = path.join(installation, STATE_OWNER_NATIVE_RELATIVE_PATH);
+  const sqliteInclude = await verifiedSqliteExtensionIncludes();
   run('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread',
     ...(process.platform === 'darwin' ? ['-bundle', '-undefined', 'dynamic_lookup'] : ['-shared', '-fPIC']),
-    '-I', path.join(nodeRoot, 'include/node'), path.join(repository, 'native/state-owner/state-owner.c'), '-o', helper]);
+    '-I', sqliteInclude, '-I', path.join(nodeRoot, 'include/node'),
+    path.join(repository, 'native/state-owner/state-owner.c'), '-o', helper]);
   await chmod(helper, 0o500);
   async function image(variant: string) {
-    const main = path.join(fixture, `${variant}.cjs`);
-    const result = await build({ entryPoints: [path.join(repository, 'src/state/testing/supervisor-sea-child.ts')], outfile: main,
-      bundle: true, platform: 'node', format: 'cjs', target: 'node24.21', metafile: true,
-      // This entry is SEA-only; its ordinary ESM native-helper branch cannot run.
-      define: { 'import.meta.url': 'undefined', __QUALIFICATION_IMAGE_VARIANT__: JSON.stringify(variant) } });
-    for (const emitted of Object.values(result.metafile!.outputs)) {
-      assert(emitted.imports.every((item) => item.external && item.path.startsWith('node:')),
-        'SEA application closure must have no runtime filesystem dependency');
-    }
-    const blob = path.join(fixture, `${variant}.blob`);
-    const configuration = path.join(fixture, `${variant}-sea.json`);
-    await writeFile(configuration, JSON.stringify({ main, output: blob, useSnapshot: false, useCodeCache: false,
-      execArgvExtension: 'none', disableExperimentalSEAWarning: true, assets: { 'explicit-test-root.json': rootAsset } }),
-    { flag: 'wx', mode: 0o600 });
-    run(carrier, ['--experimental-sea-config', configuration]);
-    const executable = path.join(installation, variant);
-    await copyFile(carrier, executable);
-    if (process.platform === 'darwin') run('codesign', ['--remove-signature', executable]);
-    await inject(executable, 'NODE_SEA_BLOB', await readFile(blob),
-      { sentinelFuse: 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2', machoSegmentName: 'NODE_SEA' });
-    if (process.platform === 'darwin') run('codesign', ['--sign', '-', executable]);
-    await chmod(executable, 0o500);
-    return executable;
+    return buildSupervisorSeaImage({ fixture, carrier,
+      entryPoint: path.join(repository, 'src/state/testing/supervisor-sea-child.ts'),
+      executable: path.join(installation, variant), variant, assets: { 'explicit-test-root.json': rootAsset },
+      defines: { __QUALIFICATION_IMAGE_VARIANT__: JSON.stringify(variant) } });
   }
   const supervisor = await image('approved');
   const changedApplication = await image('changed');

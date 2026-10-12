@@ -1,13 +1,14 @@
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { constants, type BigIntStats } from 'node:fs';
+import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
 import path from 'node:path';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import { setImmediate } from 'node:timers/promises';
+import { DatabaseSync } from 'node:sqlite';
 
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting, identityHash, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
+import { digestOmitting, identityHash, normalizeAbsolutePath } from '../kernel/identity.js';
 import type { StateRootIdentityV1, WorkspaceGenerationIdentityV1 } from '../kernel/types.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { decodeWorkspaceGenerationIdentity } from './decoders.js';
@@ -386,9 +387,202 @@ type NativeCurrentProcess = Readonly<{
   imageFd: number; imageByteCount: number; imageIdentityKey: string;
   assertHeld(): void; close(): void;
 }>;
+type NativeInstalledKeeper = Readonly<{ assertHeld(): void; readyLocator(): Buffer; close(): void }>;
+type NativeInstalledAnchor = Readonly<{ assertHeld(): void;
+  withRoot(operation: (fd: number, rootPath: string) => void): void; close(): void }>;
+type NativeCredentialScope = Readonly<{ generation: string; assertHeld(): void; close(): void }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
   captureCurrentProcess(): NativeCurrentProcess;
-  openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot };
+  openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
+  acquireCredentialScope?(rootFd: number, stateRoot: string, root: readonly bigint[]): NativeCredentialScope;
+  initializeInstalledKeeper?(stateRoot: string, bundleDigest: string, relativePath: string,
+    image: readonly bigint[], root: readonly bigint[]): NativeInstalledKeeper;
+  acquireInstalledAnchor?(stateRoot: string, bundleDigest: string, relativePath: string,
+    image: readonly bigint[], root: readonly bigint[], locator: Buffer): NativeInstalledAnchor;
+  executeInstalledImage?(fd: number, image: readonly bigint[], bootstrap: readonly bigint[], root: readonly bigint[],
+    stateRoot: string, bundleDigest: string, relativePath: string, role: 'keeper' | 'supervisor' | 'endpoint'): never };
+const nativeBindings = new WeakMap<NativeStateOwner, NativeBinding>();
+// Byte-identical copies may dlopen as different images with different static
+// VFS state. Credential bootstrap must use the actual first loaded image.
+const loadedImageIdentities = new WeakMap<NativeStateOwner, BigIntStats>();
+
+/** Private credential bridge, not a descriptor getter or loader selector.
+ * The installed producer still owns and revalidates this signed FileHandle. */
+export async function assertHeldCredentialNativeImage(native: NativeStateOwner, image: FileHandle): Promise<void> {
+  const expected = loadedImageIdentities.get(native);
+  if (!expected) throw new KernelStorageError('ARTIFACT_MISMATCH', 'credential native image has no actual load provenance');
+  let actual: BigIntStats;
+  try { actual = await image.stat({ bigint: true }); }
+  catch { throw new KernelStorageError('ARTIFACT_MISMATCH', 'credential native image is no longer held'); }
+  if (!['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'].every(key =>
+    actual[key as keyof BigIntStats] === expected[key as keyof BigIntStats])) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'credential helper is not the physically loaded image; a fresh process is required');
+  }
+}
+
+/** Fixed same-image/same-engine bridge. The producer retains both originals;
+ * callers cannot select a data FD, VFS, extension entry, URI or SQLite engine. */
+export async function withHeldCredentialNativeScope<T>(native: NativeStateOwner, input: Readonly<{
+  image: FileHandle; root: FileHandle; rootIdentity: BigIntStats; stateRoot: string;
+}>, operation: (scope: NativeCredentialScope) => Promise<T>): Promise<T> {
+  const binding = nativeBindings.get(native);
+  if (!binding || typeof binding.acquireCredentialScope !== 'function')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed helper lacks credential scope acquisition');
+  if (process.versions.node !== '24.21.0')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'credential authority requires the fixed installed Node 24.21.0 backend');
+  await assertHeldCredentialNativeImage(native, input.image);
+  let owned: NativeCredentialScope;
+  const convert = (error: unknown): never => {
+    if (error instanceof KernelStorageError || error instanceof TypeError) throw error;
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('credential scope descriptors did not retire', error);
+    // Verified native reports this only after complete healthy acquisition
+    // cleanup. Contention is not corruption or a request to recover state.
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_CREDENTIAL_BUSY') throw error;
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'credential scope could not hold its original physical bindings', { cause: error });
+  };
+  try {
+    const root = input.rootIdentity;
+    owned = binding.acquireCredentialScope(input.root.fd, input.stateRoot, [root.dev, root.ino, root.uid, root.gid, root.mode]);
+  } catch (error) { return convert(error); }
+  let result: T;
+  let failed = false;
+  let failure: unknown;
+  try {
+    owned.assertHeld();
+    const bootstrap = new DatabaseSync(':memory:', { allowExtension: true });
+    try {
+      await assertHeldCredentialNativeImage(native, input.image);
+      // This optional entrypoint is provided by the fixed 24.21.0 backend;
+      // the repository's client-minimum Node typings predate that overload.
+      (bootstrap.loadExtension as (image: string, entry: string) => void).call(bootstrap,
+        `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${input.image.fd}`, 'sqlite3_cliqcredentialvfs_init');
+      bootstrap.enableLoadExtension(false);
+      owned.assertHeld();
+    } finally {
+      try { bootstrap.close(); }
+      catch (error) { throw new ResourceRetirementError('credential SQLite bootstrap did not retire', error); }
+    }
+    result = await operation(owned);
+  } catch (error) { failed = true; failure = error; }
+  // A failed database retirement is not permission to close guards beneath a
+  // potentially live pager. Native holds the context until a fresh process.
+  if (failure instanceof ResourceRetirementError) throw failure;
+  try { owned.close(); }
+  catch (error) { throw new ResourceRetirementError('credential native scope did not retire',
+    new AggregateError(failed ? [failure, error] : [error])); }
+  if (failed) throw failure;
+  return result!;
+}
+
+/** Private verified-installation bridge. The keeper owns only containment and
+ * its independent image observation, never StateOwner or a caller-supplied FD. */
+export function initializeHeldInstalledKeeper(native: NativeStateOwner, input: Readonly<{
+  stateRoot: string; root: BigIntStats; image: BigIntStats; bundleDigest: string; relativePath: string;
+}>): NativeInstalledKeeper {
+  const binding = nativeBindings.get(native);
+  if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed keeper requires Linux');
+  if (!binding || typeof binding.initializeInstalledKeeper !== 'function')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed native helper lacks keeper initialization');
+  const failed = (error: unknown): never => {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('installed keeper descriptors did not retire', error);
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      (error as { message?: string } | null)?.message ?? 'installed native keeper refused its physical identity', { cause: error });
+  };
+  let owned: NativeInstalledKeeper;
+  try {
+    const image = input.image;
+    owned = binding.initializeInstalledKeeper(input.stateRoot, input.bundleDigest, input.relativePath,
+      [image.dev, image.ino, image.size, image.uid, image.gid, image.mode, image.nlink, image.mtimeNs, image.ctimeNs],
+      [input.root.dev, input.root.ino, input.root.uid, input.root.gid, input.root.mode]);
+  } catch (error) { failed(error); }
+  const handle: NativeInstalledKeeper = Object.freeze({
+    assertHeld() {
+      if (this !== handle) throw new TypeError('invalid installed keeper handle');
+      try { owned.assertHeld(); } catch (error) { failed(error); }
+    },
+    readyLocator() {
+      if (this !== handle) throw new TypeError('invalid installed keeper handle');
+      try { return owned.readyLocator(); } catch (error) { return failed(error); }
+    },
+    close() {
+      if (this !== handle) throw new TypeError('invalid installed keeper handle');
+      try { owned.close(); } catch (error) { failed(error); }
+    },
+  });
+  return handle;
+}
+
+/** Private consumer bridge. The locator is untrusted; native acquisition binds
+ * the live signed keeper and obtains its original pin through held procfs. */
+export function acquireHeldInstalledAnchor(native: NativeStateOwner, input: Readonly<{
+  stateRoot: string; root: BigIntStats; image: BigIntStats; bundleDigest: string; relativePath: string; locator: Buffer;
+}>): NativeInstalledAnchor {
+  const binding = nativeBindings.get(native);
+  if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed anchor requires Linux');
+  if (!binding || typeof binding.acquireInstalledAnchor !== 'function')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed native helper lacks anchor acquisition');
+  const failed = (error: unknown): never => {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('installed anchor descriptors did not retire', error);
+    throw new KernelStorageError('ARTIFACT_MISMATCH',
+      (error as { message?: string } | null)?.message ?? 'installed native anchor refused its physical identity', { cause: error });
+  };
+  let owned: NativeInstalledAnchor;
+  try {
+    const image = input.image;
+    owned = binding.acquireInstalledAnchor(input.stateRoot, input.bundleDigest, input.relativePath,
+      [image.dev, image.ino, image.size, image.uid, image.gid, image.mode, image.nlink, image.mtimeNs, image.ctimeNs],
+      [input.root.dev, input.root.ino, input.root.uid, input.root.gid, input.root.mode], input.locator);
+  } catch (error) { failed(error); }
+  const handle: NativeInstalledAnchor = Object.freeze({
+    assertHeld() {
+      if (this !== handle) throw new TypeError('invalid installed anchor handle');
+      try { owned.assertHeld(); } catch (error) { failed(error); }
+    },
+    withRoot(operation) {
+      if (this !== handle) throw new TypeError('invalid installed anchor handle');
+      let callbackFailure: { error: unknown } | undefined;
+      try { owned.withRoot((fd, rootPath) => {
+        try { return operation(fd, rootPath); }
+        catch (error) { callbackFailure = { error }; throw error; }
+      }); } catch (error) {
+        if (callbackFailure && error === callbackFailure.error) throw error;
+        failed(error);
+      }
+    },
+    close() {
+      if (this !== handle) throw new TypeError('invalid installed anchor handle');
+      try { owned.close(); } catch (error) { failed(error); }
+    },
+  });
+  return handle;
+}
+
+/** Private installed-producer bridge, not a NativeStateOwner public operation.
+ * Only the producer supplies these checked identities; C borrows the original
+ * FileHandle and independently binds both filesystem images before exec. */
+export function executeHeldInstalledImage(native: NativeStateOwner, file: FileHandle, input: Readonly<{
+  stateRoot: string; root: BigIntStats; bootstrap: BigIntStats; image: BigIntStats;
+  bundleDigest: string; relativePath: string; role: 'keeper' | 'supervisor' | 'endpoint';
+}>): never {
+  const binding = nativeBindings.get(native);
+  if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed execution requires Linux');
+  if (!binding || typeof binding.executeInstalledImage !== 'function')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed native helper lacks fixed-role execution');
+  const imageTuple = (info: BigIntStats) => [info.dev, info.ino, info.size, info.uid, info.gid, info.mode, info.nlink, info.mtimeNs, info.ctimeNs];
+  try {
+    binding.executeInstalledImage(file.fd, imageTuple(input.image), imageTuple(input.bootstrap),
+      [input.root.dev, input.root.ino, input.root.uid, input.root.gid, input.root.mode],
+      input.stateRoot, input.bundleDigest, input.relativePath, input.role);
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('installed native execution descriptors did not retire', error);
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed native execution refused its bootstrap or selected image', { cause: error });
+  }
+  throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed native execution unexpectedly returned');
+}
 
 /** One canonical projection for bootstrap and native filesystem consumers.
  * This derives bytes only; the caller must hold and validate the native lock. */
@@ -567,54 +761,7 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
   const file = await open(STATE_OWNER_NATIVE_PATH, constants.O_RDONLY | constants.O_NOFOLLOW);
   let operationError: unknown;
   try {
-    const before = await file.stat({ bigint: true });
-    if (!before.isFile() || before.uid !== BigInt(process.geteuid!()) || before.nlink !== 1n ||
-        (before.mode & 0o7777n) !== 0o500n || before.size <= 0n || before.size > 16n * 1024n * 1024n) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper must be an owner-only 0500 regular file of at most 16 MiB');
-    }
-    const bytes = await file.readFile();
-    const after = await file.stat({ bigint: true });
-    const digest = sha256Bytes(bytes);
-    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
-        before.uid !== after.uid || before.mode !== after.mode || before.nlink !== after.nlink ||
-        before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs || BigInt(bytes.byteLength) !== after.size) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper changed while being read');
-    }
-    if (bundle) {
-      const entry = bundle.entries.find((candidate) => candidate.entryId === STATE_OWNER_NATIVE_ENTRY_ID);
-      if (!entry || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
-          entry.relativePath !== STATE_OWNER_NATIVE_RELATIVE_PATH || entry.digest !== digest || entry.byteCount !== bytes.byteLength) {
-        throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper does not match the signed RuntimeBundle');
-      }
-    }
-    if (loaded) {
-      if (loaded.digest !== digest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper changed within this process');
-      return loaded.implementation;
-    }
-    const nativeModule = new Module(STATE_OWNER_NATIVE_PATH);
-    process.dlopen(nativeModule, `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${file.fd}`);
-    const binding: NativeBinding = nativeModule.exports;
-    if (typeof binding.acquireLock !== 'function' || typeof binding.processStartToken !== 'function' ||
-        typeof binding.captureCurrentProcess !== 'function' || typeof binding.openWorkspaceRoot !== 'function') {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper has an unsupported interface');
-    }
-    const implementation: NativeStateOwner = {
-      acquireLock(stateRoot, createLayout) {
-        if (normalizeAbsolutePath(stateRoot) !== stateRoot) throw new TypeError('StateOwner root must be canonical');
-        const held = binding.acquireLock(stateRoot, createLayout);
-        try { return wrapLock(held, stateRoot); } catch (error) { held.close(); throw error; }
-      },
-      processStartToken: () => binding.processStartToken(),
-      observeCurrentProcess: () => observeCurrentProcess(binding),
-      openWorkspaceRoot(workspacePath) {
-        if (normalizeAbsolutePath(workspacePath) !== workspacePath) throw new TypeError('source workspace root must be canonical');
-        const root = Object.freeze(binding.openWorkspaceRoot(workspacePath));
-        workspaceRoots.set(root, workspacePath);
-        return root;
-      }
-    };
-    loaded = { digest, implementation: Object.freeze(implementation) };
-    return loaded.implementation;
+    return await loadHeldStateOwnerImage(file, bundle);
   } catch (error) {
     operationError = error;
     throw error;
@@ -623,6 +770,66 @@ export async function loadNativeStateOwner(bundle?: RuntimeBundleManifest): Prom
     catch (error) { throw new ResourceRetirementError('installed StateOwner image descriptor did not retire',
       operationError === undefined ? error : new AggregateError([operationError, error])); }
   }
+}
+
+/** Internal fixed-image bridge for the installed producer. The file is already
+ * held by its owning scope; this routine neither closes it nor exposes a
+ * descriptor/path selector through the installed public handle. */
+export async function loadHeldStateOwnerImage(file: FileHandle, bundle?: RuntimeBundleManifest): Promise<NativeStateOwner> {
+  const before = await file.stat({ bigint: true });
+  if (!before.isFile() || before.uid !== BigInt(process.geteuid!()) || before.nlink !== 1n ||
+      (before.mode & 0o7777n) !== 0o500n || before.size <= 0n || before.size > 16n * 1024n * 1024n) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper must be an owner-only 0500 regular file of at most 16 MiB');
+  }
+  const fd = file.fd;
+  // Installed files survive several borrows. Positional reads never consume
+  // their shared file offset, and a closed FileHandle cannot lend a reused fd.
+  const digest = await hashHeldProcessImage(fd, Number(before.size), () => {
+    if (file.fd !== fd) throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native image handle is closed');
+  });
+  const after = await file.stat({ bigint: true });
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+      before.uid !== after.uid || before.mode !== after.mode || before.nlink !== after.nlink ||
+      before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper changed while being read');
+  }
+  if (bundle) {
+    const entry = bundle.entries.find((candidate) => candidate.entryId === STATE_OWNER_NATIVE_ENTRY_ID);
+    if (!entry || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
+        entry.relativePath !== STATE_OWNER_NATIVE_RELATIVE_PATH || entry.digest !== digest || entry.byteCount !== Number(after.size)) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper does not match the signed RuntimeBundle');
+    }
+  }
+  if (loaded) {
+    if (loaded.digest !== digest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper changed within this process');
+    return loaded.implementation;
+  }
+  const nativeModule = new Module(STATE_OWNER_NATIVE_PATH);
+  process.dlopen(nativeModule, `${process.platform === 'linux' ? '/proc/self/fd' : '/dev/fd'}/${file.fd}`);
+  const binding: NativeBinding = nativeModule.exports;
+  if (typeof binding.acquireLock !== 'function' || typeof binding.processStartToken !== 'function' ||
+      typeof binding.captureCurrentProcess !== 'function' || typeof binding.openWorkspaceRoot !== 'function') {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'StateOwner native helper has an unsupported interface');
+  }
+  const implementation: NativeStateOwner = {
+    acquireLock(stateRoot, createLayout) {
+      if (normalizeAbsolutePath(stateRoot) !== stateRoot) throw new TypeError('StateOwner root must be canonical');
+      const held = binding.acquireLock(stateRoot, createLayout);
+      try { return wrapLock(held, stateRoot); } catch (error) { held.close(); throw error; }
+    },
+    processStartToken: () => binding.processStartToken(),
+    observeCurrentProcess: () => observeCurrentProcess(binding),
+    openWorkspaceRoot(workspacePath) {
+      if (normalizeAbsolutePath(workspacePath) !== workspacePath) throw new TypeError('source workspace root must be canonical');
+      const root = Object.freeze(binding.openWorkspaceRoot(workspacePath));
+      workspaceRoots.set(root, workspacePath);
+      return root;
+    }
+  };
+  loaded = { digest, implementation: Object.freeze(implementation) };
+  nativeBindings.set(loaded.implementation, binding);
+  loadedImageIdentities.set(loaded.implementation, before);
+  return loaded.implementation;
 }
 
 export function assertStateOwnerLock(lock: HeldStateOwnerLock): void {

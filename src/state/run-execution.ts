@@ -9,7 +9,7 @@ import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
 import { decodeRetainedRunAssembly, type RunAssemblyValidationMaterial } from '../model/run-assembly.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual, type RuntimeBundleManifest, type ReleaseTrustKey } from '../policy/runtime-authority.js';
-import { assertNativeContainmentDeath, LINUX_WORKER_RECIPE, openLinuxWorkerLauncher,
+import { assertNativeContainmentDeath, LINUX_WORKER_RECIPE, openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher,
   type LinuxBlockedWorker, type LinuxWorkerController, type LinuxWorkerInstallation } from '../sandbox/linux-worker.js';
 import { borrowRunWorkspaceForExecution, materializeRunWorkspace, reopenRunWorkspace, type RunWorkspaceGeneration } from '../workspace/run-workspace/generation.js';
 import type { ArtifactCatalog } from './artifacts.js';
@@ -32,6 +32,7 @@ import { readToolCut } from './tool-cut.js';
 import { decodeRunSpec, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { retirePreactivationLaunch } from './preactivation-retirement.js';
 import type { HeldWorkerReservation } from './native-owner.js';
+import { withInstalledWorkerRoot, type HeldInstalledAnchor, type HeldInstalledRuntime } from './installed-runtime.js';
 
 /** Trusted installation paths belong to Supervisor bootstrap, not a Run or a control frame. */
 export type RunExecutionInstallation = Pick<LinuxWorkerInstallation, 'installationRoot' | 'cgroupParent'>;
@@ -46,7 +47,7 @@ type WorkerSpec = Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>
 type EditSpec = Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocation' } }>;
 
 async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: LinuxWorkerController,
-  installation: RunExecutionInstallation, selected: Awaited<ReturnType<typeof readToolCut>>, generationRef: string,
+  installation: Pick<RunExecutionInstallation, 'cgroupParent'>, selected: Awaited<ReturnType<typeof readToolCut>>, generationRef: string,
   reservation: HeldWorkerReservation, launchId: string, spawnNonceDigest: string, activationNonceDigest: string) {
   const { run, runSpec } = selected;
   const assembly = decodeRetainedRunAssembly(await artifacts.readCanonical(runSpec.assemblyRef));
@@ -142,15 +143,21 @@ async function publishInspector(artifacts: ArtifactCatalog, owner: StateOwnerRec
  * Durable lifecycle, retry and budgets remain exclusively in the existing reducers. */
 export async function loadRunExecution(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   bootstrap: { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[]; execution?: RunExecutionInstallation } | undefined,
-  input: LoadRunExecutionInput, isClosing: () => boolean = () => false
+  input: LoadRunExecutionInput, isClosing: () => boolean = () => false,
+  selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor
 ): Promise<{ execution: RunExecution; closeWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }): Promise<Run>; close(): Promise<void> }> {
   // Validation material includes trusted resolver functions; retain those
   // functions while snapshotting their data, just like loadAgentRun does.
   input = { runId: input.runId, material: Object.fromEntries(Object.entries(input.material).map(([key, value]) =>
     [key, typeof value === 'function' ? value : immutableSnapshot(value)])) as RunAssemblyValidationMaterial };
   const runId = input.runId;
-  const installation = bootstrap?.execution && immutableSnapshot(bootstrap.execution);
-  const launcher = await openLinuxWorkerLauncher(installation && bootstrap && { ...installation, runtimeAuthority: bootstrap });
+  const installed = selectedRuntime !== undefined || installedAnchor !== undefined;
+  let installation: Pick<RunExecutionInstallation, 'cgroupParent'> | undefined;
+  if (installed) {
+    withInstalledWorkerRoot(selectedRuntime!, installedAnchor!, (_fd, cgroupParent) => { installation = { cgroupParent }; });
+  } else installation = bootstrap?.execution && immutableSnapshot(bootstrap.execution);
+  const launcher = installed ? await openInstalledLinuxWorkerLauncher(selectedRuntime!, installedAnchor!) :
+    await openLinuxWorkerLauncher(bootstrap?.execution && { ...immutableSnapshot(bootstrap.execution), runtimeAuthority: bootstrap });
   let worker: LinuxBlockedWorker | undefined;
   async function reobserveRetirement() {
     if (closed || isClosing() || operationAbort?.signal.aborted || !worker) {

@@ -515,10 +515,13 @@ static int observe_process(pid_t pid, char token[128]) {
 }
 
 #include "control-socket.c"
+#include "installed-exec.c"
+#include "installed-anchor.c"
 #include "generation-tree.c"
 #include "source-staging.c"
 #include "worker-reservation.c"
 #include "source-root.c"
+#include "credential-authority.c"
 
 static napi_value process_start_token(napi_env env, napi_callback_info info) {
     (void)info;
@@ -570,8 +573,12 @@ static napi_value assert_prior_process_dead(napi_env env, napi_callback_info inf
 static napi_value initialize(napi_env env, napi_value exports) {
     const napi_property_descriptor methods[] = {
         {"acquireLock", NULL, acquire_lock, NULL, NULL, NULL, napi_default, NULL},
+        {"acquireCredentialScope", NULL, acquire_credential_scope, NULL, NULL, NULL, napi_default, NULL},
         {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},
         {"captureCurrentProcess", NULL, capture_current_process, NULL, NULL, NULL, napi_default, NULL},
+        {"executeInstalledImage", NULL, execute_installed_image, NULL, NULL, NULL, napi_default, NULL},
+        {"initializeInstalledKeeper", NULL, initialize_installed_keeper, NULL, NULL, NULL, napi_default, NULL},
+        {"acquireInstalledAnchor", NULL, acquire_installed_anchor, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkspaceRoot", NULL, open_workspace_root, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok) return NULL;

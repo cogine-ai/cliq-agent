@@ -48,6 +48,18 @@ export type ProcessContainmentOwner =
       supervisorInstanceId: string
     }
 
+/** Acyclic signed recipe; runtime/entry/UID bindings belong to the derived image. */
+export type SandboxRootProfileV1 = {
+  schemaVersion: 1
+  format: 'cliq-sandbox-root-profile-v1'
+  protocol: 'cliq-fresh-empty-root-v1'
+  filesystemKind: 'fresh_ephemeral_tmpfs'
+  fixedDirectories: ['/home/cliq', '/tmp', '/work']
+  persistent: false
+  networkConfiguration: 'none'
+  profileDigest: string
+}
+
 export type SandboxRootImageV1 = {
   schemaVersion: 1
   format: 'cliq-sandbox-root-image-v1'

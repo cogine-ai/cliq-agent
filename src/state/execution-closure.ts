@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
-import type { ProcessContainment, ProcessContainmentPlanV1, SandboxLaunchSpecV1, SandboxProfileV1,
+import type { ProcessContainment, ProcessContainmentPlanV1, SandboxLaunchSpecV1, SandboxProfileV1, SandboxRootProfileV1,
   SandboxResourceSpec, SandboxMountV1 } from '../kernel/execution.js';
 import type { InvocationJournalEntry, Run, RunAssemblyV1, RunSpec, StateOwnerRecordV1, WorkerIdentity, WorkerLaunch,
   WorkspaceGenerationIdentityV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
@@ -134,6 +134,18 @@ function resources(value: unknown): SandboxResourceSpec {
   }
   return resource as SandboxResourceSpec;
 }
+/** Signed acyclic empty-root recipe, not an admission permission/resource policy. */
+export function decodeSandboxRootProfile(value: unknown): SandboxRootProfileV1 {
+  const profile = record(value, ['schemaVersion', 'format', 'protocol', 'filesystemKind', 'fixedDirectories',
+    'persistent', 'networkConfiguration', 'profileDigest'], 'sandbox root profile');
+  for (const [key, expected] of Object.entries({ schemaVersion: 1, format: 'cliq-sandbox-root-profile-v1',
+    protocol: 'cliq-fresh-empty-root-v1', filesystemKind: 'fresh_ephemeral_tmpfs', persistent: false,
+    networkConfiguration: 'none' })) literal(profile[key], expected, `sandbox root profile ${key}`);
+  equal(profile.fixedDirectories, ['/home/cliq', '/tmp', '/work'], 'sandbox root profile directories');
+  rehash(profile, 'profileDigest', 'sandbox root profile');
+  return profile as SandboxRootProfileV1;
+}
+
 export function decodeSandboxProfile(value: unknown): SandboxProfileV1 {
   const profile = record(value, ['schemaVersion', 'format', 'backend', 'allowedOwners', 'filesystemPolicy', 'hostFilesystemReachability',
     'networkAtSpawn', 'networkAfterRelease', 'credentialReachability', 'stateRootReachability', 'inheritedHostEnvironment', 'resources', 'profileDigest'], 'sandbox profile');

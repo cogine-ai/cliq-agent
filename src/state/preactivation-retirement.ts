@@ -8,7 +8,9 @@ import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import { assertNativeContainmentDeath, assertNativePreactivationObservation, type LinuxWorkerController,
-  type NativePreactivationObservation, openLinuxWorkerLauncher, type LinuxWorkerInstallation } from '../sandbox/linux-worker.js';
+  type NativePreactivationObservation, openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher,
+  type LinuxWorkerInstallation } from '../sandbox/linux-worker.js';
+import type { HeldInstalledAnchor, HeldInstalledRuntime } from './installed-runtime.js';
 import { observeRetainedRunWorkspace, readRetainedWorkspaceObservation } from '../workspace/run-workspace/generation.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from './artifacts.js';
@@ -34,7 +36,8 @@ const FRESHNESS_MS = 5000;
  * capability and remain blocking for retry, without claiming native retirement.
  * Unknown retained data cannot establish that exception and retains the owner. */
 export async function retireAbandonedPreactivations(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  owner: StateOwnerContext, installation?: LinuxWorkerInstallation): Promise<void> {
+  owner: StateOwnerContext, installation?: LinuxWorkerInstallation,
+  selected?: HeldInstalledRuntime, anchor?: HeldInstalledAnchor): Promise<void> {
   let launcher: Awaited<ReturnType<typeof openLinuxWorkerLauncher>> | undefined;
   let primary: { error: unknown } | undefined;
   try {
@@ -50,7 +53,8 @@ export async function retireAbandonedPreactivations(driver: SqliteDriver, artifa
       if (plan.backend.kind === 'linux' && plan.backend.nativeReservation) launches.push(launch);
     }
     if (launches.length === 0) return;
-    launcher = await openLinuxWorkerLauncher(installation);
+    launcher = selected !== undefined || anchor !== undefined
+      ? await openInstalledLinuxWorkerLauncher(selected!, anchor!) : await openLinuxWorkerLauncher(installation);
     for (const launch of launches) {
       const controller = await launcher.startController();
       let failure: { error: unknown } | undefined;

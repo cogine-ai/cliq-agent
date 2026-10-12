@@ -19,7 +19,7 @@ import type { ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1
 import type { WorkerDeathWait, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1,
   SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1 } from '../../src/kernel/types.js';
-import { openLinuxWorkerLauncher } from '../../src/sandbox/linux-worker.js';
+import { openLinuxWorkerLauncher, type LinuxWorkerController, type LinuxWorkerLauncher } from '../../src/sandbox/linux-worker.js';
 import { createLinuxWorkerCampaignFixture } from '../../src/sandbox/testing/worker-campaign-fixture.js';
 import type { LocalControlConnection, LocalControlListener } from '../../src/state/control-channel.js';
 import { decodeWorkerIdentity } from '../../src/state/decoders.js';
@@ -63,6 +63,106 @@ async function bounded<T>(operation: Promise<T>, milliseconds = 30_000): Promise
       timer = setTimeout(() => reject(new Error('actual Linux campaign operation timed out')), milliseconds);
     })]);
   } finally { clearTimeout(timer); }
+}
+
+async function controllerAnchorBirth() {
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'controller-anchor' });
+  let launcher: LinuxWorkerLauncher | undefined, controller: LinuxWorkerController | undefined;
+  const held: FileHandle[] = [];
+  let primary: { error: unknown } | undefined;
+  const directoryFlags = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
+  const descriptorPath = (handle: FileHandle) => `/proc/self/fd/${handle.fd}`;
+  const identity = (value: fs.BigIntStats) => ({ dev: value.dev, ino: value.ino, uid: value.uid, gid: value.gid, mode: value.mode });
+  const processCgroup = async (pid: number) => {
+    const lines = (await readFile(`/proc/${pid}/cgroup`, 'utf8')).trim().split('\n');
+    assert.equal(lines.length, 1, 'qualification requires a single unified cgroup hierarchy');
+    assert.match(lines[0]!, /^0::\//u);
+    const relative = lines[0]!.slice(3);
+    assert.equal(path.posix.normalize(relative), relative);
+    return path.posix.join('/sys/fs/cgroup', relative);
+  };
+  const assertDirectory = async (handle: FileHandle, namedPath: string, expected: fs.BigIntStats) => {
+    const physical = await handle.stat({ bigint: true }), named = await lstat(namedPath, { bigint: true });
+    assert.ok(physical.isDirectory() && named.isDirectory() && !named.isSymbolicLink());
+    assert.deepEqual(identity(physical), identity(expected)); assert.deepEqual(identity(named), identity(expected));
+    assert.equal(fs.statfsSync(descriptorPath(handle)).type, 0x63677270, 'held directory must be native cgroup2');
+  };
+  try {
+    const uid = process.getuid!(), gid = process.getgid!();
+    assert.notEqual(uid, 0, 'controller qualification must exercise actual non-root delegation');
+    const sourcePath = await processCgroup(process.pid), sourceToken = processToken(process.pid);
+    assert.equal(sourcePath, path.join(options.cgroupParent, 'supervisor'));
+    // Hold every directory reached without following a caller path symlink.
+    let root = await open('/', directoryFlags); held.push(root);
+    assert.equal(path.normalize(options.cgroupParent), options.cgroupParent);
+    assert.ok(options.cgroupParent.startsWith('/sys/fs/cgroup/'));
+    for (const component of options.cgroupParent.split('/').slice(1)) {
+      assert.ok(component !== '' && component !== '.' && component !== '..');
+      root = await open(`${descriptorPath(root)}/${component}`, directoryFlags); held.push(root);
+    }
+    const rootBefore = await root.stat({ bigint: true });
+    assert.equal(rootBefore.uid, BigInt(uid)); assert.equal(rootBefore.gid, BigInt(gid));
+    assert.equal(rootBefore.mode & 0o7777n, 0o700n);
+    await assertDirectory(root, options.cgroupParent, rootBefore);
+    assert.deepEqual(pids(descriptorPath(root)), [], 'delegation root must have no internal processes');
+
+    launcher = await openLinuxWorkerLauncher({ ...options, runtimeAuthority: fixture.runtimeAuthority });
+    controller = await bounded(launcher.startController());
+    assert.ok(Number.isSafeInteger(controller.pid) && controller.pid > 0 && controller.pid !== process.pid);
+    const pid = controller.pid, token = processToken(pid), controllerPath = await processCgroup(pid);
+    assert.equal(token, controller.processStartToken, 'public process identity must match the real kernel lifetime');
+    const status = await readFile(`/proc/${pid}/status`, 'utf8');
+    assert.match(status, new RegExp(`^PPid:\\s+${process.pid}$`, 'mu'));
+    assert.deepEqual(status.match(/^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)$/mu)?.slice(1).map(Number),
+      [uid, uid, uid, uid], 'controller must retain the non-root calling identity');
+    const controllersPath = path.join(options.cgroupParent, 'controllers');
+    assert.equal(path.dirname(controllerPath), controllersPath,
+      'controller must be in a private anchor/controllers leaf, outside the Supervisor service leaf');
+    assert.notEqual(controllerPath, sourcePath);
+    const controllerName = path.basename(controllerPath);
+    assert.match(controllerName, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
+    const controllers = await open(`${descriptorPath(root)}/controllers`, directoryFlags); held.push(controllers);
+    const controllersBefore = await controllers.stat({ bigint: true });
+    const leaf = await open(`${descriptorPath(controllers)}/${controllerName}`, directoryFlags); held.push(leaf);
+    const leafBefore = await leaf.stat({ bigint: true });
+    for (const metadata of [controllersBefore, leafBefore]) {
+      assert.equal(metadata.uid, BigInt(uid)); assert.equal(metadata.gid, BigInt(gid));
+      assert.equal(metadata.mode & 0o7777n, 0o700n);
+    }
+    await assertDirectory(root, options.cgroupParent, rootBefore);
+    await assertDirectory(controllers, controllersPath, controllersBefore);
+    await assertDirectory(leaf, controllerPath, leafBefore);
+    assert.equal((await readFile(`${descriptorPath(leaf)}/cgroup.type`, 'utf8')).trim(), 'domain');
+    assert.equal((await readFile(`${descriptorPath(leaf)}/cgroup.subtree_control`, 'utf8')).trim(), '');
+    assert.deepEqual(pids(descriptorPath(leaf)), [pid], 'idle controller leaf contains its sole original producer');
+    assert.match(await readFile(`${descriptorPath(leaf)}/cgroup.events`, 'utf8'), /(?:^|\n)populated 1\n/u);
+    assert.equal(await processCgroup(pid), controllerPath); assert.equal(processToken(pid), token);
+    assert.equal(await processCgroup(process.pid), sourcePath); assert.equal(processToken(process.pid), sourceToken);
+
+    // No reservation, scope or worker was created: this controller is the
+    // complete producer set. Normal close must join it before retiring its leaf.
+    await bounded(controller.close(), 15_000); controller = undefined;
+    await assert.rejects(access(`/proc/${pid}`), { code: 'ENOENT' }, 'close must join the original controller child');
+    await assert.rejects(lstat(controllerPath), { code: 'ENOENT' }, 'joined controller-only leaf must retire safely');
+    assert.deepEqual(identity(await leaf.stat({ bigint: true })), identity(leafBefore), 'held leaf retains its original inode');
+    await assertDirectory(root, options.cgroupParent, rootBefore);
+    await assertDirectory(controllers, controllersPath, controllersBefore);
+    console.log(JSON.stringify({ scenario: 'actual-controller-anchor-birth', supervisorPid: process.pid, supervisorStartToken: sourceToken,
+      sourcePath, controllerPid: pid, controllerStartToken: token, controllerPath, ownerUid: uid,
+      rootDevice: String(rootBefore.dev), rootInode: String(rootBefore.ino), controllerDevice: String(leafBefore.dev), controllerInode: String(leafBefore.ino),
+      note: 'HELLO-time actual placement and controller-only retirement; not initial-fork atomicity, whole-worker death or installed signed Supervisor I1; offline fixture prefix only' }));
+  } catch (error) { primary = { error }; throw error; }
+  finally {
+    const failures: unknown[] = [];
+    for (const resource of [controller, launcher]) {
+      try { await resource?.close(); } catch (error) { failures.push(error); }
+    }
+    for (const handle of [...held].reverse()) {
+      try { await handle.close(); } catch (error) { failures.push(error); }
+    }
+    try { await fixture.dispose(); } catch (error) { failures.push(error); }
+    if (failures.length !== 0) throw new AggregateError([...(primary ? [primary.error] : []), ...failures], 'controller anchor campaign and cleanup failures');
+  }
 }
 
 async function control(store: StateStore) {
@@ -558,7 +658,10 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
   const primary = Object.assign(new Error(`campaign actual worker image read failed ${created ? 'after READY before identity' : 'before spawn'}`), { code: 'EIO' });
   type ReadyScope = { path: string; cgroupId: string; pidNamespaceId: string; workerPid: number; workerToken: string;
     initPid: number; initToken: string; members: { pid: number; token: string }[] };
-  let injected: { launch: WorkerLaunch; controllerPid: number; controllerToken: string; physicalScope?: ReadyScope } | undefined;
+  type SealedImage = { fd: number; device: string; inode: string };
+  let injected: { launch: WorkerLaunch; controllerPid: number; controllerToken: string; physicalScope?: ReadyScope;
+    sealedImage?: SealedImage } | undefined;
+  let freshImage: (SealedImage & { launchId: string; digest: string }) | undefined;
   let probing = false, faults = 0;
   let operationFailure: { error: unknown } | undefined;
   let successorOpeningFailed = false;
@@ -649,7 +752,8 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
                       workerPid: physicalScope!.workerPid, fault: 'escaping_symlink_then_image_EIO' }));
                   } finally { fs.closeSync(root); }
                 }
-                assert.ok(count > 0); injected = { launch, controllerPid, controllerToken, ...(physicalScope ? { physicalScope } : {}) }; faults++;
+                assert.ok(count > 0); injected = { launch, controllerPid, controllerToken, ...(physicalScope ? { physicalScope } : {}),
+                  ...(!created ? { sealedImage: { fd, device: String(held.dev), inode: String(held.ino) } } : {}) }; faults++;
                 throw primary;
               }
             }
@@ -697,13 +801,75 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
       for (const member of fault.physicalScope.members) await assert.rejects(access(`/proc/${member.pid}`), { code: 'ENOENT' });
     }
     await assert.rejects(access(`/proc/${fault.controllerPid}`), { code: 'ENOENT' });
-    await store.close();
-    try { store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
-    catch (error) { successorOpeningFailed = true; throw error; }
-    const reopened = await checkpointBytes(store, fixture.runId);
-    assertQueuedReadyCut(reopened, before);
-    const retry = await store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
-    await bounded(retry.executeCurrentTool({ expectedRunRevision: reopened.closure.run.revision }));
+    let retry = execution;
+    if (created) {
+      await store.close();
+      try { store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+      catch (error) { successorOpeningFailed = true; throw error; }
+      retry = await store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
+    } else {
+      // The original image read failed before birth and its seal really retired.
+      // Keep the same public execution owner: a new Store would silently replace
+      // its launcher and fail to exercise recovery from that transient read.
+      assert.ok(fault.sealedImage);
+      try {
+        const remaining = fs.fstatSync(fault.sealedImage.fd, { bigint: true });
+        assert.ok(String(remaining.dev) !== fault.sealedImage.device || String(remaining.ino) !== fault.sealedImage.inode,
+          'the failed original seal must retire before a legal fresh attempt');
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EBADF') throw error; }
+      fs.readSync = ((...args: unknown[]) => {
+        const count = Reflect.apply(originalRead, fs, args) as number;
+        if (!freshImage && !probing && count > 0) {
+          probing = true;
+          try {
+            const fd = args[0] as number, held = fs.fstatSync(fd, { bigint: true });
+            if (held.isFile() && held.size === BigInt(workerImage.byteCount) &&
+                fs.readlinkSync(`/proc/self/fd/${fd}`) === '/memfd:cliq-runtime-image (deleted)') {
+              const hash = createHash('sha256'), chunk = Buffer.alloc(Math.min(64 * 1024, workerImage.byteCount));
+              for (let offset = 0; offset < workerImage.byteCount;) {
+                const length = originalRead(fd, chunk, 0, Math.min(chunk.length, workerImage.byteCount - offset), offset);
+                assert.ok(length > 0); hash.update(chunk.subarray(0, length)); offset += length;
+              }
+              const digest = hash.digest('hex');
+              if (digest === workerImage.digest) {
+                const launches = inspection.readSnapshot(connection => connection.prepare(
+                  'SELECT launch_id FROM worker_launches WHERE run_id=? AND retired_at IS NULL')
+                  .all<{ launch_id: string }>(fixture.runId).map(row => readRequiredWorkerLaunch(connection, row.launch_id)));
+                assert.equal(launches.length, 1); const launch = launches[0]!;
+                assert.equal(launch.phase, 'reserved'); assert.notEqual(launch.launchId, fault.launch.launchId);
+                assert.equal(launch.workerIdentityDigest, undefined); assert.equal(launch.processContainmentRef, undefined);
+                const plan = frozenArtifact<ProcessContainmentPlanV1>(fixture.stateRoot, launch.containmentPlanRef);
+                assert.equal(plan.backend.kind, 'linux');
+                if (plan.backend.kind !== 'linux') throw new Error('fresh image lacks its actual Linux reservation');
+                const scopePath = plan.backend.cgroupPath;
+                assert.throws(() => fs.lstatSync(scopePath), { code: 'ENOENT' },
+                  'observe the real fresh seal before worker birth, not a later executable observation');
+                const after = fs.fstatSync(fd, { bigint: true });
+                for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(after[field], held[field]);
+                assert.ok(String(held.dev) !== fault.sealedImage!.device || String(held.ino) !== fault.sealedImage!.inode,
+                  'a legal retry must validate a new actual seal, not reuse the retired image');
+                freshImage = { fd, device: String(held.dev), inode: String(held.ino), launchId: launch.launchId, digest };
+              }
+            }
+          } finally { probing = false; }
+        }
+        return count;
+      }) as typeof fs.readSync;
+      syncBuiltinESMExports();
+    }
+    const retryCut = await checkpointBytes(store, fixture.runId);
+    assertQueuedReadyCut(retryCut, before);
+    if (!created) console.log(JSON.stringify({ scenario: 'actual-transient-image-same-execution-retry', phase: 'retry',
+      runId: fixture.runId, failedLaunchId: fault.launch.launchId, supervisorInstanceId: fault.launch.supervisorInstanceId,
+      firstFailureCode: primary.code, actualReadFaults: faults, expectedRunRevision: retryCut.closure.run.revision,
+      failedSealedImage: fault.sealedImage, faultRemoved: true,
+      note: 'same live public execution; original controller joined and seal retired; retry has no injected read failure' }));
+    try {
+      await assert.doesNotReject(bounded(retry.executeCurrentTool({ expectedRunRevision: retryCut.closure.run.revision })),
+        created ? 'the real successor must execute after preactivation retirement' :
+          'the same live execution must recover after the actual transient image read, not replay its cached rejection');
+    } finally { fs.readSync = originalRead; syncBuiltinESMExports(); }
+    if (!created) assert.ok(freshImage, 'successful retry must include a fresh actual signed seal/hash before birth');
     const after = await checkpointBytes(store, fixture.runId);
     assert.equal(after.closure.run.id, before.closure.run.id); assert.equal(after.closure.run.status, 'queued');
     assert.equal(after.closure.run.leaseEpoch, before.closure.run.leaseEpoch + 1);
@@ -723,6 +889,11 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
     assert.deepEqual(originalFacts, fault.launch, 'retirement must retain every original reservation binding');
     const replacement = replacements[0]!;
     assert.equal(replacement.phase, 'retired');
+    if (!created) {
+      assert.equal(replacement.launchId, freshImage!.launchId);
+      assert.equal(replacement.supervisorInstanceId, fault.launch.supervisorInstanceId,
+        'same-launcher retry must retain its live StateOwner, not silently reopen the Store');
+    }
     assert.notEqual(replacement.launchId, old.launchId); assert.notEqual(replacement.spawnNonceDigest, old.spawnNonceDigest);
     assert.notEqual(replacement.activationNonceDigest, old.activationNonceDigest); assert.notEqual(replacement.workspaceGenerationRef, old.workspaceGenerationRef);
     const proof = await store.artifacts.readCanonical<ProcessContainmentNoSpawnEvidenceV1 | ProcessContainmentDeathEvidenceV1>(old.retirementEvidenceRef);
@@ -751,10 +922,19 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
       if (proof.kind !== 'containment_plan_quiescent' || proof.backend.kind !== 'linux') throw new Error('unattempted worker retirement lacks exact Linux no-spawn evidence');
       assert.equal(proof.backend.matchingLaunchNonceProcessCount, 0);
     }
+    if (!created) {
+      // Reopen only after the same live execution has finished the real tool.
+      // Persistence coverage cannot substitute a new launcher's fresh cache.
+      await store.close();
+      try { store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+      catch (error) { successorOpeningFailed = true; throw error; }
+      assert.deepEqual(await checkpointBytes(store, fixture.runId), after);
+    }
     console.log(JSON.stringify({ scenario: `actual-${boundary.replaceAll('_', '-')}-retirement-and-retry`, runId: fixture.runId,
       oldLaunchId: old.launchId, newLaunchId: replacement.launchId, oldGenerationRef: old.workspaceGenerationRef,
       newGenerationRef: replacement.workspaceGenerationRef,
       ...(fault.physicalScope ? { actualWorkerPid: fault.physicalScope.workerPid, actualWorkerStartToken: fault.physicalScope.workerToken } : {}),
+      ...(!created ? { retryScope: 'same_live_execution', failedSealedImage: fault.sealedImage, freshSealedImage: freshImage } : {}),
       actualReadFaults: faults, nativeEffectCount: 1, permanentToolClaims: 1 }));
   } catch (error) { operationFailure = { error }; throw error; }
   finally {
@@ -2499,6 +2679,7 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
 }
 
 for (const [scenario, run] of [
+  ['controller-anchor-birth', controllerAnchorBirth],
   ['before-spawn-retirement-retry', () => preactivationRetirementRetry('before_spawn')],
   ['ready-before-identity-retirement-retry', () => preactivationRetirementRetry('ready_before_identity')],
   ['invalid-preactivation-tree-retirement-retry', () => preactivationRetirementRetry('ready_invalid_tree')],

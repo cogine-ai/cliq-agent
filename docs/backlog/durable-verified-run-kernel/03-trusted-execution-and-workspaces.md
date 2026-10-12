@@ -119,6 +119,14 @@ Likely files/modules:
 
 Implementation notes:
 
+Signed empty-root entries decode as the acyclic `SandboxRootProfileV1` below,
+not as `SandboxProfileV1` permission/resource policy. Installation imports their
+complete bytes into CAS and independently rehashes `profileDigest` with only
+itself omitted. Fixed Supervisor code derives `SandboxRootImageV1` afterward by
+copying those verified static fields and adding the exact bundle/entry and
+actual UID bindings. The signed recipe never points back to its bundle or image;
+`entryDigest` remains the complete recipe ArtifactRef, not `imageDigest`.
+
 The hidden native owner now provides the descriptor-relative quarantine move
 primitive described in [M2 state core](../../kernel/m2-state-core.md#native-generation-quarantine-relocation).
 It supports fixed Linux generation-directory and macOS backing-file locators,
@@ -783,6 +791,16 @@ SQLite recovery reducer, and does not advance this work package's completion.
           targetRef: ArtifactRef
           supervisorInstanceId: string
         }
+    type SandboxRootProfileV1 = {
+      schemaVersion: 1
+      format: 'cliq-sandbox-root-profile-v1'
+      protocol: 'cliq-fresh-empty-root-v1'
+      filesystemKind: 'fresh_ephemeral_tmpfs'
+      fixedDirectories: ['/home/cliq', '/tmp', '/work']
+      persistent: false
+      networkConfiguration: 'none'
+      profileDigest: string
+    }
     type SandboxRootImageV1 = {
       schemaVersion: 1
       format: 'cliq-sandbox-root-image-v1'
@@ -1123,7 +1141,7 @@ SQLite recovery reducer, and does not advance this work package's completion.
 
    Every `containmentPlanRef` resolves to the exact plan above and every actual containment repeats its plan owner/filesystem/parent/nonce plus `sandboxLaunchSpecRef`/digest and backend reservation/locator identity. `SandboxRootImageV1.imageDigest` omits itself; its ref/digest resolves one non-executable signed RuntimeBundle `sandbox_root_profile` entry by exact id/version/digest. Fixed Supervisor code materializes a fresh ephemeral tmpfs root with exactly `/home/cliq`, `/tmp`, and `/work`, owner-only identity, no device/socket/network state, and no persistent bytes. Plan, launch filesystem, and actual containment repeat that same root-image ref/digest. A host directory, mutable image, caller-selected/reused writable root, missing digest, or merely empty-looking path is invalid. Pre-spawn recovery accepts only the exact plan-quiescent evidence union repeating that launch ref/digest; post-spawn retirement/Checkpoint/receipt accepts only the exact all-descendants-dead union repeating it. `PlatformProcessIdentityV1.identityDigest`, `StateRootIdentityV1.identityDigest`, and `StateLockIdentityV1.identityDigest` each omit themselves under JCS. Process identity is a bounded current platform observation with positive safe-integer PID, NFC-ASCII native start token, same-user uid, and executable-image digest equal to the selected signed Supervisor entry. State-root identity is produced only by component-wise no-follow opening of the configured absolute root and `fstat` of the held same-user `0700` directory descriptor; its NFC path has no dot/parent/empty component, device/directory-file ids are unsigned decimal strings, owner equals effective uid, and replacement/rename/owner/mode/descriptor-path disagreement blocks authority. Lock identity comes only from `fstat` of the held no-follow same-user regular `${stateRoot}/runtime/state-owner.lock` descriptor; its state-root ref+digest equal that held parent descriptor and it binds the literal relative path, unsigned-decimal device/file ids, uid, literal `0600`, and link count one. Caller paths, PID without start token, a root reopened by path after validation, or a reopened/replaced lock are invalid.
 
-   `state_owners` stores only exact `StateOwnerRecordV1`: epochs are positive, unique, contiguous, strictly increasing, and row digests recompute. Every identity/acquisition ref+digest closed-decodes exactly. `genesis` is epoch one for an empty owner table and one exact as-yet-unowned `KernelGenerationIdentityV1`: `fresh_empty` validates the fixed empty database/CAS closure; `migrated_candidate` validates the matching durable Kernel authority marker plus exact candidate/database-image/CAS/migration closure and is legal only as the first Kernel repository transaction after cutover. Clean acquisition requires the latest graceful terminal row/evidence; death takeover atomically terminalizes the active predecessor and appends the evidence-matched successor.
+   `state_owners` stores only exact `StateOwnerRecordV1`: epochs are positive, unique, contiguous, strictly increasing, and row digests recompute. Every identity/acquisition ref+digest closed-decodes exactly. `genesis` is epoch one for an empty owner table and one exact as-yet-unowned `KernelGenerationIdentityV1`: `fresh_empty` validates the fixed empty database/CAS closure; `fresh_installed` validates empty business state plus only the complete CAS seed of the same continuously held verified installation for the lock's exact StateRoot; `migrated_candidate` validates the matching durable Kernel authority marker plus exact candidate/database-image/CAS/migration closure and is legal only as the first Kernel repository transaction after cutover. Clean acquisition requires the latest graceful terminal row/evidence; death takeover atomically terminalizes the active predecessor and appends the evidence-matched successor.
 
    The universal state-owner gate has exactly three narrow acquisition entrypoints while holding/revalidating decoded root/lock descriptors. `bootstrapStateOwner` registers only staged identity/acquisition metadata plus active epoch one for the exact selected fresh or migrated generation under the rules above. `acquireStateOwnerAfterGracefulRelease` registers only new process/acquisition metadata plus `n+1`; `takeoverStateOwner` registers transition/new-process/acquisition metadata and atomically terminalizes+appends. These transactions cannot mutate Run/Session/Journal/broker state or release capability; every other repository write needs an active owner. Staged bytes remain unrooted until commit.
 
@@ -1170,6 +1188,8 @@ SQLite recovery reducer, and does not advance this work package's completion.
 12. **Sanitize the worker environment.** Build it from a fixed allowlist: controlled `PATH`, locale fields, private `HOME`, private `TMPDIR`, and non-secret Run identity fields. Do not spread `process.env`. Explicit ordinary values must be schema-validated and frozen in the sandbox profile; secret values are handles resolved only by the trusted broker. The preactivated environment contains no usable broker handle. Redact broker errors before they reach artifacts or events.
 
 13. **Broker all privileged network/effect operations.** Broker and sandbox entrypoints accept principal/channel identity only as Supervisor-injected exact `LocalPrincipalIdentityV1`/`LocalControlChannelIdentityV1`; a UDS channel must transitively decode exact held-descriptor `LocalSocketPeerObservationV1`, and in-process identity must bind the signed current process. A worker, environment, operation request, model output, or caller cannot supply or override either field. Every time/deadline/expiry comparison uses exact canonical UTC milliseconds plus checked arithmetic and the current healthy `CanonicalTimeFenceV1`; `clock_regressed` makes both release gates fail closed, revokes broker tokens, blocks renewal/redemption/retry/expiry extension, and begins containment quiescence until the current owner observes the retained high-water. Use a versioned request envelope:
+
+   For `kind='model'`, `payloadRef` equals the Journal and `OperationGrantV1.requestRef` and decodes the complete `ModelRequestV1`, not its bare `bodyBytesRef`. `target` equals the grant's `targetRef`; Journal `target` remains the exact `ModelRequestV1.model`. The broker request digest is `SHA-256(JCS({schemaVersion,runId,opId,attempt,kind,target,payloadRef,grantRef,expiresAt}))`, distinct from `ModelRequestV1.requestDigest`, which the grant binds unchanged. The deterministic request-id tuple below uses this broker-core digest. Dispatch/owner/revision/lease/worker/containment/generation fields remain outside that core and must independently match the exact permanent claim and current live authority; the same request id never permits changed fences to join or adopt that claim. `expiresAt` equals the grant expiry; a grant exceeding the Run deadline is rejected, not silently clamped. The trusted compiler reproduces the path/media type and exact referenced body bytes before release; this mapping creates no extra request artifact, ledger or dispatch authority.
 
     ```ts
     type BrokerRequest = {
