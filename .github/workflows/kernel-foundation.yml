@@ -66,6 +66,14 @@ jobs:
         run: |
           probe_node=$(realpath "$(command -v node)")
           sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --credentials "$probe_node" "$RUNNER_TEMP/cliq-credential-journey"
+      - name: Retain the bounded credential feedback before broader qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: credential-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-credential-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Verify installed-state and native-retirement boundaries on Linux 22.04
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # These component tests also run in the 24.04 matrix. Keep the real

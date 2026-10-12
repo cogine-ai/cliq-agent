@@ -95,8 +95,18 @@ if (process.platform === 'linux' && process.arch === 'x64')
                 for (const result of settled) if (result.status === 'rejected') throw result.reason;
               } finally { for (const fd of writers) fs.closeSync(fd); }
             }
+            // Admission of a subsequent real read-only operation proves that
+            // queued cancellation joined its owners and released the busy gate.
+            // This does not require a user manager to be available or ready.
+            assert.equal(native.currentUser().uid, process.getuid());
+            let next;
+            assert.doesNotThrow(() => {
+              next = native.userManager({ kind: 'inspect', unit: 'cliq-queue-fixture-not-installed.service' });
+            });
+            assert.equal(typeof next.then, 'function');
+            await next.catch(() => {});
           })().catch(error => { console.error(error); process.exitCode = 1; });
-        `], { encoding: 'utf8', timeout: 50000, killSignal: 'SIGKILL', maxBuffer: 65536,
+        `], { encoding: 'utf8', timeout: 75000, killSignal: 'SIGKILL', maxBuffer: 65536,
           env: { PATH: process.env.PATH, UV_THREADPOOL_SIZE: '4' }, cwd: fixture });
         // spawnSync bounds and reaps only the fixture process. On the expected
         // RED it has already released and joined all of its blocked work.

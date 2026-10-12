@@ -3,6 +3,7 @@
  * caller-selected bus/interface/method executes on its owning worker. */
 #define _GNU_SOURCE
 #include <node_api.h>
+#include <uv.h>
 #include <gio/gio.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -54,6 +55,10 @@ struct task {
   unsigned char *secret; size_t secret_size;
   struct timespec deadline; pthread_t watchdog; pthread_mutex_t mutex; pthread_cond_t condition;
   bool mutex_ready, condition_ready, watchdog_started, finished, unsafe, env_closing;
+  /* Only the main loop reads/writes these timer/completion flags. In
+   * particular, expiry never races a worker write to error, unsafe or secret. */
+  uv_timer_t deadline_timer;
+  bool timer_initialized, timer_closing, timer_closed, work_complete, expired, cancel_requested, main_retirement_failed;
   GCancellable *cancel; GDBusConnection *bus; int runtime_fd;
   char session[TEXT_CAP]; struct stat runtime_identity, socket_identity;
   GVariant *unit_properties, *service_properties;
@@ -694,6 +699,9 @@ static void retire_main_handles(struct task *task) {
     else task->mutex_ready = false;
   }
   if (!valid) { task->unsafe = true; atomic_store(&retirement_failed, true); fail(task, "resource_retirement"); }
+  /* Its optional wakeup FD belongs to the cancellable too. Once every worker
+   * and callback is joined, retire that owner before a successful reply. */
+  if (!task->unsafe && task->cancel) { g_object_unref(task->cancel); task->cancel = NULL; }
 }
 static void release_task(struct task *task) {
   if (task->secret) { wipe(task->secret, task->secret_size); free(task->secret); task->secret = NULL; }
@@ -707,23 +715,68 @@ static void release_task(struct task *task) {
   if (task->cancel) g_object_unref(task->cancel);
   free(task);
 }
-static void complete(napi_env env, napi_status status, void *data) {
-  struct task *task = data;
-  if (status != napi_ok) fail(task, "platform_worker_unavailable");
-  /* Completion runs only after execute returned and its watchdog joined.
-   * Consume every remaining callback/thread handle before publishing a result. */
+static void finish_task(struct task *task) {
+  if (!task->work_complete || (task->timer_initialized && !task->timer_closed)) return;
+  /* Neither the async worker nor the timer can still access the task. The
+   * queued-cancel path never ran execute, so retire its copied input here. */
+  if (task->secret) { wipe(task->secret, task->secret_size); free(task->secret); task->secret = NULL; }
+  if (task->expired || !remaining(task)) task->error = "platform_timeout";
+  if (task->main_retirement_failed) {
+    task->unsafe = true; task->error = "resource_retirement"; atomic_store(&retirement_failed, true);
+  }
   retire_main_handles(task);
-  if (!task->env_closing) {
+  if (!task->env_closing && task->deferred) {
+    /* A uv_close callback has no implicit Node-API handle scope. A broken
+     * environment cannot safely publish a reply or continue this producer. */
+    napi_handle_scope scope;
+    if (napi_open_handle_scope(task->env, &scope) != napi_ok)
+      napi_fatal_error("cliq-credential-platform", NAPI_AUTO_LENGTH, "platform completion scope unavailable", NAPI_AUTO_LENGTH);
     napi_value result = NULL;
-    if (!task->error) result = result_value(env, task);
-    if (task->error || task->unsafe) napi_reject_deferred(env, task->deferred, error_value(env, task->unsafe, task->error));
-    else napi_resolve_deferred(env, task->deferred, result);
+    if (!task->error) result = result_value(task->env, task);
+    napi_status settled = task->error || task->unsafe
+      ? napi_reject_deferred(task->env, task->deferred, error_value(task->env, task->unsafe, task->error))
+      : napi_resolve_deferred(task->env, task->deferred, result);
+    if (settled != napi_ok || napi_close_handle_scope(task->env, scope) != napi_ok)
+      napi_fatal_error("cliq-credential-platform", NAPI_AUTO_LENGTH, "platform completion unavailable", NAPI_AUTO_LENGTH);
+    task->deferred = NULL;
   }
   atomic_store(&job_in_flight, false); release_task(task);
 }
+static void timer_closed(uv_handle_t *handle) {
+  struct task *task = handle->data; task->timer_closed = true; finish_task(task);
+}
+static void close_timer(struct task *task) {
+  if (task->timer_initialized && !task->timer_closing) {
+    task->timer_closing = true;
+    uv_close((uv_handle_t *)&task->deadline_timer, timer_closed);
+  }
+}
+static void cancel_task(struct task *task) {
+  g_cancellable_cancel(task->cancel);
+  if (!task->work_complete && !task->cancel_requested) {
+    task->cancel_requested = true;
+    napi_status status = napi_cancel_async_work(task->env, task->work);
+    /* generic_failure is the documented race with work already executing.
+     * Both that case and successful queued cancellation still require complete. */
+    if (status != napi_ok && status != napi_generic_failure) {
+      task->main_retirement_failed = true; atomic_store(&retirement_failed, true);
+    }
+  }
+}
+static void deadline_expired(uv_timer_t *timer) {
+  struct task *task = timer->data; task->expired = true;
+  cancel_task(task); close_timer(task);
+}
+static void complete(napi_env env, napi_status status, void *data) {
+  (void)env; struct task *task = data; task->work_complete = true;
+  /* Worker-owned fields are now joined. Even a positive result must not be
+   * published after expiry; cancellation never waives either ownership gate. */
+  if (status != napi_ok) fail(task, "platform_worker_unavailable");
+  close_timer(task); finish_task(task);
+}
 static void cleanup_task(napi_async_cleanup_hook_handle handle, void *data) {
-  (void)handle; struct task *task = data; task->env_closing = true; g_cancellable_cancel(task->cancel);
-  (void)napi_cancel_async_work(task->env, task->work);
+  (void)handle; struct task *task = data; task->env_closing = true;
+  cancel_task(task); close_timer(task);
 }
 static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   if (atomic_load(&retirement_failed)) { napi_throw(env, error_value(env, true, "resource_retirement")); return NULL; }
@@ -766,6 +819,7 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   if (!valid || !atomic_compare_exchange_strong(&job_in_flight, &occupied, true)) {
     release_task(task); napi_throw(env, error_value(env, false, valid ? "platform_busy" : "invalid_platform_request")); return NULL;
   }
+  napi_value promise = NULL, resource;
   if (clock_gettime(CLOCK_MONOTONIC, &task->deadline)) goto failed;
   task->deadline.tv_sec += DEADLINE_SECONDS;
   task->cancel = g_cancellable_new();
@@ -778,13 +832,24 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   pthread_condattr_destroy(&attributes);
   if (condition) goto failed;
   task->condition_ready = true;
-  napi_value promise, resource;
   if (napi_create_promise(env, &task->deferred, &promise) != napi_ok ||
       napi_create_string_utf8(env, "cliq-linux-credential-platform", NAPI_AUTO_LENGTH, &resource) != napi_ok ||
       napi_create_async_work(env, NULL, resource, execute, complete, task, &task->work) != napi_ok ||
-      napi_add_async_cleanup_hook(env, cleanup_task, task, &task->cleanup_hook) != napi_ok || napi_queue_async_work(env, task->work) != napi_ok) goto failed;
+      napi_add_async_cleanup_hook(env, cleanup_task, task, &task->cleanup_hook) != napi_ok) goto failed;
+  uv_loop_t *loop;
+  if (napi_get_uv_event_loop(env, &loop) != napi_ok || uv_timer_init(loop, &task->deadline_timer)) goto failed;
+  task->timer_initialized = true; task->deadline_timer.data = task;
+  uv_update_time(loop);
+  if (uv_timer_start(&task->deadline_timer, deadline_expired, (uint64_t)remaining(task), 0) ||
+      napi_queue_async_work(env, task->work) != napi_ok) goto failed;
   return promise;
 failed:
+  task->work_complete = true; fail(task, "platform_worker_unavailable");
+  if (promise) {
+    /* A timer initialized during failed setup still owns the task. Return
+     * the refusal only after its real close callback and all other owners. */
+    close_timer(task); finish_task(task); return promise;
+  }
   retire_main_handles(task);
   bool unsafe = task->unsafe;
   atomic_store(&job_in_flight, false); release_task(task);
