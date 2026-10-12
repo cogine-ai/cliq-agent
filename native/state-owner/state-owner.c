@@ -515,6 +515,7 @@ static int observe_process(pid_t pid, char token[128]) {
 }
 
 #include "control-socket.c"
+#include "control-client.c"
 #include "installed-exec.c"
 #include "installed-anchor.c"
 #include "generation-tree.c"
@@ -576,6 +577,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
         {"acquireCredentialScope", NULL, acquire_credential_scope, NULL, NULL, NULL, napi_default, NULL},
         {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},
         {"captureCurrentProcess", NULL, capture_current_process, NULL, NULL, NULL, napi_default, NULL},
+        {"connectInstalledControl", NULL, connect_installed_control, NULL, NULL, NULL, napi_default, NULL},
         {"executeInstalledImage", NULL, execute_installed_image, NULL, NULL, NULL, napi_default, NULL},
         {"initializeInstalledKeeper", NULL, initialize_installed_keeper, NULL, NULL, NULL, napi_default, NULL},
         {"acquireInstalledAnchor", NULL, acquire_installed_anchor, NULL, NULL, NULL, napi_default, NULL},

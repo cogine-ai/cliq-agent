@@ -8513,6 +8513,7 @@ The v1 wire contract is generated from one canonical TypeScript/JSON-Schema pack
 | `authorization.create` | `requestId` plus one bounded read/identity/verifier-execution decision and TTL | opaque principal-owned grant id and canonical target digest; no caller artifact ref |
 | `authorization.list` | kind/cursor, limit default 50/max 100 | redacted active/consumed/revoked grant summaries |
 | `authorization.revoke` | `requestId`, grant id | active becomes revoked; revoked replay is stable; consumed is an idempotent `already_consumed` no-op summary |
+| `credential.finalize` | original credential `requestId`, `operationId`, attempt `1..3` and command digest; no caller identity/time/secret/platform path | original credential operation after the sole time-fence prefix and active/committed transaction; no separate control-request ledger |
 | `mcp.register` | `requestId`, registration id, explicit stdio/HTTP target ids, credential grant ids, stateless assertion, bounded recovery requests | sandbox-probed immutable registry revision or fail-closed error |
 | `mcp.refresh` | `requestId`, registration id, expected registry revision | copy current immutable transport/recovery/lifecycle inputs, reprobe, and append a revision; no replacement ids/target and admitted Runs retain the old digest |
 | `mcp.list` | cursor, limit default 50/max 100 | redacted registry summaries and manifest digests |
@@ -8535,8 +8536,10 @@ cannot submit raw secrets. For enroll/rotate/expiry expansion, auth first starts
 or connects the correctly installed Supervisor outside the credential lock,
 then prepares/writes/round-trips the secret locally and fully retires that
 scope before sending `credential.finalize`. This narrow secret-free request
-names only the original operation id, attempt and command digest, in the normal
-bounded protocol/request-correlation envelope. It supplies no identity, time,
+names only the original request id, operation id, attempt and command digest,
+with `protocolVersion:1` and `method`. It is not a new `MutationBase`: its replay
+identity and historical result remain in credential history, never a second
+`control_requests` row or wire-request digest. It supplies no identity, time,
 platform path, subject, secret or verified boolean. The Supervisor reads the
 exact secret_stored history from its own private credential scope and freshly
 matches its genuine UDS peer to the original prepared in-process auth producer's
@@ -8573,6 +8576,15 @@ type MutationBase = {
   protocolVersion: 1
   requestId: string
   requestDigest: string
+}
+
+type CredentialFinalizeRequest = {
+  protocolVersion: 1
+  method: 'credential.finalize'
+  requestId: string
+  operationId: string
+  attempt: 1 | 2 | 3
+  commandDigest: string
 }
 
 type BudgetOptions = Partial<RunSpec['budgets']>
@@ -8903,6 +8915,7 @@ type ControlMutationRequestV1 =
   | AuthorizationRevokeRequest
   | McpRegisterRequest
   | McpRefreshRequest
+  | CredentialFinalizeRequest
 
 type ControlRequestV1 = ControlQueryRequestV1 | ControlMutationRequestV1
 
@@ -9038,8 +9051,10 @@ type ControlMethodV1 =
   | 'authorization.create' | 'authorization.list' | 'authorization.revoke'
   | 'mcp.register' | 'mcp.refresh' | 'mcp.list'
   | 'artifact.get' | 'supervisor.status'
+  | 'credential.finalize'
 
 type ControlResultV1 =
+  | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 }
   | {
       method: 'control.hello'
       protocolVersion: 1

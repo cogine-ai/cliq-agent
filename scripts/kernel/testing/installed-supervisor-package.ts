@@ -51,6 +51,12 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
   assert.equal(workers.error, undefined, 'production worker image construction did not join');
   assert.equal(workers.status, 0, `production worker image construction: ${workers.stderr}`);
+  const credentialRoot = path.join(fixture, 'credential-platform-image');
+  const credentials = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-credential-platform.mjs'),
+    credentialRoot, path.join(nodeRoot, 'include/node')],
+  { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+  assert.equal(credentials.error, undefined, 'production credential platform construction did not join');
+  assert.equal(credentials.status, 0, `production credential platform construction: ${credentials.stderr}`);
   const workerEntries = await Promise.all(([
     ['linux_worker_native', 'platform_helper', 'linux-worker.node'],
     ['linux_worker_controller', 'platform_helper', 'cliq-linux-worker-controller'],
@@ -68,6 +74,8 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     { entryId: STATE_OWNER_NATIVE_ENTRY_ID, role: 'platform_helper', relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH,
       executable: true, bytes: await readFile(helper) },
     ...workerEntries,
+    { entryId: 'linux_credential_platform', role: 'platform_helper', relativePath: 'native/linux-x64/linux-credential-platform.node',
+      executable: true, bytes: await readFile(path.join(credentialRoot, 'linux-credential-platform.node')) },
     { entryId: 'installed-policy', role: 'policy_engine', relativePath: 'profiles/policy.json', executable: false, bytes: canonicalJsonBytes(profile) },
     { entryId: 'default_https_trust_store', role: 'trust_store', relativePath: 'profiles/https-trust.pem', executable: false,
       bytes: Buffer.from(rootCertificates.join('\n')) },

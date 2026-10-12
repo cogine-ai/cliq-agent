@@ -20,6 +20,7 @@ import { digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '.
 import { sampleCanonicalNow } from './canonical-time.js';
 import type { HeldControlListener, HeldControlPeer, NativePeerObservation } from './native-owner.js';
 import { hashHeldProcessImage } from './process-image.js';
+import { immutableSnapshot } from '../model/immutable.js';
 
 export type AuthenticatedControlIdentity = Readonly<{
   principalId: string;
@@ -36,7 +37,8 @@ export type LocalControlConnection = Readonly<{
 }>;
 /** Owner lifecycle only: close drains dispatches, so never await it inside one. */
 export type LocalControlListener = Readonly<{ close(): Promise<void> }>;
-type LiveChannel = { digest: string; assertCurrent(): void };
+type LiveChannel = { digest: string; assertCurrent(): void;
+  processIdentity: PlatformProcessIdentityV1; channel: LocalControlChannelIdentityV1 };
 const liveChannels = new WeakMap<StateOwnerContext, Map<string, LiveChannel>>();
 type AuthenticatedFrame = { owner: StateOwnerContext; identity: AuthenticatedControlIdentity; channel: LiveChannel; active: boolean };
 const authenticatedFrames = new AsyncLocalStorage<AuthenticatedFrame>();
@@ -120,7 +122,8 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
       assertCurrent();
       identity = Object.freeze({ principalId: principal.principalId, channelIdentityRef: channelArtifact.ref,
         channelIdentityDigest: channel.channelIdentityDigest });
-      channels.set(identity.channelIdentityRef, { digest: identity.channelIdentityDigest, assertCurrent });
+      channels.set(identity.channelIdentityRef, { digest: identity.channelIdentityDigest, assertCurrent,
+        processIdentity: immutableSnapshot(processIdentity), channel: immutableSnapshot(channel) });
       return identity;
     };
     const connection: LocalControlConnection = Object.freeze({
@@ -178,6 +181,21 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
     }
   });
   return listener;
+}
+
+/** Fixed synchronous friend for the final authorization cut. Historical
+ * artifacts cannot enter this registry, and an earlier async closure walk
+ * cannot substitute for this still-current native frame. */
+export function assertCurrentControlFrame(owner: StateOwnerContext, identity: AuthenticatedControlIdentity):
+  Readonly<{ processIdentity: PlatformProcessIdentityV1; channel: LocalControlChannelIdentityV1 }> {
+  const frame = authenticatedFrames.getStore();
+  if (!frame?.active || frame.owner !== owner || frame.identity !== identity)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control operation has no current native authenticated frame');
+  const live = liveChannels.get(owner)?.get(identity.channelIdentityRef);
+  if (!live || frame.channel !== live || live.digest !== identity.channelIdentityDigest)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'control operation native channel changed');
+  live.assertCurrent();
+  return Object.freeze({ processIdentity: live.processIdentity, channel: live.channel });
 }
 
 /** Rewalk a historical channel against this database's retained StateRoot, without authenticating new input. */

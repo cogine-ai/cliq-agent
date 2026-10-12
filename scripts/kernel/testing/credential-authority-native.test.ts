@@ -43,6 +43,13 @@ test('original-root native credential scope uses one SQLite image and healthy ge
     await mkdir(path.join(root, 'runtime'), { recursive: true, mode: 0o700 });
     await chmod(root, 0o700); await chmod(path.join(root, 'runtime'), 0o700);
     const canonicalRoot = await realpath(root);
+    const lifetimeProbe = path.join(fixture, 'producer-lifetime-probe');
+    if (process.platform === 'linux') {
+      const lifetimeSource = fileURLToPath(new URL('credential-producer-lifetime-probe.c', import.meta.url));
+      const lifetimeCompiled = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', lifetimeSource, '-o', lifetimeProbe],
+        { encoding: 'utf8', timeout: 60000 });
+      assert.equal(lifetimeCompiled.error, undefined); assert.equal(lifetimeCompiled.status, 0, lifetimeCompiled.stderr);
+    }
     const child = spawnSync(carrier.carrier, ['--no-warnings', '--expose-gc', '-e', `
       (async()=>{
       const assert = require('node:assert/strict');
@@ -58,6 +65,30 @@ test('original-root native credential scope uses one SQLite image and healthy ge
       assert.equal(fs.existsSync(root+'/credentials'),false);
       const a = native.acquireCredentialScope(fd, root, tuple);
       assert.equal(typeof a.generation, 'string'); a.assertHeld();
+      if (process.platform === 'linux') {
+        assert.equal(a.observeProducerLifetime(process.pid,process.geteuid(),native.processStartToken()),'present');
+        assert.throws(()=>a.observeProducerLifetime.call({},process.pid,process.geteuid(),native.processStartToken()),/invalid/);
+        for (const invalid of ['', 'unknown', 'linux-proc-start-ticks:0', 'linux-proc-start-ticks:01', native.processStartToken()+'\\0extra'])
+          assert.throws(()=>a.observeProducerLifetime(process.pid,process.geteuid(),invalid),e=>e.code==='ERR_CLIQ_CREDENTIAL_PROCESS_IDENTITY');
+        for (const invalid of [0,-1,1.5,NaN,Infinity,2**32+process.pid])
+          assert.throws(()=>a.observeProducerLifetime(invalid,process.geteuid(),native.processStartToken()),e=>e.code==='ERR_CLIQ_CREDENTIAL_PROCESS_IDENTITY');
+        assert.throws(()=>a.observeProducerLifetime(process.pid,process.geteuid()+1,native.processStartToken()),e=>e.code==='ERR_CLIQ_CREDENTIAL_PROCESS_IDENTITY');
+        const producer=require('node:child_process').spawn(${JSON.stringify(lifetimeProbe)},[],{stdio:['pipe','pipe','pipe']});
+        const lines=require('node:readline').createInterface({input:producer.stdout})[Symbol.asyncIterator]();
+        const joined=new Promise((resolve,reject)=>{producer.once('error',reject);producer.once('close',(code,signal)=>resolve({code,signal}));});
+        void joined.catch(()=>{});const watchdog=setTimeout(()=>producer.kill('SIGKILL'),5000);
+        try {
+          const live=(await lines.next()).value;assert.match(live,/^LIVE [1-9]\\d*$/);const pid=Number(live.split(' ')[1]);
+          const stat=fs.readFileSync('/proc/'+pid+'/stat','utf8');
+          const token='linux-proc-start-ticks:'+stat.slice(stat.lastIndexOf(')')+2).trim().split(/\\s+/)[19];
+          assert.equal(a.observeProducerLifetime(pid,process.geteuid(),token),'present');
+          producer.stdin.write('k');assert.equal((await lines.next()).value,'ZOMBIE');
+          assert.equal(fs.readFileSync('/proc/'+pid+'/stat','utf8').slice(stat.lastIndexOf(')')+2).split(' ')[0],'Z');
+          assert.equal(a.observeProducerLifetime(pid,process.geteuid(),token),'present','zombie is still the original lifetime');
+          producer.stdin.write('r');assert.equal((await lines.next()).value,'REAPED');assert.deepEqual(await joined,{code:0,signal:null});
+          assert.equal(a.observeProducerLifetime(pid,process.geteuid(),token),'dead','real reap supplies positive kernel absence');
+        } finally {clearTimeout(watchdog);if(producer.exitCode===null&&producer.signalCode===null)producer.kill('SIGKILL');await joined;}
+      }
       assert.throws(() => a.assertHeld.call({}), /invalid/);
       assert.throws(() => a.close('forbidden'), /invalid/);
       assert.throws(() => native.acquireCredentialScope(fd, root, tuple), /active|acquir|scope/);
@@ -83,6 +114,7 @@ test('original-root native credential scope uses one SQLite image and healthy ge
       const first = open(); first.exec("CREATE TABLE proof(value TEXT); INSERT INTO proof VALUES ('held-original')");
       assert.throws(() => a.close(), /live|open/); a.assertHeld(); first.close(); a.close();
       assert.throws(() => a.assertHeld(), /closed|retired|inactive/);
+      assert.throws(() => a.observeProducerLifetime(process.pid,0,native.processStartToken()), /closed|retired|inactive/);
       assert.throws(() => a.close(), /closed|retired|inactive/);
       fs.fstatSync(fd);
       const b = native.acquireCredentialScope(fd, root, tuple); assert.notEqual(a.generation,b.generation);

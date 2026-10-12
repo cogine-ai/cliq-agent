@@ -133,6 +133,14 @@ The operation attribute is always the creating enroll/rotate operation id;
 revoke/cleanup reconstruct its attributes from that retained creating operation,
 never substitute the revoke operation id.
 CreateItem success followed by a lost reply remains recoverable by that id.
+The `secret_stored` fact retains one bounded, self-hashed, secret-free native
+platform observation in that same fact row: complete attributes digest and
+creating operation/logical id, actual bus GUID/socket/runtime/lifetime, service
+unique owner/uid/lifetime and default collection/item locators. A unique bus
+name alone can be reused after bus restart. Finalization freshly compares that
+observation; cleanup uses the current same-user store and complete original
+attributes, not a permanently required old daemon. This is provenance, not a
+new ledger, secret hash, authority grant or time ticket.
 Locked, prompted, ambiguous, replaced-owner/alias or unavailable-store results
 never create active authority. Errors and trace artifacts exclude remote
 payloads/secrets; no promise is made to erase every V8/GIO copy.
@@ -145,8 +153,10 @@ authority identity or an acceptable overwrite policy here.
 
 #### Narrow authenticated finalizer
 
-`credential.finalize` carries only protocol/request correlation plus the
-original `operationId`, `attempt` and `commandDigest`. It carries no raw secret,
+`credential.finalize` carries only `protocolVersion:1`, `method`, the original
+`requestId`, `operationId`, `attempt` and `commandDigest`. It is a continuation
+of the credential operation, not a new `MutationBase` or `control_requests`
+identity. It carries no raw secret,
 principal/channel/PID, timestamp, platform path, subject or verified boolean.
 The original operation remains the sole request/replay identity; no second
 time-ticket, finalizer journal or authority-request ledger is created.

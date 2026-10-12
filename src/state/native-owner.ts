@@ -278,6 +278,14 @@ export type HeldControlPeer = Readonly<{
   close(): void;
 }>;
 export type HeldControlListener = Readonly<{ assertHeld(): void; close(): void }>;
+/** Fixed installed auth transport, independent of StateOwner and SQLite.
+ * The native original root/runtime/socket/selected image survive FD transfer. */
+export type HeldInstalledControlClient = Readonly<{
+  server: Readonly<{ pid: number; uid: number; gid: number; processStartToken: string }>;
+  takeSocketFd(): number;
+  assertHeld(): void;
+  close(): void;
+}>;
 /** A physical move observation only: no containment death, tree or SQLite authority. */
 export type GenerationQuarantineMove = Readonly<{
   quarantineCanonicalRootRelativePath: string;
@@ -390,11 +398,14 @@ type NativeCurrentProcess = Readonly<{
 type NativeInstalledKeeper = Readonly<{ assertHeld(): void; readyLocator(): Buffer; close(): void }>;
 type NativeInstalledAnchor = Readonly<{ assertHeld(): void;
   withRoot(operation: (fd: number, rootPath: string) => void): void; close(): void }>;
-type NativeCredentialScope = Readonly<{ generation: string; assertHeld(): void; close(): void }>;
+type NativeCredentialScope = Readonly<{ generation: string; assertHeld(): void; close(): void;
+  observeProducerLifetime(pid: number, ownerUid: number, processStartToken: string): 'present' | 'dead' }>;
 type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): NativeLock; processStartToken(): string;
   captureCurrentProcess(): NativeCurrentProcess;
   openWorkspaceRoot(workspacePath: string): HeldWorkspaceRoot;
   acquireCredentialScope?(rootFd: number, stateRoot: string, root: readonly bigint[]): NativeCredentialScope;
+  connectInstalledControl?(rootFd: number, stateRoot: string, root: readonly bigint[],
+    imageFd: number, image: readonly bigint[]): HeldInstalledControlClient;
   initializeInstalledKeeper?(stateRoot: string, bundleDigest: string, relativePath: string,
     image: readonly bigint[], root: readonly bigint[]): NativeInstalledKeeper;
   acquireInstalledAnchor?(stateRoot: string, bundleDigest: string, relativePath: string,
@@ -405,6 +416,54 @@ const nativeBindings = new WeakMap<NativeStateOwner, NativeBinding>();
 // Byte-identical copies may dlopen as different images with different static
 // VFS state. Credential bootstrap must use the actual first loaded image.
 const loadedImageIdentities = new WeakMap<NativeStateOwner, BigIntStats>();
+
+/** Composition-only bridge: the verified installed selection supplies its
+ * original FileHandles, never a caller socket, PID or executable locator. */
+export function openHeldInstalledControlClient(native: NativeStateOwner, input: Readonly<{
+  root: FileHandle; rootIdentity: BigIntStats; stateRoot: string;
+  image: FileHandle; imageIdentity: BigIntStats;
+}>): HeldInstalledControlClient {
+  const binding = nativeBindings.get(native);
+  if (!binding || typeof binding.connectInstalledControl !== 'function')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed helper lacks fixed control client');
+  if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed control client requires Linux');
+  const convert = (error: unknown): never => {
+    if (error instanceof KernelStorageError || error instanceof ResourceRetirementError) throw error;
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('installed control client descriptors did not retire', error);
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'fixed installed Supervisor connection or identity is unavailable', { cause: error });
+  };
+  let owned: HeldInstalledControlClient | undefined;
+  try {
+    const root = input.rootIdentity, image = input.imageIdentity;
+    owned = binding.connectInstalledControl(input.root.fd, input.stateRoot,
+      [root.dev, root.ino, root.uid, root.gid, root.mode], input.image.fd,
+      [image.dev, image.ino, image.uid, image.gid, image.mode, image.size, image.nlink, image.mtimeNs, image.ctimeNs]);
+    owned.assertHeld();
+  } catch (error) {
+    if (owned) {
+      try { owned.close(); }
+      catch (retirement) { throw new ResourceRetirementError('installed control acquisition did not retire', new AggregateError([error, retirement])); }
+    }
+    return convert(error);
+  }
+  const held = owned;
+  const client: HeldInstalledControlClient = Object.freeze({ server: Object.freeze({ ...held.server }),
+    takeSocketFd() {
+      if (this !== client) throw new TypeError('invalid installed control client');
+      try { return held.takeSocketFd(); } catch (error) { return convert(error); }
+    },
+    assertHeld() {
+      if (this !== client) throw new TypeError('invalid installed control client');
+      try { held.assertHeld(); } catch (error) { return convert(error); }
+    },
+    close() {
+      if (this !== client) throw new TypeError('invalid installed control client');
+      try { held.close(); } catch (error) { return convert(error); }
+    }
+  });
+  return client;
+}
 
 /** Private credential bridge, not a descriptor getter or loader selector.
  * The installed producer still owns and revalidates this signed FileHandle. */

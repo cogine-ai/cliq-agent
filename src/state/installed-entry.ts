@@ -11,11 +11,13 @@ import { acquireInstalledAnchor, createInstalledRuntime, initializeInstalledKeep
   type HeldInstalledAnchor, type HeldInstalledKeeper, type HeldInstalledRuntime } from './installed-runtime.js';
 import { joinResourceOperations, KernelStorageError } from './errors.js';
 import { exactKeys } from '../policy/runtime-authority.js';
-import { openStateStore, type StateStore } from './store.js';
+import { decodeCredentialEnrollRequest, enrollCredentialAuthority, openStateStore,
+  type CredentialEnrollRequest, type StateStore } from './store.js';
+import { installServices } from './installed-services.js';
 
 // Hidden Linux SEA entry. Default CLI startup is unchanged. Release roots are
 // embedded at image construction, never selected by argv/environment/control.
-// Admission and execution are not enabled by this read-only composition.
+// Run admission and execution are not enabled by this composition.
 let selected: HeldInstalledRuntime | undefined;
 let store: StateStore | undefined;
 let service: InstalledControlService | undefined;
@@ -88,15 +90,20 @@ async function readEndpointRequest(): Promise<EndpointRequest> {
 /** Fixed secret-free metadata only. The canonical base64url envelope leaves
  * fd 0 unread, so committed replay can later decide before requesting a secret.
  * Never interpolate caller bytes into a diagnostic. */
-function readCredentialRequest(command: string | undefined): { schemaVersion: 1; kind: 'read'; credentialGrantId: string } {
+type CredentialRequest = { schemaVersion: 1; kind: 'read'; credentialGrantId: string }
+  | { schemaVersion: 1; kind: 'install_services' } | CredentialEnrollRequest;
+function readCredentialRequest(command: string | undefined): CredentialRequest {
   try {
     if (typeof command !== 'string' || !command.length || command.length > 87382 || !/^[A-Za-z0-9_-]+$/u.test(command))
       throw new TypeError('invalid credential metadata envelope');
     const bytes = Buffer.from(command, 'base64url');
     if (bytes.length > 65536 || bytes.toString('base64url') !== command) throw new TypeError('noncanonical credential metadata envelope');
     const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Record<string, unknown>;
-    if (!value || typeof value !== 'object' || Array.isArray(value) || !canonicalJsonBytes(value).equals(bytes) ||
-        !exactKeys(value, ['schemaVersion', 'kind', 'credentialGrantId']) || value.schemaVersion !== 1 || value.kind !== 'read' ||
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !canonicalJsonBytes(value).equals(bytes) || value.schemaVersion !== 1)
+      throw new TypeError('invalid credential metadata');
+    if (value.kind === 'install_services' && exactKeys(value, ['schemaVersion', 'kind'])) return value as { schemaVersion: 1; kind: 'install_services' };
+    if (value.kind === 'enroll') return decodeCredentialEnrollRequest(value);
+    if (!exactKeys(value, ['schemaVersion', 'kind', 'credentialGrantId']) || value.kind !== 'read' ||
         typeof value.credentialGrantId !== 'string' || !value.credentialGrantId || normalizeCanonicalText(value.credentialGrantId) !== value.credentialGrantId)
       throw new TypeError('invalid credential read metadata');
     return value as { schemaVersion: 1; kind: 'read'; credentialGrantId: string };
@@ -144,8 +151,10 @@ async function start(): Promise<void> {
   });
   if (mode === '--installed-credential') {
     const request = readCredentialRequest(process.argv[6]);
-    const response = await withCredentialAuthorityLock(selected, async token =>
-      ({ schemaVersion: 1, record: readCredentialAuthority(token, request.credentialGrantId) }));
+    const response = request.kind === 'install_services' ? { schemaVersion: 1, ...await installServices(selected) }
+      : request.kind === 'enroll' ? { schemaVersion: 1, operation: await enrollCredentialAuthority(selected, request) }
+      : await withCredentialAuthorityLock(selected, async token =>
+        ({ schemaVersion: 1, record: readCredentialAuthority(token, request.credentialGrantId) }));
     await close();
     console.log(canonicalJsonBytes(response).toString('utf8'));
     return;

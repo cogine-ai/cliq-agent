@@ -27,12 +27,10 @@ static int credential_no_arguments(napi_env env, napi_callback_info info, napi_v
   napi_value argument;
   return napi_get_cb_info(env, info, &count, &argument, self, NULL) == napi_ok && count == 0;
 }
-static credential_context *credential_unwrap_scope(napi_env env, napi_callback_info info) {
-  napi_value self;
+static credential_context *credential_scope_receiver(napi_env env, napi_value self) {
   bool tagged = false;
   credential_context *ctx = NULL;
-  if (!credential_no_arguments(env, info, &self) ||
-      napi_check_object_type_tag(env, self, &credential_scope_tag, &tagged) != napi_ok || !tagged ||
+  if (napi_check_object_type_tag(env, self, &credential_scope_tag, &tagged) != napi_ok || !tagged ||
       napi_unwrap(env, self, (void **)&ctx) != napi_ok || ctx == NULL ||
       !credential_owner_context(ctx) || env != ctx->owner_env) {
     credential_error(env, "ERR_CLIQ_CREDENTIAL_SCOPE", "invalid credential scope or owner context");
@@ -44,6 +42,14 @@ static credential_context *credential_unwrap_scope(napi_env env, napi_callback_i
   }
   return ctx;
 }
+static credential_context *credential_unwrap_scope(napi_env env, napi_callback_info info) {
+  napi_value self;
+  if (!credential_no_arguments(env, info, &self)) {
+    credential_error(env, "ERR_CLIQ_CREDENTIAL_SCOPE", "invalid credential scope arguments");
+    return NULL;
+  }
+  return credential_scope_receiver(env, self);
+}
 static napi_value credential_assert_scope(napi_env env, napi_callback_info info) {
   credential_context *ctx = credential_unwrap_scope(env, info);
   if (ctx == NULL) return NULL;
@@ -51,6 +57,64 @@ static napi_value credential_assert_scope(napi_env env, napi_callback_info info)
     return credential_error(env, "ERR_CLIQ_CREDENTIAL_SCOPE", "credential authority bindings changed or native resources are uncertain");
   napi_value result;
   return napi_get_undefined(env, &result) == napi_ok ? result : NULL;
+}
+/* Only the private business reader supplies a retained producer tuple. This
+ * observation never acquires StateOwner or infers death from /proc/PID/exe. */
+static napi_value credential_observe_producer(napi_env env, napi_callback_info info) {
+  size_t count = 4, length;
+  napi_value arguments[4], self, result;
+  double pid, uid;
+  char prior[128], first[128], second[128];
+  if (napi_get_cb_info(env, info, &count, arguments, &self, NULL) != napi_ok || count != 3)
+    return credential_error(env, "ERR_CLIQ_CREDENTIAL_PROCESS_IDENTITY", "invalid retained credential producer identity");
+  credential_context *ctx = credential_scope_receiver(env, self);
+  if (ctx == NULL) return NULL;
+  if (credential_check_bindings(ctx) != 0)
+    return credential_error(env, "ERR_CLIQ_CREDENTIAL_SCOPE", "credential producer observation requires its held scope");
+#ifdef __linux__
+  if (napi_get_value_double(env, arguments[0], &pid) != napi_ok || !(pid >= 1 && pid <= INT_MAX) || pid != (pid_t)pid ||
+      napi_get_value_double(env, arguments[1], &uid) != napi_ok || !(uid >= 0 && uid <= UINT_MAX) || uid != (uid_t)uid ||
+      (uid_t)uid != ctx->owner_uid || (uid_t)uid != ctx->identities[CREDENTIAL_ROOT].st_uid ||
+      napi_get_value_string_utf8(env, arguments[2], NULL, 0, &length) != napi_ok || length == 0 || length >= sizeof(prior) ||
+      napi_get_value_string_utf8(env, arguments[2], prior, sizeof(prior), &length) != napi_ok || strlen(prior) != length)
+    return credential_error(env, "ERR_CLIQ_CREDENTIAL_PROCESS_IDENTITY", "invalid retained credential producer identity");
+  static const char prefix[] = "linux-proc-start-ticks:";
+  if (length <= sizeof(prefix) - 1 || strncmp(prior, prefix, sizeof(prefix) - 1) != 0)
+    return credential_error(env, "ERR_CLIQ_CREDENTIAL_PROCESS_IDENTITY", "invalid retained credential producer start token");
+  char *end;
+  errno = 0;
+  unsigned long long ticks = strtoull(prior + sizeof(prefix) - 1, &end, 10);
+  if (errno != 0 || ticks == 0 || *end != '\0')
+    return credential_error(env, "ERR_CLIQ_CREDENTIAL_PROCESS_IDENTITY", "invalid retained credential producer start token");
+  snprintf(first, sizeof(first), "linux-proc-start-ticks:%llu", ticks);
+  if (strcmp(prior, first) != 0)
+    return credential_error(env, "ERR_CLIQ_CREDENTIAL_PROCESS_IDENTITY", "invalid retained credential producer start token");
+  int retirement_failed = 0;
+  int observed = observe_process_with_retirement((pid_t)pid, first, &retirement_failed);
+  if (retirement_failed) {
+    credential_poison(ctx);
+    return credential_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "credential producer observation descriptors did not retire");
+  }
+  if (observed < 0)
+    return credential_error(env, "ERR_CLIQ_CREDENTIAL_PROCESS_UNKNOWN", "credential producer lifetime observation is unavailable");
+  int present = observed == 1 && strcmp(prior, first) == 0;
+  if (!present) {
+    observed = observe_process_with_retirement((pid_t)pid, second, &retirement_failed);
+    if (retirement_failed) {
+      credential_poison(ctx);
+      return credential_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "credential producer observation descriptors did not retire");
+    }
+    if (observed < 0)
+      return credential_error(env, "ERR_CLIQ_CREDENTIAL_PROCESS_UNKNOWN", "credential producer lifetime observation is unavailable");
+    present = observed == 1 && strcmp(prior, second) == 0;
+  }
+  if (credential_check_bindings(ctx) != 0)
+    return credential_error(env, "ERR_CLIQ_CREDENTIAL_SCOPE", "credential producer observation scope changed");
+  return napi_create_string_utf8(env, present ? "present" : "dead", NAPI_AUTO_LENGTH, &result) == napi_ok ? result : NULL;
+#else
+  (void)pid; (void)uid; (void)length; (void)prior; (void)first; (void)second; (void)result;
+  return credential_error(env, "ERR_CLIQ_CREDENTIAL_PROCESS_UNKNOWN", "credential producer observation requires Linux");
+#endif
 }
 static void credential_finalize_scope(napi_env env, void *data, void *hint) {
   (void)env; (void)hint;
@@ -187,6 +251,7 @@ static napi_value acquire_credential_scope(napi_env env, napi_callback_info info
   int text_length = snprintf(text, sizeof(text), "%ju:%ju", (uintmax_t)ctx->owner_pid, (uintmax_t)ctx->generation);
   const napi_property_descriptor methods[] = {
     {"assertHeld", NULL, credential_assert_scope, NULL, NULL, NULL, napi_default, NULL},
+    {"observeProducerLifetime", NULL, credential_observe_producer, NULL, NULL, NULL, napi_default, NULL},
     {"close", NULL, credential_close_scope, NULL, NULL, NULL, napi_default, NULL}
   };
   error = "credential token construction failed";

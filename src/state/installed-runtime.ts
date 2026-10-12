@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { constants, type BigIntStats } from 'node:fs';
+import { constants, fstatSync, lstatSync, type BigIntStats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, type FileHandle } from 'node:fs/promises';
 import { isMainThread } from 'node:worker_threads';
 import { Module } from 'node:module';
@@ -19,9 +19,11 @@ import { decodeControlChannel, decodeLocalPrincipalIdentity, decodePlatformProce
 import { checkCanonicalBytes, validateBundle, validateTrustStore } from './installed-artifacts.js';
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
 import type { NativeWorkerBinding, NativeWorkerImage } from '../sandbox/linux-worker.js';
+import type { NativeCredentialPlatformBinding } from './credential-platform.js';
 import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
   stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
+import { openHeldInstalledControlClient, type HeldInstalledControlClient } from './native-owner.js';
 
 export type HeldInstalledRuntime = Readonly<{
   bundle: RuntimeBundleManifest;
@@ -45,7 +47,9 @@ export type InstalledCredentialProvenance = Readonly<{
   objects: ReadonlyMap<string, Buffer>; releaseKeys: readonly ReleaseTrustKey[];
 }>;
 type CredentialPhysicalBinding = { native: NativeStateOwner;
-  scope: Readonly<{ generation: string; assertHeld(): void }>;
+  scope: Readonly<{ generation: string; assertHeld(): void;
+    observeProducerLifetime(pid: number, ownerUid: number, processStartToken: string): 'present' | 'dead' }>;
+  assertSelection(): void;
   pid: number; processStartToken: string; generation: string; active: boolean;
   provenance: InstalledCredentialProvenance };
 const credentialPhysicalScopes = new WeakMap<InstalledCredentialScope, CredentialPhysicalBinding>();
@@ -56,6 +60,7 @@ function checkedCredentialPhysicalScope(physical: InstalledCredentialScope): Cre
   if (held.pid !== process.pid || held.native.processStartToken() !== held.processStartToken || held.scope.generation !== held.generation)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'credential authority scope belongs to another process or generation');
   held.scope.assertHeld();
+  held.assertSelection();
   return held;
 }
 /** Genuine-brand-first friend operations; neither returns a descriptor/native
@@ -65,6 +70,25 @@ export function assertInstalledCredentialScope(physical: InstalledCredentialScop
 }
 export function installedCredentialProvenance(physical: InstalledCredentialScope): InstalledCredentialProvenance {
   return checkedCredentialPhysicalScope(physical).provenance;
+}
+/** Ordinary recovery only. Retained lifetime input is read by the private
+ * business owner; missing executable paths or caller PIDs never prove death. */
+export function observeInstalledCredentialProducer(physical: InstalledCredentialScope,
+  processIdentity: PlatformProcessIdentityV1): 'present' | 'dead' {
+  const binding = checkedCredentialPhysicalScope(physical);
+  if (processIdentity.platform !== 'linux' || processIdentity.ownerUid !== binding.provenance.rootIdentity.ownerUid)
+    mismatch('credential producer lifetime does not belong to this root');
+  try {
+    const result = binding.scope.observeProducerLifetime(processIdentity.pid, processIdentity.ownerUid, processIdentity.processStartToken);
+    checkedCredentialPhysicalScope(physical);
+    return result;
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+      const failure = new ResourceRetirementError('credential producer observation resources did not retire', error);
+      rememberRetirement(failure); throw failure;
+    }
+    throw error;
+  }
 }
 
 export { commitEndpointAuthority, readEndpointAuthority, readCredentialAuthority } from './store.js';
@@ -89,6 +113,8 @@ type InstalledRuntimeBinding = {
   initializeKeeper(): Promise<HeldInstalledKeeper>;
   acquireAnchor(): Promise<HeldInstalledAnchor>;
   loadWorkerNative(): Promise<NativeWorkerBinding>;
+  loadCredentialPlatform(): Promise<NativeCredentialPlatformBinding>;
+  openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
   credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T>;
 };
@@ -113,6 +139,18 @@ export function loadInstalledWorkerNative(selected: HeldInstalledRuntime): Promi
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('installed runtime is not a verified held selection');
   return binding.loadWorkerNative();
+}
+/** These two fixed friends carry no StateOwner/credential lock. The selected
+ * producer supplies and retains the actual signed image/root descriptors. */
+export function loadInstalledCredentialPlatform(selected: HeldInstalledRuntime): Promise<NativeCredentialPlatformBinding> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('installed runtime is not a verified held selection');
+  return binding.loadCredentialPlatform();
+}
+export function openInstalledControlClient(selected: HeldInstalledRuntime): Promise<HeldInstalledControlClient> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('installed runtime is not a verified held selection');
+  return binding.openControlClient();
 }
 export function sealInstalledWorkerImage(selected: HeldInstalledRuntime, entryId: string): Promise<NativeWorkerImage> {
   const binding = heldInstalledRuntimes.get(selected);
@@ -250,6 +288,20 @@ class Scope {
   async assertDirectories(): Promise<void> {
     healthy();
     for (const directory of this.directories) await this.assertDirectory(directory);
+  }
+  assertMetadata(files: readonly InstalledFile[]): void {
+    healthy();
+    for (const directory of this.directories) {
+      const held = fstatSync(directory.handle.fd, { bigint: true });
+      const named = lstatSync(directory.parent ? childPath(directory.parent, directory.name) : '/', { bigint: true });
+      checkDirectory(held, directory.private); checkDirectory(named, directory.private);
+      if (!sameDirectory(directory.info, held) || !sameDirectory(held, named)) mismatch('installed runtime directory changed');
+    }
+    for (const file of files) {
+      const held = fstatSync(file.handle.fd, { bigint: true });
+      const named = lstatSync(childPath(file.parent, file.name), { bigint: true });
+      if (!sameFile(file.info, held) || !sameFile(held, named)) mismatch('installed runtime signed file metadata changed');
+    }
   }
   async directory(parent: Directory, name: string, create = false): Promise<Directory> {
     await this.assertDirectory(parent);
@@ -553,6 +605,13 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         let tail = Promise.resolve();
         let closePromise: Promise<void> | undefined;
         let workerNative: NativeWorkerBinding | undefined;
+        let credentialPlatform: NativeCredentialPlatformBinding | undefined;
+        const platformJobs = new Set<Promise<unknown>>();
+        const assertSelection = () => {
+          if (poisoned !== undefined) throw poisoned;
+          try { scope.assertMetadata([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]); }
+          catch (error) { rememberRetirement(error); poisoned = error; throw error; }
+        };
         const revalidate = async () => {
           healthy(); await scope.assertDirectories();
           for (const file of [active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]) await verifyBytes(file);
@@ -609,7 +668,10 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           close(this: HeldInstalledRuntime): Promise<void> {
             if (this !== selected) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime handle receiver is not its held instance'));
             closed = true;
-            return closePromise ??= tail.then(() => scope.close());
+            return closePromise ??= tail.then(async () => {
+              await joinResourceOperations([...platformJobs]);
+              await scope.close();
+            });
           },
         });
         heldInstalledRuntimes.set(selected, {
@@ -671,7 +733,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   if (this !== physical) throw new TypeError('invalid installed credential physical scope receiver');
                   assertInstalledCredentialScope(physical);
                 } });
-                const binding: CredentialPhysicalBinding = { native, scope: credential, pid: process.pid,
+                const binding: CredentialPhysicalBinding = { native, scope: credential, assertSelection, pid: process.pid,
                   processStartToken: native.processStartToken(), generation: credential.generation, active: true,
                   provenance: Object.freeze({ selected, ownerPrincipalId, rootIdentity, processIdentity,
                     principalIdentity, channelIdentity, objects, releaseKeys }) };
@@ -702,6 +764,72 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
               await checkedRevalidate();
               return workerNative;
+            });
+          },
+          loadCredentialPlatform() {
+            return enqueue(async () => {
+              if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'credential platform requires the fixed signed Linux backend');
+              await checkedRevalidate();
+              if (!credentialPlatform) {
+                const entry = signed.bundle.entries.find(value => value.entryId === 'linux_credential_platform');
+                const file = signed.entries.get('linux_credential_platform');
+                if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
+                    entry.relativePath !== 'native/linux-x64/linux-credential-platform.node')
+                  mismatch('fixed signed credential platform module is missing');
+                const loaded = new Module('cliq-installed-linux-credential-platform');
+                process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+                const native = loaded.exports as NativeCredentialPlatformBinding;
+                if (native.interfaceVersion !== 1 || typeof native.secretService !== 'function' || typeof native.userManager !== 'function' ||
+                    typeof native.currentUser !== 'function')
+                  mismatch('unsupported installed credential platform interface');
+                const invoke = <T>(operation: () => Promise<T>): Promise<T> => {
+                  if (closed) mismatch('installed runtime handle is closed');
+                  assertSelection();
+                  const job = Promise.resolve().then(operation).then(result => { assertSelection(); return result; }, error => {
+                    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                      const failure = new ResourceRetirementError('credential platform resources did not retire', error);
+                      rememberRetirement(failure); throw failure;
+                    }
+                    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential platform rejected an operation');
+                  });
+                  platformJobs.add(job);
+                  void job.finally(() => platformJobs.delete(job)).catch(() => {});
+                  return job;
+                };
+                credentialPlatform = Object.freeze({ interfaceVersion: 1 as const,
+                  secretService: input => invoke(() => native.secretService(input)),
+                  userManager: input => invoke(() => native.userManager(input)),
+                  currentUser: () => {
+                    assertSelection();
+                    try { const user = native.currentUser(); assertSelection(); return user; }
+                    catch (error) {
+                      if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                        const failure = new ResourceRetirementError('credential platform resources did not retire', error);
+                        rememberRetirement(failure); throw failure;
+                      }
+                      throw error;
+                    }
+                  } });
+              }
+              await checkedRevalidate();
+              return credentialPlatform;
+            });
+          },
+          openControlClient() {
+            return enqueue(async () => {
+              const native = await loadSelectedNative();
+              const image = signed.entries.get(supervisor.entryId)!;
+              const client = openHeldInstalledControlClient(native, { root: state.handle, rootIdentity: state.info,
+                stateRoot, image: image.handle, imageIdentity: image.info });
+              try { await checkedRevalidate(); client.assertHeld(); return client; }
+              catch (error) {
+                try { client.close(); } catch (failure) {
+                  const retirement = new ResourceRetirementError('installed control client did not retire', new AggregateError([error, failure]));
+                  rememberRetirement(retirement); throw retirement;
+                }
+                throw error;
+              }
             });
           },
           sealWorkerImage(entryId) {
