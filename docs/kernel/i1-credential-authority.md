@@ -116,11 +116,15 @@ Identity, channel, subject, core hashes and platform selectors are producer-owne
   be revoked without aborting or deleting that producer's pending item.
 - `{schemaVersion:1,kind:'cleanup',requestId}` names an existing enroll, rotate
   or revoke request, never a new cleanup identity. It returns that operation
-  envelope after the owning cleanup phase. Live/unknown producers refuse;
+  envelope after the owning cleanup phase. Live/unknown pending producers refuse;
   current latest active items remain protected. Aborted and superseded items
   use their exact creating-operation selectors, and absence/deletion reflects
   only the fresh observed cut, not a promise that a late remote create can
   never arrive. No cleanup ledger hides these known items from later sweeps.
+  Ordinary completed revoke replay returns its exact retained receipt without
+  platform access. Explicit cleanup still sweeps the known item; success returns
+  that unchanged completed receipt, while a failed fresh sweep returns a closed
+  error rather than rewriting historical completion.
 
 Ordinary auth does not install/reload/repair units. Missing profiles or drift
 produce remediation; a successful manager job/socket existence alone is not
@@ -147,9 +151,11 @@ authority time or a guarantee about a stalled main loop.
    endpoint's owner/purpose/ref/identity/TLS and current credential history.
    The pre-input read is not the final race gate.
 3. Generate the opaque 256-bit subject candidate **before** core hashing, then
-   freeze the complete secret-free core and first authenticated channel.
-   Its bytes/observedAt remain unchanged for the same uncommitted core and
-   contiguous attempts 1..3; only one committed generation can acquire it.
+   freeze the complete secret-free core. Its bytes/subject observedAt and
+   intended revision/generation remain unchanged across contiguous attempts
+   1..3; only one committed generation can acquire it. Each attempt freezes its
+   own first authenticated channel and producer lifetime: a fresh attempt never
+   adopts the dead earlier producer's channel or rewrites its retained facts.
    Resubmitted uncommitted secrets are latest-secret-wins, not compared to
    abandoned bytes. If a competing rotation changes the intended revision or
    generation, refuse the old request rather than repurposing its candidate;

@@ -12,7 +12,8 @@ import { acquireInstalledAnchor, createInstalledRuntime, initializeInstalledKeep
 import { joinResourceOperations, KernelStorageError } from './errors.js';
 import { exactKeys } from '../policy/runtime-authority.js';
 import { decodeCredentialWriteRequest, writeCredentialAuthority, decodeCredentialRevokeRequest, revokeCredentialAuthority, openStateStore,
-  type CredentialWriteRequest, type CredentialRevokeRequest, type StateStore } from './store.js';
+  decodeCredentialCleanupRequest, cleanupCredentialAuthority,
+  type CredentialWriteRequest, type CredentialRevokeRequest, type CredentialCleanupRequest, type StateStore } from './store.js';
 import { installServices } from './installed-services.js';
 
 // Hidden Linux SEA entry. Default CLI startup is unchanged. Release roots are
@@ -91,7 +92,7 @@ async function readEndpointRequest(): Promise<EndpointRequest> {
  * fd 0 unread, so committed replay can later decide before requesting a secret.
  * Never interpolate caller bytes into a diagnostic. */
 type CredentialRequest = { schemaVersion: 1; kind: 'read'; credentialGrantId: string }
-  | { schemaVersion: 1; kind: 'install_services' } | CredentialWriteRequest | CredentialRevokeRequest;
+  | { schemaVersion: 1; kind: 'install_services' } | CredentialWriteRequest | CredentialRevokeRequest | CredentialCleanupRequest;
 function readCredentialRequest(command: string | undefined): CredentialRequest {
   try {
     if (typeof command !== 'string' || !command.length || command.length > 87382 || !/^[A-Za-z0-9_-]+$/u.test(command))
@@ -104,6 +105,7 @@ function readCredentialRequest(command: string | undefined): CredentialRequest {
     if (value.kind === 'install_services' && exactKeys(value, ['schemaVersion', 'kind'])) return value as { schemaVersion: 1; kind: 'install_services' };
     if (value.kind === 'enroll' || value.kind === 'rotate') return decodeCredentialWriteRequest(value);
     if (value.kind === 'revoke') return decodeCredentialRevokeRequest(value);
+    if (value.kind === 'cleanup') return decodeCredentialCleanupRequest(value);
     if (!exactKeys(value, ['schemaVersion', 'kind', 'credentialGrantId']) || value.kind !== 'read' ||
         typeof value.credentialGrantId !== 'string' || !value.credentialGrantId || normalizeCanonicalText(value.credentialGrantId) !== value.credentialGrantId)
       throw new TypeError('invalid credential read metadata');
@@ -155,6 +157,7 @@ async function start(): Promise<void> {
     const response = request.kind === 'install_services' ? { schemaVersion: 1, ...await installServices(selected) }
       : request.kind === 'enroll' || request.kind === 'rotate' ? { schemaVersion: 1, operation: await writeCredentialAuthority(selected, request) }
       : request.kind === 'revoke' ? { schemaVersion: 1, operation: await revokeCredentialAuthority(selected, request) }
+      : request.kind === 'cleanup' ? { schemaVersion: 1, operation: await cleanupCredentialAuthority(selected, request) }
       : await withCredentialAuthorityLock(selected, async token =>
         ({ schemaVersion: 1, record: readCredentialAuthority(token, request.credentialGrantId) }));
     await close();

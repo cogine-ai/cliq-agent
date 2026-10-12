@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { decodeCredentialWriteRequest, type CredentialWriteRequest } from './store.js';
 import { decodeCredentialRevokeRequest, type CredentialRevokeRequest } from './store.js';
+import { decodeCredentialCleanupRequest, type CredentialCleanupRequest } from './store.js';
 
 // Shape-only metadata examples: neither decoding nor these values establishes
 // installed authentication, producer lifetime, platform storage or authority.
@@ -155,4 +156,41 @@ test('credential revoke metadata is copied and frozen without retaining or freez
   assert.throws(() => { (retained as { credentialGrantId: string }).credentialGrantId = 'changed'; }, TypeError);
   assert.throws(() => Object.defineProperty(retained, 'unknown', { value: true }), TypeError);
   assert.deepEqual(retained, expected);
+});
+
+const cleanup = { schemaVersion: 1, kind: 'cleanup', requestId: enroll.requestId } satisfies CredentialCleanupRequest;
+
+test('credential cleanup names only an existing request, not a new authority or item', () => {
+  for (const value of [cleanup, Object.assign(Object.create(null), cleanup)])
+    assert.deepEqual(decodeCredentialCleanupRequest(value), cleanup);
+  for (const key of Object.keys(cleanup)) {
+    const missing: Record<string, unknown> = { ...cleanup }; delete missing[key];
+    assert.throws(() => decodeCredentialCleanupRequest(missing), TypeError);
+  }
+  for (const key of ['credentialGrantId', 'expectedAuthorityRevision', 'secretSubmissionId', 'ownerPrincipalId',
+    'platformItem', 'selector', 'pid', 'commandCore', 'cleanupPhase', 'secret', 'unknown'])
+    assert.throws(() => decodeCredentialCleanupRequest({ ...cleanup, [key]: 'not-authority' }), TypeError);
+  assert.throws(() => decodeCredentialCleanupRequest({ ...cleanup, [Symbol('unknown')]: true }), TypeError);
+  assert.throws(() => decodeCredentialCleanupRequest(Object.defineProperty({ ...cleanup }, 'unknown', { value: true })), TypeError);
+});
+
+test('credential cleanup rejects non-object, schema drift and noncanonical request identities', () => {
+  for (const value of [undefined, null, false, 1, 'cleanup', [], new Date(), Object.create(cleanup)])
+    assert.throws(() => decodeCredentialCleanupRequest(value), TypeError);
+  for (const schemaVersion of [undefined, null, '1', 0, 2])
+    assert.throws(() => decodeCredentialCleanupRequest({ ...cleanup, schemaVersion }), TypeError);
+  for (const kind of [undefined, null, 'read', 'enroll', 'rotate', 'revoke', 'CLEANUP'])
+    assert.throws(() => decodeCredentialCleanupRequest({ ...cleanup, kind }), TypeError);
+  for (const requestId of [undefined, null, 1, '', 'nul\0id', 'e\u0301', '\ud800', 'é'.repeat(129),
+    '019a0012-0000-4000-8000-0000000000af', '019a0012-0000-7000-c000-0000000000af',
+    '019A0012-0000-7000-8000-0000000000AF', 'not-a-uuid'])
+    assert.throws(() => decodeCredentialCleanupRequest({ ...cleanup, requestId }), TypeError);
+});
+
+test('credential cleanup retains a detached immutable metadata copy', () => {
+  const caller: Record<string, unknown> = { ...cleanup }, retained = decodeCredentialCleanupRequest(caller);
+  assert.notEqual(retained, caller); assert.equal(Object.isFrozen(caller), false);
+  caller.requestId = rotate.requestId; caller.kind = 'rotate';
+  assert.deepEqual(retained, cleanup); assert.equal(Object.isFrozen(retained), true);
+  assert.throws(() => { (retained as { requestId: string }).requestId = rotate.requestId; }, TypeError);
 });

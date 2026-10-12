@@ -62,7 +62,7 @@ import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { assertInstalledCredentialScope, installedCredentialProvenance,
+import { assertInstalledCredentialScope, installedCredentialProvenance, observeInstalledCredentialProducer,
   type InstalledCredentialScope, type InstalledCredentialProvenance,
   withHeldInstalledRuntime, withInstalledWorkerRoot, type HeldInstalledAnchor,
   type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
@@ -220,6 +220,17 @@ export function decodeCredentialRevokeRequest(input: unknown): CredentialRevokeR
   if (!Number.isSafeInteger(value.expectedAuthorityRevision) || (value.expectedAuthorityRevision as number) < 1)
     throw new TypeError('invalid credential expected revision');
   return immutableSnapshot(value as CredentialRevokeRequest);
+}
+
+export type CredentialCleanupRequest = Readonly<{ schemaVersion: 1; kind: 'cleanup'; requestId: string }>;
+export function decodeCredentialCleanupRequest(input: unknown): CredentialCleanupRequest {
+  const value = input as Record<string, unknown>, keys = ['schemaVersion', 'kind', 'requestId'];
+  if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
+      Reflect.ownKeys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key)) || value.schemaVersion !== 1 || value.kind !== 'cleanup' ||
+      typeof value.requestId !== 'string' || !value.requestId || normalizeCanonicalText(value.requestId) !== value.requestId ||
+      Buffer.byteLength(value.requestId) > 256) throw new TypeError('invalid credential cleanup metadata');
+  assertRequestId(value.requestId);
+  return immutableSnapshot(value as CredentialCleanupRequest);
 }
 
 type CredentialFact = { operation: CredentialAuthorityOperationV1; observation?: SecretServiceObservation };
@@ -448,7 +459,7 @@ function readCredentialHistory(held: CredentialBinding, grantId: string, resultR
     throw new TypeError('credential committed operation has no authority result');
   return { latest, result, creating };
 }
-function checkCredentialReplay(held: CredentialBinding, request: CredentialWriteRequest): CredentialAuthorityOperationV1 | undefined {
+function readCredentialWriteOperation(held: CredentialBinding, request: CredentialWriteRequest): CredentialAuthorityOperationV1 | undefined {
   ensureEndpointSchema(held.database!);
   if (credentialSchemaVersion(held.database!) === 1) return undefined;
   if (held.database!.prepare('SELECT 1 FROM credential_revoke_operations WHERE owner_principal_id=? AND request_id=?').get(held.ownerPrincipalId, request.requestId))
@@ -473,11 +484,8 @@ function checkCredentialReplay(held: CredentialBinding, request: CredentialWrite
   if (operation.phase === 'committed') {
     const history = readCredentialHistory(held, operation.credentialGrantId, operation.committedAuthorityRevision);
     if (!history.result) throw new TypeError('credential replay has no historical result');
-    return immutableSnapshot(operation);
   }
-  // First enrollment tracer does not yet qualify recovery. A pending fact is
-  // never promoted or spent by a read or a replacement producer.
-  throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential request requires independent orphan recovery');
+  return immutableSnapshot(operation);
 }
 function appendCredentialFact(held: CredentialBinding, operation: CredentialAuthorityOperationV1, observation?: SecretServiceObservation): void {
   const bytes = canonicalJsonBytes(operation);
@@ -543,35 +551,128 @@ function credentialWriteIntent(held: CredentialBinding, request: CredentialWrite
         endpoint.registration.endpointIdentityDigest !== previous.endpointIdentityDigest || endpoint.registration.tlsPolicyDigest !== previous.tlsPolicyDigest)))
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential requires a current active endpoint of its purpose');
   const pending = credentialSchemaVersion(held.database!) !== 1 && held.database!.prepare(`SELECT 1 FROM credential_operation_facts AS f WHERE owner_principal_id=?
-    AND credential_grant_id=? AND phase_rank=0 AND NOT EXISTS(SELECT 1 FROM credential_operation_facts AS t
+    AND credential_grant_id=? AND request_id<>? AND phase_rank=0 AND NOT EXISTS(SELECT 1 FROM credential_operation_facts AS t
       WHERE t.owner_principal_id=f.owner_principal_id AND t.request_id=f.request_id AND t.attempt=f.attempt AND t.phase_rank=2) LIMIT 1`)
-    .get(held.ownerPrincipalId, request.credentialGrantId);
+    .get(held.ownerPrincipalId, request.credentialGrantId, request.requestId);
   if (pending) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential has a pending producer');
   return { previous, endpoint, purpose, expiresAt: request.expiresAt ?? (request.kind === 'rotate' ? previous!.expiresAt : undefined) };
 }
+
+function credentialWriteAttempts(held: CredentialBinding, requestId: string): CredentialAuthorityOperationV1[] {
+  const facts = readCredentialFacts(held, requestId);
+  return facts.filter((fact, index) => fact.operation.attempt !== facts[index + 1]?.operation.attempt).map(fact => fact.operation);
+}
+function assertCredentialPendingDead(held: CredentialBinding, attempts: readonly CredentialAuthorityOperationV1[]): void {
+  for (const operation of attempts) {
+    if (operation.phase !== 'prepared' && operation.phase !== 'secret_stored') continue;
+    const original = retainedCredentialChannel(held, operation);
+    let observed: 'present' | 'dead';
+    try { observed = observeInstalledCredentialProducer(held.physical, original.processIdentity); }
+    catch (error) {
+      if (error instanceof ResourceRetirementError) throw error;
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'credential pending producer lifetime is unknown', { cause: error });
+    }
+    if (observed !== 'dead') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential pending producer is still present');
+  }
+}
+function credentialFrozenWriteIntent(operation: CredentialAuthorityOperationV1,
+  intent: ReturnType<typeof credentialWriteIntent>): void {
+  const core = operation.commandCore;
+  if (operation.intendedAuthorityRevision !== (intent.previous?.authorityRevision ?? 0) + 1 ||
+      operation.intendedSecretGeneration !== (intent.previous?.secretGeneration ?? 0) + 1 ||
+      core.purpose !== intent.purpose || core.endpointRegistrationRef !== intent.endpoint.expectedRegistrationArtifactRef ||
+      core.endpointIdentityDigest !== intent.endpoint.registration.endpointIdentityDigest ||
+      core.tlsPolicyDigest !== intent.endpoint.registration.tlsPolicyDigest || core.expiresAt !== intent.expiresAt)
+    throw new KernelStorageError('REVISION_CONFLICT', 'credential frozen request no longer names its intended revision or generation');
+}
+/** Classification never writes a phase or touches the platform. A terminal
+ * third abort refuses before input, service readiness or platform loading. */
+function credentialWriteContinuation(held: CredentialBinding, request: CredentialWriteRequest): CredentialAuthorityOperationV1 | undefined {
+  const operation = readCredentialWriteOperation(held, request);
+  if (operation?.phase === 'committed') return operation;
+  if (operation?.phase === 'aborted' && operation.attempt === 3)
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential request exhausted its three attempts; a new request id is required');
+  const intent = credentialWriteIntent(held, request);
+  if (operation) {
+    credentialFrozenWriteIntent(operation, intent);
+    assertCredentialPendingDead(held, credentialWriteAttempts(held, request.requestId));
+  }
+  return operation;
+}
+function credentialWriteCleanupState(held: CredentialBinding, requestId: string) {
+  const attempts = credentialWriteAttempts(held, requestId), operation = attempts.at(-1);
+  if (!operation) throw new KernelStorageError('NOT_FOUND', 'credential cleanup request has no retained operation');
+  const history = readCredentialHistory(held, operation.credentialGrantId,
+    operation.phase === 'committed' ? operation.committedAuthorityRevision : undefined);
+  if (operation.phase === 'committed' && !history.result) throw new TypeError('credential cleanup committed result is absent');
+  assertCredentialPendingDead(held, attempts);
+  const items = attempts.filter(candidate => !(history.latest?.state === 'active' &&
+    canonicalJsonBytes(history.latest.platformItem).equals(canonicalJsonBytes(candidate.platformItem))));
+  if ((operation.phase === 'prepared' || operation.phase === 'secret_stored') && !items.includes(operation))
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'credential pending item is protected by current active authority');
+  if (!items.length) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential cleanup cannot delete a current active item');
+  return { operation, items };
+}
+/** Every sweep revisits the retained planned items, even terminal aborts.
+ * Positive absence is this cut only; it cannot hide a later remote create. */
+async function cleanupCredentialWriteRequest(held: CredentialBinding, requestId: string,
+  platform: NativeCredentialPlatformBinding): Promise<CredentialAuthorityOperationV1> {
+  const { operation, items } = credentialWriteCleanupState(held, requestId);
+  for (const candidate of items) {
+    const selector = credentialSelector(held, candidate);
+    try {
+      const observed = decodeSecretServiceObservation(await platform.secretService({ kind: 'delete_known', selector }));
+      if (!['deleted', 'absent'].includes(observed.kind) || observed.bus.uid !== held.rootIdentity.ownerUid ||
+          !canonicalJsonBytes(observed.selector).equals(canonicalJsonBytes(selector))) throw new TypeError('credential orphan deletion observation differs');
+      assertInstalledCredentialScope(held.physical);
+    } catch (error) {
+      if (error instanceof ResourceRetirementError) throw error;
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'credential known-item cleanup did not prove absence or deletion', { cause: error });
+    }
+  }
+  if (operation.phase !== 'prepared' && operation.phase !== 'secret_stored') return immutableSnapshot(operation);
+  const finishedAt = encodeCanonicalTime(Math.max(Date.now(), parseCanonicalTime(operation.createdAt),
+    parseCanonicalTime(held.channelIdentity.openedAt)));
+  const aborted = credentialTransition(operation, 'aborted', { abortReason: 'recovered_orphan', finishedAt });
+  endpointTransaction(held.database!, () => {
+    appendCredentialFact(held, aborted);
+    const result = readCredentialFacts(held, requestId).at(-1)?.operation;
+    if (!result || !canonicalJsonBytes(result).equals(canonicalJsonBytes(aborted))) throw new TypeError('credential orphan abort readback differs');
+    assertInstalledCredentialScope(held.physical);
+  });
+  return immutableSnapshot(aborted);
+}
+
 function prepareCredentialWrite(held: CredentialBinding, request: CredentialWriteRequest): CredentialAuthorityOperationV1 {
   ensureCredentialSchema(held.database!);
-  if (checkCredentialReplay(held, request)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential already committed during preparation');
-  const { previous, endpoint, purpose, expiresAt } = credentialWriteIntent(held, request);
+  const prior = readCredentialWriteOperation(held, request);
+  if (prior && (prior.phase !== 'aborted' || prior.attempt === 3))
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential preparation requires a fresh request or recoverable terminal abort');
+  const intent = credentialWriteIntent(held, request), { previous, endpoint, purpose, expiresAt } = intent;
+  if (prior) credentialFrozenWriteIntent(prior, intent);
   const now = sampleCanonicalNow();
-  if ([endpoint.createdAt, held.channelIdentity.openedAt, ...(previous ? [previous.createdAt] : [])].some(time => parseCanonicalTime(time) > parseCanonicalTime(now)) ||
+  if ([endpoint.createdAt, held.channelIdentity.openedAt, ...(previous ? [previous.createdAt] : []),
+    ...(prior ? [prior.finishedAt!, prior.commandCore.externalSubject.observedAt] : [])].some(time => parseCanonicalTime(time) > parseCanonicalTime(now)) ||
       (expiresAt && parseCanonicalTime(expiresAt) <= parseCanonicalTime(now)))
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential preparation time or expiry is invalid');
-  const subjectBody = { schemaVersion: 1 as const, format: 'cliq-credential-external-subject-v1' as const,
-    endpointIdentityDigest: endpoint.registration.endpointIdentityDigest,
-    subject: { kind: 'opaque_generation' as const, opaqueSubjectId: randomBytes(32).toString('base64url'),
-      scopes: ['endpoint_exact_only'] as ['endpoint_exact_only'], audiences: [] as [] }, observedAt: now };
-  const externalSubject = { ...subjectBody, subjectDigest: canonicalSha256(subjectBody) };
-  const target = { credentialGrantId: request.credentialGrantId, ownerPrincipalId: held.ownerPrincipalId, purpose,
-    endpointRegistrationRef: endpoint.expectedRegistrationArtifactRef, endpointIdentityDigest: endpoint.registration.endpointIdentityDigest,
-    tlsPolicyDigest: endpoint.registration.tlsPolicyDigest, ...(expiresAt ? { expiresAt } : {}),
-    externalSubjectDigest: externalSubject.subjectDigest };
-  const coreBody = { schemaVersion: 1 as const, ...target, kind: request.kind, secretSubmissionId: request.secretSubmissionId,
-    externalSubject, credentialTargetDigest: canonicalSha256(target) };
-  const core = decodeCredentialAuthorityCommandCore({ ...coreBody, commandDigest: canonicalSha256(coreBody) });
-  const operationBody = { schemaVersion: 1 as const, operationId: identityHash(held.ownerPrincipalId, request.requestId, core.commandDigest, 1),
+  const core = prior?.commandCore ?? (() => {
+    const subjectBody = { schemaVersion: 1 as const, format: 'cliq-credential-external-subject-v1' as const,
+      endpointIdentityDigest: endpoint.registration.endpointIdentityDigest,
+      subject: { kind: 'opaque_generation' as const, opaqueSubjectId: randomBytes(32).toString('base64url'),
+        scopes: ['endpoint_exact_only'] as ['endpoint_exact_only'], audiences: [] as [] }, observedAt: now };
+    const externalSubject = { ...subjectBody, subjectDigest: canonicalSha256(subjectBody) };
+    const target = { credentialGrantId: request.credentialGrantId, ownerPrincipalId: held.ownerPrincipalId, purpose,
+      endpointRegistrationRef: endpoint.expectedRegistrationArtifactRef, endpointIdentityDigest: endpoint.registration.endpointIdentityDigest,
+      tlsPolicyDigest: endpoint.registration.tlsPolicyDigest, ...(expiresAt ? { expiresAt } : {}),
+      externalSubjectDigest: externalSubject.subjectDigest };
+    const coreBody = { schemaVersion: 1 as const, ...target, kind: request.kind, secretSubmissionId: request.secretSubmissionId,
+      externalSubject, credentialTargetDigest: canonicalSha256(target) };
+    return decodeCredentialAuthorityCommandCore({ ...coreBody, commandDigest: canonicalSha256(coreBody) });
+  })();
+  const attempt = (prior?.attempt ?? 0) + 1 as 1 | 2 | 3;
+  const operationBody = { schemaVersion: 1 as const, operationId: identityHash(held.ownerPrincipalId, request.requestId, core.commandDigest, attempt),
     requestId: request.requestId, requestDigest: core.commandDigest, channelIdentityRef: canonicalSha256(held.channelIdentity),
-    channelIdentityDigest: held.channelIdentity.channelIdentityDigest, commandCore: core, attempt: 1 as const, ownerPrincipalId: held.ownerPrincipalId,
+    channelIdentityDigest: held.channelIdentity.channelIdentityDigest, commandCore: core, attempt, ownerPrincipalId: held.ownerPrincipalId,
     kind: core.kind, credentialGrantId: core.credentialGrantId, credentialTargetDigest: core.credentialTargetDigest,
     intendedAuthorityRevision: (previous?.authorityRevision ?? 0) + 1, intendedSecretGeneration: (previous?.secretGeneration ?? 0) + 1,
     intendedExternalSubjectDigest: core.externalSubjectDigest,
@@ -587,7 +688,7 @@ function prepareCredentialWrite(held: CredentialBinding, request: CredentialWrit
   return operation;
 }
 function credentialTransition(operation: CredentialAuthorityOperationV1, phase: 'secret_stored' | 'committed' | 'aborted',
-  fields: { committedAuthorityRevision?: number; abortReason?: 'platform_store_failed'; finishedAt?: string } = {}): CredentialAuthorityOperationV1 {
+  fields: { committedAuthorityRevision?: number; abortReason?: 'platform_store_failed' | 'recovered_orphan'; finishedAt?: string } = {}): CredentialAuthorityOperationV1 {
   const { operationDigest: _digest, ...original } = operation;
   const body = { ...original, phase, ...fields };
   return decodeCredentialAuthorityOperation({ ...body, operationDigest: canonicalSha256(body) });
@@ -609,13 +710,25 @@ async function readCredentialSecret(): Promise<Buffer> {
 /** Complete fixed installed business action. Input and phase writers are owned
  * here, not exposed as injectable callbacks/factories or public phase methods. */
 export async function writeCredentialAuthority(selected: HeldInstalledRuntime, request: CredentialWriteRequest): Promise<CredentialAuthorityOperationV1> {
-  const replay = await withCredentialAuthorityLock(selected, async token => {
+  const initial = await withCredentialAuthorityLock(selected, async token => {
     const held = checkedCredentialToken(token); request = decodeCredentialWriteRequest(request);
-    const existing = checkCredentialReplay(held, request);
-    if (!existing) credentialWriteIntent(held, request);
-    return existing;
+    return credentialWriteContinuation(held, request);
   });
-  if (replay) return replay;
+  if (initial?.phase === 'committed') return initial;
+  let platform: NativeCredentialPlatformBinding | undefined;
+  if (initial) {
+    // Loading is outside the retired scope; private locked helpers never
+    // reacquire a lock or call back into the selected runtime's loader.
+    platform = await loadInstalledCredentialPlatform(selected);
+    const resumed = await withCredentialAuthorityLock(selected, async token => {
+      const held = checkedCredentialToken(token), current = credentialWriteContinuation(held, request);
+      if (current?.phase === 'committed') return current;
+      if (!current) throw new TypeError('credential retry lost its retained operation');
+      await cleanupCredentialWriteRequest(held, request.requestId, platform!);
+      return credentialWriteContinuation(held, request);
+    });
+    if (resumed?.phase === 'committed') return resumed;
+  }
   let client = await ensureInstalledCredentialSupervisor(selected);
   let secret: Buffer | undefined;
   try {
@@ -623,14 +736,20 @@ export async function writeCredentialAuthority(selected: HeldInstalledRuntime, r
     // Input waited without credential locks. Reconnect/observe the actual
     // current owner before preparation instead of reusing old readiness.
     await client.close(); client = await ensureInstalledCredentialSupervisor(selected);
-    const platform = await loadInstalledCredentialPlatform(selected);
+    platform ??= await loadInstalledCredentialPlatform(selected);
     const operation = await withCredentialAuthorityLock(selected, async token => {
-      const held = checkedCredentialToken(token), raced = checkCredentialReplay(held, request);
-      if (raced) return raced;
+      const held = checkedCredentialToken(token), raced = credentialWriteContinuation(held, request);
+      if (raced?.phase === 'committed') return raced;
+      // The input interval was unlocked. Re-sweep every retained abandoned
+      // item, and only then create the next contiguous frozen-core attempt.
+      if (raced) {
+        await cleanupCredentialWriteRequest(held, request.requestId, platform!);
+        credentialWriteContinuation(held, request);
+      }
       const prepared = prepareCredentialWrite(held, request);
       let observation: SecretServiceObservation;
       try {
-        observation = decodeSecretServiceObservation(await platform.secretService({ kind: 'create_compare',
+        observation = decodeSecretServiceObservation(await platform!.secretService({ kind: 'create_compare',
           selector: credentialSelector(held, prepared), secret: secret! }));
         if (observation.kind !== 'stored' || observation.bus.uid !== held.rootIdentity.ownerUid ||
             !canonicalJsonBytes(observation.selector).equals(canonicalJsonBytes(credentialSelector(held, prepared))))
@@ -663,7 +782,7 @@ export async function writeCredentialAuthority(selected: HeldInstalledRuntime, r
           if (!previous || previous.state !== 'active') throw new TypeError('rotation cleanup has no original active revision');
           if (history.latest?.state === 'active' && canonicalJsonBytes(history.latest.platformItem).equals(canonicalJsonBytes(previous.platformItem))) return;
           const selector = credentialSelector(held, credentialCreatingOperation(held, previous));
-          const observed = decodeSecretServiceObservation(await platform.secretService({ kind: 'delete_known', selector }));
+          const observed = decodeSecretServiceObservation(await platform!.secretService({ kind: 'delete_known', selector }));
           if (!['deleted', 'absent'].includes(observed.kind) || observed.bus.uid !== held.rootIdentity.ownerUid ||
               !canonicalJsonBytes(observed.selector).equals(canonicalJsonBytes(selector))) throw new TypeError('rotation cleanup observation differs');
           token.assertHeld();
@@ -731,16 +850,23 @@ export async function revokeCredentialAuthority(selected: HeldInstalledRuntime, 
     return commitCredentialRevocation(held, request);
   });
   if (committed.cleanupPhase === 'cleanup_complete') return committed;
+  return cleanupCredentialRevocation(selected, request.requestId, false);
+}
+
+/** This owning phase names the retained receipt, never manufactures another
+ * revoke command or calls an auto-locking action from inside its scope. */
+async function cleanupCredentialRevocation(selected: HeldInstalledRuntime, requestId: string,
+  explicit: boolean): Promise<CredentialAuthorityRevokeOperationV1> {
   let platform: NativeCredentialPlatformBinding | undefined, loadFailed = false;
   try { platform = await loadInstalledCredentialPlatform(selected); }
   catch (error) { if (error instanceof ResourceRetirementError) throw error; loadFailed = true; }
   return withCredentialAuthorityLock(selected, async token => {
-    const held = checkedCredentialToken(token), row = readCredentialRevokeRow(held, request.requestId);
+    const held = checkedCredentialToken(token), row = readCredentialRevokeRow(held, requestId);
     if (!row) throw new TypeError('credential revoke cleanup lost its original receipt');
     const history = readCredentialHistory(held, row.operation.credentialGrantId);
     if (!history.latest || !history.creating) throw new TypeError('credential revoke cleanup has no terminal result');
     validateCredentialRevokeResult(held, row, history.latest, history.creating);
-    if (row.operation.cleanupPhase === 'cleanup_complete') return immutableSnapshot(row.operation);
+    if (row.operation.cleanupPhase === 'cleanup_complete' && !explicit) return immutableSnapshot(row.operation);
     const selector = credentialSelector(held, history.creating);
     let observation: CredentialCleanupObservation;
     if (loadFailed) observation = { schemaVersion: 1, kind: 'cleanup_failure', selector,
@@ -762,6 +888,13 @@ export async function revokeCredentialAuthority(selected: HeldInstalledRuntime, 
     }
     token.assertHeld();
     const original = row.operation;
+    // Completed receipts are historical results. Explicit cleanup repeats the
+    // actual known-item sweep, but neither success nor failure rewrites them.
+    if (original.cleanupPhase === 'cleanup_complete') {
+      if (observation.kind === 'cleanup_failure')
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'credential completed receipt fresh sweep did not prove absence or deletion');
+      return immutableSnapshot(original);
+    }
     const { operationDigest: _digest, cleanupPhase: _phase, cleanupEvidenceDigest: _evidence,
       cleanupErrorCode: _error, cleanupFinishedAt: _finished, ...identity } = original;
     const finishedAt = encodeCanonicalTime(Math.max(Date.now(), parseCanonicalTime(held.channelIdentity.openedAt),
@@ -774,12 +907,48 @@ export async function revokeCredentialAuthority(selected: HeldInstalledRuntime, 
     endpointTransaction(held.database!, () => {
       held.database!.prepare(`UPDATE credential_revoke_operations SET operation_json=?,cleanup_observation_json=?
         WHERE owner_principal_id=? AND request_id=?`).run(canonicalJsonBytes(operation).toString('utf8'),
-          canonicalJsonBytes(observation).toString('utf8'), held.ownerPrincipalId, request.requestId);
-      const checked = readCredentialRevokeRow(held, request.requestId);
+          canonicalJsonBytes(observation).toString('utf8'), held.ownerPrincipalId, requestId);
+      const checked = readCredentialRevokeRow(held, requestId);
       if (!checked || !canonicalJsonBytes(checked.operation).equals(canonicalJsonBytes(operation))) throw new TypeError('credential cleanup readback differs');
       validateCredentialRevokeResult(held, checked, history.latest!, history.creating!); token.assertHeld();
     });
     return immutableSnapshot(operation);
+  });
+}
+
+function credentialCleanupKind(held: CredentialBinding, requestId: string): 'write' | 'revoke' {
+  ensureEndpointSchema(held.database!);
+  const facts = readCredentialFacts(held, requestId), row = readCredentialRevokeRow(held, requestId);
+  if (facts.length && row) throw new TypeError('credential cleanup request belongs to more than one action');
+  if (row) {
+    const history = readCredentialHistory(held, row.operation.credentialGrantId);
+    if (!history.latest || !history.creating) throw new TypeError('credential cleanup revoke result is absent');
+    validateCredentialRevokeResult(held, row, history.latest, history.creating);
+    return 'revoke';
+  }
+  if (facts.length) { credentialWriteCleanupState(held, requestId); return 'write'; }
+  throw new KernelStorageError('NOT_FOUND', 'credential cleanup request has no retained operation');
+}
+
+/** Explicit cleanup is independent of input and Supervisor availability.
+ * Only the selected producer owns the platform; no scope/phase factory leaks. */
+export async function cleanupCredentialAuthority(selected: HeldInstalledRuntime, request: CredentialCleanupRequest):
+Promise<CredentialAuthorityOperationV1 | CredentialAuthorityRevokeOperationV1> {
+  const kind = await withCredentialAuthorityLock(selected, async token => {
+    request = decodeCredentialCleanupRequest(request);
+    return credentialCleanupKind(checkedCredentialToken(token), request.requestId);
+  });
+  if (kind === 'revoke') return cleanupCredentialRevocation(selected, request.requestId, true);
+  let platform: NativeCredentialPlatformBinding;
+  try { platform = await loadInstalledCredentialPlatform(selected); }
+  catch (error) {
+    if (error instanceof ResourceRetirementError) throw error;
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'credential known-item cleanup platform is unavailable', { cause: error });
+  }
+  return withCredentialAuthorityLock(selected, async token => {
+    const held = checkedCredentialToken(token);
+    if (credentialCleanupKind(held, request.requestId) !== kind) throw new TypeError('credential cleanup action changed');
+    return cleanupCredentialWriteRequest(held, request.requestId, platform);
   });
 }
 
