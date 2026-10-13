@@ -298,7 +298,7 @@ package/real-user-manager qualification under `scripts/kernel/testing/`.
 
 ### Acceptance Criteria
 
-- [ ] Real installed enroll/read/replay/rotate/revoke/cleanup journey with one
+- [x] Real installed enroll/read/replay/rotate/revoke/cleanup journey with one
   genuine default Secret Service and no provider I/O.
 - [ ] Same-request committed replay returns original result/provenance without
   reading new secret; bounded 1..3 orphan retries, permanent digest conflict.
@@ -426,15 +426,29 @@ joined trace corpora; 1253 scan streams all closed, with no detected generated
 secret bytes or retained needles/tails. Preparation-time expiry does not
 qualify finalizer expiry, clock regression or any precise pause/crash cut.
 
-The next platform-negative fixture adds one fixed non-secret attribute to a
+Commit `3937c44269bcbd0026812e6c9ffc87244e53af3e` passed all eight checks in
+[run 38357917600](https://github.com/cogine-ai/cliq-agent/actions/runs/38357917600).
+The platform-negative fixture added one fixed non-secret attribute to a
 genuinely enrolled item while preserving all nine actual selector pairs. The
-real search still matches that item; the exact attribute-set check must refuse
-cleanup without blocking terminal revocation. Restoring only the extra
-attribute must allow the same original receipt to finish cleanup, with terminal
-metadata unchanged. This case is pending genuine Linux qualification, not
-ambiguity, owner/alias replacement or finalizer-drift evidence. The fixture
-never reads the secret or creates/deletes items and remains restricted to the
-actual disposable account, GNOME image and observed bus/service lifetime.
+real search still matched that item; the exact attribute-set check refused
+cleanup without blocking terminal revocation. The item and its secret bytes
+remained unchanged; restoring only the extra attribute allowed the same
+original receipt to finish cleanup, with terminal metadata unchanged and both
+installed roles inactive. This is not ambiguity, owner/alias replacement or
+finalizer-drift evidence. The fixture never reads the secret or creates/deletes
+items and stays restricted to the actual disposable account, GNOME image and
+observed bus/service lifetime. The final corpus covered 246 files, both SQLite
+databases, 110 logical rows and four joined trace corpora; all 1362 scan streams
+closed without detected generated-secret bytes or retained needles/tails.
+
+The next static admission negative revokes the actual endpoint through the
+signed endpoint command, then attempts a new enroll with an unwritten, unended
+secret-input pipe. It requires the exact endpoint refusal before input, no new
+authority or retained operation, unchanged historical credential replay/read,
+empty actual store inventory and inactive installed roles. This case is pending
+genuine Linux qualification; it does not qualify concurrent endpoint revocation
+at the finalizer cut. No additional active grant or production interface is
+introduced.
 
 The real post-`secret_stored`, retired-scope producer pause remains blocked:
 both the proposed native helper and the narrower standard-tool metadata-only

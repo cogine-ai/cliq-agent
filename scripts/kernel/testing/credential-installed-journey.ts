@@ -10,7 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
-import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRecord, decodeCredentialAuthorityRevokeOperation, decodeEndpointAuthorityOperation,
+import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRecord, decodeCredentialAuthorityRevokeOperation, decodeEndpointAuthorityOperation, decodeEndpointAuthorityRecord,
   type EndpointRegistrationV1 } from '../../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
@@ -105,7 +105,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'genuine signed credential journey, preparation-only expiry and extra-item-attribute cleanup refusal, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, finalizer expiry/drift, ambiguity, live-producer presence, clock regression, broker or I1' };
+    scope: 'genuine signed credential journey, preparation-only expiry, extra-item-attribute cleanup refusal and revoked-endpoint static admission refusal, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, finalizer expiry/drift/concurrent revoke, ambiguity, live-producer presence, clock regression, broker or I1' };
   const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
     negativeSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
@@ -1192,6 +1192,39 @@ async function campaign(filename: string): Promise<void> {
     }
     assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
       credentialGrantId: negativeMetadata.credentialGrantId }), 'record')), negativeRevoked);
+
+    report.phase = 'revoked_endpoint_admission';
+    // A genuine static revocation cut, not a concurrent finalizer race.
+    const endpointRevokeCore = { schemaVersion: 1, kind: 'revoke', ownerPrincipalId,
+      endpointRegistrationId: registration.endpointRegistrationId, expectedAuthorityRevision: 1, commandDigest: '' } as const;
+    const endpointRevocation = decodeEndpointAuthorityOperation(success(command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'],
+      canonicalJsonBytes({ schemaVersion: 1, kind: 'commit', requestId: '019a0012-0000-7000-8000-000000000043',
+        commandCore: { ...endpointRevokeCore, commandDigest: digestOmitting(endpointRevokeCore, 'commandDigest') } })), 'operation'));
+    assert.equal(endpointRevocation.kind, 'revoke'); assert.equal(endpointRevocation.disposition, 'revoked');
+    assert.equal(endpointRevocation.committedAuthorityRevision, 2);
+    const endpointRevoked = decodeEndpointAuthorityRecord(success(command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'],
+      canonicalJsonBytes({ schemaVersion: 1, kind: 'read', endpointRegistrationId: registration.endpointRegistrationId })), 'record'));
+    assert.equal(endpointRevoked.state, 'revoked'); assert.equal(endpointRevoked.authorityRevision, 2);
+    assert.equal(endpointRevoked.recordDigest, endpointRevocation.resultRecordDigest);
+    const revokedEndpointMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000044',
+      credentialGrantId: 'credential-journey-revoked-endpoint-grant', secretSubmissionId: 'credential-journey-revoked-endpoint-submission' };
+    exactRefusal(await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
+      canonicalJsonBytes(revokedEndpointMetadata).toString('base64url')]), 'STATE_TRANSITION_INVALID',
+      'credential requires a current active endpoint of its purpose');
+    assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: revokedEndpointMetadata.credentialGrantId }), 'record'), null);
+    exactRefusal(credential({ schemaVersion: 1, kind: 'cleanup', requestId: revokedEndpointMetadata.requestId }),
+      'NOT_FOUND', 'credential cleanup request has no retained operation');
+    const historicalAfterEndpoint = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+      ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')]);
+    assert.deepEqual(decodeCredentialAuthorityOperation(success(historicalAfterEndpoint, 'operation')), operation);
+    assert.equal(historicalAfterEndpoint.stdout, `${canonicalJsonBytes({ schemaVersion: 1, operation }).toString('utf8')}\n`);
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record')), revokedRecord);
+    assert.deepEqual(observe('list').items, []); assert.equal(serviceOwner(), unlockedAgain.nameOwner);
+    assert.deepEqual(inactive(), report.servicesAfterStoreNegatives);
+    report.revokedEndpointAdmission = { noReturnedAuthority: true, noRetainedOperation: true,
+      originalOperationReplayUnchanged: true, terminalRecordUnchanged: true, servicesRemainInactive: true,
+      secretInputPipeUnwrittenAndUnended: true, concurrentFinalizerRevokeQualified: false };
     report.phase = 'complete'; report.qualified = true;
   } catch (error) { primary = error; }
   finally {
