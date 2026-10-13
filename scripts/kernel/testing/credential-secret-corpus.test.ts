@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -38,6 +39,50 @@ test('copied read-only diagnostics scan TEXT/BLOB cells and leave original bytes
       assert.deepEqual(Object.keys(result).sort(), ['logicalBytesScanned', 'logicalRowsScanned', 'logicalValuesScanned']);
     } finally { scanner.close(); }
   });
+});
+
+test('copied diagnostics retain the real SQLite statement through GC and scan every final row', () => {
+  // Real default-engine copies and real scanner; GC acts only in this child
+  // diagnostic. No production phase, clock, native proof or authority is used.
+  const result = spawnSync(process.execPath, ['--no-warnings', '--expose-gc', '--import', 'tsx', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+    import os from 'node:os'; import path from 'node:path'; import { DatabaseSync } from 'node:sqlite';
+    import { scanCopiedCredentialDatabase } from ${JSON.stringify(new URL('./credential-secret-corpus.ts', import.meta.url).href)};
+    import { createCredentialSecretScanner } from ${JSON.stringify(new URL('./credential-secret-scan.ts', import.meta.url).href)};
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-credential-corpus-'));
+    const filename = path.join(directory, 'authority.sqlite'), input = Buffer.from('diagnostic-only-secret-avoid-logging');
+    const write = (found) => {
+      const database = new DatabaseSync(filename);
+      try {
+        database.exec('CREATE TABLE retained_objects(value TEXT) STRICT');
+        const insert = database.prepare('INSERT INTO retained_objects VALUES (?)');
+        for (let index = 0; index < 100; index++) insert.run(found && index === 99 ? input.toString('utf8') : 'ordinary diagnostic bytes');
+      } finally { database.close(); }
+    };
+    const scan = () => {
+      const scanner = createCredentialSecretScanner([input], { maxBytes: 32 * 1024 * 1024, maxStreams: 4096 });
+      let chunks = 0;
+      const checked = { ...scanner, openStream() {
+        const stream = scanner.openStream(); return { close: () => stream.close(), scan(bytes) {
+          stream.scan(bytes); if (++chunks === 3) { global.gc(); global.gc(); }
+        } };
+      } };
+      try { return scanCopiedCredentialDatabase(filename, checked); } finally { scanner.close(); }
+    };
+    try {
+      await writeFile(filename, '', { flag: 'wx', mode: 0o600 }); write(false);
+      const before = await readFile(filename), result = scan();
+      assert.equal(result.logicalRowsScanned, 100); assert.equal(result.logicalValuesScanned, 102);
+      assert.deepEqual(await readFile(filename), before);
+      await rm(filename); await writeFile(filename, '', { flag: 'wx', mode: 0o600 }); write(true);
+      const withSecret = await readFile(filename);
+      assert.throws(() => scan(), { code: 'SECRET_DETECTED' }); assert.deepEqual(await readFile(filename), withSecret);
+      console.log('owned copied SQLite GC scan qualified');
+    } finally { input.fill(0); await rm(directory, { recursive: true, force: true }); }
+  `], { encoding: 'utf8', timeout: 10000, maxBuffer: 16 * 1024 });
+  assert.equal(result.status, 0, 'owned copied SQLite GC scan failed');
+  assert.equal(result.stdout, 'owned copied SQLite GC scan qualified\n');
 });
 
 for (const kind of ['TEXT', 'BLOB'] as const) test(`copied logical ${kind} secret detection has a closed data-free error`, async () => {

@@ -68,12 +68,17 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
       check(typeof table.name === 'string' && /^[a-z][a-z0-9_]{0,63}$/u.test(table.name));
       check(typeof table.sql === 'string' && /^CREATE TABLE\s/iu.test(table.sql));
       scan(table.name); scan(table.sql);
-      stage = 'prepare'; const statement = database.prepare(`SELECT * FROM "${table.name}"`);
+      const query = `SELECT * FROM "${table.name}"`;
+      stage = 'prepare'; const statement = database.prepare(query);
       stage = 'rows';
       for (const row of statement.iterate()) {
         check(++logicalRowsScanned <= rowLimit);
         for (const value of Object.values(row)) scan(value);
       }
+      // Node 22.13's iterator does not retain its statement. Keep the actual
+      // owner live through iteration and reject a finalized/mismatched query;
+      // a temporary prepare(...).iterate() can lose it during scanning's GC.
+      check(statement.sourceSQL === query);
     }
     stage = 'stability';
     check(identity(lstatSync(filename, { bigint: true })) === identity(original));

@@ -458,8 +458,8 @@ The completed-schema preservation check saves the original signed endpoint
 registration/read responses before the first credential enrollment. After the
 actual v1-to-v2 extension, it requires exact original operation/record equality
 and identical canonical response bytes from the same signed public entry.
-Those exact comparisons passed in the test-first run below. The complete
-extended campaign remains pending and this does not qualify old/new migration
+Those exact comparisons passed in the test-first run below and in the complete
+extended journey at `92e3c8e` below. This does not qualify old/new migration
 crash cuts.
 
 The next genuine ambiguity check enrolls one item through the signed entry,
@@ -469,8 +469,8 @@ generated secret. A fresh public nonce belongs only to its fixture Label, not
 the selector. Revoke and explicit cleanup must commit/retain terminal metadata
 but refuse to delete either ambiguous item. Only the positively identified
 fixture-created path/Label may be removed; original-receipt cleanup must then
-complete against the unique original item. This is pending Linux qualification
-and proves no finalizer ambiguity or precise crash cut.
+complete against the unique original item. That static cleanup case is qualified
+at `92e3c8e` below and proves no finalizer ambiguity or precise crash cut.
 
 The test-first commit `28fdaf58bebbcfec367aa89dc1e890ee351fce2e` completed
 [run 38414424280](https://github.com/cogine-ai/cliq-agent/actions/runs/38414424280)
@@ -499,6 +499,27 @@ diagnostic preserves the same sequence, assertions and limits for the next run.
 The independently reproduced full-width SQLite INTEGER limitation is not yet
 evidence of this Linux failure's cause. Later independent store regressions
 remain held outside this diagnostic iteration.
+
+Commit `92e3c8e7d147022012bda7bcab7bc5bbee8d67ec` passed all eight checks in
+[run 38423130293](https://github.com/cogine-ai/cliq-agent/actions/runs/38423130293).
+The complete journey report qualifies completed-schema endpoint preservation
+and actual full-selector ambiguity cleanup: neither matching item was deleted
+under ambiguity, terminal metadata and original receipt identity survived, and
+only the positively identified fixture item was retired before unique-original
+cleanup completed. Its final corpus covered 255 files, both SQLite databases,
+128 logical rows, 472 logical values and four joined trace corpora; all 1537
+scan streams closed without detected generated secrets or retained needles/tails.
+This remains a scoped journey, not complete I1 or finalizer ambiguity evidence.
+
+Independent diagnosis on checksum-verified stock Node 22.13.0 reproduced its
+[upstream iterator ownership defect](https://github.com/nodejs/node/issues/57493).
+The original temporary `prepare(...).iterate()` expression fails a real copied
+database/scanner regression under GC; keeping the actual statement live through
+iteration passes all 100 rows and detects a secret only in the final row, while
+preserving original database bytes. A post-iteration statement read makes that
+ownership explicit. No client/runner version, query bounds or scanner limits
+are changed. This establishes a supported-version reader defect, not the unique
+historical cause of run `38418796368`, whose closed original error is unavailable.
 
 The real post-`secret_stored`, retired-scope producer pause remains blocked:
 both the proposed native helper and the narrower standard-tool metadata-only
