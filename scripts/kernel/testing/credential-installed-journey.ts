@@ -105,7 +105,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'genuine signed credential journey, preparation-only expiry refusal, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, finalizer expiry, live-producer presence, clock regression, broker or I1' };
+    scope: 'genuine signed credential journey, preparation-only expiry and extra-item-attribute cleanup refusal, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, finalizer expiry/drift, ambiguity, live-producer presence, clock regression, broker or I1' };
   const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
     negativeSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
@@ -963,12 +963,13 @@ async function campaign(filename: string): Promise<void> {
 
     // These are actual adversarial store preconditions, not fabricated native
     // observations or SQL authority. The administrative helper cannot run on
-    // an ordinary account's vault and never reads or creates credential items.
-    const storeFixture = (action: 'lock' | 'alias-session' | 'alias-restore', collection?: string) => {
-      const result = command(recipe.storeFixture, [action, ...(collection ? [collection] : [])]);
+    // an ordinary account's vault and never reads secrets or creates items.
+    const storeFixture = (action: 'lock' | 'alias-session' | 'alias-restore' | 'item-extra' | 'item-restore', locator?: string, itemId?: string) => {
+      const result = command(recipe.storeFixture, [action, ...(locator ? [locator] : []), ...(itemId ? [itemId] : [])]);
       assert.equal(result.status, 0, 'actual disposable store precondition did not complete');
       const value = parseJsonStrict(result.stdout.trim()) as Record<string, unknown>;
-      const flag = action === 'lock' ? 'locked' : action === 'alias-session' ? 'defaultAliasSession' : 'defaultAliasMatched';
+      const flag = action === 'lock' ? 'locked' : action === 'alias-session' ? 'defaultAliasSession'
+        : action === 'item-extra' ? 'itemAttributesExtra' : action === 'item-restore' ? 'itemAttributesRestored' : 'defaultAliasMatched';
       assert.deepEqual(Object.keys(value).sort(), ['diagnosticOnly', 'action', 'collection', flag, 'connectionClosed'].sort());
       assert.equal(value.diagnosticOnly, true); assert.equal(value.action, action);
       assert.equal(value[flag], true); assert.equal(value.connectionClosed, true);
@@ -992,6 +993,66 @@ async function campaign(filename: string): Promise<void> {
       assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', setup.supervisorUnit, setup.keeperUnit]).status, 0);
       return inactive();
     };
+    report.phase = 'item_attribute_drift_setup';
+    const driftMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000041',
+      credentialGrantId: 'credential-journey-attribute-grant', secretSubmissionId: 'credential-journey-attribute-submission' };
+    const driftOperation = decodeCredentialAuthorityOperation(success(credential(driftMetadata, negativeSecret), 'operation'));
+    assert.equal(driftOperation.phase, 'committed'); assert.equal(driftOperation.attempt, 1);
+    assert.equal(driftOperation.requestId, driftMetadata.requestId); assert.equal(driftOperation.credentialGrantId, driftMetadata.credentialGrantId);
+    const driftRecord = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: driftMetadata.credentialGrantId }), 'record'));
+    assert.equal(driftRecord.state, 'active'); assert.equal(driftRecord.authorityRevision, 1);
+    assert.equal(driftRecord.credentialGrantId, driftMetadata.credentialGrantId);
+    assert.deepEqual(driftRecord.platformItem, driftOperation.platformItem);
+    const driftItem = driftRecord.platformItem; assert.equal(driftItem.kind, 'linux_secret_service');
+    if (driftItem.kind !== 'linux_secret_service') throw new Error('Linux drift fixture requires a Secret Service item');
+    const driftBefore = observe('list'); assert.equal(driftBefore.items.length, 1);
+    assert.equal(driftBefore.nameOwner, restored.nameOwner); assert.equal(driftBefore.servicePid, restored.servicePid);
+    assert.equal(observe('compare', driftBefore.items[0]!, driftItem.itemId, negativeSecret).readback, true);
+    const driftServices = stopRoles();
+    report.phase = 'item_attribute_drift';
+    report.itemAttributesExtra = storeFixture('item-extra', driftBefore.items[0]!, driftItem.itemId);
+    let driftPrimary: unknown, driftRevoke: ReturnType<typeof decodeCredentialAuthorityRevokeOperation> | undefined;
+    let driftRevoked: ReturnType<typeof decodeCredentialAuthorityRecord> | undefined;
+    try {
+      const result = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
+        canonicalJsonBytes({ schemaVersion: 1, kind: 'revoke', requestId: '019a0012-0000-7000-8000-000000000042',
+          credentialGrantId: driftMetadata.credentialGrantId, expectedAuthorityRevision: 1 }).toString('base64url')]);
+      driftRevoke = decodeCredentialAuthorityRevokeOperation(success(result, 'operation'));
+      assert.equal(driftRevoke.requestId, '019a0012-0000-7000-8000-000000000042');
+      assert.equal(driftRevoke.credentialGrantId, driftMetadata.credentialGrantId); assert.equal(driftRevoke.committedAuthorityRevision, 2);
+      assert.deepEqual(driftRevoke.platformItem, driftItem);
+      assert.equal(driftRevoke.cleanupPhase, 'cleanup_failed');
+      assert.equal(driftRevoke.cleanupErrorCode, 'platform_store_unavailable');
+      driftRevoked = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+        credentialGrantId: driftMetadata.credentialGrantId }), 'record'));
+      const { recordDigest: _beforeDigest, ...beforeBody } = driftRecord;
+      const { recordDigest: _afterDigest, ...afterBody } = driftRevoked;
+      assert.deepEqual(afterBody, { ...beforeBody, state: 'revoked', authorityRevision: 2, revokedAt: driftRevoke.metadataCommittedAt,
+        revokedByRequestId: driftRevoke.requestId, revokedByRequestDigest: driftRevoke.requestDigest });
+      assert.equal(driftRevoke.revokedRecordDigest, driftRevoked.recordDigest);
+      assert.deepEqual(observe('list').items, driftBefore.items);
+      assert.equal(observe('compare', driftBefore.items[0]!, driftItem.itemId, negativeSecret).readback, true);
+      assert.equal(serviceOwner(), driftBefore.nameOwner); assert.deepEqual(inactive(), driftServices);
+    } catch (error) { driftPrimary = error; throw error; }
+    finally {
+      try { report.itemAttributesRestored = storeFixture('item-restore', driftBefore.items[0]!, driftItem.itemId); }
+      catch (error) { throw new AggregateError([driftPrimary, error].filter(Boolean), 'actual item test and restoration failed'); }
+    }
+    assert(driftRevoke && driftRevoked);
+    report.phase = 'item_attribute_drift_cleanup';
+    const driftCleanup = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'cleanup',
+      requestId: driftRevoke.requestId }), 'operation'));
+    assert.equal(driftCleanup.cleanupPhase, 'cleanup_complete');
+    assert.deepEqual(receiptIdentity(driftCleanup), receiptIdentity(driftRevoke));
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: driftMetadata.credentialGrantId }), 'record')), driftRevoked);
+    assert.deepEqual(observe('list').items, []); assert.equal(serviceOwner(), driftBefore.nameOwner);
+    assert.deepEqual(inactive(), driftServices);
+    report.itemAttributeCleanupRefusal = { terminalRevokeWithoutSupervisor: true, mismatchedItemNotDeleted: true,
+      originalReceiptIdentityMatched: true, revokedRecordUnchanged: true, restoredCleanupComplete: true,
+      secretInputPipeUnwrittenAndUnended: true, finalizerDriftQualified: false, ambiguityQualified: false };
+
     report.phase = 'locked_store_setup';
     const negativeMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000030',
       credentialGrantId: '019a0012-0000-7000-8000-000000000031', secretSubmissionId: '019a0012-0000-7000-8000-000000000130' };

@@ -1,6 +1,8 @@
 /* Test-only MUTATION of the disposable user's actual GNOME Secret Service.
  * Not a read-only observer, credential AuthorityProof or recovery decision.
  * No secret input, key generation, item creation/deletion, SQL or provider.
+ * Item drift adds/removes only one fixed test attribute, preserving the actual
+ * production-owned selector values. It never changes an item's secret.
  * The renamed prerequisite entry is never invoked by this command interface.
  * cc -std=c11 -O2 -Wall -Wextra -Werror credential-store-fixture.c \
  *   $(pkg-config --cflags --libs gio-2.0) -o credential-store-fixture
@@ -202,14 +204,77 @@ static gboolean fixture_lock(Probe *p) {
     fixture_collection(p, TRUE) && fixture_alias(p, p->collection);
 }
 
+static const char *fixture_item_keys[] = {"xdg:schema", "cliq:namespace", "cliq:item-id", "cliq:principal-id", "cliq:state-root",
+  "cliq:operation-id", "cliq:grant-id", "cliq:secret-generation", "cliq:target-digest", "cliq:fixture-extra"};
+
+static gboolean fixture_item_member(Probe *p, const char *item) {
+  size_t prefix = strlen(p->collection);
+  if (!object_path(item) || strncmp(item, p->collection, prefix) || item[prefix] != '/' ||
+      !item[prefix + 1] || strchr(item + prefix + 1, '/')) return fail(p, "fixture-item-path", NULL);
+  g_autoptr(GVariant) items = property(p, p->collection, SECRET_IFACE "Collection", "Items", "ao");
+  if (!items || g_variant_n_children(items) > 4096) return fail(p, "fixture-item-inventory", NULL);
+  guint matches = 0;
+  for (gsize index = 0; index < g_variant_n_children(items); index++) {
+    const char *actual; g_variant_get_child(items, index, "&o", &actual);
+    if (!strcmp(actual, item)) matches++;
+  }
+  return (matches == 1 || fail(p, "fixture-item-membership", NULL)) && unlocked(p, item, SECRET_IFACE "Item");
+}
+
+static gboolean fixture_item_attributes_valid(Probe *p, GVariant *attrs, const char *logical_id, gboolean extra) {
+  if (!attrs || g_variant_n_children(attrs) != (extra ? 10u : 9u) || g_variant_get_size(attrs) > 65536)
+    return fail(p, "fixture-item-attribute-bound", NULL);
+  guint seen = 0; GVariantIter iter; const char *key, *value; g_variant_iter_init(&iter, attrs);
+  while (g_variant_iter_next(&iter, "{&s&s}", &key, &value)) {
+    guint index = 0;
+    while (index < G_N_ELEMENTS(fixture_item_keys) && strcmp(key, fixture_item_keys[index])) index++;
+    if (index >= (extra ? 10u : 9u) || (seen & (1u << index)) || !*value || strlen(value) > 4096)
+      return fail(p, "fixture-item-attribute-keyset", NULL);
+    seen |= 1u << index;
+    if ((index == 0 && strcmp(value, SCHEMA)) || (index == 1 && strcmp(value, "ai.cogine.cliq.credentials.v1")) ||
+        (index == 2 && strcmp(value, logical_id)) || (index == 9 && strcmp(value, "1")))
+      return fail(p, "fixture-item-attribute-binding", NULL);
+  }
+  return seen == (extra ? 1023u : 511u) || fail(p, "fixture-item-attribute-keyset", NULL);
+}
+
+static gboolean fixture_item_attributes(Probe *p, const char *item, const char *logical_id, gboolean restoring) {
+  if (!fixture_collection(p, FALSE) || !fixture_item_member(p, item)) return FALSE;
+  g_autoptr(GVariant) before = property(p, item, SECRET_IFACE "Item", "Attributes", "a{ss}");
+  if (!fixture_item_attributes_valid(p, before, logical_id, restoring)) return FALSE;
+  GVariantBuilder builder; g_variant_builder_init(&builder, G_VARIANT_TYPE("a{ss}"));
+  GVariantIter iter; const char *key, *value; g_variant_iter_init(&iter, before);
+  while (g_variant_iter_next(&iter, "{&s&s}", &key, &value))
+    if (strcmp(key, fixture_item_keys[9])) g_variant_builder_add(&builder, "{ss}", key, value);
+  if (!restoring) g_variant_builder_add(&builder, "{ss}", fixture_item_keys[9], "1");
+  g_autoptr(GVariant) expected = g_variant_ref_sink(g_variant_builder_end(&builder));
+  g_autoptr(GVariant) changed = call(p, p->owner, item, "org.freedesktop.DBus.Properties", "Set",
+    g_variant_new("(ssv)", SECRET_IFACE "Item", "Attributes", expected), "()");
+  if (!changed) return FALSE;
+  g_autoptr(GVariant) after = property(p, item, SECRET_IFACE "Item", "Attributes", "a{ss}");
+  if (!fixture_item_attributes_valid(p, after, logical_id, !restoring)) return FALSE;
+  // Dictionary ordering is not identity; require the complete original values.
+  g_variant_iter_init(&iter, expected);
+  while (g_variant_iter_next(&iter, "{&s&s}", &key, &value)) {
+    const char *actual;
+    if (!g_variant_lookup(after, key, "&s", &actual) || strcmp(actual, value))
+      return fail(p, "fixture-item-attribute-readback", NULL);
+  }
+  return fixture_item_member(p, item) && fixture_collection(p, FALSE) && fixture_alias(p, p->collection);
+}
+
 int main(int argc, char **argv) {
   Probe p = { .runtime_fd = -1, .uid = getuid() }; Fixture fixture = { .home_fd = -1 };
   gboolean locking = argc == 2 && !strcmp(argv[1], "lock");
   gboolean alias_session = argc == 2 && !strcmp(argv[1], "alias-session");
   gboolean restoring = argc == 3 && !strcmp(argv[1], "alias-restore");
+  gboolean item_extra = argc == 4 && !strcmp(argv[1], "item-extra");
+  gboolean item_restore = argc == 4 && !strcmp(argv[1], "item-restore");
   gboolean change_alias = TRUE; char *session = NULL;
   if (unsetenv("G_DBUS_DEBUG")) { fail(&p, "disable-payload-debug", NULL); goto done; }
-  if ((!locking && !alias_session && !restoring) || !p.uid || geteuid() != p.uid || (restoring && !object_path(argv[2]))) {
+  if ((!locking && !alias_session && !restoring && !item_extra && !item_restore) || !p.uid || geteuid() != p.uid ||
+      (restoring && !object_path(argv[2])) || ((item_extra || item_restore) &&
+        (!object_path(argv[2]) || !*argv[3] || strlen(argv[3]) > 1024 || !g_utf8_validate(argv[3], -1, NULL)))) {
     fail(&p, "fixture-arguments", NULL); goto done;
   }
   if (!fixture_home(&p, &fixture) || !connect_bus(&p) || !fixture_current(&p, &fixture)) goto done;
@@ -219,7 +284,9 @@ int main(int argc, char **argv) {
   } else if (!default_collection(&p)) goto done;
   if (alias_session && !fixture_session(&p, NULL, &session)) goto done;
   if (!fixture_current(&p, &fixture)) goto done;
-  if (locking) {
+  if (item_extra || item_restore) {
+    if (!fixture_item_attributes(&p, argv[2], argv[3], item_restore)) goto done;
+  } else if (locking) {
     if (!fixture_lock(&p)) goto done;
   } else {
     if (change_alias) {
@@ -244,8 +311,10 @@ done:
   }
   fixture_close(&p, &p.runtime_fd); fixture_close(&p, &fixture.home_fd);
   if (!p.failed && (printf("{\"diagnosticOnly\":true,\"action\":\"%s\",\"collection\":\"%s\",\"%s\":true,\"connectionClosed\":true}\n",
-      locking ? "lock" : alias_session ? "alias-session" : "alias-restore", alias_session ? session : p.collection,
-      locking ? "locked" : alias_session ? "defaultAliasSession" : "defaultAliasMatched") < 0 || fflush(stdout)))
+      locking ? "lock" : alias_session ? "alias-session" : item_extra ? "item-extra" : item_restore ? "item-restore" : "alias-restore",
+      alias_session ? session : p.collection,
+      locking ? "locked" : alias_session ? "defaultAliasSession" : item_extra ? "itemAttributesExtra" :
+        item_restore ? "itemAttributesRestored" : "defaultAliasMatched") < 0 || fflush(stdout)))
     fail(&p, "fixture-report-output", NULL);
   g_free(p.owner); g_free(p.unique); g_free(p.collection); g_free(session);
   return p.failed ? 1 : 0;

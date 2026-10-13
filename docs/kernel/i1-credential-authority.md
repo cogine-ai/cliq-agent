@@ -415,11 +415,26 @@ complete exact comparison; the existing signed v0/v1 negatives now use that
 same strict representation and bound. This run passed the seven other checks,
 but did not reach the final SQLite/CAS corpus scan and is not a green campaign.
 
-The next no-pause case uses an actually expired enrollment through the signed
-entry and checks no retained operation, no new authority and unchanged original
-record/item, actual services and readiness. It remains pending genuine Linux
-qualification. Preparation-time expiry does not qualify finalizer expiry,
-clock regression or any precise pause/crash cut.
+Commit `3d069e6622bbcac93c23dbccc13987cbb63cb3e9` passed all eight checks in
+[run 38356121735](https://github.com/cogine-ai/cliq-agent/actions/runs/38356121735).
+The actual expired enrollment returned the exact preparation-time refusal;
+read returned no authority and explicit cleanup proved no retained operation.
+The original record/item bytes, actual services and readiness stayed unchanged.
+The v0/v1/v2 unsupported-format refusals passed, followed by the final stable
+corpus scan: 237 files, both SQLite databases, 96 logical rows and all four
+joined trace corpora; 1253 scan streams all closed, with no detected generated
+secret bytes or retained needles/tails. Preparation-time expiry does not
+qualify finalizer expiry, clock regression or any precise pause/crash cut.
+
+The next platform-negative fixture adds one fixed non-secret attribute to a
+genuinely enrolled item while preserving all nine actual selector pairs. The
+real search still matches that item; the exact attribute-set check must refuse
+cleanup without blocking terminal revocation. Restoring only the extra
+attribute must allow the same original receipt to finish cleanup, with terminal
+metadata unchanged. This case is pending genuine Linux qualification, not
+ambiguity, owner/alias replacement or finalizer-drift evidence. The fixture
+never reads the secret or creates/deletes items and remains restricted to the
+actual disposable account, GNOME image and observed bus/service lifetime.
 
 The real post-`secret_stored`, retired-scope producer pause remains blocked:
 both the proposed native helper and the narrower standard-tool metadata-only
