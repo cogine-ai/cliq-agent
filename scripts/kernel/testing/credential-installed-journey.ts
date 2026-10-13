@@ -105,7 +105,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'genuine signed credential journey, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, live-producer presence, clock regression, broker or I1' };
+    scope: 'genuine signed credential journey, preparation-only expiry refusal, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, finalizer expiry, live-producer presence, clock regression, broker or I1' };
   const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
     negativeSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
@@ -551,6 +551,34 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(await readFile(readyPath), readyBytes);
     const readyAfter = await lstat(readyPath, { bigint: true });
     for (const key of imageFields) assert.equal(readyAfter[key], ready[key]);
+
+    report.phase = 'expired_preparation_refusal';
+    // Real wall time and the same signed entry. This is preparation expiry,
+    // not a finalizer cut: no test clock or delayed/pause hook is introduced.
+    const expiredMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000040',
+      credentialGrantId: 'credential-journey-expired-grant', secretSubmissionId: 'credential-journey-expired-submission',
+      expiresAt: '2000-01-01T00:00:00.000Z' };
+    const exactRefusal = (response: ReturnType<typeof credential>, code: string, message: string) => {
+      assert.equal(response.status, 1); assert.equal(response.stdout, '');
+      const line = response.stderr.trim().split('\n').at(-1); assert(line && Buffer.byteLength(line) <= 2048);
+      assert.deepEqual(parseJsonStrict(line), Object.assign(Object.create(null),
+        { diagnosticOnly: true, scope: 'installed-read-startup', code, message }));
+    };
+    exactRefusal(credential(expiredMetadata, secret), 'STATE_TRANSITION_INVALID', 'credential preparation time or expiry is invalid');
+    assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: expiredMetadata.credentialGrantId }), 'record'), null);
+    exactRefusal(credential({ schemaVersion: 1, kind: 'cleanup', requestId: expiredMetadata.requestId }),
+      'NOT_FOUND', 'credential cleanup request has no retained operation');
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record')), record);
+    const expiredInventory = observe('list'); assert.deepEqual(expiredInventory.items, after.items);
+    for (const key of ['nameOwner', 'servicePid', 'serviceUid', 'collection'] as const) assert.equal(expiredInventory[key], after[key]);
+    const expiredReadback = observe('compare', after.items[0]!, record.platformItem.itemId, secret);
+    assert.equal(expiredReadback.readback, true); assert.equal(expiredReadback.logicalItemIdMatched, true);
+    assert.deepEqual(await processCut(setup.keeperUnit, 'keeper'), keeper);
+    assert.deepEqual(await processCut(setup.supervisorUnit, 'supervisor'), supervisor);
+    assert.deepEqual(await readFile(readyPath), readyBytes);
+    report.expiredPreparationRefusal = { noReturnedAuthority: true, noRetainedOperation: true, originalRecordUnchanged: true,
+      originalItemUnchanged: true, actualServicesUnchanged: true, finalizerExpiryQualified: false, clockRegressionQualified: false };
 
     report.phase = 'orphan_first_prepared_sigkill';
     const orphanMetadata = { schemaVersion: 1, kind: 'enroll', requestId: '019a0012-0000-7000-8000-000000000027',
@@ -1090,8 +1118,10 @@ async function campaign(filename: string): Promise<void> {
         pathPresent: !!fields && Object.hasOwn(fields, 'path'),
         codeClass: codes.find(([code]) => code === fields?.code)?.[1] ?? (fields && !Object.hasOwn(fields, 'code') ? 'absent' : 'other'),
         messageClass };
-      assert.deepEqual(actual, { diagnosticOnly: true, scope: 'installed-read-startup',
-        code: 'RECOVERY_REQUIRED', message: 'endpoint authority schema is not supported' });
+      // Strict JSON deliberately returns null-prototype objects. Match that
+      // representation without dropping any actual fields from the comparison.
+      assert.deepEqual(actual, Object.assign(Object.create(null), { diagnosticOnly: true, scope: 'installed-read-startup',
+        code: 'RECOVERY_REQUIRED', message: 'endpoint authority schema is not supported' }));
       assert.deepEqual(inactive(), report.servicesAfterStoreNegatives);
       report.unknownV2SchemaRefusal = { noReturnedAuthority: true, servicesRemainInactive: true };
     } catch (error) { schemaPrimary = error; throw error; }

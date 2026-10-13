@@ -405,6 +405,22 @@ parallel on the same free standard Ubuntu 22.04 runner label, retaining their
 own reports. No production-operation deadline or qualification assertion is
 relaxed to fit a serialized job budget.
 
+The bounded diagnostic at `d8dc886b84273db3297005949fcee5376b20cdb9` in
+[run 38354473748](https://github.com/cogine-ai/cliq-agent/actions/runs/38354473748)
+confirmed the v2 extra-table read returned the exact expected refusal, with all
+four fields and no extra path. The journey still failed: its strict comparison
+used an ordinary expected object while the strict JSON parser intentionally
+returns null-prototype objects. Matching the expected prototype preserves the
+complete exact comparison; the existing signed v0/v1 negatives now use that
+same strict representation and bound. This run passed the seven other checks,
+but did not reach the final SQLite/CAS corpus scan and is not a green campaign.
+
+The next no-pause case uses an actually expired enrollment through the signed
+entry and checks no retained operation, no new authority and unchanged original
+record/item, actual services and readiness. It remains pending genuine Linux
+qualification. Preparation-time expiry does not qualify finalizer expiry,
+clock regression or any precise pause/crash cut.
+
 The real post-`secret_stored`, retired-scope producer pause remains blocked:
 both the proposed native helper and the narrower standard-tool metadata-only
 owned pause implementation were stopped by the platform safety check. Their

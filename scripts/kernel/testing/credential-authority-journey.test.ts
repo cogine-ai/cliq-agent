@@ -8,6 +8,7 @@ import test from 'node:test';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../../src/config.js';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { sha256Bytes } from '../../../src/kernel/identity.js';
+import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { createInstalledRuntime } from '../../../src/state/installed-runtime.js';
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
 
@@ -81,8 +82,9 @@ test('signed installed credential read is independent and rejects unsupported au
         assert.equal(refused.stdout, '', 'unsupported format must not publish a credential record');
         const lines = refused.stderr.trim().split('\n').filter(line => line.startsWith('{'));
         assert.equal(lines.length, 1);
-        assert.deepEqual(JSON.parse(lines[0]!), { diagnosticOnly: true, scope: 'installed-read-startup',
-          code: 'RECOVERY_REQUIRED', message: 'endpoint authority schema is not supported' });
+        assert(Buffer.byteLength(lines[0]!) <= 2048);
+        assert.deepEqual(parseJsonStrict(lines[0]!), Object.assign(Object.create(null), { diagnosticOnly: true, scope: 'installed-read-startup',
+          code: 'RECOVERY_REQUIRED', message: 'endpoint authority schema is not supported' }));
       };
       await context.test('v1 with a legal extra sqlitex table is an unsupported format', async () => {
         // The signed auth has exited. Deliberately damage only its exact
