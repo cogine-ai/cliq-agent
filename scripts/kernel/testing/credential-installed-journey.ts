@@ -1068,7 +1068,29 @@ async function campaign(filename: string): Promise<void> {
       const refused = credential({ schemaVersion: 1, kind: 'read', credentialGrantId: negativeMetadata.credentialGrantId });
       assert.equal(refused.status, 1); assert.equal(refused.stdout, '');
       const line = refused.stderr.trim().split('\n').at(-1); assert(line && Buffer.byteLength(line) <= 2048);
-      assert.deepEqual(parseJsonStrict(line), { diagnosticOnly: true, scope: 'installed-read-startup',
+      const actual = parseJsonStrict(line);
+      const fields = actual && typeof actual === 'object' && !Array.isArray(actual) ? actual as Record<string, unknown> : undefined;
+      // Only source-owned labels and booleans survive. Never copy arbitrary
+      // error text, code, paths, keys or assertion differences into artifacts.
+      const codes = [['RECOVERY_REQUIRED', 'recovery_required'], ['ARTIFACT_MISMATCH', 'artifact_mismatch'],
+        ['UNSUPPORTED_PLATFORM', 'unsupported_platform'], ['ERR_CLIQ_CREDENTIAL_BUSY', 'credential_busy'],
+        ['ERR_SQLITE_ERROR', 'sqlite_error']] as const;
+      const messageClass = fields?.message === 'endpoint authority schema is not supported' ? 'schema_unsupported'
+        : fields?.message === 'credential scope could not hold its original physical bindings' ? 'native_bindings'
+        : ['credential scope descriptors did not retire', 'credential native scope did not retire', 'credential SQLite bootstrap did not retire',
+          'credential authority database did not retire'].includes(fields?.message as string) ? 'credential_retirement'
+        : ['installed runtime descriptor retirement failed', 'installed runtime retirement did not join']
+          .includes(fields?.message as string) ? 'installed_retirement'
+        : fields?.message === 'credential authority requires exclusive pager mode' ? 'pager_mode'
+        : fields?.message === 'credential authority requires fixed exclusive-mode WAL' ? 'wal_mode' : 'other';
+      report.unknownV2SchemaDiagnostic = { diagnosticOnly: true, objectExpected: !!fields,
+        diagnosticOnlyExpected: fields?.diagnosticOnly === true, scopeExpected: fields?.scope === 'installed-read-startup',
+        codeExpected: fields?.code === 'RECOVERY_REQUIRED', messageExpected: fields?.message === 'endpoint authority schema is not supported',
+        keysetExpected: !!fields && JSON.stringify(Object.keys(fields).sort()) === '["code","diagnosticOnly","message","scope"]',
+        pathPresent: !!fields && Object.hasOwn(fields, 'path'),
+        codeClass: codes.find(([code]) => code === fields?.code)?.[1] ?? (fields && !Object.hasOwn(fields, 'code') ? 'absent' : 'other'),
+        messageClass };
+      assert.deepEqual(actual, { diagnosticOnly: true, scope: 'installed-read-startup',
         code: 'RECOVERY_REQUIRED', message: 'endpoint authority schema is not supported' });
       assert.deepEqual(inactive(), report.servicesAfterStoreNegatives);
       report.unknownV2SchemaRefusal = { noReturnedAuthority: true, servicesRemainInactive: true };
