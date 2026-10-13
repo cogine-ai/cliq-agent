@@ -18,7 +18,7 @@ import { installedReadClientScript } from './installed-read-control.js';
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
 import { crashPreparedCredentialWrite, inspectPreparedCredentialCrashFacts } from './credential-write-crash.js';
 import { createCredentialSecretScanner } from './credential-secret-scan.js';
-import { scanCredentialSecretCorpus } from './credential-secret-corpus.js';
+import { CredentialSecretCorpusError, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string;
   releaseKeysFile: string; controlDirectory: string; observer: string; storeFixture: string; reportFile: string };
@@ -1340,7 +1340,11 @@ async function campaign(filename: string): Promise<void> {
         const corpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs, scanner });
         assert.equal(corpus.sqliteDatabasesScanned, 2); assert.equal(corpus.evidenceDirectoriesScanned, 4);
         report.secretCorpus = corpus; report.phase = 'complete';
-      } catch (error) { primary = error; }
+      } catch (error) {
+        if (error instanceof CredentialSecretCorpusError && error.databaseFailure)
+          report.secretCorpusDatabaseFailure = error.databaseFailure;
+        primary = error;
+      }
     }
     if (primary) {
       report.qualified = false;

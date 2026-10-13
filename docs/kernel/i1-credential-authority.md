@@ -484,6 +484,22 @@ streams without detecting generated secrets or retaining needles/tails, and
 joined the daemon; it did not reach the final SQLite/CAS corpus scan. Neither
 this RED nor portable tests qualify the pending real ambiguity case.
 
+Commit `1f8bab928dcb890e7b0c0502e3acd758a613b5da` completed
+[run 38418796368](https://github.com/cogine-ai/cliq-agent/actions/runs/38418796368)
+with the seven independent checks successful, but the credential journey failed
+at its final `secret_corpus` phase. Actual duplicate creation/removal, the full
+ambiguity-cleanup assertions and completed-schema preservation all passed
+before that failure. The daemon joined and all 1169 output scan streams closed
+without a secret hit or scan-limit exhaustion. The copied logical SQLite scan
+then wrapped an unknown native/API error; its deleted diagnostic copies and
+closed report cannot retrospectively establish the underlying error category.
+This is not a fully qualified campaign or evidence of secret absence across the
+complete SQLite/CAS corpus. A minimal source-owned database/stage/error-class
+diagnostic preserves the same sequence, assertions and limits for the next run.
+The independently reproduced full-width SQLite INTEGER limitation is not yet
+evidence of this Linux failure's cause. Later independent store regressions
+remain held outside this diagnostic iteration.
+
 The real post-`secret_stored`, retired-scope producer pause remains blocked:
 both the proposed native helper and the narrower standard-tool metadata-only
 owned pause implementation were stopped by the platform safety check. Their

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { scanCopiedCredentialDatabase, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
+import { CredentialSecretCorpusError, scanCopiedCredentialDatabase, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
 import { createCredentialSecretScanner } from './credential-secret-scan.js';
 
 // Actual disposable SQLite/filesystem fixtures test the byte diagnostic only.
@@ -99,7 +99,14 @@ test('malformed copied SQLite and an oversized table corpus fail with fixed erro
     await writeFile(filename, 'arbitrary error text must not escape', { flag: 'wx', mode: 0o600 });
     const scanner = createCredentialSecretScanner([secret()], limits);
     try {
-      assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), { message: 'credential secret corpus did not qualify' });
+      assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => {
+        assert(error instanceof CredentialSecretCorpusError);
+        assert.equal(error.message, 'credential secret corpus did not qualify'); assert.equal(Object.hasOwn(error, 'cause'), false);
+        assert.deepEqual(error.databaseFailure, { database: 'authority', stage: 'schema', errorClass: 'sqlite_not_database' });
+        assert.equal(Object.isFrozen(error.databaseFailure), true);
+        assert(!JSON.stringify(error).includes(filename)); assert(!JSON.stringify(error).includes('arbitrary error text'));
+        return true;
+      });
       await rm(filename);
       await createDatabase(filename, database => { for (let index = 0; index < 65; index++) database.exec(`CREATE TABLE table_${index}(value TEXT)`); });
       assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), { message: 'credential secret corpus did not qualify' });
@@ -111,6 +118,12 @@ test('copied diagnostics reject non-copy paths and symlink leaves before opening
   await copyFixture(async filename => {
     const scanner = createCredentialSecretScanner([secret()], limits);
     try {
+      for (const value of [undefined, null, 1, Symbol('untrusted filename'), { filename }])
+        assert.throws(() => scanCopiedCredentialDatabase(value as never, scanner), error => {
+          assert(error instanceof CredentialSecretCorpusError);
+          assert.equal(error.message, 'credential secret corpus did not qualify'); assert.equal(Object.hasOwn(error, 'cause'), false);
+          assert.equal(error.databaseFailure, undefined); assert(!JSON.stringify(error).includes(filename)); return true;
+        });
       assert.throws(() => scanCopiedCredentialDatabase(path.join(path.dirname(filename), 'other.sqlite'), scanner),
         { message: 'credential secret corpus did not qualify' });
       await symlink('/nonexistent/diagnostic-target', filename);

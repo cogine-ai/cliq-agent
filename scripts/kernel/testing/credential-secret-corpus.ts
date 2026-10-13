@@ -10,8 +10,13 @@ import { CredentialSecretScanError, type CredentialSecretScanner } from './crede
 
 const chunkBytes = 64 * 1024, sqliteLimit = 16 * 1024 * 1024, fileLimit = 512 * 1024 * 1024;
 const entryLimit = 1024, rowLimit = 8192, cellLimit = 65536;
+type DatabaseFailureStage = 'open' | 'configure' | 'schema' | 'prepare' | 'rows' | 'stability';
+type DatabaseFailureClass = 'sqlite_error' | 'sqlite_busy' | 'sqlite_locked' | 'sqlite_io' | 'sqlite_corrupt'
+  | 'sqlite_readonly' | 'sqlite_not_database' | 'out_of_range' | 'type_error' | 'other';
 export class CredentialSecretCorpusError extends Error {
-  constructor() { super('credential secret corpus did not qualify'); this.name = 'CredentialSecretCorpusError'; }
+  constructor(readonly databaseFailure?: Readonly<{ database: 'kernel' | 'authority'; stage: DatabaseFailureStage; errorClass: DatabaseFailureClass }>) {
+    super('credential secret corpus did not qualify'); this.name = 'CredentialSecretCorpusError';
+  }
 }
 function refused(): never { throw new CredentialSecretCorpusError(); }
 function check(value: unknown): asserts value { if (!value) refused(); }
@@ -32,8 +37,10 @@ function scanValue(scanner: CredentialSecretScanner, bytes: Uint8Array): void {
  * Nothing here accepts a retained object as proof or rehashes secret bytes. */
 export function scanCopiedCredentialDatabase(filename: string, scanner: CredentialSecretScanner) {
   let database: DatabaseSync | undefined;
+  let stage: DatabaseFailureStage = 'open';
   let logicalRowsScanned = 0, logicalValuesScanned = 0, logicalBytesScanned = 0;
   try {
+    check(typeof filename === 'string');
     check(path.isAbsolute(filename) && path.normalize(filename) === filename &&
       /^cliq-credential-corpus-[A-Za-z0-9]+$/u.test(path.basename(path.dirname(filename))) &&
       ['authority.sqlite', 'kernel.sqlite3'].includes(path.basename(filename)));
@@ -43,7 +50,9 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
     check(original.isFile() && !original.isSymbolicLink() && original.uid === directory.uid && original.nlink === 1n &&
       (original.mode & 0o7777n) === 0o600n && original.size <= BigInt(sqliteLimit));
     database = new DatabaseSync(filename, { readOnly: true, allowExtension: false });
+    stage = 'configure';
     database.exec('PRAGMA trusted_schema=OFF; PRAGMA query_only=ON');
+    stage = 'schema';
     const tables = database.prepare("SELECT name,sql FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' LIMIT 65").all();
     check(tables.length > 0 && tables.length <= 64);
     const scan = (value: unknown) => {
@@ -59,17 +68,30 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
       check(typeof table.name === 'string' && /^[a-z][a-z0-9_]{0,63}$/u.test(table.name));
       check(typeof table.sql === 'string' && /^CREATE TABLE\s/iu.test(table.sql));
       scan(table.name); scan(table.sql);
-      for (const row of database.prepare(`SELECT * FROM "${table.name}"`).iterate()) {
+      stage = 'prepare'; const statement = database.prepare(`SELECT * FROM "${table.name}"`);
+      stage = 'rows';
+      for (const row of statement.iterate()) {
         check(++logicalRowsScanned <= rowLimit);
         for (const value of Object.values(row)) scan(value);
       }
     }
+    stage = 'stability';
     check(identity(lstatSync(filename, { bigint: true })) === identity(original));
     check(directoryIdentity(lstatSync(path.dirname(filename), { bigint: true })) === directoryIdentity(directory));
     return Object.freeze({ logicalRowsScanned, logicalValuesScanned, logicalBytesScanned });
   } catch (error) {
     if (error instanceof CredentialSecretScanError || error instanceof CredentialSecretCorpusError) throw error;
-    return refused();
+    // Keep only a closed code class and source-owned stage, never SQLite's
+    // messages, input, table/column names, paths, numeric values or causes.
+    const code = error instanceof Error ? Object.getOwnPropertyDescriptor(error, 'code')?.value : undefined;
+    const engineCode = error instanceof Error ? Object.getOwnPropertyDescriptor(error, 'errcode')?.value : undefined;
+    const sqliteClasses: Readonly<Record<number, DatabaseFailureClass>> = { 5: 'sqlite_busy', 6: 'sqlite_locked',
+      8: 'sqlite_readonly', 10: 'sqlite_io', 11: 'sqlite_corrupt', 26: 'sqlite_not_database' };
+    const errorClass: DatabaseFailureClass = code === 'ERR_SQLITE_ERROR'
+      ? typeof engineCode === 'number' && Number.isSafeInteger(engineCode) && engineCode >= 0 && engineCode <= 65535
+        ? sqliteClasses[engineCode & 255] ?? 'sqlite_error' : 'sqlite_error'
+      : code === 'ERR_OUT_OF_RANGE' ? 'out_of_range' : error instanceof TypeError ? 'type_error' : 'other';
+    throw new CredentialSecretCorpusError(Object.freeze({ database: path.basename(filename) === 'kernel.sqlite3' ? 'kernel' : 'authority', stage, errorClass }));
   } finally { try { database?.close(); } catch { refused(); } }
 }
 
