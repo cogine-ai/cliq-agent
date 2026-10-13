@@ -454,12 +454,13 @@ corpus covered 246 files, both SQLite databases, 114 logical rows and four
 joined trace corpora; all 1394 scan streams closed without detected generated
 secret bytes or retained needles/tails.
 
-The next completed-schema preservation check saves the original signed endpoint
+The completed-schema preservation check saves the original signed endpoint
 registration/read responses before the first credential enrollment. After the
 actual v1-to-v2 extension, it requires exact original operation/record equality
 and identical canonical response bytes from the same signed public entry.
-This case is pending genuine Linux qualification and does not qualify old/new
-migration crash cuts.
+Those exact comparisons passed in the test-first run below. The complete
+extended campaign remains pending and this does not qualify old/new migration
+crash cuts.
 
 The next genuine ambiguity check enrolls one item through the signed entry,
 then the bounded disposable-account fixture must create a second actual item
@@ -468,10 +469,20 @@ generated secret. A fresh public nonce belongs only to its fixture Label, not
 the selector. Revoke and explicit cleanup must commit/retain terminal metadata
 but refuse to delete either ambiguous item. Only the positively identified
 fixture-created path/Label may be removed; original-receipt cleanup must then
-complete against the unique original item. The native fixture capability is
-initially absent so its genuine precondition failure must be retained before
-implementation. This is pending Linux qualification and proves no finalizer
-ambiguity or precise crash cut.
+complete against the unique original item. This is pending Linux qualification
+and proves no finalizer ambiguity or precise crash cut.
+
+The test-first commit `28fdaf58bebbcfec367aa89dc1e890ee351fce2e` completed
+[run 38414424280](https://github.com/cogine-ai/cliq-agent/actions/runs/38414424280)
+with seven successful checks and the expected credential-journey failure at
+`ambiguous_store_create`: that immutable commit intentionally lacked the
+fixture's duplicate-create command. This is a missing test-fixture capability,
+not a demonstrated production defect. The retained report confirms the actual
+completed v1-to-v2 endpoint operation/record and response-byte preservation
+checks passed before that failure. Its bounded output scan closed all 511
+streams without detecting generated secrets or retaining needles/tails, and
+joined the daemon; it did not reach the final SQLite/CAS corpus scan. Neither
+this RED nor portable tests qualify the pending real ambiguity case.
 
 The real post-`secret_stored`, retired-scope producer pause remains blocked:
 both the proposed native helper and the narrower standard-tool metadata-only

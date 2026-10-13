@@ -1,6 +1,8 @@
 /* Test-only MUTATION of the disposable user's actual GNOME Secret Service.
  * Not a read-only observer, credential AuthorityProof or recovery decision.
- * No secret input, key generation, item creation/deletion, SQL or provider.
+ * No original-secret reads, key generation, SQL or provider. The ambiguity
+ * fixture creates one additional item from separate disposable stdin bytes,
+ * then can delete only that exact, nonce-labelled fixture item.
  * Item drift adds/removes only one fixed test attribute, preserving the actual
  * production-owned selector values. It never changes an item's secret.
  * The renamed prerequisite entry is never invoked by this command interface.
@@ -263,6 +265,124 @@ static gboolean fixture_item_attributes(Probe *p, const char *item, const char *
   return fixture_item_member(p, item) && fixture_collection(p, FALSE) && fixture_alias(p, p->collection);
 }
 
+static gboolean fixture_duplicate_paths(Probe *p, GVariant *paths, const char *original, const char *duplicate) {
+  if (!paths || g_variant_n_children(paths) != (duplicate ? 2u : 1u)) return fail(p, "fixture-duplicate-inventory", NULL);
+  guint seen = 0;
+  for (gsize index = 0; index < g_variant_n_children(paths); index++) {
+    const char *actual; g_variant_get_child(paths, index, "&o", &actual);
+    guint bit = !strcmp(actual, original) ? 1u : duplicate && !strcmp(actual, duplicate) ? 2u : 0u;
+    if (!bit || (seen & bit)) return fail(p, "fixture-duplicate-inventory", NULL);
+    seen |= bit;
+  }
+  return seen == (duplicate ? 3u : 1u) || fail(p, "fixture-duplicate-inventory", NULL);
+}
+
+/* A collection inventory alone does not prove selector ambiguity. Require
+ * the actual service search to return exactly the same unlocked item set. */
+static gboolean fixture_duplicate_inventory(Probe *p, GVariant *attrs, const char *original, const char *duplicate) {
+  g_autoptr(GVariant) items = property(p, p->collection, SECRET_IFACE "Collection", "Items", "ao");
+  if (!fixture_duplicate_paths(p, items, original, duplicate)) return FALSE;
+  g_autoptr(GVariant) reply = call(p, p->owner, ROOT, SECRET_IFACE "Service", "SearchItems",
+    g_variant_new("(@a{ss})", attrs), "(aoao)");
+  if (!reply) return FALSE;
+  g_autoptr(GVariant) unlocked_items = g_variant_get_child_value(reply, 0);
+  g_autoptr(GVariant) locked_items = g_variant_get_child_value(reply, 1);
+  return (!g_variant_n_children(locked_items) || fail(p, "fixture-duplicate-locked", NULL)) &&
+    fixture_duplicate_paths(p, unlocked_items, original, duplicate);
+}
+
+static gboolean fixture_duplicate_attributes(Probe *p, const char *item, const char *logical_id, GVariant *expected) {
+  g_autoptr(GVariant) actual = property(p, item, SECRET_IFACE "Item", "Attributes", "a{ss}");
+  if (!fixture_item_attributes_valid(p, actual, logical_id, FALSE)) return FALSE;
+  GVariantIter iter; const char *key, *value; g_variant_iter_init(&iter, expected);
+  while (g_variant_iter_next(&iter, "{&s&s}", &key, &value)) {
+    const char *observed;
+    if (!g_variant_lookup(actual, key, "&s", &observed) || strcmp(observed, value))
+      return fail(p, "fixture-duplicate-attributes", NULL);
+  }
+  return TRUE;
+}
+
+static gboolean fixture_duplicate_input(Probe *p) {
+  const gint64 deadline = g_get_monotonic_time() + TIMEOUT_MS * G_TIME_SPAN_MILLISECOND;
+  gsize count = 0;
+  for (;;) {
+    const gint64 remaining = deadline - g_get_monotonic_time();
+    if (remaining <= 0) return fail(p, "fixture-duplicate-input", NULL);
+    struct pollfd input = { .fd = STDIN_FILENO, .events = POLLIN };
+    int ready = poll(&input, 1, (int) ((remaining + G_TIME_SPAN_MILLISECOND - 1) / G_TIME_SPAN_MILLISECOND));
+    if (ready < 0 && errno == EINTR) continue;
+    if (ready <= 0 || (input.revents & (POLLERR | POLLNVAL))) return fail(p, "fixture-duplicate-input", NULL);
+    ssize_t received = read(STDIN_FILENO, p->secret + count, sizeof(p->secret) - count);
+    if (received < 0 && errno == EINTR) continue;
+    if (received < 0) return fail(p, "fixture-duplicate-input", NULL);
+    if (!received) break;
+    count += (gsize) received;
+    if (count > 32) return fail(p, "fixture-duplicate-input-length", NULL);
+  }
+  return count == 32 || fail(p, "fixture-duplicate-input-length", NULL);
+}
+
+static gboolean fixture_duplicate(Probe *p, Fixture *fixture, const char *original, const char *logical_id,
+    const char *nonce, char **duplicate, gboolean removing) {
+  if (!fixture_collection(p, FALSE) || !fixture_alias(p, p->collection) || !fixture_item_member(p, original)) return FALSE;
+  g_autoptr(GVariant) attrs = property(p, original, SECRET_IFACE "Item", "Attributes", "a{ss}");
+  g_autoptr(GVariant) original_label = property(p, original, SECRET_IFACE "Item", "Label", "s");
+  if (!fixture_item_attributes_valid(p, attrs, logical_id, FALSE) || !original_label) return FALSE;
+  const char *label_prefix = "Cliq disposable ambiguity fixture "; char label[96];
+  snprintf(label, sizeof(label), "%s%s", label_prefix, nonce);
+  const char *original_label_text = g_variant_get_string(original_label, NULL);
+  if (g_str_has_prefix(original_label_text, label_prefix)) return fail(p, "fixture-duplicate-original-label", NULL);
+  if (!fixture_duplicate_inventory(p, attrs, original, removing ? *duplicate : NULL)) return FALSE;
+  if (!removing) {
+    if (!fixture_duplicate_input(p) || !fixture_current(p, fixture)) return FALSE;
+    g_autoptr(GVariant) opened = call(p, p->owner, ROOT, SECRET_IFACE "Service", "OpenSession",
+      g_variant_new("(sv)", "plain", g_variant_new_string("")), "(vo)");
+    if (!opened) return FALSE;
+    const char *session; g_variant_get_child(opened, 1, "&o", &session);
+    if (!object_path(session)) return fail(p, "fixture-duplicate-session", NULL);
+    p->session = g_strdup(session);
+    g_autoptr(GVariant) box = g_variant_get_child_value(opened, 0);
+    g_autoptr(GVariant) output = g_variant_get_variant(box);
+    if (!g_variant_is_of_type(output, G_VARIANT_TYPE_STRING) || strcmp(g_variant_get_string(output, NULL), ""))
+      return fail(p, "fixture-duplicate-session", NULL);
+    GVariantBuilder properties; g_variant_builder_init(&properties, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&properties, "{sv}", SECRET_IFACE "Item.Label", g_variant_new_string(label));
+    g_variant_builder_add(&properties, "{sv}", SECRET_IFACE "Item.Attributes", attrs);
+    g_autoptr(GVariant) created = call(p, p->owner, p->collection, SECRET_IFACE "Collection", "CreateItem",
+      g_variant_new("(@a{sv}(o@ay@ays)b)", g_variant_builder_end(&properties), p->session,
+        g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, NULL, 0, 1),
+        g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, p->secret, 32, 1), CONTENT_TYPE, FALSE), "(oo)");
+    if (!created) return FALSE;
+    const char *named, *prompt; g_variant_get(created, "(&o&o)", &named, &prompt);
+    if (!object_path(named) || !strcmp(named, original) || strcmp(prompt, "/")) return fail(p, "fixture-duplicate-created", NULL);
+    *duplicate = g_strdup(named);
+  }
+  if (!fixture_item_member(p, *duplicate) || !fixture_duplicate_attributes(p, *duplicate, logical_id, attrs)) return FALSE;
+  g_autoptr(GVariant) duplicate_label = property(p, *duplicate, SECRET_IFACE "Item", "Label", "s");
+  if (!duplicate_label || strcmp(g_variant_get_string(duplicate_label, NULL), label))
+    return fail(p, "fixture-duplicate-ownership", NULL);
+  g_autoptr(GVariant) stable_label = property(p, original, SECRET_IFACE "Item", "Label", "s");
+  if (!stable_label || strcmp(g_variant_get_string(stable_label, NULL), original_label_text))
+    return fail(p, "fixture-duplicate-original-label", NULL);
+  if (!fixture_duplicate_attributes(p, original, logical_id, attrs) ||
+      !fixture_duplicate_inventory(p, attrs, original, *duplicate) || !fixture_current(p, fixture)) return FALSE;
+  if (removing) {
+    /* This exact locator came from the fixture creation receipt. Never select
+     * a deletion target from SearchItems, nor fall back after uncertain create. */
+    g_autoptr(GVariant) deleted = call(p, p->owner, *duplicate, SECRET_IFACE "Item", "Delete", NULL, "(o)");
+    if (!deleted) return FALSE;
+    const char *prompt; g_variant_get(deleted, "(&o)", &prompt);
+    if (strcmp(prompt, "/")) return fail(p, "fixture-duplicate-delete-prompt", NULL);
+  }
+  g_autoptr(GVariant) current_label = property(p, original, SECRET_IFACE "Item", "Label", "s");
+  return ((current_label && !strcmp(g_variant_get_string(current_label, NULL), original_label_text)) ||
+      fail(p, "fixture-duplicate-original-label", NULL)) && fixture_item_member(p, original) &&
+    fixture_duplicate_attributes(p, original, logical_id, attrs) &&
+    fixture_duplicate_inventory(p, attrs, original, removing ? NULL : *duplicate) &&
+    fixture_collection(p, FALSE) && fixture_alias(p, p->collection) && fixture_current(p, fixture);
+}
+
 int main(int argc, char **argv) {
   Probe p = { .runtime_fd = -1, .uid = getuid() }; Fixture fixture = { .home_fd = -1 };
   gboolean locking = argc == 2 && !strcmp(argv[1], "lock");
@@ -270,11 +390,16 @@ int main(int argc, char **argv) {
   gboolean restoring = argc == 3 && !strcmp(argv[1], "alias-restore");
   gboolean item_extra = argc == 4 && !strcmp(argv[1], "item-extra");
   gboolean item_restore = argc == 4 && !strcmp(argv[1], "item-restore");
-  gboolean change_alias = TRUE; char *session = NULL;
+  gboolean duplicate_create = argc == 5 && !strcmp(argv[1], "duplicate-create");
+  gboolean duplicate_remove = argc == 6 && !strcmp(argv[1], "duplicate-remove");
+  gboolean change_alias = TRUE; char *session = NULL, *duplicate = NULL;
   if (unsetenv("G_DBUS_DEBUG")) { fail(&p, "disable-payload-debug", NULL); goto done; }
-  if ((!locking && !alias_session && !restoring && !item_extra && !item_restore) || !p.uid || geteuid() != p.uid ||
+  if ((!locking && !alias_session && !restoring && !item_extra && !item_restore && !duplicate_create && !duplicate_remove) || !p.uid || geteuid() != p.uid ||
       (restoring && !object_path(argv[2])) || ((item_extra || item_restore) &&
-        (!object_path(argv[2]) || !*argv[3] || strlen(argv[3]) > 1024 || !g_utf8_validate(argv[3], -1, NULL)))) {
+        (!object_path(argv[2]) || !*argv[3] || strlen(argv[3]) > 1024 || !g_utf8_validate(argv[3], -1, NULL))) ||
+      ((duplicate_create || duplicate_remove) && (!object_path(argv[2]) || !*argv[3] || strlen(argv[3]) > 1024 ||
+        !g_utf8_validate(argv[3], -1, NULL) || strlen(argv[4]) != 32 || strspn(argv[4], "0123456789abcdef") != 32)) ||
+      (duplicate_remove && (!object_path(argv[5]) || !strcmp(argv[2], argv[5])))) {
     fail(&p, "fixture-arguments", NULL); goto done;
   }
   if (!fixture_home(&p, &fixture) || !connect_bus(&p) || !fixture_current(&p, &fixture)) goto done;
@@ -284,7 +409,10 @@ int main(int argc, char **argv) {
   } else if (!default_collection(&p)) goto done;
   if (alias_session && !fixture_session(&p, NULL, &session)) goto done;
   if (!fixture_current(&p, &fixture)) goto done;
-  if (item_extra || item_restore) {
+  if (duplicate_create || duplicate_remove) {
+    if (duplicate_remove) duplicate = g_strdup(argv[5]);
+    if (!fixture_duplicate(&p, &fixture, argv[2], argv[3], argv[4], &duplicate, duplicate_remove)) goto done;
+  } else if (item_extra || item_restore) {
     if (!fixture_item_attributes(&p, argv[2], argv[3], item_restore)) goto done;
   } else if (locking) {
     if (!fixture_lock(&p)) goto done;
@@ -303,6 +431,12 @@ int main(int argc, char **argv) {
   }
   if (!fixture_current(&p, &fixture)) goto done;
 done:
+  if (p.session) {
+    char *owned_session = p.session; p.session = NULL;
+    g_autoptr(GVariant) closed = call(&p, p.owner, owned_session, SECRET_IFACE "Session", "Close", NULL, "()");
+    g_free(owned_session);
+    if (!closed) p.failed = 1;
+  }
   if (!p.failed && p.bus && !fixture_current(&p, &fixture)) p.failed = 1;
   if (p.bus) {
     GError *error = NULL; p.connection_closed = g_dbus_connection_close_sync(p.bus, NULL, &error);
@@ -310,12 +444,17 @@ done:
     g_object_unref(p.bus); p.bus = NULL;
   }
   fixture_close(&p, &p.runtime_fd); fixture_close(&p, &fixture.home_fd);
-  if (!p.failed && (printf("{\"diagnosticOnly\":true,\"action\":\"%s\",\"collection\":\"%s\",\"%s\":true,\"connectionClosed\":true}\n",
+  explicit_bzero(p.secret, sizeof(p.secret));
+  if (!p.failed && (duplicate_create || duplicate_remove)) {
+    if (printf("{\"diagnosticOnly\":true,\"action\":\"%s\",\"collection\":\"%s\",\"duplicateItem\":\"%s\",\"%s\":true,\"connectionClosed\":true}\n",
+        duplicate_create ? "duplicate-create" : "duplicate-remove", p.collection, duplicate,
+        duplicate_create ? "duplicateCreated" : "duplicateRemoved") < 0 || fflush(stdout)) fail(&p, "fixture-report-output", NULL);
+  } else if (!p.failed && (printf("{\"diagnosticOnly\":true,\"action\":\"%s\",\"collection\":\"%s\",\"%s\":true,\"connectionClosed\":true}\n",
       locking ? "lock" : alias_session ? "alias-session" : item_extra ? "item-extra" : item_restore ? "item-restore" : "alias-restore",
       alias_session ? session : p.collection,
       locking ? "locked" : alias_session ? "defaultAliasSession" : item_extra ? "itemAttributesExtra" :
         item_restore ? "itemAttributesRestored" : "defaultAliasMatched") < 0 || fflush(stdout)))
     fail(&p, "fixture-report-output", NULL);
-  g_free(p.owner); g_free(p.unique); g_free(p.collection); g_free(session);
+  g_free(p.owner); g_free(p.unique); g_free(p.collection); g_free(session); g_free(duplicate);
   return p.failed ? 1 : 0;
 }
