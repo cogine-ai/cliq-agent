@@ -105,7 +105,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'genuine signed credential journey, preparation-only expiry, extra-item-attribute cleanup refusal and revoked-endpoint static admission refusal, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, finalizer expiry/drift/concurrent revoke, ambiguity, live-producer presence, clock regression, broker or I1' };
+    scope: 'genuine signed credential journey, completed-schema endpoint preservation, preparation-only expiry, extra-item-attribute and full-selector ambiguity cleanup refusal, revoked-endpoint static admission refusal, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, finalizer expiry/drift/concurrent revoke/ambiguity, live-producer presence, clock regression, broker or I1' };
   const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
     negativeSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
@@ -457,10 +457,16 @@ async function campaign(filename: string): Promise<void> {
     registration.registrationDigest = digestOmitting(registration, 'registrationDigest');
     const endpointCore = { schemaVersion: 1, kind: 'register', ownerPrincipalId, registration,
       expectedRegistrationArtifactRef: canonicalSha256(registration), commandDigest: '' } as const;
-    const endpointOperation = decodeEndpointAuthorityOperation(success(command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'],
-      canonicalJsonBytes({ schemaVersion: 1, kind: 'commit', requestId: '019a0012-0000-7000-8000-000000000021',
-        commandCore: { ...endpointCore, commandDigest: digestOmitting(endpointCore, 'commandDigest') } })), 'operation'));
+    const endpointRequestBytes = canonicalJsonBytes({ schemaVersion: 1, kind: 'commit', requestId: '019a0012-0000-7000-8000-000000000021',
+      commandCore: { ...endpointCore, commandDigest: digestOmitting(endpointCore, 'commandDigest') } });
+    const endpointCommitted = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], endpointRequestBytes);
+    const endpointOperation = decodeEndpointAuthorityOperation(success(endpointCommitted, 'operation'));
     assert.equal(endpointOperation.disposition, 'registered');
+    const endpointReadBytes = canonicalJsonBytes({ schemaVersion: 1, kind: 'read', endpointRegistrationId: registration.endpointRegistrationId });
+    const endpointBeforeUpgrade = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], endpointReadBytes);
+    const endpointBeforeRecord = decodeEndpointAuthorityRecord(success(endpointBeforeUpgrade, 'record'));
+    assert.equal(endpointBeforeRecord.state, 'active'); assert.equal(endpointBeforeRecord.authorityRevision, 1);
+    assert.equal(endpointBeforeRecord.recordDigest, endpointOperation.resultRecordDigest);
     const metadata = { schemaVersion: 1, kind: 'enroll', requestId: '019a0012-0000-7000-8000-000000000022',
       credentialGrantId: 'credential-journey-grant', purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
       secretSubmissionId: 'credential-journey-submission', expiresAt: '2099-01-01T00:00:00.000Z' };
@@ -472,6 +478,17 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(operation.ownerPrincipalId, ownerPrincipalId); assert.equal(operation.commandCore.secretSubmissionId, metadata.secretSubmissionId);
     assert.equal(operation.intendedAuthorityRevision, 1); assert.equal(operation.intendedSecretGeneration, 1);
     report.operation = operation;
+    report.phase = 'completed_schema_upgrade_replay';
+    // The actual endpoint entry created v1; the genuine credential write
+    // completed v2. Compare public retained results, not SQL-seeded authority.
+    const endpointReplay = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], endpointRequestBytes);
+    assert.deepEqual(decodeEndpointAuthorityOperation(success(endpointReplay, 'operation')), endpointOperation);
+    assert.equal(endpointReplay.stdout, endpointCommitted.stdout);
+    const endpointAfterUpgrade = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], endpointReadBytes);
+    assert.deepEqual(decodeEndpointAuthorityRecord(success(endpointAfterUpgrade, 'record')), endpointBeforeRecord);
+    assert.equal(endpointAfterUpgrade.stdout, endpointBeforeUpgrade.stdout);
+    report.completedSchemaUpgradeReplay = { originalEndpointOperationUnchanged: true, originalEndpointRecordUnchanged: true,
+      exactResponseBytesMatched: true, migrationCrashCutsQualified: false };
     report.phase = 'read';
     const record = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: metadata.credentialGrantId }), 'record'));
     assert.equal(record.state, 'active'); assert.equal(record.authorityRevision, 1); assert.equal(record.secretGeneration, 1);
@@ -963,7 +980,8 @@ async function campaign(filename: string): Promise<void> {
 
     // These are actual adversarial store preconditions, not fabricated native
     // observations or SQL authority. The administrative helper cannot run on
-    // an ordinary account's vault and never reads secrets or creates items.
+    // an ordinary account's vault and never reads the original secret. The
+    // separate duplicate commands own only their positively identified item.
     const storeFixture = (action: 'lock' | 'alias-session' | 'alias-restore' | 'item-extra' | 'item-restore', locator?: string, itemId?: string) => {
       const result = command(recipe.storeFixture, [action, ...(locator ? [locator] : []), ...(itemId ? [itemId] : [])]);
       assert.equal(result.status, 0, 'actual disposable store precondition did not complete');
@@ -1052,6 +1070,90 @@ async function campaign(filename: string): Promise<void> {
     report.itemAttributeCleanupRefusal = { terminalRevokeWithoutSupervisor: true, mismatchedItemNotDeleted: true,
       originalReceiptIdentityMatched: true, revokedRecordUnchanged: true, restoredCleanupComplete: true,
       secretInputPipeUnwrittenAndUnended: true, finalizerDriftQualified: false, ambiguityQualified: false };
+
+    report.phase = 'ambiguous_store_setup';
+    const ambiguousMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000045',
+      credentialGrantId: 'credential-journey-ambiguous-grant', secretSubmissionId: 'credential-journey-ambiguous-submission' };
+    const ambiguousOperation = decodeCredentialAuthorityOperation(success(credential(ambiguousMetadata, negativeSecret), 'operation'));
+    assert.equal(ambiguousOperation.phase, 'committed'); assert.equal(ambiguousOperation.requestId, ambiguousMetadata.requestId);
+    const ambiguousRecord = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: ambiguousMetadata.credentialGrantId }), 'record'));
+    assert.equal(ambiguousRecord.state, 'active'); assert.equal(ambiguousRecord.authorityRevision, 1);
+    assert.equal(ambiguousRecord.credentialGrantId, ambiguousMetadata.credentialGrantId);
+    assert.deepEqual(ambiguousRecord.platformItem, ambiguousOperation.platformItem);
+    const ambiguousItem = ambiguousRecord.platformItem;
+    assert(ambiguousItem.kind === 'linux_secret_service');
+    const ambiguousBefore = observe('list'); assert.equal(ambiguousBefore.items.length, 1);
+    assert.equal(ambiguousBefore.nameOwner, restored.nameOwner); assert.equal(ambiguousBefore.collection, restored.collection);
+    const originalItem = ambiguousBefore.items[0]!;
+    assert.equal(observe('compare', originalItem, ambiguousItem.itemId, negativeSecret).readback, true);
+    assert.equal(secret.equals(negativeSecret), false);
+    const ambiguousServices = stopRoles(), duplicateNonce = randomBytes(16).toString('hex');
+    const duplicateFixture = (action: 'duplicate-create' | 'duplicate-remove', duplicate?: string) => {
+      const result = command(recipe.storeFixture, [action, originalItem, ambiguousItem.itemId, duplicateNonce,
+        ...(duplicate ? [duplicate] : [])], action === 'duplicate-create' ? secret : undefined);
+      assert.equal(result.status, 0, 'owned duplicate store precondition did not complete');
+      const value = parseJsonStrict(result.stdout.trim()) as Record<string, unknown>;
+      const flag = action === 'duplicate-create' ? 'duplicateCreated' : 'duplicateRemoved';
+      assert.deepEqual(Object.keys(value).sort(), ['diagnosticOnly', 'action', 'collection', 'duplicateItem', flag, 'connectionClosed'].sort());
+      assert.equal(value.diagnosticOnly, true); assert.equal(value.action, action); assert.equal(value.collection, restored.collection);
+      assert.equal(value[flag], true); assert.equal(value.connectionClosed, true); assert.equal(typeof value.duplicateItem, 'string');
+      const locator = value.duplicateItem as string;
+      assert(locator.startsWith(`${restored.collection}/`)); assert.match(locator.slice(restored.collection.length + 1), /^[A-Za-z0-9_]+$/u);
+      assert(Buffer.byteLength(locator) <= 1024); assert.notEqual(locator, originalItem);
+      if (duplicate) assert.equal(locator, duplicate);
+      report[action === 'duplicate-create' ? 'duplicateCreated' : 'duplicateRemoved'] = value;
+      return locator;
+    };
+    let duplicateItem: string | undefined, ambiguousPrimary: unknown;
+    let ambiguousRevoke: ReturnType<typeof decodeCredentialAuthorityRevokeOperation> | undefined;
+    let ambiguousRevoked: ReturnType<typeof decodeCredentialAuthorityRecord> | undefined;
+    try {
+      report.phase = 'ambiguous_store_create'; duplicateItem = duplicateFixture('duplicate-create');
+      const expectedItems = [originalItem, duplicateItem].sort();
+      const unchangedItems = () => {
+        const current = observe('list'); assert.deepEqual(current.items, expectedItems);
+        for (const key of ['nameOwner', 'servicePid', 'serviceUid', 'collection'] as const) assert.equal(current[key], ambiguousBefore[key]);
+        assert.equal(observe('compare', originalItem, ambiguousItem.itemId, negativeSecret).readback, true);
+        assert.equal(observe('compare', duplicateItem!, ambiguousItem.itemId, secret).readback, true);
+        assert.deepEqual(inactive(), ambiguousServices);
+      };
+      unchangedItems(); report.phase = 'ambiguous_store_revoke';
+      ambiguousRevoke = decodeCredentialAuthorityRevokeOperation(success(await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+        ['--bootstrap-credential', canonicalJsonBytes({ schemaVersion: 1, kind: 'revoke', requestId: '019a0012-0000-7000-8000-000000000046',
+          credentialGrantId: ambiguousMetadata.credentialGrantId, expectedAuthorityRevision: 1 }).toString('base64url')]), 'operation'));
+      assert.equal(ambiguousRevoke.requestId, '019a0012-0000-7000-8000-000000000046');
+      assert.equal(ambiguousRevoke.credentialGrantId, ambiguousMetadata.credentialGrantId); assert.equal(ambiguousRevoke.committedAuthorityRevision, 2);
+      assert.equal(ambiguousRevoke.cleanupPhase, 'cleanup_failed'); assert.equal(ambiguousRevoke.cleanupErrorCode, 'platform_store_unavailable');
+      assert.deepEqual(ambiguousRevoke.platformItem, ambiguousItem);
+      ambiguousRevoked = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+        credentialGrantId: ambiguousMetadata.credentialGrantId }), 'record'));
+      const { recordDigest: _beforeDigest, ...beforeBody } = ambiguousRecord;
+      const { recordDigest: _afterDigest, ...afterBody } = ambiguousRevoked;
+      assert.deepEqual(afterBody, { ...beforeBody, state: 'revoked', authorityRevision: 2, revokedAt: ambiguousRevoke.metadataCommittedAt,
+        revokedByRequestId: ambiguousRevoke.requestId, revokedByRequestDigest: ambiguousRevoke.requestDigest });
+      assert.equal(ambiguousRevoke.revokedRecordDigest, ambiguousRevoked.recordDigest); unchangedItems();
+      const repeated = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'cleanup', requestId: ambiguousRevoke.requestId }), 'operation'));
+      assert.equal(repeated.cleanupPhase, 'cleanup_failed'); assert.equal(repeated.cleanupErrorCode, 'platform_store_unavailable');
+      assert.deepEqual(receiptIdentity(repeated), receiptIdentity(ambiguousRevoke));
+      assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+        credentialGrantId: ambiguousMetadata.credentialGrantId }), 'record')), ambiguousRevoked); unchangedItems();
+    } catch (error) { ambiguousPrimary = error; throw error; }
+    finally {
+      if (duplicateItem) try { duplicateFixture('duplicate-remove', duplicateItem); }
+      catch (error) { throw new AggregateError([ambiguousPrimary, error].filter(Boolean), 'actual ambiguity test and duplicate retirement failed'); }
+    }
+    assert(ambiguousRevoke && ambiguousRevoked); report.phase = 'ambiguous_store_cleanup';
+    assert.deepEqual(observe('list').items, [originalItem]);
+    assert.equal(observe('compare', originalItem, ambiguousItem.itemId, negativeSecret).readback, true);
+    const ambiguousCleanup = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'cleanup', requestId: ambiguousRevoke.requestId }), 'operation'));
+    assert.equal(ambiguousCleanup.cleanupPhase, 'cleanup_complete'); assert.deepEqual(receiptIdentity(ambiguousCleanup), receiptIdentity(ambiguousRevoke));
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: ambiguousMetadata.credentialGrantId }), 'record')), ambiguousRevoked);
+    assert.deepEqual(observe('list').items, []); assert.equal(serviceOwner(), ambiguousBefore.nameOwner); assert.deepEqual(inactive(), ambiguousServices);
+    report.ambiguousStoreCleanup = { terminalRevokeWithoutSupervisor: true, bothMatchingItemsPreserved: true,
+      explicitAmbiguousCleanupRefused: true, ownedDuplicateOnlyRetired: true, originalReceiptIdentityMatched: true,
+      revokedRecordUnchanged: true, uniqueOriginalCleanupComplete: true, secretInputPipeUnwrittenAndUnended: true,
+      finalizerAmbiguityQualified: false };
 
     report.phase = 'locked_store_setup';
     const negativeMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000030',

@@ -441,14 +441,37 @@ observed bus/service lifetime. The final corpus covered 246 files, both SQLite
 databases, 110 logical rows and four joined trace corpora; all 1362 scan streams
 closed without detected generated-secret bytes or retained needles/tails.
 
-The next static admission negative revokes the actual endpoint through the
-signed endpoint command, then attempts a new enroll with an unwritten, unended
-secret-input pipe. It requires the exact endpoint refusal before input, no new
-authority or retained operation, unchanged historical credential replay/read,
-empty actual store inventory and inactive installed roles. This case is pending
-genuine Linux qualification; it does not qualify concurrent endpoint revocation
-at the finalizer cut. No additional active grant or production interface is
-introduced.
+Commit `d3d9443a1e7f56a2f8e8eb45e654b8da5a727acd` passed all eight checks in
+[run 38404301875](https://github.com/cogine-ai/cliq-agent/actions/runs/38404301875).
+The static admission negative revoked the actual endpoint through the signed
+endpoint command, then attempted a new enroll with an unwritten, unended
+secret-input pipe. The exact endpoint refusal preceded input, no new authority
+or operation was retained, historical credential replay/read stayed unchanged,
+and the actual store inventory remained empty with installed roles inactive.
+This does not qualify concurrent endpoint revocation at the finalizer cut.
+No additional active grant or production interface was introduced. The final
+corpus covered 246 files, both SQLite databases, 114 logical rows and four
+joined trace corpora; all 1394 scan streams closed without detected generated
+secret bytes or retained needles/tails.
+
+The next completed-schema preservation check saves the original signed endpoint
+registration/read responses before the first credential enrollment. After the
+actual v1-to-v2 extension, it requires exact original operation/record equality
+and identical canonical response bytes from the same signed public entry.
+This case is pending genuine Linux qualification and does not qualify old/new
+migration crash cuts.
+
+The next genuine ambiguity check enrolls one item through the signed entry,
+then the bounded disposable-account fixture must create a second actual item
+with identical complete selector attributes and a different already-scanned
+generated secret. A fresh public nonce belongs only to its fixture Label, not
+the selector. Revoke and explicit cleanup must commit/retain terminal metadata
+but refuse to delete either ambiguous item. Only the positively identified
+fixture-created path/Label may be removed; original-receipt cleanup must then
+complete against the unique original item. The native fixture capability is
+initially absent so its genuine precondition failure must be retained before
+implementation. This is pending Linux qualification and proves no finalizer
+ambiguity or precise crash cut.
 
 The real post-`secret_stored`, retired-scope producer pause remains blocked:
 both the proposed native helper and the narrower standard-tool metadata-only
