@@ -752,6 +752,44 @@ and preserves actual retirement failures; a post-failure closed flag alone does
 not waive them. Linux compile/runtime and an actual old-code RED for this native
 case have not yet been observed locally; source review is not runtime evidence.
 
+Repair commit `d5cafbf6e27d1e431889b760c7abf982a046cb08` is not all-green:
+[PR run 38576057378](https://github.com/cogine-ai/cliq-agent/actions/runs/38576057378)
+passed seven checks, but the new executing-timeout component failed. Its native
+module and fixture compiled; the unchanged queue case passed. The new caller
+was refused with `process_identity_unavailable` after about 3.7 seconds, before
+the intended 30-second timeout. The branch run reproduced this refusal after
+about 3.3 seconds. Neither qualifies the new executing-timeout regression.
+The root-to-user fixture coordinator had not performed an ordinary user exec;
+Linux's nondumpable `/proc` ownership is consistent with the native identity
+gate correctly refusing it. A fixture-only ordinary non-root re-exec is being
+verified, not a dumpability/sysctl change or weakened `/proc`/UID assertion.
+
+The independent genuine installed credential job in that PR run completed in
+12 minutes 13 seconds with its original scoped assertions, daemon join and full
+261-file/two-database/128-row/472-value/four-trace corpus. All 1659 scanner streams
+closed, with 108 needles, no match/limit breach and zero retained needles/tails;
+runner baselines matched and cleanup errors were zero. Its report SHA-256 is
+`1fb608d7a8bc4c71f35af4a3a96896809d66f597c05b96fca1e8ba539666738a`.
+Linux Node 22.13 passed 1944/1944 tests with zero failures/skips. These successes
+do not erase the failed component gate or complete the remaining I1 campaign.
+The same-commit [branch run 38576047311](https://github.com/cogine-ai/cliq-agent/actions/runs/38576047311)
+reached the credential job's unchanged 20-minute limit and was cancelled; its
+installed journey is not qualified. The successful PR run does not erase this
+independent timeout or establish ample runner capacity.
+
+The fixture correction re-execs the same test ELF normally after full UID/GID
+drop, in the same private mount namespace. Before exporting its external service,
+it checks actual same-UID `/proc` ownership and all real/effective/saved IDs,
+retains the parent-death hook, verifies and consumes both namespace handles,
+and binds its private `/run` marker/flags to the actual held mount ID. Covered
+older `/run` rows in mountinfo are not the current descriptor's mount. The healthy
+native response must name the actual caller's parent as its manager. All original
+timeout, rejection, connection-departure, host-runtime and child-join assertions
+remain; the pre-exec ownership boolean is an observation, not authority evidence.
+Local build and a second full 1916/1916 suite passed with zero failures/skips;
+strict TypeScript, JS syntax and independent source audits passed. New Linux
+qualification remains pending until the corrected fixture actually runs.
+
 ### Risks And Dependencies
 
 Order: synchronize RFC/WP contracts; one real public tracer bullet; implement

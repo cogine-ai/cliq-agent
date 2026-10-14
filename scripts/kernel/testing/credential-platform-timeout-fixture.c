@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
+#include <linux/magic.h>
+#include <linux/nsfs.h>
 #include <poll.h>
 #include <pwd.h>
 #include <sched.h>
@@ -17,8 +19,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -141,10 +145,104 @@ static bool isolated_runtime(uid_t *uid, gid_t *gid, char address[128]) {
   length = snprintf(address, 128, "unix:path=%s/bus", runtime);
   return length > 0 && length < 128 && getuid() == *uid && geteuid() == *uid && getgid() == *gid && getegid() == *gid;
 }
+static bool mount_option(const char *options, const char *wanted) {
+  size_t length = strlen(wanted); const char *cursor = options;
+  while (*cursor) {
+    const char *end = strchr(cursor, ','); size_t count = end ? (size_t)(end - cursor) : strlen(cursor);
+    if (count == length && !memcmp(cursor, wanted, length)) return true;
+    if (!end) break;
+    cursor = end + 1;
+  }
+  return false;
+}
+static bool fixture_mount(int runtime_descriptor) {
+  struct stat before, after, named; struct statx mount_before, mount_after;
+  if (fstat(runtime_descriptor, &before) || lstat("/run", &named) || named.st_dev != before.st_dev || named.st_ino != before.st_ino ||
+      statx(runtime_descriptor, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW, STATX_MNT_ID, &mount_before) ||
+      !(mount_before.stx_mask & STATX_MNT_ID)) return false;
+  char mount_id[24]; int length = snprintf(mount_id, sizeof(mount_id), "%llu", (unsigned long long)mount_before.stx_mnt_id);
+  if (length <= 0 || (size_t)length >= sizeof(mount_id)) return false;
+  FILE *mounts = fopen("/proc/self/mountinfo", "re"); if (!mounts) return false;
+  char line[4096]; size_t rows = 0, bytes = 0, matches = 0; bool valid = true;
+  while (fgets(line, sizeof(line), mounts)) {
+    size_t length = strlen(line); bytes += length;
+    if (++rows > 1024 || bytes > 262144 || !length || line[length - 1] != '\n') { valid = false; break; }
+    char *fields[32], *save = NULL; size_t count = 0;
+    for (char *field = strtok_r(line, " \n", &save); field; field = strtok_r(NULL, " \n", &save)) {
+      if (count == 32) { valid = false; break; }
+      fields[count++] = field;
+    }
+    if (!valid || count < 10) { valid = false; break; }
+    /* Covered /run mounts remain in mountinfo. Only the mount actually held
+     * by this descriptor can decide our current runtime's qualification. */
+    if (strcmp(fields[0], mount_id)) continue;
+    matches++;
+    /* No shared/master propagation marker is allowed on our new mount. */
+    valid = count == 10 && !strcmp(fields[3], "/") && !strcmp(fields[4], "/run") && !strcmp(fields[6], "-") &&
+      !strcmp(fields[7], "tmpfs") && !strcmp(fields[8], "cliq-platform-component") &&
+      mount_option(fields[5], "nosuid") && mount_option(fields[5], "nodev");
+    if (!valid) break;
+  }
+  if (ferror(mounts)) valid = false;
+  if (fclose(mounts)) valid = false;
+  if (fstat(runtime_descriptor, &after) || lstat("/run", &named) || named.st_dev != before.st_dev || named.st_ino != before.st_ino ||
+      after.st_dev != before.st_dev || after.st_ino != before.st_ino || after.st_uid != before.st_uid ||
+      after.st_gid != before.st_gid || after.st_mode != before.st_mode ||
+      statx(runtime_descriptor, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW, STATX_MNT_ID, &mount_after) ||
+      !(mount_after.stx_mask & STATX_MNT_ID) || mount_after.stx_mnt_id != mount_before.stx_mnt_id) valid = false;
+  return valid && matches == 1;
+}
+static bool post_exec_runtime(int *original_namespace, uid_t *uid, gid_t *gid, char address[128]) {
+  uid_t real, saved; gid_t real_gid, saved_gid; struct stat before, current, proc, run, users, runtime; int signal;
+  if (getresuid(&real, uid, &saved) || getresgid(&real_gid, gid, &saved_gid) || !*uid ||
+      real != *uid || saved != *uid || real_gid != *gid || saved_gid != *gid ||
+      prctl(PR_GET_PDEATHSIG, &signal) || signal != SIGKILL || lstat("/proc/self/stat", &proc) ||
+      !S_ISREG(proc.st_mode) || proc.st_uid != *uid) return false;
+  struct passwd *account = getpwuid(*uid);
+  if (!account || account->pw_gid != *gid || !account->pw_dir || account->pw_dir[0] != '/' ||
+      *original_namespace < 3 || ioctl(*original_namespace, NS_GET_NSTYPE) != CLONE_NEWNS ||
+      fstat(*original_namespace, &before)) return false;
+  int descriptor = open("/proc/self/ns/mnt", O_RDONLY | O_CLOEXEC);
+  bool valid = descriptor >= 0 && ioctl(descriptor, NS_GET_NSTYPE) == CLONE_NEWNS && !fstat(descriptor, &current) &&
+    (current.st_dev != before.st_dev || current.st_ino != before.st_ino);
+  int owned = descriptor; descriptor = -1; if (owned >= 0 && close(owned)) valid = false;
+  owned = *original_namespace; *original_namespace = -1; if (close(owned)) valid = false;
+  if (!valid || lstat("/run", &run) || !S_ISDIR(run.st_mode) || run.st_uid || run.st_gid ||
+      (run.st_mode & 07777) != 0755 || lstat("/run/user", &users) || !S_ISDIR(users.st_mode) || users.st_uid || users.st_gid ||
+      (users.st_mode & 07777) != 0755) return false;
+  char directory[64]; int length = snprintf(directory, sizeof(directory), "/run/user/%lu", (unsigned long)*uid);
+  if (length < 0 || (size_t)length >= sizeof(directory) || lstat(directory, &runtime) || !S_ISDIR(runtime.st_mode) ||
+      runtime.st_uid != *uid || runtime.st_gid != *gid || (runtime.st_mode & 07777) != 0700) return false;
+  descriptor = open("/run", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); struct statfs filesystem;
+  valid = descriptor >= 0 && !fstatfs(descriptor, &filesystem) && filesystem.f_type == TMPFS_MAGIC && fixture_mount(descriptor);
+  owned = descriptor; descriptor = -1; if (owned >= 0 && close(owned)) valid = false;
+  length = snprintf(address, 128, "unix:path=%s/bus", directory);
+  char socket[80]; int socket_length = snprintf(socket, sizeof(socket), "%s/bus", directory); struct stat absent;
+  return valid && length > 0 && length < 128 && socket_length > 0 && (size_t)socket_length < sizeof(socket) &&
+    lstat(socket, &absent) < 0 && errno == ENOENT;
+}
 int main(int argc, char **argv) {
   struct fixture fixture = {.daemon = -1, .child = -1}; uid_t uid; gid_t gid; char address[128]; int ready[2] = {-1, -1};
-  GError *error = NULL; GDBusNodeInfo *shape = NULL;
-  if (argc != 4 || argv[1][0] != '/' || argv[2][0] != '/' || argv[3][0] != '/' || !isolated_runtime(&uid, &gid, address)) goto failed;
+  GError *error = NULL; GDBusNodeInfo *shape = NULL; int original_namespace = -1; bool pre_exec_root_owned = false;
+  if (argc == 4 && argv[0][0] == '/' && argv[1][0] == '/' && argv[2][0] == '/' && argv[3][0] == '/') {
+    original_namespace = open("/proc/self/ns/mnt", O_RDONLY | O_CLOEXEC);
+    if (original_namespace < 3 || !isolated_runtime(&uid, &gid, address)) goto failed;
+    struct stat proc; if (lstat("/proc/self/stat", &proc) || !S_ISREG(proc.st_mode) || (proc.st_uid && proc.st_uid != uid)) goto failed;
+    pre_exec_root_owned = proc.st_uid == 0;
+    int flags = fcntl(original_namespace, F_GETFD);
+    if (flags < 0 || fcntl(original_namespace, F_SETFD, flags & ~FD_CLOEXEC)) goto failed;
+    char descriptor[24]; if (snprintf(descriptor, sizeof(descriptor), "%d", original_namespace) >= (int)sizeof(descriptor)) goto failed;
+    /* A normal, non-setuid exec gives this service its ordinary non-root
+     * /proc identity. Never toggle dumpability or weaken native UID checks. */
+    char *continued[] = {argv[0], "--ordinary-nonroot", descriptor, pre_exec_root_owned ? "1" : "0", argv[1], argv[2], argv[3], NULL};
+    execv(argv[0], continued); goto failed;
+  }
+  if (argc != 7 || strcmp(argv[1], "--ordinary-nonroot") || (strcmp(argv[3], "0") && strcmp(argv[3], "1"))) goto failed;
+  char *end; errno = 0; long descriptor = strtol(argv[2], &end, 10);
+  if (errno || *end || descriptor < 3 || descriptor > INT_MAX) goto failed;
+  original_namespace = (int)descriptor; pre_exec_root_owned = !strcmp(argv[3], "1"); argv += 3; argc -= 3;
+  if (argc != 4 || argv[1][0] != '/' || argv[2][0] != '/' || argv[3][0] != '/' ||
+      !post_exec_runtime(&original_namespace, &uid, &gid, address)) goto failed;
   (void)uid; (void)gid;
   if (pipe2(ready, O_CLOEXEC)) goto failed;
   char listen[160]; if (snprintf(listen, sizeof(listen), "--address=%s", address) >= (int)sizeof(listen)) goto failed;
@@ -181,6 +279,7 @@ int main(int argc, char **argv) {
 failed:
   fixture.failed = true;
 cleanup:
+  if (original_namespace >= 0) { int namespace_owned = original_namespace; original_namespace = -1; if (close(namespace_owned)) fixture.failed = true; }
   if (fixture.monitor) g_source_remove(fixture.monitor);
   if (fixture.timeout) g_source_remove(fixture.timeout);
   if (fixture.interrupted) g_source_remove(fixture.interrupted);
@@ -201,5 +300,5 @@ cleanup:
   }
   g_clear_error(&error); if (shape) g_dbus_node_info_unref(shape); if (fixture.loop) g_main_loop_unref(fixture.loop);
   if (fixture.failed) { fputs("credential platform timeout component refused\n", stderr); return 1; }
-  puts("{\"diagnosticOnly\":true,\"actualFirstConnectionRetired\":true,\"healthySubsequentOperation\":true,\"childrenJoined\":true,\"installedI1Qualified\":false}"); return 0;
+  printf("{\"diagnosticOnly\":true,\"preExecProcRootOwned\":%s,\"postExecSameUidProc\":true,\"actualFirstConnectionRetired\":true,\"healthySubsequentOperation\":true,\"childrenJoined\":true,\"installedI1Qualified\":false}\n", pre_exec_root_owned ? "true" : "false"); return 0;
 }

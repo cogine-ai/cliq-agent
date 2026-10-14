@@ -27,7 +27,7 @@ try {
   assert.equal(healthy.kind, 'reload');
   assert.equal(healthy.uid, process.getuid());
   assert.equal(healthy.manager.uid, process.getuid());
-  assert(healthy.manager.pid > 0);
+  assert.equal(healthy.manager.pid, process.ppid, 'the same ordinary non-root fixture must own the actual service');
 } catch (error) {
   console.error(error);
   process.exitCode = 1;

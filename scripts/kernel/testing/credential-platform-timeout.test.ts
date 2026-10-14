@@ -49,7 +49,9 @@ if (process.platform === 'linux' && process.arch === 'x64')
           env: { PATH: process.env.PATH, UV_THREADPOOL_SIZE: '4' } });
         assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr);
         const report = JSON.parse(child.stdout);
-        assert.deepEqual(report, { diagnosticOnly: true, actualFirstConnectionRetired: true,
+        assert.equal(typeof report.preExecProcRootOwned, 'boolean'); // Observed diagnostic, not a qualification prerequisite.
+        const { preExecProcRootOwned, ...qualified } = report;
+        assert.deepEqual(qualified, { diagnosticOnly: true, postExecSameUidProc: true, actualFirstConnectionRetired: true,
           healthySubsequentOperation: true, childrenJoined: true, installedI1Qualified: false });
         console.log(JSON.stringify(report)); // Retain only this source-owned closed evidence shape.
       } finally {
