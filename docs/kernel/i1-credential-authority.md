@@ -598,6 +598,23 @@ The migration-crash, finalizer-drift/expiry/ambiguity, concurrent-revoke, clock,
 live-producer, ABA and complete-I1 evidence boundaries remain unchanged; this
 green scoped campaign does not justify a partial capability PR.
 
+A further no-pause qualification now tests the unlocked input interval. A
+fresh signed auth caller has not written or ended fd 0 when its genuine initial
+UDS channel becomes visible. The test reads only the actual bounded CAS and
+validates the full channel/peer/process/principal/StateRoot closure against the
+original live PID/start/UID/selected image, not a guessed delay or caller-made
+native proof. Source order establishes that initial intent classification has
+already retired before this hello dispatch; it does not prove receipt of the
+hello ACK or the exact `readSecret` entry. Another normal signed endpoint command
+must then commit revocation before the original caller supplies its complete
+secret input. The original caller must naturally join with the exact endpoint
+refusal, no credential record or retained operation/attempt, and unchanged
+actual empty platform inventory/owner/collection. The prior static refusal and
+all historical replay, corpus and retirement assertions remain. Both the
+production 10-second input bound and CI budgets remain unchanged. This case
+is pending genuine Linux qualification and qualifies neither live pending
+producer/ABA nor finalizer revocation competition or any precise crash cut.
+
 ### Risks And Dependencies
 
 Order: synchronize RFC/WP contracts; one real public tracer bullet; implement
