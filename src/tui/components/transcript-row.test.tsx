@@ -43,6 +43,7 @@ test('renders a tool entry with status glyph, name, and summary', () => {
     />
   );
   const frame = lastFrame() ?? '';
+  assert.match(frame, /✓ succeeded/);
   assert.match(frame, /edit/);
   assert.match(frame, /src\/foo\.ts/);
 });
@@ -52,8 +53,25 @@ test('renders a tool entry without a summary (running, no preview yet)', () => {
     <TranscriptRow entry={{ kind: 'tool', id: 't1', tool: 'bash', status: 'running', summary: '' }} />
   );
   const frame = lastFrame() ?? '';
+  assert.match(frame, /▸ running/);
   assert.match(frame, /bash/);
   assert.doesNotMatch(frame, /—/); // no detail separator without a summary
+});
+
+test('tool cards keep waiting, failure, denial, and blocking distinct without color', () => {
+  const cases = [
+    ['waiting', '… waiting approval'],
+    ['error', '✗ failed'],
+    ['denied', '⊘ denied'],
+    ['blocked', '■ blocked']
+  ] as const;
+
+  for (const [status, expected] of cases) {
+    const { lastFrame } = render(
+      <TranscriptRow entry={{ kind: 'tool', id: status, tool: 'bash', status, summary: 'pwd' }} />
+    );
+    assert.match(lastFrame() ?? '', new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
 });
 
 test('renders short tool output folded to one line', () => {
@@ -153,7 +171,7 @@ test('renders the full bash body when entry.expanded is true', () => {
   assert.doesNotMatch(frame, /more lines/);
 });
 
-test('renders a system entry as italic dim text', () => {
+test('renders a system entry as italic muted text', () => {
   const { lastFrame } = render(
     <TranscriptRow entry={{ kind: 'system', id: 's1', text: 'session reset' }} />
   );

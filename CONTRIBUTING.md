@@ -42,6 +42,28 @@ The Ink TUI lives at `src/tui/` and is the default interactive surface on a TTY 
 
 When you add a new `RuntimeEvent` variant in `src/protocol/runtime/events.ts`, you also need to update `src/tui/store.ts` (and `src/headless/events.ts`) — both rely on `assertNever` for compile-time exhaustiveness.
 
+### TUI semantic state language
+
+`src/tui/semantic-styles.ts` is the small, canonical mapping for state color and
+contrast. It is deliberately not a configurable theme. Reuse these meanings
+instead of assigning a new color in an individual component:
+
+| Tone | Meaning | Typical TUI use |
+| --- | --- | --- |
+| `safe` | constrained, low-risk mode | Plan mode |
+| `info` | neutral context or scoped action | mode context, commands |
+| `active` | work is currently progressing | running tools and turns |
+| `warning` | attention or a decision is needed | waiting approval, blocked action |
+| `danger` | elevated or persistent risk | YOLO mode, risky grants, denial |
+| `success` | action completed successfully | tool success, validated state |
+| `error` | action failed | tool/runtime failure |
+| `muted` | passive metadata | paths, tokens, descriptions |
+
+Use the named ANSI colors from that module so limited-color terminals degrade
+predictably. Important states must also render a stable marker and a text label;
+color alone is never the state indicator. Keep passive metadata readable and
+reserve emphasis for state changes, risks, errors, and actionable prompts.
+
 ## Contribution scope
 
 At this stage, the most useful contributions are:
