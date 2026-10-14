@@ -681,11 +681,21 @@ export async function readRecoveryClosure(
   );
   const groups = validateJournalGraph(journal);
   const journalBudgets = await validateJournalArtifactsAndBudgets(artifacts, groups);
+  const generationProofs: WorkspaceGenerationStateV1[] = [];
+  if (workspaceGenerations.some(generation => generation.phase === 'retired')) {
+    try {
+      const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+      if (assembly.format !== 'cliq-run-assembly-v1') throw new TypeError('generation retirement requires its typed historical runtime');
+      for (const generation of workspaceGenerations) generationProofs.push(generation.phase === 'retired'
+        ? (await readRetiredGenerationSource(driver, artifacts, { run, spec: runSpec, assembly, generation })).source : generation);
+    } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error); }
+  } else generationProofs.push(...workspaceGenerations);
+  await validateGenerationArtifacts(artifacts, generationProofs);
   if (journal.some((entry) => entry.opKind === 'model')) {
     try {
       await validateAgentRecovery({ artifacts, run, spec: runSpec, items, journal,
         principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
-        checkpoints: databaseCut.checkpoints, workspaceGenerations,
+        checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
         context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) });
       const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
       if (assembly.format === 'cliq-run-assembly-v1') await validateInstalledBrokerAmbiguityHistory({ driver, artifacts,
@@ -707,16 +717,6 @@ export async function readRecoveryClosure(
   if (run.status !== 'running' && !isZeroBudget(run.budgetReserved) && journal.length === 0) {
     recoveryFailure('lease-free Run has an unexplained budget reservation');
   }
-  const generationProofs: WorkspaceGenerationStateV1[] = [];
-  if (workspaceGenerations.some(generation => generation.phase === 'retired')) {
-    try {
-      const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
-      if (assembly.format !== 'cliq-run-assembly-v1') throw new TypeError('generation retirement requires its typed historical runtime');
-      for (const generation of workspaceGenerations) generationProofs.push(generation.phase === 'retired'
-        ? (await readRetiredGenerationSource(driver, artifacts, { run, spec: runSpec, assembly, generation })).source : generation);
-    } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error); }
-  } else generationProofs.push(...workspaceGenerations);
-  await validateGenerationArtifacts(artifacts, generationProofs);
   const sealedGenerations = generationProofs.filter(generation => generation.phase === 'sealed');
   const sealedLaunches = databaseCut.allWorkerLaunches.filter(launch => launch.phase === 'retired' && launch.generationWriteState === 'sealed');
   if (sealedGenerations.length || sealedLaunches.length) {
