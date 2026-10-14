@@ -884,14 +884,16 @@ No additional product choice is needed for this approved A path. Concrete
 transport/input/unit details must satisfy the above contracts before their
 tests/implementation; failure to prove them is not permission to weaken them.
 
-## Backlog Ready Spec — fixed finalizer-time diagnostics (design only)
+## Backlog Ready Spec — fixed finalizer-time diagnostics
 
 ### Verdict
 
-NOT READY for implementation: on 2026-10-15 the owner approved designing the
-minimal fixed diagnostic contract, with design confirmation required before
-implementation. The following is a proposal, not current behavior or evidence
-that a finalizer-negative cut has executed. The existing full-I1 criteria remain.
+On 2026-10-15 the owner confirmed implementation of this two-reason contract.
+The minimal production change and pure wire-data regressions are implemented;
+complete local verification passed, while exact-head Linux is pending at this
+checkpoint.
+The reasons are diagnostic only, not evidence that a finalizer-negative cut has
+executed. The existing full-I1 criteria and excluded pause workflows remain.
 
 ### Source
 
@@ -923,7 +925,7 @@ In: two fixed finalizer-time `messageCode` values and a compiled local mapping
 through the existing `credential.finalize` response and pure decoder seam.
 Out: `operation_status`, new wire fields/error-code variants/methods, phase readers/writers,
 time/identity inputs, negative-receipt tables, protocol-version changes, recovery
-advice, automatic retries and a new logger or adapter factory. This proposal
+advice, automatic retries and a new logger or adapter factory. This increment
 does not reconstruct or retry the excluded producer-pause workflows.
 
 ### Proposed Implementation Direction
@@ -965,12 +967,13 @@ fake Store/frame/clock seam solely to exercise it.
 
 ### Acceptance Criteria
 
-- [ ] Owner confirms this two-reason design before production changes.
-- [ ] Only the actual finalizer time guards select the two new diagnostics;
-  preparation, hello, epoch/peer/endpoint drift and clock regression do not.
+- [x] Owner confirmed this two-reason design before production changes.
+- [x] Source inspection: only the actual finalizer time guards select the two new
+  diagnostics; preparation, hello, epoch/peer/endpoint drift and clock regression
+  do not. This is not runtime evidence of either negative cut.
 - [ ] Every existing state/time/identity predicate, lock order, fence/credential
   commit order, immutable replay and terminal-revoke behavior remains unchanged.
-- [ ] Client known-pair mapping, cross-code/method misuse, unknown-messageCode
+- [x] Approved pure seam: client known-pair mapping, cross-code/method misuse, unknown-messageCode
   fallback, unchanged strict malformed-frame rejection and absence of
   remote-content import are tested at the approved pure seam.
 - [ ] Genuine retirement failure still wins over ordinary refusal; no diagnostic
@@ -988,6 +991,27 @@ the free standard Linux runner with all existing assertions and scan limits.
 Review the exact throwing branches and error projection; this source check is
 not runtime evidence of a negative cut. No new test seam is approved here.
 
+At the implementation checkpoint, both positive fixed-text regressions were
+observed RED against the previous decoder and GREEN after their corresponding
+minimal mapping changes. The complete approved pure decoder suite passed 64/64
+with zero failures, cancellations or skips. It includes each reason crossed with
+all seven other accepted refusal codes, expected hello, unknown canonical codes,
+malformed envelopes and bounded/Unicode message-code rejection. Generic outcomes
+also assert no imported `cause`, `messageCode` or `errorId`. Independent source
+review found exactly two typed-error construction sites at the original finalizer
+guards, with unchanged causal precedence, sampled C, fence/credential ordering,
+identity/lock predicates and retirement handling. Design-contract checks found no
+drift and their nine regressions passed.
+Local build and the full 1963/1963 suite passed with zero failures,
+cancellations or skips; stock Node 22.13 also passed the 64-test decoder suite.
+
+These are pure-data and source observations, not executed finalizer time-refusal
+branches/server projection, a simultaneous causal-and-expiry cut or a genuine
+retirement-over-time-refusal cut. Those runtime cases remain unverified. The
+genuine installed journey, preparation-expiry assertions, native components,
+secret scanners and all CI budgets are unchanged and require exact-head Linux
+verification; previous-head green runs cannot qualify this change.
+
 ### Risks And Dependencies
 
 Diagnostic data remains untrusted and non-authoritative even on an authenticated
@@ -1000,6 +1024,6 @@ not rollback of experimental credential state.
 
 ### Open Questions
 
-Confirm this bounded two-reason contract before implementation. A deterministic,
-permitted full finalizer-negative qualification path remains a separate missing
-requirement; approving diagnostics neither supplies it nor relaxes its standard.
+A deterministic, permitted full finalizer-negative qualification path remains a
+separate missing requirement; approving or implementing diagnostics neither
+supplies it nor relaxes its standard.

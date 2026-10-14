@@ -1219,6 +1219,27 @@ Implementation notes:
    claim its fence is healthy. Existing endpoint registration/replay survives
    the transactional credential-schema extension unchanged.
 
+   The actual finalizer time guard alone may select two fixed refusal diagnostics:
+   `credential.finalize.noncausal_time` when an existing causal timestamp exceeds C,
+   or `credential.finalize.expired` when no causal violation exists and
+   `expiresAt <= C`. Causal checking keeps precedence over expiry. Both retain
+   `code='AUTHORIZATION_REQUIRED'`, `retryable=false` and the exact v1 envelope;
+   the internal classification remains `STATE_TRANSITION_INVALID`.
+   Other valid refusals retain their existing projection. No condition, C sample,
+   fence/credential commit order, retirement precedence or refusal-side fact changes.
+   There are no new fields, methods, status interface, time inputs, authority or retry
+   permissions.
+
+   Only the verified `(credential.finalize, AUTHORIZATION_REQUIRED, messageCode)`
+   triple selects compiled client text: respectively `installed Supervisor refused
+   credential finalization because its timestamps are not causal` and `installed
+   Supervisor refused expired credential finalization`. Unknown message codes or
+   known message codes paired with another wire code/expected method use the existing
+   fixed generic refusal; malformed envelopes, wrong methods and unknown wire codes still
+   fail strict decoding. Remote text, error ids and timestamps are never imported.
+   These diagnostics do not prove a real negative cut executed or complete I1;
+   unexecuted finalizer negatives and all other missing qualification remain unverified.
+
    Legacy `~/.cliq/auth.json` preflight uses exact `LegacyAuthStoreObservationV1` under the old auth lock/root descriptor: `present` holds and rehashes one same-owner regular-file/link-count-one/no-follow identity; `absent` proves descriptor-relative `ENOENT` and creates no file. Present recognized HTTPS entries receive deterministic endpoint/enrollment operations and round-trip evidence; both branches publish a complete secret-free `LegacyAuthNonSecretProjectionV1` plus `CredentialReadyManifestV1`, whose records are an all-and-only bijection with secret-bearing projection entries. The original raw file or absence remains authoritative and general backup excludes auth bytes. At final cutover, the exclusive global/state-owner token, local-model lock, legacy locks, credential lock, and exact `credential_cutover` control revalidate that branch, then replace/create the secret-free migrated marker and publish the exact Kernel receipt/authority marker last. A pre-authority crash restores normalized ProviderAuthStore-v1 semantics from projection/platform items for `present`, or unlinks/fsyncs/reproves `ENOENT` for `absent`; a post-authority crash validates marker cleanup. Unsupported entries, store/equality failure, replacement failure, or observation drift blocks publication.
 
    Rollback never restores the marker and starts an incompatible old parser. Every attempt retains exact `RollbackToLegacyRequestV1` bound to the current Kernel authority marker/generation and its cutover backup; `allowPlaintextLegacyCredentials=false|true` is explicit and the true branch alone derives `PlaintextLegacyCredentialConsentV1`. After global drain and before any restore, `rollback_draining` repeats that source identity while WP01 snapshots the exact closed/checkpointed current database to the derived read-only archive path, freezes the complete current CAS namespace, and publishes `ArchivedKernelGenerationManifestV1`; `rollback_restoring` and the legacy receipt repeat that archive ref/digest. Source absent selects `restored_absent` and removes/fsyncs the marker with no file/consent. Source present with zero ready records selects `rendered_nonsecret` and deterministically restores only the projection without consent. Source present with records selects `rendered_with_credentials`, requires exact consent, reads every still-active matching item, and stages/fsyncs/validates the `0600` file. Missing/revoked/unreadable/mismatched entries block. WP01 then binds the receipt and both identical marker bytes in `rollback_restoring`, gracefully terminalizes the active StateOwner as the last Kernel transaction, publishes the legacy-root marker first and state-root global marker last, and exits; a recovery successor remains fenced and gracefully terminalizes too. Raw keys are never backed up, and no secure-erasure claim is made.

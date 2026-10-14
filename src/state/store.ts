@@ -61,7 +61,7 @@ import { ensureInstalledCredentialSupervisor, type CredentialFinalizeRequest } f
 import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
-import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { CredentialFinalizationTimeError, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { assertInstalledCredentialScope, installedCredentialProvenance, observeInstalledCredentialProducer,
   type InstalledCredentialScope, type InstalledCredentialProvenance,
   withHeldInstalledRuntime, withInstalledWorkerRoot, type HeldInstalledAnchor,
@@ -1651,9 +1651,10 @@ export class StateStore {
         if (cut.status !== 'healthy') throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence refuses credential expansion');
         const nowMs = parseCanonicalTime(cut.now);
         if ([endpoint.createdAt, registration.createdAt, ...(latest ? [latest.createdAt] : []), operation.createdAt, core.externalSubject.observedAt,
-          original.channel.openedAt, cut.channelOpenedAt].some(time => parseCanonicalTime(time) > nowMs) ||
-            (core.expiresAt && parseCanonicalTime(core.expiresAt) <= nowMs))
-          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential expansion time or expiry is not causal');
+          original.channel.openedAt, cut.channelOpenedAt].some(time => parseCanonicalTime(time) > nowMs))
+          throw new CredentialFinalizationTimeError('noncausal_time');
+        if (core.expiresAt && parseCanonicalTime(core.expiresAt) <= nowMs)
+          throw new CredentialFinalizationTimeError('expired');
         return commitCredentialWrite(held, operation, cut.now);
       });
     })();
