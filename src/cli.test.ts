@@ -205,6 +205,17 @@ test('parseArgs rejects conflicting run session selectors', () => {
   );
 });
 
+test('parseArgs rejects removed --tui rollout flag', () => {
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--tui', 'chat']),
+    /--tui has been removed/i
+  );
+  assert.throws(
+    () => parseArgs(['node', 'src/index.ts', '--tui=1', 'chat']),
+    /--tui has been removed/i
+  );
+});
+
 test('parseArgs accepts --tui-debug', () => {
   assert.deepEqual(parseArgs(['node', 'src/index.ts', '--tui-debug', 'chat']), {
     cmd: 'chat',
@@ -1108,6 +1119,7 @@ test('printHelp documents aliases, policy modes, skills, and streaming', () => {
   assert.match(output, /--streaming MODE/);
   assert.match(output, /--jsonl/);
   assert.match(output, /--tui-debug/);
+  assert.doesNotMatch(output, /--tui\s+Force the Ink TUI/);
   assert.match(output, /CLIQ_TUI_DEBUG/);
   assert.match(
     output,
@@ -2907,35 +2919,30 @@ test('buildTuiRunnerMaxTurnsOption carries explicit max turns into TUI runner op
   assert.deepEqual(buildTuiRunnerMaxTurnsOption(42), { maxTurns: 42 });
 });
 
-test('resolveTuiPreference precedence: --classic > --tui > CLIQ_TUI=0 > TTY default', () => {
+test('resolveTuiPreference precedence: --classic > CLIQ_TUI=0 > TTY default', () => {
   // Default on a TTY: TUI on.
   assert.equal(
-    resolveTuiPreference({ classic: false, tui: false, envOptOut: false, isTTY: true }),
+    resolveTuiPreference({ classic: false, envOptOut: false, isTTY: true }),
     true
   );
   // Default off a TTY: legacy readline.
   assert.equal(
-    resolveTuiPreference({ classic: false, tui: false, envOptOut: false, isTTY: false }),
+    resolveTuiPreference({ classic: false, envOptOut: false, isTTY: false }),
     false
   );
   // CLIQ_TUI=0 overrides the TTY default.
   assert.equal(
-    resolveTuiPreference({ classic: false, tui: false, envOptOut: true, isTTY: true }),
+    resolveTuiPreference({ classic: false, envOptOut: true, isTTY: true }),
     false
   );
-  // --tui overrides CLIQ_TUI=0 (explicit CLI flag wins over env).
+  // --classic wins over the TTY default.
   assert.equal(
-    resolveTuiPreference({ classic: false, tui: true, envOptOut: true, isTTY: true }),
-    true
-  );
-  // --classic wins over --tui (most conservative explicit choice).
-  assert.equal(
-    resolveTuiPreference({ classic: true, tui: true, envOptOut: false, isTTY: true }),
+    resolveTuiPreference({ classic: true, envOptOut: false, isTTY: true }),
     false
   );
   // --classic wins on non-TTY too (redundant but consistent).
   assert.equal(
-    resolveTuiPreference({ classic: true, tui: false, envOptOut: false, isTTY: false }),
+    resolveTuiPreference({ classic: true, envOptOut: false, isTTY: false }),
     false
   );
 });
