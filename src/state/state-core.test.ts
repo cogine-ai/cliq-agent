@@ -151,6 +151,228 @@ test('dispatch claim is singleflight and cannot be appended twice', async () => 
   }
 });
 
+test('pre-dispatch failure settles prepared attempt and releases reservation', async () => {
+  const fixture = await createActiveFixture('predispatch-fail');
+  try {
+    const request = await fixture.store.artifacts.publishCanonical(
+      { schemaVersion: 1, format: 'cliq-tool-request-test-v1' },
+      'cliq-tool-request-v1'
+    );
+    const error = await fixture.store.artifacts.publishCanonical(
+      { schemaVersion: 1, format: 'cliq-invocation-error-test-v1', message: 'prep failed' },
+      'cliq-invocation-error-v1'
+    );
+    const prepared = await fixture.store.prepareInvocation({
+      runId: fixture.runId,
+      expectedRunRevision: fixture.runRevision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: 'predispatch-op',
+      opKind: 'tool',
+      target: 'test.fail',
+      requestRef: request.ref,
+      replayClass: 'retry',
+      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
+    });
+    assert.equal(prepared.run.budgetReserved.toolCalls, 1);
+    const failed = await fixture.store.failInvocationBeforeDispatch({
+      runId: fixture.runId,
+      opId: prepared.entry.opId,
+      attempt: 0,
+      expectedRunRevision: prepared.run.revision,
+      errorRef: error.ref
+    });
+    assert.equal(failed.entry.phase, 'failed');
+    assert.equal(failed.run.budgetReserved.toolCalls, 0);
+    assert.equal(failed.run.budgetConsumed.toolCalls, 0);
+    assert.deepEqual(failed.settlement.released, prepared.entry.budgetDelta);
+
+    const closure = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(closure.journal.map((entry) => entry.phase), ['prepared', 'failed']);
+  } finally {
+    await disposeFixture(fixture);
+  }
+});
+
+test('pre-dispatch failure rejects an attempt that already has a dispatch claim', async () => {
+  const fixture = await createActiveFixture('predispatch-claim-reject');
+  try {
+    const request = await fixture.store.artifacts.publishCanonical({ request: true }, 'cliq-tool-request-v1');
+    const error = await fixture.store.artifacts.publishCanonical(
+      { schemaVersion: 1, message: 'too late' },
+      'cliq-invocation-error-v1'
+    );
+    const prepared = await fixture.store.prepareInvocation({
+      runId: fixture.runId,
+      expectedRunRevision: fixture.runRevision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: 'predispatch-claimed-op',
+      opKind: 'tool',
+      target: 'test.fail',
+      requestRef: request.ref,
+      replayClass: 'retry',
+      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
+    });
+    await fixture.store.claimInvocationDispatch({
+      runId: fixture.runId,
+      expectedRunRevision: prepared.run.revision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: prepared.entry.opId,
+      attempt: 0,
+      dispatchId: 'predispatch-claim',
+      brokerFenceTokenDigest: digest('predispatch-claim:fence')
+    });
+    await assert.rejects(
+      fixture.store.failInvocationBeforeDispatch({
+        runId: fixture.runId,
+        opId: prepared.entry.opId,
+        attempt: 0,
+        expectedRunRevision: prepared.run.revision,
+        errorRef: error.ref
+      }),
+      (error) => error instanceof KernelStorageError && error.code === 'STATE_TRANSITION_INVALID'
+    );
+  } finally {
+    await disposeFixture(fixture);
+  }
+});
+
+test('claimed failure without release settles with post-claim evidence', async () => {
+  const fixture = await createActiveFixture('claimed-fail');
+  try {
+    const request = await fixture.store.artifacts.publishCanonical({ request: true }, 'cliq-tool-request-v1');
+    const prepared = await fixture.store.prepareInvocation({
+      runId: fixture.runId,
+      expectedRunRevision: fixture.runRevision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: 'claimed-fail-op',
+      opKind: 'tool',
+      target: 'test.crash',
+      requestRef: request.ref,
+      replayClass: 'retry',
+      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
+    });
+    await fixture.store.claimInvocationDispatch({
+      runId: fixture.runId,
+      expectedRunRevision: prepared.run.revision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: prepared.entry.opId,
+      attempt: 0,
+      dispatchId: 'claimed-fail-dispatch',
+      brokerFenceTokenDigest: digest('claimed-fail:fence')
+    });
+    const error = await fixture.store.artifacts.publishCanonical(
+      { schemaVersion: 1, message: 'worker crashed' },
+      'cliq-invocation-error-v1'
+    );
+    const evidencePayload = {
+      schemaVersion: 1,
+      format: 'cliq-post-claim-no-release-evidence-test-v1',
+      reason: 'no release observed',
+      evidenceDigest: ''
+    };
+    evidencePayload.evidenceDigest = digestOmitting(evidencePayload, 'evidenceDigest');
+    const evidence = await fixture.store.artifacts.publishCanonical(
+      evidencePayload,
+      'cliq-post-claim-no-release-evidence-v1'
+    );
+    const failed = await fixture.store.failClaimedInvocationWithoutRelease({
+      runId: fixture.runId,
+      opId: prepared.entry.opId,
+      attempt: 0,
+      expectedRunRevision: prepared.run.revision,
+      errorRef: error.ref,
+      evidenceRef: evidence.ref,
+      evidenceDigest: evidencePayload.evidenceDigest
+    });
+    assert.equal(failed.entry.phase, 'failed');
+    assert.equal(failed.entry.evidenceRef, evidence.ref);
+    assert.equal(failed.run.budgetReserved.toolCalls, 0);
+    assert.equal(failed.run.budgetConsumed.toolCalls, 0);
+
+    const closure = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(closure.journal.map((entry) => entry.phase), [
+      'prepared',
+      'dispatch_claimed',
+      'failed'
+    ]);
+  } finally {
+    await disposeFixture(fixture);
+  }
+});
+
+test('manual unknown invocation can be abandoned after ambiguity evidence', async () => {
+  const fixture = await createActiveFixture('manual-abandon');
+  try {
+    const request = await fixture.store.artifacts.publishCanonical({ request: true }, 'cliq-tool-request-v1');
+    const prepared = await fixture.store.prepareInvocation({
+      runId: fixture.runId,
+      expectedRunRevision: fixture.runRevision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: 'manual-unknown-op',
+      opKind: 'tool',
+      target: 'test.ambiguous',
+      requestRef: request.ref,
+      replayClass: 'manual',
+      reservation: { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 }
+    });
+    await fixture.store.claimInvocationDispatch({
+      runId: fixture.runId,
+      expectedRunRevision: prepared.run.revision,
+      leaseEpoch: fixture.leaseEpoch,
+      opId: prepared.entry.opId,
+      attempt: 0,
+      dispatchId: 'manual-unknown-dispatch',
+      brokerFenceTokenDigest: digest('manual-unknown:fence')
+    });
+    const ambiguityPayload = {
+      schemaVersion: 1,
+      format: 'cliq-invocation-ambiguity-evidence-test-v1',
+      reason: 'outcome unknown',
+      evidenceDigest: ''
+    };
+    ambiguityPayload.evidenceDigest = digestOmitting(ambiguityPayload, 'evidenceDigest');
+    const ambiguity = await fixture.store.artifacts.publishCanonical(
+      ambiguityPayload,
+      'cliq-invocation-ambiguity-evidence-v1'
+    );
+    const unknown = await fixture.store.markInvocationUnknown({
+      runId: fixture.runId,
+      opId: prepared.entry.opId,
+      attempt: 0,
+      expectedRunRevision: prepared.run.revision,
+      evidenceRef: ambiguity.ref,
+      evidenceDigest: ambiguityPayload.evidenceDigest
+    });
+    assert.equal(unknown.entry.phase, 'unknown');
+    assert.equal(unknown.run.budgetConsumed.toolCalls, 1);
+    assert.equal(unknown.run.budgetReserved.toolCalls, 0);
+
+    const attestation = await fixture.store.artifacts.publishCanonical(
+      { schemaVersion: 1, format: 'cliq-manual-abandon-attestation-test-v1', opId: prepared.entry.opId },
+      'cliq-manual-abandon-attestation-v1'
+    );
+    const abandoned = await fixture.store.abandonUnknownInvocation({
+      runId: fixture.runId,
+      opId: prepared.entry.opId,
+      attempt: 0,
+      attestationRef: attestation.ref
+    });
+    assert.equal(abandoned.phase, 'abandoned');
+    assert.equal(abandoned.attestationRef, attestation.ref);
+    assert.equal(abandoned.budgetSettlementRef, unknown.entry.budgetSettlementRef);
+
+    const closure = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(closure.journal.map((entry) => entry.phase), [
+      'prepared',
+      'dispatch_claimed',
+      'unknown',
+      'abandoned'
+    ]);
+  } finally {
+    await disposeFixture(fixture);
+  }
+});
+
 test('recovery requires every terminal Journal artifact to remain in CAS', async () => {
   const fixture = await createAgentFixture('recovery-terminal-cas', undefined, { mode: 'default' });
   try {
