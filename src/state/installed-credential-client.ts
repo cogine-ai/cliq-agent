@@ -93,7 +93,8 @@ async function peerBinding(native: HeldInstalledControlClient, observation: Inst
   }
 }
 
-function result(response: unknown, method: 'control.hello' | 'credential.finalize'): Record<string, unknown> {
+/** Pure wire-data decoder; accepting data here confers no peer or authority. */
+export function decodeInstalledCredentialControlResult(response: unknown, method: 'control.hello' | 'credential.finalize'): Record<string, unknown> {
   const value = response as Record<string, unknown>;
   if (value?.ok === false) {
     exact(value, ['protocolVersion', 'ok', 'method', 'error']);
@@ -103,7 +104,7 @@ function result(response: unknown, method: 'control.hello' | 'credential.finaliz
       code === 'INCOMPATIBLE_PROTOCOL' ? ['supportedControlRange', 'supportedHeadlessRange', 'upgradeAction'] : [];
     exact(error, ['schemaVersion', 'code', 'retryable', 'messageCode', ...extra]);
     if (error.schemaVersion !== 1 || error.retryable !== false || !['INVALID_REQUEST', 'INTERNAL', 'INCOMPATIBLE_PROTOCOL',
-      'NOT_FOUND', 'AUTHORIZATION_REQUIRED', 'ARTIFACT_MISMATCH', 'UNSUPPORTED_PLATFORM'].includes(code))
+      'NOT_FOUND', 'AUTHORIZATION_REQUIRED', 'ARTIFACT_MISMATCH', 'UNSUPPORTED_PLATFORM', 'REQUEST_ID_CONFLICT'].includes(code))
       throw new TypeError('invalid installed control refusal');
     text(error.messageCode);
     // A refusal never imports remote messages/payloads into diagnostics. No
@@ -224,7 +225,7 @@ export async function ensureInstalledCredentialSupervisor(selected: HeldInstalle
       try { candidate = finalizeRequest(request); } catch (error) { return Promise.reject(new KernelStorageError('INVALID_REQUEST', 'invalid original credential continuation', { cause: error })); }
       running = (async () => {
         try {
-          await checkCurrent(); const response = result(await exchange(candidate), 'credential.finalize');
+          await checkCurrent(); const response = decodeInstalledCredentialControlResult(await exchange(candidate), 'credential.finalize');
           exact(response, ['method', 'operation']); const operation = decodeCredentialAuthorityOperation(response.operation);
           if (operation.phase !== 'committed' || operation.operationId !== candidate.operationId || operation.requestId !== candidate.requestId ||
               operation.attempt !== candidate.attempt || operation.requestDigest !== candidate.commandDigest)
@@ -245,7 +246,7 @@ export async function ensureInstalledCredentialSupervisor(selected: HeldInstalle
   });
   try {
     await checkCurrent();
-    const hello = result(await exchange({ protocolVersion: 1, method: 'control.hello', clientBuild: 'cliq-installed-credential-v1',
+    const hello = decodeInstalledCredentialControlResult(await exchange({ protocolVersion: 1, method: 'control.hello', clientBuild: 'cliq-installed-credential-v1',
       controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds: ['credential.finalize'] }), 'control.hello');
     exact(hello, ['method', 'protocolVersion', 'serverBuild', 'controlSchemaRange', 'enabledFeatureIds', 'supervisorInstanceId', 'activeRuntimeBundle', 'headlessSchemaRange']);
     const bundle = exact(hello.activeRuntimeBundle, ['schemaVersion', 'runtimeBundleRef', 'bundleDigest', 'bundleVersion']);

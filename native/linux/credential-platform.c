@@ -421,7 +421,10 @@ done:
    * session. No remote Close failure can justify keeping the bus unowned. */
   if (task->bus) {
     GError *error = NULL;
-    if (!g_dbus_connection_is_closed(task->bus) && !g_dbus_connection_close_sync(task->bus, task->cancel, &error)) {
+    /* Operation cancellation must not turn a completed local disconnect into
+     * G_IO_ERROR_CANCELLED. Still join the close; actual retirement failures
+     * remain sticky, and expiry can never publish an operation success. */
+    if (!g_dbus_connection_is_closed(task->bus) && !g_dbus_connection_close_sync(task->bus, NULL, &error)) {
       task->unsafe = true; atomic_store(&retirement_failed, true); fail(task, "resource_retirement");
     }
     g_clear_error(&error);

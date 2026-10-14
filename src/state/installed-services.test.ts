@@ -11,11 +11,21 @@ test('installed profiles bind the complete root identity and preserve a literal 
   assert(profiles.keeper.text.includes('ExecStart=/home/cliq/state/runtime/bootstrap --bootstrap-keeper\n'));
   assert(profiles.keeper.text.includes('Restart=no\n')); assert(profiles.supervisor.text.includes('Restart=on-failure\n'));
   assert(!profiles.keeper.text.includes('PartOf=') && !profiles.keeper.text.includes('BindsTo='));
-  const literal = installedServiceProfiles('/home/cliq/state %H $USER\n[Service]', identity).supervisor;
-  assert(literal.text.includes('ExecStart=":/home/cliq/state %%H $USER\\x0a[Service]/runtime/bootstrap" --bootstrap-supervisor\n'));
-  assert.deepEqual(literal.args, ['/home/cliq/state %H $USER\n[Service]/runtime/bootstrap', '--bootstrap-supervisor']);
+  const literal = installedServiceProfiles('/home/cliq/state %H $USER [Service]', identity).supervisor;
+  assert(literal.text.includes('ExecStart=":/home/cliq/state %%H $USER [Service]/runtime/bootstrap" --bootstrap-supervisor\n'));
+  assert.deepEqual(literal.args, ['/home/cliq/state %H $USER [Service]/runtime/bootstrap', '--bootstrap-supervisor']);
   assert.deepEqual(literal.flags, ['no-env-expand']);
   assert.equal(literal.text.split('\n').filter(line => line === '[Service]').length, 1);
+});
+
+test('installed profiles reject characters systemd forbids in a decoded executable path', () => {
+  // systemd validates the C-unescaped executable, not its quoted unit bytes.
+  // Keep this platform-specific restriction out of generic filesystem paths.
+  const unsupported = [...Array.from({ length: 32 }, (_, index) => String.fromCharCode(index)), '\x7f', '"', "'"];
+  for (const character of unsupported) {
+    assert.throws(() => installedServiceProfiles(`/home/cliq/state${character}root`, 'a'.repeat(64)), TypeError,
+      `unsupported executable character U+${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  }
 });
 
 test('service setup rejects an unverified selection before observing its caller properties', async () => {

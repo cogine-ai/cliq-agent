@@ -94,9 +94,12 @@ jobs:
       # These independent disposable fixtures must not spend the stateful
       # credential journey's unchanged budget. Keep their exact assertions
       # on the same qualified OS/Node baseline; no authority crosses jobs.
-      - name: Bound the genuine native credential worker queue
+      - name: Bound the genuine native credential queue and connection retirement
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: node --test --import tsx scripts/kernel/testing/credential-platform-queue.test.ts
+        run: >-
+          node --test --test-concurrency=1 --import tsx
+          scripts/kernel/testing/credential-platform-queue.test.ts
+          scripts/kernel/testing/credential-platform-timeout.test.ts
       - name: Verify the bounded secret scan before collecting credential artifacts
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: >-

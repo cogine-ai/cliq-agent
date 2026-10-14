@@ -90,6 +90,9 @@ Identity, channel, subject, core hashes and platform selectors are producer-owne
   Both fixed roles explicitly use working directory `/`; effective-property
   checks do not mistake the user manager's implicit passwd-home default for
   an empty setting or accept arbitrary working-directory drift.
+  Reject control characters, DEL and quotes in the StateRoot before creating
+  profiles: systemd rejects these bytes in a decoded executable path even when
+  unit text quotes or C-escapes them. Generic filesystem identity remains unchanged.
   After both profiles load, the effective keeper `Before` may contain only
   shutdown ordering and this installation's exact Supervisor (the mirror of
   its fixed `After=keeper`); this does not authorize any extra startup dependency.
@@ -697,7 +700,57 @@ The downloaded report SHA-256 hashes are
 `7753a5fca7fb3f2fbb7e93cf17aa3edfd19b019f720cd8a7fe6b5b8cfe48c228` (PR)
 and `bd66ccf105b64a741de2e1b344810b87489e0c50f509edb44182e556e6e06423` (branch).
 The approved [progress PR #521](https://github.com/cogine-ai/cliq-agent/pull/521)
-remains Draft: the complete-I1 acceptance checklist above is still incomplete.
+does not complete I1: the acceptance checklist above is still incomplete,
+regardless of its GitHub Draft/ready presentation.
+
+The documentation-only commit `b474783691adffe8b7674a7599bf34688b810fd7`
+also passed all eight checks independently in
+[PR run 38565646184](https://github.com/cogine-ai/cliq-agent/actions/runs/38565646184)
+and [branch run 38565637401](https://github.com/cogine-ai/cliq-agent/actions/runs/38565637401).
+Credential jobs took 19 minutes 28 seconds and 18 minutes 53 seconds under the
+unchanged 20-minute limit; this still does not establish spare capacity. Both
+reports retained the genuine initial-gate/input endpoint refusal, unchanged
+negative qualification boundaries, complete 261-file/two-database/128-row/
+472-value corpus, daemon join, restored runner baseline and zero cleanup errors.
+The PR report closed all 1661 streams and the branch report all 1659, with 108
+needles, no match or limit breach and zero retained needles/tails. Their SHA-256
+hashes are `d05ee4acb97b971c94ce58c2bcbdc5ed5301d67d2c24331a08483ed6724f0ce7`
+(PR) and `5dfa43734a092c653039ca3d98e7a03b5ae27fdc31db12876ccaea08b557fb14`
+(branch). These runs precede the review repairs and cannot qualify their code.
+
+#### PR #521 review triage
+
+The current-code review identified three necessary repairs: reject systemd's
+unsupported decoded executable characters before profile writes, accept the
+server's closed `REQUEST_ID_CONFLICT` refusal without changing retry semantics,
+and retire a timed-out platform operation's local D-Bus connection without
+reusing its cancelled operation token. Genuine close failure must still retain
+its owners and poison subsequent operations; successful local retirement does
+not turn an expired operation into success. The owner approved direct testing
+of the existing pure wire decoder; it creates no peer or credential authority.
+
+Other suggestions do not justify changes in this repair: fixed local refusal
+diagnostics intentionally import no remote payload or new retry policy; the
+native self-image predicate also enforces regular-file/size admissibility; the
+SQLite post-iteration statement reference deliberately retains its owner.
+Extracting authority storage, enlarging CI budgets, making qualification optional
+or splitting the stateful journey would exceed this focused repair without
+demonstrated necessary correctness benefit. Missing live-pending/ABA/finalizer
+and crash-cut evidence remains missing, not waived by this review or green CI.
+
+For these repairs, local build and 1916/1916 tests passed with zero failures or
+skips; stock Node 22.13 passed the focused profile/wire/SQLite suite (60 tests).
+The profile and request-conflict regressions were observed RED before their
+minimal fixes and GREEN after them. Strict journey/observer/component TypeScript
+and design-contract checks passed. The new public native component fixture uses
+a private mount namespace and a real same-UID D-Bus daemon, with only its external
+service withholding the first reply. It must observe actual first-connection
+departure, admit a healthy subsequent call and join all owned children without
+altering the host runtime. It creates no StateOwner, credential phase, installed
+identity or canonical clock. Production still requires positive local close/join
+and preserves actual retirement failures; a post-failure closed flag alone does
+not waive them. Linux compile/runtime and an actual old-code RED for this native
+case have not yet been observed locally; source review is not runtime evidence.
 
 ### Risks And Dependencies
 

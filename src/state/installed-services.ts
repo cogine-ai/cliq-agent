@@ -46,6 +46,10 @@ function commandWord(value: string): string {
 export function installedServiceProfiles(stateRoot: string, rootIdentityDigest: string): Profiles {
   if (normalizeAbsolutePath(stateRoot) !== stateRoot || !/^[0-9a-f]{64}$/u.test(rootIdentityDigest))
     throw new TypeError('installed service profile requires a canonical root and complete identity digest');
+  // ExecStart validates the decoded executable with systemd's string_is_safe;
+  // unit quoting or C-escaping cannot make these filesystem bytes acceptable.
+  if (/[\x00-\x1f\x7f"']/u.test(stateRoot))
+    throw new TypeError('installed service root contains characters forbidden in a systemd executable path');
   const executable = path.join(stateRoot, 'runtime/bootstrap');
   const keeper = `cliq-${rootIdentityDigest}-keeper.service`, supervisor = `cliq-${rootIdentityDigest}-supervisor.service`;
   // ':' suppresses environment expansion for literal dollar-bearing paths.
