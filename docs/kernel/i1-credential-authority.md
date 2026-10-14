@@ -530,7 +530,11 @@ credential history, so both readers now use one data-only owned-statement
 primitive in the existing SQLite module. It delegates native IteratorClose,
 keeps number revisions unchanged, and owns no database or authority. Parameter
 binding, early break and consumer-error regressions cover that exact primitive;
-the GC copy-reader test covers full rows and final-row secret detection. No
+the GC copy-reader test covers full rows and final-row secret detection. A
+separate bounded default-engine GC child uses the production-shaped temporary
+statement call and requires all 100 rows plus the exact last row. On stock
+Node 22.13, removing helper ownership makes that test fail; restoring ownership
+makes it pass, without relying on the copy reader's own final statement access. No
 client/runner version, query bounds or scanner limits
 are changed. This establishes a supported-version reader defect, not the unique
 historical cause of run `38418796368`, whose closed original error is unavailable.
@@ -562,6 +566,20 @@ without rewriting that completed receipt or terminal record; after restarting
 the actual store it must return the same completed bytes. Both cases are
 pending genuine Linux qualification and qualify neither finalizer drift nor
 resource-retirement uncertainty.
+
+Commit `b61ca1e15ec2250939474433a1fdd641282dade6` passed the four complete
+OS/Node build-test matrix jobs and three other Linux jobs in
+[run 38530434655](https://github.com/cogine-ai/cliq-agent/actions/runs/38530434655),
+but its credential job was cancelled at the unchanged 20-minute limit. Only
+the initial runner baseline was retained, not the journey's final report.
+This is not qualification of either new store case or the final corpus. The
+preceding green credential job already took 19 minutes 45 seconds. Its three
+independent component checks took about 62 seconds (64 in the cancelled run);
+they now run unchanged in the existing same-baseline Linux preflight job.
+The stateful journey remains intact, no authority moves between jobs, and
+the 20/15-minute budgets and free standard runners are unchanged. Bounded
+fixed-phase/monotonic-elapsed test logs diagnose remaining latency only;
+they neither identify this timeout's unique cause nor replace final evidence.
 
 ### Risks And Dependencies
 

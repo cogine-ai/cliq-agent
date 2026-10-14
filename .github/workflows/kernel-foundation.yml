@@ -57,18 +57,6 @@ jobs:
         id: build
       - name: Install actual platform and worker build prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
-      - name: Bound the genuine native credential worker queue
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: node --test --import tsx scripts/kernel/testing/credential-platform-queue.test.ts
-      - name: Verify the bounded secret scan before collecting credential artifacts
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: >-
-          node --test --import tsx
-          scripts/kernel/testing/credential-secret-scan.test.ts
-          scripts/kernel/testing/credential-secret-corpus.test.ts
-      - name: Reject unsupported credential schemas through the signed entry
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: node --test --import tsx scripts/kernel/testing/credential-authority-journey.test.ts
       - name: Exercise signed credential commands and Supervisor autostart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -103,6 +91,21 @@ jobs:
         id: build
       - name: Install actual platform and worker build prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
+      # These independent disposable fixtures must not spend the stateful
+      # credential journey's unchanged budget. Keep their exact assertions
+      # on the same qualified OS/Node baseline; no authority crosses jobs.
+      - name: Bound the genuine native credential worker queue
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node --test --import tsx scripts/kernel/testing/credential-platform-queue.test.ts
+      - name: Verify the bounded secret scan before collecting credential artifacts
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: >-
+          node --test --import tsx
+          scripts/kernel/testing/credential-secret-scan.test.ts
+          scripts/kernel/testing/credential-secret-corpus.test.ts
+      - name: Reject unsupported credential schemas through the signed entry
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node --test --import tsx scripts/kernel/testing/credential-authority-journey.test.ts
       - name: Verify installed-state and native-retirement boundaries on Linux 22.04
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # These component tests also run in the 24.04 matrix. Keep the real

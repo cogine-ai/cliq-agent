@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { lstatSync } from 'node:fs';
 import { chmod, link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -13,6 +14,31 @@ import {
   type SqliteDriver,
   type SqliteStatement
 } from './sqlite-driver.js';
+
+test('owned native SQLite iteration retains a temporary statement through GC and returns every row', () => {
+  // A real default-engine read, matching the production caller's temporary
+  // statement. GC stays in this child; no authority or production hook is used.
+  const result = spawnSync(process.execPath, ['--no-warnings', '--expose-gc', '--import', 'tsx', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { DatabaseSync } from 'node:sqlite';
+    import { iterateNodeSqliteStatement } from ${JSON.stringify(new URL('./sqlite-driver.ts', import.meta.url).href)};
+    const database = new DatabaseSync(':memory:');
+    try {
+      database.exec("CREATE TABLE records(id INTEGER, value TEXT) STRICT; WITH RECURSIVE fixture(id) AS (VALUES(0) UNION ALL SELECT id+1 FROM fixture WHERE id<100) INSERT INTO records SELECT id, 'row-'||id FROM fixture");
+      const rows = [];
+      for (const row of iterateNodeSqliteStatement(database.prepare('SELECT id,value FROM records WHERE id >= ? ORDER BY id'), 1)) {
+        rows.push({ ...row });
+        if (rows.length === 1) { global.gc(); global.gc(); }
+      }
+      assert.equal(rows.length, 100);
+      assert.deepEqual(rows, Array.from({ length: 100 }, (_, index) => ({ id: index + 1, value: 'row-' + (index + 1) })));
+      assert.deepEqual(rows.at(-1), { id: 100, value: 'row-100' });
+    } finally { database.close(); }
+    console.log('owned temporary SQLite GC read qualified');
+  `], { encoding: 'utf8', timeout: 10000, maxBuffer: 16 * 1024 });
+  assert.equal(result.status, 0, 'owned temporary SQLite GC read failed');
+  assert.equal(result.stdout, 'owned temporary SQLite GC read qualified\n');
+});
 
 test('owned native SQLite iteration retains parameter binding and resets on early exit', () => {
   const database = new DatabaseSync(':memory:');

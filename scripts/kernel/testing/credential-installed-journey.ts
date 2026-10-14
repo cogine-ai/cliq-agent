@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chown, lstat, mkdir, open, readFile, readdir, readlink, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -106,6 +107,18 @@ async function campaign(filename: string): Promise<void> {
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
     scope: 'genuine signed credential journey, completed-schema endpoint preservation, preparation-only expiry, extra-item-attribute/full-selector ambiguity/default-alias cleanup refusal, offline completed-receipt replay and fresh-sweep refusal, revoked-endpoint static admission refusal, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, finalizer expiry/drift/concurrent revoke/ambiguity, live-producer presence, clock regression, broker or I1' };
+  const phaseStartedAt = performance.now();
+  let phaseLogCount = 0;
+  const markPhase = (value: string): void => {
+    report.phase = value;
+    if (phaseLogCount >= 64) return;
+    phaseLogCount++;
+    // Only fixed source-owned stages and monotonic elapsed time. Diagnostic
+    // output never changes acceptance, even if the output stream has failed.
+    try { console.log(`I1 credential phase ${value} elapsedMs=${Math.floor(performance.now() - phaseStartedAt)}`); }
+    catch { /* Diagnostic only. */ }
+  };
+  markPhase('installation');
   const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
     negativeSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
@@ -407,7 +420,7 @@ async function campaign(filename: string): Promise<void> {
     const rootDigest = canonicalSha256({ schemaVersion: 1, format: 'cliq-state-root-identity-v1', platform: 'linux',
       canonicalAbsolutePath: recipe.stateRoot, ownerUid: ledger.uid, deviceId: root.dev.toString(), directoryFileId: root.ino.toString(),
       mode: 448, openedNoFollow: true, layoutVersion: 1 });
-    report.phase = 'install_services';
+    markPhase('install_services');
     const setupResponse = credential({ schemaVersion: 1, kind: 'install_services' });
     report.setupExitStatus = setupResponse.status;
     // Setup has no secret input. Retain only the signed entry's bounded closed
@@ -442,7 +455,7 @@ async function campaign(filename: string): Promise<void> {
       assert.equal(inactive.ActiveState, 'inactive'); assert.equal(inactive.MainPID, '0');
       report[`${role}Before`] = inactive;
     }
-    report.phase = 'endpoint_register';
+    markPhase('endpoint_register');
     const ownerPrincipalId = identityHash('cliq-local-principal-v1', rootDigest, 'linux', ledger.uid);
     const trust = signed.bundle.entries.find(entry => entry.entryId === 'default_https_trust_store')!;
     const registration: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
@@ -470,7 +483,7 @@ async function campaign(filename: string): Promise<void> {
     const metadata = { schemaVersion: 1, kind: 'enroll', requestId: '019a0012-0000-7000-8000-000000000022',
       credentialGrantId: 'credential-journey-grant', purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
       secretSubmissionId: 'credential-journey-submission', expiresAt: '2099-01-01T00:00:00.000Z' };
-    report.phase = 'enroll';
+    markPhase('enroll');
     const enrolled = credential(metadata, secret);
     const operation = decodeCredentialAuthorityOperation(success(enrolled, 'operation'));
     assert.equal(operation.phase, 'committed'); assert.equal(operation.kind, 'enroll'); assert.equal(operation.attempt, 1);
@@ -478,7 +491,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(operation.ownerPrincipalId, ownerPrincipalId); assert.equal(operation.commandCore.secretSubmissionId, metadata.secretSubmissionId);
     assert.equal(operation.intendedAuthorityRevision, 1); assert.equal(operation.intendedSecretGeneration, 1);
     report.operation = operation;
-    report.phase = 'completed_schema_upgrade_replay';
+    markPhase('completed_schema_upgrade_replay');
     // The actual endpoint entry created v1; the genuine credential write
     // completed v2. Compare public retained results, not SQL-seeded authority.
     const endpointReplay = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], endpointRequestBytes);
@@ -489,7 +502,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(endpointAfterUpgrade.stdout, endpointBeforeUpgrade.stdout);
     report.completedSchemaUpgradeReplay = { originalEndpointOperationUnchanged: true, originalEndpointRecordUnchanged: true,
       exactResponseBytesMatched: true, migrationCrashCutsQualified: false };
-    report.phase = 'read';
+    markPhase('read');
     const record = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: metadata.credentialGrantId }), 'record'));
     assert.equal(record.state, 'active'); assert.equal(record.authorityRevision, 1); assert.equal(record.secretGeneration, 1);
     assert.equal(record.credentialGrantId, metadata.credentialGrantId); assert.equal(record.ownerPrincipalId, ownerPrincipalId);
@@ -504,7 +517,7 @@ async function campaign(filename: string): Promise<void> {
     assert(parseCanonicalTime(record.createdAt) >= parseCanonicalTime(record.externalSubject.observedAt));
     assert(parseCanonicalTime(record.createdAt) >= parseCanonicalTime(endpointOperation.committedAt)); report.record = record;
 
-    report.phase = 'actual_manager_and_platform';
+    markPhase('actual_manager_and_platform');
     const processCut = async (unit: string, role: 'keeper' | 'supervisor') => {
       const current = show(unit); assert.equal(current.ActiveState, 'active'); assert.equal(current.SubState, 'running');
       assert.equal(current.ExecMainPID, current.MainPID); assert.match(current.InvocationID!, /^[a-f0-9]{32}$/u);
@@ -569,7 +582,7 @@ async function campaign(filename: string): Promise<void> {
     const readyAfter = await lstat(readyPath, { bigint: true });
     for (const key of imageFields) assert.equal(readyAfter[key], ready[key]);
 
-    report.phase = 'expired_preparation_refusal';
+    markPhase('expired_preparation_refusal');
     // Real wall time and the same signed entry. This is preparation expiry,
     // not a finalizer cut: no test clock or delayed/pause hook is introduced.
     const expiredMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000040',
@@ -597,7 +610,7 @@ async function campaign(filename: string): Promise<void> {
     report.expiredPreparationRefusal = { noReturnedAuthority: true, noRetainedOperation: true, originalRecordUnchanged: true,
       originalItemUnchanged: true, actualServicesUnchanged: true, finalizerExpiryQualified: false, clockRegressionQualified: false };
 
-    report.phase = 'orphan_first_prepared_sigkill';
+    markPhase('orphan_first_prepared_sigkill');
     const orphanMetadata = { schemaVersion: 1, kind: 'enroll', requestId: '019a0012-0000-7000-8000-000000000027',
       credentialGrantId: 'credential-journey-orphan-grant', purpose: 'model_endpoint',
       endpointRegistrationId: registration.endpointRegistrationId, secretSubmissionId: 'credential-journey-orphan-submission',
@@ -617,11 +630,11 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(prepared.commandCore.endpointRegistrationRef, record.endpointRegistrationRef);
     assert.equal(prepared.commandCore.endpointIdentityDigest, record.endpointIdentityDigest);
     assert.equal(prepared.commandCore.tlsPolicyDigest, record.tlsPolicyDigest);
-    report.phase = 'orphan_read_does_not_promote';
+    markPhase('orphan_read_does_not_promote');
     assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: orphanMetadata.credentialGrantId }), 'record'), null,
       'ordinary read must not promote the joined prepared orphan');
     assert.deepEqual(observe('list').items, after.items, 'prepared cut must precede an actual platform item');
-    report.phase = 'orphan_automatic_same_request_retry';
+    markPhase('orphan_automatic_same_request_retry');
     const recovered = decodeCredentialAuthorityOperation(success(credential(orphanMetadata, resubmittedSecret), 'operation'));
     assert.equal(recovered.phase, 'committed'); assert.equal(recovered.attempt, 2);
     assert.equal(recovered.requestId, orphanMetadata.requestId); assert.equal(recovered.credentialGrantId, orphanMetadata.credentialGrantId);
@@ -647,7 +660,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(orphanCompared.item, orphanItems[0]); assert.equal(orphanCompared.nameOwner, before.nameOwner);
     assert.equal(orphanCompared.servicePid, before.servicePid);
     report.orphanRecoveredOperation = recovered; report.orphanRecoveredRecord = orphanRecord; report.orphanPlatformReadback = orphanCompared;
-    report.phase = 'revoke_recovered_fixture_grant';
+    markPhase('revoke_recovered_fixture_grant');
     const orphanRevocation = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'revoke',
       requestId: '019a0012-0000-7000-8000-000000000028', credentialGrantId: orphanMetadata.credentialGrantId,
       expectedAuthorityRevision: 1 }), 'operation'));
@@ -668,7 +681,7 @@ async function campaign(filename: string): Promise<void> {
     const capCuts: Awaited<ReturnType<typeof crashPreparedCredentialWrite>>[] = [];
     report.attemptCapCuts = capCuts;
     for (const expectedAttempt of [1, 2, 3] as const) {
-      report.phase = `attempt_cap_prepared_${expectedAttempt}_sigkill`;
+      markPhase(`attempt_cap_prepared_${expectedAttempt}_sigkill`);
       const cut = await crashPreparedCredentialWrite({ fixture: ledger.fixture, username: ledger.username,
         uid: ledger.uid, gid: ledger.gid, home: ledger.home, stateRoot: recipe.stateRoot,
         ownerPrincipalId: record.ownerPrincipalId, selectedImage: expectedImage, selectedImageDigest: selectedEntry.digest,
@@ -697,7 +710,7 @@ async function campaign(filename: string): Promise<void> {
       } catch { /* No arbitrary output becomes the bounded closed-refusal evidence. */ }
       assert(confirmed, 'only the exact exhaustion refusal qualifies the cap, not generic contention or failure');
     };
-    report.phase = 'attempt_cap_fourth_refused';
+    markPhase('attempt_cap_fourth_refused');
     exhaustedRefusal(await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential', capCommand]));
     const exhaustedFacts = await inspectPreparedCredentialCrashFacts(thirdCut);
     assert.equal(exhaustedFacts.length, 6); assert(exhaustedFacts.length <= 9);
@@ -709,7 +722,7 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(terminalThird.commandCore, thirdCut.prepared.commandCore);
     assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: capMetadata.credentialGrantId }), 'record'), null);
     assert.deepEqual(observe('list').items, after.items);
-    report.phase = 'attempt_cap_repeated_refusal';
+    markPhase('attempt_cap_repeated_refusal');
     exhaustedRefusal(await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential', capCommand]));
     assert.deepEqual(await inspectPreparedCredentialCrashFacts(thirdCut), exhaustedFacts, 'exhausted replay must not spend another fact or attempt');
     assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: capMetadata.credentialGrantId }), 'record'), null);
@@ -722,7 +735,7 @@ async function campaign(filename: string): Promise<void> {
       noAttemptFourInActualSnapshot: true, originalInventoryUnchanged: true, secretInputPipeUnwrittenAndUnended: true,
       offlinePlatformZeroCallsQualified: false, liveProducerPresenceQualified: false, fullCrashCampaignQualified: false };
 
-    report.phase = 'cleanup_current_active_refusal';
+    markPhase('cleanup_current_active_refusal');
     const activeCleanup = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
       canonicalJsonBytes({ schemaVersion: 1, kind: 'cleanup', requestId: metadata.requestId }).toString('base64url')]);
     assert.equal(activeCleanup.status, 1, 'explicit cleanup must refuse the current active generation');
@@ -746,7 +759,7 @@ async function campaign(filename: string): Promise<void> {
     report.activeCleanupRefusal = { diagnosticOnly: true, code: 'STATE_TRANSITION_INVALID', metadataUnchanged: true,
       actualInventoryUnchanged: true, secretInputPipeUnwrittenAndUnended: true };
 
-    report.phase = 'rotate';
+    markPhase('rotate');
     const rotateMetadata = { schemaVersion: 1, kind: 'rotate', requestId: '019a0012-0000-7000-8000-000000000023',
       credentialGrantId: metadata.credentialGrantId, expectedAuthorityRevision: 1, secretSubmissionId: 'credential-journey-rotation-submission' };
     const rotatedOperation = decodeCredentialAuthorityOperation(success(credential(rotateMetadata, rotatedSecret), 'operation'));
@@ -758,7 +771,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(rotatedOperation.committedAuthorityRevision, 2); assert.notEqual(rotatedOperation.operationId, operation.operationId);
     assert.notEqual(rotatedOperation.credentialTargetDigest, operation.credentialTargetDigest);
     report.rotatedOperation = rotatedOperation;
-    report.phase = 'read_rotated';
+    markPhase('read_rotated');
     const rotatedRecord = decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
       credentialGrantId: metadata.credentialGrantId }), 'record'));
     assert.equal(rotatedRecord.state, 'active'); assert.equal(rotatedRecord.authorityRevision, 2); assert.equal(rotatedRecord.secretGeneration, 2);
@@ -787,7 +800,7 @@ async function campaign(filename: string): Promise<void> {
     assert.notEqual(rotatedRecord.platformItem.itemId, record.platformItem.itemId);
     assert(!rotatedRecord.platformItem.itemId.startsWith('/'), 'rotated item identity must remain logical');
     report.rotatedRecord = rotatedRecord;
-    report.phase = 'actual_rotated_platform';
+    markPhase('actual_rotated_platform');
     const afterRotate = observe('list'); assert.equal(afterRotate.items.length, 1);
     assert.equal(afterRotate.nameOwner, before.nameOwner); assert.equal(afterRotate.servicePid, before.servicePid);
     assert.equal(afterRotate.collection, before.collection); assert.notEqual(afterRotate.items[0], compared.item);
@@ -800,7 +813,7 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(await processCut(setup.supervisorUnit, 'supervisor'), supervisor);
     assert.deepEqual(await readFile(readyPath), readyBytes);
 
-    report.phase = 'committed_submission_reuse';
+    markPhase('committed_submission_reuse');
     const reused = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
       canonicalJsonBytes({ ...rotateMetadata, requestId: '019a0012-0000-7000-8000-000000000024',
         expectedAuthorityRevision: 2, secretSubmissionId: metadata.secretSubmissionId }).toString('base64url')]);
@@ -818,7 +831,7 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(observe('list').items, afterRotate.items);
     report.committedSubmissionReuseRefused = { fixedInputRefusal: true, secretInputPipeUnwrittenAndUnended: true };
 
-    report.phase = 'exact_replay_without_services_or_secret_input';
+    markPhase('exact_replay_without_services_or_secret_input');
     const stopped = command('/usr/bin/systemctl', ['--user', 'stop', setup.supervisorUnit, setup.keeperUnit]);
     assert.equal(stopped.status, 0, 'actual installed services must stop before replay');
     const inactive = () => [setup.supervisorUnit, setup.keeperUnit].map(unit => {
@@ -848,7 +861,7 @@ async function campaign(filename: string): Promise<void> {
     report.servicesAfterReplay = inactive(); noStore();
     report.exactReplay = { originalOperationMatched: true, rotatedOperationMatched: true, latestRotatedRecordMatched: true,
       secretInputPipeUnwrittenAndUnended: true, authLauncherJoined: true, secretServiceOwnerAbsent: true };
-    report.phase = 'permanent_request_intent_conflict';
+    markPhase('permanent_request_intent_conflict');
     for (let repeated = 0; repeated < 2; repeated++) {
       const conflict = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
         canonicalJsonBytes({ ...metadata, expiresAt: '2098-01-01T00:00:00.000Z' }).toString('base64url')]);
@@ -864,7 +877,7 @@ async function campaign(filename: string): Promise<void> {
     report.permanentIntentConflict = { exactRepeatedRefusal: true, latestRecordUnchanged: true,
       servicesRemainInactive: true, secretServiceOwnerAbsent: true, secretInputPipeUnwrittenAndUnended: true };
 
-    report.phase = 'revoke_without_services_or_secret_input';
+    markPhase('revoke_without_services_or_secret_input');
     const revokeMetadata = { schemaVersion: 1, kind: 'revoke', requestId: '019a0012-0000-7000-8000-000000000025',
       credentialGrantId: metadata.credentialGrantId, expectedAuthorityRevision: 2 };
     const revokeBytes = canonicalJsonBytes(revokeMetadata);
@@ -897,7 +910,7 @@ async function campaign(filename: string): Promise<void> {
         'terminal revoke must not rewrite or block historical committed replay');
       assert.equal(historical.stdout, `${canonicalJsonBytes({ schemaVersion: 1, operation: originalOperation }).toString('utf8')}\n`);
     }
-    report.phase = 'revoke_retry_without_store';
+    markPhase('revoke_retry_without_store');
     const retry = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
       ['--bootstrap-credential', revokeBytes.toString('base64url')]);
     const retriedRevocation = decodeCredentialAuthorityRevokeOperation(success(retry, 'operation'));
@@ -917,7 +930,7 @@ async function campaign(filename: string): Promise<void> {
     report.terminalRevoke = { metadataRemainsRevoked: true, originalReceiptIdentityMatched: true,
       historicalOperationsMatched: true, secretInputPipeUnwrittenAndUnended: true, secretServiceOwnerAbsent: true };
 
-    report.phase = 'restore_fixture_secret_service';
+    markPhase('restore_fixture_secret_service');
     const restored = await startDaemon();
     assert.notEqual(restored.nameOwner, before.nameOwner); assert.equal(restored.collection, before.collection);
     assert(daemonFact && (daemonFact.pid !== originalDaemon.pid || daemonFact.start !== originalDaemon.start),
@@ -929,7 +942,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(restoredCompared.servicePid, restored.servicePid); assert.equal(restoredCompared.collection, restored.collection);
     report.platformRestored = restored; report.platformRestoredReadback = restoredCompared;
     report.servicesBeforeCleanup = inactive();
-    report.phase = 'revoke_retry_with_restored_store';
+    markPhase('revoke_retry_with_restored_store');
     const cleanup = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
       ['--bootstrap-credential', revokeBytes.toString('base64url')]);
     const completedRevocation = decodeCredentialAuthorityRevokeOperation(success(cleanup, 'operation'));
@@ -941,7 +954,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(cleared.nameOwner, restored.nameOwner); assert.equal(cleared.servicePid, restored.servicePid);
     assert.equal(cleared.collection, restored.collection);
     report.cleanupComplete = completedRevocation; report.platformAfterCleanup = cleared;
-    report.phase = 'completed_revoke_exact_replay';
+    markPhase('completed_revoke_exact_replay');
     const completedReplay = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
       ['--bootstrap-credential', revokeBytes.toString('base64url')]);
     assert.deepEqual(decodeCredentialAuthorityRevokeOperation(success(completedReplay, 'operation')), completedRevocation,
@@ -952,7 +965,7 @@ async function campaign(filename: string): Promise<void> {
     report.successfulCleanupRetry = { originalReceiptIdentityMatched: true, revokedRecordUnchanged: true,
       actualInventoryEmpty: true, completedReceiptExactReplay: true, secretInputPipeUnwrittenAndUnended: true };
 
-    report.phase = 'explicit_completed_revoke_cleanup';
+    markPhase('explicit_completed_revoke_cleanup');
     const explicitRevoke = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
       canonicalJsonBytes({ schemaVersion: 1, kind: 'cleanup', requestId: revokeMetadata.requestId }).toString('base64url')]);
     assert.deepEqual(decodeCredentialAuthorityRevokeOperation(success(explicitRevoke, 'operation')), completedRevocation,
@@ -963,7 +976,7 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(observe('list').items, []); assert.equal(serviceOwner(), restored.nameOwner);
     assert.deepEqual(inactive(), report.servicesBeforeCleanup);
     for (const [requestId, originalOperation] of [[metadata.requestId, operation], [rotateMetadata.requestId, rotatedOperation]] as const) {
-      report.phase = originalOperation.kind === 'enroll' ? 'explicit_superseded_enroll_cleanup' : 'explicit_revoked_rotate_cleanup';
+      markPhase(originalOperation.kind === 'enroll' ? 'explicit_superseded_enroll_cleanup' : 'explicit_revoked_rotate_cleanup');
       const explicit = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
         canonicalJsonBytes({ schemaVersion: 1, kind: 'cleanup', requestId }).toString('base64url')]);
       assert.deepEqual(decodeCredentialAuthorityOperation(success(explicit, 'operation')), originalOperation,
@@ -1011,7 +1024,7 @@ async function campaign(filename: string): Promise<void> {
       assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', setup.supervisorUnit, setup.keeperUnit]).status, 0);
       return inactive();
     };
-    report.phase = 'item_attribute_drift_setup';
+    markPhase('item_attribute_drift_setup');
     const driftMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000041',
       credentialGrantId: 'credential-journey-attribute-grant', secretSubmissionId: 'credential-journey-attribute-submission' };
     const driftOperation = decodeCredentialAuthorityOperation(success(credential(driftMetadata, negativeSecret), 'operation'));
@@ -1028,7 +1041,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(driftBefore.nameOwner, restored.nameOwner); assert.equal(driftBefore.servicePid, restored.servicePid);
     assert.equal(observe('compare', driftBefore.items[0]!, driftItem.itemId, negativeSecret).readback, true);
     const driftServices = stopRoles();
-    report.phase = 'item_attribute_drift';
+    markPhase('item_attribute_drift');
     report.itemAttributesExtra = storeFixture('item-extra', driftBefore.items[0]!, driftItem.itemId);
     let driftPrimary: unknown, driftRevoke: ReturnType<typeof decodeCredentialAuthorityRevokeOperation> | undefined;
     let driftRevoked: ReturnType<typeof decodeCredentialAuthorityRecord> | undefined;
@@ -1058,7 +1071,7 @@ async function campaign(filename: string): Promise<void> {
       catch (error) { throw new AggregateError([driftPrimary, error].filter(Boolean), 'actual item test and restoration failed'); }
     }
     assert(driftRevoke && driftRevoked);
-    report.phase = 'item_attribute_drift_cleanup';
+    markPhase('item_attribute_drift_cleanup');
     const driftCleanup = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'cleanup',
       requestId: driftRevoke.requestId }), 'operation'));
     assert.equal(driftCleanup.cleanupPhase, 'cleanup_complete');
@@ -1071,7 +1084,7 @@ async function campaign(filename: string): Promise<void> {
       originalReceiptIdentityMatched: true, revokedRecordUnchanged: true, restoredCleanupComplete: true,
       secretInputPipeUnwrittenAndUnended: true, finalizerDriftQualified: false, ambiguityQualified: false };
 
-    report.phase = 'ambiguous_store_setup';
+    markPhase('ambiguous_store_setup');
     const ambiguousMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000045',
       credentialGrantId: 'credential-journey-ambiguous-grant', secretSubmissionId: 'credential-journey-ambiguous-submission' };
     const ambiguousOperation = decodeCredentialAuthorityOperation(success(credential(ambiguousMetadata, negativeSecret), 'operation'));
@@ -1109,7 +1122,7 @@ async function campaign(filename: string): Promise<void> {
     let ambiguousRevoke: ReturnType<typeof decodeCredentialAuthorityRevokeOperation> | undefined;
     let ambiguousRevoked: ReturnType<typeof decodeCredentialAuthorityRecord> | undefined;
     try {
-      report.phase = 'ambiguous_store_create'; duplicateItem = duplicateFixture('duplicate-create');
+      markPhase('ambiguous_store_create'); duplicateItem = duplicateFixture('duplicate-create');
       const expectedItems = [originalItem, duplicateItem].sort();
       const unchangedItems = () => {
         const current = observe('list'); assert.deepEqual(current.items, expectedItems);
@@ -1118,7 +1131,7 @@ async function campaign(filename: string): Promise<void> {
         assert.equal(observe('compare', duplicateItem!, ambiguousItem.itemId, secret).readback, true);
         assert.deepEqual(inactive(), ambiguousServices);
       };
-      unchangedItems(); report.phase = 'ambiguous_store_revoke';
+      unchangedItems(); markPhase('ambiguous_store_revoke');
       ambiguousRevoke = decodeCredentialAuthorityRevokeOperation(success(await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
         ['--bootstrap-credential', canonicalJsonBytes({ schemaVersion: 1, kind: 'revoke', requestId: '019a0012-0000-7000-8000-000000000046',
           credentialGrantId: ambiguousMetadata.credentialGrantId, expectedAuthorityRevision: 1 }).toString('base64url')]), 'operation'));
@@ -1143,7 +1156,7 @@ async function campaign(filename: string): Promise<void> {
       if (duplicateItem) try { duplicateFixture('duplicate-remove', duplicateItem); }
       catch (error) { throw new AggregateError([ambiguousPrimary, error].filter(Boolean), 'actual ambiguity test and duplicate retirement failed'); }
     }
-    assert(ambiguousRevoke && ambiguousRevoked); report.phase = 'ambiguous_store_cleanup';
+    assert(ambiguousRevoke && ambiguousRevoked); markPhase('ambiguous_store_cleanup');
     assert.deepEqual(observe('list').items, [originalItem]);
     assert.equal(observe('compare', originalItem, ambiguousItem.itemId, negativeSecret).readback, true);
     const ambiguousCleanup = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'cleanup', requestId: ambiguousRevoke.requestId }), 'operation'));
@@ -1155,7 +1168,7 @@ async function campaign(filename: string): Promise<void> {
       revokedRecordUnchanged: true, uniqueOriginalCleanupComplete: true, secretInputPipeUnwrittenAndUnended: true,
       finalizerAmbiguityQualified: false };
 
-    report.phase = 'locked_store_setup';
+    markPhase('locked_store_setup');
     const negativeMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000030',
       credentialGrantId: '019a0012-0000-7000-8000-000000000031', secretSubmissionId: '019a0012-0000-7000-8000-000000000130' };
     const negativeOperation = decodeCredentialAuthorityOperation(success(credential(negativeMetadata, negativeSecret), 'operation'));
@@ -1170,7 +1183,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(negativeBefore.nameOwner, restored.nameOwner); assert.equal(negativeBefore.collection, restored.collection);
     assert.equal(observe('compare', negativeBefore.items[0]!, negativeItem.itemId, negativeSecret).readback, true);
     report.servicesBeforeLockedStore = stopRoles();
-    report.phase = 'locked_store'; report.lockedStore = storeFixture('lock');
+    markPhase('locked_store'); report.lockedStore = storeFixture('lock');
     assert.equal(serviceOwner(), negativeBefore.nameOwner);
     const lockedItems = command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'get-property',
       negativeBefore.nameOwner, negativeBefore.collection, 'org.freedesktop.Secret.Collection', 'Items']);
@@ -1198,13 +1211,13 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(retainedLockedItems.status, 0); assert.equal(retainedLockedItems.stdout, lockedItems.stdout);
     report.lockedStoreRefusal = { noNewAuthority: true, originalReadUnchanged: true, originalItemStillPresent: true,
       terminalRevokeWithoutSupervisor: true, revokedRevision: 2, cleanupFailed: true };
-    report.phase = 'locked_store_restore';
+    markPhase('locked_store_restore');
     await stopDaemon(negativeBefore.servicePid);
     const unlockedAgain = await startDaemon(); assert.equal(unlockedAgain.items.length, 1);
     assert.notEqual(unlockedAgain.nameOwner, negativeBefore.nameOwner);
     assert.equal(observe('compare', unlockedAgain.items[0]!, negativeItem.itemId, negativeSecret).readback, true);
     assert.deepEqual(inactive(), report.servicesBeforeLockedRevoke);
-    report.phase = 'nondurable_default_alias';
+    markPhase('nondurable_default_alias');
     const aliasFixture = storeFixture('alias-session'); report.nondurableDefaultAlias = aliasFixture;
     let aliasPrimary: unknown;
     try {
@@ -1233,7 +1246,7 @@ async function campaign(filename: string): Promise<void> {
         assert.equal(sessionItems.status, 0); assert.equal(sessionItems.stdout.trim(), 'ao 0');
         assert.equal(serviceOwner(), unlockedAgain.nameOwner); assert.deepEqual(inactive(), report.servicesBeforeLockedRevoke);
       };
-      unchangedAliasItems(); report.phase = 'nondurable_alias_known_cleanup';
+      unchangedAliasItems(); markPhase('nondurable_alias_known_cleanup');
       const aliasRevoke = decodeCredentialAuthorityRevokeOperation(success(await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
         ['--bootstrap-credential', canonicalJsonBytes(negativeRevoke).toString('base64url')]), 'operation'));
       assert.equal(aliasRevoke.cleanupPhase, 'cleanup_failed'); assert.equal(aliasRevoke.cleanupErrorCode, 'platform_store_unavailable');
@@ -1247,7 +1260,7 @@ async function campaign(filename: string): Promise<void> {
       report.nondurableAliasKnownCleanup = { terminalReadAndCleanupWithoutSupervisor: true, originalItemStillPresent: true,
         sessionInventoryEmpty: true, originalReceiptIdentityMatched: true, revokedRecordUnchanged: true,
         secretInputPipeUnwrittenAndUnended: true, finalizerAliasDriftQualified: false };
-      report.phase = 'nondurable_alias_admission';
+      markPhase('nondurable_alias_admission');
       const nondurableRequest = { ...negativeMetadata, requestId: '019a0012-0000-7000-8000-000000000035',
         credentialGrantId: '019a0012-0000-7000-8000-000000000036', secretSubmissionId: '019a0012-0000-7000-8000-000000000135' };
       platformWriteRefused(credential(nondurableRequest, negativeSecret));
@@ -1261,7 +1274,7 @@ async function campaign(filename: string): Promise<void> {
       try { report.defaultAliasRestored = storeFixture('alias-restore', unlockedAgain.collection); }
       catch (error) { throw new AggregateError([aliasPrimary, error].filter(Boolean), 'actual alias test and restoration failed'); }
     }
-    report.phase = 'restored_alias_known_cleanup';
+    markPhase('restored_alias_known_cleanup');
     const restoredAliasItem = observe('list'); assert.deepEqual(restoredAliasItem.items, unlockedAgain.items);
     for (const key of ['nameOwner', 'servicePid', 'serviceUid', 'collection'] as const) assert.equal(restoredAliasItem[key], unlockedAgain[key]);
     assert.equal(observe('compare', restoredAliasItem.items[0]!, negativeItem.itemId, negativeSecret).readback, true);
@@ -1273,7 +1286,7 @@ async function campaign(filename: string): Promise<void> {
     report.nondurableAliasCleanupRestored = { originalItemBytesUnchanged: true, originalReceiptIdentityMatched: true,
       cleanupComplete: true, revokedRecordUnchanged: true, finalizerAliasDriftQualified: false };
     assert.deepEqual(observe('list').items, []); report.servicesAfterStoreNegatives = stopRoles();
-    report.phase = 'unknown_credential_schema';
+    markPhase('unknown_credential_schema');
     // Corrupt only this disposable, fully closed v2 fixture. This does not
     // seed valid authority: the same signed read must reject an extra legal
     // user table, and removing it must preserve the actual committed history.
@@ -1332,7 +1345,7 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
       credentialGrantId: negativeMetadata.credentialGrantId }), 'record')), negativeRevoked);
 
-    report.phase = 'revoked_endpoint_admission';
+    markPhase('revoked_endpoint_admission');
     // A genuine static revocation cut, not a concurrent finalizer race.
     const endpointRevokeCore = { schemaVersion: 1, kind: 'revoke', ownerPrincipalId,
       endpointRegistrationId: registration.endpointRegistrationId, expectedAuthorityRevision: 1, commandDigest: '' } as const;
@@ -1364,7 +1377,7 @@ async function campaign(filename: string): Promise<void> {
     report.revokedEndpointAdmission = { noReturnedAuthority: true, noRetainedOperation: true,
       originalOperationReplayUnchanged: true, terminalRecordUnchanged: true, servicesRemainInactive: true,
       secretInputPipeUnwrittenAndUnended: true, concurrentFinalizerRevokeQualified: false };
-    report.phase = 'offline_completed_receipt';
+    markPhase('offline_completed_receipt');
     await stopDaemon(); noStore();
     const completedBytes = `${canonicalJsonBytes({ schemaVersion: 1, operation: completedRevocation }).toString('utf8')}\n`;
     const completedReplayWithoutStore = async () => {
@@ -1381,7 +1394,7 @@ async function campaign(filename: string): Promise<void> {
       canonicalJsonBytes({ schemaVersion: 1, kind: 'cleanup', requestId: revokeMetadata.requestId }).toString('base64url')]),
       'RECOVERY_REQUIRED', 'credential completed receipt fresh sweep did not prove absence or deletion');
     await completedReplayWithoutStore();
-    report.phase = 'completed_receipt_store_restored';
+    markPhase('completed_receipt_store_restored');
     const finalStore = await startDaemon(); assert.notEqual(finalStore.nameOwner, unlockedAgain.nameOwner);
     assert.equal(finalStore.collection, unlockedAgain.collection); assert.deepEqual(finalStore.items, []);
     const completedFreshSweep = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
@@ -1395,7 +1408,7 @@ async function campaign(filename: string): Promise<void> {
     report.offlineCompletedReceipt = { exactOfflineReplayBeforeAndAfterFailedSweep: true, failedFreshSweepRefused: true,
       completedReceiptUnchanged: true, terminalRecordUnchanged: true, restoredFreshSweepExactReplay: true,
       servicesRemainInactive: true, secretInputPipeUnwrittenAndUnended: true };
-    report.phase = 'complete'; report.qualified = true;
+    markPhase('complete'); report.qualified = true;
   } catch (error) { primary = error; }
   finally {
     secret.fill(0); rotatedSecret.fill(0); abandonedSecret.fill(0); resubmittedSecret.fill(0); negativeSecret.fill(0); password.fill(0);
@@ -1403,11 +1416,11 @@ async function campaign(filename: string): Promise<void> {
     try { await stopDaemon(); }
     catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'fixture platform daemon retirement failed'); }
     if (!primary) {
-      report.phase = 'secret_corpus';
+      markPhase('secret_corpus');
       try {
         const corpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs, scanner });
         assert.equal(corpus.sqliteDatabasesScanned, 2); assert.equal(corpus.evidenceDirectoriesScanned, 4);
-        report.secretCorpus = corpus; report.phase = 'complete';
+        report.secretCorpus = corpus; markPhase('complete');
       } catch (error) {
         if (error instanceof CredentialSecretCorpusError && error.databaseFailure)
           report.secretCorpusDatabaseFailure = error.databaseFailure;
