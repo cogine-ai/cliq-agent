@@ -16,6 +16,10 @@ type Input = Readonly<{ stateRoot: string; originalAuth: Readonly<{ pid: number;
 type ObservedHello = Readonly<{ channelIdentityRef: string; channelIdentityDigest: string; peerObservationRef: string;
   peerProcessIdentityRef: string; principalIdentityRef: string; stateRootIdentityRef: string;
   processIdentity: PlatformProcessIdentityV1 }>;
+type AuthStage = 'start_changed' | 'uid_changed' | 'image_not_selected' | 'process_absent' | 'selected';
+type PendingStage = Exclude<AuthStage, 'selected'> | 'channel_not_published' | 'publication_in_progress';
+type Observation = Readonly<{ kind: 'observed'; hello: ObservedHello }> | Readonly<{ kind: 'pending'; stage: PendingStage;
+  candidates: number; channels: number; matchingPidChannels: number }>;
 const refPattern = /^[0-9a-f]{64}$/u, fileLimit = 1048576, totalLimit = 8 * fileLimit;
 const channelPrefix = Buffer.from('{"channelIdentityDigest":');
 const physical = (info: BigIntStats) => [info.dev, info.ino, info.uid, info.gid, info.mode, info.nlink,
@@ -26,10 +30,13 @@ const check = (value: unknown): void => { if (!value) throw new Error('initial c
 /** Caller owns the actual signed auth child and leaves its input unwritten.
  * Source order is initial classifier -> initial hello -> input -> reconnect;
  * publication identifies only the first hello dispatch, never its ACK. */
-export async function observeInitialCredentialHello(input: Input): Promise<ObservedHello | undefined> {
+export async function observeInitialCredentialHello(input: Input): Promise<Observation> {
   const directories: { handle: FileHandle; filename: string; info: BigIntStats }[] = [];
   const handles = new Set<FileHandle>(), publicationPending = Symbol();
   const retire = async (handle: FileHandle) => { handles.delete(handle); await handle.close(); };
+  let candidateCount = 0, channelCount = 0, matchingPidChannels = 0;
+  const pending = (stage: PendingStage): Observation => Object.freeze({ kind: 'pending', stage,
+    candidates: candidateCount, channels: channelCount, matchingPidChannels });
   try {
     check(process.platform === 'linux' && process.geteuid!() === 0);
     check(/^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+\/home\/probe\/credential-state$/u.test(input.stateRoot));
@@ -45,20 +52,22 @@ export async function observeInitialCredentialHello(input: Input): Promise<Obser
     const selected = await lstat(input.selectedImage, { bigint: true });
     check(selected.isFile() && !selected.isSymbolicLink() && selected.uid === BigInt(uid) &&
       selected.nlink === 1n && (selected.mode & 0o7777n) === 0o500n && selected.size > 0n);
-    const currentAuth = async () => {
+    const currentAuth = async (): Promise<AuthStage> => {
       try {
         const raw = await readFile(`/proc/${pid}/stat`, 'utf8'); check(raw.length <= 8192 && raw.startsWith(`${pid} (`));
         const fields = raw.slice(raw.lastIndexOf(')') + 2).trim().split(/\s+/u); check(fields.length > 19);
-        if (fields[19] !== start) return false;
+        if (fields[19] !== start) return 'start_changed';
         const status = await readFile(`/proc/${pid}/status`, 'utf8'); check(status.length <= 16384);
         const observedUid = status.match(/^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/mu); check(observedUid);
-        if (!observedUid!.slice(1).every(value => Number(value) === uid)) return false;
+        if (!observedUid!.slice(1).every(value => Number(value) === uid)) return 'uid_changed';
         const image = await stat(`/proc/${pid}/exe`, { bigint: true });
         const again = await readFile(`/proc/${pid}/stat`, 'utf8'); check(again.length <= 8192 && again.startsWith(`${pid} (`));
-        return again.slice(again.lastIndexOf(')') + 2).trim().split(/\s+/u)[19] === start && physical(image) === physical(selected);
-      } catch (error) { if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return false; throw error; }
+        if (again.slice(again.lastIndexOf(')') + 2).trim().split(/\s+/u)[19] !== start) return 'start_changed';
+        return physical(image) === physical(selected) ? 'selected' : 'image_not_selected';
+      } catch (error) { if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return 'process_absent'; throw error; }
     };
-    if (!await currentAuth()) return undefined;
+    const initialAuth = await currentAuth();
+    if (initialAuth !== 'selected') return pending(initialAuth);
     const openDirectory = async (filename: string, parent?: typeof directories[number]) => {
       const locator = parent ? `/proc/self/fd/${parent.handle.fd}/${path.basename(filename)}` : filename;
       const before = await lstat(locator, { bigint: true }); check(before.isDirectory() && !before.isSymbolicLink());
@@ -89,6 +98,7 @@ export async function observeInitialCredentialHello(input: Input): Promise<Obser
       check(entries.every(name => refPattern.test(name) || /^\.tmp-(?:stream|[0-9a-f]{64})-[0-9a-f]{32}$/u.test(name))); return entries;
     };
     const candidates = (await names()).filter(name => refPattern.test(name) && !baseline.has(name));
+    candidateCount = candidates.length;
     let bytesRead = 0;
     const values = new Map<string, unknown>();
     const read = async (ref: string, channelCandidate = false): Promise<unknown> => {
@@ -125,9 +135,11 @@ export async function observeInitialCredentialHello(input: Input): Promise<Obser
     let result: ObservedHello | undefined;
     for (const ref of candidates) {
       const value = await read(ref, true); if ((value as { format?: unknown })?.format !== 'cliq-local-control-channel-identity-v1') continue;
-      const channel = decodeControlChannel(value); if (channel.client !== 'rpc' || channel.transport.kind !== 'uds_peer') continue;
+      const channel = decodeControlChannel(value); channelCount++;
+      if (channel.client !== 'rpc' || channel.transport.kind !== 'uds_peer') continue;
       const peer = decodeLocalSocketPeerObservation(await read(channel.transport.peerObservationRef));
       const processIdentity = decodePlatformProcessIdentity(await read(peer.peerProcessIdentityRef));
+      if (processIdentity.pid === pid) matchingPidChannels++;
       if (processIdentity.pid !== pid || processIdentity.processStartToken !== `linux-proc-start-ticks:${start}`) continue;
       const principal = decodeLocalPrincipalIdentity(await read(channel.principalIdentityRef));
       const retainedRoot = decodeStateRootIdentity(await read(principal.stateRootIdentityRef));
@@ -149,8 +161,10 @@ export async function observeInitialCredentialHello(input: Input): Promise<Obser
     for (const held of directories) check(directoryIdentity(await held.handle.stat({ bigint: true })) === directoryIdentity(held.info) &&
       directoryIdentity(await lstat(held.filename, { bigint: true })) === directoryIdentity(held.info));
     check(physical(await lstat(input.selectedImage, { bigint: true })) === physical(selected));
-    return await currentAuth() ? result : undefined;
-  } catch (error) { if (error === publicationPending) return undefined; throw new Error('initial credential hello observation refused'); }
+    const finalAuth = await currentAuth();
+    if (finalAuth !== 'selected') return pending(finalAuth);
+    return result ? Object.freeze({ kind: 'observed', hello: result }) : pending('channel_not_published');
+  } catch (error) { if (error === publicationPending) return pending('publication_in_progress'); throw new Error('initial credential hello observation refused'); }
   finally {
     const retired = await Promise.allSettled([...handles].reverse().map(retire));
     check(retired.every(result => result.status === 'fulfilled'));

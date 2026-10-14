@@ -175,6 +175,7 @@ async function campaign(filename: string): Promise<void> {
   };
   const openInputCommand = async (executable: string, args: string[], inputPlan?: Readonly<{
     secret: Buffer;
+    diagnostic: { launcherObserved: boolean; directChildrenSeen: number | null; completeInputWriteJoined: boolean };
     ready(auth: NonNullable<Awaited<ReturnType<typeof processFact>>>): Promise<boolean>;
     beforeInput(auth: NonNullable<Awaited<ReturnType<typeof processFact>>>): Promise<void>;
   }>) => {
@@ -222,12 +223,14 @@ async function campaign(filename: string): Promise<void> {
         if (child.pid) {
           const current = await processFact(child.pid);
           if (!launcher && current?.parent === process.pid && current.group === child.pid && current.session === child.pid) launcher = current;
+          if (inputPlan) inputPlan.diagnostic.launcherObserved = launcher !== undefined;
           if (current && launcher?.start === current.start) {
             const children = await readFile(`/proc/${child.pid}/task/${child.pid}/children`, 'utf8').catch((error: NodeJS.ErrnoException) => {
               if (error.code === 'ENOENT') return ''; throw error;
             });
             const pids = children.trim() ? children.trim().split(/\s+/u).map(Number) : [];
             assert(pids.length <= 1, 'trusted runuser must own only the signed auth child');
+            if (inputPlan) inputPlan.diagnostic.directChildrenSeen = pids.length;
             if (pids[0]) {
               const observed = await processFact(pids[0]);
               if (observed?.parent === child.pid) auth = observed;
@@ -250,6 +253,7 @@ async function campaign(filename: string): Promise<void> {
               child.stdin.off('error', failed); error ? reject(error) : resolve();
             });
           }), 5000);
+          inputPlan.diagnostic.completeInputWriteJoined = true;
           submittedAuth = original;
         }
         await Promise.race([joined, delay(20)]);
@@ -1383,16 +1387,27 @@ async function campaign(filename: string): Promise<void> {
     const endpointRevokeCore = { schemaVersion: 1, kind: 'revoke', ownerPrincipalId,
       endpointRegistrationId: registration.endpointRegistrationId, expectedAuthorityRevision: 1, commandDigest: '' } as const;
     let endpointRevocation: ReturnType<typeof decodeEndpointAuthorityOperation> | undefined;
-    let initialHello: Awaited<ReturnType<typeof observeInitialCredentialHello>>;
+    let initialHello: Extract<Awaited<ReturnType<typeof observeInitialCredentialHello>>, { kind: 'observed' }>['hello'] | undefined;
+    const inputObservation: { diagnosticOnly: true; launcherObserved: boolean; directChildrenSeen: number | null;
+      authObserved: boolean; readyChecks: number;
+      helloObserved: boolean; completeInputWriteJoined: boolean;
+      lastPending?: Extract<Awaited<ReturnType<typeof observeInitialCredentialHello>>, { kind: 'pending' }> } = {
+        diagnosticOnly: true, launcherObserved: false, directChildrenSeen: null,
+        authObserved: false, readyChecks: 0, helloObserved: false, completeInputWriteJoined: false };
+    report.initialGateObservation = inputObservation;
     const racedInput = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
       canonicalJsonBytes(raceMetadata).toString('base64url')], {
       secret: negativeSecret,
+      diagnostic: inputObservation,
       async ready(auth) {
-        initialHello = await observeInitialCredentialHello({ stateRoot: recipe.stateRoot,
+        inputObservation.authObserved = true; inputObservation.readyChecks++;
+        assert(inputObservation.readyChecks <= 2048, 'initial credential observation exceeded its diagnostic bound');
+        const observation = await observeInitialCredentialHello({ stateRoot: recipe.stateRoot,
           originalAuth: { pid: auth.pid, start: auth.start, uid: ledger.uid },
           selectedImage: expectedImage, selectedImageDigest: selectedEntry.digest,
           expectedRootDigest: rootDigest, expectedPrincipalId: ownerPrincipalId, baselineCASrefs });
-        return initialHello !== undefined;
+        if (observation.kind === 'pending') { inputObservation.lastPending = observation; return false; }
+        initialHello = observation.hello; inputObservation.helloObserved = true; return true;
       },
       async beforeInput() {
         assert(initialHello);

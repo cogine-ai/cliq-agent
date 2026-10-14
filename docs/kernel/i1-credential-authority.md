@@ -8,7 +8,9 @@ Implementation and qualification in progress, not qualified or complete. The own
 on 2026-10-12: enroll/rotate may automatically start or connect the installed
 Supervisor; only its existing canonical-time authority may finalize expansion.
 Read, historical replay, revoke and cleanup remain independent. This is one
-credential capability, not a sequence of schema/adapter-only PRs.
+credential capability, not a sequence of schema/adapter-only PRs. On 2026-10-14
+the owner approved a clearly labelled progress PR for review, with qualification
+still incomplete. That approval does not complete I1 or authorize kernel cutover.
 
 ### Source
 
@@ -550,8 +552,9 @@ incomplete/unintegrated work is recoverably kept outside this patch. No test
 hook, fabricated NativeProof, process-memory inspection or alternate authority
 is introduced to get around that constraint. Live-producer/finalizer/clock and
 remaining crash qualification must stay explicitly incomplete until genuine,
-permitted evidence is available; this is not another product choice or a
-reason to publish a partial capability PR.
+permitted evidence is available; the blocked workflow is not evidence or a
+reason to claim a completed capability. The later approved progress PR does
+not change this qualification boundary.
 
 Two further no-pause regressions reuse existing genuine journey state, not new
 grants or production interfaces. The locked-store receipt's known original
@@ -596,7 +599,8 @@ Its downloaded report's SHA-256 is
 `e8ad60bd73de3787416d887766e6c4fbbfbfe7184b578996b76b2f6a4a04f345`.
 The migration-crash, finalizer-drift/expiry/ambiguity, concurrent-revoke, clock,
 live-producer, ABA and complete-I1 evidence boundaries remain unchanged; this
-green scoped campaign does not justify a partial capability PR.
+green scoped campaign does not establish complete I1. The subsequently approved
+progress PR must explicitly retain that distinction.
 
 A further no-pause qualification now tests the unlocked input interval. A
 fresh signed auth caller has not written or ended fd 0 when its genuine initial
@@ -615,11 +619,29 @@ production 10-second input bound and CI budgets remain unchanged. This case
 is pending genuine Linux qualification and qualifies neither live pending
 producer/ABA nor finalizer revocation competition or any precise crash cut.
 
+The first real run of this case at
+`f491e95516e3bfd0d8de799be639844ae9f3abb6`,
+[run 38553599311](https://github.com/cogine-ai/cliq-agent/actions/runs/38553599311),
+passed seven independent checks but failed the credential journey at
+`initial_gate_endpoint_revocation`. The closed report locates the unchanged
+30-second fixture deadline, not an observation error or a CI timeout. It does
+not prove that the observer was called, that the original auth reached its
+selected image, or that an initial hello was published. The daemon joined and
+all 727 output scan streams closed without a generated-secret match or limit
+breach; the final SQLite/CAS corpus was not reached. The downloaded report's
+SHA-256 is `bbbe0470a136716b282495876da0c22ef6f876ab4ee738a369d68719804af9b3`.
+This is not qualification or evidence identifying a production defect.
+The next iteration records only fixed original-auth/pending classifications,
+bounded CAS counts and complete-input-write join status. It preserves every
+identity/closure/retirement predicate and all original time/scan budgets;
+pending diagnostics never satisfy readiness or manufacture authority.
+
 ### Risks And Dependencies
 
 Order: synchronize RFC/WP contracts; one real public tracer bullet; implement
 only its owning path; repeat within this one capability; independent review;
-full portable and real Linux qualification before a coherent PR. Qualification
+full portable and real Linux qualification before claiming I1 complete. The
+approved progress PR is for review with its missing evidence explicitly listed. Qualification
 uses generated disposable secrets/keys/users, not the owner's real credentials.
 The default CLI/state remain untouched. No downgrade or legacy fallback is
 introduced; schema-crash recovery accepts complete supported old/new states.
