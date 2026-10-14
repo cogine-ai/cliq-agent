@@ -1685,7 +1685,10 @@ export class StateStore {
     const { replayInstalledRunAdmission, admitInstalledRun } = await import('./reducers/admission.js');
     const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity);
     if (replay) {
-      if ('run' in replay) { await this.retainInstalledAgent(replay.run.id); this.scheduleInstalledRun(replay.run.id); }
+      if ('run' in replay) {
+        if (['queued', 'running', 'waiting'].includes(replay.run.status)) await this.retainInstalledAgent(replay.run.id);
+        this.scheduleInstalledRun(replay.run.id);
+      }
       return replay;
     }
     const { assembleInstalledRun, assertInstalledRunRecipe, InstalledRunAuthorityError } = await import('./installed-run.js');
@@ -1874,7 +1877,10 @@ export class StateStore {
 
   private scheduleInstalledRun(runId: string): void {
     if (!this.supportsInstalledRuns() || this.installedRunTasks.has(runId)) return;
-    const task = this.installedQueue.then(() => this.driveInstalledRun(runId));
+    const task = this.installedQueue.then(async () => {
+      try { await this.driveInstalledRun(runId); }
+      finally { await this.retireInstalledTerminalRun(runId); }
+    });
     this.installedRunTasks.set(runId, task);
     this.installedQueue = task.catch(error => {
       this.installedRunFailures.set(runId, error);
@@ -1887,10 +1893,31 @@ export class StateStore {
     });
   }
 
+  private async retireInstalledTerminalRun(runId: string): Promise<void> {
+    const run = readRun(this.driver, runId);
+    if (!['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(run.status)) return;
+    // A model end is not terminal. Validate the actual terminal graph before
+    // releasing its original installation/launcher image owners; failures keep
+    // both the cache and StateOwner, never masquerading as positive cleanup.
+    await readRecoveryClosure(this.driver, this.artifacts, runId);
+    const opening = this.executions.get(runId);
+    if (opening) {
+      try { await (await opening).close(); }
+      catch (error) { throw error instanceof ResourceRetirementError ? error :
+        new ResourceRetirementError('terminal Run launcher did not retire', error); }
+      if (this.executions.get(runId) === opening) this.executions.delete(runId);
+    }
+    this.installedAgents.delete(runId);
+    this.installedAgentLoads.delete(runId);
+    this.installedRunFailures.delete(runId);
+  }
+
   private async driveInstalledRun(runId: string): Promise<void> {
     if (!this.supportsInstalledRuns()) return;
     const { loadInstalledRunMaterial } = await import('./installed-run.js');
-    const run = readRun(this.driver, runId), spec = decodeRunSpec(await this.artifacts.readCanonical(run.specRef));
+    const run = readRun(this.driver, runId);
+    if (!['queued', 'running', 'waiting'].includes(run.status)) return;
+    const spec = decodeRunSpec(await this.artifacts.readCanonical(run.specRef));
     const material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
     const opening = this.executions.get(runId);
     const execution = opening ? (await opening).execution : await this.loadRunExecution({ runId, material });
@@ -1955,7 +1982,7 @@ export class StateStore {
       const { loadInstalledRunMaterial } = await import('./installed-run.js');
       const material = await loadInstalledRunMaterial({ selected: this.installedRuntime, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
       agent = await loadAgentRun(this.driver, this.artifacts, this.owner, { runId, material, releaseKeys: this.runtimeAuthority.releaseKeys });
-      this.installedAgents.set(runId, agent);
+      if (['queued', 'running', 'waiting'].includes(run.status)) this.installedAgents.set(runId, agent);
     }
     const result = await agent.cancelRun({ ...identity, requestId: value.requestId as string, expectedRunRevision: value.expectedRevision as number });
     // The StopIntent commits first; revocation enters native synchronously.
