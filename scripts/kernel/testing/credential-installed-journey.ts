@@ -1317,7 +1317,73 @@ async function campaign(filename: string): Promise<void> {
       credentialGrantId: negativeMetadata.credentialGrantId }), 'record')), negativeRevoked);
     report.nondurableAliasCleanupRestored = { originalItemBytesUnchanged: true, originalReceiptIdentityMatched: true,
       cleanupComplete: true, revokedRecordUnchanged: true, finalizerAliasDriftQualified: false };
-    assert.deepEqual(observe('list').items, []); report.servicesAfterStoreNegatives = stopRoles();
+    assert.deepEqual(observe('list').items, []);
+    markPhase('initial_gate_endpoint_revocation');
+    // Reuse the Supervisor genuinely started by nondurableRequest above.
+    // Cold autostart is covered earlier; this cut tests the input interval,
+    // not another startup plus two commands within the replay fixture budget.
+    const raceUnits = [setup.keeperUnit, setup.supervisorUnit], raceServices = raceUnits.map(show);
+    for (const service of raceServices) {
+      assert.equal(service.ActiveState, 'active'); assert.equal(service.SubState, 'running');
+      assert.match(service.MainPID!, /^[1-9][0-9]*$/u); assert.equal(service.MainPID, service.ExecMainPID);
+      assert.match(service.InvocationID!, /^[0-9a-f]{32}$/u);
+    }
+    const raceMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000047',
+      credentialGrantId: 'credential-journey-input-revocation-grant', secretSubmissionId: 'credential-journey-input-revocation-submission' };
+    const raceInventory = observe('list'); assert.deepEqual(raceInventory.items, []);
+    const baselineCASrefs = (await readdir(path.join(recipe.stateRoot, 'cas'))).filter(ref => /^[0-9a-f]{64}$/u.test(ref));
+    const endpointRevokeCore = { schemaVersion: 1, kind: 'revoke', ownerPrincipalId,
+      endpointRegistrationId: registration.endpointRegistrationId, expectedAuthorityRevision: 1, commandDigest: '' } as const;
+    let endpointRevocation: ReturnType<typeof decodeEndpointAuthorityOperation> | undefined;
+    let initialHello: Extract<Awaited<ReturnType<typeof observeInitialCredentialHello>>, { kind: 'observed' }>['hello'] | undefined;
+    const inputObservation: { diagnosticOnly: true; launcherObserved: boolean; directChildrenSeen: number | null;
+      authObserved: boolean; readyChecks: number;
+      helloObserved: boolean; completeInputWriteJoined: boolean;
+      lastPending?: Extract<Awaited<ReturnType<typeof observeInitialCredentialHello>>, { kind: 'pending' }> } = {
+        diagnosticOnly: true, launcherObserved: false, directChildrenSeen: null,
+        authObserved: false, readyChecks: 0, helloObserved: false, completeInputWriteJoined: false };
+    report.initialGateObservation = inputObservation;
+    const racedInput = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
+      canonicalJsonBytes(raceMetadata).toString('base64url')], {
+      secret: negativeSecret,
+      diagnostic: inputObservation,
+      async ready(auth) {
+        inputObservation.authObserved = true; inputObservation.readyChecks++;
+        assert(inputObservation.readyChecks <= 2048, 'initial credential observation exceeded its diagnostic bound');
+        const observation = await observeInitialCredentialHello({ stateRoot: recipe.stateRoot,
+          originalAuth: { pid: auth.pid, start: auth.start, uid: ledger.uid },
+          selectedImage: expectedImage, selectedImageDigest: selectedEntry.digest,
+          expectedRootDigest: rootDigest, expectedPrincipalId: ownerPrincipalId, baselineCASrefs });
+        if (observation.kind === 'pending') { inputObservation.lastPending = observation; return false; }
+        initialHello = observation.hello; inputObservation.helloObserved = true; return true;
+      },
+      async beforeInput() {
+        assert(initialHello);
+        endpointRevocation = decodeEndpointAuthorityOperation(success(command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'],
+          canonicalJsonBytes({ schemaVersion: 1, kind: 'commit', requestId: '019a0012-0000-7000-8000-000000000043',
+            commandCore: { ...endpointRevokeCore, commandDigest: digestOmitting(endpointRevokeCore, 'commandDigest') } })), 'operation'));
+        assert.equal(endpointRevocation.kind, 'revoke'); assert.equal(endpointRevocation.disposition, 'revoked');
+        assert.equal(endpointRevocation.committedAuthorityRevision, 2);
+      }
+    });
+    assert(initialHello && endpointRevocation);
+    exactRefusal(racedInput, 'STATE_TRANSITION_INVALID', 'credential requires a current active endpoint of its purpose');
+    assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: raceMetadata.credentialGrantId }), 'record'), null);
+    exactRefusal(credential({ schemaVersion: 1, kind: 'cleanup', requestId: raceMetadata.requestId }),
+      'NOT_FOUND', 'credential cleanup request has no retained operation');
+    const inventoryAfterRace = observe('list'); assert.deepEqual(inventoryAfterRace.items, raceInventory.items);
+    for (const key of ['nameOwner', 'servicePid', 'serviceUid', 'collection'] as const) assert.equal(inventoryAfterRace[key], raceInventory[key]);
+    for (const [index, unit] of raceUnits.entries()) {
+      const after = show(unit); assert.equal(after.ActiveState, 'active'); assert.equal(after.SubState, 'running');
+      for (const key of ['MainPID', 'ExecMainPID', 'InvocationID', 'ControlGroup'] as const) assert.equal(after[key], raceServices[index]![key]);
+    }
+    report.servicesAfterStoreNegatives = stopRoles();
+    report.preInputEndpointRevocation = { diagnosticOnly: true, initialHello,
+      initialClassifierBeforeRevocation: true, fullInputAcceptedAfterRevocation: true, authNaturallyJoined: true,
+      exactPostInputRefusal: true, noRetainedOperationOrAttempt: true, noCredentialRecord: true,
+      platformInventoryRemainedEmpty: true, platformOwnerAndCollectionUnchanged: true,
+      existingServiceInvocationsUnchanged: true, coldAutostartQualified: false,
+      exactReadSecretEntryQualified: false, livePendingQualified: false, concurrentFinalizerRevokeQualified: false };
     markPhase('unknown_credential_schema');
     // Corrupt only this disposable, fully closed v2 fixture. This does not
     // seed valid authority: the same signed read must reject an extra legal
@@ -1377,60 +1443,6 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
       credentialGrantId: negativeMetadata.credentialGrantId }), 'record')), negativeRevoked);
 
-    markPhase('initial_gate_endpoint_revocation');
-    // A normal caller supplies input only after another genuine command wins
-    // revocation. No internal phase, pause, clock or authority is injected.
-    const raceMetadata = { ...metadata, requestId: '019a0012-0000-7000-8000-000000000047',
-      credentialGrantId: 'credential-journey-input-revocation-grant', secretSubmissionId: 'credential-journey-input-revocation-submission' };
-    const raceInventory = observe('list'); assert.deepEqual(raceInventory.items, []);
-    const baselineCASrefs = (await readdir(path.join(recipe.stateRoot, 'cas'))).filter(ref => /^[0-9a-f]{64}$/u.test(ref));
-    const endpointRevokeCore = { schemaVersion: 1, kind: 'revoke', ownerPrincipalId,
-      endpointRegistrationId: registration.endpointRegistrationId, expectedAuthorityRevision: 1, commandDigest: '' } as const;
-    let endpointRevocation: ReturnType<typeof decodeEndpointAuthorityOperation> | undefined;
-    let initialHello: Extract<Awaited<ReturnType<typeof observeInitialCredentialHello>>, { kind: 'observed' }>['hello'] | undefined;
-    const inputObservation: { diagnosticOnly: true; launcherObserved: boolean; directChildrenSeen: number | null;
-      authObserved: boolean; readyChecks: number;
-      helloObserved: boolean; completeInputWriteJoined: boolean;
-      lastPending?: Extract<Awaited<ReturnType<typeof observeInitialCredentialHello>>, { kind: 'pending' }> } = {
-        diagnosticOnly: true, launcherObserved: false, directChildrenSeen: null,
-        authObserved: false, readyChecks: 0, helloObserved: false, completeInputWriteJoined: false };
-    report.initialGateObservation = inputObservation;
-    const racedInput = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
-      canonicalJsonBytes(raceMetadata).toString('base64url')], {
-      secret: negativeSecret,
-      diagnostic: inputObservation,
-      async ready(auth) {
-        inputObservation.authObserved = true; inputObservation.readyChecks++;
-        assert(inputObservation.readyChecks <= 2048, 'initial credential observation exceeded its diagnostic bound');
-        const observation = await observeInitialCredentialHello({ stateRoot: recipe.stateRoot,
-          originalAuth: { pid: auth.pid, start: auth.start, uid: ledger.uid },
-          selectedImage: expectedImage, selectedImageDigest: selectedEntry.digest,
-          expectedRootDigest: rootDigest, expectedPrincipalId: ownerPrincipalId, baselineCASrefs });
-        if (observation.kind === 'pending') { inputObservation.lastPending = observation; return false; }
-        initialHello = observation.hello; inputObservation.helloObserved = true; return true;
-      },
-      async beforeInput() {
-        assert(initialHello);
-        endpointRevocation = decodeEndpointAuthorityOperation(success(command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'],
-          canonicalJsonBytes({ schemaVersion: 1, kind: 'commit', requestId: '019a0012-0000-7000-8000-000000000043',
-            commandCore: { ...endpointRevokeCore, commandDigest: digestOmitting(endpointRevokeCore, 'commandDigest') } })), 'operation'));
-        assert.equal(endpointRevocation.kind, 'revoke'); assert.equal(endpointRevocation.disposition, 'revoked');
-        assert.equal(endpointRevocation.committedAuthorityRevision, 2);
-      }
-    });
-    assert(initialHello && endpointRevocation);
-    exactRefusal(racedInput, 'STATE_TRANSITION_INVALID', 'credential requires a current active endpoint of its purpose');
-    assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: raceMetadata.credentialGrantId }), 'record'), null);
-    exactRefusal(credential({ schemaVersion: 1, kind: 'cleanup', requestId: raceMetadata.requestId }),
-      'NOT_FOUND', 'credential cleanup request has no retained operation');
-    const inventoryAfterRace = observe('list'); assert.deepEqual(inventoryAfterRace.items, raceInventory.items);
-    for (const key of ['nameOwner', 'servicePid', 'serviceUid', 'collection'] as const) assert.equal(inventoryAfterRace[key], raceInventory[key]);
-    assert.deepEqual(stopRoles(), report.servicesAfterStoreNegatives);
-    report.preInputEndpointRevocation = { diagnosticOnly: true, initialHello,
-      initialClassifierBeforeRevocation: true, fullInputAcceptedAfterRevocation: true, authNaturallyJoined: true,
-      exactPostInputRefusal: true, noRetainedOperationOrAttempt: true, noCredentialRecord: true,
-      platformInventoryRemainedEmpty: true, platformOwnerAndCollectionUnchanged: true,
-      exactReadSecretEntryQualified: false, livePendingQualified: false, concurrentFinalizerRevokeQualified: false };
     markPhase('revoked_endpoint_admission');
     // Keep the separate genuine static refusal, not a concurrent finalizer cut.
     assert.equal(endpointRevocation.kind, 'revoke'); assert.equal(endpointRevocation.disposition, 'revoked');

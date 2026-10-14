@@ -636,6 +636,39 @@ bounded CAS counts and complete-input-write join status. It preserves every
 identity/closure/retirement predicate and all original time/scan budgets;
 pending diagnostics never satisfy readiness or manufacture authority.
 
+The bounded diagnostic iteration at
+`36a2a35fe7b500cf1b039c892c68a05439c43d2b`,
+[run 38557844718](https://github.com/cogine-ai/cliq-agent/actions/runs/38557844718),
+again passed seven independent checks and failed at that fixture deadline.
+It positively observed the owned launcher/direct auth, the complete genuine
+hello closure and the complete input-write join; the endpoint revoke command
+and its ACK checks necessarily preceded that input. It therefore excludes
+missing auth/hello observation as this run's failure, but does not establish
+the unique cause of the remaining natural-join timeout. The daemon joined and
+all 727 output scan streams closed without a secret match or limit breach;
+the final corpus was again not reached. Its report's SHA-256 is
+`9a6d3c6be766a3eadfab4d20665d37bfc603aefbd5ad8ab88a6cf6f29da558d7`.
+The independent PR run of the same immutable commit,
+[run 38558452327](https://github.com/cogine-ai/cliq-agent/actions/runs/38558452327),
+retained the same phase/deadline and positive auth/hello/input-join flags,
+with 825 ready checks instead of 836. Its report's SHA-256 is
+`1086aa9e5452811f3ad878b4f2bc329315ac4d02f4ef7c116d58308454e759b0`.
+Both are RED, not complete qualification or unique-root-cause evidence.
+
+The next fixture arrangement reuses the genuine Supervisor already started
+by the preceding nondurable-alias auth case, before the existing stopRoles.
+It requires both fixed services active/running and verifies unchanged actual
+PID/invocation/cgroup after the input race. The original cold-autostart case
+remains intact; this new cut qualifies connection to an existing Supervisor,
+not cold startup. No role is artificially started, no readiness is inferred
+from a manager job, and no new pause, delay or budget is introduced. The single
+existing stop then precedes all original unknown-schema/inactive, static
+endpoint-refusal, historical-replay, offline-receipt and final-corpus checks.
+Earlier real endpoint revocation does not change terminal credential reads,
+which validate the original registration closure rather than active authority.
+Every original assertion remains; this arrangement still awaits genuine Linux
+qualification and is not a demonstrated production fix.
+
 ### Risks And Dependencies
 
 Order: synchronize RFC/WP contracts; one real public tracer bullet; implement
