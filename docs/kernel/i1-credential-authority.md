@@ -563,9 +563,9 @@ byte comparison first proves the original secret survived. Separately, a
 completed revoke receipt is replayed byte-for-byte with Secret Service fully
 joined/offline. A fresh explicit sweep must return its exact closed refusal
 without rewriting that completed receipt or terminal record; after restarting
-the actual store it must return the same completed bytes. Both cases are
-pending genuine Linux qualification and qualify neither finalizer drift nor
-resource-retirement uncertainty.
+the actual store it must return the same completed bytes. Both cases passed
+genuine Linux qualification in run `38533888757`; they qualify neither
+finalizer drift nor resource-retirement uncertainty.
 
 Commit `b61ca1e15ec2250939474433a1fdd641282dade6` passed the four complete
 OS/Node build-test matrix jobs and three other Linux jobs in
@@ -580,6 +580,23 @@ The stateful journey remains intact, no authority moves between jobs, and
 the 20/15-minute budgets and free standard runners are unchanged. Bounded
 fixed-phase/monotonic-elapsed test logs diagnose remaining latency only;
 they neither identify this timeout's unique cause nor replace final evidence.
+
+Commit `7a8f0bef5d7a2924895d22bca7f1378a2dd68bb4` passed all eight checks in
+[run 38533888757](https://github.com/cogine-ai/cliq-agent/actions/runs/38533888757).
+The real credential job took 18 minutes 58 seconds and the preflight job
+8 minutes 22 seconds within the unchanged budgets. Linux Node 22.13's complete
+suite passed 1926/1926, including the direct temporary-statement GC, IteratorClose
+and consumer-error regressions; the complete local suite passed 1898/1898.
+The retained journey report is `qualified=true`, `phase=complete`, with both
+new static store cases' assertions satisfied and `daemonJoined=true`. The final
+corpus covered 255 files, both databases, 128 logical rows, 472 logical values,
+CAS and four joined trace directories. All 1629 scan streams closed, with 108
+needles, no secret match or limit breach, and zero retained needles/tails.
+Its downloaded report's SHA-256 is
+`e8ad60bd73de3787416d887766e6c4fbbfbfe7184b578996b76b2f6a4a04f345`.
+The migration-crash, finalizer-drift/expiry/ambiguity, concurrent-revoke, clock,
+live-producer, ABA and complete-I1 evidence boundaries remain unchanged; this
+green scoped campaign does not justify a partial capability PR.
 
 ### Risks And Dependencies
 
