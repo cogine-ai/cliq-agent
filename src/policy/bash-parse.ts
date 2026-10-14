@@ -3,10 +3,12 @@ import { BUILTIN_BASH_DENY_HEADS } from './decision-table.js';
 const SHELL_INTERPRETER_HEADS = new Set([
   'ash',
   'bash',
+  'csh',
   'dash',
   'fish',
   'ksh',
   'sh',
+  'tcsh',
   'zsh'
 ]);
 
