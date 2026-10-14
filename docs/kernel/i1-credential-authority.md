@@ -11,6 +11,10 @@ Read, historical replay, revoke and cleanup remain independent. This is one
 credential capability, not a sequence of schema/adapter-only PRs. On 2026-10-14
 the owner approved a clearly labelled progress PR for review, with qualification
 still incomplete. That approval does not complete I1 or authorize kernel cutover.
+On 2026-10-15 the owner authorized and PR #521 merged as that progress checkpoint
+at `b7107476e33b6d0d9438352718e3ff7b6307d903`. Its tree is identical to the
+reviewed `e839ebd7d34920539ef9305fe532afc4a4e6747e` implementation. This merge
+does not install a release, migrate legacy data or enable default CLI cutover.
 
 ### Source
 
@@ -818,7 +822,8 @@ commands were broadly 10..15 percent slower in the cancelled run. The successful
 final corpus scan took about 0.223 seconds. These observations do not establish
 a unique cause or justify reducing crash/scanner assertions or raising budgets.
 
-The next one-variable experiment increases only installed-runtime's internal
+Implementation `e839ebd7d34920539ef9305fe532afc4a4e6747e` increases only
+installed-runtime's internal
 streaming IO batch from 64 KiB to a bounded 1 MiB. It retains every fresh complete
 byte hash, signed count, EOF, before/after physical identity, revalidation boundary
 and descriptor retirement. No cached integrity result, authority, probe change,
@@ -826,20 +831,49 @@ pause delay change or omitted journey case is introduced. The existing public
 installer-only seam now checks a signed opaque entry spanning multiple MiB with
 a partial tail and refuses same-size corruption in its last byte before creating
 StateRoot. These opaque bytes are never executed and cannot qualify an installed
-image. Actual capacity improvement and the additional Linux regressions remain
-unverified until the unchanged full Linux jobs run; a local proxy measurement
-cannot establish either.
+image. At the implementation commit the Linux results were still pending;
+the subsequently completed exact-head evidence is retained below. A local proxy
+measurement alone cannot establish actual Linux performance or qualification.
 Local build and another complete 1916/1916 suite passed with zero failures,
 cancellations or skips; the unchanged design guard passed all nine regressions.
 macOS exercised only the unsupported-platform installer contract, not the new
 Linux large-entry/tail-corruption cases.
+
+Both exact-head [PR run 38588125656](https://github.com/cogine-ai/cliq-agent/actions/runs/38588125656)
+and [branch run 38588111674](https://github.com/cogine-ai/cliq-agent/actions/runs/38588111674)
+passed all eight checks. Their credential jobs took 12 minutes 27 seconds and
+11 minutes 3 seconds respectively within the original 20-minute budget. Both
+Linux preflight jobs passed the large-entry/tail-corruption cases and the real
+timeout/healthy-retry component; the latter still declares
+`installedI1Qualified=false`. Linux Node 22.13 passed 1945/1945 tests, with zero
+failures, cancellations or skips.
+
+Both actual journey reports are `qualified=true / phase=complete`, with the
+daemon joined. Each scanned 261 files, both databases, 128 logical rows, 472
+logical values and four trace directories. All 1659 scanner streams closed,
+with 108 needles, no match/limit breach and zero retained needles/tails. Actual
+before/after runner baselines matched, cleanup errors and campaign exit status
+were zero. The nine positive input-revocation flags remain true and all four
+excluded input qualification flags remain false; the other unqualified
+finalizer/crash/live-producer cases remain excluded as well.
+Report SHA-256:
+
+- PR: `2fe4d4cf0566abe98e40779af985ee7590caea0e257c270c8ee2aefe0d9bf69e`.
+- Branch: `89c78a18508efbb9555cad2623b47903747d648499faff40314dd819a036c174`.
+
+The faster completed runs support retaining the bounded fresh-byte read change.
+They do not establish a unique causal diagnosis or guarantee future runner
+capacity. Earlier cancellations remain recorded; no budget, identity check,
+pause delay, scanner limit, stateful journey case or acceptance requirement was
+relaxed. Progress-merge approval is not release, rollback/downgrade or complete-I1
+approval; reverting source cannot undo experimental credential databases/items.
 
 ### Risks And Dependencies
 
 Order: synchronize RFC/WP contracts; one real public tracer bullet; implement
 only its owning path; repeat within this one capability; independent review;
 full portable and real Linux qualification before claiming I1 complete. The
-approved progress PR is for review with its missing evidence explicitly listed. Qualification
+merged progress checkpoint retains its missing evidence explicitly. Qualification
 uses generated disposable secrets/keys/users, not the owner's real credentials.
 The default CLI/state remain untouched. No downgrade or legacy fallback is
 introduced; schema-crash recovery accepts complete supported old/new states.
@@ -849,3 +883,123 @@ introduced; schema-crash recovery accepts complete supported old/new states.
 No additional product choice is needed for this approved A path. Concrete
 transport/input/unit details must satisfy the above contracts before their
 tests/implementation; failure to prove them is not permission to weaken them.
+
+## Backlog Ready Spec — fixed finalizer-time diagnostics (design only)
+
+### Verdict
+
+NOT READY for implementation: on 2026-10-15 the owner approved designing the
+minimal fixed diagnostic contract, with design confirmation required before
+implementation. The following is a proposal, not current behavior or evidence
+that a finalizer-negative cut has executed. The existing full-I1 criteria remain.
+
+### Source
+
+Base: merged PR #521 at `b7107476e33b6d0d9438352718e3ff7b6307d903`.
+Successful GitHub issue searches for `finalize_refused`, `finalizer diagnostic`
+and `credential refusal` found no matches within those open/closed query scopes
+(limit 20 each). No issue is created. Current code has one generic
+`credential.finalize_refused` projection in `src/state/installed-control.ts`
+and a fixed local refusal in `src/state/installed-credential-client.ts`.
+`src/state/store.ts` separately checks preparation and finalizer time/expiry.
+
+### User Outcome
+
+A genuine time refusal received from the installed Supervisor can produce a
+fixed local diagnosis distinguishing noncausal finalization timestamps from
+expiry at finalization. Diagnosis supplies no retry permission, completion
+status, active authority, time ticket or proof of any unexecuted acceptance case.
+
+### Problem
+
+An ordinary short-expiry request can fail at preparation before finalization.
+Even retained `secret_stored` history cannot prove the Supervisor received the
+continuation. Current generic rejection, a null credential read, or a diagnostic
+alone is therefore insufficient evidence of the finalizer's expiry cut.
+
+### Scope
+
+In: two fixed finalizer-time `messageCode` values and a compiled local mapping
+through the existing `credential.finalize` response and pure decoder seam.
+Out: `operation_status`, new wire fields/error-code variants/methods, phase readers/writers,
+time/identity inputs, negative-receipt tables, protocol-version changes, recovery
+advice, automatic retries and a new logger or adapter factory. This proposal
+does not reconstruct or retry the excluded producer-pause workflows.
+
+### Proposed Implementation Direction
+
+Only an internally classified refusal thrown by the actual finalizer time
+guard may select these values. Use a narrow typed error, not exception-message
+matching, caller properties or an arbitrary cause chain. Keep its existing
+`STATE_TRANSITION_INVALID` classification; on the wire keep
+`code='AUTHORIZATION_REQUIRED'`, `retryable=false`, and the exact v1 envelope.
+Other state/endpoint/phase refusals keep `credential.finalize_refused`.
+
+| Finalizer guard | Fixed wire `messageCode` | Fixed local diagnostic |
+| --- | --- | --- |
+| Any existing causal timestamp exceeds sampled C | `credential.finalize.noncausal_time` | `installed Supervisor refused credential finalization because its timestamps are not causal` |
+| No causal violation; `expiresAt <= C` | `credential.finalize.expired` | `installed Supervisor refused expired credential finalization` |
+| Other valid refusal / unknown messageCode | Existing value / no new mapping | Existing generic fixed refusal |
+
+When both causal violation and expiry hold, keep the existing causal-check
+precedence. Do not
+move or resample C, move a guard before the Run fence, add an await/callback/log
+between ordered commits, change any condition, or write credential facts on a
+refusal. Canonical-fence regression and retirement failure are not time-diagnostic
+successes: preserve their current error/poisoning behavior and precedence.
+
+The client selects fixed text only for the exact verified triple
+`(credential.finalize, AUTHORIZATION_REQUIRED, known messageCode)`. Within an
+otherwise valid expected-method refusal, a known text paired with another
+code/hello method, or an unknown messageCode, uses the existing fixed generic
+refusal. A wrong envelope/method or unknown wire code still fails strict decoding.
+Never print remote payload, errorId, timestamps, paths,
+raw exception text or an unrecognized messageCode. Keep outer
+`RECOVERY_REQUIRED`, `retryable=false`, exact decoding and resource joins.
+
+Likely files: `src/state/store.ts`, `src/state/errors.ts`,
+`src/state/installed-control.ts`, `src/state/installed-credential-client.ts`,
+adjacent approved decoder regressions and
+the mirrored RFC/WP contracts. Do not expose an internal classifier or add a
+fake Store/frame/clock seam solely to exercise it.
+
+### Acceptance Criteria
+
+- [ ] Owner confirms this two-reason design before production changes.
+- [ ] Only the actual finalizer time guards select the two new diagnostics;
+  preparation, hello, epoch/peer/endpoint drift and clock regression do not.
+- [ ] Every existing state/time/identity predicate, lock order, fence/credential
+  commit order, immutable replay and terminal-revoke behavior remains unchanged.
+- [ ] Client known-pair mapping, cross-code/method misuse, unknown-messageCode
+  fallback, unchanged strict malformed-frame rejection and absence of
+  remote-content import are tested at the approved pure seam.
+- [ ] Genuine retirement failure still wins over ordinary refusal; no diagnostic
+  changes cleanup, sticky refusal, descriptor joins or retry policy.
+- [ ] Existing installed journey/expiry-preparation assertions and full secret
+  corpus pass within unchanged free-runner budgets, without omitted cases.
+- [ ] Unexecuted finalizer negatives and all other open I1 cuts remain explicitly
+  unverified; pure-data/source review cannot mark them qualified.
+
+### Validation
+
+Use `npm run build`, `npm test`, design-contract guards and the approved pure
+wire decoder tests. Reuse the genuine signed installed entry/v1 UDS journey on
+the free standard Linux runner with all existing assertions and scan limits.
+Review the exact throwing branches and error projection; this source check is
+not runtime evidence of a negative cut. No new test seam is approved here.
+
+### Risks And Dependencies
+
+Diagnostic data remains untrusted and non-authoritative even on an authenticated
+connection. A real acceptance claim still needs the genuine original process,
+request/operation correlation, actual reached guard, retained state/platform
+closure, absence of expansion and all owning-resource/secret-scan joins.
+More granular messages do not make those missing facts exist. This proposal
+adds no database/schema migration; reverting it restores fixed generic text,
+not rollback of experimental credential state.
+
+### Open Questions
+
+Confirm this bounded two-reason contract before implementation. A deterministic,
+permitted full finalizer-negative qualification path remains a separate missing
+requirement; approving diagnostics neither supplies it nor relaxes its standard.
