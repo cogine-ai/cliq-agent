@@ -7,15 +7,18 @@ import { parseJsonStrict } from '../kernel/json.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { openInstalledControl, type InstalledControlService } from './installed-control.js';
 import { acquireInstalledAnchor, createInstalledRuntime, initializeInstalledKeeper, withHeldInstalledRuntime,
-  commitEndpointAuthority, readEndpointAuthority, withCredentialAuthorityLock,
+  commitEndpointAuthority, readEndpointAuthority, readCredentialAuthority, withCredentialAuthorityLock,
   type HeldInstalledAnchor, type HeldInstalledKeeper, type HeldInstalledRuntime } from './installed-runtime.js';
 import { joinResourceOperations, KernelStorageError } from './errors.js';
 import { exactKeys } from '../policy/runtime-authority.js';
-import { openStateStore, type StateStore } from './store.js';
+import { decodeCredentialWriteRequest, writeCredentialAuthority, decodeCredentialRevokeRequest, revokeCredentialAuthority, openStateStore,
+  decodeCredentialCleanupRequest, cleanupCredentialAuthority,
+  type CredentialWriteRequest, type CredentialRevokeRequest, type CredentialCleanupRequest, type StateStore } from './store.js';
+import { installServices } from './installed-services.js';
 
 // Hidden Linux SEA entry. Default CLI startup is unchanged. Release roots are
 // embedded at image construction, never selected by argv/environment/control.
-// Admission and execution are not enabled by this read-only composition.
+// Run admission and execution are not enabled by this composition.
 let selected: HeldInstalledRuntime | undefined;
 let store: StateStore | undefined;
 let service: InstalledControlService | undefined;
@@ -85,6 +88,31 @@ async function readEndpointRequest(): Promise<EndpointRequest> {
   } finally { clearTimeout(timer); }
 }
 
+/** Fixed secret-free metadata only. The canonical base64url envelope leaves
+ * fd 0 unread, so committed replay can later decide before requesting a secret.
+ * Never interpolate caller bytes into a diagnostic. */
+type CredentialRequest = { schemaVersion: 1; kind: 'read'; credentialGrantId: string }
+  | { schemaVersion: 1; kind: 'install_services' } | CredentialWriteRequest | CredentialRevokeRequest | CredentialCleanupRequest;
+function readCredentialRequest(command: string | undefined): CredentialRequest {
+  try {
+    if (typeof command !== 'string' || !command.length || command.length > 87382 || !/^[A-Za-z0-9_-]+$/u.test(command))
+      throw new TypeError('invalid credential metadata envelope');
+    const bytes = Buffer.from(command, 'base64url');
+    if (bytes.length > 65536 || bytes.toString('base64url') !== command) throw new TypeError('noncanonical credential metadata envelope');
+    const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Record<string, unknown>;
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !canonicalJsonBytes(value).equals(bytes) || value.schemaVersion !== 1)
+      throw new TypeError('invalid credential metadata');
+    if (value.kind === 'install_services' && exactKeys(value, ['schemaVersion', 'kind'])) return value as { schemaVersion: 1; kind: 'install_services' };
+    if (value.kind === 'enroll' || value.kind === 'rotate') return decodeCredentialWriteRequest(value);
+    if (value.kind === 'revoke') return decodeCredentialRevokeRequest(value);
+    if (value.kind === 'cleanup') return decodeCredentialCleanupRequest(value);
+    if (!exactKeys(value, ['schemaVersion', 'kind', 'credentialGrantId']) || value.kind !== 'read' ||
+        typeof value.credentialGrantId !== 'string' || !value.credentialGrantId || normalizeCanonicalText(value.credentialGrantId) !== value.credentialGrantId)
+      throw new TypeError('invalid credential read metadata');
+    return value as { schemaVersion: 1; kind: 'read'; credentialGrantId: string };
+  } catch (cause) { throw new KernelStorageError('INVALID_REQUEST', 'expected bounded canonical secret-free credential metadata', { cause }); }
+}
+
 async function start(): Promise<void> {
   if (!isSea() || process.platform !== 'linux') throw new Error('expected the installed Linux SEA');
   const executable = normalizeAbsolutePath(process.execPath);
@@ -94,16 +122,19 @@ async function start(): Promise<void> {
     .decode(getAsset('release-trust-roots.json'))) as ReleaseTrustKey[];
   const runtime = createInstalledRuntime({ releaseKeys });
   const mode = process.argv[2];
-  if (mode === '--bootstrap-supervisor' || mode === '--bootstrap-keeper' || mode === '--bootstrap-endpoint') {
+  if (mode === '--bootstrap-supervisor' || mode === '--bootstrap-keeper' || mode === '--bootstrap-endpoint' || mode === '--bootstrap-credential') {
     const runtimeRoot = path.dirname(executable);
-    if (process.argv.length !== 3 || path.basename(executable) !== 'bootstrap' || path.basename(runtimeRoot) !== 'runtime')
+    if (process.argv.length !== (mode === '--bootstrap-credential' ? 4 : 3) || path.basename(executable) !== 'bootstrap' || path.basename(runtimeRoot) !== 'runtime')
       throw new Error('expected only a fixed role at StateRoot/runtime/bootstrap');
+    if (mode === '--bootstrap-credential') readCredentialRequest(process.argv[3]);
     selected = await runtime.openSelected(path.dirname(runtimeRoot));
     // Bootstrap has no StateOwner, Store, control/worker handles or graceful
     // SIGTERM handler. Exec is terminal, never a running-owner restart API.
-    return runtime.executeSelected(selected, mode === '--bootstrap-keeper' ? 'keeper' : mode === '--bootstrap-endpoint' ? 'endpoint' : 'supervisor');
+    return runtime.executeSelected(selected, mode === '--bootstrap-keeper' ? 'keeper' : mode === '--bootstrap-endpoint' ? 'endpoint' :
+      mode === '--bootstrap-credential' ? 'credential' : 'supervisor', mode === '--bootstrap-credential' ? process.argv[3] : undefined);
   }
-  if ((mode !== '--installed-supervisor' && mode !== '--installed-keeper' && mode !== '--installed-endpoint') || process.argv.length !== 6)
+  if ((mode !== '--installed-supervisor' && mode !== '--installed-keeper' && mode !== '--installed-endpoint' && mode !== '--installed-credential') ||
+      process.argv.length !== (mode === '--installed-credential' ? 7 : 6))
     throw new Error('expected a fixed installed Supervisor role');
   const stateRoot = normalizeAbsolutePath(process.argv[3]!);
   const bundleDigest = process.argv[4]!, rootLocator = process.argv[5]!;
@@ -121,6 +152,18 @@ async function start(): Promise<void> {
     if (`${installed.stateRoot.deviceId}:${installed.stateRoot.fileId}:${installed.stateRoot.ownerUid}` !== rootLocator)
       throw new Error('installed StateRoot differs from the pre-exec root');
   });
+  if (mode === '--installed-credential') {
+    const request = readCredentialRequest(process.argv[6]);
+    const response = request.kind === 'install_services' ? { schemaVersion: 1, ...await installServices(selected) }
+      : request.kind === 'enroll' || request.kind === 'rotate' ? { schemaVersion: 1, operation: await writeCredentialAuthority(selected, request) }
+      : request.kind === 'revoke' ? { schemaVersion: 1, operation: await revokeCredentialAuthority(selected, request) }
+      : request.kind === 'cleanup' ? { schemaVersion: 1, operation: await cleanupCredentialAuthority(selected, request) }
+      : await withCredentialAuthorityLock(selected, async token =>
+        ({ schemaVersion: 1, record: readCredentialAuthority(token, request.credentialGrantId) }));
+    await close();
+    console.log(canonicalJsonBytes(response).toString('utf8'));
+    return;
+  }
   if (mode === '--installed-endpoint') {
     const request = await readEndpointRequest();
     const response = await withCredentialAuthorityLock(selected, async token => request.kind === 'read'

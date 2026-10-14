@@ -38,6 +38,40 @@ jobs:
       - run: npm run build
       - run: npm test
 
+  linux-credential-authority:
+    name: Linux installed credential authority diagnostics
+    # The real credential journey and independent component baseline run in
+    # parallel on free standard runners. This is not complete installed I1.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        id: build
+      - name: Install actual platform and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
+      - name: Exercise signed credential commands and Supervisor autostart
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --credentials "$probe_node" "$RUNNER_TEMP/cliq-credential-journey"
+      - name: Retain the bounded credential feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: credential-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-credential-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-supervisor-preflight:
     name: Linux Supervisor image and actual user-manager diagnostics
     # Component/OS facts only, not an installed I1 qualification. Standard
@@ -57,7 +91,26 @@ jobs:
         id: build
       - name: Install actual platform and worker build prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap strace
+      # These independent disposable fixtures must not spend the stateful
+      # credential journey's unchanged budget. Keep their exact assertions
+      # on the same qualified OS/Node baseline; no authority crosses jobs.
+      - name: Bound the genuine native credential queue and connection retirement
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: >-
+          node --test --test-concurrency=1 --import tsx
+          scripts/kernel/testing/credential-platform-queue.test.ts
+          scripts/kernel/testing/credential-platform-timeout.test.ts
+      - name: Verify the bounded secret scan before collecting credential artifacts
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: >-
+          node --test --import tsx
+          scripts/kernel/testing/credential-secret-scan.test.ts
+          scripts/kernel/testing/credential-secret-corpus.test.ts
+      - name: Reject unsupported credential schemas through the signed entry
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node --test --import tsx scripts/kernel/testing/credential-authority-journey.test.ts
       - name: Verify installed-state and native-retirement boundaries on Linux 22.04
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # These component tests also run in the 24.04 matrix. Keep the real
         # installed/native boundary on the qualified 22.04 baseline too;
         # they do not substitute for the systemd installed execution chain.
@@ -70,6 +123,7 @@ jobs:
           src/state/genesis-schema-boundaries.test.ts
           src/state/supervisor-observation.test.ts
           src/state/installed-control.test.ts
+          src/state/installed-control-client.test.ts
           src/sandbox/native-controller-close.test.ts
           scripts/kernel/sqlite-extension-headers.test.ts
           scripts/kernel/testing/installed-read-control.test.ts

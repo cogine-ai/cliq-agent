@@ -1,30 +1,29 @@
-import { createHash, randomBytes, X509Certificate } from 'node:crypto';
-import { constants, type BigIntStats } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { constants, fstatSync, lstatSync, type BigIntStats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, type FileHandle } from 'node:fs/promises';
 import { isMainThread } from 'node:worker_threads';
 import { Module } from 'node:module';
 import { isSea } from 'node:sea';
-import { DatabaseSync } from 'node:sqlite';
 
 import { KERNEL_CAS_DIRECTORY } from '../config.js';
-import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
-import { decodeEndpointAuthorityCommandCore, decodeEndpointAuthorityOperation, decodeEndpointAuthorityRecord,
-  type EndpointAuthorityCommandCoreV1, type EndpointAuthorityOperationV1, type EndpointAuthorityRecordV1,
-  type EndpointRegistrationV1 } from '../kernel/credential-authority.js';
-import { assertArtifactRef, assertRequestId, digestOmitting, encodeCanonicalTime, identityHash,
-  normalizeAbsolutePath, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
+import { assertArtifactRef, digestOmitting, encodeCanonicalTime, identityHash,
+  normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
 import type { LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, PlatformProcessIdentityV1, StateRootIdentityV1 } from '../kernel/types.js';
-import { parseJsonStrict } from '../kernel/json.js';
 import { immutableSnapshot } from '../model/immutable.js';
-import { exactKeys, policyProfile, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { exactKeys, policyProfile, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 import { decodeControlChannel, decodeLocalPrincipalIdentity, decodePlatformProcessIdentity, decodeStateRootIdentity } from './decoders.js';
+import { checkCanonicalBytes, validateBundle, validateTrustStore } from './installed-artifacts.js';
+import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
 import type { NativeWorkerBinding, NativeWorkerImage } from '../sandbox/linux-worker.js';
+import type { NativeCredentialPlatformBinding } from './credential-platform.js';
 import { acquireHeldInstalledAnchor, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
   stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
   type NativeStateOwner } from './native-owner.js';
+import { openHeldInstalledControlClient, type HeldInstalledControlClient } from './native-owner.js';
 
 export type HeldInstalledRuntime = Readonly<{
   bundle: RuntimeBundleManifest;
@@ -38,334 +37,62 @@ export type HeldInstalledKeeper = Readonly<{ assertHeld(): void; close(): void }
 /** Supervisor ownership of the verified keeper's original root, not admission
  * authority, a pathname substitute or a transferable numeric descriptor. */
 export type HeldInstalledAnchor = Readonly<{ assertHeld(): void; close(): void }>;
-/** Physical authority-store scope, not an authenticated channel or credential
- * grant. Its SQL, data descriptors, URI and retirement never escape. */
-export type HeldCredentialAuthorityLock = Readonly<{ assertHeld(): void }>;
-type CredentialContext = { selected: HeldInstalledRuntime; ownerPrincipalId: string;
-  native: NativeStateOwner; scope: Readonly<{ generation: string; assertHeld(): void }>;
+/** Internal physical owner. It is minted only in credentialScope and passed
+ * directly to the fixed business runner, never returned to caller callbacks. */
+export type InstalledCredentialScope = Readonly<{ assertHeld(): void }>;
+export type InstalledCredentialProvenance = Readonly<{
+  selected: HeldInstalledRuntime; ownerPrincipalId: string;
   rootIdentity: StateRootIdentityV1; processIdentity: PlatformProcessIdentityV1;
   principalIdentity: LocalPrincipalIdentityV1; channelIdentity: LocalControlChannelIdentityV1;
-  objects: ReadonlyMap<string, Buffer>; releaseKeys: readonly ReleaseTrustKey[] };
-type CredentialBinding = CredentialContext & { pid: number; processStartToken: string; generation: string; active: boolean;
-  lastCommittedAt?: string;
-  database?: DatabaseSync };
-const credentialTokens = new WeakMap<HeldCredentialAuthorityLock, CredentialBinding>();
+  objects: ReadonlyMap<string, Buffer>; releaseKeys: readonly ReleaseTrustKey[];
+}>;
+type CredentialPhysicalBinding = { native: NativeStateOwner;
+  scope: Readonly<{ generation: string; assertHeld(): void;
+    observeProducerLifetime(pid: number, ownerUid: number, processStartToken: string): 'present' | 'dead' }>;
+  assertSelection(): void;
+  pid: number; processStartToken: string; generation: string; active: boolean;
+  provenance: InstalledCredentialProvenance };
+const credentialPhysicalScopes = new WeakMap<InstalledCredentialScope, CredentialPhysicalBinding>();
 
-function checkedCredentialToken(token: HeldCredentialAuthorityLock): CredentialBinding {
-  const held = credentialTokens.get(token);
-  if (!held || !held.active) throw new KernelStorageError('ARTIFACT_MISMATCH', 'credential authority token is invalid or its callback has ended');
-  if (held.pid !== process.pid || held.native.processStartToken() !== held.processStartToken ||
-      held.scope.generation !== held.generation)
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'credential authority token belongs to another process or generation');
+function checkedCredentialPhysicalScope(physical: InstalledCredentialScope): CredentialPhysicalBinding {
+  const held = credentialPhysicalScopes.get(physical);
+  if (!held || !held.active) mismatch('installed credential physical scope is invalid or ended');
+  if (held.pid !== process.pid || held.native.processStartToken() !== held.processStartToken || held.scope.generation !== held.generation)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'credential authority scope belongs to another process or generation');
   held.scope.assertHeld();
+  held.assertSelection();
   return held;
 }
-
-/** Locked same-principal lookup. A caller id never selects a different owner;
- * neither SQL nor the physical store lifetime escapes the installed producer. */
-export function readEndpointAuthority(token: HeldCredentialAuthorityLock, endpointRegistrationId: string): EndpointAuthorityRecordV1 | null {
-  const held = checkedCredentialToken(token);
+/** Genuine-brand-first friend operations; neither returns a descriptor/native
+ * object nor lets a caller register a structural physical owner. */
+export function assertInstalledCredentialScope(physical: InstalledCredentialScope): void {
+  checkedCredentialPhysicalScope(physical);
+}
+export function installedCredentialProvenance(physical: InstalledCredentialScope): InstalledCredentialProvenance {
+  return checkedCredentialPhysicalScope(physical).provenance;
+}
+/** Ordinary recovery only. Retained lifetime input is read by the private
+ * business owner; missing executable paths or caller PIDs never prove death. */
+export function observeInstalledCredentialProducer(physical: InstalledCredentialScope,
+  processIdentity: PlatformProcessIdentityV1): 'present' | 'dead' {
+  const binding = checkedCredentialPhysicalScope(physical);
+  if (processIdentity.platform !== 'linux' || processIdentity.ownerUid !== binding.provenance.rootIdentity.ownerUid)
+    mismatch('credential producer lifetime does not belong to this root');
   try {
-    if (typeof endpointRegistrationId !== 'string' || !endpointRegistrationId ||
-        normalizeCanonicalText(endpointRegistrationId) !== endpointRegistrationId || Buffer.byteLength(endpointRegistrationId) > SMALL_BYTES)
-      throw new TypeError('invalid endpoint id');
-  } catch (cause) { throw new KernelStorageError('INVALID_REQUEST', 'endpoint id must be bounded nonempty canonical text', { cause }); }
-  try {
-    ensureEndpointSchema(held.database!);
-    const history = readEndpointHistory(held, endpointRegistrationId);
-    held.scope.assertHeld();
-    return history.length ? immutableSnapshot(history[history.length - 1]!) : null;
-  } catch (cause) {
-    if (cause instanceof ResourceRetirementError) throw cause;
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'retained endpoint authority could not be verified', { cause });
+    const result = binding.scope.observeProducerLifetime(processIdentity.pid, processIdentity.ownerUid, processIdentity.processStartToken);
+    checkedCredentialPhysicalScope(physical);
+    return result;
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+      const failure = new ResourceRetirementError('credential producer observation resources did not retire', error);
+      rememberRetirement(failure); throw failure;
+    }
+    throw error;
   }
 }
 
-/** Authenticated exact-core mutation. Current identity always precedes replay;
- * the first operation's channel and historical result are never rewritten. */
-export function commitEndpointAuthority(token: HeldCredentialAuthorityLock, requestId: string,
-  commandCore: EndpointAuthorityCommandCoreV1): EndpointAuthorityOperationV1 {
-  const held = checkedCredentialToken(token);
-  let core: EndpointAuthorityCommandCoreV1;
-  let coreBytes: Buffer;
-  try {
-    if (typeof requestId !== 'string') throw new TypeError('invalid endpoint request id');
-    assertRequestId(requestId);
-    coreBytes = canonicalJsonBytes(commandCore);
-    if (coreBytes.length > SMALL_BYTES) throw new TypeError('endpoint command exceeds its byte bound');
-    core = immutableSnapshot(decodeEndpointAuthorityCommandCore(parseJsonStrict(coreBytes.toString('utf8'))));
-    if (core.ownerPrincipalId !== held.ownerPrincipalId) throw new TypeError('endpoint owner differs from authenticated principal');
-  } catch (cause) { throw new KernelStorageError('INVALID_REQUEST', 'endpoint command is invalid for this authenticated principal', { cause }); }
-  try {
-    const database = held.database!;
-    ensureEndpointSchema(database);
-    const endpointId = core.kind === 'register' ? core.registration.endpointRegistrationId : core.endpointRegistrationId;
-    const previous = readEndpointOperation(held, requestId);
-    if (previous) {
-      const history = readEndpointHistory(held, previous.endpointRegistrationId);
-      validateEndpointResult(previous, history);
-      if (previous.requestDigest !== core.commandDigest || !canonicalJsonBytes(previous.commandCore).equals(coreBytes))
-        throw new KernelStorageError('REQUEST_ID_CONFLICT', 'endpoint request id already names different command bytes');
-      return immutableSnapshot(previous);
-    }
-    const history = readEndpointHistory(held, endpointId);
-    const latest = history[history.length - 1];
-    const now = encodeCanonicalTime(Date.now());
-    if (parseCanonicalTime(now) < parseCanonicalTime(held.lastCommittedAt ?? held.channelIdentity.openedAt) ||
-        (latest && parseCanonicalTime(now) < parseCanonicalTime(latest.state === 'revoked' ? latest.revokedAt : latest.createdAt)))
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'endpoint authority wall clock regressed');
-    let record: EndpointAuthorityRecordV1;
-    let disposition: EndpointAuthorityOperationV1['disposition'];
-    if (core.kind === 'register') {
-      verifyEndpointTrust(held, core.registration, false);
-      if (core.registration.registrationKind !== 'user' || parseCanonicalTime(core.registration.createdAt) > parseCanonicalTime(now))
-        throw new KernelStorageError('INVALID_REQUEST', 'endpoint registration must be an already-created user registration');
-      if (latest?.state === 'revoked') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'a revoked endpoint id cannot be registered again');
-      if (latest) {
-        if (latest.expectedRegistrationArtifactRef !== core.expectedRegistrationArtifactRef ||
-            !canonicalJsonBytes(latest.registration).equals(canonicalJsonBytes(core.registration)))
-          throw new KernelStorageError('REVISION_CONFLICT', 'endpoint id already names a different registration');
-        record = latest; disposition = 'already_registered';
-      } else {
-        const value = { schemaVersion: 1, endpointRegistrationId: endpointId, authorityRevision: 1, ownerPrincipalId: held.ownerPrincipalId,
-          sourceRequestId: requestId, sourceRequestDigest: core.commandDigest, registration: core.registration,
-          expectedRegistrationArtifactRef: core.expectedRegistrationArtifactRef, createdAt: now, state: 'active' } as const;
-        record = decodeEndpointAuthorityRecord({ ...value, recordDigest: canonicalSha256(value) }); disposition = 'registered';
-      }
-    } else {
-      if (!latest) throw new KernelStorageError('NOT_FOUND', 'endpoint id is not registered');
-      if (latest.state === 'revoked') { record = latest; disposition = 'already_revoked'; }
-      else {
-        if (core.expectedAuthorityRevision !== latest.authorityRevision)
-          throw new KernelStorageError('REVISION_CONFLICT', 'endpoint active revision differs from the expected revision');
-        const { recordDigest: _digest, ...original } = latest;
-        const value = { ...original, authorityRevision: 2, state: 'revoked', revokedAt: now,
-          revokedByRequestId: requestId, revokedByRequestDigest: core.commandDigest } as const;
-        record = decodeEndpointAuthorityRecord({ ...value, recordDigest: canonicalSha256(value) }); disposition = 'revoked';
-      }
-    }
-    const value = { schemaVersion: 1, operationId: identityHash(held.ownerPrincipalId, requestId, core.commandDigest),
-      requestId, requestDigest: core.commandDigest, channelIdentityRef: canonicalSha256(held.channelIdentity),
-      channelIdentityDigest: held.channelIdentity.channelIdentityDigest, commandCore: core, ownerPrincipalId: held.ownerPrincipalId,
-      kind: core.kind, endpointRegistrationId: endpointId, disposition, committedAuthorityRevision: record.authorityRevision,
-      resultRecordDigest: record.recordDigest, committedAt: now } as const;
-    const operation = decodeEndpointAuthorityOperation({ ...value, operationDigest: canonicalSha256(value) });
-    const recordBytes = canonicalJsonBytes(record), operationBytes = canonicalJsonBytes(operation);
-    if (recordBytes.length > SMALL_BYTES || operationBytes.length > SMALL_BYTES)
-      throw new KernelStorageError('INVALID_REQUEST', 'endpoint authority result exceeds its byte bound');
-    endpointTransaction(database, () => {
-      for (const [ref, bytes] of held.objects) {
-        const existing = database.prepare('SELECT bytes FROM retained_objects WHERE artifact_ref=?').get(ref);
-        if (existing) {
-          if (!(existing.bytes instanceof Uint8Array) || !Buffer.from(existing.bytes).equals(bytes))
-            throw new TypeError('retained endpoint object differs from its original bytes');
-        } else database.prepare('INSERT INTO retained_objects(artifact_ref,bytes) VALUES (?,?)').run(ref, bytes);
-      }
-      if (disposition === 'registered' || disposition === 'revoked') database.prepare(`INSERT INTO endpoint_records
-        (owner_principal_id,endpoint_registration_id,authority_revision,record_json) VALUES (?,?,?,?)`)
-        .run(held.ownerPrincipalId, endpointId, record.authorityRevision, recordBytes.toString('utf8'));
-      database.prepare('INSERT INTO endpoint_operations(owner_principal_id,request_id,operation_json) VALUES (?,?,?)')
-        .run(held.ownerPrincipalId, requestId, operationBytes.toString('utf8'));
-      validateEndpointResult(operation, readEndpointHistory(held, endpointId));
-      held.scope.assertHeld();
-    });
-    held.lastCommittedAt = now;
-    return immutableSnapshot(operation);
-  } catch (cause) {
-    if (cause instanceof KernelStorageError) throw cause;
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'endpoint authority transaction could not be verified', { cause });
-  }
-}
-
-function endpointTransaction<T>(database: DatabaseSync, operation: () => T): T {
-  database.exec('BEGIN IMMEDIATE');
-  try { const result = operation(); database.exec('COMMIT'); return result; }
-  catch (cause) {
-    try { database.exec('ROLLBACK'); }
-    catch (rollback) { throw new ResourceRetirementError('endpoint authority transaction retirement is uncertain', new AggregateError([cause, rollback])); }
-    throw cause;
-  }
-}
-
-function ensureEndpointSchema(database: DatabaseSync): void {
-  const version = database.prepare('PRAGMA user_version').get()?.user_version;
-  const names = database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row => row.name).sort();
-  if (version === 1 && JSON.stringify(names) === JSON.stringify(['endpoint_operations', 'endpoint_records', 'retained_objects'])) return;
-  if (version !== 0 || names.length) throw new KernelStorageError('RECOVERY_REQUIRED', 'endpoint authority schema is not supported');
-  // Schema genesis is harmless and replayable. A warm read establishes it
-  // before the production business-transaction crash campaign starts.
-  endpointTransaction(database, () => database.exec(`
-    CREATE TABLE endpoint_records(owner_principal_id TEXT NOT NULL, endpoint_registration_id TEXT NOT NULL,
-      authority_revision INTEGER NOT NULL CHECK(authority_revision IN (1,2)), record_json TEXT NOT NULL,
-      PRIMARY KEY(owner_principal_id,endpoint_registration_id,authority_revision)) STRICT;
-    CREATE TABLE endpoint_operations(owner_principal_id TEXT NOT NULL, request_id TEXT NOT NULL,
-      operation_json TEXT NOT NULL, PRIMARY KEY(owner_principal_id,request_id)) STRICT;
-    CREATE TABLE retained_objects(artifact_ref TEXT PRIMARY KEY NOT NULL, bytes BLOB NOT NULL) STRICT;
-    PRAGMA user_version=1;
-  `));
-}
-
-function endpointJson<T>(text: unknown, decode: (value: unknown) => T): T {
-  if (typeof text !== 'string' || Buffer.byteLength(text) > SMALL_BYTES) throw new TypeError('endpoint JSON is not bounded text');
-  const bytes = Buffer.from(text), value = parseJsonStrict(text);
-  if (!canonicalJsonBytes(value).equals(bytes)) throw new TypeError('endpoint JSON is not canonical');
-  return decode(value);
-}
-
-function endpointObject(held: CredentialBinding, ref: string, limit = SMALL_BYTES, retained = true): Buffer {
-  const value = retained ? held.database!.prepare('SELECT bytes FROM retained_objects WHERE artifact_ref=?').get(ref)?.bytes : held.objects.get(ref);
-  if (!(value instanceof Uint8Array) || value.length > limit || sha256Bytes(value) !== ref)
-    throw new TypeError('endpoint retained object is missing or does not rehash');
-  return Buffer.from(value);
-}
-
-function verifyEndpointTrust(held: CredentialBinding, registration: EndpointRegistrationV1, retained: boolean): void {
-  const tls = registration.tls;
-  const selected = held.selected.bundle.entries.find(value => value.entryId === 'default_https_trust_store');
-  if (tls.trustStoreRuntimeBundleRef !== held.selected.bundleDigest || tls.trustStoreRuntimeBundleManifestDigest !== held.selected.bundle.manifestDigest ||
-      !selected || selected.role !== 'trust_store' || selected.executable || selected.digest !== tls.trustStoreRef || selected.digest !== tls.trustStoreDigest)
-    throw new KernelStorageError(retained ? 'RECOVERY_REQUIRED' : 'INVALID_REQUEST', 'endpoint must use the fixed signed installed HTTPS trust store');
-  const bundleBytes = endpointObject(held, tls.trustStoreRuntimeBundleRef, SMALL_BYTES, retained);
-  const bundle = validateBundle(checkCanonicalBytes(bundleBytes), held.releaseKeys);
-  const entry = bundle.entries.find(value => value.entryId === 'default_https_trust_store');
-  if (tls.trustStoreRuntimeBundleRef !== held.selected.bundleDigest || bundle.manifestDigest !== tls.trustStoreRuntimeBundleManifestDigest ||
-      !entry || entry.role !== 'trust_store' || entry.executable || entry.digest !== tls.trustStoreRef || entry.digest !== tls.trustStoreDigest)
-    throw new KernelStorageError(retained ? 'RECOVERY_REQUIRED' : 'INVALID_REQUEST', 'endpoint must use the fixed signed installed HTTPS trust store');
-  const bytes = endpointObject(held, entry.digest, TRUST_BYTES, retained);
-  if (bytes.length !== entry.byteCount) throw new TypeError('endpoint trust-store byte count differs from the signed entry');
-  validateTrustStore(bytes);
-}
-
-function readEndpointOperation(held: CredentialBinding, requestId: string): EndpointAuthorityOperationV1 | undefined {
-  try {
-    const row = held.database!.prepare('SELECT operation_json FROM endpoint_operations WHERE owner_principal_id=? AND request_id=?')
-      .get(held.ownerPrincipalId, requestId);
-    if (!row) return undefined;
-    const operation = endpointJson(row.operation_json, decodeEndpointAuthorityOperation);
-    if (operation.ownerPrincipalId !== held.ownerPrincipalId || operation.requestId !== requestId) throw new TypeError('endpoint operation index differs');
-    const object = (ref: string) => {
-      const bytes = endpointObject(held, ref);
-      const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-      if (!canonicalJsonBytes(value).equals(bytes)) throw new TypeError('endpoint identity object is not canonical');
-      return value;
-    };
-    const channel = decodeControlChannel(object(operation.channelIdentityRef));
-    const principal = decodeLocalPrincipalIdentity(object(channel.principalIdentityRef));
-    const root = decodeStateRootIdentity(object(principal.stateRootIdentityRef));
-    if (channel.transport.kind !== 'in_process') throw new TypeError('endpoint channel is not the installed in-process transport');
-    const processIdentity = decodePlatformProcessIdentity(object(channel.transport.processIdentityRef));
-    if (channel.channelIdentityDigest !== operation.channelIdentityDigest || channel.principalId !== held.ownerPrincipalId || channel.client !== 'cli' ||
-        principal.identityDigest !== channel.principalIdentityDigest || principal.principalId !== held.ownerPrincipalId ||
-        principal.stateRootIdentityDigest !== root.identityDigest || canonicalSha256(root) !== canonicalSha256(held.rootIdentity) ||
-        principal.platform !== root.platform || principal.effectiveUid !== root.ownerUid || processIdentity.platform !== root.platform ||
-        processIdentity.ownerUid !== root.ownerUid || processIdentity.identityDigest !== channel.transport.processIdentityDigest ||
-        processIdentity.executableImageDigest !== held.processIdentity.executableImageDigest || processIdentity.observedAt !== channel.openedAt ||
-        parseCanonicalTime(operation.committedAt) < parseCanonicalTime(channel.openedAt)) throw new TypeError('endpoint channel closure differs');
-    return operation;
-  } catch (cause) { throw new KernelStorageError('RECOVERY_REQUIRED', 'retained endpoint operation provenance could not be verified', { cause }); }
-}
-
-function validateEndpointResult(operation: EndpointAuthorityOperationV1, history: readonly EndpointAuthorityRecordV1[]): void {
-  const record = history[operation.committedAuthorityRevision - 1];
-  const core = operation.commandCore;
-  if (!record || record.recordDigest !== operation.resultRecordDigest || record.ownerPrincipalId !== operation.ownerPrincipalId ||
-      record.endpointRegistrationId !== operation.endpointRegistrationId ||
-      parseCanonicalTime(operation.committedAt) < parseCanonicalTime(record.state === 'revoked' ? record.revokedAt : record.createdAt))
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'endpoint operation historical result differs');
-  if (core.kind === 'register') {
-    if (record.state !== 'active' || record.expectedRegistrationArtifactRef !== core.expectedRegistrationArtifactRef ||
-        !canonicalJsonBytes(record.registration).equals(canonicalJsonBytes(core.registration)) ||
-        (operation.disposition === 'registered' && (record.sourceRequestId !== operation.requestId || record.sourceRequestDigest !== operation.requestDigest ||
-          record.createdAt !== operation.committedAt))) throw new KernelStorageError('RECOVERY_REQUIRED', 'endpoint registration result differs');
-  } else if (record.state !== 'revoked' || (operation.disposition === 'revoked' &&
-      (core.expectedAuthorityRevision !== 1 || record.revokedByRequestId !== operation.requestId || record.revokedByRequestDigest !== operation.requestDigest ||
-        record.revokedAt !== operation.committedAt))) throw new KernelStorageError('RECOVERY_REQUIRED', 'endpoint revocation result differs');
-}
-
-function readEndpointHistory(held: CredentialBinding, endpointId: string): EndpointAuthorityRecordV1[] {
-  try {
-    const rows = held.database!.prepare(`SELECT authority_revision,record_json FROM endpoint_records
-      WHERE owner_principal_id=? AND endpoint_registration_id=? ORDER BY authority_revision LIMIT 3`).all(held.ownerPrincipalId, endpointId);
-    if (rows.length > 2) throw new TypeError('endpoint history contains extra revisions');
-    const history = rows.map((row, index) => {
-      const record = endpointJson(row.record_json, decodeEndpointAuthorityRecord);
-      if (record.ownerPrincipalId !== held.ownerPrincipalId || record.endpointRegistrationId !== endpointId ||
-          record.authorityRevision !== index + 1 || record.authorityRevision !== row.authority_revision)
-        throw new TypeError('endpoint history index or continuity differs');
-      verifyEndpointTrust(held, record.registration, true);
-      return record;
-    });
-    if (!history.length) {
-      // An orphan operation must not make a deleted endpoint look unregistered.
-      const orphan = held.database!.prepare(`SELECT 1 FROM endpoint_operations WHERE owner_principal_id=?
-        AND json_extract(operation_json,'$.endpointRegistrationId')=? LIMIT 1`).get(held.ownerPrincipalId, endpointId);
-      if (orphan) throw new TypeError('endpoint operation has no retained result');
-      return history;
-    }
-    const first = history[0]!;
-    const source = readEndpointOperation(held, first.sourceRequestId);
-    if (first.state !== 'active' || first.registration.registrationKind !== 'user' || !source || source.disposition !== 'registered' || source.requestDigest !== first.sourceRequestDigest ||
-        parseCanonicalTime(first.registration.createdAt) > parseCanonicalTime(first.createdAt)) throw new TypeError('endpoint registration source is missing or invalid');
-    validateEndpointResult(source, history);
-    const revoked = history[1];
-    if (revoked) {
-      if (revoked.state !== 'revoked' || parseCanonicalTime(revoked.revokedAt) < parseCanonicalTime(first.createdAt))
-        throw new TypeError('endpoint terminal revision or revocation time differs');
-      const { recordDigest: _firstDigest, ...original } = first;
-      const { recordDigest: _revokedDigest, ...actual } = revoked;
-      if (!canonicalJsonBytes(actual).equals(canonicalJsonBytes({ ...original, authorityRevision: 2, state: 'revoked',
-        revokedAt: revoked.revokedAt, revokedByRequestId: revoked.revokedByRequestId, revokedByRequestDigest: revoked.revokedByRequestDigest })))
-        throw new TypeError('endpoint revocation rewrites original registration or source');
-      const operation = readEndpointOperation(held, revoked.revokedByRequestId);
-      if (!operation || operation.disposition !== 'revoked' || operation.requestDigest !== revoked.revokedByRequestDigest)
-        throw new TypeError('endpoint revocation source is missing or invalid');
-      validateEndpointResult(operation, history);
-    }
-    return history;
-  } catch (cause) { throw new KernelStorageError('RECOVERY_REQUIRED', 'retained endpoint history could not be verified', { cause }); }
-}
-
-/** Only the verified installed producer can mint tokens. Keep both this
- * function and its SQL private: a structural factory/native/owner argument
- * must never become a second way to manufacture repository authority. */
-async function runHeldCredentialAuthority<T>(input: Readonly<CredentialContext>, operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T> {
-  const binding: CredentialBinding = { ...input, pid: process.pid, processStartToken: input.native.processStartToken(),
-    generation: input.scope.generation, active: true };
-  const token: HeldCredentialAuthorityLock = Object.freeze({ assertHeld() {
-    if (this !== token) throw new TypeError('invalid credential authority token receiver');
-    checkedCredentialToken(token);
-  } });
-  credentialTokens.set(token, binding);
-  let database: DatabaseSync | undefined;
-  let failed = false;
-  let failure: unknown;
-  let result: T;
-  try {
-    token.assertHeld();
-    database = new DatabaseSync('file:cliq-credential-authority?vfs=cliq-credential-vfs-v1', { allowExtension: false });
-    if (database.prepare('PRAGMA locking_mode=EXCLUSIVE').get()?.locking_mode !== 'exclusive')
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'credential authority requires exclusive pager mode');
-    database.exec('PRAGMA temp_store=MEMORY; PRAGMA mmap_size=0; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=0');
-    if (database.prepare('PRAGMA journal_mode=WAL').get()?.journal_mode !== 'wal')
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'credential authority requires fixed exclusive-mode WAL');
-    // Initialize the real transaction facility without inventing a schema,
-    // endpoint, platform observation or authenticated business authority.
-    database.exec('BEGIN IMMEDIATE; COMMIT');
-    binding.database = database;
-    token.assertHeld();
-    result = await operation(token);
-    token.assertHeld();
-  } catch (error) { failed = true; failure = error; }
-  finally {
-    binding.active = false;
-    binding.database = undefined;
-    try { database?.close(); }
-    catch (error) { throw new ResourceRetirementError('credential authority database did not retire',
-      new AggregateError(failed ? [failure, error] : [error])); }
-  }
-  if (failed) throw failure;
-  return result!;
-}
+export { commitEndpointAuthority, readEndpointAuthority, readCredentialAuthority } from './store.js';
+export type { HeldCredentialAuthorityLock } from './store.js';
 
 type InstalledDirectoryIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid: number }>;
 /** Trusted startup observation only. No descriptor or independently supplied
@@ -382,10 +109,12 @@ export type InstalledRuntimeBorrow = Readonly<{
 type InstalledRuntimeBinding = {
   factory: InstalledRuntime;
   borrow<T>(operation: (installed: InstalledRuntimeBorrow) => Promise<T>): Promise<T>;
-  execute(role: 'keeper' | 'supervisor' | 'endpoint'): Promise<never>;
+  execute(role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): Promise<never>;
   initializeKeeper(): Promise<HeldInstalledKeeper>;
   acquireAnchor(): Promise<HeldInstalledAnchor>;
   loadWorkerNative(): Promise<NativeWorkerBinding>;
+  loadCredentialPlatform(): Promise<NativeCredentialPlatformBinding>;
+  openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
   credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T>;
 };
@@ -410,6 +139,18 @@ export function loadInstalledWorkerNative(selected: HeldInstalledRuntime): Promi
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('installed runtime is not a verified held selection');
   return binding.loadWorkerNative();
+}
+/** These two fixed friends carry no StateOwner/credential lock. The selected
+ * producer supplies and retains the actual signed image/root descriptors. */
+export function loadInstalledCredentialPlatform(selected: HeldInstalledRuntime): Promise<NativeCredentialPlatformBinding> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('installed runtime is not a verified held selection');
+  return binding.loadCredentialPlatform();
+}
+export function openInstalledControlClient(selected: HeldInstalledRuntime): Promise<HeldInstalledControlClient> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('installed runtime is not a verified held selection');
+  return binding.openControlClient();
 }
 export function sealInstalledWorkerImage(selected: HeldInstalledRuntime, entryId: string): Promise<NativeWorkerImage> {
   const binding = heldInstalledRuntimes.get(selected);
@@ -460,7 +201,7 @@ type InstalledRuntime = Readonly<{
   openSelected(stateRoot: string): Promise<HeldInstalledRuntime>;
   /** Bootstrap-only terminal operation. No StateOwner/control/worker may have
    * been acquired; the signed entry point enforces this fixed startup order. */
-  executeSelected(held: HeldInstalledRuntime, role: 'keeper' | 'supervisor' | 'endpoint'): Promise<never>;
+  executeSelected(held: HeldInstalledRuntime, role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): Promise<never>;
 }>;
 type Directory = { handle: FileHandle; info: BigIntStats; parent?: Directory; name: string; private: boolean };
 type InstalledFile = { handle: FileHandle; info: BigIntStats; parent: Directory; name: string; digest?: string };
@@ -469,7 +210,9 @@ type VerifiedPackage = { root: Directory; manifest: InstalledFile; bundle: Runti
 
 const SMALL_BYTES = 1_048_576;
 const TRUST_BYTES = 16 * SMALL_BYTES;
-const CHUNK_BYTES = 64 * 1024;
+// Bound each IO batch without caching integrity: every verification still reads
+// and hashes all bytes, checks exact EOF and joins the original physical owner.
+const CHUNK_BYTES = 1_048_576;
 // Descriptor retirement is process authority, not the lifetime of a factory or
 // selected handle. A fresh factory must not erase an uncertain close.
 let retirementFailure: ResourceRetirementError | undefined;
@@ -547,6 +290,20 @@ class Scope {
   async assertDirectories(): Promise<void> {
     healthy();
     for (const directory of this.directories) await this.assertDirectory(directory);
+  }
+  assertMetadata(files: readonly InstalledFile[]): void {
+    healthy();
+    for (const directory of this.directories) {
+      const held = fstatSync(directory.handle.fd, { bigint: true });
+      const named = lstatSync(directory.parent ? childPath(directory.parent, directory.name) : '/', { bigint: true });
+      checkDirectory(held, directory.private); checkDirectory(named, directory.private);
+      if (!sameDirectory(directory.info, held) || !sameDirectory(held, named)) mismatch('installed runtime directory changed');
+    }
+    for (const file of files) {
+      const held = fstatSync(file.handle.fd, { bigint: true });
+      const named = lstatSync(childPath(file.parent, file.name), { bigint: true });
+      if (!sameFile(file.info, held) || !sameFile(held, named)) mismatch('installed runtime signed file metadata changed');
+    }
   }
   async directory(parent: Directory, name: string, create = false): Promise<Directory> {
     await this.assertDirectory(parent);
@@ -642,47 +399,6 @@ async function readSmall(file: InstalledFile, limit = SMALL_BYTES): Promise<Buff
   return Buffer.concat(bytes);
 }
 async function verifyBytes(file: InstalledFile): Promise<void> { for await (const _chunk of chunks(file)) { /* streamed integrity check */ } }
-function checkCanonicalBytes(bytes: Buffer): unknown {
-  try {
-    const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
-    let count = 0;
-    while (pending.length) {
-      const item = pending.pop()!;
-      if (++count > 10_000 || item.depth > 32) mismatch('installed runtime canonical graph exceeds its decoding bound');
-      if (item.value && typeof item.value === 'object') for (const child of Object.values(item.value)) pending.push({ value: child, depth: item.depth + 1 });
-    }
-    if (!canonicalJsonBytes(value).equals(bytes)) mismatch('installed runtime JSON bytes are not canonical');
-    return value;
-  } catch (cause) { if (cause instanceof KernelStorageError) throw cause; mismatch('installed runtime canonical data cannot be decoded', cause); }
-}
-function validateBundle(value: unknown, releaseKeys: readonly ReleaseTrustKey[]): RuntimeBundleManifest {
-  try {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) mismatch('installed runtime manifest must be an object');
-    const bundle = value as RuntimeBundleManifest;
-    if (!Array.isArray(bundle.entries) || !Array.isArray(bundle.structuredArtifacts) || !Array.isArray(bundle.guestToolchainManifestRefs)) mismatch('installed runtime manifest graph must contain arrays');
-    verifyRuntimeBundle(bundle, releaseKeys);
-    if (bundle.guestToolchainManifestRefs.length || bundle.structuredArtifacts.length !== 1) mismatch('installed runtime contains unsupported structured roots');
-    for (const entry of bundle.entries) {
-      if (entry.relativePath.normalize('NFC') !== entry.relativePath || Buffer.byteLength(entry.relativePath) > 4096 ||
-          entry.relativePath === 'manifest.json' || entry.relativePath.startsWith('manifest.json/') ||
-          (entry.executable && entry.byteCount === 0) ||
-          (['supervisor', 'worker', 'provider_adapter', 'tool_adapter', 'platform_helper', 'mcp_server', 'mcp_recovery_adapter', 'local_inference'].includes(entry.role) && !entry.executable) ||
-          ['guest_toolchain', 'skill_bundle', 'mcp_recovery_profile', 'bundle_object', 'system_prompt', 'compaction_prompt'].includes(entry.role)) {
-        mismatch('installed runtime entry path or role is unsupported');
-      }
-    }
-    return immutableSnapshot(bundle);
-  } catch (cause) { if (cause instanceof KernelStorageError) throw cause; mismatch('installed runtime release manifest failed validation', cause); }
-}
-function validateTrustStore(bytes: Buffer): void {
-  try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    const certificates = text.match(/-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----/gu);
-    if (!certificates?.length || text.replace(/-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----/gu, '').trim()) mismatch('signed HTTPS trust store must contain only PEM certificates');
-    for (const certificate of certificates) new X509Certificate(certificate);
-  } catch (cause) { if (cause instanceof KernelStorageError) throw cause; mismatch('signed HTTPS trust store is invalid', cause); }
-}
 async function checkPackageGraph(scope: Scope, root: Directory, bundle: RuntimeBundleManifest): Promise<void> {
   const expected = new Map<string, Set<string>>();
   for (const filename of ['manifest.json', ...bundle.entries.map(entry => entry.relativePath)]) {
@@ -792,16 +508,18 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
       typeof key.keyId !== 'string' || !key.keyId || typeof key.publicKeyPem !== 'string' || !key.publicKeyPem) ||
       new Set(releaseKeys.map(key => key.keyId)).size !== releaseKeys.length) mismatch('installed runtime requires fixed unambiguous trusted composition keys');
   const runtime: InstalledRuntime = Object.freeze({
-    executeSelected(this: InstalledRuntime, held: HeldInstalledRuntime, role: 'keeper' | 'supervisor' | 'endpoint'): Promise<never> {
+    executeSelected(this: InstalledRuntime, held: HeldInstalledRuntime, role: 'keeper' | 'supervisor' | 'endpoint' | 'credential', command?: string): Promise<never> {
       // Reject receiver/brand/factory/primitive role before touching a caller
       // property, queue, or descriptor. Invalid calls do not consume a handle.
       if (this !== runtime) mismatch('installed runtime factory receiver is not its trusted instance');
       const binding = heldInstalledRuntimes.get(held);
       if (!binding || binding.factory !== runtime) mismatch('installed execution requires this factory\'s genuine held selection');
-      if (role !== 'keeper' && role !== 'supervisor' && role !== 'endpoint') mismatch('installed execution requires a fixed primitive role');
+      if (role !== 'keeper' && role !== 'supervisor' && role !== 'endpoint' && role !== 'credential') mismatch('installed execution requires a fixed primitive role');
+      if (role === 'credential' ? typeof command !== 'string' || !command.length || command.length > 87382 || !/^[A-Za-z0-9_-]+$/u.test(command)
+        : command !== undefined) mismatch('installed execution requires bounded credential metadata only for the fixed credential role');
       if (!isMainThread) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed execution requires the main thread');
       healthy();
-      return binding.execute(role);
+      return binding.execute(role, command);
     },
     async installInitial(this: InstalledRuntime, target: { packageRoot: string; stateRoot: string }) {
       supportedPlatform();
@@ -889,6 +607,13 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         let tail = Promise.resolve();
         let closePromise: Promise<void> | undefined;
         let workerNative: NativeWorkerBinding | undefined;
+        let credentialPlatform: NativeCredentialPlatformBinding | undefined;
+        const platformJobs = new Set<Promise<unknown>>();
+        const assertSelection = () => {
+          if (poisoned !== undefined) throw poisoned;
+          try { scope.assertMetadata([active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]); }
+          catch (error) { rememberRetirement(error); poisoned = error; throw error; }
+        };
         const revalidate = async () => {
           healthy(); await scope.assertDirectories();
           for (const file of [active, signed.manifest, bootstrap, ...signed.entries.values(), ...casFiles]) await verifyBytes(file);
@@ -945,7 +670,10 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           close(this: HeldInstalledRuntime): Promise<void> {
             if (this !== selected) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime handle receiver is not its held instance'));
             closed = true;
-            return closePromise ??= tail.then(() => scope.close());
+            return closePromise ??= tail.then(async () => {
+              await joinResourceOperations([...platformJobs]);
+              await scope.close();
+            });
           },
         });
         heldInstalledRuntimes.set(selected, {
@@ -1003,10 +731,20 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 image: image.handle, root: state.handle, rootIdentity: state.info, stateRoot,
               }, async credential => {
                 await checkedRevalidate(); credential.assertHeld();
-                const result = await runHeldCredentialAuthority({ selected, ownerPrincipalId, native, scope: credential,
-                  rootIdentity, processIdentity, principalIdentity, channelIdentity, objects, releaseKeys }, operation);
-                await checkedRevalidate(); credential.assertHeld();
-                return result;
+                const physical: InstalledCredentialScope = Object.freeze({ assertHeld() {
+                  if (this !== physical) throw new TypeError('invalid installed credential physical scope receiver');
+                  assertInstalledCredentialScope(physical);
+                } });
+                const binding: CredentialPhysicalBinding = { native, scope: credential, assertSelection, pid: process.pid,
+                  processStartToken: native.processStartToken(), generation: credential.generation, active: true,
+                  provenance: Object.freeze({ selected, ownerPrincipalId, rootIdentity, processIdentity,
+                    principalIdentity, channelIdentity, objects, releaseKeys }) };
+                credentialPhysicalScopes.set(physical, binding);
+                try {
+                  const result = await runInstalledCredentialAuthority(physical, operation);
+                  await checkedRevalidate(); credential.assertHeld();
+                  return result;
+                } finally { binding.active = false; }
               });
             }).catch(error => { rememberRetirement(error); throw error; });
           },
@@ -1028,6 +766,79 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
               await checkedRevalidate();
               return workerNative;
+            });
+          },
+          loadCredentialPlatform() {
+            return enqueue(async () => {
+              if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'credential platform requires the fixed signed Linux backend');
+              await checkedRevalidate();
+              if (!credentialPlatform) {
+                const entry = signed.bundle.entries.find(value => value.entryId === 'linux_credential_platform');
+                const file = signed.entries.get('linux_credential_platform');
+                if (!entry || !file || entry.role !== 'platform_helper' || !entry.executable || entry.version !== '1' ||
+                    entry.relativePath !== 'native/linux-x64/linux-credential-platform.node')
+                  mismatch('fixed signed credential platform module is missing');
+                const loaded = new Module('cliq-installed-linux-credential-platform');
+                process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+                const native = loaded.exports as NativeCredentialPlatformBinding;
+                if (native.interfaceVersion !== 1 || typeof native.secretService !== 'function' || typeof native.userManager !== 'function' ||
+                    typeof native.currentUser !== 'function')
+                  mismatch('unsupported installed credential platform interface');
+                const invoke = <T>(operation: () => Promise<T>): Promise<T> => {
+                  if (closed) mismatch('installed runtime handle is closed');
+                  assertSelection();
+                  const job = Promise.resolve().then(operation).then(result => { assertSelection(); return result; }, error => {
+                    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                      const failure = new ResourceRetirementError('credential platform resources did not retire', error);
+                      rememberRetirement(failure); throw failure;
+                    }
+                    // Only fixed native status codes survive. Remote/native
+                    // messages, payloads and stacks never become receipt data.
+                    const value = error as { code?: unknown; platformCode?: unknown } | null;
+                    const platformCode = value?.code === 'ERR_CLIQ_CREDENTIAL_PLATFORM' &&
+                      (value.platformCode === 'delete_denied' || value.platformCode === 'delete_failed')
+                      ? value.platformCode : 'platform_store_unavailable';
+                    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed credential platform rejected an operation',
+                      { cause: Object.freeze({ platformCode }) });
+                  });
+                  platformJobs.add(job);
+                  void job.finally(() => platformJobs.delete(job)).catch(() => {});
+                  return job;
+                };
+                credentialPlatform = Object.freeze({ interfaceVersion: 1 as const,
+                  secretService: input => invoke(() => native.secretService(input)),
+                  userManager: input => invoke(() => native.userManager(input)),
+                  currentUser: () => {
+                    assertSelection();
+                    try { const user = native.currentUser(); assertSelection(); return user; }
+                    catch (error) {
+                      if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                        const failure = new ResourceRetirementError('credential platform resources did not retire', error);
+                        rememberRetirement(failure); throw failure;
+                      }
+                      throw error;
+                    }
+                  } });
+              }
+              await checkedRevalidate();
+              return credentialPlatform;
+            });
+          },
+          openControlClient() {
+            return enqueue(async () => {
+              const native = await loadSelectedNative();
+              const image = signed.entries.get(supervisor.entryId)!;
+              const client = openHeldInstalledControlClient(native, { root: state.handle, rootIdentity: state.info,
+                stateRoot, image: image.handle, imageIdentity: image.info });
+              try { await checkedRevalidate(); client.assertHeld(); return client; }
+              catch (error) {
+                try { client.close(); } catch (failure) {
+                  const retirement = new ResourceRetirementError('installed control client did not retire', new AggregateError([error, failure]));
+                  rememberRetirement(retirement); throw retirement;
+                }
+                throw error;
+              }
             });
           },
           sealWorkerImage(entryId) {
@@ -1156,7 +967,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
             }).catch(error => { rememberRetirement(error); throw error; });
           },
-          execute(role): Promise<never> {
+          execute(role, command): Promise<never> {
             if (closed) mismatch('installed runtime handle is closed');
             closed = true; // Consume synchronously; join existing borrows first.
             const pending = tail.then(async (): Promise<never> => {
@@ -1172,7 +983,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 executeHeldInstalledImage(native, image, {
                   stateRoot, root: state.info, bootstrap: bootstrap.info,
                   image: file.info, bundleDigest: signed.bundleDigest,
-                  relativePath: supervisor.relativePath, role,
+                  relativePath: supervisor.relativePath, role, command,
                 });
               } catch (error) { rememberRetirement(error); failure = error; }
               const retireImage = async () => {

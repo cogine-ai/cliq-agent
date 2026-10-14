@@ -7,6 +7,8 @@ import type { LocalControlConnection } from './control-channel.js';
 import { EventCursorExpiredError, type ReadControlRequest, type ReadControlResult } from './control-read.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import type { StateStore } from './store.js';
+import type { CredentialAuthorityOperationV1 } from '../kernel/credential-authority.js';
+import type { CredentialFinalizeRequest } from './installed-credential-client.js';
 
 export type RuntimeBundlePublicSummaryV1 = Readonly<{
   schemaVersion: 1;
@@ -38,12 +40,12 @@ const METHODS = ['control.hello', 'session.create', 'session.list', 'session.get
   'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.get', 'run.attach',
   'run.cancel', 'run.approve', 'run.input', 'run.reconcile', 'run.diff', 'run.result', 'run.apply',
   'authorization.create', 'authorization.list', 'authorization.revoke', 'mcp.register',
-  'mcp.refresh', 'mcp.list', 'artifact.get', 'supervisor.status'] as const;
+  'mcp.refresh', 'mcp.list', 'artifact.get', 'supervisor.status', 'credential.finalize'] as const;
 export type ControlMethodV1 = typeof METHODS[number];
 type Range = { min: number; max: number };
 type HelloRequest = { protocolVersion: 1; method: 'control.hello'; clientBuild: string;
   controlSchemaRange: Range; headlessSchemaRange: Range; requestedFeatureIds: string[] };
-export type InstalledControlResultV1 = ReadControlResult | SupervisorStatusV1 | (SupervisorHelloV1 & {
+export type InstalledControlResultV1 = ReadControlResult | SupervisorStatusV1 | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
   method: 'control.hello'; protocolVersion: 1; serverBuild: string;
   controlSchemaRange: { min: 1; max: 1 }; enabledFeatureIds: string[];
 });
@@ -57,7 +59,7 @@ export type InstalledControlErrorV1 = InvalidError
   | (ErrorBase & { code: 'EVENT_CURSOR_EXPIRED'; retryable: false;
       earliestEventSeq: number; latestEventSeq: number; snapshot: RunSnapshotV1 })
   | (ErrorBase & { code: 'INTERNAL'; retryable: false; errorId: string })
-  | (ErrorBase & { code: 'NOT_FOUND' | 'AUTHORIZATION_REQUIRED' | 'ARTIFACT_MISMATCH' | 'UNSUPPORTED_PLATFORM'; retryable: false });
+  | (ErrorBase & { code: 'NOT_FOUND' | 'AUTHORIZATION_REQUIRED' | 'ARTIFACT_MISMATCH' | 'UNSUPPORTED_PLATFORM' | 'REQUEST_ID_CONFLICT'; retryable: false });
 export type InstalledControlResponseV1 =
   | { protocolVersion: 1; ok: true; result: InstalledControlResultV1 }
   | { protocolVersion: 1; ok: false; method: ControlMethodV1; error: InstalledControlErrorV1 }
@@ -68,7 +70,7 @@ const MAX_OUTSTANDING = 64;
 // All owned partial/request/response bodies share this budget. Each connection
 // has four-byte input/output headers; Store metadata is separately bounded.
 const BUFFER_BYTES = (MAX_OUTSTANDING + 1) * FRAME_BYTES;
-const FEATURES = ['session.get', 'run.get', 'run.attach', 'supervisor.status'];
+const FEATURES = ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize'];
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 function text(value: unknown): string {
@@ -111,7 +113,7 @@ type Pending = { connection: Connection; body: Buffer };
 // A new server cannot turn uncertain native retirement into successful close.
 let controlRetirementFailure: ResourceRetirementError | undefined;
 
-/** Read-only v1 native UDS service; no admission, execution or provider authority. */
+/** Bounded v1 native UDS service; no Run admission, execution or provider I/O. */
 export function openInstalledControl(store: StateStore,
   options: Readonly<{ serverBuild: string }>, onError: (error: Error) => void): InstalledControlService {
   if (controlRetirementFailure) throw controlRetirementFailure;
@@ -150,7 +152,7 @@ export function openInstalledControl(store: StateStore,
       if (!connection.channel.socket.destroyed) connection.channel.socket.destroy();
     }
   };
-  const errorResult = (error: unknown): InstalledControlErrorV1 => {
+  const errorResult = (error: unknown, credential = false): InstalledControlErrorV1 => {
     if (error instanceof ResourceRetirementError) {
       retirementFailure ??= error;
       controlRetirementFailure ??= error;
@@ -160,6 +162,10 @@ export function openInstalledControl(store: StateStore,
       messageCode: 'control.event_cursor_expired', earliestEventSeq: error.earliestEventSeq,
       latestEventSeq: error.latestEventSeq, snapshot: error.snapshot };
     if (error instanceof TypeError || (error instanceof KernelStorageError && error.code === 'INVALID_REQUEST')) return invalid();
+    if (credential && error instanceof KernelStorageError && error.code === 'REQUEST_ID_CONFLICT') return {
+      schemaVersion: 1, code: 'REQUEST_ID_CONFLICT', retryable: false, messageCode: 'control.request_id_conflict' };
+    if (credential && error instanceof KernelStorageError && error.code === 'STATE_TRANSITION_INVALID') return {
+      schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'credential.finalize_refused' };
     if (error instanceof KernelStorageError && (error.code === 'NOT_FOUND' || error.code === 'ARTIFACT_MISMATCH' || error.code === 'UNSUPPORTED_PLATFORM')) {
       return { schemaVersion: 1, code: error.code, retryable: false, messageCode: 'control.read_rejected' };
     }
@@ -189,12 +195,16 @@ export function openInstalledControl(store: StateStore,
           }
           connection.handshaken = true;
           return { protocolVersion: 1, ok: true, result: { ...observed, method: 'control.hello', protocolVersion: 1,
-            serverBuild, controlSchemaRange: { min: 1, max: 1 }, enabledFeatureIds: candidate.requestedFeatureIds.filter(feature => FEATURES.includes(feature)) }
+            serverBuild, controlSchemaRange: { min: 1, max: 1 }, enabledFeatureIds: candidate.requestedFeatureIds.filter(feature =>
+              FEATURES.includes(feature) && (feature !== 'credential.finalize' || store.supportsCredentialFinalization())) }
           } satisfies InstalledControlResponseV1;
         }
         if (!connection.handshaken) return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.hello_required' } } satisfies InstalledControlResponseV1;
         if (request.protocolVersion !== 1) throw new TypeError('protocol version must be 1');
+        if (method === 'credential.finalize') return { protocolVersion: 1, ok: true,
+          result: { method: 'credential.finalize', operation: await store.finalizeCredential(request as CredentialFinalizeRequest, identity) }
+        } satisfies InstalledControlResponseV1;
         if (method === 'session.get' || method === 'run.get' || method === 'run.attach') {
           return { protocolVersion: 1, ok: true, result: await store.readControl(request as ReadControlRequest, identity) } satisfies InstalledControlResponseV1;
         }
@@ -205,7 +215,7 @@ export function openInstalledControl(store: StateStore,
         return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
       } catch (error) {
-        return { protocolVersion: 1, ok: false, method: knownMethod, error: errorResult(error) } satisfies InstalledControlResponseV1;
+        return { protocolVersion: 1, ok: false, method: knownMethod, error: errorResult(error, method === 'credential.finalize') } satisfies InstalledControlResponseV1;
       }
     });
     if (controlRetirementFailure) throw controlRetirementFailure;

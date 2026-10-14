@@ -3,6 +3,7 @@
 # qualifies the real signed keeper/Supervisor owner chain, not full I1 or
 # containment-death authority. --secrets observes credential-platform and SQLite
 # path prerequisites without qualifying production credential authority.
+# --credentials exercises one actual installed enrollment/read journey, not I1.
 # Invoke with sudo, an absolute existing Node path
 # and an optional new output directory. Do not run on a host
 # without an independently disposable test UID and actual systemd user manager.
@@ -15,10 +16,11 @@ case ${1:-} in
   --installed) probe_campaign_kind=installed; shift ;;
   --installed-retirement-refusal) probe_campaign_kind=retirement; shift ;;
   --secrets) probe_campaign_kind=secrets; shift ;;
+  --credentials) probe_campaign_kind=credentials; shift ;;
 esac
 readonly probe_campaign_kind
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -42,12 +44,20 @@ readonly probe_installed_driver="$probe_source_dir/qualify-installed-keeper.ts"
 readonly probe_secret_driver="$probe_source_dir/qualify-secret-service.ts"
 readonly probe_secret_source="$probe_source_dir/cliq-secret-service-probe.c"
 readonly probe_sqlite_driver="$probe_source_dir/qualify-sqlite-paths.ts"
-if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement || "$probe_campaign_kind" = secrets ]]; then
+readonly probe_credential_driver="$probe_source_dir/testing/credential-installed-journey.ts"
+readonly probe_credential_source="$probe_source_dir/testing/credential-journey-observer.c"
+readonly probe_credential_store_source="$probe_source_dir/testing/credential-store-fixture.c"
+if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement || "$probe_campaign_kind" = secrets || "$probe_campaign_kind" = credentials ]]; then
   probe_typescript_driver=$probe_installed_driver
   if [[ "$probe_campaign_kind" = secrets ]]; then
     probe_typescript_driver=$probe_secret_driver
     [[ -f "$probe_secret_driver" && ! -L "$probe_secret_driver" && -f "$probe_secret_source" && ! -L "$probe_secret_source" ]] || exit 2
     [[ -f "$probe_sqlite_driver" && ! -L "$probe_sqlite_driver" ]] || exit 2
+  fi
+  if [[ "$probe_campaign_kind" = credentials ]]; then
+    probe_typescript_driver=$probe_credential_driver
+    [[ -f "$probe_credential_driver" && ! -L "$probe_credential_driver" && -f "$probe_credential_source" && ! -L "$probe_credential_source" ]] || exit 2
+    [[ -f "$probe_credential_store_source" && ! -L "$probe_credential_store_source" ]] || exit 2
   fi
   probe_installed_loader=$("$probe_node" --input-type=module -e \
     'import { createRequire } from "node:module"; process.stdout.write(createRequire(process.argv[1]).resolve("tsx"));' \
@@ -353,8 +363,16 @@ const sqlitePaths = mode === 'secrets' ? {
   buildFixture: `${fixture}/sqlite-path-build`, caseRoot: `${home}/probe/sqlite-path-cases`,
   reportFile: `${output}/sqlite-paths.json`,
 } : undefined;
+const credentials = mode === 'credentials' ? {
+  buildFixture: `${fixture}/credential-package-build`, packageRoot: `${fixture}/credential-package-build/package`,
+  installerEntry: `${fixture}/credential-package-build/installed-runtime-installer.mjs`,
+  stateRoot: `${home}/probe/credential-state`, releaseKeysFile: `${fixture}/credential-release-keys.json`,
+  controlDirectory: `${home}/probe/credential-secret-service-control`,
+  observer: `${fixture}/cliq-credential-journey-observer`, storeFixture: `${fixture}/cliq-credential-store-fixture`,
+  reportFile: `${output}/credential-journey.json`,
+} : undefined;
 writeFileSync(file, JSON.stringify({ diagnosticOnly: true, fixture, fixtureIdentity, username,
-  uid, gid, runnerUid, home, dropin, birthHelper, anchor, scenarios, installed, secretService, sqlitePaths,
+  uid, gid, runnerUid, home, dropin, birthHelper, anchor, scenarios, installed, secretService, sqlitePaths, credentials,
   reportFile: `${output}/systemd-user-probe.json` }, null, 2) + '\n',
   { flag: 'wx', mode: 0o444 });
 NODE
@@ -384,7 +402,23 @@ if [[ "$probe_campaign_kind" = secrets ]]; then
   cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_secret_source" -o "$probe_secret_helper" "${probe_gio_flags[@]}"
   chmod 0555 "$probe_secret_helper"
 fi
+if [[ "$probe_campaign_kind" = credentials ]]; then
+  [[ -x /usr/bin/gnome-keyring-daemon && -x /usr/bin/busctl ]] || {
+    printf 'actual GNOME Keyring daemon and user-bus inspection are required\n' >&2; exit 1;
+  }
+  unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR
+  read -r -a probe_gio_flags <<< "$(pkg-config --cflags --libs gio-2.0)"
+  cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_credential_source" -o "$probe_fixture/cliq-credential-journey-observer" "${probe_gio_flags[@]}"
+  chmod 0555 "$probe_fixture/cliq-credential-journey-observer"
+  cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_credential_store_source" -o "$probe_fixture/cliq-credential-store-fixture" "${probe_gio_flags[@]}"
+  chmod 0555 "$probe_fixture/cliq-credential-store-fixture"
+fi
 mkdir -m 0755 -- "$probe_home/.config" "$probe_home/.config/systemd" "$probe_home/.config/systemd/user"
+if [[ "$probe_campaign_kind" = credentials ]]; then
+  # The signed same-user setup, not this root harness, writes its fixed profiles.
+  # These three exact directories have just been created inside the frozen home.
+  chown "$probe_uid:$probe_gid" "$probe_home/.config" "$probe_home/.config/systemd" "$probe_home/.config/systemd/user"
+fi
 mkdir -m 0700 -- "$probe_home/probe"
 chown "$probe_uid:$probe_gid" "$probe_home/probe"
 if [[ "$probe_campaign_kind" = diagnostic ]]; then
@@ -479,6 +513,10 @@ elif [[ "$probe_campaign_kind" = installed ]]; then
   "$probe_node" --import "$probe_installed_loader" "$probe_installed_driver" --campaign "$probe_ledger"
 elif [[ "$probe_campaign_kind" = retirement ]]; then
   "$probe_node" --import "$probe_installed_loader" "$probe_installed_driver" --retirement-refusal "$probe_ledger"
+elif [[ "$probe_campaign_kind" = credentials ]]; then
+  # No returned production unit name becomes privileged cleanup authority.
+  # The immutable ledger's exact fresh UID/manager owns the complete retirement.
+  "$probe_node" --import "$probe_installed_loader" "$probe_credential_driver" --campaign "$probe_ledger"
 else
   "$probe_node" --import "$probe_installed_loader" "$probe_secret_driver" --campaign "$probe_ledger"
   "$probe_node" --import "$probe_installed_loader" "$probe_sqlite_driver" --campaign "$probe_ledger"
