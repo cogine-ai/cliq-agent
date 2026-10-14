@@ -787,8 +787,52 @@ native response must name the actual caller's parent as its manager. All origina
 timeout, rejection, connection-departure, host-runtime and child-join assertions
 remain; the pre-exec ownership boolean is an observation, not authority evidence.
 Local build and a second full 1916/1916 suite passed with zero failures/skips;
-strict TypeScript, JS syntax and independent source audits passed. New Linux
-qualification remains pending until the corrected fixture actually runs.
+strict TypeScript, JS syntax and independent source audits passed.
+
+At fixture correction `7626f9f05e7024987ceff6512e6967cebe29bf02`, both real
+Linux preflight jobs passed the executing-timeout component and unchanged queue
+component (2/2, zero failures/cancellations/skips). Each closed component report
+observed the ordinary user exec, actual first-connection departure, healthy
+subsequent operation and all child joins; `installedI1Qualified` remained false.
+The executing native call met its unchanged 25..35-second assertion around the
+production 30-second deadline. This is a genuine current-code GREEN, not an
+observed old-code RED or installed/finalizer qualification.
+
+The [branch run 38580252866](https://github.com/cogine-ai/cliq-agent/actions/runs/38580252866)
+passed all eight checks; its credential job completed in 18 minutes 46 seconds.
+The exact report is `qualified=true / phase=complete / daemonJoined=true`, with
+261 files, two databases, 128 logical rows, 472 logical values and four evidence
+directories. All 1659 scanner streams closed, with 108 needles, no match/limit
+breach and zero retained needles/tails. Runner baselines matched, cleanup errors
+and campaign exit status were zero. Report SHA-256:
+`7d7995e331fab3dd694fa55cf03549985eb583ea355074059a3c5062619e7965`.
+The same-commit [PR run 38580259687](https://github.com/cogine-ai/cliq-agent/actions/runs/38580259687)
+passed seven checks but its credential job was cancelled at the unchanged
+20-minute limit. It retained only the initial baseline, not a final qualified
+journey/corpus report. The branch success does not erase that PR gate.
+
+The existing fixed phase logs are sufficient to diagnose capacity without
+additional instrumentation. The four prepared crash blocks took 374.397 seconds
+in the successful branch run and 380.873 seconds in the cancelled PR run; ordinary
+commands were broadly 10..15 percent slower in the cancelled run. The successful
+final corpus scan took about 0.223 seconds. These observations do not establish
+a unique cause or justify reducing crash/scanner assertions or raising budgets.
+
+The next one-variable experiment increases only installed-runtime's internal
+streaming IO batch from 64 KiB to a bounded 1 MiB. It retains every fresh complete
+byte hash, signed count, EOF, before/after physical identity, revalidation boundary
+and descriptor retirement. No cached integrity result, authority, probe change,
+pause delay change or omitted journey case is introduced. The existing public
+installer-only seam now checks a signed opaque entry spanning multiple MiB with
+a partial tail and refuses same-size corruption in its last byte before creating
+StateRoot. These opaque bytes are never executed and cannot qualify an installed
+image. Actual capacity improvement and the additional Linux regressions remain
+unverified until the unchanged full Linux jobs run; a local proxy measurement
+cannot establish either.
+Local build and another complete 1916/1916 suite passed with zero failures,
+cancellations or skips; the unchanged design guard passed all nine regressions.
+macOS exercised only the unsupported-platform installer contract, not the new
+Linux large-entry/tail-corruption cases.
 
 ### Risks And Dependencies
 

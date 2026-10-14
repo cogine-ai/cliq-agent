@@ -19,7 +19,7 @@ import { KernelStorageError } from './errors.js';
 /** Real signed files for installer/CAS semantics only. The opaque executable
  * entries are deliberately not running Supervisor/worker/addon images and are
  * never spawned or dlopened. They establish no execution qualification. */
-async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole?: 'system_prompt' | 'compaction_prompt') {
+async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole?: 'system_prompt' | 'compaction_prompt', supervisorBytes?: Buffer) {
   await mkdir(packageRoot, { mode: 0o700 });
   const profile = policyProfile();
   const rootCore = {
@@ -30,7 +30,7 @@ async function writeInstallerOnlyPackage(packageRoot: string, unclosedPromptRole
   const rootRecipe = { ...rootCore, profileDigest: canonicalSha256(rootCore) };
   const contents = [
     { entryId: 'installer-only-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true,
-      bytes: Buffer.from('installer-only opaque Supervisor bytes; not a runnable image\n') },
+      bytes: supervisorBytes ?? Buffer.from('installer-only opaque Supervisor bytes; not a runnable image\n') },
     { entryId: 'installer-only-worker', role: 'worker', relativePath: 'workers/worker', executable: true,
       bytes: Buffer.from('installer-only opaque worker bytes; not a runnable image\n') },
     { entryId: STATE_OWNER_NATIVE_ENTRY_ID, role: 'platform_helper', relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH,
@@ -85,7 +85,12 @@ if (process.platform === 'linux') test('initial installation retains the complet
   const packageRoot = path.join(fixture, 'package');
   const stateRoot = path.join(fixture, 'state');
   try {
-    const signed = await writeInstallerOnlyPackage(packageRoot);
+    // Exercise complete streaming copy/hash and a partial final batch using opaque
+    // signed data, never an executable or installed execution qualification.
+    const supervisorBytes = Buffer.alloc(2 * 1_048_576 + 17, 0x61);
+    supervisorBytes.fill(0x63, 1_048_576, 2 * 1_048_576);
+    supervisorBytes[supervisorBytes.length - 1] = 0x7a;
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, supervisorBytes);
     // This factory seam is trusted composition, not a client key/path override.
     // The final SEA bootstrap supplies its compiled-in root; this file does not
     // claim to qualify that entry, actual process images or native execution.
@@ -193,6 +198,30 @@ else test('unsupported platforms refuse trusted installed-runtime construction w
     await assert.rejects(lstat(path.join(stateRoot, 'runtime', 'active.json')), { code: 'ENOENT' });
     await assert.rejects(lstat(path.join(stateRoot, KERNEL_DATABASE_FILENAME)), { code: 'ENOENT' });
     assert.deepEqual(await readFile(path.join(packageRoot, 'manifest.json')), manifestBefore);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});
+
+if (process.platform === 'linux') test('initial installation rejects corruption at the end of a large signed entry before creating StateRoot', async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-runtime-tail-')));
+  await chmod(fixture, 0o700);
+  const packageRoot = path.join(fixture, 'package');
+  const stateRoot = path.join(fixture, 'state');
+  try {
+    const bytes = Buffer.alloc(2 * 1_048_576 + 17, 0x61);
+    bytes.fill(0x63, 1_048_576, 2 * 1_048_576);
+    bytes[bytes.length - 1] = 0x7a;
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, bytes);
+    const filename = path.join(packageRoot, 'supervisor');
+    const corrupt = Buffer.from(bytes);
+    corrupt[corrupt.length - 1] = 0x62;
+    await chmod(filename, 0o700);
+    await writeFile(filename, corrupt);
+    await chmod(filename, 0o500);
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    await assert.rejects(runtime.installInitial({ packageRoot, stateRoot }), error =>
+      error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH' &&
+      error.message === 'installed runtime signed file digest differs');
+    await assert.rejects(lstat(stateRoot), { code: 'ENOENT' });
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });
 

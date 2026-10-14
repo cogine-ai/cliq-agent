@@ -210,7 +210,9 @@ type VerifiedPackage = { root: Directory; manifest: InstalledFile; bundle: Runti
 
 const SMALL_BYTES = 1_048_576;
 const TRUST_BYTES = 16 * SMALL_BYTES;
-const CHUNK_BYTES = 64 * 1024;
+// Bound each IO batch without caching integrity: every verification still reads
+// and hashes all bytes, checks exact EOF and joins the original physical owner.
+const CHUNK_BYTES = 1_048_576;
 // Descriptor retirement is process authority, not the lifetime of a factory or
 // selected handle. A fresh factory must not erase an uncertain close.
 let retirementFailure: ResourceRetirementError | undefined;
