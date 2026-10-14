@@ -72,6 +72,42 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  linux-installed-run:
+    name: Linux signed installed Run closed-loop diagnostics
+    # Real installed/manager/native transport mechanics, not complete I1 or a
+    # qualified provider. Reuse the unmodified qualified 22.04 sandbox policy.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap
+      - name: Compile the native transport with visible compiler diagnostics
+        run: node scripts/kernel/build-linux-model-broker.mjs "$RUNNER_TEMP/cliq-model-broker-compile"
+      - name: Exercise actual installed Run, ready Checkpoint, reconnect and restart
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-run-journey"
+      - name: Retain bounded installed Run and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-run-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-run-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-supervisor-preflight:
     name: Linux Supervisor image and actual user-manager diagnostics
     # Component/OS facts only, not an installed I1 qualification. Standard

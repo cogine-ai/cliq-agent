@@ -8,7 +8,7 @@ import type { ArtifactCatalog } from '../../state/artifacts.js';
 import { decodeFrozenIgnoreRules, decodeSourceManifest, decodeSourceProjection, decodeWorkspaceEntries,
   decodeWorkspaceGenerationIdentity, decodeWorkspaceState } from '../../state/decoders.js';
 import { KernelStorageError, ResourceRetirementError } from '../../state/errors.js';
-import { borrowGenerationForExecution, openGenerationFileWriter, openGenerationSnapshot, stateRootIdentityForLock, writeGenerationEntry,
+import { assertRetiredGenerationTree, borrowGenerationForExecution, openGenerationFileWriter, openGenerationSnapshot, stateRootIdentityForLock, writeGenerationEntry,
   type BorrowedGenerationForExecution, type HeldGenerationTree, type HeldStateOwnerLock } from '../../state/native-owner.js';
 import { loadFrozenPrivateGit, observedPrivateGit, type FrozenPrivateGit } from './private-git.js';
 
@@ -47,7 +47,7 @@ type RetainedObservationData = Readonly<{
   observedState: WorkspaceGenerationQuarantineEvidenceV1['observedState'];
 }>;
 const retainedObservations = new WeakMap<RetainedWorkspaceObservation,
-  { owner: HeldStateOwnerLock; data: RetainedObservationData }>();
+  { owner: HeldStateOwnerLock; tree: HeldGenerationTree; data: RetainedObservationData }>();
 
 /** Trusted recovery code consumes only an actual minted observation. This is
  * filesystem evidence, never containment death or permission to clear a wait. */
@@ -56,6 +56,19 @@ export function readRetainedWorkspaceObservation(observation: RetainedWorkspaceO
   if (!retained) throw new TypeError('invalid retained private workspace observation');
   retained.owner.assertHeld();
   return retained.data;
+}
+/** Retirement consumes the closed native resource owner of this exact lock,
+ * not a data projection obtained under a predecessor or foreign StateOwner. */
+export function readRetainedWorkspaceRetirement(owner: HeldStateOwnerLock, observation: RetainedWorkspaceObservation):
+  RetainedObservationData & { treeObservedAt: string } {
+  const retained = retainedObservations.get(observation);
+  if (!retained || retained.owner !== owner) throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace retirement does not belong to this exact StateOwner');
+  const observed = assertRetiredGenerationTree(retained.tree);
+  if (!Number.isSafeInteger(observed) || observed < 1) mismatch('native generation retirement time is invalid');
+  const data = readRetainedWorkspaceObservation(observation);
+  const observedAt = new Date(observed).toISOString();
+  if (observedAt < data.observedAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement clock precedes the actual tree observation');
+  return Object.freeze({ ...data, treeObservedAt: data.observedAt, observedAt });
 }
 
 export function borrowRunWorkspaceForExecution(generation: RunWorkspaceGeneration): BorrowedGenerationForExecution {
@@ -320,7 +333,7 @@ export async function observeRetainedRunWorkspace(input: { filesystem: HeldState
     filesystem.assertHeld();
     tree.assertHeld();
     const observation = Object.freeze({}) as RetainedWorkspaceObservation;
-    retainedObservations.set(observation, { owner: filesystem, data: Object.freeze({
+    retainedObservations.set(observation, { owner: filesystem, tree, data: Object.freeze({
       generationRef: canonicalSha256(identity), generationIdentityDigest: identity.identityDigest,
       observedAt: new Date().toISOString(), observedState }) });
     return observation;

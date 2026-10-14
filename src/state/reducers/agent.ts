@@ -28,6 +28,8 @@ import { loadToolContinuation } from './tool.js';
 import { readToolCut } from '../tool-cut.js';
 import type { ReleaseTrustKey } from '../../policy/runtime-authority.js';
 import type { NativeWorkerRetirement } from '../tool-checkpoint.js';
+import { planModelOperationGrant } from '../../kernel/model-grant.js';
+import { readModelGrantClosure, readModelTarget } from '../model-grant.js';
 
 export type LoadAgentRunInput = {
   runId: string;
@@ -213,6 +215,13 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, entry.requestRef);
     const reproduced = await reproduceRequest(admittedRun, request);
     if (reproduced.requestRef !== entry.requestRef) throw new TypeError('retained native request cannot be reproduced');
+    if (!entry.grantRef) throw new TypeError('retained model preparation has no operation grant');
+    const retainedGrant = await readCanonicalArtifact<import('../../kernel/model-grant.js').ModelOperationGrantV1>(artifacts, entry.grantRef);
+    const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, retainedGrant.frontierRef);
+    if (frontier.kind !== 'agent') throw new TypeError('retained model grant has no model frontier');
+    const closure = await readModelGrantClosure(driver, artifacts, { run: admittedRun, spec, assembly, frontier,
+      frontierRef: retainedGrant.frontierRef, request, requestRef: entry.requestRef, grantRef: entry.grantRef });
+    if (entry.target !== closure.targetRef || entry.timestamp < closure.grant.issuedAt) throw new TypeError('retained model preparation differs from its grant');
     const completed = recovered.journal.find((result) => result.opId === entry.opId && result.attempt === entry.attempt && result.phase === 'completed');
     if (completed?.resultRef) {
       const root = await readCanonicalArtifact<{ format: string }>(artifacts, completed.resultRef);
@@ -265,6 +274,10 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, entry.requestRef);
       const prepared = await reproduceRequest(closure.run, request);
       if (prepared.requestRef !== entry.requestRef) throw new TypeError('retained model request cannot be reproduced');
+      if (!entry.grantRef || frontier.kind !== 'agent') throw new TypeError('model attempt has no exact model operation grant');
+      const authority = await readModelGrantClosure(driver, artifacts, { run: closure.run, spec, assembly, frontier,
+        frontierRef: closure.run.frontierRef, request, requestRef: entry.requestRef, grantRef: entry.grantRef });
+      if (entry.target !== authority.targetRef) throw new TypeError('model attempt target differs from its operation grant');
       let disposition: 'candidate_required' | 'stop_required' | undefined;
       if (state.phase === 'completed') {
         const root = await readCanonicalArtifact<{ format: string; stopReason?: string }>(artifacts, state.resultRef!);
@@ -305,18 +318,29 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         compactionPlanRef: planArtifact!.ref, sourceContextUtf8: compaction.sourceContextUtf8 })
         : model.prepare({ kind: 'normal', invocation: { runId, opId, attempt }, projectionRef: projectionArtifact.ref, projection });
       if (history.length) assertSameModelOperation(await readCanonicalArtifact<ModelRequestV1>(artifacts, history[0]!.requestRef), prepared.request);
-      const metadata = await publishPlans(artifacts, [projectionArtifact, frontierPlan, ...(planArtifact ? [planArtifact] : []), ...prepared.artifacts]);
+      const target = await readModelTarget(driver, artifacts, { run: cut.run, spec, assembly });
+      const grant = planModelOperationGrant({ ...target, run: cut.run, spec, assembly, frontier, frontierRef: frontierPlan.ref,
+        request: prepared.request as ModelRequestV1, requestRef: prepared.requestRef }, sampleCanonicalNow(), cut.run.deadlineAt);
+      const grantPlan = planCanonicalArtifact(grant, grant.format);
+      const targetMetadata = await artifacts.describe(target.targetRef, 'application/json',
+        target.target.format === 'cliq-endpoint-registration-v1' ? 'cliq-endpoint-registration-v1' : 'cliq-local-zero-cost-v1');
+      const metadata = [...await publishPlans(artifacts, [projectionArtifact, frontierPlan, grantPlan,
+        ...(planArtifact ? [planArtifact] : []), ...prepared.artifacts]), targetMetadata];
       const admitted = await prepareValidatedInvocation(driver, artifacts, owner, {
         runId, expectedRunRevision, leaseEpoch, opId, opKind: 'model',
-        target: assembly.provider.model, requestRef: prepared.requestRef, replayClass: 'retry',
+        target: target.targetRef, requestRef: prepared.requestRef, replayClass: 'retry', grantRef: grantPlan.ref,
         reservation: { modelTokens: prepared.request.reservation.modelTokens, costMicros: prepared.request.reservation.costMicros,
           toolCalls: 0, repairAttempts: 0 }
-      }, { metadata, validate: (connection, run, actualAttempt) => {
+      }, { metadata, validate: (connection, run, actualAttempt, now) => {
         if (actualAttempt !== attempt || run.frontierRef !== cut.run.frontierRef || run.latestCheckpointId !== cut.run.latestCheckpointId) {
           throw new KernelStorageError('REVISION_CONFLICT', 'model request no longer matches its state cut');
         }
         if (requireRetryReady(modelRetryState(assembly.retry.model, readOperationJournal(connection, runId, opId), sampleCanonicalNow())) !== attempt) {
           throw new KernelStorageError('REVISION_CONFLICT', 'model retry history changed before reservation');
+        }
+        if (now < grant.issuedAt || now >= grant.expiresAt ||
+            connection.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(runId)?.principal_id !== target.principalId) {
+          throw new KernelStorageError('LEASE_FENCED', 'model grant lifetime or principal changed before reservation');
         }
       }, commit(connection) {
         connection.prepare('UPDATE runs SET frontier_ref = ? WHERE id = ?').run(frontierPlan.ref, runId);
@@ -344,6 +368,12 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       if (replayed.requestRef !== prepared.requestRef || canonicalSha256(prepared.budgetDelta) !== canonicalSha256({
         modelTokens: request.reservation.modelTokens, costMicros: request.reservation.costMicros, toolCalls: 0, repairAttempts: 0
       })) throw new KernelStorageError('RECOVERY_REQUIRED', 'retained request or reservation cannot be reproduced from its loaded authority');
+      if (!prepared.grantRef) throw new TypeError('model completion has no original operation grant');
+      const authority = await readModelGrantClosure(driver, artifacts, { run: cut.run, spec, assembly, frontier: cut.frontier,
+        frontierRef: cut.run.frontierRef!, request, requestRef: prepared.requestRef, grantRef: prepared.grantRef });
+      if (prepared.target !== authority.targetRef || prepared.timestamp < authority.grant.issuedAt) {
+        throw new TypeError('model completion differs from its original target/grant');
+      }
       await publishPlans(artifacts, plans);
       const material = result.kind === 'usable' ? await readModelTurnMaterial(artifacts, result.ref) : undefined;
       const resultMetadata: PublishedArtifact[] = [];

@@ -29,7 +29,8 @@ import {
   readControlRequest
 } from '../rows.js';
 import type { SqliteDriver } from '../sqlite-driver.js';
-import { captureLiveWorkspaceIdentity } from '../workspace-identity.js';
+import { captureLiveWorkspaceIdentity, captureInstalledWorkspaceIdentity } from '../workspace-identity.js';
+import type { HeldInstalledRuntime } from '../installed-runtime.js';
 
 export type CreateSessionInput = {
   principalId: string;
@@ -179,7 +180,8 @@ export async function createSession(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
-  input: CreateSessionInput
+  input: CreateSessionInput,
+  selected?: HeldInstalledRuntime
 ): Promise<CreateSessionResult> {
   assertRequestId(input.requestId);
   assertAdmissionKey(input.admissionKey);
@@ -205,10 +207,8 @@ export async function createSession(
   const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
   const channel = channelClosure.channel;
 
-  const captured = await captureLiveWorkspaceIdentity({
-    workspacePath,
-    ownerPrincipalId: input.principalId
-  });
+  const capture = { workspacePath, ownerPrincipalId: input.principalId };
+  const captured = selected ? await captureInstalledWorkspaceIdentity(selected, capture) : await captureLiveWorkspaceIdentity(capture);
   const published: PublishedArtifact[] = [...channelClosure.metadata];
   let workspaceIdentity: Extract<WorkspaceIdentityV1, { kind: 'live' }> = captured.identity;
   if (captured.repository !== undefined) {

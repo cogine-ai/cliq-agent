@@ -5,6 +5,20 @@ import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodePlatformProcessIdentity, decodeStateLockIdentity } from './decoders.js';
 
+/** Pure identity projection, not evidence of a live observation. Producers must
+ * independently hold and gate the actual StateOwner and physical resource. */
+export function supervisorInspectorIdentity(owner: StateOwnerRecordV1): SupervisorInspectorIdentityV1 {
+  const inspector: SupervisorInspectorIdentityV1 = { schemaVersion: 1, format: 'cliq-supervisor-inspector-identity-v1',
+    supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch,
+    runtimeBundleRef: owner.runtimeBundleRef, runtimeBundleManifestDigest: owner.runtimeBundleManifestDigest,
+    supervisorEntryId: owner.supervisorEntryId, supervisorEntryVersion: owner.supervisorEntryVersion,
+    supervisorExecutableDigest: owner.supervisorExecutableDigest, processIdentityRef: owner.processIdentityRef,
+    processIdentityDigest: owner.processIdentityDigest, stateLockIdentityRef: owner.stateLockIdentityRef,
+    stateLockIdentityDigest: owner.stateLockIdentityDigest, instanceNonceDigest: owner.instanceNonceDigest,
+    activatedAt: owner.acquiredAt, identityDigest: '' };
+  inspector.identityDigest = digestOmitting(inspector, 'identityDigest'); return inspector;
+}
+
 /** Shared identity check, not proof of a live observation. Each consumer owns freshness and state-owner fencing. */
 export async function readSupervisorInspector(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1,
   assembly: { runtime: { runtimeBundleRef: string; runtimeBundleManifestDigest: string } },

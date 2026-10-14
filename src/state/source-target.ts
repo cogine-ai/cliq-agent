@@ -12,6 +12,8 @@ import { readCanonicalArtifact } from './agent-context.js';
 import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { decodeWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { DEFAULT_SANDBOX_RESOURCES } from './installed-sandbox-profile.js';
 import { decodeSandboxProfile } from './execution-closure.js';
 import { assertHeldWorkspaceRoot, heldWorkspaceRootPath, type HeldWorkspaceRoot } from './native-owner.js';
 import { DEFAULT_RUN_BUDGETS, mergeBudgets, readAdmissionReplay, readSession, readSessionPrincipalId } from './rows.js';
@@ -126,10 +128,7 @@ function model(value: unknown): RunModelRequest {
     endpoint: { kind: 'registered', endpointRegistrationId: text(endpoint.endpointRegistrationId) },
     modelCredentialGrantIds: ids(data.modelCredentialGrantIds, 32, 1) };
 }
-const RESOURCE_DEFAULTS: SandboxResourceSpec = { maxProcesses: 256, memoryBytes: 4 * 1024 ** 3,
-  cpuQuotaMicrosPerSecond: 400_000, maxOpenFiles: 1024, maxSingleFileBytes: 2 * 1024 ** 3,
-  maxGenerationBytes: 20 * 1024 ** 3, maxInvocationOutputBytes: 16 * 1024 ** 2,
-  maxIpcFrameBytes: 16 * 1024 ** 2, maxQueuedIpcBytes: 64 * 1024 ** 2 };
+const RESOURCE_DEFAULTS = DEFAULT_SANDBOX_RESOURCES;
 const RESOURCE_RANGES: Record<keyof SandboxResourceSpec, readonly [number, number]> = {
   maxProcesses: [1, 1024], memoryBytes: [256 * 1024 ** 2, 32 * 1024 ** 3], cpuQuotaMicrosPerSecond: [10_000, 1_600_000],
   maxOpenFiles: [64, 8192], maxSingleFileBytes: [1024 ** 2, 16 * 1024 ** 3], maxGenerationBytes: [256 * 1024 ** 2, 100 * 1024 ** 3],
@@ -269,6 +268,7 @@ export async function recheckVerifiedSourceInspectionTarget(owner: StateOwnerCon
 export async function createVerifiedSourceInspectionTarget(context: {
   driver: SqliteDriver; artifacts: ArtifactCatalog; owner: StateOwnerContext; bootstrap: SourceInspectionBootstrap;
   workspaceRoot: HeldWorkspaceRoot; trust: HeldWorkspaceSourceTrust;
+  selectedRuntime?: HeldInstalledRuntime;
 }, inlineRequest: unknown, identity: AuthenticatedControlIdentity): Promise<VerifiedSourceInspectionTarget> {
   const normalized = normalizeRunSubmitRequest(inlineRequest), request = normalized.request;
   identity = immutableSnapshot(identity);
@@ -291,14 +291,25 @@ export async function createVerifiedSourceInspectionTarget(context: {
   assertWorkspaceSourceTrust(trust, request.workspacePath);
   if (request.sourceIncludes.some(include => include.readGrantId !== undefined)) invalid('source read grants are not implemented; ignored bytes cannot be captured');
   if (request.verifiers.length || request.dependency.mode !== 'none') invalid('verifier/dependency admission is not yet implemented');
-  if (request.model.provider !== 'ollama' || request.registeredMcpServerIds.length || request.skillIds.length)
-    invalid('remote model/MCP/skill admission authority is not yet implemented');
+  if (request.registeredMcpServerIds.length || request.skillIds.length) invalid('MCP/skill admission authority is not yet implemented');
+  if (request.model.provider !== 'ollama') {
+    if (!context.selectedRuntime || request.model.provider !== 'openai-compatible')
+      invalid('remote model admission requires the genuine installed fixed broker recipe');
+    await withHeldInstalledRuntime(context.selectedRuntime, async installed => {
+      await installed.revalidate();
+      if (installed.bundleDigest !== canonicalSha256(bootstrap.bundle) ||
+          !installed.modelAuthority?.models.some(model => model.catalog.value.provider === request.model.provider &&
+            model.catalog.value.model === request.model.model && model.catalog.value.adapter.adapterId === 'openai-compatible-broker-v1' &&
+            model.catalog.value.adapter.version === '1')) invalid('remote model source capture lacks the selected signed model authority');
+      await installed.revalidate();
+    });
+  }
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
   if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== identity.principalId || workspace.platform !== hostPlatform() ||
       workspace.canonicalRootPath !== request.workspacePath || canonicalSha256(workspace.rootIdentity) !== canonicalSha256(workspaceRoot.identity) ||
       (workspace.repositoryIdentityRef === undefined) !== (workspaceRoot.repositoryDirectory === undefined))
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'live workspace does not match the exact Session identity');
-  if (workspace.repositoryIdentityRef !== undefined) await recaptureLiveWorkspaceIdentity(workspace, request.workspacePath);
+  if (workspace.repositoryIdentityRef !== undefined) await recaptureLiveWorkspaceIdentity(workspace, request.workspacePath, context.selectedRuntime);
   verifyRuntimeBundle(bootstrap.bundle, bootstrap.releaseKeys);
   const runtimeBundleRef = canonicalSha256(bootstrap.bundle);
   if (active.runtimeBundleRef !== runtimeBundleRef || active.runtimeBundleManifestDigest !== bootstrap.bundle.manifestDigest ||

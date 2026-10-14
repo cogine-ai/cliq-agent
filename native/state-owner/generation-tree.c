@@ -7,10 +7,11 @@ typedef struct generation_borrow generation_borrow;
 typedef struct generation_cursor generation_cursor;
 typedef struct generation_stream generation_stream;
 static void close_tree_streams(generation_tree *tree);
+static int generation_children_retired(generation_tree *tree);
 struct generation_tree {
     state_lock *lock;
     napi_ref lock_ref;
-    int parents[5], fd, git_fd, retained, archived, finalized;
+    int parents[5], fd, git_fd, retained, archived, finalized, retirement_failed;
     struct stat parent_ids[5], identity, git_identity;
     char run[129], generation[44], target[44];
     generation_borrow *borrows;
@@ -26,20 +27,24 @@ struct generation_borrow {
 };
 static const napi_type_tag tree_tag = {0xc626aab45303f22dULL, 0xf5bdbb739dd3f01eULL};
 static const napi_type_tag borrow_tag = {0xc9430387dce4cc29ULL, 0xfbe71a981f7de18cULL};
+static void retire_generation_fd(generation_tree *tree, int *fd) {
+    retire_process_fd(fd, &tree->retirement_failed);
+    if (tree->retirement_failed) tree->lock->generation_retirement_error = 1;
+}
+static napi_value generation_retirement_error(napi_env env, generation_tree *tree) {
+    if (!tree->retirement_failed && !tree->lock->generation_retirement_error) return NULL;
+    napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "private generation resource retirement remains uncertain"); return NULL;
+}
 
 static void close_tree(generation_tree *tree) {
     close_tree_streams(tree);
     for (generation_borrow *borrow = tree->borrows; borrow; borrow = borrow->next) {
-        if (borrow->fd >= 0) close(borrow->fd);
-        borrow->fd = -1;
+        retire_generation_fd(tree, &borrow->fd);
     }
-    if (tree->git_fd >= 0) close(tree->git_fd);
-    tree->git_fd = -1;
-    if (tree->fd >= 0) close(tree->fd);
-    tree->fd = -1;
+    retire_generation_fd(tree, &tree->git_fd);
+    retire_generation_fd(tree, &tree->fd);
     for (int i = 4; i >= 0; i--) {
-        if (tree->parents[i] >= 0) close(tree->parents[i]);
-        tree->parents[i] = -1;
+        retire_generation_fd(tree, &tree->parents[i]);
     }
 }
 static void close_lock_trees(state_lock *lock) {
@@ -71,7 +76,7 @@ static int tree_directory_at(int parent, const char *name, const struct stat *id
     return private_directory(&named) && same_inode(&named, identity) ? 1 : -1;
 }
 static int tree_held(generation_tree *tree) {
-    if (tree->fd < 0 || !lock_is_held(tree->lock)) return 0;
+    if (tree->fd < 0 || tree->retirement_failed || tree->lock->generation_retirement_error || !lock_is_held(tree->lock)) return 0;
     const char *names[] = {"runs", tree->run, "generations", "quarantine", "workspace-generations"};
     for (int i = 0; i < (tree->retained ? 5 : 3); i++) {
         struct stat opened, named;
@@ -117,8 +122,32 @@ static napi_value tree_close(napi_env env, napi_callback_info info) {
     generation_tree *tree = unwrap_tree(env, info);
     if (!tree) return NULL;
     close_tree(tree);
+    if (tree->retirement_failed || tree->lock->generation_retirement_error) return generation_retirement_error(env, tree);
     napi_value value;
     return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
+}
+static napi_value tree_assert_retired(napi_env env, napi_callback_info info) {
+    generation_tree *tree = unwrap_tree(env, info);
+    if (!tree) return NULL;
+    if (tree->retirement_failed || tree->lock->generation_retirement_error) return generation_retirement_error(env, tree);
+    if (!lock_is_held(tree->lock)) return native_error(env, "generation retirement lost its original StateOwner");
+    for (generation_tree *owned = tree->lock->trees; owned; owned = owned->next) {
+        if (!same_inode(&owned->identity, &tree->identity)) continue;
+        if (owned->fd >= 0 || owned->git_fd >= 0 || owned->retirement_failed)
+            return native_error(env, "same-generation tree resources are not retired");
+        for (int i = 0; i < 5; i++) if (owned->parents[i] >= 0)
+            return native_error(env, "same-generation parent descriptors are not retired");
+        for (generation_borrow *borrow = owned->borrows; borrow; borrow = borrow->next) if (borrow->fd >= 0)
+            return native_error(env, "same-generation execution borrow is not retired");
+        /* Cursors and streams are checked by the private helper below after
+         * their definitions; their lists remain linked across close. */
+        if (!generation_children_retired(owned)) return native_error(env, "same-generation snapshot or writer resources are not retired");
+    }
+    uv_timeval64_t observed;
+    if (uv_gettimeofday(&observed) != 0 || observed.tv_sec < 0) return native_error(env, "generation retirement observation time unavailable");
+    double milliseconds = (double)observed.tv_sec * 1000 + observed.tv_usec / 1000;
+    if (milliseconds <= 0 || milliseconds > 9007199254740991.0) return native_error(env, "generation retirement observation time invalid");
+    napi_value value; return napi_create_double(env, milliseconds, &value) == napi_ok ? value : NULL;
 }
 
 /* Every path is an exact UTF-8 relative entry; .git is controlled by the
@@ -149,8 +178,8 @@ static int entry_directory(const struct stat *info, dev_t device, int metadata) 
 }
 /* Holds all traversed ancestors until the operation and post-check finish. */
 typedef struct { int fds[2049]; struct stat ids[2049]; char *names[2049]; size_t count; int metadata; char path[4097]; } tree_walk;
-static void close_walk(tree_walk *walk) {
-    for (size_t i = walk->count; i > 0; i--) close(walk->fds[i - 1]);
+static void close_walk(generation_tree *tree, tree_walk *walk) {
+    for (size_t i = walk->count; i > 0; i--) retire_generation_fd(tree, &walk->fds[i - 1]);
     walk->count = 0;
 }
 static int walk_parent(generation_tree *tree, const char *path, tree_walk *walk, char **leaf) {
@@ -165,14 +194,14 @@ static int walk_parent(generation_tree *tree, const char *path, tree_walk *walk,
         struct stat opened, named;
         if (fd < 0) goto failed;
         if (fstat(fd, &opened) < 0 || !entry_directory(&opened, tree->identity.st_dev, walk->metadata) ||
-            fstatat(parent, start, &named, AT_SYMLINK_NOFOLLOW) < 0 || !same_inode(&opened, &named)) { close(fd); goto failed; }
+            fstatat(parent, start, &named, AT_SYMLINK_NOFOLLOW) < 0 || !same_inode(&opened, &named)) { retire_generation_fd(tree, &fd); goto failed; }
         walk->fds[walk->count] = fd; walk->ids[walk->count] = opened; walk->names[walk->count++] = start;
         parent = fd; start = slash + 1;
     }
     *leaf = start;
     return parent;
 failed:
-    close_walk(walk); return -1;
+    close_walk(tree, walk); return -1;
 }
 static int walk_held(generation_tree *tree, tree_walk *walk) {
     if (!tree_held(tree)) return 0;
@@ -203,8 +232,9 @@ static napi_value tree_mkdir(napi_env env, napi_callback_info info) {
     if (!strcmp(path, ".git")) { tree->git_fd = fd; tree->git_identity = opened; fd = -1; }
     error = NULL;
 done:
-    if (fd >= 0) close(fd);
-    close_walk(&walk);
+    retire_generation_fd(tree, &fd);
+    close_walk(tree, &walk);
+    if (tree->retirement_failed || tree->lock->generation_retirement_error) return generation_retirement_error(env, tree);
     if (error) return native_error(env, error);
     napi_value value; return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
 }
@@ -254,7 +284,8 @@ static napi_value tree_symlink(napi_env env, napi_callback_info info) {
         !S_ISLNK(end.st_mode) || (end.st_mode & 07777) != 0777 || end.st_nlink != 1 || !walk_held(tree, &walk)) goto done;
     error = NULL;
 done:
-    close_walk(&walk);
+    close_walk(tree, &walk);
+    if (tree->retirement_failed || tree->lock->generation_retirement_error) return generation_retirement_error(env, tree);
     if (error) return native_error(env, error);
     napi_value value; return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
 }
@@ -281,22 +312,23 @@ static int number_property(napi_env env, napi_value result, const char *key, dou
 /* Rewalk every directory by held descriptor, fsync files and deepest-first
  * directories, then prove every named ancestor still resolves to that inode. */
 typedef struct { int fd; DIR *directory; struct stat before; char *path; char *name; } scan_frame;
-static int open_scan_frame(scan_frame *frame, int fd, const char *path, const char *name) {
+static int open_scan_frame(generation_tree *tree, scan_frame *frame, int fd, const char *path, const char *name) {
     frame->fd = fd;
     frame->path = strdup(path); frame->name = name ? strdup(name) : NULL;
     if (!frame->path || (name && !frame->name) || fstat(fd, &frame->before) < 0) goto failed;
     int scan_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (scan_fd < 0) goto failed;
     frame->directory = fdopendir(scan_fd);
-    if (!frame->directory) { close(scan_fd); goto failed; }
+    if (!frame->directory) { retire_generation_fd(tree, &scan_fd); goto failed; }
     return 1;
 failed:
     free(frame->path); free(frame->name); frame->path = frame->name = NULL;
     return 0;
 }
-static void close_scan_frame(scan_frame *frame, int close_fd) {
-    if (frame->directory) closedir(frame->directory);
-    if (close_fd) close(frame->fd);
+static void close_scan_frame(generation_tree *tree, scan_frame *frame, int close_fd) {
+    DIR *owned = frame->directory; frame->directory = NULL;
+    if (owned && closedir(owned) < 0) { record_process_retirement_failure(&tree->retirement_failed); tree->lock->generation_retirement_error = 1; }
+    if (close_fd) retire_generation_fd(tree, &frame->fd);
     free(frame->path); free(frame->name);
     memset(frame, 0, sizeof(*frame));
 }
@@ -323,22 +355,27 @@ struct generation_stream {
 };
 static const napi_type_tag cursor_tag = {0xa60ae5f30d39d96eULL, 0xa998f2ef4779fd9aULL};
 static const napi_type_tag stream_tag = {0xf9f6ca627d87c0b8ULL, 0x96f42b3d97f9311eULL};
+static int generation_children_retired(generation_tree *tree) {
+    for (generation_cursor *cursor = tree->cursors; cursor; cursor = cursor->next)
+        if (!cursor->closed || cursor->frames || cursor->active_file || cursor->depth) return 0;
+    for (generation_stream *stream = tree->streams; stream; stream = stream->next)
+        if (stream->fd >= 0 || stream->walk || stream->cursor) return 0;
+    return 1;
+}
 static void close_cursor(generation_cursor *cursor) {
     if (cursor->active_file) {
-        if (cursor->active_file->fd >= 0) close(cursor->active_file->fd);
-        cursor->active_file->fd = -1;
+        retire_generation_fd(cursor->tree, &cursor->active_file->fd);
         cursor->active_file->cursor = NULL;
         cursor->active_file = NULL;
         cursor->failed = 1;
     }
-    while (cursor->depth) { close_scan_frame(&cursor->frames[cursor->depth - 1], cursor->depth > 1); cursor->depth--; }
+    while (cursor->depth) { close_scan_frame(cursor->tree, &cursor->frames[cursor->depth - 1], cursor->depth > 1); cursor->depth--; }
     free(cursor->frames); cursor->frames = NULL;
     cursor->closed = 1;
 }
 static void close_stream(generation_stream *stream) {
-    if (stream->fd >= 0) close(stream->fd);
-    stream->fd = -1;
-    if (stream->walk) { close_walk(stream->walk); free(stream->walk); stream->walk = NULL; }
+    retire_generation_fd(stream->tree, &stream->fd);
+    if (stream->walk) { close_walk(stream->tree, stream->walk); free(stream->walk); stream->walk = NULL; }
     if (stream->cursor && stream->cursor->active_file == stream) {
         if (!stream->complete) stream->cursor->failed = 1;
         stream->cursor->active_file = NULL;
@@ -398,6 +435,7 @@ static napi_value stream_close(napi_env env, napi_callback_info info) {
     generation_stream *stream = unwrap_stream(env, info);
     if (!stream) return NULL;
     close_stream(stream);
+    if (stream->tree->retirement_failed || stream->tree->lock->generation_retirement_error) return generation_retirement_error(env, stream->tree);
     napi_value value; return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
 }
 static napi_value stream_read(napi_env env, napi_callback_info info) {
@@ -458,6 +496,7 @@ static napi_value stream_finish(napi_env env, napi_callback_info info) {
     if (!sync_directory(parent) || !stream_held(stream)) return native_error(env, "private generation writer parent fsync or reobservation failed");
     stream->complete = 1;
     close_stream(stream);
+    if (stream->tree->retirement_failed || stream->tree->lock->generation_retirement_error) return generation_retirement_error(env, stream->tree);
     napi_value value; return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
 }
 static void finalize_stream(napi_env env, void *data, void *hint) {
@@ -535,6 +574,7 @@ static napi_value cursor_close(napi_env env, napi_callback_info info) {
     generation_cursor *cursor = unwrap_cursor(env, info);
     if (!cursor) return NULL;
     close_cursor(cursor);
+    if (cursor->tree->retirement_failed || cursor->tree->lock->generation_retirement_error) return generation_retirement_error(env, cursor->tree);
     napi_value value; return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
 }
 static napi_value cursor_complete(napi_env env, napi_callback_info info) {
@@ -562,7 +602,9 @@ static napi_value cursor_next(napi_env env, napi_callback_info info) {
                 !stable_content(&frame->before, &after) || !cursor_held(cursor) ||
                 (cursor->depth > 1 && (fstatat(cursor->frames[cursor->depth - 2].fd, frame->name, &named, AT_SYMLINK_NOFOLLOW) < 0 ||
                     !same_inode(&after, &named)))) goto failed;
-            close_scan_frame(frame, cursor->depth > 1); cursor->depth--; continue;
+            close_scan_frame(cursor->tree, frame, cursor->depth > 1); cursor->depth--;
+            if (cursor->tree->retirement_failed || cursor->tree->lock->generation_retirement_error) goto failed;
+            continue;
         }
         if (!strcmp(item->d_name, ".") || !strcmp(item->d_name, "..")) continue;
         if (strchr(item->d_name, '\\') || !utf8_valid((unsigned char *)item->d_name)) goto failed;
@@ -580,7 +622,7 @@ static napi_value cursor_next(napi_env env, napi_callback_info info) {
             int child = openat(frame->fd, item->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (child < 0) goto failed;
             if (fstat(child, &opened) < 0 || !same_inode(&opened, &named) ||
-                !open_scan_frame(&cursor->frames[cursor->depth], child, path, item->d_name)) { close(child); goto failed; }
+                !open_scan_frame(cursor->tree, &cursor->frames[cursor->depth], child, path, item->d_name)) { retire_generation_fd(cursor->tree, &child); goto failed; }
             cursor->depth++;
         } else if (S_ISREG(named.st_mode)) {
             mode_t mode = named.st_mode & 07777;
@@ -621,6 +663,7 @@ static napi_value cursor_next(napi_env env, napi_callback_info info) {
 failed:
     cursor->failed = 1;
     close_cursor(cursor);
+    if (cursor->tree->retirement_failed || cursor->tree->lock->generation_retirement_error) return generation_retirement_error(env, cursor->tree);
     return native_error(env, "private generation snapshot rejected changed, linked, special or unreadable entries");
 }
 static void finalize_cursor(napi_env env, void *data, void *hint) {
@@ -652,7 +695,7 @@ static napi_value tree_open_snapshot(napi_env env, napi_callback_info info) {
         {"assertComplete", NULL, cursor_complete, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, cursor_close, NULL, NULL, NULL, napi_default, NULL}
     };
-    if (!cursor->frames || !open_scan_frame(&cursor->frames[0], tree->fd, "", NULL)) goto failed;
+    if (!cursor->frames || !open_scan_frame(tree, &cursor->frames[0], tree->fd, "", NULL)) goto failed;
     cursor->depth = 1;
     if (napi_get_cb_info(env, info, NULL, NULL, &receiver, NULL) != napi_ok ||
         napi_create_reference(env, receiver, 1, &cursor->tree_ref) != napi_ok || napi_create_object(env, &result) != napi_ok ||
@@ -689,8 +732,8 @@ static napi_value borrow_assert(napi_env env, napi_callback_info info) {
 static napi_value borrow_close(napi_env env, napi_callback_info info) {
     generation_borrow *borrow = unwrap_borrow(env, info);
     if (!borrow) return NULL;
-    if (borrow->fd >= 0) close(borrow->fd);
-    borrow->fd = -1;
+    retire_generation_fd(borrow->tree, &borrow->fd);
+    if (borrow->tree->retirement_failed || borrow->tree->lock->generation_retirement_error) return generation_retirement_error(env, borrow->tree);
     napi_value value; return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
 }
 static napi_value borrow_quota(napi_env env, napi_callback_info info) {
@@ -728,7 +771,7 @@ static void finalize_borrow(napi_env env, void *data, void *hint) {
     generation_borrow *borrow = data;
     generation_tree *tree = borrow->tree;
     napi_ref tree_ref = borrow->tree_ref;
-    if (borrow->fd >= 0) close(borrow->fd);
+    retire_generation_fd(tree, &borrow->fd);
     generation_borrow **link = &borrow->tree->borrows;
     while (*link && *link != borrow) link = &(*link)->next;
     if (*link) *link = borrow->next;
@@ -757,7 +800,7 @@ static napi_value tree_borrow(napi_env env, napi_callback_info info) {
         !identity_member(env, result, "identity", &opened) ||
         napi_define_properties(env, result, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
         napi_type_tag_object(env, result, &borrow_tag) != napi_ok || napi_wrap(env, result, borrow, finalize_borrow, NULL, NULL) != napi_ok) {
-        if (borrow->fd >= 0) close(borrow->fd);
+        retire_generation_fd(tree, &borrow->fd);
         if (borrow->tree_ref) napi_delete_reference(env, borrow->tree_ref);
         free(borrow); return native_error(env, "cannot mint held generation borrow");
     }
@@ -842,6 +885,7 @@ static napi_value generation_tree_open(napi_env env, napi_callback_info info, in
         {"openSnapshot", NULL, tree_open_snapshot, NULL, NULL, NULL, napi_default, NULL},
         {"openFileWriter", NULL, tree_open_writer, NULL, NULL, NULL, napi_default, NULL},
         {"borrow", NULL, tree_borrow, NULL, NULL, NULL, napi_default, NULL},
+        {"assertRetired", NULL, tree_assert_retired, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, tree_close, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_create_object(env, &result) != napi_ok || !identity_member(env, result, "identity", &tree->identity) ||

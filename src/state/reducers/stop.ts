@@ -18,7 +18,8 @@ import { KernelStorageError, stateOperation } from '../errors.js';
 import { isZeroBudget, subtractBudget } from '../invariants.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
 import { appendInvocationJournalEntry, nextJournalSequence } from '../repositories/journal.js';
-import { readWorkerLaunchesForRun } from '../repositories/worker-launches.js';
+import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from '../repositories/worker-launches.js';
+import { readRequiredWorkspaceGenerationByRef } from '../repositories/workspace-generations.js';
 import { insertControlRequest, readControlRequest, readRun, readSession, ZERO_BUDGET } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
@@ -27,6 +28,7 @@ import { readResourceStopCause } from '../resource-stop.js';
 import { prepareModelFailureStop } from '../model-failure.js';
 import { prepareToolCheckpoint, type NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { readToolCut } from '../tool-cut.js';
+import { assertRetiredGenerationCut } from '../generation-retirement.js';
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
 
 /** Loaded authority only. Cancellation fences immediately; terminal drain independently proves the entire current cut. */
@@ -208,7 +210,8 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       if (assembly.mcpServers.length) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'MCP stop requires server-containment closure');
       // The public recovery cut already verified every sealed worker proof;
       // stop additionally forbids the preactivation and fenced branches.
-      if (readWorkerLaunchesForRun(driver, runId).some(launch => launch.phase === 'retired' && launch.generationWriteState !== 'sealed')) {
+      if (readWorkerLaunchesForRun(driver, runId).some(launch => launch.phase === 'retired' && launch.generationWriteState !== 'sealed' &&
+          !selected.workspaceGenerations.some(generation => generation.generationRef === launch.workspaceGenerationRef && generation.phase === 'retired'))) {
         throw new TypeError('terminal stop retains an unsealed retired worker');
       }
       const intent = await readAgentStop(driver, artifacts, selected);
@@ -289,7 +292,10 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
             .get(runId, run.activeWorkerLaunchId ?? '')) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop cannot retain a pending worker launch');
           for (const artifact of [...continuation.metadata, ...(seal?.metadata ?? []), terminalArtifact, projectionArtifact]) insertArtifactMetadata(connection, artifact, committedAt);
           seal?.commit(connection, run, committedAt);
-          if (connection.prepare("SELECT 1 FROM workspace_generations WHERE run_id = ? AND phase != 'sealed' LIMIT 1").get(runId)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop requires every workspace generation sealed');
+          if (connection.prepare("SELECT 1 FROM workspace_generations WHERE run_id = ? AND phase NOT IN ('sealed','retired') LIMIT 1").get(runId)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop requires every workspace generation sealed or positively retired');
+          assertRetiredGenerationCut(connection, run, selected.workspaceGenerations.map(generation =>
+            seal && generation.generationRef === readRequiredWorkerLaunch(connection, run.activeWorkerLaunchId!).workspaceGenerationRef
+              ? readRequiredWorkspaceGenerationByRef(connection, generation.generationRef) : generation));
           for (const refund of refunds) appendInvocationJournalEntry(connection, refund.entry);
           continuation.commit(connection, run, selected.journal.length + refunds.length, committedAt);
           connection.prepare(`UPDATE runs SET status = ?, next_step = NULL, frontier_ref = NULL, waiting_reason = NULL, waiting_on_ref = NULL,

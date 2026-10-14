@@ -11,11 +11,11 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual, type RuntimeBundleManifest, type ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { assertNativeContainmentDeath, LINUX_WORKER_RECIPE, openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher,
   type LinuxBlockedWorker, type LinuxWorkerController, type LinuxWorkerInstallation } from '../sandbox/linux-worker.js';
-import { borrowRunWorkspaceForExecution, materializeRunWorkspace, reopenRunWorkspace, type RunWorkspaceGeneration } from '../workspace/run-workspace/generation.js';
+import { borrowRunWorkspaceForExecution, materializeRunWorkspace, observeRetainedRunWorkspace, reopenRunWorkspace, type RunWorkspaceGeneration } from '../workspace/run-workspace/generation.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, decodeWorkerProcessContainment } from './execution-closure.js';
+import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment } from './execution-closure.js';
 import { loadAgentRun } from './reducers/agent.js';
 import { assertLiveDispatchState } from './reducers/invocation.js';
 import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, completeWorkerRecoveryProbe } from './reducers/worker-recovery.js';
@@ -33,21 +33,38 @@ import { decodeRunSpec, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity 
 import { retirePreactivationLaunch } from './preactivation-retirement.js';
 import type { HeldWorkerReservation } from './native-owner.js';
 import { withInstalledWorkerRoot, type HeldInstalledAnchor, type HeldInstalledRuntime } from './installed-runtime.js';
+import { stopCheckpointId } from '../runtime/stop.js';
+import { retireQuarantinedGeneration } from './generation-retirement.js';
+import { observeInstalledBrokerQuiescence, type StateStore } from './store.js';
+import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 
 /** Trusted installation paths belong to Supervisor bootstrap, not a Run or a control frame. */
 export type RunExecutionInstallation = Pick<LinuxWorkerInstallation, 'installationRoot' | 'cgroupParent'>;
 export type LoadRunExecutionInput = { runId: string; material: RunAssemblyValidationMaterial };
 export type RunExecution = Readonly<{
+  activateCurrentWorker(input: { expectedRunRevision: number }): Promise<Run>;
+  assertCurrentModelWorker(input: { runId: string; leaseEpoch: number; launchId: string; generationRef: string; workerIdentityDigest: string }): void;
   executeCurrentTool(input: { expectedRunRevision: number }): Promise<Run>;
+  finishCurrentStop(input: { expectedRunRevision: number }): Promise<Run>;
+  resumeCurrentRetirement(input: { expectedRunRevision: number }): Promise<Run>;
   recoverWorker(input: { expectedRunRevision: number }): Promise<Run>;
 }>;
 
 const nonce = () => sha256Bytes(randomBytes(32));
 type WorkerSpec = Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>;
 type EditSpec = Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocation' } }>;
+type WorkerActivationCut = Pick<Awaited<ReturnType<typeof readRecoveryClosure>>,
+  'run' | 'runSpec' | 'latestCheckpoint' | 'workspaceGenerations'>;
+type ActiveWorker = {
+  authority: { generationRef: string; generationIdentityDigest: string };
+  recipe: Awaited<ReturnType<typeof publishWorkerRecipe>>;
+  reserved: Awaited<ReturnType<typeof reserveWorkerLaunch>>;
+  activated: ReturnType<typeof activateWorkerLease>;
+  processContainmentRef: string;
+};
 
 async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: LinuxWorkerController,
-  installation: Pick<RunExecutionInstallation, 'cgroupParent'>, selected: Awaited<ReturnType<typeof readToolCut>>, generationRef: string,
+  installation: Pick<RunExecutionInstallation, 'cgroupParent'>, selected: Pick<WorkerActivationCut, 'run' | 'runSpec'>, generationRef: string,
   reservation: HeldWorkerReservation, launchId: string, spawnNonceDigest: string, activationNonceDigest: string) {
   const { run, runSpec } = selected;
   const assembly = decodeRetainedRunAssembly(await artifacts.readCanonical(runSpec.assemblyRef));
@@ -144,7 +161,7 @@ async function publishInspector(artifacts: ArtifactCatalog, owner: StateOwnerRec
 export async function loadRunExecution(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   bootstrap: { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[]; execution?: RunExecutionInstallation } | undefined,
   input: LoadRunExecutionInput, isClosing: () => boolean = () => false,
-  selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor
+  selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor, executionStore?: StateStore
 ): Promise<{ execution: RunExecution; closeWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }): Promise<Run>; close(): Promise<void> }> {
   // Validation material includes trusted resolver functions; retain those
   // functions while snapshotting their data, just like loadAgentRun does.
@@ -191,9 +208,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let generation: RunWorkspaceGeneration | undefined, controller: LinuxWorkerController | undefined;
   let reservation: HeldWorkerReservation | undefined;
   let ownedLaunchId: string | undefined;
+  let activeWorker: ActiveWorker | undefined;
   async function retireResources() {
     const retainedGeneration = generation, retainedController = controller, retainedReservation = reservation;
-    generation = undefined; controller = undefined; reservation = undefined; worker = undefined; ownedLaunchId = undefined;
+    generation = undefined; controller = undefined; reservation = undefined; worker = undefined; ownedLaunchId = undefined; activeWorker = undefined;
     try { retainedGeneration?.close(); }
     catch (failure) { cleanupFailure ??= failure; }
     // One failed release must not bypass the independent process join.
@@ -214,6 +232,164 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     assertActiveStateOwner(driver, owner);
     return value.expectedRunRevision;
   };
+  /** One actual birth spine for model and tool frontiers. Success retains the
+   * original resources; the existing operation owner joins them on failure. */
+  async function activateWorker(selected: WorkerActivationCut, signal: AbortSignal): Promise<ActiveWorker> {
+    if (activeWorker || worker || generation || controller || reservation || ownedLaunchId !== undefined) {
+      throw new KernelStorageError('REVISION_CONFLICT', 'Run execution already owns native worker resources');
+    }
+    const { run } = selected;
+    if (run.status !== 'queued' || run.activeWorkerLaunchId !== undefined || run.cancelRequested || run.stopIntentRef ||
+        sampleCanonicalNow() >= run.deadlineAt) {
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker activation requires its unstopped lease-free queued cut');
+    }
+    const candidates = selected.workspaceGenerations.filter(row => row.phase === 'materializing' || row.phase === 'preactivated_readonly');
+    if (candidates.length > 1 || candidates.some(row => row.phase === 'materializing')) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'worker activation retains an incomplete or competing private generation');
+    }
+    let authority: ActiveWorker['authority'];
+    let preactivatedGeneration: Extract<import('../kernel/types.js').WorkspaceGenerationStateV1, { phase: 'preactivated_readonly' }>;
+    const retained = candidates[0];
+    if (retained?.phase === 'preactivated_readonly') {
+      if (retained.sourceCheckpointId !== selected.latestCheckpoint.id || retained.sourceWorkspaceStateRef !== selected.latestCheckpoint.workspaceStateRef) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'retained private generation does not restore the current ready Checkpoint');
+      }
+      const identity = decodeWorkspaceGenerationIdentity(await artifacts.readCanonical(retained.generationRef));
+      generation = await reopenRunWorkspace({ filesystem: owner.filesystem, artifacts, identity, checkpoint: selected.latestCheckpoint, signal });
+      authority = { generationRef: retained.generationRef, generationIdentityDigest: retained.generationIdentityDigest };
+      preactivatedGeneration = retained;
+    } else {
+      generation = await materializeRunWorkspace({ filesystem: owner.filesystem, artifacts, checkpoint: selected.latestCheckpoint, signal });
+      const materialized = await generation.publishMaterializedAuthority();
+      authority = materialized;
+      const materializing = await registerWorkspaceGeneration(driver, artifacts, owner, { runId, generationRef: authority.generationRef,
+        generationIdentityDigest: authority.generationIdentityDigest });
+      preactivatedGeneration = await recordWorkspaceGenerationPreactivated(driver, artifacts, owner, { generationId: generation.generationId,
+        expectedRowVersion: materializing.rowVersion, snapshotEvidenceRef: materialized.snapshotEvidenceRef, snapshotEvidenceDigest: materialized.snapshotEvidenceDigest });
+    }
+    // Keep the existing two-write readonly pair intact across cancellation.
+    signal.throwIfAborted();
+    const profile = decodeSandboxProfile(await artifacts.readCanonical(selected.runSpec.sandboxProfileRef));
+    const borrowed = borrowRunWorkspaceForExecution(generation);
+    try { borrowed.assertQuota(profile.resources.maxGenerationBytes); } finally { borrowed.close(); }
+    controller = await launcher.startController({ signal });
+    const launchId = identityHash('cliq-worker-launch-v1', runId, String(run.leaseEpoch + 1), nonce());
+    const spawnNonceDigest = nonce(), activationNonceDigest = nonce();
+    reservation = owner.filesystem.createWorkerReservation(launchId, spawnNonceDigest);
+    const recipe = await publishWorkerRecipe(artifacts, controller, installation!, selected, authority.generationRef,
+      reservation, launchId, spawnNonceDigest, activationNonceDigest);
+    const closure = await readWorkerLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...recipe.input, run });
+    signal.throwIfAborted();
+    await controller.bindWorkerReservation({ closure, reservation, activationNonceDigest });
+    signal.throwIfAborted();
+    const reserved = await reserveWorkerLaunch(driver, artifacts, owner, recipe.input);
+    ownedLaunchId = reserved.launchId;
+    worker = await controller.launchWorker({ closure, generation, activationNonceDigest: reserved.activationNonceDigest });
+    const processIdentity = await worker.observeProcess();
+    const processContainmentRef = (await artifacts.publishCanonical(worker.containment, 'cliq-process-containment-v1')).ref;
+    const workerIdentity: WorkerIdentity = { schemaVersion: 1, ...processIdentity, spawnNonceDigest: reserved.spawnNonceDigest,
+      activationNonceDigest: reserved.activationNonceDigest, intendedLeaseEpoch: recipe.spec.owner.intendedLeaseEpoch, launchId: reserved.launchId,
+      supervisorInstanceId: reserved.supervisorInstanceId, processContainmentRef };
+    const workerIdentityDigest = (await artifacts.publishCanonical(workerIdentity, 'cliq-worker-identity-v1')).ref;
+    await recordWorkerPreactivated(driver, artifacts, owner, { launchId: reserved.launchId, workerIdentityDigest, processContainmentRef });
+    const activated = activateWorkerLease(driver, owner, { launchId: reserved.launchId, expectedRunRevision: run.revision,
+      expectedGenerationRowVersion: preactivatedGeneration.rowVersion, leaseDurationMs: 60_000 });
+    signal.throwIfAborted();
+    await worker.activateCommitted(activated.launch);
+    signal.throwIfAborted();
+    activeWorker = { authority, recipe, reserved, activated, processContainmentRef };
+    return activeWorker;
+  }
+  /** Tool completion and stop drain share the original physical worker's
+   * quiescence/snapshot spine. A retained artifact cannot supply this owner. */
+  async function retireToCheckpoint(current: ActiveWorker, checkpointId: string, signal: AbortSignal) {
+    if (current !== activeWorker || !worker || !generation || ownedLaunchId !== current.activated.launch.launchId) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'checkpoint retirement lost its original physical worker owner');
+    }
+    const currentWorker = worker, currentGeneration = generation;
+    const { authority, recipe, reserved, activated, processContainmentRef } = current;
+    const beforeSeal = await readRecoveryClosure(driver, artifacts, runId);
+    signal.throwIfAborted();
+    const activeGeneration = beforeSeal.workspaceGenerations.find(row => row.generationRef === authority.generationRef);
+    const activeLaunch = beforeSeal.workerLaunches.find(row => row.launchId === activated.launch.launchId);
+    if (!activeGeneration || !activeLaunch || beforeSeal.run.activeWorkerLaunchId !== activeLaunch.launchId ||
+        beforeSeal.run.leaseEpoch !== activeLaunch.leaseEpoch || activeLaunch.workspaceGenerationRef !== authority.generationRef ||
+        activeLaunch.workerIdentityDigest !== activated.launch.workerIdentityDigest || activeLaunch.processContainmentRef !== processContainmentRef) {
+      throw new KernelStorageError('LEASE_FENCED', 'checkpoint retirement differs from the original worker and generation');
+    }
+    const quiesceId = identityHash('cliq-worker-quiesce-v1', activated.launch.launchId, checkpointId);
+    const revoking = beginGenerationRevocation(driver, owner, { launchId: activeLaunch.launchId,
+      expectedLeaseVersion: activeLaunch.leaseVersion, expectedGenerationRowVersion: activeGeneration.rowVersion, quiesceId });
+    const death = await currentWorker.stop();
+    assertNativeContainmentDeath(death);
+    requireEqual(death.containment, currentWorker.containment, 'checkpoint original native containment');
+    const checkpointing = beginGenerationCheckpoint(driver, owner, { launchId: activeLaunch.launchId, expectedLeaseVersion: revoking.launch.leaseVersion,
+      expectedGenerationRowVersion: revoking.generation.rowVersion, quiesceId });
+    const observed = await currentGeneration.observe({ signal });
+    const inspector = await publishInspector(artifacts, assertActiveStateOwner(driver, owner));
+    const deathCore = { schemaVersion: 1, kind: 'containment_all_descendants_dead', containmentRef: processContainmentRef,
+      planRef: recipe.input.containmentPlanRef, sandboxLaunchSpecRef: recipe.input.sandboxLaunchSpecRef,
+      sandboxLaunchSpecDigest: recipe.spec.launchSpecDigest, owner: death.containment.owner, launchNonceDigest: reserved.spawnNonceDigest,
+      inspectorSupervisorInstanceId: owner.supervisorInstanceId, ...inspector,
+      backend: { ...death.containment.backend, cgroupPopulated: death.cgroupPopulated,
+        namespaceInitDeadAndReaped: death.namespaceInitDeadAndReaped, remainingTrackedDescendants: death.remainingTrackedDescendants }, observedAt: death.observedAt };
+    const retirement = await artifacts.publishCanonical({ ...deathCore, evidenceDigest: canonicalSha256(deathCore) }, 'cliq-process-containment-death-evidence-v1');
+    const state = await artifacts.readCanonical<import('../kernel/types.js').WorkspaceStateManifest>(observed.workspaceStateRef);
+    const snapshot: WorkspaceGenerationSnapshotEvidenceV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-snapshot-evidence-v1',
+      purpose: 'sealed_to_checkpoint', quiescenceEvidenceRef: retirement.ref, runId,
+      generationRef: authority.generationRef, generationIdentityDigest: authority.generationIdentityDigest,
+      checkpointId, workspaceStateRef: observed.workspaceStateRef, workspaceStateDigest: observed.workspaceStateDigest,
+      entriesRef: observed.entriesRef, treeDigest: observed.treeDigest,
+      ...(state.privateGitStateRef ? { privateGitStateRef: state.privateGitStateRef } : {}),
+      descriptorRewalkComplete: observed.descriptorRewalkComplete, fileFsyncComplete: observed.fileFsyncComplete,
+      directoryFsyncComplete: observed.directoryFsyncComplete, observedAt: sampleCanonicalNow(), evidenceDigest: '' };
+    snapshot.evidenceDigest = digestOmitting(snapshot, 'evidenceDigest');
+    const snapshotEvidenceRef = (await artifacts.publishCanonical(snapshot, snapshot.format)).ref;
+    return { postEffect: { workspaceStateRef: observed.workspaceStateRef, snapshotEvidenceRef, retirementEvidenceRef: retirement.ref },
+      snapshot, checkpointing, quiesceId };
+  }
+  function ownOperation(work: Promise<Run>, abort: AbortController, retainWorker = false): Promise<Run> {
+    let operationFailure: { error: unknown } | undefined;
+    const operation = work.catch(async error => {
+      operationFailure = { error };
+      if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
+      try {
+        const run = readRun(driver, runId);
+        if (ownedLaunchId !== undefined && run.activeWorkerLaunchId === ownedLaunchId) {
+          await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
+        } else if (ownedLaunchId !== undefined && run.status === 'queued') {
+          // Join the original spawner first. A new controller can only inspect
+          // the exact witness; it cannot release the old activation channel.
+          await controller?.close();
+          controller = await launcher.startController();
+          await retirePreactivationLaunch(driver, artifacts, owner, ownedLaunchId, controller);
+          worker = undefined;
+        }
+      } catch (failure) {
+        // Losing the state fence cannot bypass actual resource retirement or
+        // be mistaken for a graceful owner release.
+        cleanupFailure ??= failure;
+      } finally {
+        if (worker) {
+          try { const death = await worker.stop(); assertNativeContainmentDeath(death); }
+          catch (failure) { cleanupFailure ??= failure; }
+        }
+      }
+      throw error;
+    }).finally(async () => {
+      try { if (!retainWorker || operationFailure) await retireResources(); }
+      catch (failure) {
+        if (operationFailure && operationFailure.error !== failure) {
+          cleanupFailure = new ResourceRetirementError('Run execution failed and its resources did not retire',
+            new AggregateError([operationFailure.error, failure], 'execution and retirement failures'));
+          throw cleanupFailure;
+        }
+        throw failure;
+      } finally { pending = undefined; if (operationAbort === abort) operationAbort = undefined; }
+    });
+    pending = operation;
+    return operation;
+  }
   async function closeProbe(input: { runId: string; expectedRunRevision: number }, waitForDeadline = false): Promise<Run> {
     input = immutableSnapshot(input);
     if (!exactKeys(input, ['runId', 'expectedRunRevision']) || input.runId !== runId ||
@@ -266,6 +442,48 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     }
   }
   const execution: RunExecution = Object.freeze({
+    assertCurrentModelWorker: value => {
+      if (!exactKeys(value, ['runId', 'leaseEpoch', 'launchId', 'generationRef', 'workerIdentityDigest']) ||
+          value.runId !== runId || !Number.isSafeInteger(value.leaseEpoch) || value.leaseEpoch < 1 ||
+          closed || isClosing() || cleanupFailure !== undefined || pending || !activeWorker || !worker || !generation || !controller || !reservation ||
+          value.launchId !== ownedLaunchId || value.launchId !== activeWorker.activated.launch.launchId ||
+          value.generationRef !== activeWorker.authority.generationRef || value.workerIdentityDigest !== activeWorker.activated.launch.workerIdentityDigest) {
+        throw new KernelStorageError('LEASE_FENCED', 'model release does not name this execution owner\'s original physical worker');
+      }
+      const run = readRun(driver, runId);
+      const live = assertLiveDispatchState(driver, owner, runId, run.revision, value.leaseEpoch, sampleCanonicalNow());
+      if (run.nextStep !== 'agent' || live.launch.launchId !== value.launchId || live.launch.workerIdentityDigest !== value.workerIdentityDigest ||
+          live.launch.workspaceGenerationRef !== value.generationRef || live.launch.processContainmentRef !== activeWorker.processContainmentRef) {
+        throw new KernelStorageError('LEASE_FENCED', 'model release durable worker identity changed');
+      }
+      reservation.assertHeld();
+      worker.assertHeld();
+      // The native worker already retains the original generation borrow;
+      // its assertion verifies that descriptor, mount, quota identity and owner.
+      assertActiveStateOwner(driver, owner);
+    },
+    activateCurrentWorker: async value => {
+      const expectedRunRevision = revision(value);
+      const abort = new AbortController();
+      operationAbort = abort;
+      const signal = abort.signal;
+      const work = (async () => {
+        signal.throwIfAborted();
+        const selected = await readRecoveryClosure(driver, artifacts, runId);
+        signal.throwIfAborted();
+        if (selected.run.revision !== expectedRunRevision || selected.run.nextStep !== 'agent' || !selected.run.frontierRef) {
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model worker activation requires its current agent frontier');
+        }
+        const frontier = await artifacts.readCanonical<import('../kernel/types.js').RunFrontier>(selected.run.frontierRef);
+        if (frontier.kind !== 'agent' || !['model_turn', 'context_compaction'].includes(frontier.phase)) {
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model worker activation requires a validated model frontier');
+        }
+        signal.throwIfAborted();
+        const activated = await activateWorker(selected, signal);
+        return activated.activated.run;
+      })();
+      return ownOperation(work, abort, true);
+    },
     executeCurrentTool: async value => {
       const expectedRunRevision = revision(value);
       const abort = new AbortController();
@@ -275,9 +493,21 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         signal.throwIfAborted();
         const selected = await readToolCut(driver, artifacts, runId, agent.resolveToolInput);
         signal.throwIfAborted();
-        if (selected.run.revision !== expectedRunRevision || selected.run.status !== 'queued' || selected.run.activeWorkerLaunchId !== undefined ||
-            selected.run.cancelRequested || selected.run.stopIntentRef || sampleCanonicalNow() >= selected.run.deadlineAt) {
-          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool execution requires its unstopped lease-free queued cut');
+        const queued = selected.run.status === 'queued' && selected.run.activeWorkerLaunchId === undefined;
+        const retained = selected.run.status === 'running' && activeWorker !== undefined && worker !== undefined && generation !== undefined &&
+          selected.run.activeWorkerLaunchId === activeWorker.activated.launch.launchId;
+        if (selected.run.revision !== expectedRunRevision || (!queued && !retained) || selected.run.cancelRequested ||
+            selected.run.stopIntentRef || sampleCanonicalNow() >= selected.run.deadlineAt) {
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool execution requires its queued cut or this owner\'s live native worker');
+        }
+        if (retained) {
+          const live = assertLiveDispatchState(driver, owner, runId, expectedRunRevision, selected.run.leaseEpoch, sampleCanonicalNow());
+          if (live.launch.workspaceGenerationRef !== activeWorker!.authority.generationRef ||
+              live.launch.processContainmentRef !== activeWorker!.processContainmentRef || live.launch.launchId !== ownedLaunchId) {
+            throw new KernelStorageError('LEASE_FENCED', 'tool cut differs from this execution owner\'s original worker');
+          }
+          await worker!.observeProcess();
+          signal.throwIfAborted();
         }
         if (selected.call.toolName !== 'edit') throw new KernelStorageError('INVALID_REQUEST', 'this installed recipe supports only the current builtin edit');
         const projection = await agent.readToolInvocation();
@@ -287,101 +517,17 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         }
         const workspaceCut = await readRecoveryClosure(driver, artifacts, runId);
         requireEqual(workspaceCut.run, selected.run, 'native tool workspace cut');
-        const candidates = workspaceCut.workspaceGenerations.filter(row => row.phase === 'materializing' || row.phase === 'preactivated_readonly');
-        if (candidates.length > 1 || candidates.some(row => row.phase === 'materializing')) {
-          throw new KernelStorageError('RECOVERY_REQUIRED', 'tool execution retains an incomplete or competing private generation');
-        }
-        let authority: { generationRef: string; generationIdentityDigest: string };
-        let preactivatedGeneration: Extract<import('../kernel/types.js').WorkspaceGenerationStateV1, { phase: 'preactivated_readonly' }>;
-        const retained = candidates[0];
-        if (retained?.phase === 'preactivated_readonly') {
-          if (retained.sourceCheckpointId !== selected.latestCheckpoint.id || retained.sourceWorkspaceStateRef !== selected.latestCheckpoint.workspaceStateRef) {
-            throw new KernelStorageError('RECOVERY_REQUIRED', 'retained private generation does not restore the current ready Checkpoint');
-          }
-          const identity = decodeWorkspaceGenerationIdentity(await artifacts.readCanonical(retained.generationRef));
-          generation = await reopenRunWorkspace({ filesystem: owner.filesystem, artifacts, identity, checkpoint: selected.latestCheckpoint, signal });
-          authority = { generationRef: retained.generationRef, generationIdentityDigest: retained.generationIdentityDigest };
-          preactivatedGeneration = retained;
-        } else {
-          generation = await materializeRunWorkspace({ filesystem: owner.filesystem, artifacts, checkpoint: selected.latestCheckpoint, signal });
-          const materialized = await generation.publishMaterializedAuthority();
-          authority = materialized;
-          const materializing = await registerWorkspaceGeneration(driver, artifacts, owner, { runId, generationRef: authority.generationRef,
-            generationIdentityDigest: authority.generationIdentityDigest });
-          preactivatedGeneration = await recordWorkspaceGenerationPreactivated(driver, artifacts, owner, { generationId: generation.generationId,
-            expectedRowVersion: materializing.rowVersion, snapshotEvidenceRef: materialized.snapshotEvidenceRef, snapshotEvidenceDigest: materialized.snapshotEvidenceDigest });
-        }
-        // The two durable generation writes above finish as a readonly pair,
-        // even if shutdown arrives between them.
-        signal.throwIfAborted();
-        // Quota is checked before reserving a launch and again by the native launcher before process creation.
-        const profile = decodeSandboxProfile(await artifacts.readCanonical(selected.runSpec.sandboxProfileRef));
-        const borrowed = borrowRunWorkspaceForExecution(generation);
-        try { borrowed.assertQuota(profile.resources.maxGenerationBytes); } finally { borrowed.close(); }
-        controller = await launcher.startController({ signal });
-        const launchId = identityHash('cliq-worker-launch-v1', runId, String(selected.run.leaseEpoch + 1), nonce());
-        const spawnNonceDigest = nonce(), activationNonceDigest = nonce();
-        reservation = owner.filesystem.createWorkerReservation(launchId, spawnNonceDigest);
-        const recipe = await publishWorkerRecipe(artifacts, controller, installation!, selected, authority.generationRef,
-          reservation, launchId, spawnNonceDigest, activationNonceDigest);
-        const closure = await readWorkerLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...recipe.input, run: selected.run });
-        signal.throwIfAborted();
-        await controller.bindWorkerReservation({ closure, reservation, activationNonceDigest });
-        signal.throwIfAborted();
-        const reserved = await reserveWorkerLaunch(driver, artifacts, owner, recipe.input);
-        ownedLaunchId = reserved.launchId;
-        worker = await controller.launchWorker({ closure, generation, activationNonceDigest: reserved.activationNonceDigest });
-        const processIdentity = await worker.observeProcess();
-        const processContainmentRef = (await artifacts.publishCanonical(worker.containment, 'cliq-process-containment-v1')).ref;
-        const workerIdentity: WorkerIdentity = { schemaVersion: 1, ...processIdentity, spawnNonceDigest: reserved.spawnNonceDigest,
-          activationNonceDigest: reserved.activationNonceDigest, intendedLeaseEpoch: recipe.spec.owner.intendedLeaseEpoch, launchId: reserved.launchId,
-          supervisorInstanceId: reserved.supervisorInstanceId, processContainmentRef };
-        const workerIdentityDigest = (await artifacts.publishCanonical(workerIdentity, 'cliq-worker-identity-v1')).ref;
-        await recordWorkerPreactivated(driver, artifacts, owner, { launchId: reserved.launchId, workerIdentityDigest, processContainmentRef });
-        const activated = activateWorkerLease(driver, owner, { launchId: reserved.launchId, expectedRunRevision,
-          expectedGenerationRowVersion: preactivatedGeneration.rowVersion, leaseDurationMs: 60_000 });
-        signal.throwIfAborted();
-        await worker.activateCommitted(activated.launch);
-        async function retireToCheckpoint(checkpointId: string) {
-          const beforeSeal = await readRecoveryClosure(driver, artifacts, runId);
-          const activeGeneration = beforeSeal.workspaceGenerations.find(row => row.generationRef === authority.generationRef)!;
-          const activeLaunch = beforeSeal.workerLaunches.find(row => row.launchId === activated.launch.launchId)!;
-          const quiesceId = identityHash('cliq-worker-quiesce-v1', activated.launch.launchId, checkpointId);
-          const revoking = beginGenerationRevocation(driver, owner, { launchId: activeLaunch.launchId,
-            expectedLeaseVersion: activeLaunch.leaseVersion, expectedGenerationRowVersion: activeGeneration.rowVersion, quiesceId });
-          const death = await worker!.stop();
-          assertNativeContainmentDeath(death);
-          const checkpointing = beginGenerationCheckpoint(driver, owner, { launchId: activeLaunch.launchId, expectedLeaseVersion: revoking.launch.leaseVersion,
-            expectedGenerationRowVersion: revoking.generation.rowVersion, quiesceId });
-          const observed = await generation!.observe({ signal });
-          const inspector = await publishInspector(artifacts, assertActiveStateOwner(driver, owner));
-          const deathCore = { schemaVersion: 1, kind: 'containment_all_descendants_dead', containmentRef: processContainmentRef,
-            planRef: recipe.input.containmentPlanRef, sandboxLaunchSpecRef: recipe.input.sandboxLaunchSpecRef,
-            sandboxLaunchSpecDigest: recipe.spec.launchSpecDigest, owner: death.containment.owner, launchNonceDigest: reserved.spawnNonceDigest,
-            inspectorSupervisorInstanceId: owner.supervisorInstanceId, ...inspector,
-            backend: { ...death.containment.backend, cgroupPopulated: death.cgroupPopulated,
-              namespaceInitDeadAndReaped: death.namespaceInitDeadAndReaped, remainingTrackedDescendants: death.remainingTrackedDescendants }, observedAt: death.observedAt };
-          const retirement = await artifacts.publishCanonical({ ...deathCore, evidenceDigest: canonicalSha256(deathCore) }, 'cliq-process-containment-death-evidence-v1');
-          const state = await artifacts.readCanonical<import('../kernel/types.js').WorkspaceStateManifest>(observed.workspaceStateRef);
-          const snapshot: WorkspaceGenerationSnapshotEvidenceV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-snapshot-evidence-v1',
-            purpose: 'sealed_to_checkpoint', quiescenceEvidenceRef: retirement.ref, runId,
-            generationRef: authority.generationRef, generationIdentityDigest: authority.generationIdentityDigest,
-            checkpointId, workspaceStateRef: observed.workspaceStateRef, workspaceStateDigest: observed.workspaceStateDigest,
-            entriesRef: observed.entriesRef, treeDigest: observed.treeDigest,
-            ...(state.privateGitStateRef ? { privateGitStateRef: state.privateGitStateRef } : {}),
-            descriptorRewalkComplete: observed.descriptorRewalkComplete, fileFsyncComplete: observed.fileFsyncComplete,
-            directoryFsyncComplete: observed.directoryFsyncComplete, observedAt: sampleCanonicalNow(), evidenceDigest: '' };
-          snapshot.evidenceDigest = digestOmitting(snapshot, 'evidenceDigest');
-          const snapshotEvidenceRef = (await artifacts.publishCanonical(snapshot, snapshot.format)).ref;
-          return { postEffect: { workspaceStateRef: observed.workspaceStateRef, snapshotEvidenceRef, retirementEvidenceRef: retirement.ref },
-            snapshot, checkpointing, quiesceId };
-        }
+        const current = queued ? await activateWorker(workspaceCut, signal) : activeWorker!;
+        const { recipe, processContainmentRef } = current;
+        const activated = { ...current.activated, run: queued ? current.activated.run : selected.run };
+        if (!worker || !generation) throw new KernelStorageError('RECOVERY_REQUIRED', 'native tool execution lost its original physical owner');
+        const currentWorker = worker;
         signal.throwIfAborted();
         const prepared = await agent.prepareTool({ expectedRunRevision: activated.run.revision, leaseEpoch: activated.run.leaseEpoch });
         if (prepared.disposition !== 'prepared') {
           const checkpointId = prepared.disposition === 'approval_required' ? prepared.checkpointId
             : identityHash('cliq-denied-tool-worker-checkpoint-v1', runId, prepared.run.latestCheckpointId, nonce());
-          const proof = await retireToCheckpoint(checkpointId);
+          const proof = await retireToCheckpoint(current, checkpointId, signal);
           if (prepared.disposition === 'approval_required') {
             await agent.waitForToolApproval({ expectedRunRevision: prepared.run.revision, waitingOnRef: prepared.waitingOnRef, checkpoint: proof.postEffect });
           } else {
@@ -394,8 +540,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           return readRun(driver, runId);
         }
         const dispatchId = identityHash('cliq-tool-dispatch-v1', runId, prepared.entry.opId, String(prepared.entry.attempt), nonce());
-        if (worker.containment.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'native edit parent is not Linux');
-        const sandboxLaunchSpecRef = await publishEditRecipe(artifacts, recipe.spec, processContainmentRef, worker.containment.backend.cgroupPath, prepared, dispatchId);
+        if (currentWorker.containment.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'native edit parent is not Linux');
+        const sandboxLaunchSpecRef = await publishEditRecipe(artifacts, recipe.spec, processContainmentRef, currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
         // The permanent claim precedes even blocked invocation process creation.
         signal.throwIfAborted();
         const claimed = await agent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: activated.run.leaseEpoch,
@@ -405,13 +551,13 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, activated.run.leaseEpoch, sampleCanonicalNow());
         const edit = await readBuiltinEditLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...live, prepared: prepared.entry,
           request: claimed.request, target: claimed.target, call, grant, dispatchId, sandboxLaunchSpecRef });
-        const invocation = await worker.createInvocation(edit);
+        const invocation = await currentWorker.createInvocation(edit);
         await invocation.observeProcess();
         signal.throwIfAborted();
         await claimed.release(invocation);
         const result = await invocation.result();
         const observedAt = sampleCanonicalNow();
-        const proof = await retireToCheckpoint(toolCheckpointId(runId, prepared.entry.opId, prepared.entry.attempt));
+        const proof = await retireToCheckpoint(current, toolCheckpointId(runId, prepared.entry.opId, prepared.entry.attempt), signal);
         const base = { schemaVersion: 1 as const, format: 'cliq-tool-observation-v1' as const, runId, opId: claimed.entry.opId,
           attempt: claimed.entry.attempt, requestRef: claimed.entry.requestRef, targetRef: claimed.entry.target,
           grantRef: claimed.entry.grantRef!, dispatchId, observedAt,
@@ -427,50 +573,77 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         await agent.completeTool({ opId: claimed.entry.opId, attempt: claimed.entry.attempt, expectedRunRevision: prepared.run.revision, observationRef });
         return readRun(driver, runId);
       })();
-      let operationFailure: { error: unknown } | undefined;
-      const operation = work.catch(async error => {
-        operationFailure = { error };
-        if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
-        try {
-          const run = readRun(driver, runId);
-          if (ownedLaunchId !== undefined && run.activeWorkerLaunchId === ownedLaunchId) {
-            await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
-          } else if (ownedLaunchId !== undefined && run.status === 'queued') {
-            // Join the original spawner first. A new controller can only inspect
-            // the exact witness; it cannot release the old activation channel.
-            await controller?.close();
-            controller = await launcher.startController();
-            await retirePreactivationLaunch(driver, artifacts, owner, ownedLaunchId, controller);
-            worker = undefined;
+      return ownOperation(work, abort);
+    },
+    finishCurrentStop: async value => {
+      const expectedRunRevision = revision(value);
+      const abort = new AbortController();
+      operationAbort = abort;
+      const signal = abort.signal;
+      const work = (async () => {
+        const selected = await readRecoveryClosure(driver, artifacts, runId);
+        signal.throwIfAborted();
+        if (selected.run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'stop drain revision changed');
+        if (!selected.run.stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop drain requires the persisted StopIntent');
+        if (selected.run.activeWorkerLaunchId === undefined) {
+          if (activeWorker || worker || generation || controller || reservation || ownedLaunchId !== undefined) {
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'worker-free stop retains unresolved physical execution resources');
           }
-        } catch (failure) {
-          // Losing the state fence cannot bypass actual resource retirement or
-          // be mistaken for a graceful owner release.
-          cleanupFailure ??= failure;
-        } finally {
-          if (worker) {
-            try { const death = await worker.stop(); assertNativeContainmentDeath(death); }
-            catch (failure) { cleanupFailure ??= failure; }
-          }
+          // The reducer requires every original generation sealed or backed
+          // by retirement evidence; this branch supplies no new authority.
+          return (await agent.commitTerminalStop({ expectedRunRevision })).run;
         }
-        throw error;
-      }).finally(async () => {
-        try { await retireResources(); }
-        catch (failure) {
-          // Retirement still fences this resource owner, but must not erase
-          // the operation that made retirement necessary. Retain both for
-          // this rejection and subsequent Store.close attempts.
-          if (operationFailure && operationFailure.error !== failure) {
-            cleanupFailure = new ResourceRetirementError('Run execution failed and its resources did not retire',
-              new AggregateError([operationFailure.error, failure], 'execution and retirement failures'));
-            throw cleanupFailure;
-          }
-          throw failure;
+        if (!activeWorker || !worker || !generation || !controller || !reservation ||
+            selected.run.activeWorkerLaunchId !== ownedLaunchId || selected.run.activeWorkerLaunchId !== activeWorker.activated.launch.launchId) {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'stop drain cannot adopt another worker\'s retirement authority');
         }
-        finally { pending = undefined; if (operationAbort === abort) operationAbort = undefined; }
-      });
-      pending = operation;
-      return operation;
+        const proof = await retireToCheckpoint(activeWorker, stopCheckpointId(runId, selected.run.stopIntentRef), signal);
+        signal.throwIfAborted();
+        // commitTerminalStop checks exact settled invocation history, the
+        // currently accounted workspace, and refreshes actual native death
+        // before its one atomic Checkpoint/Session/terminal transition.
+        return (await agent.commitTerminalStop({ expectedRunRevision, checkpoint: proof.postEffect })).run;
+      })();
+      return ownOperation(work, abort);
+    },
+    resumeCurrentRetirement: async value => {
+      const expectedRunRevision = revision(value);
+      const abort = new AbortController(); operationAbort = abort;
+      const signal = abort.signal;
+      const work = (async () => {
+        let cut = await readRecoveryClosure(driver, artifacts, runId);
+        signal.throwIfAborted();
+        if (cut.run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'retirement resume revision changed');
+        if (!cut.workspaceGenerations.some(row => row.phase === 'quarantined')) return cut.run;
+        if (cut.run.status !== 'queued' || cut.run.activeWorkerLaunchId !== undefined ||
+            activeWorker || worker || generation || controller || reservation || ownedLaunchId !== undefined || !executionStore) {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement resume requires its lease-free queued cut and original installed resource owner');
+        }
+        for (const row of cut.workspaceGenerations.filter(value => value.phase === 'quarantined')) {
+          signal.throwIfAborted();
+          const launches = readWorkerLaunchesForRun(driver, runId).filter(launch => launch.workspaceGenerationRef === row.generationRef);
+          if (launches.length !== 1) throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement resume has no unique original worker launch');
+          const launch = launches[0]!;
+          const closure = await readQuarantinedWorkerLaunchClosure(driver, artifacts, owner, { run: cut.run, launch, generation: row });
+          const containment = decodeWorkerProcessContainment(await artifacts.readCanonical(launch.processContainmentRef!));
+          const workerIdentity = decodeWorkerIdentity(await artifacts.readCanonical(launch.workerIdentityDigest!));
+          controller = await launcher.startController({ signal });
+          const death = await controller.terminateRetained({ closure, containment, workerIdentity, signal });
+          assertNativeContainmentDeath(death);
+          const workerRetirement = await controller.closeRetained();
+          const quarantine = await artifacts.readCanonical<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(row.quarantineEvidenceRef!);
+          const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
+            identity: closure.generation, sourceRowVersion: quarantine.sourceRowVersion, signal });
+          signal.throwIfAborted();
+          const brokerQuiescence = observeInstalledBrokerQuiescence(executionStore, runId);
+          await retireQuarantinedGeneration(driver, artifacts, owner, { runId, expectedRunRevision: cut.run.revision,
+            expectedGenerationRowVersion: row.rowVersion, generationRef: row.generationRef, workerRetirement, workspaceRetirement, brokerQuiescence });
+          await retireResources();
+          cut = await readRecoveryClosure(driver, artifacts, runId);
+        }
+        return cut.run;
+      })();
+      return ownOperation(work, abort, true);
     },
     recoverWorker: async value => {
       const expectedRunRevision = revision(value);
@@ -494,8 +667,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const death = await controller.terminateRetained({ closure, containment, workerIdentity, signal });
         assertNativeContainmentDeath(death);
         signal.throwIfAborted();
+        const handoff = cut.run.nextStep === 'agent' ? await agent.readModelAttempt() : undefined;
+        if (handoff) requireEqual(handoff.run, cut.run, 'worker recovery model handoff cut');
+        const candidateHandoff = handoff?.state.phase === 'completed' && handoff.disposition === 'candidate_required' &&
+          handoff.prepared.request.kind === 'normal';
         const replacement = cut.workspaceGenerations.filter(row => row.phase === 'preactivated_readonly' || row.phase === 'materializing');
-        if (replacement.length === 0) {
+        if (replacement.length === 0 && !candidateHandoff) {
           generation = await materializeRunWorkspace({ filesystem: owner.filesystem, artifacts, checkpoint: cut.latestCheckpoint, signal });
           const authority = await generation.publishMaterializedAuthority();
           // Do not insert a cancellation point between these two writes: a
@@ -506,10 +683,28 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           await recordWorkspaceGenerationPreactivated(driver, artifacts, owner, { generationId: generation.generationId,
             expectedRowVersion: materializing.rowVersion, snapshotEvidenceRef: authority.snapshotEvidenceRef, snapshotEvidenceDigest: authority.snapshotEvidenceDigest });
           signal.throwIfAborted();
-        } else if (replacement.length !== 1 || replacement[0]!.phase !== 'preactivated_readonly') {
+        } else if (replacement.length > 0 && (replacement.length !== 1 || replacement[0]!.phase !== 'preactivated_readonly')) {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'worker recovery retains an incomplete or competing replacement');
         }
-        return completeWorkerRecoveryProbe(driver, artifacts, owner, { runId, expectedRunRevision: cut.run.revision }, death, signal);
+        // An already durable normal model end retains its I2 handoff. It is
+        // neither resent nor given an unused healthy replacement generation.
+        const recovered = await completeWorkerRecoveryProbe(driver, artifacts, owner, { runId, expectedRunRevision: cut.run.revision }, death, signal);
+        signal.throwIfAborted();
+        const retiredWorker = await controller.closeRetained();
+        const current = await readRecoveryClosure(driver, artifacts, runId);
+        const quarantined = current.workspaceGenerations.find(row => row.generationRef === oldGeneration.generationRef);
+        if (!quarantined || quarantined.phase !== 'quarantined' || current.run.revision !== recovered.revision) {
+          throw new KernelStorageError('REVISION_CONFLICT', 'recovered generation changed before actual resource retirement');
+        }
+        const quarantine = await artifacts.readCanonical<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(quarantined.quarantineEvidenceRef);
+        const retiredWorkspace = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
+          identity: closure.generation, sourceRowVersion: quarantine.sourceRowVersion, signal });
+        if (!executionStore) throw new KernelStorageError('RECOVERY_REQUIRED', 'generation retirement has no original installed Store broker owner');
+        const brokerQuiescence = observeInstalledBrokerQuiescence(executionStore, runId);
+        await retireQuarantinedGeneration(driver, artifacts, owner, { runId, expectedRunRevision: recovered.revision,
+          expectedGenerationRowVersion: quarantined.rowVersion, generationRef: quarantined.generationRef,
+          workerRetirement: retiredWorker, workspaceRetirement: retiredWorkspace, brokerQuiescence });
+        return readRun(driver, runId);
       };
       const work = (async () => {
         if (closed || isClosing()) throw new KernelStorageError('LEASE_FENCED', 'Run execution is closing');
@@ -521,6 +716,16 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         }
         const wait = await artifacts.readCanonical<WorkerDeathWait>(run.waitingOnRef);
         if (wait.subject.kind !== 'worker_death') throw new KernelStorageError('INVALID_REQUEST', 'this execution scope cannot reconcile another subject');
+        if (activeWorker) {
+          if (wait.subject.oldWorkerLaunchId !== ownedLaunchId || !worker) {
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'worker recovery does not name this scope\'s retained physical worker');
+          }
+          const death = await worker.stop();
+          assertNativeContainmentDeath(death);
+          // The inspection below uses a fresh controller and the retained
+          // original containment. Never overwrite an unjoined physical owner.
+          await retireResources();
+        }
         if (wait.probeState.phase === 'automatic_in_flight' && wait.probeState.dispatch.owningSupervisorInstanceId !== owner.supervisorInstanceId) {
           // A successor closes, rather than resumes, the predecessor task.
           // Return its committed schedule; do not hide the backoff in a loop.
@@ -578,6 +783,22 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const joins = await Promise.allSettled([...(cancel ? [cancel] : []), ...(pending ? [pending.catch(() => {})] : [])]);
       const failure = joins.find(result => result.status === 'rejected');
       if (failure?.status === 'rejected') cleanupFailure ??= failure.reason;
+      if (activeWorker) {
+        try {
+          const run = readRun(driver, runId);
+          if (run.activeWorkerLaunchId !== ownedLaunchId) {
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'shutdown lost its retained worker\'s durable owner');
+          }
+          await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
+        } catch (error) { cleanupFailure ??= error; }
+        try {
+          if (!worker) throw new KernelStorageError('RECOVERY_REQUIRED', 'shutdown lost its original physical worker');
+          const death = await worker.stop();
+          assertNativeContainmentDeath(death);
+        } catch (error) { cleanupFailure ??= error; }
+        try { await retireResources(); }
+        catch (error) { cleanupFailure ??= error; }
+      }
       // Installation image release must not invalidate the execution's actual
       // retirement observation, and is still attempted after a failed join.
       try { await launcher.close(); }

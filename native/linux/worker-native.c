@@ -38,7 +38,7 @@ struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, re
     unsigned int next_scope, pending; char token[CLIQ_WORKER_TOKEN_BYTES]; unsigned int references;
     struct native_scope *scopes, *pending_scope;
     struct cliq_worker_packet retained, reservation, reservation_inspection;
-    bool reservation_bound, inspection_only;
+    bool reservation_bound, inspection_only, retained_observed;
     napi_env env; napi_async_work cleanup_work; napi_async_cleanup_hook_handle cleanup_hook;
     napi_deferred close_deferred; napi_ref close_promise;
 };
@@ -530,8 +530,58 @@ static napi_value scope_observation(napi_env env, const struct cliq_worker_packe
     return result;
 }
 
+/* Reobserve original containment at the synchronous release cut. Names locate
+ * only descriptor-relative candidates; retained device/inode and actual procfs
+ * membership must still match. No named-root or fork/migration fallback. */
+static bool scope_placement_current(struct native_scope *scope) {
+    struct controller *controller = scope->controller;
+    if (controller->closed || controller->retirement_failed || atomic_load(&native_retirement_failed) ||
+        !controller_placement(controller, controller->token)) return false;
+    int parent = -1, root = -1, group = -1;
+    int root_parent = controller->anchor_root;
+    bool valid = true; struct stat identity;
+    if (scope->invocation) {
+        if (!scope->parent || scope->parent->stopped) valid = false;
+        else {
+            parent = openat(controller->anchor_root, scope->parent->identity.cgroup_name,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            valid = parent >= 0 && private_cgroup(parent, &identity) &&
+                (uint64_t)identity.st_dev == scope->parent->identity.cgroup_device &&
+                (uint64_t)identity.st_ino == scope->parent->identity.cgroup_inode;
+            root_parent = parent;
+        }
+    }
+    if (valid) {
+        root = openat(root_parent, scope->identity.cgroup_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        valid = root >= 0 && private_cgroup(root, &identity) &&
+            (uint64_t)identity.st_dev == scope->identity.cgroup_device && (uint64_t)identity.st_ino == scope->identity.cgroup_inode;
+    }
+    if (valid && !scope->invocation) {
+        group = openat(root, "worker", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        valid = group >= 0 && private_cgroup(group, &identity);
+    }
+    char expected[PATH_MAX + 256];
+    int length = scope->invocation
+        ? snprintf(expected, sizeof(expected), "0::%s/%s/%s\n", controller->root_path + strlen("/sys/fs/cgroup"),
+            scope->parent ? scope->parent->identity.cgroup_name : "", scope->identity.cgroup_name)
+        : snprintf(expected, sizeof(expected), "0::%s/%s/worker\n", controller->root_path + strlen("/sys/fs/cgroup"), scope->identity.cgroup_name);
+    struct process_sample first, last;
+    valid = valid && length > 0 && (size_t)length < sizeof(expected) &&
+        sample_process(controller, (pid_t)scope->identity.pid, &first, true) && !first.absent && first.uid == geteuid() &&
+        strcmp(first.token, scope->identity.start_token) == 0 && strcmp(first.cgroup, expected) == 0 &&
+        sample_process(controller, (pid_t)scope->identity.pid, &last, true) && !last.absent &&
+        last.uid == first.uid && strcmp(last.token, first.token) == 0 && strcmp(last.cgroup, first.cgroup) == 0 &&
+        controller_placement(controller, controller->token);
+    int *descriptors[] = { &group, &root, &parent };
+    for (size_t i = 0; i < sizeof(descriptors) / sizeof(descriptors[0]); i++) {
+        if (!retire_descriptor(descriptors[i])) { controller->retirement_failed = true; valid = false; }
+    }
+    return valid && !atomic_load(&native_retirement_failed);
+}
+
 static bool scope_image_current(struct native_scope *scope) {
     char token[CLIQ_WORKER_TOKEN_BYTES], path[128]; struct stat held, current, owner, namespace;
+    if (!scope_placement_current(scope)) return false;
     if (!cliq_process_token((pid_t)scope->identity.pid, token) || strcmp(token, scope->identity.start_token) != 0) return false;
     snprintf(path, sizeof(path), "/proc/%ld", (long)scope->identity.pid);
     if (stat(path, &owner) != 0 || owner.st_uid != geteuid()) return false;
@@ -546,7 +596,8 @@ static bool scope_image_current(struct native_scope *scope) {
         scope->invocation ? "cliq-linux-edit" : "cliq-linux-worker");
     return stat(path, &current) == 0 && held.st_dev == current.st_dev && held.st_ino == current.st_ino &&
         cliq_generation_mount((pid_t)scope->identity.pid, scope->identity.generation_device, scope->identity.generation_inode, !scope->invocation) &&
-        cliq_process_token((pid_t)scope->identity.pid, token) && strcmp(token, scope->identity.start_token) == 0;
+        cliq_process_token((pid_t)scope->identity.pid, token) && strcmp(token, scope->identity.start_token) == 0 &&
+        scope_placement_current(scope);
 }
 
 static napi_value scope_inspect(napi_env env, napi_callback_info info) {
@@ -892,7 +943,7 @@ static napi_value terminate_retained(napi_env env, napi_callback_info info) {
         !parse_retained_tokens(request.init_start_token, subreaper, &request)) return failure(env, "retained native identity is unsupported or malformed");
     request.pid = (int64_t)pid;
     int held = (int)cgroup;
-    controller->retained = request;
+    controller->retained_observed = false; controller->retained = request;
     if (!begin_request(controller, NULL, &request, &held, 1)) return failure(env, "retained whole-hierarchy death could not be requested");
     return undefined(env);
 }
@@ -909,7 +960,52 @@ static napi_value poll_retained(napi_env env, napi_callback_info info) {
         response.observed_at_ms == 0 || response.observed_at_ms > UINT64_C(9007199254740991) ||
         response.cgroup_inode != controller->retained.cgroup_inode || response.pid_namespace_inode != controller->retained.pid_namespace_inode ||
         strcmp(response.init_start_token, controller->retained.init_start_token) != 0) return failure(env, "retained native death belongs to another reservation");
+    controller->retained_observed = true;
     return scope_observation(env, &response);
+}
+
+/* A closed inspector cannot resurrect or adopt its original worker. Verify
+ * both completed native joins and current kernel observations, using only the
+ * original held installation-root identity and retained process lifetimes. */
+static napi_value assert_retained_retired(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1], self; struct controller *controller; uint64_t root;
+    napi_get_cb_info(env, info, &argc, args, &self, NULL);
+    if (argc != 1 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+        !controller->closed || !controller->cleanup_done || !controller->reaped || !controller->retained_observed ||
+        controller->retirement_failed || atomic_load(&native_retirement_failed) || controller->scopes ||
+        !number(env, args[0], &root) || root > INT32_MAX)
+        return failure(env, "retained namespace/resource owners have not positively retired");
+    struct stat held, scope_identity; char events[512];
+    if (!private_cgroup((int)root, &held) || !same_directory(&controller->root_identity, &held))
+        return failure(env, "retained retirement lost its original installation root");
+    int scope = openat((int)root, controller->retained.cgroup_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool valid = scope >= 0 && private_cgroup(scope, &scope_identity) &&
+        scope_identity.st_dev == held.st_dev && (uint64_t)scope_identity.st_ino == controller->retained.cgroup_inode &&
+        read_bounded(controller, scope, "cgroup.events", events, sizeof(events)) &&
+        (strncmp(events, "populated 0\n", 12) == 0 || strstr(events, "\npopulated 0\n") != NULL) &&
+        !(strncmp(events, "populated 1\n", 12) == 0 || strstr(events, "\npopulated 1\n") != NULL);
+    int64_t pids[] = { controller->retained.pid, controller->retained.namespace_init_pid,
+        controller->retained.monitor_pid, controller->retained.subreaper_pid };
+    const char *tokens[] = { controller->retained.start_token, controller->retained.init_native_start_token,
+        controller->retained.monitor_start_token, controller->retained.subreaper_start_token };
+    for (size_t i = 0; valid && i < sizeof(pids) / sizeof(pids[0]); i++) {
+        struct process_sample sample;
+        valid = pids[i] > 0 && pids[i] <= INT32_MAX && *tokens[i] && sample_process(controller, (pid_t)pids[i], &sample, false) &&
+            (sample.absent || strcmp(sample.token, tokens[i]) != 0);
+    }
+    struct stat current;
+    valid = valid && fstat(scope, &current) == 0 && same_directory(&scope_identity, &current) &&
+        private_cgroup((int)root, &current) && same_directory(&controller->root_identity, &current);
+    if (!retire_descriptor(&scope)) controller->retirement_failed = true;
+    if (controller->retirement_failed || atomic_load(&native_retirement_failed)) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "retained retirement inspection descriptors did not retire"); return NULL;
+    }
+    if (!valid) return failure(env, "retained containment or namespace owner is not currently empty and dead");
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0) return failure(env, "retained retirement observation time unavailable");
+    double observed = (double)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    if (observed <= 0 || observed > 9007199254740991.0) return failure(env, "retained retirement observation time invalid");
+    napi_value result; napi_create_double(env, observed, &result); return result;
 }
 
 static napi_value controller_close(napi_env env, napi_callback_info info) {
@@ -1025,6 +1121,7 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "createInvocation", NULL, create_invocation, NULL, NULL, NULL, napi_default, NULL },
         { "terminateRetained", NULL, terminate_retained, NULL, NULL, NULL, napi_default, NULL },
         { "pollRetained", NULL, poll_retained, NULL, NULL, NULL, napi_default, NULL },
+        { "assertRetainedRetired", NULL, assert_retained_retired, NULL, NULL, NULL, napi_default, NULL },
         { "close", NULL, controller_close, NULL, NULL, NULL, napi_default, NULL }
     };
     /* All receiver allocation/branding and async ownership precede the first

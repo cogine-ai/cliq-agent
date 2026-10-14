@@ -74,6 +74,7 @@ export function assertNativePreactivationObservation(observation: NativePreactiv
 
 export type LinuxBlockedWorker = Readonly<{
   containment: ProcessContainment;
+  assertHeld(): void;
   observeProcess(): Promise<LinuxObservedProcess>;
   activateCommitted(launch: WorkerLaunch): Promise<void>;
   createInvocation(closure: BuiltinEditLaunchClosure): Promise<LinuxBlockedInvocation>;
@@ -89,6 +90,7 @@ export type LinuxWorkerController = Readonly<{
   launchWorker(input: { closure: WorkerLaunchClosure; generation: RunWorkspaceGeneration; activationNonceDigest: string }): Promise<LinuxBlockedWorker>;
   terminateRetained(input: { closure: WorkerLaunchClosure; containment: ProcessContainment; workerIdentity: WorkerIdentity;
     signal?: AbortSignal }): Promise<NativeContainmentDeathObservation>;
+  closeRetained(): Promise<NativeRetainedWorkerRetirement>;
   close(): Promise<void>;
 }>;
 export type LinuxWorkerLauncher = Readonly<{ startController(options?: { signal?: AbortSignal }): Promise<LinuxWorkerController>; close(): Promise<void> }>;
@@ -118,11 +120,36 @@ type NativeController = { pid: number; processStartToken: string;
   createInvocation(generation: number, parent: NativeScope, helper: NativeImage, adapter: NativeImage, bwrap: NativeImage, input: NativeImage, config: object): NativeScope;
   terminateRetained(cgroup: number, config: object): void;
   pollRetained(): NativeObservation | undefined;
+  assertRetainedRetired(cgroupRootFd: number): number;
   close(): Promise<void>;
 };
 export type NativeWorkerBinding = { interfaceVersion: 3; sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
   openController(helper: NativeImage, cgroupRootFd: number): NativeController };
 type NativeBinding = NativeWorkerBinding;
+
+declare const retiredWorkerBrand: unique symbol;
+export type NativeRetainedWorkerRetirement = Readonly<{ [retiredWorkerBrand]: true }>;
+const retiredWorkers = new WeakMap<NativeRetainedWorkerRetirement,
+  { containment: ProcessContainment; deathObservedAt: string; assertCurrent(): number }>();
+/** Fresh physical check of a genuine joined native owner. No data decoder or
+ * caller callback can mint this receipt or its zero resource observations. */
+export function readNativeRetainedWorkerRetirement(receipt: NativeRetainedWorkerRetirement): Readonly<{
+  containment: ProcessContainment; observedAt: string; liveContainmentCount: 0; activeMountCount: 0;
+}> {
+  const held = retiredWorkers.get(receipt);
+  if (!held) throw new TypeError('invalid native retained worker retirement');
+  let observed: number;
+  try { observed = held.assertCurrent(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw retirementError('retained native inspection resource did not retire', error);
+    throw error;
+  }
+  if (!Number.isSafeInteger(observed) || observed < 1) mismatch('native retirement observation time is invalid');
+  const observedAt = new Date(observed).toISOString();
+  if (observedAt < held.deathObservedAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement clock precedes original actual death');
+  return immutableSnapshot({ containment: held.containment, observedAt, liveContainmentCount: 0, activeMountCount: 0 });
+}
 
 export async function openInstalledLinuxWorkerLauncher(selected: HeldInstalledRuntime,
   anchor: HeldInstalledAnchor): Promise<LinuxWorkerLauncher> {
@@ -503,6 +530,8 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
         signal?.throwIfAborted();
         let native!: NativeController;
         let controllerClosed = false, controllerClosing: Promise<void> | undefined;
+        let retainedDeath: NativeContainmentDeathObservation | undefined;
+        let retired: NativeRetainedWorkerRetirement | undefined;
         const closeController = () => {
           controllerClosed = true;
           if (!controllerClosing) {
@@ -611,6 +640,13 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                 const containment = actualContainment(closure, created.observe()); let active = false, borrowRetired = false;
                 const worker: LinuxBlockedWorker = Object.freeze({
                   containment,
+                  assertHeld() {
+                    if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'model release requires the original active native worker');
+                    controllerReceiver(); borrowed.assertHeld();
+                    const current = created.observe();
+                    same(actualContainment(closure, current, containment.createdAt), containment, 'current native worker containment');
+                    controllerReceiver(); borrowed.assertHeld();
+                  },
                   async observeProcess() { if (this !== worker) throw new TypeError('invalid blocked worker'); receiver(); borrowed.assertHeld(); return observedProcess(created, workerDigest); },
                   async activateCommitted(launch) {
                     if (this !== worker) throw new TypeError('invalid blocked worker'); borrowed.assertHeld();
@@ -686,6 +722,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
             },
             async terminateRetained({ closure, containment, workerIdentity, signal }) {
               if (this !== controller) throw new TypeError('invalid controller receiver'); controllerReceiver();
+              retainedDeath = undefined;
               if (signal?.aborted) { await closeController(); signal.throwIfAborted(); }
               assertWorkerLaunchClosure(closure);
               same(closure.bundle, bundle, 'retained worker bundle');
@@ -703,8 +740,28 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                   workerPid: workerIdentity.pid, processStartToken: workerIdentity.processStartToken }); });
                 const observed = await awaitNative(() => native.pollRetained(), closeController, signal);
                 controllerReceiver(); signal?.throwIfAborted();
-                return checkedDeath(observed, containment);
+                const death = checkedDeath(observed, containment);
+                retainedDeath = death;
+                return death;
               } catch (error) { await closeController(); throw error; }
+            },
+            async closeRetained() {
+              if (this !== controller) throw new TypeError('invalid controller receiver');
+              const death = retainedDeath;
+              if (!death) throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement requires this inspector\'s actual full-containment death');
+              await closeController();
+              if (!retired) {
+                const receipt = Object.freeze({}) as NativeRetainedWorkerRetirement;
+                retiredWorkers.set(receipt, { containment: death.containment, deathObservedAt: death.observedAt, assertCurrent() {
+                  receiver();
+                  let observed!: number;
+                  source.withRoot(fd => { observed = native.assertRetainedRetired(fd); });
+                  return observed;
+                } });
+                retired = receipt;
+              }
+              readNativeRetainedWorkerRetirement(retired);
+              return retired;
             },
             async close() { if (this !== controller) throw new TypeError('invalid worker controller'); await closeController(); controllers.delete(native); }
           });

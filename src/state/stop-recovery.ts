@@ -12,9 +12,9 @@ import { joinResourceOperations } from './errors.js';
 import { isZeroBudget } from './invariants.js';
 import { readControlRequest, readSession, readSessionPrincipalId } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
-import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readResourceStopCause } from './resource-stop.js';
 import { validateModelFailureStop } from './model-failure.js';
+import { assertRetiredGenerationCut } from './generation-retirement.js';
 
 export type CancelResponse = Extract<ControlApplicationResponseV1, { ok: true }> & { result: Extract<ControlResultV1, { method: 'run.cancel' }> };
 
@@ -76,7 +76,7 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
       run.status !== intent.targetStatus || run.terminalReason !== intent.reason || !run.terminalDetailRef || run.resultRef ||
       run.nextStep !== null || run.frontierRef || run.activeWorkerLaunchId || run.waitingOnRef || run.waitingReason ||
       closure.workerLaunches.some((launch) => launch.phase !== 'retired') ||
-      closure.workspaceGenerations.some((generation) => generation.phase !== 'sealed') ||
+      closure.workspaceGenerations.some((generation) => generation.phase !== 'sealed' && generation.phase !== 'retired') ||
       checkpoint.id !== stopCheckpointId(run.id, run.stopIntentRef) || checkpoint.createdAt !== run.updatedAt ||
       checkpoint.journalSeq !== journal.length || checkpoint.runItemSeq !== closure.items.length) throw new TypeError('terminal stop has an open Run/worker/budget cut');
   const detail = await readCanonicalArtifact<TerminalDetail>(artifacts, run.terminalDetailRef);
@@ -86,10 +86,9 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   requireEqual(detail, agentStopDetail(intent, run.stopIntentRef, preparedAt), 'terminal reason closure');
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
   if (assembly.format !== 'cliq-run-assembly-v1' || assembly.mcpServers.length) throw new TypeError('terminal stop lacks its typed containment closure');
-  // Common recovery has already verified the complete sealed-worker graph.
-  if (readWorkerLaunchesForRun(driver, run.id).some(launch => launch.phase !== 'retired' || launch.generationWriteState !== 'sealed')) {
-    throw new TypeError('terminal stop retains an unsealed worker');
-  }
+  // Common recovery verified every complete seal or retirement/source graph;
+  // a phase string alone cannot satisfy this final retained SQL cut.
+  assertRetiredGenerationCut(driver, run, closure.workspaceGenerations);
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
     if (!['model', 'tool'].includes(entry.opKind) || (entry.phase !== 'completed' &&
         (entry.phase !== 'failed' || hasClaim))) throw new TypeError('terminal stop retains unresolved dispatch evidence');

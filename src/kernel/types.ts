@@ -894,6 +894,27 @@ export type WorkspaceGenerationQuarantineEvidenceV1 =
         }
     );
 
+export type WorkspaceGenerationRetirementEvidenceV1 = {
+  schemaVersion: 1;
+  format: 'cliq-workspace-generation-retirement-evidence-v1';
+  runId: string;
+  generationRef: ArtifactRef;
+  generationIdentityDigest: string;
+  inspectorIdentityRef: ArtifactRef;
+  inspectorIdentityDigest: string;
+  observedAt: string;
+  evidenceDigest: string;
+} & (
+  | { fromPhase: 'sealed'; snapshotEvidenceRef: ArtifactRef; snapshotEvidenceDigest: string; workerLaunchId: string;
+      containmentDeathEvidenceRef: ArtifactRef; containmentDeathEvidenceDigest: string;
+      quarantineEvidenceRef?: never; quarantineEvidenceDigest?: never }
+  | { fromPhase: 'quarantined'; quarantineEvidenceRef: ArtifactRef; quarantineEvidenceDigest: string;
+      sourceQuarantinedRowVersion: number; activeRunPointerCount: 0; nonretiredWorkerLaunchCount: 0;
+      liveContainmentCount: 0; activeMountCount: 0; releasableBrokerClaimCount: 0;
+      snapshotEvidenceRef?: never; snapshotEvidenceDigest?: never; workerLaunchId?: never;
+      containmentDeathEvidenceRef?: never; containmentDeathEvidenceDigest?: never }
+);
+
 export type WorkspaceGenerationStateBaseV1 = {
   schemaVersion: 1;
   generationId: string;

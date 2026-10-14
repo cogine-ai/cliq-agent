@@ -65,7 +65,7 @@ typedef struct {
     generation_tree *trees;
     source_staging *source_stagings;
     worker_reservation *worker_reservations;
-    int source_retirement_error, worker_reservation_error;
+    int source_retirement_error, worker_reservation_error, generation_retirement_error;
     int finalized;
 } state_lock;
 
@@ -189,6 +189,9 @@ static state_lock *unwrap_lock(napi_env env, napi_callback_info info) {
 static napi_value assert_held(napi_env env, napi_callback_info info) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
+    if (lock->generation_retirement_error) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "generation descriptors did not retire; StateOwner remains held"); return NULL;
+    }
     if (!lock_is_held(lock)) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
     napi_value result;
     if (napi_get_undefined(env, &result) != napi_ok) return NULL;
@@ -198,11 +201,17 @@ static napi_value assert_held(napi_env env, napi_callback_info info) {
 static napi_value release_lock(napi_env env, napi_callback_info info) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
-    if (close_lock_source_stagings(lock)) {
+    int source_failed = close_lock_source_stagings(lock);
+    int reservation_failed = close_lock_worker_reservations(lock);
+    close_lock_trees(lock);
+    if (source_failed) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source staging descriptors did not retire; StateOwner remains held"); return NULL;
     }
-    if (close_lock_worker_reservations(lock)) {
+    if (reservation_failed) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "worker reservation descriptors did not retire; StateOwner remains held"); return NULL;
+    }
+    if (lock->generation_retirement_error) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "generation descriptors did not retire; StateOwner remains held"); return NULL;
     }
     close_lock(lock);
     napi_value result;

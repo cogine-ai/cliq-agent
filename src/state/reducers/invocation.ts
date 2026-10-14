@@ -39,6 +39,10 @@ import { decodeBudgetSettlement, decodeContextManifest, decodeRunSpec } from '..
 import { readCanonicalArtifact } from '../agent-context.js';
 import type { ModelRequestV1, NormalPromptProjectionV1, ModelVisiblePromptV1 } from '../../model/request.js';
 import { assertSameModelOperation, modelRetryState } from '../../runtime/model-retry.js';
+import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
+import { assertModelGrantDispatch, readModelGrantClosure } from '../model-grant.js';
+import { prepareInstalledBrokerAmbiguity } from '../broker-ambiguity.js';
+import { MODEL_BROKER_ENTRY_ID } from '../model-broker-native.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -204,7 +208,7 @@ export async function prepareValidatedInvocation(
   input: PrepareInvocationInput,
   typed?: {
     metadata: PublishedArtifact[];
-    validate: (connection: SqliteConnection, run: Run, attempt: number) => void;
+    validate: (connection: SqliteConnection, run: Run, attempt: number, now: string) => void;
     commit?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry) => void;
   }
 ): Promise<{ entry: InvocationJournalEntry; run: Run }> {
@@ -246,7 +250,7 @@ export async function prepareValidatedInvocation(
     );
     const highest = readHighestPreparedAttempt(connection, input.runId, input.opId);
     const attempt = highest === undefined ? 0 : highest.attempt + 1;
-    typed?.validate(connection, run, attempt);
+    typed?.validate(connection, run, attempt, now);
     if (highest !== undefined) {
       const previous = readInvocationAttempt(connection, input.runId, input.opId, highest.attempt);
       if (!previousAttemptAllowsRetry(previous)) {
@@ -328,7 +332,7 @@ export async function readModelRetryHistory(driver: SqliteDriver, artifacts: Art
   return history;
 }
 
-const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
+export const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
   driver: SqliteDriver, artifacts: ArtifactCatalog, prepared: InvocationJournalEntry
 ) => {
   const run = readRun(driver, prepared.runId);
@@ -336,7 +340,7 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
   const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef);
   const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
   const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
-  const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
+  const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   const checkpoint = readCheckpoint(driver, run.latestCheckpointId);
   const context = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));
   if (frontier.kind !== 'agent' || !['model_turn', 'context_compaction'].includes(frontier.phase) ||
@@ -344,7 +348,7 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
       prepared.opId !== modelOperationId(run.id, frontier) ||
       request.schemaVersion !== 1 || request.format !== 'cliq-model-request-v1' ||
       request.requestDigest !== digestOmitting(request, 'requestDigest') || request.runId !== run.id ||
-      request.opId !== prepared.opId || request.attempt !== prepared.attempt || request.model !== prepared.target || request.assemblyRef !== context.assemblyRef ||
+      request.opId !== prepared.opId || request.attempt !== prepared.attempt || request.model !== assembly.provider.model || request.assemblyRef !== context.assemblyRef ||
       spec.operation !== 'agent' || request.assemblyRef !== spec.assemblyRef || context.admittedContextRef !== spec.admittedContextRef ||
       request.kind !== (frontier.phase === 'model_turn' ? 'normal' : 'context_compaction') || request.compactionPlanRef !== frontier.compactionPlanRef ||
       context.runId !== run.id || checkpoint.runId !== run.id || context.throughItemSeq !== checkpoint.runItemSeq ||
@@ -370,7 +374,13 @@ const readModelClaimCut = stateOperation('RECOVERY_REQUIRED', async (
   }
   const history = await readModelRetryHistory(driver, artifacts, run.id, prepared.opId);
   modelRetryState(assembly.retry.model, history, sampleCanonicalNow());
-  return { run, checkpoint, prepared, retryPolicy: assembly.retry.model };
+  if (!prepared.grantRef) throw new KernelStorageError('RECOVERY_REQUIRED', 'prepared model claim has no operation grant');
+  const authority = await readModelGrantClosure(driver, artifacts, { run, spec, assembly, frontier,
+    frontierRef: run.frontierRef, request, requestRef: prepared.requestRef, grantRef: prepared.grantRef });
+  if (prepared.target !== authority.targetRef || prepared.timestamp < authority.grant.issuedAt) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'prepared model claim target or time differs from its operation grant');
+  }
+  return { run, checkpoint, prepared, request, spec, assembly, frontier, authority, retryPolicy: assembly.retry.model };
 });
 
 export async function claimInvocationDispatch(
@@ -432,6 +442,7 @@ export async function claimValidatedInvocation(
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'dispatch claim is not for the highest prepared attempt');
     }
     if (highest.opKind === 'model' && (!modelCut || highest.requestRef !== modelCut.prepared.requestRef ||
+        highest.grantRef !== modelCut.prepared.grantRef || highest.target !== modelCut.prepared.target ||
         run.nextStep !== 'agent' || run.frontierRef !== modelCut.run.frontierRef || run.latestCheckpointId !== modelCut.run.latestCheckpointId ||
         readCheckpoint(connection, run.latestCheckpointId).contextManifestRef !== modelCut.checkpoint.contextManifestRef ||
         latestRunItemSequence(connection, run.id) !== modelCut.checkpoint.runItemSeq)) {
@@ -441,6 +452,8 @@ export async function claimValidatedInvocation(
     if (attemptEntries.length !== 1 || attemptEntries[0]?.phase !== 'prepared') {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'invocation attempt is already claimed or settled');
     }
+    if (modelCut) assertModelGrantDispatch(modelCut.authority.grant, { run, prepared: highest,
+      history: readOperationJournal(connection, run.id, highest.opId), now });
     validate?.(connection, run, highest, now);
     claimed = {
       ...highest,
@@ -483,7 +496,9 @@ export type SettlementContinuation = (input: {
   settlement: BudgetSettlementV1;
 }) => Promise<{
   metadata: PublishedArtifact[];
-  commit: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void;
+  unknownEvidence?: { evidenceRef: string; evidenceDigest: string };
+  validate?: (connection: SqliteConnection, run: Run, committedAt: string) => void;
+  commit?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void;
 }>;
 
 export async function settleValidatedInvocation(
@@ -588,19 +603,25 @@ export async function settleValidatedInvocation(
     settlement.settlementDigest = digestOmitting(settlement, 'settlementDigest');
     const settlementArtifact = await artifacts.publishCanonical(settlement, 'cliq-budget-settlement-v1');
     const continuationPlan = await continuation?.({ run: snapshotRun, prepared, settlement });
+    if (continuationPlan?.unknownEvidence && terminal.phase !== 'unknown') {
+      throw new KernelStorageError('INVALID_REQUEST', 'only a protected unknown settlement can restage its evidence');
+    }
+    const selectedTerminal = terminal.phase === 'unknown' && continuationPlan?.unknownEvidence
+      ? { ...terminal, ...continuationPlan.unknownEvidence } : terminal;
     try {
       return commitInitialSettlement(
         driver,
         owner,
         input,
-        terminal,
+        selectedTerminal,
         prepared,
         claim,
         snapshotRun,
         settlement,
         settlementArtifact,
         [...terminalMetadata, ...(continuationPlan?.metadata ?? [])],
-        continuationPlan?.commit
+        continuationPlan?.commit,
+        continuationPlan?.validate
       );
     } catch (error) {
       if (error instanceof ReducerSnapshotChanged) {
@@ -624,7 +645,8 @@ function commitInitialSettlement(
   settlement: BudgetSettlementV1,
   settlementArtifact: PublishedArtifact,
   terminalMetadata: PublishedArtifact[],
-  commitContinuation?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void
+  commitContinuation?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void,
+  validateTerminal?: (connection: SqliteConnection, run: Run, committedAt: string) => void
 ): { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run } {
   let result!: { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run };
   let fenceOutcome: TimeFenceAdvance | undefined;
@@ -654,6 +676,7 @@ function commitInitialSettlement(
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, committedAt);
     if (fenceOutcome !== 'healthy') return;
     if (committedAt < settlement.settledAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'transaction clock precedes its staged settlement');
+    validateTerminal?.(connection, run, committedAt);
     insertArtifactMetadata(connection, settlementArtifact, committedAt);
     for (const artifact of terminalMetadata) {
       insertArtifactMetadata(connection, artifact, committedAt);
@@ -753,17 +776,41 @@ export function failClaimedInvocationWithoutRelease(
   });
 }
 
-export function markInvocationUnknown(
+export async function markInvocationUnknown(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
   input: SettleInvocationInput & { evidenceRef: string; evidenceDigest: string }
 ): Promise<{ entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run }> {
+  const run = readRun(driver, input.runId);
+  const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
+  const assembly = await readCanonicalArtifact<Partial<RunAssemblyV1>>(artifacts, spec.assemblyRef);
+  const prepared = readInvocationAttempt(driver, input.runId, input.opId, input.attempt).find(entry => entry.phase === 'prepared');
+  if (prepared?.opKind === 'model' && assembly.format === 'cliq-run-assembly-v1' && assembly.provider?.adapter?.adapterId === MODEL_BROKER_ENTRY_ID) {
+    return markInstalledBrokerAmbiguity(driver, artifacts, owner, input);
+  }
   return settleValidatedInvocation(driver, artifacts, owner, input, {
     phase: 'unknown',
     evidenceRef: input.evidenceRef,
     evidenceDigest: input.evidenceDigest
   });
+}
+
+/** Private installed failed-release producer only. The protected continuation
+ * fixes observation time to the actual unknown Journal settlement, then checks
+ * its exact current claim inside that same SQL transaction before insertion. */
+export function markInstalledBrokerAmbiguity(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  input: SettleInvocationInput & { evidenceRef: string; evidenceDigest: string }
+): Promise<{ entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run }> {
+  return settleValidatedInvocation(driver, artifacts, owner, input,
+    { phase: 'unknown', evidenceRef: input.evidenceRef, evidenceDigest: input.evidenceDigest },
+    async ({ run, prepared, settlement }) => {
+      const claim = readInvocationAttempt(driver, input.runId, input.opId, input.attempt).find(entry => entry.phase === 'dispatch_claimed');
+      const plan = await prepareInstalledBrokerAmbiguity(driver, artifacts, owner, { run, prepared, claim,
+        evidenceRef: input.evidenceRef, evidenceDigest: input.evidenceDigest, settledAt: settlement.settledAt });
+      if (!plan) throw new KernelStorageError('INVALID_REQUEST', 'installed broker ambiguity requires its fixed admitted model recipe');
+      return plan;
+    });
 }
 
 export async function abandonUnknownInvocation(

@@ -10,6 +10,28 @@ import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_PATH, STATE_OWNER_NATIV
 let supervisorImage: Promise<{ digest: string; byteCount: number }> | undefined;
 let nativeImage: Promise<{ digest: string; byteCount: number }> | undefined;
 
+/** Fixed public test certificate; its discarded private key is not retained.
+ * Offline artifact data only, never an installed TLS/provider qualification. */
+export const OFFLINE_MODEL_TRUST_STORE_PEM = `-----BEGIN CERTIFICATE-----
+MIIC0DCCAbgCCQCjpyAgsuVh1DANBgkqhkiG9w0BAQsFADAqMSgwJgYDVQQDDB9D
+bGlxIG9mZmxpbmUgbW9kZWwgZGF0YSBmaXh0dXJlMB4XDTI2MTAxNDE5Mjg1MFoX
+DTM2MTAxMTE5Mjg1MFowKjEoMCYGA1UEAwwfQ2xpcSBvZmZsaW5lIG1vZGVsIGRh
+dGEgZml4dHVyZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALKLqi3X
+5Cxn3MQGUtIs1wIJ+iCHBHEtEfxkz820tJrKfTlKmT/8RuXXR0Wnh3nK5KdmTQ+b
+NYHOQpolw0FMtv0Tig3ucgW/hxqQcs/W0VOdbooOmlC0KYjBj8BdzhftXTdZiZJG
+s6it26V3U83W7UGRiB1ApkDJOYn/N5Pp1RoQzB5bK4SubGlRZdGsU2hWuAJ32Yk/
+Rubxgpcnn8N6DUtHTxiaJbLj0lWncIe71pnp6cq/81PIjJbN6PWTG5wCnF4VJEA8
+s0EReG/BqfkjonEvn6tjP+tElL3kECBMD7Z3n79i/UvLRSZD23RVjQRmBYFBdXuC
+fb7+AdbVtQ9sSjECAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAIeMDGg4poGnMNg3x
+tA3rFni/7CD/TBt+tLCY8hYIjXFUc1zDAp8qUAU+P9aElEs9Rxa7Kt7e2U8u2tuG
+yeTucftNXxl2i2cJIwzRUnYUY3IaaCi7o0Fwg/JIXEDJEyJcx9j25ufK30TSjiwl
+1mviZnfkMfYFXb/ZL0Am7KRoD2a5LdW4N9NhwTk4qcLlACbrLJnJ8J+JtZ1lU5lr
+uWCIn2hJIPBKvBFJa5lWShhvQji1ZJzbq+TsQRTnah287dcI/gFAZ6oNILCNWSe8
+/WC2F/znIrjWD1U7m71V541PrOhq2BNmD4InInkeSUBcbNIuu4E2IpR1hKvF4M6T
+Pi66oQ==
+-----END CERTIFICATE-----
+`;
+
 /** A real Ed25519 signature under an explicitly injected test root. Not a Cliq release/installation qualification. */
 export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContractManifestV1['entries']) {
   supervisorImage ??= readFile(process.execPath).then((bytes) => ({ digest: sha256Bytes(bytes), byteCount: bytes.byteLength }));
@@ -28,7 +50,8 @@ export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContr
       { ...entry(STATE_OWNER_NATIVE_ENTRY_ID, 'platform_helper', true, helper.digest, '1', helper.byteCount), relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH },
       entry(assembly.provider.adapter.adapterId, 'provider_adapter', true, assembly.provider.adapter.codeDigest, assembly.provider.adapter.version),
       entry('policy-v1', 'policy_engine', false, profileRef, '1', canonicalJsonBytes(profile).byteLength),
-      entry('default_https_trust_store', 'trust_store', false), entry('root-profile-test', 'sandbox_root_profile', false),
+      entry('default_https_trust_store', 'trust_store', false, sha256Bytes(Buffer.from(OFFLINE_MODEL_TRUST_STORE_PEM)), '1',
+        Buffer.byteLength(OFFLINE_MODEL_TRUST_STORE_PEM)), entry('root-profile-test', 'sandbox_root_profile', false),
       ...tools.flatMap((tool) => tool.execution.kind === 'builtin'
         ? [entry(tool.execution.adapterId, 'tool_adapter', true, tool.execution.adapterCodeDigest, tool.execution.adapterVersion)] : [])],
     structuredArtifacts: [{ kind: 'policy_engine_profile', artifactId: 'policy-v1', rootEntryId: 'policy-v1',
@@ -40,7 +63,8 @@ export async function signedToolBundle(assembly: RunAssemblyV1, tools: ToolContr
   const bundleRef = canonicalSha256(bundle);
   assembly.runtime.runtimeBundleRef = bundleRef;
   assembly.runtime.runtimeBundleManifestDigest = bundle.manifestDigest;
-  return { bundle, profile, releaseKeys: [{ keyId: bundle.publisherKeyId, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }],
+  return { bundle, profile, trustStorePem: OFFLINE_MODEL_TRUST_STORE_PEM,
+    releaseKeys: [{ keyId: bundle.publisherKeyId, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }],
     engine: { id: 'cliq-policy-v1' as const, version: '1', runtimeBundleRef: bundleRef,
       profileEntryId: 'policy-v1', profileRef, profileDigest: profile.profileDigest } };
 }

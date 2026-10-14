@@ -12,6 +12,7 @@ import { advanceTimeFence, readTimeFence, sampleCanonicalNow } from './canonical
 import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { decodeSourceManifest } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import { loadNativeStateOwner, readSourceInspectionStagingRetirement, retireSourceInspectionStaging,
   type HeldSourceInspectionStaging, type HeldWorkspaceRoot, type SourceInspectionStagingRetirement } from './native-owner.js';
 import { insertControlRequest, readAdmissionReplay, readControlRequest, readSession, readSessionPrincipalId } from './rows.js';
@@ -89,10 +90,22 @@ function assertErrorResponse(value: unknown, inspectionId: string): asserts valu
     throw new KernelStorageError('RECOVERY_REQUIRED', 'retained source error has unknown fields');
 }
 
+/** Retained inert response only. The owning capture/replay path establishes
+ * retirement and the control association; this friend mints no Run or proof. */
+export async function readSourceInspectionErrorResponse(artifacts: ArtifactCatalog, row: SourceInspectionAttemptV1): Promise<ErrorResponse> {
+  if (row.phase !== 'retired' || row.outcome.kind === 'captured')
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection has no retained refusal response');
+  const response = await readCanonicalArtifact(artifacts, row.outcome.errorResponseRef);
+  assertErrorResponse(response, row.inspectionId);
+  if ((row.outcome.kind === 'cancelled') !== (response.error.code === 'CANCEL_REQUESTED'))
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'source outcome differs from its retained refusal');
+  return immutableSnapshot(response);
+}
+
 /** Replay validates retained evidence; it never turns old bytes into a new
  * native observation or authorizes recapture. Only the implemented no-process
  * prefix is accepted until the corresponding fixed-recipe producers exist. */
-async function readRetirement(driver: SqliteDriver, artifacts: ArtifactCatalog, row: Retired,
+export async function readSourceInspectionRetirement(driver: SqliteDriver, artifacts: ArtifactCatalog, row: Retired,
   runtime: { runtimeBundleRef: string; runtimeBundleManifestDigest: string }): Promise<void> {
   try {
     const evidence = await readCanonicalArtifact<SourceInspectionRetirementEvidenceV1>(artifacts, row.retirementEvidenceRef);
@@ -158,7 +171,7 @@ async function replay(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: S
   const originalIndex = readSourceInspectionOriginalRequest(driver, retained.inspectionId);
   const { target } = await readRetainedSourceInspectionTarget(artifacts, retained, originalIndex, bootstrap);
   if (retained.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'source inspection still owns unretired capture resources');
-  await readRetirement(driver, artifacts, retained, target);
+  await readSourceInspectionRetirement(driver, artifacts, retained, target);
   const metadata: PublishedArtifact[] = [];
   if (retained.outcome.kind === 'captured') {
     const source = decodeSourceManifest(await readCanonicalArtifact(artifacts, retained.outcome.sourceManifestRef));
@@ -284,7 +297,8 @@ export async function retireAbandonedSourceInspections(driver: SqliteDriver, art
  * It returns no accepted Run or process proof. An uncertain cleanup keeps its
  * durable capturing row and prevents another capture of that workspace. */
 export async function captureSubmittedSource(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  bootstrap: SourceInspectionOwnerBootstrap, input: { request: unknown; identity: AuthenticatedControlIdentity }, signal?: AbortSignal):
+  bootstrap: SourceInspectionOwnerBootstrap, input: { request: unknown; identity: AuthenticatedControlIdentity }, signal?: AbortSignal,
+  selectedRuntime?: HeldInstalledRuntime):
 Promise<SourceInspectionAttemptV1> {
   const normalized = normalizeRunSubmitRequest(input.request), request = normalized.request, identity = immutableSnapshot(input.identity);
   signal?.throwIfAborted(); await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
@@ -299,11 +313,18 @@ Promise<SourceInspectionAttemptV1> {
   const deadline = new AbortController();
   const captureSignal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
   try {
-    const native = await loadNativeStateOwner(bootstrap.bundle); captureSignal.throwIfAborted();
+    const native = selectedRuntime ? await withHeldInstalledRuntime(selectedRuntime, async installed => {
+      await installed.revalidate();
+      if (installed.bundleDigest !== canonicalSha256(bootstrap.bundle))
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'source native loader differs from its selected installed runtime');
+      const native = await installed.loadStateOwner(); await installed.revalidate(); return native;
+    }) : await loadNativeStateOwner(bootstrap.bundle);
+    captureSignal.throwIfAborted();
     home = native.openWorkspaceRoot(bootstrap.controlledHome); resources.push(home);
     trust = await holdWorkspaceSourceTrust(home, request.workspacePath, captureSignal); resources.push(trust);
     captureSignal.throwIfAborted(); workspaceRoot = native.openWorkspaceRoot(request.workspacePath); resources.push(workspaceRoot);
-    target = await createVerifiedSourceInspectionTarget({ driver, artifacts, owner, bootstrap, workspaceRoot, trust }, normalized.originalRequest, identity);
+    target = await createVerifiedSourceInspectionTarget({ driver, artifacts, owner, bootstrap, workspaceRoot, trust,
+      selectedRuntime }, normalized.originalRequest, identity);
     captureSignal.throwIfAborted();
     const held = readVerifiedSourceInspectionTarget(owner, target);
     stage = owner.filesystem.createSourceInspectionStaging(held.inspectionId, sha256Bytes(randomBytes(32)));

@@ -1346,6 +1346,110 @@ Implementation notes:
     Candidate self-test and compatibility inspection cannot open authoritative state for write. Activation requires the current state schema to be accepted by both old and new bundles, checks every nonterminal Run schema/assembly, and proves the candidate can launch each pinned worker/guest bundle. Pre-health candidate startup may validate but cannot migrate authoritative state; a schema change is eligible only when work package 01's transactional migration leaves the prior bundle able to reopen the resulting schema through the startup-rollback window. Otherwise return `drain_required` and leave the current Supervisor and active selection untouched across reboot.
 
     For an eligible update, the current Supervisor gates new admission, persists its handoff point, and releases the exclusive state-owner lock; the bootstrap atomically replaces/fsyncs `active.json` and the OS service manager starts the selected Supervisor, which must acquire that lock and report health before activation commits. Startup timeout/failure restores the prior selection and restarts the prior compatible Supervisor. The exclusive lock and serial service transition prohibit two authoritative Supervisors. New Runs pin the selected bundle; existing Runs continue or relaunch with their own pinned compatible bundle. An external client/npm reinstall may replace clients but cannot delete a referenced runtime. Runtime bundles referenced by nonterminal Runs or retained audit/result roots are not garbage-collected.
+Installed remote-model authority uses an acyclic post-bundle companion, not a
+new RuntimeBundle structured kind or mutable model-authority ledger. The
+existing catalog and price-table schemas remain unchanged:
+
+```ts
+type InstalledModelAuthorityClosureV1 = {
+  schemaVersion: 1
+  format: 'cliq-installed-model-authority-v1'
+  publisherKeyId: string
+  signatureAlgorithm: 'ed25519'
+  runtimeBundleRef: ArtifactRef
+  runtimeBundleManifestDigest: string
+  objects: readonly {
+    artifactRef: ArtifactRef
+    byteCount: number
+    kind: 'model_catalog_entry' | 'model_price_table' | 'ed25519_signature'
+  }[]
+  closureDigest: string
+  signature: string
+}
+```
+
+`closureDigest` omits itself and `signature` under JCS; the companion's
+ArtifactRef hashes its complete signed bytes. `runtimeBundleRef` and the
+manifest digest equal the already completed selected RuntimeBundle. Build
+and sign executable/prompt/trust-store Bundle bytes first, derive that exact
+endpoint/TLS identity second, sign catalog/price objects third, and sign the
+companion last. The Bundle never references the companion. A catalog or
+endpoint-bound price table cannot be inserted back into its own Bundle, and
+placeholder refs, external unsigned metadata and preseeded CAS are not
+substitutes for this publication order.
+
+The signature domains are exactly the ASCII strings
+`cliq-model-catalog-entry-v1\0`, `cliq-model-price-table-v1\0`, and
+`cliq-installed-model-authority-v1\0`, respectively followed by the relevant
+lowercase 64-hex semantic digest in UTF-8. Catalog and price `signatureRef`
+resolve raw 64-byte Ed25519 signatures. The companion's `signature` is the
+canonical base64 encoding of exactly 64 signature bytes. All three signer
+ids equal the selected Bundle's publisher id and resolve its unique embedded
+release key; user, unknown, duplicate, different-role/domain or differently
+Bundle-bound signatures fail closed. A signature alone is not a credible
+provider capability or cost-ceiling qualification.
+
+The companion is at most 1 MiB. Its object inventory is unique and byte-sorted
+by ArtifactRef, at most 128 objects and 8 MiB of complete object bytes.
+Catalog/price objects are each at most 64 KiB and strict canonical bounded
+JSON; signature objects are exactly 64 bytes. There are 1..32 unique
+`(provider,model,endpointIdentityDigest)` tuples, each with exactly one catalog
+and one price table, no Ollama branch, and all-and-only their detached signature
+objects. Every ref/count/hash, closed schema, validity ordering, matching
+provider/model/endpoint, catalog claims, Bundle pair and actual signed
+`provider_adapter` id/version/digest verifies before eligibility. Admission
+independently requires the existing capability/price validity through its
+deadline and a substantiated full request ceiling; credential, endpoint and
+billing authority are never inferred from the companion.
+
+The literal package layout is `model-authority.json` plus
+`model-objects/sha256/<first-two-hex>/<complete-ref>` beside the original Bundle
+package. Those paths are reserved and cannot be Bundle entries. The companion
+declares no arbitrary paths. The installed owner descriptor-captures and
+revalidates both complete closed package graphs, imports the companion and
+every member through existing hash/O_EXCL/fsync CAS, and then atomically
+publishes `modelAuthorityRef` alongside `bundleDigest` in the one existing
+`runtime/active.json` selection. No second selection file, SQL authority
+table, refresh ledger, download, caller ref, custom key or mutable path lookup
+is added. A selection without that ref remains capability-incomplete and
+cannot admit an installed Run; it is not a legacy execution fallback.
+
+Admission selects from the held current companion using public model and
+endpoint/credential ids, resolves the real principal-bound owners, and pins
+the existing signed catalog, evidence, price, endpoint and frozen credential
+refs in the ordinary assembly. Recovery verifies those individually signed
+retained CAS members against the Run's exact Bundle/endpoint identities; it
+never chooses current companion members, substitutes rotated credentials or
+rereads a package. The current selected companion is a CAS root; retained
+Runs independently root their selected members and signatures. This companion
+is discovery/import only and contains no additional runtime eligibility,
+revocation, automatic refresh or retry authority.
+
+System/compaction prompt closure remains the exact signed `structuredArtifacts`
+contract. The Linux I1 recipe supports one fixed policy profile and at most
+32 paired provider/model prompt identities; each compaction root has exactly
+the distinct refs of its three validated `ModelTextV1` members. Only those
+all-and-only signed `bundle_object` members are imported; unused or arbitrary
+object roots fail. Builtin tool contract/schema bytes may use existing signed
+non-executable `schema` entries, but the trusted assembler still validates
+their exact builtin contracts and executable identities before exposing tools.
+
+An owned scripted HTTPS fixture can qualify this installation/transport
+composition only with genuine signed fixture adapter/catalog/pricing/TLS
+bytes, actual endpoint and Secret Service credentials, exact claim-before-send
+and the second release gate, no redirects, and complete joined resources.
+Its table requires its real bounded server contract and may declare zero
+charges only for that owned server; it does not use managed-local zero-cost
+provenance. It never qualifies actual-provider capability, billing, release
+signing or the unexecuted I1 negative/crash cuts. Unsupported or unqualified
+real providers remain `MODEL_CAPABILITY_UNKNOWN` or `MODEL_COST_UNKNOWN`.
+
+The initial installed Linux broker recipe is nonstreaming JSON only. A signed
+catalog claiming streaming is discovery data, not supported execution: reject
+it with `MODEL_CAPABILITY_UNKNOWN` before admission. The native response path
+accepts only bounded `application/json`; SSE and other media types fail closed.
+No streaming qualification is implied by the general provider contract.
+
 12. Freeze repository instructions/skills/config only after Workspace Trust and bind their digests in `assemblyRef`, so detached recovery cannot silently pick up changes. Preserve declarative `AGENTS.md`/`SKILL.md` compatibility but remove repository JavaScript imports and command-hook auto-execution. Instructions and skills influence context only and never grant tools, MCP, network, sandbox reachability, or verifier exceptions.
 13. Telemetry is a redacted projection over committed Run, Journal, budget, and receipt facts using opaque ids/digests. It is not a correctness projection and cannot drive recovery. No prompt/source/tool body, secret, raw path, provider response, or remote exporter is introduced.
 14. Retention has no automatic authoritative deletion path and no `run.delete`. Keep every `run_events` row while its Run is nonterminal; terminal-Run event pruning may delete only display rows at least 30 days after terminal commit and must atomically prune all event artifact edges plus advance the retained earliest cursor. Every ArtifactRef in a retained event row is a CAS root. Quarantined generations require positive all-descendant death proof and reachability/retention checks. CAS GC considers only objects older than seven days and deletes only after a complete walk rooted at Sessions/items, Runs/specs/results, Checkpoints, RunJournal, retained RunEvent refs, worker/admin/local-inference activation-cycle and launch rows, control-request responses, receipts/provenance, grants/waits, migration archives, endpoint/service/model/capability/boundary evidence, MCP registry/registration receipts, RuntimeBundle manifests/binaries, GuestToolchain manifests/images, and every artifact reachable from those roots. Any incomplete/corrupt walk deletes nothing. Product deletion or shorter retention requires a later RFC.

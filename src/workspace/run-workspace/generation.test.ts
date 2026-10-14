@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readdirSync, statSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,6 +13,41 @@ import { ContentAddressedStore } from '../../state/cas.js';
 import { loadNativeStateOwner, type BorrowedGenerationForExecution } from '../../state/native-owner.js';
 import { borrowRunWorkspaceForExecution, materializeRunWorkspace, type RunWorkspaceGeneration } from './generation.js';
 import * as producer from './generation.js';
+
+test('uncertain native generation close is sticky and never retries a reused descriptor or releases the owner lock', async () => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), '.cliq-generation-close-'));
+  await chmod(root, 0o700);
+  try {
+    // Poisoning a native process is intentionally irreversible. Use a real
+    // disposable child, not a production fault flag or a fake native factory.
+    const source = `
+      import assert from 'node:assert/strict';
+      import { closeSync, openSync, fstatSync } from 'node:fs';
+      import path from 'node:path';
+      import { loadNativeStateOwner, borrowGenerationForExecution } from ${JSON.stringify(new URL('../../state/native-owner.ts', import.meta.url).href)};
+      const root = process.argv.at(-1);
+      const native = await loadNativeStateOwner();
+      const held = native.acquireLock(root, true);
+      const tree = held.createGenerationTree('native-retirement-fixture', 'a'.repeat(43));
+      const borrowed = borrowGenerationForExecution(tree);
+      closeSync(borrowed.fd);
+      assert.throws(() => borrowed.close(), { code: 'ERR_CLIQ_RESOURCE_RETIREMENT' });
+      const replacement = openSync(path.join(root, 'runtime', 'state-owner.lock'), 'r');
+      assert.equal(replacement, borrowed.fd, 'the test must exercise actual numeric descriptor reuse');
+      assert.throws(() => borrowed.close(), { code: 'ERR_CLIQ_RESOURCE_RETIREMENT' });
+      fstatSync(replacement);
+      assert.throws(() => tree.close(), { code: 'ERR_CLIQ_RESOURCE_RETIREMENT' });
+      fstatSync(replacement);
+      assert.throws(() => held.close(), { code: 'RECOVERY_REQUIRED' });
+      fstatSync(replacement);
+      assert.throws(() => native.acquireLock(root, false), /already held/);
+      closeSync(replacement);
+    `;
+    execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source, root], { stdio: 'pipe' });
+    const native = await loadNativeStateOwner(), successor = native.acquireLock(root, false);
+    successor.assertHeld(); successor.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 async function symlinkCheckpoint(artifacts: ArtifactCatalog, manifest: WorkspaceEntryManifest): Promise<Checkpoint> {
   const entriesRef = (await artifacts.publishCanonical(manifest, manifest.format)).ref;
@@ -427,6 +463,13 @@ test('reopening a frozen ready generation preserves identity or rejects the unsu
   assert.equal(actual.generationRef, authority.generationRef);
   assert.deepEqual(actual.observedState, { kind: 'complete_tree', treeDigest: entries.treeDigest });
   assert.throws(() => producer.readRetainedWorkspaceObservation(Object.freeze({}) as typeof observation), /invalid retained/);
+  assert.throws(() => producer.readRetainedWorkspaceRetirement(held, observation), { code: 'RECOVERY_REQUIRED' });
+  generation.close();
+  const retired = producer.readRetainedWorkspaceRetirement(held, observation);
+  assert.equal(retired.generationRef, actual.generationRef);
+  assert.equal(retired.treeObservedAt, actual.observedAt);
+  assert.ok(retired.observedAt >= retired.treeObservedAt);
+  assert.throws(() => producer.readRetainedWorkspaceRetirement(held, Object.freeze({}) as typeof observation), /exact StateOwner/);
   generation.close(); held.close();
   assert.throws(() => producer.readRetainedWorkspaceObservation(observation), /closed|held|changed/);
 });

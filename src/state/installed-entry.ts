@@ -15,10 +15,13 @@ import { decodeCredentialWriteRequest, writeCredentialAuthority, decodeCredentia
   decodeCredentialCleanupRequest, cleanupCredentialAuthority,
   type CredentialWriteRequest, type CredentialRevokeRequest, type CredentialCleanupRequest, type StateStore } from './store.js';
 import { installServices } from './installed-services.js';
+import { loadInstalledCredentialPlatform } from './installed-runtime.js';
+import { installedSandboxProfile } from './installed-sandbox-profile.js';
 
 // Hidden Linux SEA entry. Default CLI startup is unchanged. Release roots are
 // embedded at image construction, never selected by argv/environment/control.
-// Run admission and execution are not enabled by this composition.
+// The signed companion enables the fixed Run recipe; without it the original
+// credential/read-only composition remains, never a legacy execution fallback.
 let selected: HeldInstalledRuntime | undefined;
 let store: StateStore | undefined;
 let service: InstalledControlService | undefined;
@@ -188,7 +191,15 @@ async function start(): Promise<void> {
   anchor.assertHeld();
   // Only this selected mode acquires authority. Genesis borrows these newly
   // held, verified descriptors, never the retired bootstrap's historical FDs.
-  store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys }, selected, anchor);
+  const runProfile = await withHeldInstalledRuntime(selected, async installed => {
+    if (!installed.modelAuthority) return undefined;
+    await installed.revalidate();
+    return installedSandboxProfile();
+  });
+  const actualUser = runProfile ? (await loadInstalledCredentialPlatform(selected)).currentUser() : undefined;
+  store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys,
+    ...(runProfile ? { sourceInspection: { controlledHome: path.join(actualUser!.home, '.cliq'), sandboxProfile: runProfile } } : {}) }, selected, anchor);
+  await store.startInstalledRuns();
   anchor.assertHeld();
   service = openInstalledControl(store, { serverBuild: 'cliq-installed-v1' }, report);
   containmentHealth = setInterval(() => {

@@ -18,6 +18,7 @@ import { quiescedToolCheckpoint } from '../../state/testing/tool-effects.js';
 import { fixtureSandboxProfile } from '../../state/testing/worker-launch.js';
 import { builtinInputContracts } from '../../tools/builtin-inputs.js';
 import { signedLinuxWorkerTestRuntime } from './worker-runtime.js';
+import { publishOfflineModelEndpoint } from '../../state/testing/model-endpoint.js';
 
 /** Campaign setup only. Its model prefix and first worker retirement are
  * explicitly offline retained fixtures, never native execution evidence.
@@ -59,8 +60,15 @@ export async function createLinuxWorkerCampaignFixture(input: {
     const session = await store.createSession({ principalId, ...channel, requestId: uuidv7(),
       admissionKey: admissionKey(`${input.label}-session`), workspacePath: workspace });
     const workspaceIdentity = await store.artifacts.readCanonical<WorkspaceIdentityV1>(session.session.workspaceIdentityRef);
-    const credentials = [(await store.artifacts.publishCanonical({ format: 'cliq-offline-credential-fixture-v1' },
-      'cliq-offline-credential-fixture-v1')).ref];
+    const endpoint = await publishOfflineModelEndpoint({ artifacts: store.artifacts, principalId,
+      bundle: signed.bundle, trustStorePem: signed.trustStorePem, createdAt: sampleCanonicalNow() });
+    const credentials = endpoint.credentialRefs;
+    authority.assembly.provider.endpoint = endpoint.endpoint;
+    authority.material.capabilityEvidence.value.endpointIdentityDigest = endpoint.endpoint.endpointIdentityDigest;
+    authority.material.priceTable!.value.endpointIdentityDigest = endpoint.endpoint.endpointIdentityDigest;
+    authority.material.verifyProviderEndpoint = input => input.provider === authority.assembly.provider.name &&
+      input.model === authority.assembly.provider.model && canonicalSha256(input.endpoint) === canonicalSha256(endpoint.endpoint) &&
+      canonicalSha256(input.credentialGrantRefs) === canonicalSha256(credentials);
     authority.assembly.provider.credentialGrantRefs = credentials;
     authority.material.additionalCredentialGrantRefs = [];
     authority.runSpecCredentialGrantRefs = credentials;

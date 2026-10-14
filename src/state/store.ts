@@ -16,10 +16,12 @@ import { checkCanonicalBytes, validateBundle, validateTrustStore } from './insta
 import { decodeEndpointAuthorityCommandCore, decodeEndpointAuthorityOperation, decodeEndpointAuthorityRecord,
   decodeEndpointRegistration, decodeCredentialAuthorityCommandCore, decodeCredentialAuthorityOperation, decodeCredentialAuthorityRecord,
   decodeCredentialAuthorityRevokeCommandCore, decodeCredentialAuthorityRevokeOperation,
+  decodeEndpointCredentialGrantBinding, type EndpointCredentialGrantBinding,
   type CredentialAuthorityCommandCoreV1, type CredentialAuthorityOperationV1, type CredentialPurpose,
   type EndpointAuthorityCommandCoreV1, type EndpointAuthorityOperationV1, type EndpointAuthorityRecordV1,
   type EndpointRegistrationV1, type CredentialAuthorityRecordV1, type CredentialAuthorityRevokeOperationV1 } from '../kernel/credential-authority.js';
 import {
+  assertArtifactRef,
   assertRequestId,
   digestOmitting,
   encodeCanonicalTime,
@@ -66,7 +68,10 @@ import { assertInstalledCredentialScope, installedCredentialProvenance, observeI
   type InstalledCredentialScope, type InstalledCredentialProvenance,
   withHeldInstalledRuntime, withInstalledWorkerRoot, type HeldInstalledAnchor,
   type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
-import { withCredentialAuthorityLock, loadInstalledCredentialPlatform } from './installed-runtime.js';
+import { withCredentialAuthorityLock, loadInstalledCredentialPlatform, loadInstalledModelBroker } from './installed-runtime.js';
+import { MODEL_BROKER_ENTRY_ID, InstalledModelBrokerRefusalError, type NativeModelTransport, type ModelBrokerBinding, type ModelBrokerClosed } from './model-broker-native.js';
+import { decodeBrokerInvocationAmbiguity, type BrokerInvocationAmbiguityEvidenceV1 } from '../kernel/broker-ambiguity.js';
+import { supervisorInspectorIdentity } from './supervisor-inspector.js';
 import type { SupervisorHelloV1, SupervisorStatusV1 } from './installed-control.js';
 import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
@@ -87,6 +92,8 @@ import {
   failClaimedInvocationWithoutRelease,
   failInvocationBeforeDispatch,
   markInvocationUnknown,
+  markInstalledBrokerAmbiguity,
+  readModelClaimCut, assertLiveDispatchState, requireHealthyFence,
   prepareInvocation,
   type ClaimInvocationDispatchInput,
   type PrepareInvocationInput,
@@ -140,6 +147,13 @@ import { exactKeys, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundl
 import type { SandboxProfileV1, SourceInspectionAttemptV1 } from '../kernel/execution.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest } from './source-target.js';
 import { assertCurrentControlFrame, validateControlChannelClosure } from './control-channel.js';
+import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from './repositories/journal.js';
+import { assertModelGrantDispatch } from './model-grant.js';
+import { readCheckpoint } from './rows.js';
+import { decodeRunSpec } from './decoders.js';
+import type { AgentRunState } from './reducers/agent.js';
+import type { RunExecution } from './run-execution.js';
+import { installedSandboxProfile } from './installed-sandbox-profile.js';
 
 const SMALL_BYTES = 1_048_576;
 const TRUST_BYTES = 16 * SMALL_BYTES;
@@ -157,6 +171,40 @@ function checkedCredentialToken(token: HeldCredentialAuthorityLock): CredentialB
   if (!held || !held.active) throw new KernelStorageError('ARTIFACT_MISMATCH', 'credential authority token is invalid or its callback has ended');
   assertInstalledCredentialScope(held.physical);
   return held;
+}
+
+function frozenModelCredential(record: CredentialAuthorityRecordV1): EndpointCredentialGrantBinding {
+  const { state: _state, platformItem: _item, recordDigest: _digest, revokedAt: _revoked,
+    revokedByRequestId: _request, revokedByRequestDigest: _requestDigest, ...body } = record;
+  return decodeEndpointCredentialGrantBinding({ ...body, bindingDigest: canonicalSha256(body) });
+}
+function readStoredCredentialObservation(held: CredentialBinding, operation: CredentialAuthorityOperationV1): SecretServiceObservation {
+  const observed = readCredentialFacts(held, operation.requestId).find(fact =>
+    fact.operation.attempt === operation.attempt && fact.operation.phase === 'secret_stored')?.observation;
+  if (!observed) throw new KernelStorageError('ARTIFACT_MISMATCH', 'model credential has no original actual platform-store observation');
+  return observed;
+}
+function currentModelAuthority(held: CredentialBinding, principalId: string, endpointId: string,
+  credentialIds: readonly string[], now: string, frozen?: { endpoint: EndpointRegistrationV1; bindings: readonly EndpointCredentialGrantBinding[] }) {
+  if (held.ownerPrincipalId !== principalId || credentialIds.length !== 1)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed model recipe requires its exact owner and one frozen bearer credential');
+  const endpoint = readEndpointHistory(held, endpointId).at(-1);
+  if (!endpoint || endpoint.state !== 'active' || !endpoint.registration.purposes.includes('model_endpoint') ||
+      endpoint.registration.createdAt > now || endpoint.createdAt > now)
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model endpoint is not currently active');
+  const history = readCredentialHistory(held, credentialIds[0]!), record = history.latest, creating = history.creating;
+  if (!record || !creating || record.state !== 'active' || record.purpose !== 'model_endpoint' ||
+      record.createdAt > now || (record.expiresAt !== undefined && now >= record.expiresAt) ||
+      record.endpointRegistrationRef !== endpoint.expectedRegistrationArtifactRef ||
+      record.endpointIdentityDigest !== endpoint.registration.endpointIdentityDigest || record.tlsPolicyDigest !== endpoint.registration.tlsPolicyDigest)
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model credential no longer authorizes the exact active endpoint');
+  const binding = frozenModelCredential(record);
+  if (frozen && (canonicalSha256(frozen.endpoint) !== endpoint.expectedRegistrationArtifactRef ||
+      frozen.bindings.length !== 1 || canonicalSha256(frozen.bindings[0]) !== canonicalSha256(binding)))
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model frozen endpoint or credential generation was revoked or replaced');
+  assertInstalledCredentialScope(held.physical);
+  return { endpoint: endpoint.registration, bindings: [binding], creating,
+    selector: credentialSelector(held, creating), observation: readStoredCredentialObservation(held, creating) };
 }
 
 /** An authenticated v1 store contains endpoints only. Verify its exact format
@@ -1538,6 +1586,39 @@ type InstalledCredentialFinalizer = { driver: SqliteDriver; owner: StateOwnerCon
   active: boolean; task?: Promise<CredentialAuthorityOperationV1>; retirementFailure?: ResourceRetirementError };
 const installedCredentialFinalizers = new WeakMap<StateStore, InstalledCredentialFinalizer>();
 
+/** Private physical producer registry. Entries outlive ordinary caller errors
+ * until every actual native preparation/release/retirement has joined. */
+type InstalledBrokerOwner = { driver: SqliteDriver; owner: StateOwnerContext; selected: HeldInstalledRuntime;
+  operations: Map<string, Promise<unknown>>; transports: Map<string, NativeModelTransport> };
+const installedBrokerOwners = new WeakMap<StateStore, InstalledBrokerOwner>();
+export type InstalledBrokerQuiescence = Readonly<{ assertHeld(): void }>;
+const installedBrokerQuiescences = new WeakMap<InstalledBrokerQuiescence, { store: StateStore; binding: InstalledBrokerOwner; runId: string }>();
+
+export function assertInstalledBrokerQuiescence(receipt: InstalledBrokerQuiescence, driver: SqliteDriver,
+  owner: StateOwnerContext, runId: string): void {
+  const observed = installedBrokerQuiescences.get(receipt);
+  if (!observed || installedBrokerOwners.get(observed.store) !== observed.binding || observed.binding.driver !== driver ||
+      observed.binding.owner !== owner || observed.runId !== runId)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'broker quiescence has no original installed physical owner');
+  // Physical registry assertion only. The consumer checks active StateOwner
+  // and row predicates through its actual transaction-scoped SQL connection.
+  assertStateOwnerLock(owner.filesystem);
+  if (observed.binding.operations.has(runId) || observed.binding.transports.has(runId))
+    throw new ResourceRetirementError('generation retains an original native model transport owner', undefined);
+}
+
+/** No counts, callbacks, fake Store or supplied claim evidence can mint it. */
+export function observeInstalledBrokerQuiescence(store: StateStore, runId: string): InstalledBrokerQuiescence {
+  const binding = installedBrokerOwners.get(store);
+  if (!binding) throw new KernelStorageError('ARTIFACT_MISMATCH', 'broker retirement requires the genuine installed Store');
+  assertActiveStateOwner(binding.driver, binding.owner); readRun(binding.driver, runId);
+  const receipt: InstalledBrokerQuiescence = Object.freeze({ assertHeld() {
+    if (this !== receipt) throw new TypeError('invalid broker quiescence receiver');
+    assertInstalledBrokerQuiescence(receipt, binding.driver, binding.owner, runId);
+  } });
+  installedBrokerQuiescences.set(receipt, { store, binding, runId }); receipt.assertHeld(); return receipt;
+}
+
 export class StateStore {
   private closed = false;
   private released = false;
@@ -1549,6 +1630,15 @@ export class StateStore {
   private readonly executions = new Map<string, Promise<Awaited<ReturnType<typeof loadRunExecution>>>>();
   private readonly sourceInspectionTasks = new Set<SourceInspectionTask>();
   private readonly sourceInspections = new Map<string, { intent: string; task: SourceInspectionTask }>();
+  private readonly modelTransports = new Map<string, NativeModelTransport>();
+  private readonly modelOperations = new Map<string, Promise<unknown>>();
+  private readonly installedRunTasks = new Map<string, Promise<void>>();
+  private readonly installedAgents = new Map<string, AgentRunState>();
+  private readonly installedRunFailures = new Map<string, unknown>();
+  private schedulerStarted = false;
+  private installedModelAdmissionReady = false;
+  private schedulerFailure: unknown;
+  private installedQueue = Promise.resolve();
 
   private constructor(
     readonly stateRoot: string,
@@ -1558,12 +1648,189 @@ export class StateStore {
     private readonly runtimeAuthority?: StateStoreRuntimeAuthority,
     private readonly installedRuntime?: HeldInstalledRuntime,
     private readonly installedAnchor?: HeldInstalledAnchor
-  ) {}
+  ) {
+    if (installedRuntime && installedAnchor) installedBrokerOwners.set(this, { driver, owner, selected: installedRuntime,
+      operations: this.modelOperations, transports: this.modelTransports });
+  }
 
   get ownerEpoch(): number {
     return this.owner.ownerEpoch;
   }
   supportsCredentialFinalization(): boolean { return installedCredentialFinalizers.has(this); }
+  supportsInstalledRuns(): boolean { return this.schedulerStarted && this.schedulerFailure === undefined && !this.closeRequested && !this.closed; }
+
+  async createInstalledSession(request: unknown, identity: AuthenticatedControlIdentity) {
+    if (!this.supportsInstalledRuns()) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
+    const value = immutableSnapshot(request) as Record<string, unknown>;
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        !exactKeys(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'admissionKey', 'workspacePath',
+          ...(Object.hasOwn(value, 'name') ? ['name'] : [])]) || value.protocolVersion !== 1 || value.method !== 'session.create')
+      throw new KernelStorageError('INVALID_REQUEST', 'session.create requires its exact public inline contract');
+    const { requestDigest, ...core } = value;
+    if (requestDigest !== canonicalSha256(core)) throw new KernelStorageError('INVALID_REQUEST', 'session.create request digest differs');
+    return createSession(this.driver, this.artifacts, this.owner, { ...identity, requestId: value.requestId as string,
+      admissionKey: value.admissionKey as string, workspacePath: value.workspacePath as string,
+      ...(Object.hasOwn(value, 'name') ? { name: value.name as string } : {}) }, this.installedRuntime);
+  }
+
+  async submitInstalledRun(request: unknown, identity: AuthenticatedControlIdentity) {
+    if (!this.supportsInstalledRuns() || !this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
+      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
+    const normalized = normalizeRunSubmitRequest(request);
+    await validateControlChannelClosure(this.artifacts, this.owner, identity);
+    const { replayInstalledRunAdmission, admitInstalledRun } = await import('./reducers/admission.js');
+    const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity);
+    if (replay) return replay;
+    const { assembleInstalledRun, InstalledRunAuthorityError } = await import('./installed-run.js');
+    if (!this.installedModelAdmissionReady) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
+    const source = await this.captureSubmittedSource({ request, identity });
+    if (source.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'Run source inspection has not completely retired');
+    if (source.outcome.kind !== 'captured') {
+      const { readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
+      const response = await readSourceInspectionErrorResponse(this.artifacts, source);
+      await validateControlChannelClosure(this.artifacts, this.owner, identity);
+      assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
+      return { response };
+    }
+    const model = normalized.request.model;
+    if (model.provider !== 'openai-compatible') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run requires its fixed signed model recipe');
+    const selected = this.installedRuntime, controlledHome = this.runtimeAuthority.sourceInspection.controlledHome;
+    const authority = await withCredentialAuthorityLock(selected, async token => {
+      const held = checkedCredentialToken(token);
+      const authority = currentModelAuthority(held, identity.principalId, model.endpoint.endpointRegistrationId,
+        model.modelCredentialGrantIds, sampleCanonicalNow());
+      return immutableSnapshot({ endpoint: authority.endpoint, bindings: authority.bindings });
+    });
+    // Installation borrows and the credential pager share an intentionally
+    // non-reentrant physical queue. Prepare immutable data outside its lock;
+    // reacquire and check the exact current revisions for the final admission.
+    const assembled = await assembleInstalledRun({ selected, driver: this.driver, owner: this.owner,
+      artifacts: this.artifacts, identity, request: normalized.request, originalRequest: normalized.originalRequest, source,
+      endpoint: authority.endpoint, credentialBindings: authority.bindings, controlledHome });
+    const result = await withCredentialAuthorityLock(selected, async token => {
+      const held = checkedCredentialToken(token);
+      currentModelAuthority(held, identity.principalId, model.endpoint.endpointRegistrationId,
+        model.modelCredentialGrantIds, sampleCanonicalNow(), authority);
+      if (authority.bindings.some(binding => binding.expiresAt !== undefined && binding.expiresAt < assembled.deadlineAt))
+        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential validity does not cover the complete requested Run interval');
+      assertCurrentControlFrame(this.owner, identity); token.assertHeld();
+      return admitInstalledRun(this.driver, this.artifacts, this.owner, assembled, identity);
+    });
+    this.scheduleInstalledRun(result.run.id);
+    return result;
+  }
+
+  /** One bounded production lane, reconstructing retained Runs rather than
+   * maintaining another lifecycle ledger. No client connection owns its task. */
+  async startInstalledRuns(): Promise<void> {
+    if (this.schedulerStarted) throw new TypeError('installed scheduler is already started');
+    if (!this.installedRuntime || !this.installedAnchor || !this.runtimeAuthority?.sourceInspection) return;
+    const recipe = await withHeldInstalledRuntime(this.installedRuntime, async installed => {
+      await installed.revalidate();
+      return { hasDiscovery: installed.modelAuthority !== undefined,
+        hasBroker: installed.bundle.entries.some(entry => entry.entryId === MODEL_BROKER_ENTRY_ID &&
+          entry.role === 'provider_adapter' && entry.executable) };
+    });
+    if (!recipe.hasBroker) return;
+    await loadInstalledModelBroker(this.installedRuntime);
+    this.installedAnchor.assertHeld(); assertActiveStateOwner(this.driver, this.owner);
+    const rows = this.driver.prepare("SELECT id FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at,id LIMIT 1001")
+      .all<{ id: string }>();
+    if (rows.length > 1000) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed scheduler retained inventory exceeds its bounded cut');
+    this.installedModelAdmissionReady = recipe.hasDiscovery;
+    this.schedulerStarted = true;
+    for (const row of rows) this.scheduleInstalledRun(row.id);
+  }
+
+  private scheduleInstalledRun(runId: string): void {
+    if (!this.supportsInstalledRuns() || this.installedRunTasks.has(runId)) return;
+    const task = this.installedQueue.then(() => this.driveInstalledRun(runId));
+    this.installedRunTasks.set(runId, task);
+    this.installedQueue = task.catch(error => {
+      this.installedRunFailures.set(runId, error);
+      // One Run's ordinary provider refusal is not a failed physical lane.
+      // Uncertain native retirement is process-wide and must stop admission.
+      if (error instanceof ResourceRetirementError) this.schedulerFailure ??= error;
+    });
+    void task.then(() => this.installedRunTasks.delete(runId), error => {
+      if (!(error instanceof ResourceRetirementError)) this.installedRunTasks.delete(runId);
+    });
+  }
+
+  private async driveInstalledRun(runId: string): Promise<void> {
+    if (this.closeRequested || this.closed) return;
+    const { loadInstalledRunMaterial } = await import('./installed-run.js');
+    const run = readRun(this.driver, runId), spec = decodeRunSpec(await this.artifacts.readCanonical(run.specRef));
+    const material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
+    const opening = this.executions.get(runId);
+    const execution = opening ? (await opening).execution : await this.loadRunExecution({ runId, material });
+    const agent = await loadAgentRun(this.driver, this.artifacts, this.owner, { runId, material, releaseKeys: this.runtimeAuthority!.releaseKeys });
+    this.installedAgents.set(runId, agent);
+    let predecessorWorker = !opening && run.status === 'running' && run.activeWorkerLaunchId !== undefined;
+    for (;;) {
+      if (this.closeRequested || this.closed) return;
+      let current = readRun(this.driver, runId);
+      if (!['queued', 'running', 'waiting'].includes(current.status)) return;
+      if (predecessorWorker && current.status === 'running' && current.activeWorkerLaunchId) {
+        predecessorWorker = false;
+        current = await execution.recoverWorker({ expectedRunRevision: current.revision });
+      }
+      if (current.status === 'waiting' && current.waitingReason === 'reconciliation' && current.waitingOnRef) {
+        const wait = await this.artifacts.readCanonical<import('../kernel/types.js').WorkerDeathWait>(current.waitingOnRef);
+        if (wait.subject?.kind !== 'worker_death') return;
+        current = await execution.recoverWorker({ expectedRunRevision: current.revision });
+      }
+      if (current.status === 'waiting') return;
+      if (current.status === 'queued') current = await execution.resumeCurrentRetirement({ expectedRunRevision: current.revision });
+      if (current.cancelRequested || current.stopIntentRef) {
+        await execution.finishCurrentStop({ expectedRunRevision: current.revision }); return;
+      }
+      if (current.nextStep === 'tool') {
+        await execution.executeCurrentTool({ expectedRunRevision: current.revision }); continue;
+      }
+      if (current.nextStep !== 'agent') return;
+      const prior = await agent.readModelAttempt();
+      if (prior?.state.phase === 'completed' || prior?.state.phase === 'dispatch_claimed' || prior?.state.phase === 'unknown') {
+        // Model end is an I2 candidate handoff, not a verified result. Unknown
+        // and previous claims are never permission to recreate/send a token.
+        return;
+      }
+      if (current.status === 'queued') current = await execution.activateCurrentWorker({ expectedRunRevision: current.revision });
+      const prepared = await agent.prepareModel({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch });
+      try { await this.dispatchInstalledModel(execution, agent, prepared); }
+      catch (error) {
+        if (error instanceof ResourceRetirementError) throw error;
+        const stopped = readRun(this.driver, runId);
+        const entries = readInvocationAttempt(this.driver, runId, prepared.entry.opId, prepared.entry.attempt);
+        if (stopped.stopIntentRef && entries.every(entry => entry.phase !== 'unknown') &&
+          ['completed', 'failed'].includes(entries.at(-1)?.phase ?? '')) continue;
+        throw error;
+      }
+    }
+  }
+
+  async cancelInstalledRun(request: unknown, identity: AuthenticatedControlIdentity) {
+    if (!this.installedRuntime || !this.runtimeAuthority) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is unavailable');
+    const value = immutableSnapshot(request) as Record<string, unknown>;
+    if (!value || !exactKeys(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'runId', 'expectedRevision']) ||
+        value.protocolVersion !== 1 || value.method !== 'run.cancel') throw new KernelStorageError('INVALID_REQUEST', 'run.cancel requires its exact contract');
+    const { requestDigest, ...core } = value;
+    if (requestDigest !== canonicalSha256(core)) throw new KernelStorageError('INVALID_REQUEST', 'run.cancel request digest differs');
+    await validateControlChannelClosure(this.artifacts, this.owner, identity);
+    const runId = value.runId as string, run = readRun(this.driver, runId), spec = decodeRunSpec(await this.artifacts.readCanonical(run.specRef));
+    let agent = this.installedAgents.get(runId);
+    if (!agent) {
+      const { loadInstalledRunMaterial } = await import('./installed-run.js');
+      const material = await loadInstalledRunMaterial({ selected: this.installedRuntime, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
+      agent = await loadAgentRun(this.driver, this.artifacts, this.owner, { runId, material, releaseKeys: this.runtimeAuthority.releaseKeys });
+      this.installedAgents.set(runId, agent);
+    }
+    const result = await agent.cancelRun({ ...identity, requestId: value.requestId as string, expectedRunRevision: value.expectedRevision as number });
+    // The StopIntent commits first; revocation enters native synchronously.
+    await this.modelTransports.get(runId)?.close();
+    this.scheduleInstalledRun(runId);
+    return result;
+  }
 
   get stateRootIdentity(): { ref: string; digest: string } {
     return {
@@ -1709,31 +1976,41 @@ export class StateStore {
             COALESCE(SUM(status = 'running'), 0) AS running,
             COALESCE(SUM(status IN ('queued', 'running', 'waiting')), 0) AS nonterminal
             FROM runs`).get<{ queued: unknown; running: unknown; nonterminal: unknown }>()!;
-          // Real installed admission/upgrade composition is not yet available.
-          // Do not infer pin compatibility from mutable rows or advertise an
-          // unverified zero count once nonterminal pins actually exist.
-          if (requiredSafeInteger(counts.nonterminal, 'nonterminal Run count') !== 0)
-            throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Supervisor status requires trusted nonterminal pin observation');
+          const nonterminal = requiredSafeInteger(counts.nonterminal, 'nonterminal Run count');
+          const pins = connection.prepare(`SELECT CASE WHEN length(CAST(spec_ref AS BLOB))=64 THEN spec_ref ELSE NULL END AS spec_ref
+            FROM runs WHERE status IN ('queued','running','waiting') ORDER BY id LIMIT 1001`).all<{ spec_ref: string }>();
+          if (pins.length !== nonterminal || pins.length > 1000)
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'installed nonterminal pin inventory exceeds its bounded cut');
+          for (const pin of pins) assertArtifactRef(pin.spec_ref);
           return { supervisorInstanceId: owner.supervisorInstanceId,
             stateSchemaVersion: readSchemaUserVersion(connection),
             queuedRuns: requiredSafeInteger(counts.queued, 'queued Run count'),
-            runningRuns: requiredSafeInteger(counts.running, 'running Run count') };
+            runningRuns: requiredSafeInteger(counts.running, 'running Run count'), pins };
         } catch (cause) {
           if (cause instanceof TypeError || cause instanceof SyntaxError)
             throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained Supervisor status metadata is invalid', { cause });
           throw cause;
         }
       });
+      let incompatiblePinnedRunCount = 0;
+      for (const pin of cut.pins) {
+        const spec = decodeRunSpec(await this.artifacts.readCanonical(pin.spec_ref));
+        const assembly = (await import('../model/run-assembly.js')).decodeRetainedRunAssembly(await this.artifacts.readCanonical(spec.assemblyRef));
+        if (assembly.runtime.runtimeBundleRef !== installed.bundleDigest ||
+            assembly.runtime.runtimeBundleManifestDigest !== installed.bundle.manifestDigest) incompatiblePinnedRunCount++;
+      }
       await assertInstalledRootBinding(this.stateRoot, this.owner.filesystem, installed);
       await validateControlChannelClosure(this.artifacts, this.owner, authenticated);
       assertActiveStateOwner(this.driver, this.owner);
       const summary = { schemaVersion: 1 as const, runtimeBundleRef: installed.bundleDigest,
         bundleDigest: installed.bundleDigest, bundleVersion: installed.bundle.bundleVersion };
-      return immutableSnapshot({ method: 'supervisor.status' as const, health: 'degraded' as const,
+      return immutableSnapshot({ method: 'supervisor.status' as const,
+        health: this.closeRequested ? 'draining' as const : this.supportsInstalledRuns() && incompatiblePinnedRunCount === 0 && this.installedRunFailures.size === 0
+          ? 'ready' as const : 'degraded' as const,
         supervisorInstanceId: cut.supervisorInstanceId,
-        queue: { queuedRuns: cut.queuedRuns, runningRuns: cut.runningRuns, capacity: 0 },
+        queue: { queuedRuns: cut.queuedRuns, runningRuns: cut.runningRuns, capacity: this.supportsInstalledRuns() ? 1 : 0 },
         stateSchemaVersion: cut.stateSchemaVersion, activeRuntimeBundle: summary,
-        installedRuntimeBundles: [summary], incompatiblePinnedRunCount: 0 });
+        installedRuntimeBundles: [summary], incompatiblePinnedRunCount });
     });
   }
 
@@ -1918,12 +2195,158 @@ export class StateStore {
     return loadAgentRun(this.driver, this.artifacts, this.owner, input);
   }
 
+  /** Production broker only. The native image owns raw credential/header bytes
+   * and transport resources; SQL owns every claim, budget and continuation. */
+  private dispatchInstalledModel(execution: RunExecution, agent: AgentRunState,
+    attempt: Awaited<ReturnType<AgentRunState['prepareModel']>>) {
+    const runId = attempt.entry.runId;
+    if (this.modelOperations.has(runId)) throw new KernelStorageError('REVISION_CONFLICT', 'Run already owns a native model operation');
+    const operation = this.dispatchInstalledModelOwned(execution, agent, attempt);
+    this.modelOperations.set(runId, operation);
+    const release = (error?: unknown) => { if (!(error instanceof ResourceRetirementError)) this.modelOperations.delete(runId); };
+    void operation.then(() => release(), release); return operation;
+  }
+
+  private async dispatchInstalledModelOwned(execution: RunExecution, agent: AgentRunState,
+    attempt: Awaited<ReturnType<AgentRunState['prepareModel']>>) {
+    const selected = this.installedRuntime;
+    if (!selected || !this.runtimeAuthority || !this.installedAnchor)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed broker composition is unavailable');
+    const broker = await loadInstalledModelBroker(selected);
+    const prepared = attempt.entry, runId = prepared.runId;
+    const initial = await readModelClaimCut(this.driver, this.artifacts, prepared);
+    if (initial.assembly.provider.name !== 'openai-compatible' || initial.authority.target.format !== 'cliq-endpoint-registration-v1' ||
+        attempt.prepared.outbound.requestPath !== '/chat/completions')
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'model request does not select the exact installed broker recipe');
+    const target = initial.authority.target;
+    const frozen = await Promise.all(initial.assembly.provider.credentialGrantRefs.map(async ref =>
+      decodeEndpointCredentialGrantBinding(await this.artifacts.readCanonical(ref))));
+    const trustStoreBytes = await this.artifacts.readBytes(target.tls.trustStoreRef);
+    const bodyBytes = Buffer.from(attempt.prepared.outbound.bodyBytes);
+    if (sha256Bytes(bodyBytes) !== initial.request.bodyBytesRef || bodyBytes.length !== initial.request.bodyByteCount)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'model compiled body differs from the permanent prepared request');
+    return withCredentialAuthorityLock(selected, async token => {
+      const held = checkedCredentialToken(token);
+      let transport: NativeModelTransport | undefined;
+      let claimed: import('../kernel/types.js').InvocationJournalEntry | undefined;
+      let receivedResponse = false;
+      try {
+        const authority = currentModelAuthority(held, initial.authority.principalId, target.endpointRegistrationId,
+          frozen.map(binding => binding.credentialGrantId), sampleCanonicalNow(), { endpoint: target, bindings: frozen });
+        transport = await broker.prepareModelTransport({ provider: 'openai-compatible', selector: authority.selector,
+          expectedObservation: authority.observation, target: { hostAscii: target.target.hostAscii, port: target.target.port,
+            basePath: target.target.basePath, serverNameAscii: target.tls.serverNameAscii, spkiSha256Pins: target.tls.spkiSha256Pins },
+          trustStoreBytes, trustStoreDigest: target.tls.trustStoreRef, requestPath: '/chat/completions',
+          bodyBytes, bodyBytesDigest: initial.request.bodyBytesRef });
+        if (this.closeRequested || this.closed) throw new KernelStorageError('LEASE_FENCED', 'model broker is closing');
+        this.modelTransports.set(runId, transport);
+        token.assertHeld();
+        claimed = await claimInvocationDispatch(this.driver, this.artifacts, this.owner, {
+          runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision,
+          leaseEpoch: prepared.leaseEpoch, dispatchId: identityHash('cliq-installed-model-dispatch-v1', randomBytes(32).toString('hex')),
+          brokerFenceTokenDigest: transport.brokerFenceTokenDigest,
+        });
+        const binding: ModelBrokerBinding = { runId, opId: claimed.opId, attempt: claimed.attempt,
+          dispatchId: claimed.dispatchId!, dispatchJournalSeq: claimed.seq, requestRef: claimed.requestRef,
+          requestDigest: initial.request.requestDigest, targetRef: initial.authority.targetRef, targetDigest: initial.authority.targetDigest,
+          grantRef: claimed.grantRef!, supervisorInstanceId: claimed.supervisorInstanceId!, stateOwnerEpoch: claimed.stateOwnerEpoch!,
+          leaseEpoch: claimed.leaseEpoch, brokerFenceTokenDigest: transport.brokerFenceTokenDigest };
+        const gate = async <T>(release: () => Promise<T>): Promise<T> => {
+          const cut = await readModelClaimCut(this.driver, this.artifacts, prepared);
+          let fence: TimeFenceAdvance | undefined;
+          let workerCut!: Parameters<RunExecution['assertCurrentModelWorker']>[0];
+          this.driver.transaction(connection => {
+            if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'model broker is closing');
+            const now = sampleCanonicalNow();
+            assertActiveStateOwner(connection, this.owner);
+            token.assertHeld();
+            currentModelAuthority(held, cut.authority.principalId, target.endpointRegistrationId,
+              frozen.map(value => value.credentialGrantId), now, { endpoint: target, bindings: frozen });
+            fence = advanceTimeFence(connection, this.owner.ownerEpoch, now);
+            if (fence !== 'healthy') return;
+            const live = assertLiveDispatchState(connection, this.owner, runId, cut.run.revision, binding.leaseEpoch, now);
+            const history = readOperationJournal(connection, runId, prepared.opId);
+            const current = readInvocationAttempt(connection, runId, prepared.opId, prepared.attempt);
+            if (canonicalSha256(live.run) !== canonicalSha256(cut.run) || current.length !== 2 ||
+                canonicalSha256(current[1]) !== canonicalSha256(claimed) ||
+                readCheckpoint(connection, live.run.latestCheckpointId).contextManifestRef !== cut.checkpoint.contextManifestRef ||
+                readHighestPreparedAttempt(connection, runId, prepared.opId)?.seq !== prepared.seq)
+              throw new KernelStorageError('LEASE_FENCED', 'model release no longer owns its exact current permanent claim');
+            assertModelGrantDispatch(cut.authority.grant, { run: live.run, prepared, history, now, includingCurrentClaim: true });
+            workerCut = { runId, leaseEpoch: live.run.leaseEpoch, launchId: live.launch.launchId,
+              generationRef: live.launch.workspaceGenerationRef, workerIdentityDigest: live.launch.workerIdentityDigest! };
+          });
+          requireHealthyFence(fence);
+          execution.assertCurrentModelWorker(workerCut);
+          token.assertHeld();
+          return release();
+        };
+        // Only local credential redemption happened before the permanent claim.
+        // Each async revalidation ends in a fresh synchronous cut; native queue
+        // entry follows immediately with no await/callback/SQL transaction I/O.
+        await gate(() => transport!.connect(binding));
+        const response = await gate(() => transport!.releaseBody(binding));
+        receivedResponse = true;
+        await transport.close();
+        this.modelTransports.delete(runId);
+        token.assertHeld();
+        const reader = agent.model.start(attempt.prepared, { status: response.status, mediaType: response.mediaType });
+        reader.push(response.bodyBytes);
+        const result = reader.finish(sampleCanonicalNow(), agent.resolveToolInput);
+        response.bodyBytes.fill(0);
+        return await agent.completeModel({ opId: prepared.opId, attempt: prepared.attempt,
+          expectedRunRevision: readRun(this.driver, runId).revision, result });
+      } catch (error) {
+        // Unknown never becomes a no-release refund or a synthetic response.
+        // Native closure is resource retirement only, not external-effect proof.
+        let closure: ModelBrokerClosed | undefined;
+        if (transport) { closure = await transport.close(); this.modelTransports.delete(runId); }
+        if (error instanceof ResourceRetirementError) throw error;
+        if (error instanceof InstalledModelBrokerRefusalError) console.error(canonicalJsonBytes({ diagnosticOnly: true,
+          scope: 'installed-model-broker', runId, opId: prepared.opId, attempt: prepared.attempt,
+          ...(claimed ? { dispatchId: claimed.dispatchId, dispatchJournalSeq: claimed.seq } : {}), reason: error.reason }).toString('utf8'));
+        const input = { runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision };
+        const last = readInvocationAttempt(this.driver, runId, prepared.opId, prepared.attempt).at(-1);
+        if (last?.phase === 'dispatch_claimed' && claimed && closure?.requestStarted && !receivedResponse) {
+          const active = assertActiveStateOwner(this.driver, this.owner);
+          token.assertHeld();
+          if (active.supervisorInstanceId !== claimed.supervisorInstanceId || active.ownerEpoch !== claimed.stateOwnerEpoch)
+            throw new KernelStorageError('LEASE_FENCED', 'broker ambiguity cannot substitute its live claiming owner');
+          const inspector = supervisorInspectorIdentity(active), inspectorArtifact = await this.artifacts.publishCanonical(inspector, inspector.format);
+          const evidence: BrokerInvocationAmbiguityEvidenceV1 = { schemaVersion: 1, format: 'cliq-invocation-ambiguity-evidence-v1',
+            runId, frontierRef: initial.authority.grant.frontierRef, frontierDigest: initial.authority.grant.frontierRef,
+            opId: claimed.opId, opKind: 'model', attempt: claimed.attempt, dispatchId: claimed.dispatchId!, dispatchJournalSeq: claimed.seq,
+            operationRequestRef: claimed.requestRef, operationRequestDigest: initial.request.requestDigest,
+            operationTargetRef: initial.authority.targetRef, operationTargetDigest: initial.authority.targetDigest,
+            claimingSupervisorInstanceId: claimed.supervisorInstanceId!, claimingStateOwnerEpoch: claimed.stateOwnerEpoch!,
+            inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest,
+            observedAt: sampleCanonicalNow(), evidenceDigest: '', ambiguityKind: 'broker_channel_lost_after_claim',
+            brokerFenceTokenDigest: claimed.brokerFenceTokenDigest!, failureCode: 'response_stream_interrupted', durableTerminalResultAbsent: true };
+          evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest'); decodeBrokerInvocationAmbiguity(evidence);
+          const artifact = await this.artifacts.publishCanonical(evidence, evidence.format);
+          // This is an actual failed response after native body release, not a
+          // no-release refund, transport-retirement proof or display diagnosis.
+          await markInstalledBrokerAmbiguity(this.driver, this.artifacts, this.owner, { ...input, evidenceRef: artifact.ref, evidenceDigest: evidence.evidenceDigest });
+        } else if (last?.phase === 'prepared') {
+          const evidence = { schemaVersion: 1, format: 'cliq-invocation-error-v1', runId, opId: prepared.opId, attempt: prepared.attempt,
+            requestRef: prepared.requestRef, reason: 'installed_model_preparation_refused', observedAt: sampleCanonicalNow() };
+          const artifact = await this.artifacts.publishCanonical(evidence, evidence.format);
+          await failInvocationBeforeDispatch(this.driver, this.artifacts, this.owner, { ...input, errorRef: artifact.ref });
+        }
+        // Before the second release, or after a positively received response,
+        // this implementation cannot truthfully mint that ambiguity branch.
+        // Keep the original claim/reservation explicit for causal recovery.
+        throw error;
+      } finally { bodyBytes.fill(0); }
+    });
+  }
+
   async loadRunExecution(input: LoadRunExecutionInput) {
     if (this.closed || this.closeRequested || this.released) throw new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed');
     const runId = input.runId;
     if (this.executions.has(runId)) throw new KernelStorageError('REVISION_CONFLICT', 'Run already has an execution resource owner');
     const opening = loadRunExecution(this.driver, this.artifacts, this.owner, this.runtimeAuthority, input,
-      () => this.closed || this.closeRequested || this.released, this.installedRuntime, this.installedAnchor);
+      () => this.closed || this.closeRequested || this.released, this.installedRuntime, this.installedAnchor, this);
     this.executions.set(runId, opening);
     let scope: Awaited<typeof opening> | undefined;
     try {
@@ -1977,7 +2400,9 @@ export class StateStore {
       if (!bootstrap?.sourceInspection) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'trusted source inspection installation is not configured');
       abort.signal.throwIfAborted();
       return captureSubmittedSource(this.driver, this.artifacts, this.owner,
-        { bundle: bootstrap.bundle, releaseKeys: bootstrap.releaseKeys, ...bootstrap.sourceInspection }, input, abort.signal);
+        { bundle: bootstrap.bundle, releaseKeys: bootstrap.releaseKeys, ...bootstrap.sourceInspection,
+          ...(this.installedRuntime ? { sandboxProfile: installedSandboxProfile(normalized.request.sandboxResources) } : {}) },
+        input, abort.signal, this.installedRuntime);
     });
     const task: SourceInspectionTask = { abort, promise };
     this.sourceInspectionTasks.add(task);
@@ -2086,6 +2511,11 @@ export class StateStore {
     this.closeRequested = true;
     for (const task of this.sourceInspectionTasks) task.abort.abort();
     const attempt = (async () => {
+      // Retire transports and join driver tasks before fencing workers or
+      // closing their sole SQL owner; no key/request owner outlives StateOwner.
+      const brokerJoins = await Promise.allSettled([...this.modelTransports.values()].map(transport => transport.close()));
+      const producerJoins = await Promise.allSettled([...this.modelOperations.values()]);
+      const driverJoins = await Promise.allSettled([...this.installedRunTasks.values()]);
       const results = await Promise.allSettled([
         ...[...this.controlListeners].map(listener => listener.close()),
         ...[...this.sourceInspectionTasks].map(async task => {
@@ -2109,7 +2539,12 @@ export class StateStore {
           }
         })
       ]);
-      const failure = results.find(result => result.status === 'rejected');
+      // A failed broker join cannot skip independent listener/source/worker
+      // revocation. Every owner is joined, but StateOwner stays held on any
+      // retirement uncertainty; neither failure becomes a positive receipt.
+      const failure = [...brokerJoins, ...producerJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
+        ...driverJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError), ...results]
+        .find(result => result.status === 'rejected');
       if (failure?.status === 'rejected') throw failure.reason;
       this.executions.clear();
       if (!this.released) {

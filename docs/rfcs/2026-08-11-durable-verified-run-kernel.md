@@ -2669,6 +2669,110 @@ Model authority is loaded once from the exact retained assembly and signed Runti
 
 The selected signed RuntimeBundle obeys work package 06's exact `structuredArtifacts` closure. Each root binds kind/id/provider/model, a complete-byte root ref, an independently recomputed self-omitting semantic digest, and unique byte-sorted all-and-only member refs. Members are signed non-executable `bundle_object` entries whose digests equal their complete-byte ArtifactRefs. Install descriptor-verifies and imports every root/member before activation. Exactly one `system_prompt` and one `compaction_prompt` root match the assembly provider/model: the former is nonempty `ModelTextV1` and binds `instructions.systemPromptRef/systemPromptDigest`; the latter is `CompactionPromptEnvelopeV1`, binds the assembly envelope pair, and has exactly its three `ModelTextV1` members. Complete-byte and semantic digests never collapse. The same general closure retains bundled-skill files, guest image/signature, MCP recovery arguments/predicates and Windows projection schemas. Recovery never assumes preseeded CAS or rereads ambient package paths. The actual tokenizer/model files of managed local inference remain part of its signed model closure; they are not a host-side remote token counter.
 
+Installed remote-model authority uses an acyclic post-bundle companion, not a
+new RuntimeBundle structured kind or mutable model-authority ledger. The
+existing catalog and price-table schemas remain unchanged:
+
+```ts
+type InstalledModelAuthorityClosureV1 = {
+  schemaVersion: 1
+  format: 'cliq-installed-model-authority-v1'
+  publisherKeyId: string
+  signatureAlgorithm: 'ed25519'
+  runtimeBundleRef: ArtifactRef
+  runtimeBundleManifestDigest: string
+  objects: readonly {
+    artifactRef: ArtifactRef
+    byteCount: number
+    kind: 'model_catalog_entry' | 'model_price_table' | 'ed25519_signature'
+  }[]
+  closureDigest: string
+  signature: string
+}
+```
+
+`closureDigest` omits itself and `signature` under JCS; the companion's
+ArtifactRef hashes its complete signed bytes. `runtimeBundleRef` and the
+manifest digest equal the already completed selected RuntimeBundle. Build
+and sign executable/prompt/trust-store Bundle bytes first, derive that exact
+endpoint/TLS identity second, sign catalog/price objects third, and sign the
+companion last. The Bundle never references the companion. A catalog or
+endpoint-bound price table cannot be inserted back into its own Bundle, and
+placeholder refs, external unsigned metadata and preseeded CAS are not
+substitutes for this publication order.
+
+The signature domains are exactly the ASCII strings
+`cliq-model-catalog-entry-v1\0`, `cliq-model-price-table-v1\0`, and
+`cliq-installed-model-authority-v1\0`, respectively followed by the relevant
+lowercase 64-hex semantic digest in UTF-8. Catalog and price `signatureRef`
+resolve raw 64-byte Ed25519 signatures. The companion's `signature` is the
+canonical base64 encoding of exactly 64 signature bytes. All three signer
+ids equal the selected Bundle's publisher id and resolve its unique embedded
+release key; user, unknown, duplicate, different-role/domain or differently
+Bundle-bound signatures fail closed. A signature alone is not a credible
+provider capability or cost-ceiling qualification.
+
+The companion is at most 1 MiB. Its object inventory is unique and byte-sorted
+by ArtifactRef, at most 128 objects and 8 MiB of complete object bytes.
+Catalog/price objects are each at most 64 KiB and strict canonical bounded
+JSON; signature objects are exactly 64 bytes. There are 1..32 unique
+`(provider,model,endpointIdentityDigest)` tuples, each with exactly one catalog
+and one price table, no Ollama branch, and all-and-only their detached signature
+objects. Every ref/count/hash, closed schema, validity ordering, matching
+provider/model/endpoint, catalog claims, Bundle pair and actual signed
+`provider_adapter` id/version/digest verifies before eligibility. Admission
+independently requires the existing capability/price validity through its
+deadline and a substantiated full request ceiling; credential, endpoint and
+billing authority are never inferred from the companion.
+
+The literal package layout is `model-authority.json` plus
+`model-objects/sha256/<first-two-hex>/<complete-ref>` beside the original Bundle
+package. Those paths are reserved and cannot be Bundle entries. The companion
+declares no arbitrary paths. The installed owner descriptor-captures and
+revalidates both complete closed package graphs, imports the companion and
+every member through existing hash/O_EXCL/fsync CAS, and then atomically
+publishes `modelAuthorityRef` alongside `bundleDigest` in the one existing
+`runtime/active.json` selection. No second selection file, SQL authority
+table, refresh ledger, download, caller ref, custom key or mutable path lookup
+is added. A selection without that ref remains capability-incomplete and
+cannot admit an installed Run; it is not a legacy execution fallback.
+
+Admission selects from the held current companion using public model and
+endpoint/credential ids, resolves the real principal-bound owners, and pins
+the existing signed catalog, evidence, price, endpoint and frozen credential
+refs in the ordinary assembly. Recovery verifies those individually signed
+retained CAS members against the Run's exact Bundle/endpoint identities; it
+never chooses current companion members, substitutes rotated credentials or
+rereads a package. The current selected companion is a CAS root; retained
+Runs independently root their selected members and signatures. This companion
+is discovery/import only and contains no additional runtime eligibility,
+revocation, automatic refresh or retry authority.
+
+System/compaction prompt closure remains the exact signed `structuredArtifacts`
+contract. The Linux I1 recipe supports one fixed policy profile and at most
+32 paired provider/model prompt identities; each compaction root has exactly
+the distinct refs of its three validated `ModelTextV1` members. Only those
+all-and-only signed `bundle_object` members are imported; unused or arbitrary
+object roots fail. Builtin tool contract/schema bytes may use existing signed
+non-executable `schema` entries, but the trusted assembler still validates
+their exact builtin contracts and executable identities before exposing tools.
+
+An owned scripted HTTPS fixture can qualify this installation/transport
+composition only with genuine signed fixture adapter/catalog/pricing/TLS
+bytes, actual endpoint and Secret Service credentials, exact claim-before-send
+and the second release gate, no redirects, and complete joined resources.
+Its table requires its real bounded server contract and may declare zero
+charges only for that owned server; it does not use managed-local zero-cost
+provenance. It never qualifies actual-provider capability, billing, release
+signing or the unexecuted I1 negative/crash cuts. Unsupported or unqualified
+real providers remain `MODEL_CAPABILITY_UNKNOWN` or `MODEL_COST_UNKNOWN`.
+
+The initial installed Linux broker recipe is nonstreaming JSON only. A signed
+catalog claiming streaming is discovery data, not supported execution: reject
+it with `MODEL_CAPABILITY_UNKNOWN` before admission. The native response path
+accepts only bounded `application/json`; SSE and other media types fail closed.
+No streaming qualification is implied by the general provider contract.
+
 Normal prompt construction is a total stored projection, not adapter assembly. `NormalPromptProjectionV1.projectionDigest = SHA-256(JCS(projection with projectionDigest omitted))`; its Run/spec/assembly/context refs equal the current authoritative Run and ready Checkpoint, `contextManifestDigest` equals the decoded `ContextManifest.projectionDigest`, `basedOnRunRevision` is the revision being dispatched, and `frontierDigest = SHA-256(JCS(the exact current RunFrontier))`. Message indices and tool indices are contiguous from zero. The producer walks only the frozen artifacts in this order:
 
 1. Emit one system message from a closed instruction projection. The first, mandatory nonempty piece is the decoded signed-RuntimeBundle `RunAssembly.instructions.systemPromptRef` `ModelTextV1.utf8`. If the decoded workspace manifest has entries, the next piece is UTF-8 JCS of `{format:'cliq-workspace-instruction-prompt-v1',entries:[{order,canonicalRootRelativePath,appliesToSubtree:true,instructionUtf8}]}`, using every manifest entry in order and the exact decoded `ModelTextV1.utf8`; this preserves each nested scope instead of guessing one ambient target path. Each selected skill then contributes UTF-8 JCS of `{format:'cliq-skill-instruction-prompt-v1',skillId,sourceScope,instructionUtf8}` in the assembly's explicit skill order. Omit only the empty workspace block, require every skill instruction to be nonempty, and join the remaining exact pieces with two LF bytes. Every ref/digest, source identity, and text digest rehashes, and `sourceKind='assembly_instructions'`, `sourceId=assemblyRef`.

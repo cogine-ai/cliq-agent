@@ -212,6 +212,7 @@ type NativeGenerationTree = HeldGenerationTree & {
   openSnapshot(): HeldGenerationSnapshot;
   openFileWriter(path: string, mode: number, byteCount: number): HeldGenerationFileWriter;
   borrow(): BorrowedGenerationForExecution;
+  assertRetired(): number;
 };
 const nativeTrees = new WeakMap<HeldGenerationTree, NativeGenerationTree>();
 const roots = new WeakMap<HeldStateOwnerLock, StateRootIdentityV1>();
@@ -257,6 +258,17 @@ export function openGenerationFileWriter(tree: HeldGenerationTree, path: string,
  * No public client accepts a number/path as an authority override. */
 export function borrowGenerationForExecution(tree: HeldGenerationTree): BorrowedGenerationForExecution {
   return heldTree(tree).borrow();
+}
+/** Closed native owner, not a rescan, boolean or caller-supplied descriptor. */
+export function assertRetiredGenerationTree(tree: HeldGenerationTree): number {
+  const native = nativeTrees.get(tree);
+  if (!native) throw new TypeError('invalid retired generation tree owner');
+  try { return native.assertRetired(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('generation resources did not retire under their original StateOwner', error);
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'generation native resource owners are not retired', { cause: error });
+  }
 }
 /** Native-minted process/image observation, never a caller attestation. */
 export type NativePeerObservation = Readonly<{
@@ -746,7 +758,7 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
       try { held.close(); }
       catch (error) {
         if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
-          throw new ResourceRetirementError('source staging retirement prevents StateOwner release', error);
+          throw new ResourceRetirementError('native resource retirement prevents StateOwner release', error);
         throw error;
       }
     },
@@ -895,7 +907,10 @@ export async function loadHeldStateOwnerImage(file: FileHandle, bundle?: Runtime
 export function assertStateOwnerLock(lock: HeldStateOwnerLock): void {
   try {
     lock.assertHeld();
-  } catch {
+  } catch (error) {
+    if (error instanceof ResourceRetirementError) throw error;
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw new ResourceRetirementError('StateOwner retains unresolved resource retirement', error);
     throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner root/runtime/lock descriptor identity changed or closed');
   }
 }

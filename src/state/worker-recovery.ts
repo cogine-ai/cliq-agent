@@ -183,7 +183,7 @@ async function validateWorkerInFlightDispatch(artifacts: ArtifactCatalog, wait: 
 }
 
 /** Retained closed artifacts can be replay-validated, but cannot mint a live native observation. */
-async function validateWorkerQuarantines(artifacts: ArtifactCatalog, cut: WorkerCut, driver: SqliteDriver): Promise<void> {
+export async function validateRetainedWorkerQuarantines(artifacts: ArtifactCatalog, cut: WorkerCut, driver: SqliteDriver): Promise<void> {
   for (const generation of cut.workspaceGenerations) {
     if (generation.phase !== 'quarantined') continue;
     const quarantine = await readCanonicalArtifact<WorkspaceGenerationQuarantineEvidenceV1>(artifacts, generation.quarantineEvidenceRef);
@@ -335,7 +335,7 @@ async function validateWorkerQuarantines(artifacts: ArtifactCatalog, cut: Worker
 
 /** Validate the installed wait from the same SQLite cut as the Run, launch, generation and Journal. */
 export async function validateWorkerRecoveryWait(artifacts: ArtifactCatalog, cut: WorkerCut, driver: SqliteDriver): Promise<void> {
-  await validateWorkerQuarantines(artifacts, cut, driver);
+  await validateRetainedWorkerQuarantines(artifacts, cut, driver);
   const { run, workerLaunches: launches, workspaceGenerations: generations } = cut;
   const reconciling = launches.filter(launch => launch.phase === 'reconciling');
   const fenced = generations.filter(generation => generation.phase === 'fenced_reconciling');
