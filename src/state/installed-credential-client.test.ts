@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import type { InstalledControlErrorV1 } from './installed-control.js';
 import { decodeInstalledCredentialControlResult } from './installed-credential-client.js';
+import { KernelStorageError } from './errors.js';
 
 // Pure wire-data conformance only. These values create no authenticated peer,
 // installed handle, credential scope or finalization authority.
@@ -13,6 +14,28 @@ test('installed credential client recognizes a closed request-id conflict as a r
   }, 'credential.finalize'), {
     name: 'KernelStorageError', code: 'RECOVERY_REQUIRED', retryable: false,
     message: 'installed Supervisor refused the authenticated credential operation'
+  });
+});
+
+test('installed credential client diagnoses an expired finalizer refusal as terminal recovery', () => {
+  assert.throws(() => decodeInstalledCredentialControlResult({
+    protocolVersion: 1, ok: false, method: 'credential.finalize',
+    error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false,
+      messageCode: 'credential.finalize.expired' }
+  }, 'credential.finalize'), {
+    name: 'KernelStorageError', code: 'RECOVERY_REQUIRED', retryable: false,
+    message: 'installed Supervisor refused expired credential finalization'
+  });
+});
+
+test('installed credential client diagnoses noncausal finalizer timestamps as terminal recovery', () => {
+  assert.throws(() => decodeInstalledCredentialControlResult({
+    protocolVersion: 1, ok: false, method: 'credential.finalize',
+    error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false,
+      messageCode: 'credential.finalize.noncausal_time' }
+  }, 'credential.finalize'), {
+    name: 'KernelStorageError', code: 'RECOVERY_REQUIRED', retryable: false,
+    message: 'installed Supervisor refused credential finalization because its timestamps are not causal'
   });
 });
 
@@ -70,3 +93,66 @@ test('installed credential refusal diagnostics do not import remote message code
     message: 'installed Supervisor refused the authenticated credential operation'
   });
 });
+
+const genericRefusal = {
+  name: 'KernelStorageError', code: 'RECOVERY_REQUIRED', retryable: false,
+  message: 'installed Supervisor refused the authenticated credential operation'
+};
+function assertGenericRefusal(error: unknown): boolean {
+  assert(error instanceof KernelStorageError);
+  assert.deepEqual({ name: error.name, code: error.code, retryable: error.retryable, message: error.message }, genericRefusal);
+  for (const field of ['cause', 'messageCode', 'errorId']) assert.equal(Object.hasOwn(error, field), false);
+  return true;
+}
+const finalizerTimeCodes = ['credential.finalize.noncausal_time', 'credential.finalize.expired'] as const;
+for (const messageCode of finalizerTimeCodes) {
+  const response = { protocolVersion: 1, ok: false, method: 'credential.finalize',
+    error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode } };
+  // Each literal retains its required closed variant fields; a recognized text
+  // paired with another accepted code must not claim a finalizer time diagnosis.
+  for (const error of [...otherRefusals.filter(value => value.code !== 'AUTHORIZATION_REQUIRED'), conflict.error]) {
+    test(`installed client ${messageCode} paired with ${error.code} remains generic`, () => {
+      assert.throws(() => decodeInstalledCredentialControlResult({ ...response,
+        error: { ...error, messageCode } }, 'credential.finalize'), assertGenericRefusal);
+    });
+  }
+  test(`installed hello carrying ${messageCode} remains generic`, () => {
+    assert.throws(() => decodeInstalledCredentialControlResult({ ...response,
+      method: 'control.hello' }, 'control.hello'), assertGenericRefusal);
+  });
+
+  const malformedTimeRefusals = [
+    { name: 'wrong protocol', value: { ...response, protocolVersion: 2 } },
+    { name: 'wrong actual method', value: { ...response, method: 'control.hello' } },
+    { name: 'wrong error schema', value: { ...response, error: { ...response.error, schemaVersion: 2 } } },
+    { name: 'retryable response', value: { ...response, error: { ...response.error, retryable: true } } },
+    { name: 'unknown wire code', value: { ...response, error: { ...response.error, code: 'REMOTE_REFUSAL' } } },
+    { name: 'extra envelope field', value: { ...response, timestamp: 'untrusted-remote-data' } },
+    { name: 'extra error payload', value: { ...response, error: { ...response.error, payload: 'untrusted-remote-data' } } },
+    { name: 'non-string message code', value: { ...response, error: { ...response.error, messageCode: 1 } } },
+    { name: 'empty message code', value: { ...response, error: { ...response.error, messageCode: '' } } },
+    { name: 'oversized message code', value: { ...response, error: { ...response.error, messageCode: 'x'.repeat(129) } } },
+    { name: 'noncanonical message code', value: { ...response, error: { ...response.error, messageCode: 'e\u0301' } } },
+    { name: 'NUL message code', value: { ...response, error: { ...response.error, messageCode: '\u0000' } } },
+    { name: 'unpaired-surrogate message code', value: { ...response, error: { ...response.error, messageCode: '\ud800' } } }
+  ];
+  for (const { name, value } of malformedTimeRefusals) {
+    test(`installed client ${messageCode} rejects ${name} before diagnosis`, () => {
+      assert.throws(() => decodeInstalledCredentialControlResult(value, 'credential.finalize'), error => {
+        assert(error instanceof TypeError);
+        assert.equal(Object.hasOwn(error, 'cause'), false);
+        assert.equal(error.message.includes('untrusted-remote-data'), false);
+        return true;
+      });
+    });
+  }
+}
+
+for (const messageCode of ['credential.finalize.future_reason', 'untrusted\n\tmessage', '__proto__']) {
+  test(`installed credential unknown canonical message code ${JSON.stringify(messageCode)} remains generic`, () => {
+    assert.throws(() => decodeInstalledCredentialControlResult({
+      protocolVersion: 1, ok: false, method: 'credential.finalize',
+      error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode }
+    }, 'credential.finalize'), assertGenericRefusal);
+  });
+}

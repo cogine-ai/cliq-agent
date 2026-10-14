@@ -106,9 +106,15 @@ export function decodeInstalledCredentialControlResult(response: unknown, method
     if (error.schemaVersion !== 1 || error.retryable !== false || !['INVALID_REQUEST', 'INTERNAL', 'INCOMPATIBLE_PROTOCOL',
       'NOT_FOUND', 'AUTHORIZATION_REQUIRED', 'ARTIFACT_MISMATCH', 'UNSUPPORTED_PLATFORM', 'REQUEST_ID_CONFLICT'].includes(code))
       throw new TypeError('invalid installed control refusal');
-    text(error.messageCode);
+    const messageCode = text(error.messageCode);
     // A refusal never imports remote messages/payloads into diagnostics. No
     // false retry/ledger identity is synthesized from an INTERNAL response.
+    if (method === 'credential.finalize' && code === 'AUTHORIZATION_REQUIRED') {
+      if (messageCode === 'credential.finalize.noncausal_time')
+        refuse('installed Supervisor refused credential finalization because its timestamps are not causal');
+      if (messageCode === 'credential.finalize.expired')
+        refuse('installed Supervisor refused expired credential finalization');
+    }
     refuse('installed Supervisor refused the authenticated credential operation');
   }
   exact(value, ['protocolVersion', 'ok', 'result']);

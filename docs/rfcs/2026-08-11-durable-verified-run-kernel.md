@@ -8565,6 +8565,27 @@ ordinary remote finalizer; that later integration needs an explicit owning
 held-token path, not temporarily released cutover locks or recursive RPC. The
 installed credential increment does not qualify migration finalization.
 
+The actual finalizer time guard alone may select two fixed refusal diagnostics:
+`credential.finalize.noncausal_time` when an existing causal timestamp exceeds C,
+or `credential.finalize.expired` when no causal violation exists and
+`expiresAt <= C`. Causal checking keeps precedence over expiry. Both retain
+`code='AUTHORIZATION_REQUIRED'`, `retryable=false` and the exact v1 envelope;
+the internal classification remains `STATE_TRANSITION_INVALID`.
+Other valid refusals retain their existing projection. No condition, C sample,
+fence/credential commit order, retirement precedence or refusal-side fact changes.
+There are no new fields, methods, status interface, time inputs, authority or retry
+permissions.
+
+Only the verified `(credential.finalize, AUTHORIZATION_REQUIRED, messageCode)`
+triple selects compiled client text: respectively `installed Supervisor refused
+credential finalization because its timestamps are not causal` and `installed
+Supervisor refused expired credential finalization`. Unknown message codes or
+known message codes paired with another wire code/expected method use the existing
+fixed generic refusal; malformed envelopes, wrong methods and unknown wire codes still
+fail strict decoding. Remote text, error ids and timestamps are never imported.
+These diagnostics do not prove a real negative cut executed or complete I1;
+unexecuted finalizer negatives and all other missing qualification remain unverified.
+
 Wire source selectors are requests, not authoritative projection entries. An optional `readGrantId` names a user-owned registered grant, not an artifact ref. The Supervisor maps every include to exact `SourceIncludeAuthorizationV1`: no grant is accepted only for descriptor-proven tracked/nonignored bytes; ignored bytes atomically consume the exact read-scope grant into its receipt-bound branch. Excludes carry no grant. Repository config can add requested selectors but cannot provide or choose an authorization ref.
 
 Pre-admission authority uses the same thin waist. `authorization.create` canonicalizes and inspects an exact source scope bound to the canonical workspace identity, a verifier execution-identity target limited to a signed guest-toolchain entry or workspace script, an MCP-stdio target limited to a signed guest-toolchain or retained RuntimeBundle `mcp_server` executable, or an exact workspace+lockfile install-script decision. It records principal/target/digest/purpose/expiry as an opaque grant and returns only its id; it never executes the target or grants a Run effect. A verifier request must carry the matching target-kind identity grant, and may carry a matching verifier-execution grant whose canonical request digest/identity/bounds let admission mint the Run-scoped template in section 13.1. Without the latter the accepted Run may later wait for verifier-launch approval; without required identity/read/install-script authority submission returns `AUTHORIZATION_REQUIRED` and creates no Run. A grant cannot alias the same relative path in another workspace or a host binary to a guest tool id. Revocation prevents unused grants and future admissions, but cannot erase bytes already captured or silently rewrite an accepted Run; `run.cancel`/the Run's own approval subjects control accepted work. Verifier environment and argv values are explicitly non-secret literals only and the Supervisor binds that assertion into authorization/admission digests. Secrets and provider/MCP credentials travel solely as registered credential ids and broker handles, never as raw env/argv strings in a control request, CAS artifact, Journal row, or receipt.

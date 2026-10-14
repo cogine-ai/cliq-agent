@@ -5,7 +5,7 @@ import { parseJsonStrict } from '../kernel/json.js';
 import type { RunSnapshotV1 } from '../kernel/types.js';
 import type { LocalControlConnection } from './control-channel.js';
 import { EventCursorExpiredError, type ReadControlRequest, type ReadControlResult } from './control-read.js';
-import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { CredentialFinalizationTimeError, KernelStorageError, ResourceRetirementError } from './errors.js';
 import type { StateStore } from './store.js';
 import type { CredentialAuthorityOperationV1 } from '../kernel/credential-authority.js';
 import type { CredentialFinalizeRequest } from './installed-credential-client.js';
@@ -164,8 +164,12 @@ export function openInstalledControl(store: StateStore,
     if (error instanceof TypeError || (error instanceof KernelStorageError && error.code === 'INVALID_REQUEST')) return invalid();
     if (credential && error instanceof KernelStorageError && error.code === 'REQUEST_ID_CONFLICT') return {
       schemaVersion: 1, code: 'REQUEST_ID_CONFLICT', retryable: false, messageCode: 'control.request_id_conflict' };
-    if (credential && error instanceof KernelStorageError && error.code === 'STATE_TRANSITION_INVALID') return {
-      schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'credential.finalize_refused' };
+    if (credential && error instanceof KernelStorageError && error.code === 'STATE_TRANSITION_INVALID') {
+      const reason = error instanceof CredentialFinalizationTimeError ? error.reason : undefined;
+      const messageCode = reason === 'noncausal_time' ? 'credential.finalize.noncausal_time' :
+        reason === 'expired' ? 'credential.finalize.expired' : 'credential.finalize_refused';
+      return { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode };
+    }
     if (error instanceof KernelStorageError && (error.code === 'NOT_FOUND' || error.code === 'ARTIFACT_MISMATCH' || error.code === 'UNSUPPORTED_PLATFORM')) {
       return { schemaVersion: 1, code: error.code, retryable: false, messageCode: 'control.read_rejected' };
     }

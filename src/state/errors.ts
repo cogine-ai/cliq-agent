@@ -25,6 +25,15 @@ export class KernelStorageError extends Error {
   }
 }
 
+/** Internal diagnosis of an existing finalizer refusal, never time or
+ * authorization evidence. Only the finalizer's actual time guards throw it. */
+export class CredentialFinalizationTimeError extends KernelStorageError {
+  constructor(readonly reason: 'noncausal_time' | 'expired') {
+    super('STATE_TRANSITION_INVALID', 'credential expansion time or expiry is not causal');
+    this.name = 'CredentialFinalizationTimeError';
+  }
+}
+
 /** Internal resource-retirement failure, not an inspection outcome or a
  * caller-supplied proof. It must survive operation error handling so that an
  * unsettled descriptor/process cleanup can never mint a joined receipt. */
