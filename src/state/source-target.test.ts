@@ -12,6 +12,7 @@ import type { SourceManifest, WorkspaceEntryManifest } from '../kernel/types.js'
 import { testFixture } from '../model/testing/fixtures.js';
 import { createWorkspaceTrustContext, writePersistedWorkspaceTrust } from '../session/trust.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest } from './source-target.js';
+import { assertInstalledRunRecipe } from './installed-run.js';
 import { insertArtifactMetadata } from './artifacts.js';
 import { admissionKey, uuidv7 } from './testing/fixtures.js';
 import { signedToolBundle } from './testing/tool-authority.js';
@@ -37,6 +38,20 @@ test('inline submit normalization closes its schema and freezes defaults into in
   assert.throws(() => normalizeRunSubmitRequest(inlineRequest({ sourceExcludes: [{ path: 'secret', scope: 'entry', readGrantId: 'grant' }] })), { code: 'INVALID_REQUEST' });
   assert.throws(() => normalizeRunSubmitRequest(inlineRequest({ verifiers: [{ id: 'gate', version: '1', required: true,
     executable: { kind: 'toolchain', toolId: 'node' }, argv: [], cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: 'identity' }] })), { code: 'INVALID_REQUEST' });
+});
+
+test('installed recipe refuses insufficient process capacity before capture without changing generic resource normalization', () => {
+  const installedRequest = (maxProcesses: number) => normalizeRunSubmitRequest(inlineRequest({
+    model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+      endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
+    sandboxResources: { maxProcesses }
+  })).request;
+  for (const maxProcesses of [1, 7]) {
+    const request = installedRequest(maxProcesses);
+    assert.equal(request.sandboxResources.maxProcesses, maxProcesses);
+    assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
+  }
+  for (const maxProcesses of [8, 1024]) assert.doesNotThrow(() => assertInstalledRunRecipe(installedRequest(maxProcesses)));
 });
 
 for (const outcome of ['captured', 'failed'] as const) for (const missing of ['retirement', 'inspector'] as const) {

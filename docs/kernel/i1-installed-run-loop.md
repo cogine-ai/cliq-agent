@@ -23,7 +23,13 @@ The existing [credential acceptance gaps](i1-credential-authority.md) remain.
   rooted by the existing request digest, not by a second lifecycle table.
 - One Supervisor-owned serial lane drives the retained Run. Client disconnect
   neither owns nor cancels execution. Model and tool operations use the same
-  actual worker lease and strongly contained private generation.
+  actual worker lease and strongly contained private generation. A nonretired
+  launch keeps the single worker slot even after productive driving yields.
+  Joined maintenance enforces queued deadlines and renews only a genuinely
+  held live lease; initial lease expiry is capped inside its activation
+  transaction. Deadline control is loaded before productive scheduling, not
+  behind an active broker. Each maintenance cut checks the existing time fence;
+  regression fences the lane and revokes/joins producers without healing time.
 - The fixed native broker redeems the actual Secret Service item locally,
   claims before network work, then repeats current authority and native worker
   checks before releasing the request body. Raw keys stay outside Supervisor
@@ -54,6 +60,11 @@ prepared/claimed/completed Journal rows, byte-verified ready Checkpoint,
 unchanged source, disconnect/reconnect, exact and fresh-nonce replay,
 Supervisor restart without a repeated effect, and proof-backed cancellation.
 The model's final response is an I2 candidate handoff, **not** verified success.
+The same experiment observes that candidate's original worker for at least
+65 seconds, then verifies a capacity-blocked Run reaches its own three-second
+deadline with zero effects. A separate 45-second Run verifies real activation
+and cancellation. Fixture wall time covers these added experiments; existing
+phase limits, runner timeout, scan bounds and safety assertions are unchanged.
 
 The negative endpoint response exercises native secret-reflection refusal.
 Only a real released request with joined resources can produce the existing
@@ -72,6 +83,8 @@ streaming, macOS strong execution, cross-reboot recovery, live updates,
 unexecuted credential finalizer/producer/ABA and exact crash cuts, and I2
 verification/result publication. No blocked pause workflow is retried. The
 legacy default path is not cut over or used as a fallback for this entry.
+The queued deadline experiment does not qualify a live worker's exact deadline
+or a clock-regression-during-release cut; those remain unverified.
 
 Cancellation of an already materialized, healthy but never-launched replacement
 generation remains unsupported: there is no implemented positive no-launch

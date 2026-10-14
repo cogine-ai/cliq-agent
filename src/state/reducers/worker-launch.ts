@@ -271,6 +271,20 @@ export function activateWorkerLease(
   if (!Number.isSafeInteger(input.leaseDurationMs) || input.leaseDurationMs < 1 || input.leaseDurationMs > MAX_LEASE_EXTENSION_MS) {
     throw new KernelStorageError('INVALID_REQUEST', 'worker lease duration is outside 1..60000ms');
   }
+  return activateWorkerLeaseAtCurrentCut(driver, owner, input);
+}
+
+/** Installed composition chooses no duration or clock. Its initial lease is
+ * bounded by the actual Run deadline inside the same activation transaction. */
+export function activateWorkerLeaseWithinDeadline(driver: SqliteDriver, owner: StateOwnerContext,
+  input: Omit<ActivateWorkerLeaseInput, 'leaseDurationMs'>) {
+  return activateWorkerLeaseAtCurrentCut(driver, owner, { launchId: input.launchId,
+    expectedRunRevision: input.expectedRunRevision, expectedGenerationRowVersion: input.expectedGenerationRowVersion });
+}
+
+function activateWorkerLeaseAtCurrentCut(driver: SqliteDriver, owner: StateOwnerContext,
+  input: Omit<ActivateWorkerLeaseInput, 'leaseDurationMs'> & { leaseDurationMs?: number }
+): { run: Run; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 } {
   let result!: { run: Run; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1 };
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
@@ -289,7 +303,9 @@ export function activateWorkerLease(
     }
     const run = readRun(connection, currentLaunch.runId);
     assertRunCanActivate(run, now, input.expectedRunRevision);
-    const leaseExpiresAt = addCanonicalDuration(now, input.leaseDurationMs);
+    const leaseExpiresAt = input.leaseDurationMs === undefined
+      ? new Date(Math.min(parseCanonicalTime(now) + MAX_LEASE_EXTENSION_MS, parseCanonicalTime(run.deadlineAt))).toISOString()
+      : addCanonicalDuration(now, input.leaseDurationMs);
     if (parseCanonicalTime(leaseExpiresAt) > parseCanonicalTime(run.deadlineAt)) {
       throw new KernelStorageError('INVALID_REQUEST', 'initial worker lease exceeds the Run deadline');
     }

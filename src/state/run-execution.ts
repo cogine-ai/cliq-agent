@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting, identityHash, sha256Bytes } from '../kernel/identity.js';
+import { digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import type { ProcessContainmentPlanV1, SandboxLaunchSpecV1, SandboxRuntimeBindingV1 } from '../kernel/execution.js';
 import type { Run, StateOwnerRecordV1, SupervisorInspectorIdentityV1, WorkerIdentity, WorkspaceGenerationSnapshotEvidenceV1, WorkerDeathWait } from '../kernel/types.js';
 import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
@@ -19,7 +19,7 @@ import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readWorkerLaunchClo
 import { loadAgentRun } from './reducers/agent.js';
 import { assertLiveDispatchState } from './reducers/invocation.js';
 import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, completeWorkerRecoveryProbe } from './reducers/worker-recovery.js';
-import { activateWorkerLease, beginGenerationCheckpoint, beginGenerationRevocation, recordWorkerPreactivated, reserveWorkerLaunch } from './reducers/worker-launch.js';
+import { activateWorkerLeaseWithinDeadline, beginGenerationCheckpoint, beginGenerationRevocation, recordWorkerPreactivated, renewWorkerLease, reserveWorkerLaunch } from './reducers/worker-launch.js';
 import { sealWorkerGeneration } from './reducers/worker-launch.js';
 import { registerWorkspaceGeneration, recordWorkspaceGenerationPreactivated } from './reducers/workspace-transition.js';
 import { readRecoveryClosure } from './recovery-closure.js';
@@ -36,7 +36,7 @@ import { withInstalledWorkerRoot, type HeldInstalledAnchor, type HeldInstalledRu
 import { stopCheckpointId } from '../runtime/stop.js';
 import { retireQuarantinedGeneration } from './generation-retirement.js';
 import { observeInstalledBrokerQuiescence, type StateStore } from './store.js';
-import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
+import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 
 /** Trusted installation paths belong to Supervisor bootstrap, not a Run or a control frame. */
 export type RunExecutionInstallation = Pick<LinuxWorkerInstallation, 'installationRoot' | 'cgroupParent'>;
@@ -44,6 +44,7 @@ export type LoadRunExecutionInput = { runId: string; material: RunAssemblyValida
 export type RunExecution = Readonly<{
   activateCurrentWorker(input: { expectedRunRevision: number }): Promise<Run>;
   assertCurrentModelWorker(input: { runId: string; leaseEpoch: number; launchId: string; generationRef: string; workerIdentityDigest: string }): void;
+  renewCurrentWorkerLease(): 'inactive' | 'unchanged' | 'renewed' | 'expired';
   executeCurrentTool(input: { expectedRunRevision: number }): Promise<Run>;
   finishCurrentStop(input: { expectedRunRevision: number }): Promise<Run>;
   resumeCurrentRetirement(input: { expectedRunRevision: number }): Promise<Run>;
@@ -59,7 +60,7 @@ type ActiveWorker = {
   authority: { generationRef: string; generationIdentityDigest: string };
   recipe: Awaited<ReturnType<typeof publishWorkerRecipe>>;
   reserved: Awaited<ReturnType<typeof reserveWorkerLaunch>>;
-  activated: ReturnType<typeof activateWorkerLease>;
+  activated: ReturnType<typeof activateWorkerLeaseWithinDeadline>;
   processContainmentRef: string;
 };
 
@@ -292,8 +293,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       supervisorInstanceId: reserved.supervisorInstanceId, processContainmentRef };
     const workerIdentityDigest = (await artifacts.publishCanonical(workerIdentity, 'cliq-worker-identity-v1')).ref;
     await recordWorkerPreactivated(driver, artifacts, owner, { launchId: reserved.launchId, workerIdentityDigest, processContainmentRef });
-    const activated = activateWorkerLease(driver, owner, { launchId: reserved.launchId, expectedRunRevision: run.revision,
-      expectedGenerationRowVersion: preactivatedGeneration.rowVersion, leaseDurationMs: 60_000 });
+    const activated = activateWorkerLeaseWithinDeadline(driver, owner, { launchId: reserved.launchId, expectedRunRevision: run.revision,
+      expectedGenerationRowVersion: preactivatedGeneration.rowVersion });
     signal.throwIfAborted();
     await worker.activateCommitted(activated.launch);
     signal.throwIfAborted();
@@ -442,6 +443,35 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     }
   }
   const execution: RunExecution = Object.freeze({
+    renewCurrentWorkerLease: () => {
+      // An operation in flight owns its current lease. Maintenance cannot
+      // race its native activation, revocation or Checkpoint transition.
+      if (closed || isClosing() || pending || !activeWorker || !worker || !generation || !controller || !reservation) return 'inactive';
+      if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker maintenance retains a resource retirement failure');
+      const retained = activeWorker, run = readRun(driver, runId);
+      if (run.status !== 'running' || run.cancelRequested || run.stopIntentRef !== undefined || run.activeWorkerLaunchId === undefined) return 'inactive';
+      const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId);
+      if (launch.phase !== 'activated' || launch.generationWriteState !== 'active') return 'inactive';
+      if (launch.launchId !== ownedLaunchId || launch.launchId !== retained.activated.launch.launchId ||
+          launch.leaseEpoch !== retained.activated.launch.leaseEpoch || launch.workerIdentityDigest !== retained.activated.launch.workerIdentityDigest ||
+          launch.workspaceGenerationRef !== retained.authority.generationRef || launch.processContainmentRef !== retained.processContainmentRef) {
+        throw new KernelStorageError('LEASE_FENCED', 'worker maintenance differs from its original physical owner');
+      }
+      reservation.assertHeld();
+      worker.assertHeld();
+      assertActiveStateOwner(driver, owner);
+      const now = sampleCanonicalNow(), nowMs = parseCanonicalTime(now);
+      if (!launch.leaseExpiresAt || nowMs >= parseCanonicalTime(launch.leaseExpiresAt) || nowMs >= parseCanonicalTime(run.deadlineAt)) return 'expired';
+      const live = assertLiveDispatchState(driver, owner, runId, run.revision, run.leaseEpoch, now);
+      requireEqual(live.launch, launch, 'worker maintenance current launch');
+      requireEqual(live.generation, retained.activated.generation, 'worker maintenance original active generation');
+      if (parseCanonicalTime(launch.leaseExpiresAt) - nowMs > 30_000) return 'unchanged';
+      const renewed = renewWorkerLease(driver, owner, { launchId: launch.launchId, expectedLeaseVersion: launch.leaseVersion,
+        runId, leaseEpoch: run.leaseEpoch, workerIdentityDigest: launch.workerIdentityDigest!,
+        newLeaseExpiresAt: new Date(Math.min(nowMs + 60_000, parseCanonicalTime(run.deadlineAt))).toISOString() });
+      retained.activated = { ...retained.activated, launch: renewed };
+      return 'renewed';
+    },
     assertCurrentModelWorker: value => {
       if (!exactKeys(value, ['runId', 'leaseEpoch', 'launchId', 'generationRef', 'workerIdentityDigest']) ||
           value.runId !== runId || !Number.isSafeInteger(value.leaseEpoch) || value.leaseEpoch < 1 ||

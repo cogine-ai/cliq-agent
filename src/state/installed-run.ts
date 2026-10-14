@@ -71,6 +71,17 @@ function invalid(message: string): never { throw new KernelStorageError('INVALID
 function mismatch(message: string): never { throw new KernelStorageError('ARTIFACT_MISMATCH', message); }
 const same = (left: unknown, right: unknown) => canonicalJsonBytes(left).equals(canonicalJsonBytes(right));
 
+/** Reject unsupported fixed-recipe intent before source/instruction capture.
+ * Generic normalization retains the wider resource contract for other recipes. */
+export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest): asserts request is NormalizedRunSubmitRequest & {
+  model: Exclude<NormalizedRunSubmitRequest['model'], { provider: 'ollama' }>;
+} {
+  if (request.model.provider !== 'openai-compatible' || request.verifiers.length || request.dependency.mode !== 'none' ||
+      request.registeredMcpServerIds.length || request.skillIds.length || request.sourceIncludes.length ||
+      request.sandboxResources.maxProcesses < 8)
+    invalid('installed Run selects an unsupported model, execution resource, verifier, dependency, MCP, skill or source inclusion');
+}
+
 function closeOwned(resources: readonly { close(): void }[], error?: unknown): void {
   const failures: unknown[] = [];
   for (const resource of [...resources].reverse()) { try { resource.close(); } catch (failure) { failures.push(failure); } }
@@ -317,9 +328,7 @@ export async function assembleInstalledRun(input: {
     request: input.request, source: input.source, endpoint: decodeEndpointRegistration(input.endpoint),
     credentialBindings: input.credentialBindings.map(decodeEndpointCredentialGrantBinding) });
   if (!same(currentOriginal.request, request)) mismatch('installed producer did not receive the exact normalized current public frame');
-  if (request.model.provider !== 'openai-compatible' || request.verifiers.length || request.dependency.mode !== 'none' ||
-      request.registeredMcpServerIds.length || request.skillIds.length || request.sourceIncludes.length)
-    invalid('installed Run selects an unsupported model, verifier, dependency, MCP, skill or source inclusion');
+  assertInstalledRunRecipe(request);
   const remote = request.model;
   await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
   const session = readSession(driver, request.sessionId), workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
