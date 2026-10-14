@@ -669,6 +669,36 @@ which validate the original registration closure rather than active authority.
 Every original assertion remains; this arrangement still awaits genuine Linux
 qualification and is not a demonstrated production fix.
 
+Commit `1bc4156070a006c0dae5dc12af99f44c9da4f5ec` passed all eight checks in
+both [PR run 38562311225](https://github.com/cogine-ai/cliq-agent/actions/runs/38562311225)
+and [branch run 38562304187](https://github.com/cogine-ai/cliq-agent/actions/runs/38562304187).
+Their credential jobs took 16 minutes 9 seconds and 19 minutes 46 seconds,
+respectively, within the unchanged 20-minute limit; the latter's narrow margin
+is not evidence of ample budget for further qualification. Local build and
+1898/1898 tests, strict journey/observer TypeScript and design contracts passed.
+The source change only rearranged the fixture and added strict existing-service
+checks; it did not change production or weaken any predicate or budget. These
+successful runs do not retroactively identify the unique prior timeout cause.
+
+Both genuine reports are `qualified=true`, `phase=complete`, with the new
+initial-gate/input endpoint-revocation assertions satisfied: the original auth
+and initial hello were observed before the real revoke ACK, complete input then
+joined, the auth naturally exited with the exact refusal, and no new credential
+or retained operation/attempt appeared. Empty platform inventory/owner/collection
+and both actual service PID/invocation/cgroup bindings remained unchanged.
+Cold autostart, exact readSecret entry, live-pending/ABA and finalizer competition
+are explicitly not qualified by this new cut. Every original schema/static/
+historical/offline/store assertion and the final corpus completed; daemon join,
+runner-baseline restoration and zero cleanup errors were independently checked.
+Each corpus covered 261 files, both databases, 128 logical rows, 472 values,
+CAS and four trace directories. All 1659 streams closed, with 108 needles,
+no secret match or limit breach, and zero retained needles/tails.
+The downloaded report SHA-256 hashes are
+`7753a5fca7fb3f2fbb7e93cf17aa3edfd19b019f720cd8a7fe6b5b8cfe48c228` (PR)
+and `bd66ccf105b64a741de2e1b344810b87489e0c50f509edb44182e556e6e06423` (branch).
+The approved [progress PR #521](https://github.com/cogine-ai/cliq-agent/pull/521)
+remains Draft: the complete-I1 acceptance checklist above is still incomplete.
+
 ### Risks And Dependencies
 
 Order: synchronize RFC/WP contracts; one real public tracer bullet; implement
