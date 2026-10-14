@@ -4,13 +4,42 @@ import { lstatSync } from 'node:fs';
 import { chmod, link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
   openSqliteDriver,
+  iterateNodeSqliteStatement,
   type SqliteConnection,
   type SqliteDriver,
   type SqliteStatement
 } from './sqlite-driver.js';
+
+test('owned native SQLite iteration retains parameter binding and resets on early exit', () => {
+  const database = new DatabaseSync(':memory:');
+  try {
+    database.exec('CREATE TABLE records(id INTEGER, value TEXT) STRICT; INSERT INTO records VALUES (1,\'first\'),(2,\'second\'),(3,\'third\')');
+    const statement = database.prepare('SELECT id,value FROM records WHERE id >= ? ORDER BY id');
+    assert.deepEqual([...iterateNodeSqliteStatement(statement, 2)].map(row => ({ ...row })),
+      [{ id: 2, value: 'second' }, { id: 3, value: 'third' }]);
+    for (const row of iterateNodeSqliteStatement(statement, 1)) { assert.equal(row.id, 1); break; }
+    assert.equal(statement.get(3)!.id, 3);
+    for (const row of iterateNodeSqliteStatement(statement, 1)) { assert.equal(row.id, 1); break; }
+    // get() resets a cursor itself. DDL before any further statement call
+    // directly proves that break forwarded IteratorClose to the native read.
+    assert.doesNotThrow(() => database.exec('DROP TABLE records'));
+  } finally { database.close(); }
+});
+
+test('owned native SQLite iteration preserves consumer errors and permits statement reuse', () => {
+  const database = new DatabaseSync(':memory:'), marker = new Error('source-owned consumer marker');
+  try {
+    database.exec('CREATE TABLE records(id INTEGER) STRICT; INSERT INTO records VALUES (1),(2)');
+    const statement = database.prepare('SELECT id FROM records ORDER BY id');
+    assert.throws(() => { for (const row of iterateNodeSqliteStatement(statement)) { assert.equal(row.id, 1); throw marker; } },
+      error => error === marker);
+    assert.deepEqual([...iterateNodeSqliteStatement(statement)].map(row => ({ ...row })), [{ id: 1 }, { id: 2 }]);
+  } finally { database.close(); }
+});
 
 test('executes caller-owned schema and prepared statements against a file database', async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-sqlite-driver-'));

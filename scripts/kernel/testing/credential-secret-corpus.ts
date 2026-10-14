@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
+import { iterateNodeSqliteStatement } from '../../../src/state/sqlite-driver.js';
 import { CredentialSecretScanError, type CredentialSecretScanner } from './credential-secret-scan.js';
 
 const chunkBytes = 64 * 1024, sqliteLimit = 16 * 1024 * 1024, fileLimit = 512 * 1024 * 1024;
@@ -70,8 +71,11 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
       scan(table.name); scan(table.sql);
       const query = `SELECT * FROM "${table.name}"`;
       stage = 'prepare'; const statement = database.prepare(query);
+      // INTEGER cells are not byte needles. Preserve SQLite's whole signed
+      // 64-bit domain so conversion cannot stop the following TEXT/BLOB scan.
+      statement.setReadBigInts(true);
       stage = 'rows';
-      for (const row of statement.iterate()) {
+      for (const row of iterateNodeSqliteStatement(statement)) {
         check(++logicalRowsScanned <= rowLimit);
         for (const value of Object.values(row)) scan(value);
       }

@@ -119,7 +119,7 @@ import { readRecoveryClosure } from './recovery-closure.js';
 import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, type BeginWorkerRecoveryInput } from './reducers/worker-recovery.js';
 import { readRun, readSession } from './rows.js';
 import { applyKernelSchema, assertPristineKernelSchema, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
-import { openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
+import { iterateNodeSqliteStatement, openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import {
   assertActiveStateOwner,
   assertContiguousStateOwnerHistory,
@@ -424,8 +424,8 @@ function readCredentialHistory(held: CredentialBinding, grantId: string, resultR
   { latest?: CredentialAuthorityRecordV1; result?: CredentialAuthorityRecordV1; creating?: CredentialAuthorityOperationV1 } {
   let latest: CredentialAuthorityRecordV1 | undefined, result: CredentialAuthorityRecordV1 | undefined;
   let creating: CredentialAuthorityOperationV1 | undefined;
-  for (const row of held.database!.prepare(`SELECT authority_revision,record_json FROM credential_records
-    WHERE owner_principal_id=? AND credential_grant_id=? ORDER BY authority_revision`).iterate(held.ownerPrincipalId, grantId)) {
+  for (const row of iterateNodeSqliteStatement(held.database!.prepare(`SELECT authority_revision,record_json FROM credential_records
+    WHERE owner_principal_id=? AND credential_grant_id=? ORDER BY authority_revision`), held.ownerPrincipalId, grantId)) {
     const record = endpointJson(row.record_json, decodeCredentialAuthorityRecord);
     if (record.ownerPrincipalId !== held.ownerPrincipalId || record.credentialGrantId !== grantId ||
         record.authorityRevision !== (latest?.authorityRevision ?? 0) + 1 || row.authority_revision !== record.authorityRevision ||

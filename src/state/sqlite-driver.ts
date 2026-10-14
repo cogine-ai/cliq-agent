@@ -6,6 +6,17 @@ export type SqliteInputValue = null | number | bigint | string | NodeJS.ArrayBuf
 export type SqliteOutputValue = null | number | bigint | string | Uint8Array;
 export type SqliteRow = Record<string, SqliteOutputValue>;
 
+/** Keep the actual native statement alive until its iterator closes. Node
+ * 22.13's iterator retains only a native pointer, not the JS statement owner.
+ * This primitive owns no database, transaction, scope or authority. */
+export function* iterateNodeSqliteStatement(statement: StatementSync, ...parameters: SqliteInputValue[]): IterableIterator<SqliteRow> {
+  const query = statement.sourceSQL;
+  try { yield* statement.iterate(...parameters); }
+  finally {
+    if (statement.sourceSQL !== query) throw new TypeError('SQLite iterator statement changed');
+  }
+}
+
 export type SqliteRunResult = {
   changes: bigint;
   lastInsertRowid: bigint;

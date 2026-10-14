@@ -300,7 +300,7 @@ package/real-user-manager qualification under `scripts/kernel/testing/`.
 
 - [x] Real installed enroll/read/replay/rotate/revoke/cleanup journey with one
   genuine default Secret Service and no provider I/O.
-- [ ] Same-request committed replay returns original result/provenance without
+- [x] Same-request committed replay returns original result/provenance without
   reading new secret; bounded 1..3 orphan retries, permanent digest conflict.
 - [ ] Live producer/read/concurrent mutation do not cause orphan promotion or
   gratuitously consume attempts; new/ABA process cannot finalize old pending.
@@ -454,6 +454,14 @@ corpus covered 246 files, both SQLite databases, 114 logical rows and four
 joined trace corpora; all 1394 scan streams closed without detected generated
 secret bytes or retained needles/tails.
 
+That qualified journey completes the historical-replay/bounded-retry criterion:
+original and rotated operation/provenance bytes replay with an unwritten,
+unended input pipe and platform/services absent; the original prepared request
+retries with its frozen core, and actual attempts one through three preserve
+prior facts. Repeated fourth attempts and permanent intent conflicts return
+their exact pre-input refusals. This does not close the separate live-producer,
+ABA, finalizer or remaining crash criteria.
+
 The completed-schema preservation check saves the original signed endpoint
 registration/read responses before the first credential enrollment. After the
 actual v1-to-v2 extension, it requires exact original operation/record equality
@@ -517,9 +525,19 @@ The original temporary `prepare(...).iterate()` expression fails a real copied
 database/scanner regression under GC; keeping the actual statement live through
 iteration passes all 100 rows and detects a secret only in the final row, while
 preserving original database bytes. A post-iteration statement read makes that
-ownership explicit. No client/runner version, query bounds or scanner limits
+ownership explicit. The same temporary iterator also existed in production
+credential history, so both readers now use one data-only owned-statement
+primitive in the existing SQLite module. It delegates native IteratorClose,
+keeps number revisions unchanged, and owns no database or authority. Parameter
+binding, early break and consumer-error regressions cover that exact primitive;
+the GC copy-reader test covers full rows and final-row secret detection. No
+client/runner version, query bounds or scanner limits
 are changed. This establishes a supported-version reader defect, not the unique
 historical cause of run `38418796368`, whose closed original error is unavailable.
+The same private row reader also now preserves both ends of SQLite's signed
+64-bit INTEGER domain; the regression proves those fields cannot stop a later
+TEXT secret scan and leaves original bytes unchanged. This is not a business
+schema change or evidence identifying that historical Linux error.
 
 The real post-`secret_stored`, retired-scope producer pause remains blocked:
 both the proposed native helper and the narrower standard-tool metadata-only
@@ -530,6 +548,20 @@ is introduced to get around that constraint. Live-producer/finalizer/clock and
 remaining crash qualification must stay explicitly incomplete until genuine,
 permitted evidence is available; this is not another product choice or a
 reason to publish a partial capability PR.
+
+Two further no-pause regressions reuse existing genuine journey state, not new
+grants or production interfaces. The locked-store receipt's known original
+item now remains until the default alias is changed to the actual session
+collection: replay/explicit cleanup must refuse deletion, preserve the original
+receipt identity and terminal record, and leave both collections' inventories
+unchanged. Only restoring the original alias permits cleanup; an independent
+byte comparison first proves the original secret survived. Separately, a
+completed revoke receipt is replayed byte-for-byte with Secret Service fully
+joined/offline. A fresh explicit sweep must return its exact closed refusal
+without rewriting that completed receipt or terminal record; after restarting
+the actual store it must return the same completed bytes. Both cases are
+pending genuine Linux qualification and qualify neither finalizer drift nor
+resource-retirement uncertainty.
 
 ### Risks And Dependencies
 

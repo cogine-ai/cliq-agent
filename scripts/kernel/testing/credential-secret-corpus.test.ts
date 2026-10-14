@@ -85,6 +85,49 @@ test('copied diagnostics retain the real SQLite statement through GC and scan ev
   assert.equal(result.stdout, 'owned copied SQLite GC scan qualified\n');
 });
 
+test('copied diagnostics scan full-width SQLite integers without losing TEXT/BLOB coverage', async () => {
+  await copyFixture(async filename => {
+    await createDatabase(filename, database => {
+      database.exec('CREATE TABLE retained_objects(native_identity INTEGER, text_value TEXT, bytes BLOB) STRICT');
+      database.prepare('INSERT INTO retained_objects VALUES (?,?,?)').run(9223372036854775807n, 'ordinary metadata', Buffer.from('ordinary bytes'));
+    });
+    const before = await readFile(filename), scanner = createCredentialSecretScanner([secret()], limits);
+    try {
+      const result = scanCopiedCredentialDatabase(filename, scanner);
+      assert.equal(result.logicalRowsScanned, 1); assert.equal(result.logicalValuesScanned, 4);
+      assert.deepEqual(await readFile(filename), before); assert.equal(scanner.stats().matched, false);
+    } finally { scanner.close(); }
+    const input = secret(), detecting = createCredentialSecretScanner([input], limits);
+    const writer = new DatabaseSync(filename);
+    try { writer.prepare('INSERT INTO retained_objects VALUES (?,?,?)').run(-9223372036854775808n, input.toString('utf8'), Buffer.from('ordinary bytes')); }
+    finally { writer.close(); }
+    const withSecret = await readFile(filename);
+    try {
+      assert.throws(() => scanCopiedCredentialDatabase(filename, detecting), { code: 'SECRET_DETECTED' });
+      assert.equal(detecting.stats().matched, true); assert.deepEqual(await readFile(filename), withSecret);
+    } finally { detecting.close(); input.fill(0); }
+  });
+});
+
+test('copied diagnostics scan a real outstanding WAL without touching the original writer', async () => {
+  await copyFixture(async filename => {
+    const original = path.join(path.dirname(filename), 'original.sqlite'), writer = new DatabaseSync(original);
+    const scanner = createCredentialSecretScanner([secret()], limits);
+    try {
+      writer.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE retained_objects(text_value TEXT, bytes BLOB) STRICT');
+      writer.prepare('INSERT INTO retained_objects VALUES (?,?)').run('ordinary metadata', Buffer.from('ordinary bytes'));
+      const main = await readFile(original), wal = await readFile(`${original}-wal`); assert(wal.length > 32);
+      await writeFile(filename, main, { flag: 'wx', mode: 0o600 });
+      await writeFile(`${filename}-wal`, wal, { flag: 'wx', mode: 0o600 });
+      const result = scanCopiedCredentialDatabase(filename, scanner);
+      assert.equal(result.logicalRowsScanned, 1); assert.equal(result.logicalValuesScanned, 4);
+      assert.deepEqual(await readFile(original), main); assert.deepEqual(await readFile(`${original}-wal`), wal);
+      assert.equal(writer.prepare('SELECT count(*) AS total FROM retained_objects').get()!.total, 1);
+      assert.equal(scanner.stats().matched, false);
+    } finally { scanner.close(); writer.close(); }
+  });
+});
+
 for (const kind of ['TEXT', 'BLOB'] as const) test(`copied logical ${kind} secret detection has a closed data-free error`, async () => {
   await copyFixture(async filename => {
     const input = secret();

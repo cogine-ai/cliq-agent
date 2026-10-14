@@ -105,7 +105,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.credentials;
   const report: Record<string, unknown> = { diagnosticOnly: true, qualified: false, phase: 'installation', uid: ledger.uid,
-    scope: 'genuine signed credential journey, completed-schema endpoint preservation, preparation-only expiry, extra-item-attribute and full-selector ambiguity cleanup refusal, revoked-endpoint static admission refusal, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, finalizer expiry/drift/concurrent revoke/ambiguity, live-producer presence, clock regression, broker or I1' };
+    scope: 'genuine signed credential journey, completed-schema endpoint preservation, preparation-only expiry, extra-item-attribute/full-selector ambiguity/default-alias cleanup refusal, offline completed-receipt replay and fresh-sweep refusal, revoked-endpoint static admission refusal, explicit cleanup, first-prepared same-core retry and prepared-only attempts 1..3 cap with actual user-manager autostart and independent Secret Service byte comparisons; not full crash campaign, finalizer expiry/drift/concurrent revoke/ambiguity, live-producer presence, clock regression, broker or I1' };
   const secret = randomBytes(32), rotatedSecret = randomBytes(32), abandonedSecret = randomBytes(32), resubmittedSecret = randomBytes(32),
     negativeSecret = randomBytes(32), password = Buffer.from(randomBytes(32).toString('hex'));
   const capSecrets = [randomBytes(32), randomBytes(32), randomBytes(32)];
@@ -1203,11 +1203,9 @@ async function campaign(filename: string): Promise<void> {
     const unlockedAgain = await startDaemon(); assert.equal(unlockedAgain.items.length, 1);
     assert.notEqual(unlockedAgain.nameOwner, negativeBefore.nameOwner);
     assert.equal(observe('compare', unlockedAgain.items[0]!, negativeItem.itemId, negativeSecret).readback, true);
-    const unlockedRevoke = decodeCredentialAuthorityRevokeOperation(success(credential(negativeRevoke), 'operation'));
-    assert.equal(unlockedRevoke.cleanupPhase, 'cleanup_complete');
-    assert.deepEqual(receiptIdentity(unlockedRevoke), receiptIdentity(lockedRevoke)); assert.deepEqual(observe('list').items, []);
     assert.deepEqual(inactive(), report.servicesBeforeLockedRevoke);
-    report.phase = 'nondurable_default_alias'; report.nondurableDefaultAlias = storeFixture('alias-session');
+    report.phase = 'nondurable_default_alias';
+    const aliasFixture = storeFixture('alias-session'); report.nondurableDefaultAlias = aliasFixture;
     let aliasPrimary: unknown;
     try {
       assert.equal(serviceOwner(), unlockedAgain.nameOwner);
@@ -1222,6 +1220,34 @@ async function campaign(filename: string): Promise<void> {
       report.defaultAliasBeforeAuth = { diagnosticOnly: true, collection: locator[1], sessionCollection: sessionLocator[1], nameOwner: serviceOwner() };
       assert.notEqual(locator[1], '/'); assert.equal(locator[1], sessionLocator[1],
         'nondurable alias must remain the actual session collection in a fresh connection');
+      assert.equal(locator[1], aliasFixture.collection);
+      const unchangedAliasItems = () => {
+        const currentAlias = command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'call',
+          unlockedAgain.nameOwner, '/org/freedesktop/secrets', 'org.freedesktop.Secret.Service', 'ReadAlias', 's', 'default']);
+        assert.equal(currentAlias.status, 0); assert.equal(currentAlias.stdout.trim(), `o "${sessionLocator[1]}"`);
+        const items = command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'get-property',
+          unlockedAgain.nameOwner, unlockedAgain.collection, 'org.freedesktop.Secret.Collection', 'Items']);
+        assert.equal(items.status, 0); assert.equal(items.stdout.trim(), `ao 1 "${unlockedAgain.items[0]}"`);
+        const sessionItems = command('/usr/bin/busctl', [`--address=unix:path=/run/user/${ledger.uid}/bus`, 'get-property',
+          unlockedAgain.nameOwner, sessionLocator[1]!, 'org.freedesktop.Secret.Collection', 'Items']);
+        assert.equal(sessionItems.status, 0); assert.equal(sessionItems.stdout.trim(), 'ao 0');
+        assert.equal(serviceOwner(), unlockedAgain.nameOwner); assert.deepEqual(inactive(), report.servicesBeforeLockedRevoke);
+      };
+      unchangedAliasItems(); report.phase = 'nondurable_alias_known_cleanup';
+      const aliasRevoke = decodeCredentialAuthorityRevokeOperation(success(await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+        ['--bootstrap-credential', canonicalJsonBytes(negativeRevoke).toString('base64url')]), 'operation'));
+      assert.equal(aliasRevoke.cleanupPhase, 'cleanup_failed'); assert.equal(aliasRevoke.cleanupErrorCode, 'platform_store_unavailable');
+      assert.deepEqual(receiptIdentity(aliasRevoke), receiptIdentity(lockedRevoke)); unchangedAliasItems();
+      const aliasCleanup = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'cleanup',
+        requestId: negativeRevoke.requestId }), 'operation'));
+      assert.equal(aliasCleanup.cleanupPhase, 'cleanup_failed'); assert.equal(aliasCleanup.cleanupErrorCode, 'platform_store_unavailable');
+      assert.deepEqual(receiptIdentity(aliasCleanup), receiptIdentity(lockedRevoke));
+      assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+        credentialGrantId: negativeMetadata.credentialGrantId }), 'record')), negativeRevoked); unchangedAliasItems();
+      report.nondurableAliasKnownCleanup = { terminalReadAndCleanupWithoutSupervisor: true, originalItemStillPresent: true,
+        sessionInventoryEmpty: true, originalReceiptIdentityMatched: true, revokedRecordUnchanged: true,
+        secretInputPipeUnwrittenAndUnended: true, finalizerAliasDriftQualified: false };
+      report.phase = 'nondurable_alias_admission';
       const nondurableRequest = { ...negativeMetadata, requestId: '019a0012-0000-7000-8000-000000000035',
         credentialGrantId: '019a0012-0000-7000-8000-000000000036', secretSubmissionId: '019a0012-0000-7000-8000-000000000135' };
       platformWriteRefused(credential(nondurableRequest, negativeSecret));
@@ -1235,6 +1261,17 @@ async function campaign(filename: string): Promise<void> {
       try { report.defaultAliasRestored = storeFixture('alias-restore', unlockedAgain.collection); }
       catch (error) { throw new AggregateError([aliasPrimary, error].filter(Boolean), 'actual alias test and restoration failed'); }
     }
+    report.phase = 'restored_alias_known_cleanup';
+    const restoredAliasItem = observe('list'); assert.deepEqual(restoredAliasItem.items, unlockedAgain.items);
+    for (const key of ['nameOwner', 'servicePid', 'serviceUid', 'collection'] as const) assert.equal(restoredAliasItem[key], unlockedAgain[key]);
+    assert.equal(observe('compare', restoredAliasItem.items[0]!, negativeItem.itemId, negativeSecret).readback, true);
+    const unlockedRevoke = decodeCredentialAuthorityRevokeOperation(success(credential(negativeRevoke), 'operation'));
+    assert.equal(unlockedRevoke.cleanupPhase, 'cleanup_complete');
+    assert.deepEqual(receiptIdentity(unlockedRevoke), receiptIdentity(lockedRevoke));
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: negativeMetadata.credentialGrantId }), 'record')), negativeRevoked);
+    report.nondurableAliasCleanupRestored = { originalItemBytesUnchanged: true, originalReceiptIdentityMatched: true,
+      cleanupComplete: true, revokedRecordUnchanged: true, finalizerAliasDriftQualified: false };
     assert.deepEqual(observe('list').items, []); report.servicesAfterStoreNegatives = stopRoles();
     report.phase = 'unknown_credential_schema';
     // Corrupt only this disposable, fully closed v2 fixture. This does not
@@ -1327,6 +1364,37 @@ async function campaign(filename: string): Promise<void> {
     report.revokedEndpointAdmission = { noReturnedAuthority: true, noRetainedOperation: true,
       originalOperationReplayUnchanged: true, terminalRecordUnchanged: true, servicesRemainInactive: true,
       secretInputPipeUnwrittenAndUnended: true, concurrentFinalizerRevokeQualified: false };
+    report.phase = 'offline_completed_receipt';
+    await stopDaemon(); noStore();
+    const completedBytes = `${canonicalJsonBytes({ schemaVersion: 1, operation: completedRevocation }).toString('utf8')}\n`;
+    const completedReplayWithoutStore = async () => {
+      const replay = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'),
+        ['--bootstrap-credential', revokeBytes.toString('base64url')]);
+      assert.deepEqual(decodeCredentialAuthorityRevokeOperation(success(replay, 'operation')), completedRevocation);
+      assert.equal(replay.stdout, completedBytes);
+      assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+        credentialGrantId: metadata.credentialGrantId }), 'record')), revokedRecord);
+      assert.deepEqual(inactive(), report.servicesAfterStoreNegatives); noStore();
+    };
+    await completedReplayWithoutStore();
+    exactRefusal(await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
+      canonicalJsonBytes({ schemaVersion: 1, kind: 'cleanup', requestId: revokeMetadata.requestId }).toString('base64url')]),
+      'RECOVERY_REQUIRED', 'credential completed receipt fresh sweep did not prove absence or deletion');
+    await completedReplayWithoutStore();
+    report.phase = 'completed_receipt_store_restored';
+    const finalStore = await startDaemon(); assert.notEqual(finalStore.nameOwner, unlockedAgain.nameOwner);
+    assert.equal(finalStore.collection, unlockedAgain.collection); assert.deepEqual(finalStore.items, []);
+    const completedFreshSweep = await openInputCommand(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential',
+      canonicalJsonBytes({ schemaVersion: 1, kind: 'cleanup', requestId: revokeMetadata.requestId }).toString('base64url')]);
+    assert.deepEqual(decodeCredentialAuthorityRevokeOperation(success(completedFreshSweep, 'operation')), completedRevocation);
+    assert.equal(completedFreshSweep.stdout, completedBytes);
+    assert.deepEqual(decodeCredentialAuthorityRecord(success(credential({ schemaVersion: 1, kind: 'read',
+      credentialGrantId: metadata.credentialGrantId }), 'record')), revokedRecord);
+    assert.deepEqual(observe('list').items, []); assert.equal(serviceOwner(), finalStore.nameOwner);
+    assert.deepEqual(inactive(), report.servicesAfterStoreNegatives);
+    report.offlineCompletedReceipt = { exactOfflineReplayBeforeAndAfterFailedSweep: true, failedFreshSweepRefused: true,
+      completedReceiptUnchanged: true, terminalRecordUnchanged: true, restoredFreshSweepExactReplay: true,
+      servicesRemainInactive: true, secretInputPipeUnwrittenAndUnended: true };
     report.phase = 'complete'; report.qualified = true;
   } catch (error) { primary = error; }
   finally {
