@@ -1686,7 +1686,7 @@ export class StateStore {
     const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity);
     if (replay) {
       if ('run' in replay) {
-        if (['queued', 'running', 'waiting'].includes(replay.run.status)) await this.retainInstalledAgent(replay.run.id);
+        if (['queued', 'running', 'waiting'].includes(readRun(this.driver, replay.run.id).status)) await this.retainInstalledAgent(replay.run.id);
         this.scheduleInstalledRun(replay.run.id);
       }
       return replay;
@@ -1780,7 +1780,8 @@ export class StateStore {
       }
       const agent = await loadAgentRun(this.driver, this.artifacts, this.owner,
         { runId, material, releaseKeys: this.runtimeAuthority!.releaseKeys });
-      this.installedAgents.set(runId, agent); return agent;
+      if (['queued', 'running', 'waiting'].includes(readRun(this.driver, runId).status)) this.installedAgents.set(runId, agent);
+      return agent;
     })();
     this.installedAgentLoads.set(runId, task);
     void task.then(() => this.installedAgentLoads.delete(runId), error => {
@@ -1908,7 +1909,6 @@ export class StateStore {
       if (this.executions.get(runId) === opening) this.executions.delete(runId);
     }
     this.installedAgents.delete(runId);
-    this.installedAgentLoads.delete(runId);
     this.installedRunFailures.delete(runId);
   }
 
@@ -1982,7 +1982,7 @@ export class StateStore {
       const { loadInstalledRunMaterial } = await import('./installed-run.js');
       const material = await loadInstalledRunMaterial({ selected: this.installedRuntime, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
       agent = await loadAgentRun(this.driver, this.artifacts, this.owner, { runId, material, releaseKeys: this.runtimeAuthority.releaseKeys });
-      if (['queued', 'running', 'waiting'].includes(run.status)) this.installedAgents.set(runId, agent);
+      if (['queued', 'running', 'waiting'].includes(readRun(this.driver, runId).status)) this.installedAgents.set(runId, agent);
     }
     const result = await agent.cancelRun({ ...identity, requestId: value.requestId as string, expectedRunRevision: value.expectedRevision as number });
     // The StopIntent commits first; revocation enters native synchronously.
