@@ -57,6 +57,12 @@ The Linux journey uses a disposable real user manager, signed installation,
 Secret Service, native broker and an owned scripted HTTPS endpoint on a free
 standard Ubuntu 22.04 runner. It calls the installed entry and existing v1 UDS,
 not private Store, native-owner or authority factories.
+Its disposable HOME requires a real bounded ext4 filesystem: the native
+generation and controller gates check total filesystem capacity, not free
+space. Providing this physical limit for the experiment does not qualify an
+ordinary host filesystem, an automatic quota installer or per-generation
+storage isolation. The installed executable still has to run from that volume;
+the worker's separate filesystem, permission and network gates are unchanged.
 
 Its required positive chain is model → private edit → model, with nine exact
 prepared/claimed/completed Journal rows, byte-verified ready Checkpoint,

@@ -87,10 +87,11 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
       - name: Compile the native transport with visible compiler diagnostics
         run: node scripts/kernel/build-linux-model-broker.mjs "$RUNNER_TEMP/cliq-model-broker-compile"
       - name: Exercise actual installed Run, ready Checkpoint, reconnect and restart

@@ -108,6 +108,9 @@ readonly probe_installed_keeper_unit="cliq-probe-$probe_suffix-installed-keeper.
 readonly probe_installed_supervisor_unit="cliq-probe-$probe_suffix-installed-supervisor.service"
 readonly probe_installed_state="$probe_home/probe/installed-state"
 readonly probe_ledger="$probe_fixture/ownership-ledger.json"
+readonly probe_volume_image="$probe_fixture/run-home.ext4"
+readonly probe_volume_original="$probe_fixture/run-home-original.json"
+readonly probe_volume_mounted="$probe_fixture/run-home-mounted.json"
 readonly probe_before="$probe_output/runner-baseline-before.json"
 readonly probe_after="$probe_output/runner-baseline-after.json"
 probe_created=0
@@ -154,6 +157,161 @@ probe_ledger_valid() {
   [[ -n "$probe_ledger_digest" && -f "$probe_ledger" && ! -L "$probe_ledger" && \
     "$(stat -c '%u:%a:%h' "$probe_ledger")" = '0:444:1' && \
     "$(sha256sum "$probe_ledger" | cut -d' ' -f1)" = "$probe_ledger_digest" ]]
+}
+
+# Only the new installed-Run fixture needs this actual hard filesystem bound.
+# Keep the original home hidden, not changed; the production installer still
+# creates .cliq/kernel-v1 itself. All privileged retirement decisions below use
+# root-frozen physical identities, never a path returned by the test account.
+probe_run_volume() {
+  "$probe_node" --input-type=module - "$1" "$probe_fixture" "$probe_fixture_identity" \
+    "$probe_home" "$probe_volume_image" "$probe_volume_original" "$probe_volume_mounted" \
+    "$probe_uid" "$probe_gid" "$probe_output/run-filesystem.json" <<'NODE'
+import assert from 'node:assert/strict';
+import { constants, closeSync, existsSync, fchmodSync, fsyncSync, ftruncateSync, lstatSync,
+  openSync, readFileSync, readdirSync, statfsSync, writeFileSync } from 'node:fs';
+const [action, fixture, fixtureIdentity, home, image, originalFile, mountedFile, uidText, gidText, reportFile] = process.argv.slice(2);
+assert.equal(process.geteuid(), 0);
+assert.match(fixture, /^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+$/u);
+assert.equal(home, `${fixture}/home`); assert.equal(image, `${fixture}/run-home.ext4`);
+assert.equal(originalFile, `${fixture}/run-home-original.json`); assert.equal(mountedFile, `${fixture}/run-home-mounted.json`);
+const uid = Number(uidText), gid = Number(gidText), ceiling = 1024 ** 3;
+assert(Number.isSafeInteger(uid) && uid > 0 && uid === gid);
+function identity(file, kind) {
+  const value = lstatSync(file, { bigint: true });
+  assert(!value.isSymbolicLink() && (kind === 'directory' ? value.isDirectory() : value.isFile()));
+  return { device: String(value.dev), inode: String(value.ino), uid: Number(value.uid), gid: Number(value.gid),
+    mode: Number(value.mode & 0o7777n), ...(kind === 'file' ? { size: String(value.size), links: Number(value.nlink) } : {}) };
+}
+const root = identity(fixture, 'directory');
+assert.equal(`${root.device}:${root.inode}:${root.uid}`, fixtureIdentity); assert.equal(root.mode, 0o755);
+function frozen(file) {
+  const value = identity(file, 'file');
+  assert.equal(value.uid, 0); assert.equal(value.gid, 0); assert.equal(value.mode, 0o444); assert.equal(value.links, 1);
+  assert(BigInt(value.size) <= 65536n);
+  return JSON.parse(readFileSync(file, 'utf8'));
+}
+function writeFrozen(file, value) {
+  const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try { writeFileSync(fd, `${JSON.stringify(value)}\n`); fchmodSync(fd, 0o444); fsyncSync(fd); } finally { closeSync(fd); }
+}
+function filesystem() {
+  const value = statfsSync(home, { bigint: true }), capacity = value.blocks * value.bsize;
+  assert(value.blocks > 0n && value.bsize > 0n && capacity <= BigInt(Number.MAX_SAFE_INTEGER));
+  return { filesystemType: Number(value.type), totalBytes: Number(capacity) };
+}
+function mounts() {
+  const bytes = readFileSync('/proc/self/mountinfo'); assert(bytes.length <= 8 * 1024 ** 2);
+  return bytes.toString('utf8').trim().split('\n').map(line => {
+    const fields = line.split(' '), separator = fields.indexOf('-'); assert(separator >= 6);
+    return { id: fields[0], device: fields[2], root: fields[3], target: fields[4], options: fields[5],
+      type: fields[separator + 1], source: fields[separator + 2] };
+  }).filter(value => value.target === home || value.target.startsWith(`${home}/`));
+}
+function imageIdentity() {
+  const value = identity(image, 'file');
+  assert.equal(value.uid, 0); assert.equal(value.gid, 0); assert.equal(value.mode, 0o600);
+  assert.equal(value.links, 1); assert.equal(value.size, String(ceiling)); return value;
+}
+function noImageAssociation() {
+  const names = readdirSync('/sys/block'); assert(names.length <= 4096);
+  for (const name of names.filter(value => /^loop[0-9]+$/u.test(value))) {
+    let backing;
+    try { backing = readFileSync(`/sys/block/${name}/loop/backing_file`, 'utf8'); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    assert(backing.length <= 4096); assert.notEqual(backing.trim(), image);
+  }
+}
+function loop(mount, homeDevice) {
+  assert.match(mount.source, /^\/dev\/loop[0-9]+$/u); assert.match(mount.device, /^7:[0-9]+$/u);
+  const device = lstatSync(mount.source, { bigint: true }); assert(device.isBlockDevice() && !device.isSymbolicLink());
+  assert.equal(String(device.rdev), homeDevice);
+  const major = ((device.rdev >> 8n) & 0xfffn) | ((device.rdev >> 32n) & 0xfffff000n);
+  const minor = (device.rdev & 0xffn) | ((device.rdev >> 12n) & 0xffffff00n);
+  assert.equal(`${major}:${minor}`, mount.device);
+  const base = `/sys/dev/block/${mount.device}/loop`;
+  const read = name => { const value = readFileSync(`${base}/${name}`, 'utf8'); assert(value.length <= 4096); return value.trim(); };
+  const value = { source: mount.source, device: mount.device, inode: String(device.ino), rdev: String(device.rdev),
+    uid: Number(device.uid), gid: Number(device.gid), mode: Number(device.mode & 0o7777n),
+    backingFile: read('backing_file'), offset: read('offset'), sizeLimit: read('sizelimit'), autoclear: read('autoclear') };
+  assert.equal(value.uid, 0); assert.equal(value.backingFile, image); assert.equal(value.offset, '0');
+  assert.equal(value.sizeLimit, '0'); assert.equal(value.autoclear, '1'); return value;
+}
+function mounted(original, partial = false) {
+  assert.deepEqual(imageIdentity(), original.image);
+  const inventory = mounts(); assert.equal(inventory.length, 1);
+  const mount = inventory[0]; assert.equal(mount.target, home); assert.equal(mount.root, '/'); assert.equal(mount.type, 'ext4');
+  assert.match(mount.id, /^[1-9][0-9]*$/u);
+  const options = mount.options.split(',');
+  for (const option of ['rw', 'nodev', 'nosuid']) assert(options.includes(option));
+  assert(!options.includes('noexec'));
+  const actual = identity(home, 'directory');
+  assert.notEqual(actual.device, original.home.device);
+  if (partial) {
+    assert([0, uid].includes(actual.uid) && [0, gid].includes(actual.gid) && [0o700, 0o755].includes(actual.mode));
+  } else { assert.equal(actual.uid, uid); assert.equal(actual.gid, gid); assert.equal(actual.mode, 0o700); }
+  const observed = filesystem(); assert.equal(observed.filesystemType, 0xef53); assert(observed.totalBytes <= ceiling);
+  return { mount, home: actual, image: original.image, loop: loop(mount, actual.device), filesystem: observed };
+}
+if (action === 'initialize') {
+  assert.equal(mounts().length, 0);
+  const before = identity(home, 'directory'); assert.equal(before.uid, uid); assert.equal(before.gid, gid); assert.equal(before.mode, 0o700);
+  const beforeFilesystem = filesystem();
+  const fd = openSync(image, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try { ftruncateSync(fd, ceiling); fsyncSync(fd); } finally { closeSync(fd); }
+  writeFrozen(originalFile, { home: before, image: imageIdentity(), beforeFilesystem });
+} else if (action === 'capture' || action === 'retire-cut') {
+  const original = frozen(originalFile), inventory = mounts();
+  if (action === 'retire-cut' && inventory.length === 0) {
+    assert(!existsSync(mountedFile)); assert.deepEqual(identity(home, 'directory'), original.home);
+    assert.deepEqual(imageIdentity(), original.image); noImageAssociation();
+    process.stdout.write('unmounted\n');
+  } else {
+    const value = mounted(original, action === 'retire-cut' && !existsSync(mountedFile));
+    if (existsSync(mountedFile)) assert.deepEqual(value, frozen(mountedFile));
+    else writeFrozen(mountedFile, value);
+    if (action === 'capture') writeFrozen(reportFile, { diagnosticOnly: true, dedicatedBoundedExt4: true,
+      before: original.beforeFilesystem, mounted: value.filesystem, hardCapacityCeilingBytes: ceiling,
+      nativeGenerationQuotaVerified: false, nativeWorkerVerified: false });
+    else process.stdout.write('mounted\n');
+  }
+} else if (action === 'unmounted') {
+  const original = frozen(originalFile), retained = existsSync(mountedFile) ? frozen(mountedFile) : undefined;
+  assert.equal(mounts().length, 0); assert.deepEqual(identity(home, 'directory'), original.home);
+  assert.deepEqual(imageIdentity(), original.image); noImageAssociation();
+  if (retained) {
+    // Autoclear must have consumed the original loop association. Never detach
+    // an observed/reused numeric loop device and never use lazy/force unmount.
+    assert(!existsSync(`/sys/dev/block/${retained.loop.device}/loop/backing_file`));
+  }
+} else assert.fail('unsupported fixed volume operation');
+NODE
+}
+
+probe_retire_run_volume() {
+  [[ "$probe_campaign_kind" = run-journey ]] || return 0
+  if ! probe_ledger_valid; then probe_fail_cleanup 'ownership ledger changed; refusing bounded volume retirement'; return 1; fi
+  # initialize may not have completed. No mount operation precedes this frozen
+  # record; if its absence is inconsistent with a mount, retain everything.
+  if [[ ! -e "$probe_volume_original" && ! -L "$probe_volume_original" ]]; then
+    if mountpoint -q "$probe_home"; then probe_fail_cleanup 'unregistered fixture home mount retained'; return 1; fi
+    return 0
+  fi
+  local disposition
+  if ! disposition=$(probe_run_volume retire-cut); then probe_fail_cleanup 'bounded fixture volume identity changed; refusing unmount'; return 1; fi
+  if [[ "$disposition" = mounted ]]; then
+    if ! probe_ledger_valid; then probe_fail_cleanup 'ownership ledger changed before bounded volume unmount'; return 1; fi
+    if ! umount -- "$probe_home"; then probe_fail_cleanup 'bounded fixture volume did not unmount; retaining account and fixture'; return 1; fi
+  elif [[ "$disposition" != unmounted ]]; then probe_fail_cleanup 'unknown bounded volume retirement cut'; return 1
+  fi
+  # A normal unmount autoclears this exact loop association. A short bounded
+  # read-only wait accommodates kernel retirement without detaching a device.
+  local attempt
+  for attempt in {1..100}; do
+    if probe_run_volume unmounted >/dev/null 2>&1; then return 0; fi
+    sleep 0.05
+  done
+  probe_fail_cleanup 'bounded fixture mount/loop retirement was not proven'; return 1
 }
 
 probe_cleanup() {
@@ -260,8 +418,10 @@ probe_cleanup() {
           systemctl daemon-reload || probe_fail_cleanup 'removed drop-in cache invalidation failed'
         fi
         if [[ "$probe_cleanup_errors" = 0 ]]; then
-          userdel "$probe_username" || probe_fail_cleanup 'disposable account removal failed'
-          probe_remove_group
+          if probe_retire_run_volume; then
+            userdel "$probe_username" || probe_fail_cleanup 'disposable account removal failed'
+            probe_remove_group
+          fi
         fi
       fi
     fi
@@ -402,6 +562,17 @@ useradd --create-home --no-user-group --no-log-init -K HOME_MODE=0700 -K "MAIL_D
   --skel "$probe_skel" --home-dir "$probe_home" --shell /usr/sbin/nologin "$probe_username"
 probe_created=1
 [[ $(id -u "$probe_username") = "$probe_uid" && $(id -g "$probe_username") = "$probe_gid" ]] || exit 1
+if [[ "$probe_campaign_kind" = run-journey ]]; then
+  # This is the same actual bounded-ext4 quota shape as the existing worker
+  # campaign. Its HOME must remain executable: signed bootstrap and Supervisor
+  # images are installed here; the private worker namespace remains unchanged.
+  probe_run_volume initialize
+  mkfs.ext4 -q -F "$probe_volume_image"
+  mount -t ext4 -o loop,nodev,nosuid "$probe_volume_image" "$probe_home"
+  chown "$probe_uid:$probe_gid" "$probe_home"
+  chmod 0700 "$probe_home"
+  probe_run_volume capture
+fi
 install -o root -g root -m 0444 -- "$probe_source" "$probe_script"
 if [[ "$probe_campaign_kind" = diagnostic ]]; then
 cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_birth_source" -o "$probe_birth_helper"

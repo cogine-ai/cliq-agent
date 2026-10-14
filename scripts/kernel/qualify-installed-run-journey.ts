@@ -18,6 +18,7 @@ import { parseJsonStrict } from '../../src/kernel/json.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { createCredentialSecretScanner } from './testing/credential-secret-scan.js';
 import { scanCredentialSecretCorpus } from './testing/credential-secret-corpus.js';
+import { projectInstalledRunProgress, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; workspace: string; reportFile: string };
@@ -373,7 +374,11 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(admitted.status, 'queued'); assert.equal(admitted.revision, 1);
     // The submission client has exited and closed its actual socket. All
     // further observation uses a fresh native authenticated connection.
-    const read = () => accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: admitted.id }])[0]!, 'run.get');
+    const read = () => {
+      const cut = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: admitted.id }])[0]!, 'run.get');
+      report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure });
+      return cut;
+    };
     mark('real_edit_and_ready_checkpoint');
     let current: Record<string, any> | undefined;
     const completeBy = Date.now() + 90000;
@@ -750,7 +755,17 @@ async function campaign(filename: string): Promise<void> {
     for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
     assert.equal(await readFile(source, 'utf8'), hostBefore);
     report.qualified = true; mark('complete');
-  } catch (error) { primary = error; }
+  } catch (error) {
+    primary = error;
+    // Best-effort public observation only. Diagnostic failure cannot replace
+    // the original assertion or manufacture qualification/recovery authority.
+    if (report.acceptedRun) {
+      try {
+        report.failureSupervisorStatus = projectInstalledSupervisorStatus(accepted(exchange([
+          { protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status'));
+      } catch { report.failureSupervisorStatus = { diagnosticOnly: true, kind: 'supervisor_status_read_refused' }; }
+    }
+  }
   finally {
     try {
       if (server) {
