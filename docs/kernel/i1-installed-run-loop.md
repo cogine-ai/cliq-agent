@@ -140,6 +140,14 @@ it does not add a source experiment to the full journey's near-cap corpus.
 It then creates a second real Session using an NFD name: normalized-equivalent
 intent may replay under a fresh nonce, but different original public bytes under
 the same nonce must conflict. Normalization must not replace wire identity.
+The same campaign submits its Run objective in NFD, retains that original JCS
+request identity, and requires the objective artifact and actual owned HTTPS
+request to contain NFC. After credential revocation, exact and fresh normalized
+nonce replay preserve the original admission/refusal responses; changed original
+values under either bound nonce conflict, and a normalized digest substituted
+into the NFD request is rejected. This is canonical JSON identity, not retention
+of transport whitespace, key order or escape spelling. Only a complete passing
+current-source campaign qualifies that installed chain.
 
 A second independent campaign temporarily changes only the test user's default
 Secret Service alias through the existing standard-API fixture. It requires a

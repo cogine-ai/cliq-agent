@@ -160,9 +160,9 @@ function boundedJson(value: unknown, depth = 0, total = { members: 0 }): void {
   if (total.members > 10_000) invalid('inline JSON exceeds its member bound');
 }
 
-/** Request hashing retains the supplied optional fields; the admission intent
- * separately incorporates their normative defaults. No resolved capture ref
- * is accepted or mixed into either domain. */
+/** Request identity retains the original JCS values, before normalization or
+ * defaults. Only the admission intent uses the normalized/defaulted request.
+ * No resolved capture ref is accepted or mixed into either domain. */
 export function normalizeRunSubmitRequest(value: unknown): {
   request: NormalizedRunSubmitRequest; originalRequest: object; originalRequestDigest: string;
 } {
@@ -190,9 +190,10 @@ export function normalizeRunSubmitRequest(value: unknown): {
       ...(data.sandboxResources === undefined ? {} : { sandboxResources: object(data.sandboxResources, [], Object.keys(RESOURCE_DEFAULTS)) }),
       ...(data.maxChangedPaths === undefined ? {} : { maxChangedPaths: integer(data.maxChangedPaths, 0, 100_000) }),
       ...(data.maxChangedBytes === undefined ? {} : { maxChangedBytes: integer(data.maxChangedBytes, 0, 4 * 1024 ** 3) }) };
-    const originalRequest = { ...core, requestDigest };
+    const { requestDigest: _wireDigest, ...originalCore } = data;
+    const originalRequest = { ...originalCore, requestDigest };
     if (canonicalJsonBytes(originalRequest).length > 1_048_576) invalid('inline request exceeds 1 MiB');
-    if (canonicalSha256(core) !== requestDigest) invalid('inline requestDigest does not match canonical request bytes');
+    if (canonicalSha256(originalCore) !== requestDigest) invalid('inline requestDigest does not match canonical request bytes');
     const request = { ...core, requestDigest, budgets: mergeBudgets(budgets), sandboxResources: resourceOptions(data.sandboxResources),
       maxChangedPaths: core.maxChangedPaths ?? 10_000, maxChangedBytes: core.maxChangedBytes ?? 512 * 1024 ** 2 };
     return immutableSnapshot({ request, originalRequest, originalRequestDigest: requestDigest });

@@ -162,7 +162,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   };
   const credential = (metadata: Record<string, unknown>, input?: Buffer) => command(path.join(recipe.stateRoot, 'runtime/bootstrap'),
     ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')], input, 60000);
-  const request = (body: Record<string, unknown>) => ({ ...body, requestDigest: canonicalSha256(body) });
+  const request = <T extends Record<string, unknown>>(body: T): T & { requestDigest: string } =>
+    ({ ...body, requestDigest: canonicalSha256(body) });
   const hello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'installed-run-journey',
     controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     requestedFeatureIds: ['session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel', 'supervisor.status'] };
@@ -374,6 +375,9 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         const ordinal = ++requestsReceived;
         if (failureOnly) {
           assert.equal(ordinal, 1, 'a positively received provider rejection must not be retried');
+          assert(body.messages.some((message: any) => typeof message.content === 'string' &&
+            message.content.includes('Observe the owned caf\u00e9 model failure without using a tool.')),
+          'the model must receive the normalized objective, not the original NFD request spelling');
           const bytes = Buffer.from(rejectedResponse); scanBytes(bytes);
           outgoing.writeHead(429, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
           report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
@@ -522,7 +526,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     const submit = request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000104',
       admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
       workspacePath: recipe.workspace, objective: retryOnly ? 'Acknowledge restored model preparation without using a tool.'
-        : 'Change example.txt from before the private edit to after the private edit, using one edit operation.',
+        : failureOnly ? 'Observe the owned cafe\u0301 model failure without using a tool.'
+          : 'Change example.txt from before the private edit to after the private edit, using one edit operation.',
       model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
         modelCredentialGrantIds: [enrollment.credentialGrantId] }, policyMode: 'accept-edits',
       budgets: runBudgets,
@@ -890,7 +895,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       const refusalSession = currentSession();
       const refusalCore = { ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000116',
         admissionKey: randomBytes(32).toString('base64url'), expectedContextRevision: refusalSession.contextRevision,
-        objective: 'Observe a durable source refusal without executing a model.',
+        objective: 'Observe a durable cafe\u0301 source refusal without executing a model.',
         // Canonical inline selectors pass generic/installed admission. The
         // existing source projection rejects duplicates after real reservation,
         // then retires its genuine descriptors/staging before this response.
@@ -915,7 +920,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       report.sourceRefusalReplay.credentialRevokedAndSecretDeleted = true;
       mark('retained_source_refusal_and_conflicts_after_revocation');
       const replays = exchange([refusalRequest,
-        request({ ...refusalCore, requestId: '019a0012-0000-7000-8000-000000000118' }),
+        request({ ...refusalCore, requestId: '019a0012-0000-7000-8000-000000000118',
+          objective: 'Observe a durable caf\u00e9 source refusal without executing a model.' }),
         request({ ...refusalCore, objective: 'A conflicting original nonce must remain a conflict.' }),
         request({ ...refusalCore, requestId: '019a0012-0000-7000-8000-000000000119', objective: 'A conflicting admission intent must remain a conflict.' })]);
       // Retain only closed error classes if the real replay regresses. No
@@ -937,6 +943,33 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       report.sourceRefusalReplay.sameNonceAndFreshNoncePreserved = true;
       report.sourceRefusalReplay.requestAndAdmissionConflictsPreserved = true;
       report.sourceRefusalReplay.noNewRunSessionMutationOrProviderRequest = true;
+      mark('run_submit_original_wire_identity_and_normalized_intent');
+      const normalizedSubmit = request({ ...resourceCore, objective: 'Observe the owned caf\u00e9 model failure without using a tool.' });
+      assert.notEqual(submit.requestDigest, normalizedSubmit.requestDigest);
+      const wireRunReplies = exchange([submit, normalizedSubmit,
+        request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000121',
+          objective: 'Observe the owned caf\u00e9 model failure without using a tool.' }),
+        request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000121' }),
+        { ...submit, requestDigest: normalizedSubmit.requestDigest }]);
+      assert.deepEqual(wireRunReplies[0], submitReply, 'the original NFD admission must replay after credential revocation');
+      assert.deepEqual(wireRunReplies[2], submitReply, 'a fresh NFC nonce must bind the original admitted Run response');
+      for (const index of [1, 3]) assert.equal(canonicalSha256(wireRunReplies[index]), canonicalSha256({ protocolVersion: 1,
+        ok: false, method: 'run.submit', error: { schemaVersion: 1, code: 'REQUEST_ID_CONFLICT', retryable: false,
+          messageCode: 'control.mutation_refused' } }));
+      assert.equal(canonicalSha256(wireRunReplies[4]), canonicalSha256({ protocolVersion: 1, ok: false, method: 'run.submit',
+        error: { schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false, messageCode: 'control.invalid_request',
+          issues: [{ path: 'request', issueCode: 'invalid_request' }] } }));
+      const admittedSpec = parseJsonStrict((await readCas(admitted.specRef)).toString('utf8')) as Record<string, any>;
+      const objective = parseJsonStrict((await readCas(admittedSpec.objectiveRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(objective.utf8, 'Observe the owned caf\u00e9 model failure without using a tool.');
+      assert.equal(objective.byteCount, Buffer.byteLength(objective.utf8));
+      assert.deepEqual(currentSession(), refusalSession); assert.deepEqual(read(), terminal);
+      assert.equal(requestsReceived, 1); assert(!providerFailure);
+      report.runSubmitWireIdentity = { qualified: true, originalRequestDigest: submit.requestDigest,
+        normalizedSpellingRequestDigest: normalizedSubmit.requestDigest, normalizedObjectiveRef: admittedSpec.objectiveRef,
+        originalAndFreshNonceResponsesPreserved: true, exactWireNonceConflictsPreserved: true,
+        normalizedDigestSubstitutionRefused: true, normalizedObjectiveRetainedAndSent: true,
+        noNewRunSessionMutationOrProviderRequest: true };
       mark('session_create_original_wire_identity_and_normalized_intent');
       const wireSessionCore = { protocolVersion: 1, method: 'session.create',
         requestId: '019a0012-0000-7000-8000-00000000011a', admissionKey: randomBytes(32).toString('base64url'),
@@ -980,7 +1013,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       await delay(50); assert(!providerFailure, 'owned TLS responder observed a protocol failure');
       current = read();
       const completed = current.journal.filter((entry: any) => entry.phase === 'completed');
-      if (requestsReceived === 2 && completed.filter((entry: any) => entry.opKind === 'model').length === 2 &&
+      if ((requestsReceived as number) === 2 && completed.filter((entry: any) => entry.opKind === 'model').length === 2 &&
           completed.filter((entry: any) => entry.opKind === 'tool').length === 1) break;
       assert(Date.now() < completeBy, 'real installed model/edit sequence did not reach its ready Checkpoint');
       assert(!['failed', 'cancelled', 'succeeded', 'completed_unverified'].includes(current.snapshot.run.status), 'I1 mechanics cannot manufacture an I2 terminal result');

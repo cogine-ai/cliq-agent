@@ -42,6 +42,41 @@ test('inline submit normalization closes its schema and freezes defaults into in
     executable: { kind: 'toolchain', toolId: 'node' }, argv: [], cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: 'identity' }] })), { code: 'INVALID_REQUEST' });
 });
 
+test('inline submit retains original Unicode request identity separately from normalized admission intent', () => {
+  const original = inlineRequest({ objective: 'inspect cafe\u0301' });
+  const normalized = normalizeRunSubmitRequest(original);
+  assert.deepEqual(normalized.originalRequest, original);
+  assert.equal(normalized.originalRequestDigest, original.requestDigest);
+  assert.equal(normalized.request.objective, 'inspect caf\u00e9');
+  const canonical = inlineRequest({ ...original, objective: 'inspect caf\u00e9' });
+  const equivalent = normalizeRunSubmitRequest(canonical);
+  assert.notEqual(normalized.originalRequestDigest, equivalent.originalRequestDigest);
+  assert.equal(runSubmitIntentDigest('principal', normalized.request), runSubmitIntentDigest('principal', equivalent.request));
+  assert.throws(() => normalizeRunSubmitRequest({ ...original, requestDigest: canonical.requestDigest }), { code: 'INVALID_REQUEST' });
+  original.objective = 'changed after validation';
+  assert.equal((normalized.originalRequest as { objective: string }).objective, 'inspect cafe\u0301');
+});
+
+test('inline submit preserves original nested model values without weakening normalized uniqueness or scalar bounds', () => {
+  const original = inlineRequest({ model: { provider: 'openai-compatible', model: 'modele\u0301',
+    endpoint: { kind: 'registered', endpointRegistrationId: 'cafe\u0301' }, modelCredentialGrantIds: ['cle\u0301'] } });
+  const normalized = normalizeRunSubmitRequest(original);
+  assert.deepEqual(normalized.originalRequest, original);
+  assert.deepEqual(normalized.request.model, { provider: 'openai-compatible', model: 'model\u00e9',
+    endpoint: { kind: 'registered', endpointRegistrationId: 'caf\u00e9' }, modelCredentialGrantIds: ['cl\u00e9'] });
+  assert.throws(() => normalizeRunSubmitRequest(inlineRequest({ model: { ...original.model,
+    modelCredentialGrantIds: ['cle\u0301', 'cl\u00e9'] } })), { code: 'INVALID_REQUEST' });
+  for (const objective of ['', '\0', 'a'.repeat(262_145)]) {
+    assert.throws(() => normalizeRunSubmitRequest(inlineRequest({ objective })), { code: 'INVALID_REQUEST' });
+  }
+  // No valid JCS digest exists for these strings. Pass them to the production
+  // parser directly rather than letting the client-side hashing helper reject.
+  const valid = inlineRequest();
+  for (const objective of ['\ud800', '\udc00']) {
+    assert.throws(() => normalizeRunSubmitRequest({ ...valid, objective }), { code: 'INVALID_REQUEST' });
+  }
+});
+
 test('installed recipe refuses insufficient process capacity before capture without changing generic resource normalization', () => {
   const installedRequest = (maxProcesses: number) => normalizeRunSubmitRequest(inlineRequest({
     model: { provider: 'openai-compatible', model: 'owned-fixture-model',
