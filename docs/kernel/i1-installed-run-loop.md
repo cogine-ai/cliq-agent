@@ -108,10 +108,33 @@ The new native controller-only retirement receipt requires the original
 authenticated ordinary controller, original join and actual leaf removal;
 each read rechecks the held root/parent, original process lifetime and absent
 leaf. It does not prove worker no-spawn, workspace or broker retirement, and
-becomes invalid when its launcher closes. Actual-source Linux GREEN for this
-new receipt and Trust ordering is still required; portable tests are not that
-qualification. Missing/partial/substituted birth and every unexecuted physical
-cut remain explicitly recovery-required or unverified.
+becomes invalid when its launcher closes. Immutable `5bc17c1` passed this new
+receipt, all original 25 native scenarios and installed Trust ordering in both
+Linux events; those jobs are not qualification of the remaining lifecycle.
+Missing/partial/substituted birth and every unexecuted physical cut remain
+explicitly recovery-required or unverified.
+
+The physical materialization owner now separates actual directory birth from
+copying and complete rewalk. Its synchronous factory starts no allocation;
+the installed composition can retain the owner before starting work. Close
+joins copying and every minted snapshot/CAS operation before a separate fresh
+native retirement read. This does not bind preparation into StateStore or prove
+directory quarantine, containment death or a terminal transition. Genuine
+controller birth and the owning preparation graph remain unfinished.
+
+Instruction capture uses a fixed native instruction cursor: Git metadata is
+never entered, only exact `AGENTS.md` file contents may be read, and symlink
+contents are unavailable. The ordinary source cursor still rejects selected
+nested repositories. Source exclusion does not discard ordinary instruction
+scopes; Trust, source permission and tool permission remain separate. Real
+descriptor/CAS regressions pass; the new actual installed fixture must still
+qualify its source exclusion, retained bytes and owned HTTPS projection.
+
+Both `5bc17c1` installed failure campaigns reached the exact Busy UDS regression:
+actual `INVALID_REQUEST` instead of required `RATE_LIMITED`. The dedicated,
+immutable projection now applies only to `run.submit` scope contention; the
+non-reentrant scope guard is unchanged. Actual-source Linux GREEN is pending;
+the fixed retry hint does not authorize retry of an invocation or effect.
 
 ## Validation boundary
 

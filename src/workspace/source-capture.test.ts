@@ -203,6 +203,7 @@ test('caller-shaped source roots cannot mint captured filesystem bytes', async t
   const fake: HeldWorkspaceRoot = {
     identity: { deviceId: '1', fileId: '2', ownerUid: process.getuid!() },
     assertHeld() {}, readGitConfigChunk() { return null; }, close() {},
+    openInstructionSnapshot() { throw new Error('untrusted instruction cursor must not be used'); },
     openSnapshot() { return { next() { return null; }, assertComplete() {}, close() {} }; }
   };
   await assert.rejects(captureWorkspaceEntries(fake, artifacts,

@@ -40,6 +40,65 @@ export type RunWorkspaceGeneration = Readonly<{
   close(): void;
 }>;
 const generationTrees = new WeakMap<RunWorkspaceGeneration, HeldGenerationTree>();
+declare const workspaceBirthBrand: unique symbol;
+export type RunWorkspaceBirth = Readonly<{ [workspaceBirthBrand]: true }>;
+export type RunWorkspaceBirthData = Readonly<{
+  generationId: string; runId: string; workspaceIdentityDigest: string;
+  sourceCheckpointId: string; sourceWorkspaceStateRef: string;
+  sourceWorkspaceStateDigest: string; sourceTreeDigest: string;
+  creationNonceDigest: string; createdAt: string;
+  stateRootIdentity: ReturnType<typeof stateRootIdentityForLock>;
+  directoryIdentity: HeldGenerationTree['identity'];
+}>;
+export type RunWorkspaceMaterialization = Readonly<{
+  birth(): Promise<RunWorkspaceBirth>;
+  finish(): Promise<RunWorkspaceGeneration>;
+  close(): Promise<void>;
+}>;
+type WorkspaceOperations = { pending: Set<Promise<unknown>>; retirementFailure?: ResourceRetirementError };
+const workspaceBirths = new WeakMap<RunWorkspaceBirth,
+  { filesystem: HeldStateOwnerLock; tree: HeldGenerationTree; data: RunWorkspaceBirthData;
+    operations: WorkspaceOperations; joined: boolean }>();
+
+function trackWorkspaceOperation<T>(operations: WorkspaceOperations | undefined, pending: Promise<T>): Promise<T> {
+  if (operations) {
+    operations.pending.add(pending);
+    void pending.then(() => { operations.pending.delete(pending); }, error => {
+      operations.pending.delete(pending);
+      if (error instanceof ResourceRetirementError) operations.retirementFailure ??= error;
+    });
+  }
+  return pending;
+}
+
+/** Actual held directory birth only, not Linux qualification or permission to
+ * copy, mount, activate or retire it. A data/ref substitute cannot mint it. */
+export function readRunWorkspaceBirth(filesystem: HeldStateOwnerLock, birth: RunWorkspaceBirth): RunWorkspaceBirthData {
+  const held = workspaceBirths.get(birth);
+  if (!held || held.filesystem !== filesystem) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace birth requires its exact original StateOwner filesystem');
+  }
+  filesystem.assertHeld(); held.tree.assertHeld();
+  return held.data;
+}
+/** Physical resource retirement only. Directory quarantine, containment death
+ * and a committed lifecycle transition require their separate producers. */
+export function readRunWorkspaceBirthRetirement(filesystem: HeldStateOwnerLock, birth: RunWorkspaceBirth):
+  RunWorkspaceBirthData & { observedAt: string; resourcesRetired: true } {
+  const held = workspaceBirths.get(birth);
+  if (!held || held.filesystem !== filesystem) {
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'workspace retirement requires its exact original StateOwner filesystem');
+  }
+  filesystem.assertHeld();
+  if (held.operations.retirementFailure) throw held.operations.retirementFailure;
+  if (!held.joined || held.operations.pending.size !== 0)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'workspace materialization has not completely joined');
+  const observed = assertRetiredGenerationTree(held.tree);
+  if (!Number.isSafeInteger(observed) || observed < 1) mismatch('native generation retirement time is invalid');
+  const observedAt = new Date(observed).toISOString();
+  if (observedAt < held.data.createdAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement clock precedes workspace birth');
+  return Object.freeze({ ...held.data, observedAt, resourcesRetired: true });
+}
 declare const retainedObservationBrand: unique symbol;
 export type RetainedWorkspaceObservation = Readonly<{ [retainedObservationBrand]: true }>;
 type RetainedObservationData = Readonly<{
@@ -342,7 +401,8 @@ export async function observeRetainedRunWorkspace(input: { filesystem: HeldState
 
 async function mintRunWorkspace(tree: HeldGenerationTree, filesystem: HeldStateOwnerLock, artifacts: ArtifactCatalog,
   checkpoint: Checkpoint, frozen: Awaited<ReturnType<typeof readFrozenWorkspace>>, nonce: string, createdAt: string,
-  retainedIdentity?: WorkspaceGenerationIdentityV1, lifetimeSignal?: AbortSignal): Promise<RunWorkspaceGeneration> {
+  retainedIdentity?: WorkspaceGenerationIdentityV1, lifetimeSignal?: AbortSignal,
+  operations?: WorkspaceOperations): Promise<RunWorkspaceGeneration> {
   const { sourceState, source, entries, privateGit } = frozen;
   const generationId = identityHash(checkpoint.runId, checkpoint.id, checkpoint.workspaceStateRef, nonce);
   const observe = (signal?: AbortSignal) => observeTree(tree, artifacts, sourceState, privateGit,
@@ -350,41 +410,46 @@ async function mintRunWorkspace(tree: HeldGenerationTree, filesystem: HeldStateO
   const initial = await observe();
   if (initial.entriesRef !== sourceState.entriesRef || initial.treeDigest !== entries.treeDigest ||
       initial.workspaceStateRef !== checkpoint.workspaceStateRef) mismatch('physical generation does not exactly reproduce the frozen ready Checkpoint');
+  const publishAuthority = async (signal?: AbortSignal): Promise<MaterializedGenerationAuthority> => {
+    lifetimeSignal?.throwIfAborted(); signal?.throwIfAborted();
+    if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'a host staging directory is not a Linux generation or macOS VM volume');
+    const observed = await observe(signal);
+    if (observed.workspaceStateRef !== checkpoint.workspaceStateRef || observed.treeDigest !== entries.treeDigest) {
+      mismatch('materialized generation authority requires unchanged frozen source bytes');
+    }
+    const root = stateRootIdentityForLock(filesystem);
+    const identity: WorkspaceGenerationIdentityV1 = retainedIdentity ?? { schemaVersion: 1, format: 'cliq-workspace-generation-identity-v1',
+      generationId, runId: checkpoint.runId, workspaceIdentityDigest: source.workspaceIdentityDigest,
+      sourceCheckpointId: checkpoint.id, sourceWorkspaceStateRef: checkpoint.workspaceStateRef,
+      sourceWorkspaceStateDigest: sourceState.stateDigest, sourceTreeDigest: entries.treeDigest, creationNonceDigest: nonce,
+      locator: { kind: 'linux_directory', stateRootIdentityRef: canonicalSha256(root), stateRootIdentityDigest: root.identityDigest,
+        canonicalRootRelativePath: `runs/${checkpoint.runId}/generations/${generationId}`, deviceId: tree.identity.deviceId,
+        directoryFileId: tree.identity.fileId, ownerUid: tree.identity.ownerUid, mode: 448 }, createdAt, identityDigest: '' };
+    identity.identityDigest = digestOmitting(identity, 'identityDigest');
+    const generationRef = (await artifacts.publishCanonical(identity, identity.format)).ref;
+    lifetimeSignal?.throwIfAborted(); signal?.throwIfAborted();
+    const evidence: WorkspaceGenerationSnapshotEvidenceV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-snapshot-evidence-v1',
+      purpose: 'materialized_from_checkpoint', runId: checkpoint.runId, generationRef, generationIdentityDigest: identity.identityDigest,
+      checkpointId: checkpoint.id, workspaceStateRef: checkpoint.workspaceStateRef, workspaceStateDigest: sourceState.stateDigest,
+      entriesRef: sourceState.entriesRef, treeDigest: entries.treeDigest, descriptorRewalkComplete: true, fileFsyncComplete: true,
+      ...(observed.privateGitStateRef === undefined ? {} : { privateGitStateRef: observed.privateGitStateRef }),
+      directoryFsyncComplete: true, observedAt: new Date().toISOString(), evidenceDigest: '' };
+    evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
+    const snapshotEvidenceRef = (await artifacts.publishCanonical(evidence, evidence.format)).ref;
+    lifetimeSignal?.throwIfAborted(); signal?.throwIfAborted();
+    tree.assertHeld();
+    return Object.freeze({ generationRef, generationIdentityDigest: identity.identityDigest,
+      snapshotEvidenceRef, snapshotEvidenceDigest: evidence.evidenceDigest });
+  };
   const generation: RunWorkspaceGeneration = Object.freeze({
     generationId,
-    async observe(options) { if (this !== generation) throw new TypeError('invalid Run workspace generation'); return observe(options?.signal); },
+    async observe(options) {
+      if (this !== generation) throw new TypeError('invalid Run workspace generation');
+      return trackWorkspaceOperation(operations, observe(options?.signal));
+    },
     async publishMaterializedAuthority(options) {
       if (this !== generation) throw new TypeError('invalid Run workspace generation');
-      const signal = options?.signal;
-      lifetimeSignal?.throwIfAborted(); signal?.throwIfAborted();
-      if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'a host staging directory is not a Linux generation or macOS VM volume');
-      const observed = await observe(signal);
-      if (observed.workspaceStateRef !== checkpoint.workspaceStateRef || observed.treeDigest !== entries.treeDigest) {
-        mismatch('materialized generation authority requires unchanged frozen source bytes');
-      }
-      const root = stateRootIdentityForLock(filesystem);
-      const identity: WorkspaceGenerationIdentityV1 = retainedIdentity ?? { schemaVersion: 1, format: 'cliq-workspace-generation-identity-v1',
-        generationId, runId: checkpoint.runId, workspaceIdentityDigest: source.workspaceIdentityDigest,
-        sourceCheckpointId: checkpoint.id, sourceWorkspaceStateRef: checkpoint.workspaceStateRef,
-        sourceWorkspaceStateDigest: sourceState.stateDigest, sourceTreeDigest: entries.treeDigest, creationNonceDigest: nonce,
-        locator: { kind: 'linux_directory', stateRootIdentityRef: canonicalSha256(root), stateRootIdentityDigest: root.identityDigest,
-          canonicalRootRelativePath: `runs/${checkpoint.runId}/generations/${generationId}`, deviceId: tree.identity.deviceId,
-          directoryFileId: tree.identity.fileId, ownerUid: tree.identity.ownerUid, mode: 448 }, createdAt, identityDigest: '' };
-      identity.identityDigest = digestOmitting(identity, 'identityDigest');
-      const generationRef = (await artifacts.publishCanonical(identity, identity.format)).ref;
-      lifetimeSignal?.throwIfAborted(); signal?.throwIfAborted();
-      const evidence: WorkspaceGenerationSnapshotEvidenceV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-snapshot-evidence-v1',
-        purpose: 'materialized_from_checkpoint', runId: checkpoint.runId, generationRef, generationIdentityDigest: identity.identityDigest,
-        checkpointId: checkpoint.id, workspaceStateRef: checkpoint.workspaceStateRef, workspaceStateDigest: sourceState.stateDigest,
-        entriesRef: sourceState.entriesRef, treeDigest: entries.treeDigest, descriptorRewalkComplete: true, fileFsyncComplete: true,
-        ...(observed.privateGitStateRef === undefined ? {} : { privateGitStateRef: observed.privateGitStateRef }),
-        directoryFsyncComplete: true, observedAt: new Date().toISOString(), evidenceDigest: '' };
-      evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
-      const snapshotEvidenceRef = (await artifacts.publishCanonical(evidence, evidence.format)).ref;
-      lifetimeSignal?.throwIfAborted(); signal?.throwIfAborted();
-      tree.assertHeld();
-      return Object.freeze({ generationRef, generationIdentityDigest: identity.identityDigest,
-        snapshotEvidenceRef, snapshotEvidenceDigest: evidence.evidenceDigest });
+      return trackWorkspaceOperation(operations, publishAuthority(options?.signal));
     },
     close() { if (this !== generation) throw new TypeError('invalid Run workspace generation'); closeWorkspaceDescriptor(tree); }
   });
@@ -416,6 +481,136 @@ export async function reopenRunWorkspace(input: { filesystem: HeldStateOwnerLock
   catch (error) { closeWorkspaceDescriptor(tree); throw error; }
 }
 
+async function populateGenerationTree(tree: HeldGenerationTree, artifacts: ArtifactCatalog,
+  frozen: Awaited<ReturnType<typeof readFrozenWorkspace>>, signal: AbortSignal): Promise<void> {
+  for (const entry of frozen.entries.entries) {
+    signal.throwIfAborted();
+    tree.assertHeld();
+    if (entry.kind === 'directory') writeGenerationEntry(tree, { kind: 'directory', path: entry.path });
+    else if (entry.kind === 'file') {
+      const writer = openGenerationFileWriter(tree, entry.path, entry.mode as 420 | 493, entry.size);
+      try {
+        for await (const chunk of artifacts.readChunks(entry.blobRef, entry.size)) {
+          signal.throwIfAborted();
+          writer.assertHeld(); writer.writeChunk(chunk);
+          await setImmediate();
+          signal.throwIfAborted();
+          writer.assertHeld();
+        }
+        signal.throwIfAborted();
+        writer.finish();
+      } finally { closeWorkspaceDescriptor(writer); }
+    } else writeGenerationEntry(tree, { kind: 'symlink', path: entry.path, target: entry.target });
+    await setImmediate();
+    signal.throwIfAborted();
+  }
+  if (frozen.privateGit) {
+    for (const path of frozen.privateGit.directories) {
+      signal.throwIfAborted();
+      writeGenerationEntry(tree, { kind: 'directory', path });
+      await setImmediate();
+      signal.throwIfAborted();
+    }
+    for (const [path, bytes] of frozen.privateGit.files) {
+      signal.throwIfAborted();
+      const writer = openGenerationFileWriter(tree, path, 0o600, bytes.length);
+      try {
+        for (let offset = 0; offset < bytes.length; offset += 65_536) {
+          writer.writeChunk(bytes.subarray(offset, offset + 65_536));
+          await setImmediate();
+          signal.throwIfAborted();
+          writer.assertHeld();
+        }
+        writer.finish();
+      } finally { closeWorkspaceDescriptor(writer); }
+    }
+  }
+}
+
+/** Internal physical owner. Construction is synchronous and resource-free so
+ * the installed composition can register it before calling birth. Database
+ * binding belongs to that composition, never an injected persistence callback. */
+export function createRunWorkspaceMaterialization(input: {
+  filesystem: HeldStateOwnerLock; artifacts: ArtifactCatalog; checkpoint: Checkpoint;
+  generationCreationNonceDigest?: string; signal?: AbortSignal;
+}): RunWorkspaceMaterialization {
+  const { filesystem, artifacts } = input;
+  const checkpoint = structuredClone(input.checkpoint);
+  filesystem.assertHeld();
+  const root = stateRootIdentityForLock(filesystem);
+  if (checkpoint.schemaVersion !== 1 || !/^[A-Za-z0-9_-]{1,128}$/.test(checkpoint.runId) || !checkpoint.id ||
+      ![checkpoint.basedOnRunRevision, checkpoint.runItemSeq, checkpoint.journalSeq].every(n => Number.isSafeInteger(n) && n >= 0)) {
+    mismatch('materialization requires a frozen owning ready Checkpoint');
+  }
+  parseCanonicalTime(checkpoint.createdAt); assertArtifactRef(checkpoint.workspaceStateRef);
+  const nonce = input.generationCreationNonceDigest === undefined ? sha256Bytes(randomBytes(32)) : input.generationCreationNonceDigest;
+  if (typeof nonce !== 'string') throw new TypeError('generation creation nonce must be a canonical digest');
+  assertArtifactRef(nonce);
+  const generationId = identityHash(checkpoint.runId, checkpoint.id, checkpoint.workspaceStateRef, nonce);
+  const cancellation = new AbortController();
+  const signal = input.signal ? AbortSignal.any([input.signal, cancellation.signal]) : cancellation.signal;
+  const operations: WorkspaceOperations = { pending: new Set() };
+  let tree: HeldGenerationTree | undefined, opening: Promise<RunWorkspaceBirth> | undefined;
+  let frozen: Awaited<ReturnType<typeof readFrozenWorkspace>> | undefined, born: RunWorkspaceBirth | undefined;
+  let finishing: Promise<RunWorkspaceGeneration> | undefined;
+  let closed = false, closing: Promise<void> | undefined;
+  const materialization: RunWorkspaceMaterialization = Object.freeze({
+    birth() {
+      if (this !== materialization) throw new TypeError('invalid workspace materialization owner');
+      if (closed) return Promise.reject(new KernelStorageError('LEASE_FENCED', 'workspace materialization is closed'));
+      return opening ??= Promise.resolve().then(async () => {
+        signal.throwIfAborted();
+        frozen = await readFrozenWorkspace(artifacts, checkpoint.workspaceStateRef, signal);
+        signal.throwIfAborted();
+        if (frozen.sourceState.runId !== checkpoint.runId) mismatch('ready Checkpoint belongs to a different Run');
+        tree = filesystem.createGenerationTree(checkpoint.runId, generationId);
+        tree.assertHeld();
+        // Canonical registration sampled after actual create/fstat, not an
+        // intent timestamp or a claim of native CLOCK_REALTIME evidence.
+        const createdAt = new Date().toISOString();
+        const birth = Object.freeze({}) as RunWorkspaceBirth;
+        workspaceBirths.set(birth, { filesystem, tree, operations, joined: false, data: Object.freeze({ generationId, runId: checkpoint.runId,
+          workspaceIdentityDigest: frozen.source.workspaceIdentityDigest, sourceCheckpointId: checkpoint.id,
+          sourceWorkspaceStateRef: checkpoint.workspaceStateRef, sourceWorkspaceStateDigest: frozen.sourceState.stateDigest,
+          sourceTreeDigest: frozen.entries.treeDigest, creationNonceDigest: nonce, createdAt,
+          stateRootIdentity: Object.freeze({ ...root }), directoryIdentity: Object.freeze({ ...tree.identity }) }) });
+        // No cancellation check after creation: the installed owner must be
+        // able to bind this actual birth before respecting stop for copying.
+        born = birth; return birth;
+      });
+    },
+    finish() {
+      if (this !== materialization) throw new TypeError('invalid workspace materialization owner');
+      if (closed) return Promise.reject(new KernelStorageError('LEASE_FENCED', 'workspace materialization is closed'));
+      if (!born || !tree || !frozen) return Promise.reject(new TypeError('materialization requires its actual completed birth'));
+      const currentTree = tree, currentFrozen = frozen, birth = born;
+      return finishing ??= Promise.resolve().then(async () => {
+        try {
+          signal.throwIfAborted();
+          await populateGenerationTree(currentTree, artifacts, currentFrozen, signal);
+          return await mintRunWorkspace(currentTree, filesystem, artifacts, checkpoint, currentFrozen, nonce,
+            readRunWorkspaceBirth(filesystem, birth).createdAt, undefined, signal, operations);
+        } catch (error) { closeWorkspaceDescriptor(currentTree); throw error; }
+      });
+    },
+    close() {
+      if (this !== materialization) throw new TypeError('invalid workspace materialization owner');
+      if (closing) return closing;
+      closed = true; cancellation.abort(new KernelStorageError('LEASE_FENCED', 'workspace materialization is closed'));
+      closing = (async () => {
+        const results = await Promise.allSettled([...(opening ? [opening] : []), ...(finishing ? [finishing] : []), ...operations.pending]);
+        const failed = results.find(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError);
+        if (tree) closeWorkspaceDescriptor(tree);
+        if (failed?.status === 'rejected') throw failed.reason;
+        if (operations.retirementFailure) throw operations.retirementFailure;
+        if (born) workspaceBirths.get(born)!.joined = true;
+      })();
+      return closing;
+    }
+  });
+  return materialization;
+}
+
 /** Trusted factory supplies one frozen ready Checkpoint. Materialization reads
  * only that immutable CAS closure, never recaptures or links the live source.
  * A failed attempt leaves its exact orphan in place for typed quarantine/GC;
@@ -423,67 +618,9 @@ export async function reopenRunWorkspace(input: { filesystem: HeldStateOwnerLock
 export async function materializeRunWorkspace(input: {
   filesystem: HeldStateOwnerLock; artifacts: ArtifactCatalog; checkpoint: Checkpoint; signal?: AbortSignal;
 }): Promise<RunWorkspaceGeneration> {
-  const { filesystem, artifacts, signal } = input;
-  signal?.throwIfAborted();
-  const checkpoint = structuredClone(input.checkpoint);
-  filesystem.assertHeld();
-  if (checkpoint.schemaVersion !== 1 || !/^[A-Za-z0-9_-]{1,128}$/.test(checkpoint.runId) || !checkpoint.id ||
-      ![checkpoint.basedOnRunRevision, checkpoint.runItemSeq, checkpoint.journalSeq].every(n => Number.isSafeInteger(n) && n >= 0)) {
-    mismatch('materialization requires a frozen owning ready Checkpoint');
-  }
-  parseCanonicalTime(checkpoint.createdAt);
-  assertArtifactRef(checkpoint.workspaceStateRef);
-  const frozen = await readFrozenWorkspace(artifacts, checkpoint.workspaceStateRef, signal);
-  signal?.throwIfAborted();
-  const { sourceState, entries, privateGit } = frozen;
-  if (sourceState.runId !== checkpoint.runId) mismatch('ready Checkpoint belongs to a different Run');
-  const nonce = sha256Bytes(randomBytes(32));
-  const generationId = identityHash(checkpoint.runId, checkpoint.id, checkpoint.workspaceStateRef, nonce);
-  const createdAt = new Date().toISOString();
-  const tree = filesystem.createGenerationTree(checkpoint.runId, generationId);
+  const materialization = createRunWorkspaceMaterialization(input);
   try {
-    for (const entry of entries.entries) {
-      signal?.throwIfAborted();
-      tree.assertHeld();
-      if (entry.kind === 'directory') writeGenerationEntry(tree, { kind: 'directory', path: entry.path });
-      else if (entry.kind === 'file') {
-        const writer = openGenerationFileWriter(tree, entry.path, entry.mode as 420 | 493, entry.size);
-        try {
-          for await (const chunk of artifacts.readChunks(entry.blobRef, entry.size)) {
-            signal?.throwIfAborted();
-            writer.assertHeld(); writer.writeChunk(chunk);
-            await setImmediate();
-            signal?.throwIfAborted();
-            writer.assertHeld();
-          }
-          signal?.throwIfAborted();
-          writer.finish();
-        } finally { closeWorkspaceDescriptor(writer); }
-      } else writeGenerationEntry(tree, { kind: 'symlink', path: entry.path, target: entry.target });
-      await setImmediate();
-      signal?.throwIfAborted();
-    }
-    if (privateGit) {
-      for (const path of privateGit.directories) {
-        signal?.throwIfAborted();
-        writeGenerationEntry(tree, { kind: 'directory', path });
-        await setImmediate();
-        signal?.throwIfAborted();
-      }
-      for (const [path, bytes] of privateGit.files) {
-        signal?.throwIfAborted();
-        const writer = openGenerationFileWriter(tree, path, 0o600, bytes.length);
-        try {
-          for (let offset = 0; offset < bytes.length; offset += 65_536) {
-            writer.writeChunk(bytes.subarray(offset, offset + 65_536));
-            await setImmediate();
-            signal?.throwIfAborted();
-            writer.assertHeld();
-          }
-          writer.finish();
-        } finally { closeWorkspaceDescriptor(writer); }
-      }
-    }
-    return await mintRunWorkspace(tree, filesystem, artifacts, checkpoint, frozen, nonce, createdAt, undefined, signal);
-  } catch (error) { closeWorkspaceDescriptor(tree); throw error; }
+    await materialization.birth();
+    return await materialization.finish();
+  } catch (error) { await materialization.close(); throw error; }
 }

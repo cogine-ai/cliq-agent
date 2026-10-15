@@ -30,6 +30,7 @@ type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Rec
 const environment = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' };
 const hostBefore = 'before the private edit\n';
 const privateAfter = 'after the private edit\n';
+const excludedVendorInstruction = 'Ordinary vendor instructions remain independent of source exclusion.\n';
 const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
 type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign';
@@ -380,6 +381,10 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
           assert(body.messages.some((message: any) => typeof message.content === 'string' &&
             message.content.includes('Observe the owned caf\u00e9 model failure without using a tool.')),
           'the model must receive the normalized objective, not the original NFD request spelling');
+          assert(body.messages.some((message: any) => typeof message.content === 'string' &&
+            message.content.includes(excludedVendorInstruction)),
+          'the model must receive ordinary instructions from the source-excluded vendor subtree');
+          report.instructionMetadataExclusion.providerReceivedOrdinaryGuidance = true;
           try {
             // The actual complete POST holds the original credential scope
             // until this responder replies. A fresh UDS connection can refuse
@@ -529,6 +534,19 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     await mkdir(recipe.workspace, { mode: 0o700 }); await chown(recipe.workspace, ledger.uid, ledger.gid);
     const source = path.join(recipe.workspace, 'example.txt'); await writeFile(source, hostBefore, { flag: 'wx', mode: 0o644 }); await chown(source, ledger.uid, ledger.gid);
     const sourceBefore = await lstat(source, { bigint: true });
+    if (failureOnly) {
+      const vendor = path.join(recipe.workspace, 'vendor'), metadata = path.join(vendor, '.git');
+      for (const directory of [vendor, metadata]) {
+        await mkdir(directory, { mode: 0o700 }); await chown(directory, ledger.uid, ledger.gid);
+      }
+      for (const [file, bytes] of [
+        [path.join(vendor, 'AGENTS.md'), Buffer.from(excludedVendorInstruction)],
+        [path.join(metadata, 'AGENTS.md'), Buffer.from([0xff])]
+      ] as const) {
+        await writeFile(file, bytes, { flag: 'wx', mode: 0o644 }); await chown(file, ledger.uid, ledger.gid);
+      }
+      report.instructionMetadataExclusion = { qualified: false, providerReceivedOrdinaryGuidance: false };
+    }
     const workspaceId = sha256Bytes(Buffer.from(recipe.workspace)), trustDirectory = path.join(home, 'workspaces', workspaceId);
     await mkdir(trustDirectory, { recursive: true, mode: 0o700 });
     for (const directory of [path.dirname(trustDirectory), trustDirectory]) await chown(directory, ledger.uid, ledger.gid);
@@ -580,7 +598,9 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
         modelCredentialGrantIds: [enrollment.credentialGrantId] }, policyMode: 'accept-edits',
       budgets: runBudgets,
-      verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
+      verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [],
+      sourceExcludes: failureOnly ? [{ path: 'vendor', scope: 'subtree' }] : [],
+      registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
     const { requestDigest: _resourceDigest, ...resourceCore } = submit;
     if (failureOnly) {
       busySubmit = request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000123',
@@ -596,6 +616,13 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       assert.equal(unauthorized.error!.messageCode, 'run.model_authority_refused');
       assert.equal(requestsReceived, 0); assert.deepEqual(currentSession(), session);
     }
+    const defaultPolicy = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000124',
+      policyMode: 'default' })])[0]!;
+    assert.equal(canonicalSha256(defaultPolicy), canonicalSha256({ protocolVersion: 1, ok: false, method: 'run.submit',
+      error: { schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false, messageCode: 'control.invalid_request',
+        issues: [{ path: 'request', issueCode: 'invalid_request' }] } }),
+    'the fixed installed recipe must reject unsupported approval rather than auto-allow tools');
+    assert.equal(requestsReceived, 0); assert.deepEqual(currentSession(), session);
     const oversized = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000113',
       sandboxResources: { maxSingleFileBytes: 2_147_483_648 } })])[0]!;
     assert.equal(oversized.ok, false, 'unsupported explicit file limits must be refused before Run admission');
@@ -610,9 +637,25 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       assert.notEqual(report.retryAliasDrift.collection, retryPlatform.collection);
     }
     const submitReply = exchange([submit])[0]!, admitted = accepted(submitReply, 'run.submit').snapshot.run;
+    report.defaultPolicyRefused = { qualified: true, refusalCode: 'INVALID_REQUEST', noProviderRequest: true,
+      sessionUnchanged: true, permissionsAutoAllowed: false, sameAdmissionKeySubsequentlyAccepted: true };
     report.oversizedFileLimitRefused = { requestedBytes: 2_147_483_648, installedLimitBytes: 268_435_456,
       sameAdmissionKeySubsequentlyAccepted: true, silentClampingAllowed: false };
     report.acceptedRun = { id: admitted.id, sessionId: admitted.sessionId, specRef: admitted.specRef, initialCheckpointId: admitted.latestCheckpointId };
+    if (failureOnly) {
+      const spec = parseJsonStrict((await readCas(admitted.specRef)).toString('utf8')) as Record<string, any>;
+      const assembly = parseJsonStrict((await readCas(spec.assemblyRef)).toString('utf8')) as Record<string, any>;
+      const instructions = parseJsonStrict((await readCas(assembly.instructions.workspaceInstructionsRef)).toString('utf8')) as Record<string, any>;
+      assert.deepEqual(instructions.entries.map((entry: any) => entry.canonicalRootRelativePath), ['vendor/AGENTS.md']);
+      const content = parseJsonStrict((await readCas(instructions.entries[0].contentRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(content.utf8, excludedVendorInstruction);
+      const source = parseJsonStrict((await readCas(spec.baseWorkspaceManifestRef)).toString('utf8')) as Record<string, any>;
+      const entries = parseJsonStrict((await readCas(source.entriesRef)).toString('utf8')) as Record<string, any>;
+      assert.deepEqual(entries.entries.map((entry: any) => entry.path), ['example.txt']);
+      report.instructionMetadataExclusion.capturedOrdinaryGuidance = true;
+      report.instructionMetadataExclusion.sourceExcludedSubtreeAbsent = true;
+      report.instructionMetadataExclusion.gitMetadataAbsentFromInstructions = true;
+    }
     assert.equal(admitted.status, 'queued'); assert.equal(admitted.revision, 1);
     if (!failureOnly && !retryOnly) report.unauthorizedAdmissionRefused = { qualified: true, refusalCode: 'AUTHORIZATION_REQUIRED',
       fixedReason: 'run.model_authority_refused', noProviderRequest: true, sameAdmissionKeySubsequentlyAccepted: true };
@@ -940,6 +983,9 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
       assert.equal(await readFile(source, 'utf8'), hostBefore);
       report.receivedModelFailureQualified = true;
+      assert.equal(report.instructionMetadataExclusion.providerReceivedOrdinaryGuidance, true);
+      assert.deepEqual(await readFile(path.join(recipe.workspace, 'vendor', '.git', 'AGENTS.md')), Buffer.from([0xff]));
+      report.instructionMetadataExclusion.qualified = true;
       report.receivedModelFailure = { qualified: true, status: 'failed', terminalReason: 'runtime_failed', wallTimeMs: 45000,
         stoppedBeforeDeadline: true, receivedHttpStatus: 429, ownedProviderRequests: 1, noProviderRetry: true,
         completedResponseRef: completed.resultRef, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest,

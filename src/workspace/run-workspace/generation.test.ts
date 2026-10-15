@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readdirSync, statSync } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -72,6 +72,235 @@ async function symlinkCheckpoint(artifacts: ArtifactCatalog, manifest: Workspace
     contextManifestRef: entriesRef, journalSeq: 0, createdAt: '2026-10-08T00:00:00.000Z', reason: 'initial',
     workspaceStateRef: (await artifacts.publishCanonical(state, state.format)).ref };
 }
+
+test('a registered materialization owner separates real birth from ready private execution', async (t) => {
+  const create = Reflect.get(producer, 'createRunWorkspaceMaterialization');
+  assert.equal(typeof create, 'function', 'real materialization requires its synchronous resource owner');
+  const readBirth = Reflect.get(producer, 'readRunWorkspaceBirth');
+  assert.equal(typeof readBirth, 'function');
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), '.cliq-generation-birth-'));
+  await chmod(root, 0o700);
+  const held = (await loadNativeStateOwner()).acquireLock(root, true);
+  let materialization: { close(): Promise<void> } | undefined;
+  t.after(async () => { await materialization?.close(); held.close(); await rm(root, { recursive: true, force: true }); });
+  await mkdir(path.join(root, 'objects'), { mode: 0o700 });
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(root, 'objects')));
+  const bytes = Buffer.from('frozen private payload');
+  const blob = await artifacts.publishBytes(bytes, 'application/octet-stream', 'cliq-workspace-file-v1');
+  const entries: WorkspaceEntryManifest = { schemaVersion: 1, format: 'cliq-workspace-entries-v1',
+    entries: [{ path: 'payload', kind: 'file', mode: 0o644, size: bytes.length, blobRef: blob.ref }],
+    entryCount: 1, byteCount: bytes.length, treeDigest: '' };
+  entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries });
+  const checkpoint = await symlinkCheckpoint(artifacts, entries);
+  const generationCreationNonceDigest = sha256Bytes(Buffer.from('owned fixed generation intent'));
+  const before = readdirSync(root).sort();
+  const preparing = create({ filesystem: held, artifacts, checkpoint, generationCreationNonceDigest });
+  materialization = preparing;
+  assert.equal(typeof Reflect.get(preparing, 'then'), 'undefined', 'the owner must be registerable before its asynchronous work');
+  await assert.rejects(preparing.finish(), /actual completed birth/u);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(readdirSync(root).sort(), before);
+  const beforeBirth = Date.now(), birth = await preparing.birth(), afterBirth = Date.now();
+  const observed = readBirth(held, birth);
+  assert.equal(observed.creationNonceDigest, generationCreationNonceDigest);
+  assert.equal(observed.runId, checkpoint.runId); assert.equal(observed.sourceCheckpointId, checkpoint.id);
+  assert.equal(observed.sourceWorkspaceStateRef, checkpoint.workspaceStateRef);
+  const directory = path.join(root, 'runs', checkpoint.runId, 'generations', observed.generationId);
+  const actual = await lstat(directory, { bigint: true });
+  assert.equal(observed.directoryIdentity.deviceId, actual.dev.toString());
+  assert.equal(observed.directoryIdentity.fileId, actual.ino.toString());
+  assert.equal(observed.directoryIdentity.ownerUid, Number(actual.uid));
+  assert(Date.parse(observed.createdAt) >= beforeBirth && Date.parse(observed.createdAt) <= afterBirth);
+  assert.equal(new Date(observed.createdAt).toISOString(), observed.createdAt);
+  assert.deepEqual(await readdir(directory), [], 'birth must precede every payload write');
+  assert.throws(() => Reflect.apply(borrowRunWorkspaceForExecution, undefined, [preparing]), /invalid Run workspace generation/);
+  assert.throws(() => Reflect.apply(borrowRunWorkspaceForExecution, undefined, [birth]), /invalid Run workspace generation/);
+  assert.equal(await preparing.birth(), birth, 'birth must retain one actual tree, not allocate a replacement');
+  assert.equal(typeof preparing.finish, 'function', 'only a complete materialization can become a RunWorkspace');
+  const generation = await preparing.finish();
+  assert.equal(generation.generationId, observed.generationId);
+  assert.equal(await preparing.finish(), generation, 'completion must not copy a second physical tree');
+  assert.equal((await generation.observe()).workspaceStateRef, checkpoint.workspaceStateRef);
+  assert.deepEqual(await readFile(path.join(directory, 'payload')), bytes);
+  const borrowed = borrowRunWorkspaceForExecution(generation);
+  t.after(() => borrowed.close()); borrowed.assertHeld();
+  assert.equal(borrowed.identity.fileId, observed.directoryIdentity.fileId);
+  if (process.platform === 'linux') {
+    const authority = await generation.publishMaterializedAuthority();
+    const identity = await artifacts.readCanonical<WorkspaceGenerationIdentityV1>(authority.generationRef);
+    assert.equal(identity.createdAt, observed.createdAt); assert.equal(identity.creationNonceDigest, generationCreationNonceDigest);
+  } else await assert.rejects(generation.publishMaterializedAuthority(), { code: 'UNSUPPORTED_PLATFORM' });
+  await preparing.close();
+  assert.throws(() => borrowed.assertHeld(), /closed|changed/);
+});
+
+test('closing actual materialization joins its partial writer before a fresh native retirement observation', async (t) => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), '.cliq-generation-owner-close-'));
+  await chmod(root, 0o700);
+  const held = (await loadNativeStateOwner()).acquireLock(root, true);
+  let materialization: { close(): Promise<void> } | undefined, watcher: NodeJS.Immediate | undefined;
+  t.after(async () => {
+    if (watcher) clearImmediate(watcher);
+    await materialization?.close(); held.close(); await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(path.join(root, 'objects'), { mode: 0o700 });
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(root, 'objects')));
+  const bytes = Buffer.alloc(1024 * 1024, 0x72);
+  const blob = await artifacts.publishBytes(bytes, 'application/octet-stream', 'cliq-workspace-file-v1');
+  const last = await artifacts.publishBytes(Buffer.from('last'), 'application/octet-stream', 'cliq-workspace-file-v1');
+  const entries: WorkspaceEntryManifest = { schemaVersion: 1, format: 'cliq-workspace-entries-v1', entries: [
+    { path: 'stream.bin', kind: 'file', mode: 0o644, size: bytes.length, blobRef: blob.ref },
+    { path: 'z-last', kind: 'file', mode: 0o644, size: 4, blobRef: last.ref }
+  ], entryCount: 2, byteCount: bytes.length + 4, treeDigest: '' };
+  entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries });
+  const checkpoint = await symlinkCheckpoint(artifacts, entries);
+  const preparing = producer.createRunWorkspaceMaterialization({ filesystem: held, artifacts, checkpoint });
+  materialization = preparing;
+  const birth = await preparing.birth(), data = producer.readRunWorkspaceBirth(held, birth);
+  const directory = path.join(root, 'runs', checkpoint.runId, 'generations', data.generationId);
+  let joined: Promise<void> | undefined, interruptedSize: number | undefined, observationFailure: unknown;
+  const observeWrite = () => {
+    try {
+      const size = statSync(path.join(directory, 'stream.bin')).size;
+      if (size > 0 && size < bytes.length) {
+        interruptedSize = size; joined = preparing.close(); void joined.catch(() => {}); return;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        observationFailure = error; joined = preparing.close(); void joined.catch(() => {}); return;
+      }
+    }
+    watcher = setImmediate(observeWrite);
+  };
+  watcher = setImmediate(observeWrite);
+  await assert.rejects(preparing.finish(), { code: 'LEASE_FENCED' });
+  assert.equal(observationFailure, undefined);
+  assert(joined && interruptedSize, 'close must interrupt a real partial native file writer');
+  await joined;
+  assert.equal((await stat(path.join(directory, 'stream.bin'))).size, interruptedSize);
+  await assert.rejects(stat(path.join(directory, 'z-last')), { code: 'ENOENT' });
+  assert(readdirSync(path.join(root, 'objects')).every(name => /^[0-9a-f]{64}$/u.test(name)));
+  const readRetirement = Reflect.get(producer, 'readRunWorkspaceBirthRetirement');
+  assert.equal(typeof readRetirement, 'function', 'close requires a separate fresh original-native retirement observation');
+  const before = Date.now(), first = readRetirement(held, birth), second = readRetirement(held, birth), after = Date.now();
+  assert.equal(first.generationId, data.generationId); assert.equal(first.resourcesRetired, true);
+  for (const observed of [first, second]) {
+    assert(Date.parse(observed.observedAt) >= before && Date.parse(observed.observedAt) <= after);
+    assert.equal(new Date(observed.observedAt).toISOString(), observed.observedAt);
+  }
+  assert(second.observedAt >= first.observedAt);
+  assert.throws(() => producer.readRunWorkspaceBirth(held, birth), /closed|changed/);
+  held.close();
+  const successor = (await loadNativeStateOwner()).acquireLock(root, false);
+  try {
+    assert.throws(() => producer.readRunWorkspaceBirth(successor, birth), { code: 'ARTIFACT_MISMATCH' });
+    assert.throws(() => producer.readRunWorkspaceBirthRetirement(successor, birth), { code: 'ARTIFACT_MISMATCH' });
+  } finally { successor.close(); }
+});
+
+test('a materialization close joins its minted workspace snapshot and CAS cleanup before reporting retirement', async (t) => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), '.cliq-generation-owner-snapshot-'));
+  await chmod(root, 0o700);
+  const held = (await loadNativeStateOwner()).acquireLock(root, true);
+  let materialization: producer.RunWorkspaceMaterialization | undefined, watcher: NodeJS.Immediate | undefined;
+  t.after(async () => {
+    if (watcher) clearImmediate(watcher);
+    await materialization?.close(); held.close(); await rm(root, { recursive: true, force: true });
+  });
+  const objects = path.join(root, 'objects'); await mkdir(objects, { mode: 0o700 });
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(objects));
+  const bytes = Buffer.alloc(1024 * 1024, 0x74);
+  const blob = await artifacts.publishBytes(bytes, 'application/octet-stream', 'cliq-workspace-file-v1');
+  const entries: WorkspaceEntryManifest = { schemaVersion: 1, format: 'cliq-workspace-entries-v1',
+    entries: [{ path: 'stream.bin', kind: 'file', mode: 0o644, size: bytes.length, blobRef: blob.ref }],
+    entryCount: 1, byteCount: bytes.length, treeDigest: '' };
+  entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries });
+  const checkpoint = await symlinkCheckpoint(artifacts, entries);
+  materialization = producer.createRunWorkspaceMaterialization({ filesystem: held, artifacts, checkpoint });
+  const preparing = materialization, birth = await preparing.birth(), generation = await preparing.finish();
+  assert.throws(() => producer.readRunWorkspaceBirthRetirement(held, birth), { code: 'RECOVERY_REQUIRED' });
+  let joined: Promise<void> | undefined, interruptedTemporary: string | undefined, temporaryAfterJoin: boolean | undefined;
+  let observationFailure: unknown;
+  const observePublication = () => {
+    try {
+      for (const name of readdirSync(objects)) {
+        if (!name.startsWith('.tmp-stream-')) continue;
+        const size = statSync(path.join(objects, name)).size;
+        if (size > 0 && size < bytes.length) {
+          interruptedTemporary = name;
+          joined = preparing.close().then(() => { temporaryAfterJoin = readdirSync(objects).includes(name); });
+          void joined.catch(() => {}); return;
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        observationFailure = error; joined = preparing.close(); void joined.catch(() => {}); return;
+      }
+    }
+    watcher = setImmediate(observePublication);
+  };
+  watcher = setImmediate(observePublication);
+  await assert.rejects(generation.observe(), { code: 'LEASE_FENCED' });
+  assert.equal(observationFailure, undefined);
+  assert(joined && interruptedTemporary, 'close must interrupt an actual native snapshot/CAS publication');
+  await joined;
+  assert.equal(temporaryAfterJoin, false, 'owner close must join CAS cleanup, not just synchronously close the native cursor');
+  await assert.rejects(stat(path.join(objects, interruptedTemporary)), { code: 'ENOENT' });
+  assert.equal(producer.readRunWorkspaceBirthRetirement(held, birth).resourcesRetired, true);
+  await assert.rejects(generation.observe({ signal: new AbortController().signal }), { code: 'LEASE_FENCED' });
+});
+
+test('a fixed materialization intent rejects invalid nonces and never adopts an existing real generation', async (t) => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), '.cliq-generation-fixed-intent-'));
+  await chmod(root, 0o700);
+  const held = (await loadNativeStateOwner()).acquireLock(root, true);
+  const materializations: producer.RunWorkspaceMaterialization[] = [];
+  t.after(async () => {
+    for (const materialization of materializations) await materialization.close();
+    held.close(); await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(path.join(root, 'objects'), { mode: 0o700 });
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(root, 'objects')));
+  const entries: WorkspaceEntryManifest = { schemaVersion: 1, format: 'cliq-workspace-entries-v1',
+    entries: [], entryCount: 0, byteCount: 0, treeDigest: '' };
+  entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries });
+  const checkpoint = await symlinkCheckpoint(artifacts, entries), before = readdirSync(root).sort();
+  for (const generationCreationNonceDigest of [null, '', 'A'.repeat(64), 'a'.repeat(63), '../escape', 42]) {
+    assert.throws(() => Reflect.apply(producer.createRunWorkspaceMaterialization, undefined,
+      [{ filesystem: held, artifacts, checkpoint, generationCreationNonceDigest }]), TypeError);
+  }
+  assert.deepEqual(readdirSync(root).sort(), before);
+  const input = { filesystem: held, artifacts, checkpoint, generationCreationNonceDigest: sha256Bytes(Buffer.from('one fixed materialization intent')) };
+  const original = producer.createRunWorkspaceMaterialization(input); materializations.push(original);
+  const birth = await original.birth(), observed = producer.readRunWorkspaceBirth(held, birth);
+  const duplicate = producer.createRunWorkspaceMaterialization(input); materializations.push(duplicate);
+  await assert.rejects(duplicate.birth(), /absent.*locator|overwrite|adoption/u);
+  assert.deepEqual(producer.readRunWorkspaceBirth(held, birth), observed);
+});
+
+test('external cancellation preserves actual birth for registration but forbids payload copying', async (t) => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), '.cliq-generation-birth-abort-'));
+  await chmod(root, 0o700);
+  const held = (await loadNativeStateOwner()).acquireLock(root, true);
+  let materialization: producer.RunWorkspaceMaterialization | undefined;
+  t.after(async () => { await materialization?.close(); held.close(); await rm(root, { recursive: true, force: true }); });
+  await mkdir(path.join(root, 'objects'), { mode: 0o700 });
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(root, 'objects')));
+  const entries: WorkspaceEntryManifest = { schemaVersion: 1, format: 'cliq-workspace-entries-v1',
+    entries: [{ path: 'must-not-copy', kind: 'directory', mode: 0o755 }], entryCount: 1, byteCount: 0, treeDigest: '' };
+  entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: entries.entries });
+  const checkpoint = await symlinkCheckpoint(artifacts, entries), cancellation = new AbortController();
+  const reason = new Error('stop after the real directory birth, before copying');
+  materialization = producer.createRunWorkspaceMaterialization({ filesystem: held, artifacts, checkpoint, signal: cancellation.signal });
+  const birth = await materialization.birth(), original = producer.readRunWorkspaceBirth(held, birth);
+  cancellation.abort(reason);
+  assert.equal(await materialization.birth(), birth);
+  assert.deepEqual(producer.readRunWorkspaceBirth(held, birth), original, 'abort must not discard the physical fact before its concrete binding');
+  await assert.rejects(materialization.finish(), error => error === reason);
+  assert.deepEqual(await readdir(path.join(root, 'runs', checkpoint.runId, 'generations', original.generationId)), []);
+  await materialization.close();
+  assert.equal(producer.readRunWorkspaceBirthRetirement(held, birth).resourcesRetired, true);
+});
 
 test('cancelling a real streaming materialization closes its scope before rejecting', async (t) => {
   const root = await mkdtemp(path.join(await realpath(tmpdir()), '.cliq-generation-cancel-'));

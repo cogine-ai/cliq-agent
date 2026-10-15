@@ -1,8 +1,8 @@
 # I1 coherent terminal retirement — implementation contract
 
 Status: implementation direction approved on 2026-10-16; not implemented or
-qualified by this document. Closed data types/schema and a controller-only
-receipt are being implemented; the owning preparation/retirement producers and
+qualified by this document. Closed data types/schema, the physical materialization
+owner and a controller-only receipt have implementation; the owning preparation/retirement producers and
 their real Linux qualification remain incomplete. The owner accepted one WorkerLaunch preparation
 spine plus genuine preparation-retirement/private rollback evidence, including
 fail-closed incomplete birth. Model unknown retains the existing strictly newer

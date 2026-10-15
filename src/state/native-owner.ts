@@ -366,6 +366,8 @@ export type HeldWorkspaceRoot = Readonly<{
   readGitConfigChunk(): Buffer | null;
   /** Metadata only. Entries must be explicitly selected before content is opened. */
   openSnapshot(): HeldWorkspaceCursor;
+  /** Fixed instruction recipe: skip Git metadata, read only AGENTS.md bytes. */
+  openInstructionSnapshot(): HeldWorkspaceCursor;
   close(): void;
 }>;
 

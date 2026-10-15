@@ -109,7 +109,9 @@ async function controllerAnchorBirth() {
     assert.deepEqual(pids(descriptorPath(root)), [], 'delegation root must have no internal processes');
 
     launcher = await openLinuxWorkerLauncher({ ...options, runtimeAuthority: fixture.runtimeAuthority });
+    const startingAt = Date.now();
     controller = await bounded(launcher.startController());
+    const readyAt = Date.now();
     assert.ok(Number.isSafeInteger(controller.pid) && controller.pid > 0 && controller.pid !== process.pid);
     const pid = controller.pid, token = processToken(pid), controllerPath = await processCgroup(pid);
     assert.equal(token, controller.processStartToken, 'public process identity must match the real kernel lifetime');
@@ -141,6 +143,49 @@ async function controllerAnchorBirth() {
     assert.equal(await processCgroup(pid), controllerPath); assert.equal(processToken(pid), token);
     assert.equal(await processCgroup(process.pid), sourcePath); assert.equal(processToken(process.pid), sourceToken);
 
+    const readBirth = Reflect.get(linuxWorker, 'readNativeControllerPreparationBirth');
+    assert.equal(typeof readBirth, 'function', 'authenticated ordinary controller birth requires its genuine native reader');
+    const birth = Reflect.get(controller, 'preparationBirth');
+    assert.ok(birth !== null && typeof birth === 'object' && !Array.isArray(birth));
+    const directoryBirth = (value: fs.BigIntStats) => ({ deviceId: String(value.dev), fileId: String(value.ino),
+      ownerUid: Number(value.uid), ownerGid: Number(value.gid), mode: Number(value.mode) });
+    let controllerBirthDigest: string | undefined, originalBirth: Record<string, unknown> | undefined, previousBirthObservedAt = 0;
+    for (let reassertion = 0; reassertion < 2; reassertion++) {
+      const before = Date.now();
+      const value: unknown = Reflect.apply(readBirth, undefined, [birth]);
+      const after = Date.now();
+      assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value) && Object.isFrozen(value));
+      const observed = value as Record<string, unknown>;
+      assert.deepEqual(Object.keys(observed).sort(), ['controllerBirthDigest', 'identity', 'observedAt']);
+      assert.ok(observed.identity !== null && typeof observed.identity === 'object' && !Array.isArray(observed.identity));
+      const actual = observed.identity as Record<string, unknown>;
+      assert.ok(Object.isFrozen(actual));
+      assert.equal(typeof actual.readyObservedAt, 'string');
+      const nativeReadyAt = Date.parse(actual.readyObservedAt as string);
+      assert.ok(Number.isSafeInteger(nativeReadyAt));
+      assert.equal(new Date(nativeReadyAt).toISOString(), actual.readyObservedAt);
+      assert.ok(nativeReadyAt >= startingAt && nativeReadyAt <= readyAt,
+        'birth time must record the actual authenticated HELLO readiness, not a later projection');
+      assert.deepEqual(actual, { rootPath: options.cgroupParent, root: directoryBirth(rootBefore),
+        parent: directoryBirth(controllersBefore), leafName: controllerName, leaf: directoryBirth(leafBefore),
+        pid, processStartToken: token, readyObservedAt: actual.readyObservedAt });
+      assert.match(controllerName, /^controller-[0-9a-f]{32}$/u);
+      for (const field of ['root', 'parent', 'leaf'] as const) assert.ok(Object.isFrozen(actual[field]));
+      assert.equal(observed.controllerBirthDigest, canonicalSha256(actual));
+      if (originalBirth) assert.deepEqual(actual, originalBirth, 'fresh reads must preserve the original physical birth identity');
+      else { originalBirth = actual; controllerBirthDigest = observed.controllerBirthDigest as string; }
+      assert.equal(typeof observed.observedAt, 'string');
+      const observedAt = Date.parse(observed.observedAt as string);
+      assert.ok(Number.isSafeInteger(observedAt));
+      assert.equal(new Date(observedAt).toISOString(), observed.observedAt);
+      assert.ok(observedAt >= before && observedAt <= after && after - observedAt <= 5_000 &&
+        observedAt >= nativeReadyAt && observedAt >= previousBirthObservedAt,
+      'each genuine birth read must freshly reobserve the original live controller');
+      previousBirthObservedAt = observedAt;
+    }
+    assert.throws(() => Reflect.apply(readBirth, undefined, [{}]), 'a structural token cannot supply native birth authority');
+    assert.throws(() => Reflect.apply(readBirth, undefined, [{ ...birth }]), 'cloning a genuine token cannot copy native birth authority');
+
     // No reservation, scope or worker was created: this controller is the
     // complete producer set. Normal close must join it before retiring its leaf.
     const originalController = controller;
@@ -163,6 +208,7 @@ async function controllerAnchorBirth() {
       assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value));
       const observed = value as Record<string, unknown>;
       assert.equal(observed.pid, pid); assert.equal(observed.processStartToken, token);
+      assert.equal(observed.controllerBirthDigest, controllerBirthDigest, 'retirement must close this same original controller birth');
       assert.equal(observed.controllerJoined, true); assert.equal(observed.controllerLeafAbsent, true);
       assert.equal(observed.workerCreationRequested, false);
       assert.equal(observed.liveContainmentCount, 0); assert.equal(observed.activeMountCount, 0);
@@ -176,6 +222,7 @@ async function controllerAnchorBirth() {
     }
     console.log(JSON.stringify({ scenario: 'actual-controller-anchor-birth', supervisorPid: process.pid, supervisorStartToken: sourceToken,
       sourcePath, controllerPid: pid, controllerStartToken: token, controllerPath, ownerUid: uid,
+      controllerBirthDigest,
       rootDevice: String(rootBefore.dev), rootInode: String(rootBefore.ino), controllerDevice: String(leafBefore.dev), controllerInode: String(leafBefore.ino),
       note: 'HELLO-time actual placement and controller-only retirement; not initial-fork atomicity, whole-worker death or installed signed Supervisor I1; offline fixture prefix only' }));
   } catch (error) { primary = { error }; throw error; }

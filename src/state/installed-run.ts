@@ -109,7 +109,7 @@ function closeOwned(resources: readonly { close(): void }[], error?: unknown): v
 
 /** Trust authorizes this independent declarative capture, never source/tool
  * permission. No legacy loader/config/extension code is evaluated. */
-async function captureInstructions(root: HeldWorkspaceRoot, artifacts: ArtifactCatalog,
+export async function captureInstalledWorkspaceInstructions(root: HeldWorkspaceRoot, artifacts: ArtifactCatalog,
   workspace: Extract<WorkspaceIdentityV1, { kind: 'live' }>, workspaceIdentityRef: string, signal?: AbortSignal) {
   assertHeldWorkspaceRoot(root);
   if (heldWorkspaceRootPath(root) !== workspace.canonicalRootPath || !same(root.identity, workspace.rootIdentity))
@@ -122,7 +122,7 @@ async function captureInstructions(root: HeldWorkspaceRoot, artifacts: ArtifactC
     cursors.forEach(cursor => cursor.assertComplete()); selected.forEach(entry => entry.assertHeld());
   };
   try {
-    const cursor = root.openSnapshot(); resources.push(cursor); cursors.push(cursor);
+    const cursor = root.openInstructionSnapshot(); resources.push(cursor); cursors.push(cursor);
     const stack = [cursor];
     while (stack.length) {
       await setImmediate(); signal?.throwIfAborted();
@@ -376,13 +376,13 @@ export async function assembleInstalledRun(input: {
   const platform = await loadInstalledCredentialPlatform(selected), user = platform.currentUser();
   if (path.join(user.home, '.cliq') !== controlledHome) mismatch('installed instruction home is not the actual platform controlled home');
   const resources: Array<{ close(): void }> = []; let failure: unknown;
-  let instructions: Awaited<ReturnType<typeof captureInstructions>>;
+  let instructions: Awaited<ReturnType<typeof captureInstalledWorkspaceInstructions>>;
   try {
     const home = held.openWorkspaceRoot(controlledHome); resources.push(home);
     const trust = await holdWorkspaceSourceTrust(home, request.workspacePath, signal); resources.push(trust);
     assertWorkspaceSourceTrust(trust, request.workspacePath);
     const root = held.openWorkspaceRoot(request.workspacePath); resources.push(root);
-    instructions = await captureInstructions(root, artifacts, workspace, session.workspaceIdentityRef, signal);
+    instructions = await captureInstalledWorkspaceInstructions(root, artifacts, workspace, session.workspaceIdentityRef, signal);
     assertWorkspaceSourceTrust(trust, request.workspacePath);
   } catch (error) { failure = error; throw error; } finally { closeOwned(resources, failure); }
   const admittedAt = sampleCanonicalNow(), deadlineAt = addCanonicalDuration(admittedAt, request.budgets.wallTimeMs);

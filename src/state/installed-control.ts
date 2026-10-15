@@ -11,6 +11,7 @@ import type { CredentialAuthorityOperationV1 } from '../kernel/credential-author
 import type { CredentialFinalizeRequest } from './installed-credential-client.js';
 import { InstalledRunAuthorityError } from './installed-run.js';
 import { InstalledRunCapacityError } from './installed-run-capacity.js';
+import { CredentialScopeBusyError } from './installed-runtime.js';
 
 export type RuntimeBundlePublicSummaryV1 = Readonly<{
   schemaVersion: 1;
@@ -57,6 +58,7 @@ type InvalidError = ErrorBase & { code: 'INVALID_REQUEST'; retryable: false;
   issues: Array<{ path: string; issueCode: string }> };
 export type InstalledControlErrorV1 = InvalidError
   | InstalledRunCapacityError['controlError']
+  | CredentialScopeBusyError['controlError']
   | (ErrorBase & { code: 'INCOMPATIBLE_PROTOCOL'; retryable: false;
       supportedControlRange: { min: 1; max: 1 }; supportedHeadlessRange: Range;
       upgradeAction: 'upgrade_client' | 'upgrade_supervisor' })
@@ -243,6 +245,9 @@ export function openInstalledControl(store: StateStore,
         return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
       } catch (error) {
+        if (method === 'run.submit' && error instanceof CredentialScopeBusyError) {
+          return { protocolVersion: 1, ok: false, method: knownMethod, error: error.controlError } satisfies InstalledControlResponseV1;
+        }
         if (error instanceof KernelStorageError && error.code === 'REVISION_CONFLICT') {
           // Read a fresh authenticated authoritative snapshot, not the stale
           // producer cut or a fabricated metadata-only conflict response.

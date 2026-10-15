@@ -195,6 +195,8 @@ export function withHeldInstalledRuntime<T>(held: HeldInstalledRuntime,
 }
 
 export class CredentialScopeBusyError extends TypeError {
+  readonly controlError = Object.freeze({ schemaVersion: 1, code: 'RATE_LIMITED', retryable: true,
+    retryAfterMs: 1000, messageCode: 'run.credential_scope_busy' } as const);
   constructor() {
     super('ordinary credential entry cannot be called while a scope is acquiring, active or draining');
     this.name = 'CredentialScopeBusyError';
