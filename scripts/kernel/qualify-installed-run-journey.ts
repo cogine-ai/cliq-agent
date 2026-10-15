@@ -515,6 +515,36 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     for (const directory of [path.dirname(trustDirectory), trustDirectory]) await chown(directory, ledger.uid, ledger.gid);
     const trustPath = path.join(trustDirectory, 'trust.json'); await writeFile(trustPath, canonicalJsonBytes({ version: 1, workspaceId,
       workspaceRealPath: recipe.workspace, decision: 'trusted', decidedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 }); await chown(trustPath, ledger.uid, ledger.gid);
+    if (failureOnly) {
+      mark('session_trust_before_git_config');
+      const untrustedWorkspace = path.join(ledger.home, 'untrusted-git-workspace'), git = path.join(untrustedWorkspace, '.git');
+      for (const directory of [untrustedWorkspace, git]) {
+        await mkdir(directory, { mode: 0o700 }); await chown(directory, ledger.uid, ledger.gid);
+      }
+      const config = path.join(git, 'config');
+      await writeFile(config, '[extensions]\nobjectFormat = unsupported\n', { flag: 'wx', mode: 0o600 }); await chown(config, ledger.uid, ledger.gid);
+      const untrustedRequest = request({ protocolVersion: 1, method: 'session.create',
+        requestId: '019a0012-0000-7000-8000-000000000122', admissionKey: randomBytes(32).toString('base64url'),
+        workspacePath: untrustedWorkspace, name: 'Workspace Trust order' });
+      const untrusted = exchange([untrustedRequest])[0]!;
+      report.sessionTrustOrder = { qualified: false,
+        untrustedObservedCode: ['INVALID_REQUEST', 'ARTIFACT_MISMATCH'].includes(untrusted.error?.code as string)
+          ? untrusted.error!.code : 'unrecognized' };
+      assert.equal(canonicalSha256(untrusted), canonicalSha256({ protocolVersion: 1, ok: false, method: 'session.create',
+        error: { schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false, messageCode: 'control.invalid_request',
+          issues: [{ path: 'request', issueCode: 'invalid_request' }] } }));
+      const gitWorkspaceId = sha256Bytes(Buffer.from(untrustedWorkspace)), gitTrustDirectory = path.join(home, 'workspaces', gitWorkspaceId);
+      await mkdir(gitTrustDirectory, { mode: 0o700 }); await chown(gitTrustDirectory, ledger.uid, ledger.gid);
+      const gitTrustPath = path.join(gitTrustDirectory, 'trust.json');
+      await writeFile(gitTrustPath, canonicalJsonBytes({ version: 1, workspaceId: gitWorkspaceId,
+        workspaceRealPath: untrustedWorkspace, decision: 'trusted', decidedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
+      await chown(gitTrustPath, ledger.uid, ledger.gid);
+      const trusted = exchange([untrustedRequest])[0]!;
+      assert.equal(canonicalSha256(trusted), canonicalSha256({ protocolVersion: 1, ok: false, method: 'session.create',
+        error: { schemaVersion: 1, code: 'ARTIFACT_MISMATCH', retryable: false, messageCode: 'control.read_rejected' } }));
+      report.sessionTrustOrder = { ...report.sessionTrustOrder, qualified: true, untrustedRefusedBeforeGitConfig: true,
+        unchangedConfigStillRefusedAfterPersistedTrust: true };
+    }
     const sessionRequest = request({ protocolVersion: 1, method: 'session.create', requestId: '019a0012-0000-7000-8000-000000000103',
       admissionKey: randomBytes(32).toString('base64url'), workspacePath: recipe.workspace, name: 'Installed Run journey' });
     const sessionReply = exchange([sessionRequest])[0]!, session = accepted(sessionReply, 'session.create').snapshot.session;

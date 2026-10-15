@@ -20,6 +20,7 @@ import type { WorkerDeathWait, WorkerIdentity, WorkspaceEntryManifest, Workspace
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1,
   WorkspaceGenerationRetirementEvidenceV1, SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1 } from '../../src/kernel/types.js';
 import { openLinuxWorkerLauncher, type LinuxWorkerController, type LinuxWorkerLauncher } from '../../src/sandbox/linux-worker.js';
+import * as linuxWorker from '../../src/sandbox/linux-worker.js';
 import { createLinuxWorkerCampaignFixture } from '../../src/sandbox/testing/worker-campaign-fixture.js';
 import type { LocalControlConnection, LocalControlListener } from '../../src/state/control-channel.js';
 import { decodeWorkerIdentity } from '../../src/state/decoders.js';
@@ -142,12 +143,37 @@ async function controllerAnchorBirth() {
 
     // No reservation, scope or worker was created: this controller is the
     // complete producer set. Normal close must join it before retiring its leaf.
+    const originalController = controller;
     await bounded(controller.close(), 15_000); controller = undefined;
     await assert.rejects(access(`/proc/${pid}`), { code: 'ENOENT' }, 'close must join the original controller child');
     await assert.rejects(lstat(controllerPath), { code: 'ENOENT' }, 'joined controller-only leaf must retire safely');
     assert.deepEqual(identity(await leaf.stat({ bigint: true })), identity(leafBefore), 'held leaf retains its original inode');
     await assertDirectory(root, options.cgroupParent, rootBefore);
     await assertDirectory(controllers, controllersPath, controllersBefore);
+    const closePreparation = Reflect.get(originalController, 'closePreparation');
+    assert.equal(typeof closePreparation, 'function', 'joined original controller must expose genuine preparation retirement');
+    const readPreparation = Reflect.get(linuxWorker, 'readNativeControllerPreparationRetirement');
+    assert.equal(typeof readPreparation, 'function', 'preparation retirement requires its genuine native reader');
+    const retirement = await bounded(Promise.resolve(Reflect.apply(closePreparation, originalController, [])), 15_000);
+    let previousObservedAt = 0;
+    for (let reassertion = 0; reassertion < 2; reassertion++) {
+      const before = Date.now();
+      const value: unknown = Reflect.apply(readPreparation, undefined, [retirement]);
+      const after = Date.now();
+      assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value));
+      const observed = value as Record<string, unknown>;
+      assert.equal(observed.pid, pid); assert.equal(observed.processStartToken, token);
+      assert.equal(observed.controllerJoined, true); assert.equal(observed.controllerLeafAbsent, true);
+      assert.equal(observed.workerCreationRequested, false);
+      assert.equal(observed.liveContainmentCount, 0); assert.equal(observed.activeMountCount, 0);
+      assert.ok(typeof observed.observedAt === 'string');
+      const observedAt = Date.parse(observed.observedAt);
+      assert.ok(Number.isSafeInteger(observedAt));
+      assert.equal(new Date(observedAt).toISOString(), observed.observedAt);
+      assert.ok(observedAt >= before && observedAt <= after && after - observedAt <= 5_000 && observedAt >= previousObservedAt,
+        'each genuine preparation retirement read must freshly observe the closed native owner');
+      previousObservedAt = observedAt;
+    }
     console.log(JSON.stringify({ scenario: 'actual-controller-anchor-birth', supervisorPid: process.pid, supervisorStartToken: sourceToken,
       sourcePath, controllerPid: pid, controllerStartToken: token, controllerPath, ownerUid: uid,
       rootDevice: String(rootBefore.dev), rootInode: String(rootBefore.ino), controllerDevice: String(leafBefore.dev), controllerInode: String(leafBefore.ino),
