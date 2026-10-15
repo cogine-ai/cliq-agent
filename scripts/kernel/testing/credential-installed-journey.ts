@@ -699,7 +699,16 @@ async function campaign(filename: string): Promise<void> {
     for (const [index, invalidSecret] of invalidModelSecrets.entries()) {
       const invalidMetadata = { ...metadata, requestId: `019a0012-0000-7000-8000-${String(60 + index).padStart(12, '0')}`,
         credentialGrantId: `credential-journey-invalid-model-${index}`, secretSubmissionId: `credential-journey-invalid-model-submission-${index}` };
-      exactRefusal(credential(invalidMetadata, invalidSecret), 'INVALID_REQUEST',
+      const response = credential(invalidMetadata, invalidSecret);
+      let returnedCommittedOperation = false;
+      if (response.status === 0) try {
+        const observed = decodeCredentialAuthorityOperation(success(response, 'operation'));
+        returnedCommittedOperation = observed.phase === 'committed' && observed.kind === 'enroll' &&
+          observed.requestId === invalidMetadata.requestId && observed.credentialGrantId === invalidMetadata.credentialGrantId &&
+          observed.commandCore.purpose === 'model_endpoint';
+      } catch { /* Diagnostic only: never retain arbitrary returned bytes or errors. */ }
+      report.modelBearerInputAttempt = { caseIndex: index, commandExitStatus: response.status, returnedCommittedOperation };
+      exactRefusal(response, 'INVALID_REQUEST',
         'model credential secret is outside the installed bearer byte range');
       assert.equal(success(credential({ schemaVersion: 1, kind: 'read', credentialGrantId: invalidMetadata.credentialGrantId }), 'record'), null);
       exactRefusal(credential({ schemaVersion: 1, kind: 'cleanup', requestId: invalidMetadata.requestId }),
