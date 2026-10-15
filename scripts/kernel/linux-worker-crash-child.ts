@@ -106,8 +106,9 @@ async function stopPreactivation(input: CrashChildInput, metadata: ReturnType<ty
       assert.deepEqual(data, canonicalJsonBytes(receipt));
       assert.equal(receipt.evidenceDigest, digestOmitting(receipt, 'evidenceDigest'));
       const launch = soleLaunch(); assert.deepEqual(launch, failedLaunch);
+      assert.ok(launch.phase !== 'preparing' && launch.retirementKind !== 'preparation');
       const cut = metadata.readSnapshot(connection => {
-        const run = readRun(connection, input.runId), generation = readRequiredWorkspaceGenerationByRef(connection, failedLaunch!.workspaceGenerationRef);
+        const run = readRun(connection, input.runId), generation = readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef);
         assert.deepEqual(run, before.run); assert.deepEqual(readInvocationJournal(connection, input.runId), before.journal);
         assert.equal(run.status, 'queued'); assert.equal(run.activeWorkerLaunchId, undefined);
         assert.equal(generation.phase, 'preactivated_readonly'); assert.deepEqual(generation, failedGeneration,

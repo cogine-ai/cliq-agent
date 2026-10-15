@@ -292,6 +292,7 @@ test('stop and recovery reject substituted retirement, terminal reason and contr
     const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture), checkpoint: proof.checkpoint });
     await fixture.store.readRecoveryClosure(fixture.runId);
     const launch = readWorkerLaunchesForRun(writer, fixture.runId)[0]!;
+    assert.equal(launch.phase, 'retired');
     const forged: WorkerLaunch = { ...launch, retirementEvidenceRef: bad.ref };
     // Simulate a damaged database image beyond the SQL write guard; recovery must still reject it.
     const guard = writer.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'worker_launches' AND sql LIKE '%BEFORE UPDATE%'")

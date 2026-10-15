@@ -63,6 +63,17 @@ registered path is decoded, rewritten or silently normalized to make it fit.
 The same preflight rejects more than 64 SPKI pins, matching the native broker's
 array capacity without truncating the registered TLS policy. Generic endpoint
 registration retains its wider nonempty, unique, sorted pin-array contract.
+The fixed installed recipe also refuses new `default`-policy admissions until
+its interactive approval control path is implemented. Generic policy semantics
+remain unchanged: `default` asks before writes, `plan` denies them, and no
+request is silently upgraded to `accept-edits`. Already committed admission and
+source-refusal replays retain their original early replay behavior. This
+preflight does not make historical approval waits actionable.
+New installed Session creation holds the actual platform user's persisted
+Workspace Trust before reading workspace Git configuration, then reasserts
+that same held Trust after capture and before the final write transaction.
+Exact committed replays still precede all home/workspace opening; generic
+non-installed Session creation is unchanged.
 The installed scheduler retains at most 1000 nonterminal Runs across Sessions.
 New installed admission checks that same bound in its original write transaction,
 after replay/conflict and all authority/time guards, before inserting any Run.
@@ -76,6 +87,31 @@ not a promise of capacity or permission to retry any effect.
 After a validated terminal Run, its joined driver task closes the original
 launcher/sealed-image owners before evicting memory caches. This reclaims no
 durable history and does not treat a candidate, unknown or wait as terminal.
+
+## Preparation-retirement implementation boundary
+
+The [approved coherent retirement contract](i1-terminal-retirement-design.md)
+keeps one WorkerLaunch lifecycle and the strictly newer-StateOwner rule for
+model unknown. Its closed data union distinguishes non-executing `preparing`,
+bound launches and retired preparation without fictional generation, worker,
+lease or write fields. Schema V5 extends the existing phase triggers; it does
+not add a ledger, backfill birth history or remove the unique unretired index.
+The eventual promotion reducer must retain complete actual birth bindings;
+the decoder alone cannot enforce transition history.
+
+Data decoding and migration do not implement that physical lifecycle. The
+preparation producer, its historical closure and private-tool rollback are not
+complete; recovery explicitly refuses every launch carrying preparation,
+including promoted and retired bound history, until its owning proof validation
+exists. No prepared shape can release a slot or grant execution.
+The new native controller-only retirement receipt requires the original
+authenticated ordinary controller, original join and actual leaf removal;
+each read rechecks the held root/parent, original process lifetime and absent
+leaf. It does not prove worker no-spawn, workspace or broker retirement, and
+becomes invalid when its launcher closes. Actual-source Linux GREEN for this
+new receipt and Trust ordering is still required; portable tests are not that
+qualification. Missing/partial/substituted birth and every unexecuted physical
+cut remain explicitly recovery-required or unverified.
 
 ## Validation boundary
 

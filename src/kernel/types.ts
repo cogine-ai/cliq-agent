@@ -1378,7 +1378,21 @@ export type WorkerDeathWait = {
   probeState: import('./reconciliation.js').ReconciliationProbeStateV1;
 };
 
-export type WorkerLaunch = {
+/** Logical intent only. A schema-valid value is not a resource birth witness. */
+export type WorkerPreparation = {
+  stateOwnerEpoch: number;
+  sourceCheckpointId: string;
+  sourceWorkspaceStateRef: ArtifactRef;
+  generationCreationNonceDigest: string;
+  generationId: string;
+  generation?: { generationRef: ArtifactRef; generationIdentityDigest: string };
+  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string };
+  reservation?: { deviceId: string; fileId: string; ownerUid: number };
+};
+
+export type BoundWorkerPreparation = WorkerPreparation & Required<Pick<WorkerPreparation, 'generation' | 'controller' | 'reservation'>>;
+
+type WorkerLaunchIdentity = {
   schemaVersion: 1;
   launchId: string;
   runId: string;
@@ -1386,7 +1400,44 @@ export type WorkerLaunch = {
   supervisorInstanceId: string;
   spawnNonceDigest: string;
   activationNonceDigest: string;
+  createdAt: string;
+  activationDeadlineAt: string;
+};
+
+type WorkerLaunchWithoutExecution = {
+  workspaceGenerationRef?: never;
+  containmentPlanRef?: never;
+  sandboxLaunchSpecRef?: never;
+  workerIdentityDigest?: never;
+  processContainmentRef?: never;
+  leaseEpoch?: never;
+  leaseVersion?: never;
+  leaseExpiresAt?: never;
+  generationWriteState?: never;
+  quiesceId?: never;
+  activatedAt?: never;
+};
+
+export type PreparingWorkerLaunch = WorkerLaunchIdentity & WorkerLaunchWithoutExecution & {
+  phase: 'preparing';
+  preparation: WorkerPreparation;
+  retirementKind?: never;
+  retiredAt?: never;
+  retirementEvidenceRef?: never;
+};
+
+export type RetiredWorkerPreparation = WorkerLaunchIdentity & WorkerLaunchWithoutExecution & {
+  phase: 'retired';
+  retirementKind: 'preparation';
+  preparation: WorkerPreparation;
+  retiredAt: string;
+  retirementEvidenceRef: ArtifactRef;
+};
+
+export type BoundWorkerLaunch = WorkerLaunchIdentity & {
   phase: 'reserved' | 'preactivated' | 'activated' | 'reconciling' | 'retired';
+  retirementKind?: never;
+  preparation?: BoundWorkerPreparation;
   workspaceGenerationRef: ArtifactRef;
   containmentPlanRef: ArtifactRef;
   sandboxLaunchSpecRef: ArtifactRef;
@@ -1403,12 +1454,12 @@ export type WorkerLaunch = {
     | 'fenced_reconciling'
     | 'sealed';
   quiesceId?: string;
-  createdAt: string;
-  activationDeadlineAt: string;
   activatedAt?: string;
   retiredAt?: string;
   retirementEvidenceRef?: ArtifactRef;
 };
+
+export type WorkerLaunch = PreparingWorkerLaunch | RetiredWorkerPreparation | BoundWorkerLaunch;
 
 export type ChildAllocationTerminal =
   | {

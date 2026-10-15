@@ -28,7 +28,8 @@ export async function publishFixtureEditLaunch(fixture: Awaited<ReturnType<typeo
   prepared: Awaited<ReturnType<typeof prepareTool>>, dispatchId: string) {
   const { store } = fixture;
   const closure = await store.readRecoveryClosure(fixture.runId);
-  const parent = closure.workerLaunches.find((launch) => launch.launchId === closure.run.activeWorkerLaunchId)!;
+  const parent = closure.workerLaunches.find((launch) => launch.launchId === closure.run.activeWorkerLaunchId);
+  if (!parent || parent.phase !== 'activated') throw new Error('retained edit fixture requires its activated worker launch');
   const worker = await store.artifacts.readCanonical<Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>>(parent.sandboxLaunchSpecRef);
   const owner = { kind: 'run_invocation' as const, runId: fixture.runId, intendedLeaseEpoch: closure.run.leaseEpoch,
     workerLaunchId: parent.launchId, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId };

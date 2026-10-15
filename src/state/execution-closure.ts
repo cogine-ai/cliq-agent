@@ -401,6 +401,10 @@ export async function readQuarantinedWorkerLaunchClosure(driver: SqliteDriver, a
   input = immutableSnapshot(input);
   const { run, launch, generation } = input;
   const currentOwner = assertActiveStateOwner(driver, owner);
+  if (launch.retirementKind === 'preparation') {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
+  }
+  if (launch.phase !== 'retired') mismatch('retirement inspection requires its exact closed original launch');
   function current() {
     assertActiveStateOwner(driver, owner);
     equal(readRun(driver, run.id), run, 'quarantined retirement current Run');
@@ -522,6 +526,7 @@ export function decodeWorkerProcessContainment(value: unknown): ProcessContainme
 export async function readWorkerPreactivationClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, input: {
   run: Run; launch: WorkerLaunch; processContainmentRef: string; identity: WorkerIdentity;
 }) {
+  if (input.launch.phase !== 'reserved') mismatch('worker preactivation requires its exact reserved launch');
   const closure = await readWorkerLaunchClosure(artifacts, owner, { run: input.run, ...input.launch });
   const containment = decodeWorkerProcessContainment(await readCanonicalArtifact(artifacts, input.processContainmentRef));
   assertActualWorkerClosure(closure, containment, input.identity, input.launch, input.processContainmentRef, owner.supervisorInstanceId);

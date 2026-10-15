@@ -9,7 +9,7 @@ import type {
   RunFrontier,
   RunContextCompactionPlan,
   RunEvent,
-  WorkerLaunch,
+  BoundWorkerLaunch,
   WorkspaceGenerationStateV1
 } from '../../kernel/types.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
@@ -105,7 +105,7 @@ function findGenerationByRef(connection: SqliteConnection, generationRef: string
 
 type LiveDispatchState = {
   run: Run;
-  launch: WorkerLaunch;
+  launch: BoundWorkerLaunch;
   generation: WorkspaceGenerationStateV1;
 };
 

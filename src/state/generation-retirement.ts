@@ -74,6 +74,9 @@ export async function readRetiredGenerationSource(driver: SqliteDriver, artifact
   const { retirementEvidenceRef: _ref, retirementEvidenceDigest: _digest, phase: _phase, ...base } = generation;
   if (evidence.fromPhase === 'sealed') {
     const launch = readRequiredWorkerLaunch(driver, evidence.workerLaunchId);
+    if (launch.retirementKind === 'preparation') {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
+    }
     if (launch.workspaceGenerationRef !== generation.generationRef || launch.retirementEvidenceRef !== evidence.containmentDeathEvidenceRef ||
         !launch.retiredAt || launch.retiredAt > evidence.observedAt) throw new TypeError('sealed generation retirement substitutes its worker');
     const source: Source = { ...base, rowVersion: generation.rowVersion - 1, updatedAt: launch.retiredAt, phase: 'sealed',
@@ -95,6 +98,9 @@ export async function readRetiredGenerationSource(driver: SqliteDriver, artifact
   } else if (quarantine.reason === 'launch_aborted' || quarantine.reason === 'launch_died_before_activation') {
     launch = readRequiredWorkerLaunch(driver, quarantine.workerLaunchId);
   } else throw new TypeError('generation retirement requires an implemented closed quarantine producer');
+  if (launch.retirementKind === 'preparation') {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
+  }
   if (launch.workspaceGenerationRef !== generation.generationRef || launch.phase !== 'retired' || !launch.retiredAt ||
       launch.retiredAt < quarantine.observedAt || launch.retiredAt > evidence.observedAt)
     throw new TypeError('quarantined generation retirement has no closed source launch');
@@ -122,6 +128,10 @@ export function assertRetiredGenerationCut(connection: SqliteConnection | Sqlite
   assertClosedGenerationPointers(connection, generations);
   const byRef = new Map(generations.map(value => [value.generationRef, value]));
   for (const launch of readWorkerLaunchesForRun(connection, run.id)) {
+    if (launch.retirementKind === 'preparation') {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
+    }
+    if (launch.phase !== 'retired') throw new TypeError('terminal stop has no proof-backed closed generation for every worker');
     const generation = byRef.get(launch.workspaceGenerationRef);
     if (launch.phase !== 'retired' || !generation || (generation.phase !== 'sealed' && generation.phase !== 'retired') ||
         (generation.phase === 'sealed' && launch.generationWriteState !== 'sealed'))

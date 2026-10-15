@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { StateOwnerAcquisitionEvidenceV1 } from '../kernel/types.js';
@@ -51,7 +51,7 @@ test('fresh_empty genesis records the actual opened database schema, not its art
     let actualSchema: number;
     try { actualSchema = Number(inspector.prepare('PRAGMA user_version').get<{ user_version: unknown }>()!.user_version); }
     finally { inspector.close(); }
-    assert.equal(actualSchema, 4);
+    assert.equal(actualSchema, KERNEL_STATE_SCHEMA_VERSION);
     assert.equal(generation.stateSchemaVersion, actualSchema);
     assert.equal(generation.generationDigest, digestOmitting(generation, 'generationDigest'));
     assert.equal(acquisition.kernelGenerationIdentityDigest, generation.generationDigest);
@@ -99,7 +99,7 @@ if (process.platform === 'linux') test('a real signed initial installation acqui
     assert.equal(acquisition.runtimeBundleManifestDigest, signed.bundle.manifestDigest);
     const generation = await store.artifacts.readCanonical<Record<string, unknown>>(acquisition.kernelGenerationIdentityRef);
     assert.equal(generation.origin, 'fresh_installed');
-    assert.equal(generation.stateSchemaVersion, 4);
+    assert.equal(generation.stateSchemaVersion, KERNEL_STATE_SCHEMA_VERSION);
     assert.equal(generation.runtimeBundleRef, installed.bundleDigest);
     assert.equal(generation.runtimeBundleManifestDigest, signed.bundle.manifestDigest);
     assert.equal(generation.generationDigest, digestOmitting(generation, 'generationDigest'));
@@ -155,7 +155,7 @@ if (process.platform === 'linux') test('installed Supervisor status reports real
     const owner = ownerAt(stateRoot);
     assert.deepEqual(await store.readSupervisorStatus(identity), {
       method: 'supervisor.status', health: 'degraded', supervisorInstanceId: owner.supervisorInstanceId,
-      queue: { queuedRuns: 0, runningRuns: 0, capacity: 0 }, stateSchemaVersion: 4,
+      queue: { queuedRuns: 0, runningRuns: 0, capacity: 0 }, stateSchemaVersion: KERNEL_STATE_SCHEMA_VERSION,
       activeRuntimeBundle: summary, installedRuntimeBundles: [summary], incompatiblePinnedRunCount: 0,
     });
     // This handle is a borrowed installation, not owned by StateStore. Its

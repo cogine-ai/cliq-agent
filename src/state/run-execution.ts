@@ -315,7 +315,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     signal.throwIfAborted();
     const activeGeneration = beforeSeal.workspaceGenerations.find(row => row.generationRef === authority.generationRef);
     const activeLaunch = beforeSeal.workerLaunches.find(row => row.launchId === activated.launch.launchId);
-    if (!activeGeneration || !activeLaunch || beforeSeal.run.activeWorkerLaunchId !== activeLaunch.launchId ||
+    if (!activeGeneration || !activeLaunch || activeLaunch.phase !== 'activated' || beforeSeal.run.activeWorkerLaunchId !== activeLaunch.launchId ||
         beforeSeal.run.leaseEpoch !== activeLaunch.leaseEpoch || activeLaunch.workspaceGenerationRef !== authority.generationRef ||
         activeLaunch.workerIdentityDigest !== activated.launch.workerIdentityDigest || activeLaunch.processContainmentRef !== processContainmentRef) {
       throw new KernelStorageError('LEASE_FENCED', 'checkpoint retirement differs from the original worker and generation');

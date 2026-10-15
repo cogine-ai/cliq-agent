@@ -8,7 +8,7 @@ import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { readCanonicalArtifact } from './agent-context.js';
-import { joinResourceOperations } from './errors.js';
+import { joinResourceOperations, KernelStorageError } from './errors.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readStateOwner } from './state-owner.js';
 import { readStateOwnerDeath } from './state-owner-death.js';
@@ -218,6 +218,10 @@ export async function validateRetainedWorkerQuarantines(artifacts: ArtifactCatal
     const recovery = await readCanonicalArtifact<WorkerRecoveryEvidenceV1>(artifacts, quarantine.workerRecoveryEvidenceRef);
     const wait = await readCanonicalArtifact<WorkerDeathWait>(artifacts, recovery.waitingSubjectRef);
     const launch = readRequiredWorkerLaunch(driver, recovery.oldWorkerLaunchId);
+    if (launch.retirementKind === 'preparation') {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
+    }
+    if (launch.phase !== 'retired') throw new TypeError('worker recovery history has no retired original launch');
     const containment = decodeWorkerProcessContainment(await readCanonicalArtifact(artifacts, recovery.processContainmentRef));
     const plan = decodeWorkerContainmentPlan(await readCanonicalArtifact(artifacts, launch.containmentPlanRef));
     const spec = decodeWorkerSandboxLaunchSpec(await readCanonicalArtifact(artifacts, launch.sandboxLaunchSpecRef));

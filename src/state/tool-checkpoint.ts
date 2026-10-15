@@ -163,6 +163,7 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
   const { run, postEffect } = input;
   if (!run.activeWorkerLaunchId) throw new TypeError('post-effect result has no owning worker launch');
   const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId);
+  if (launch.phase !== 'activated') throw new KernelStorageError('LEASE_FENCED', 'tool result requires a quiesced checkpointing generation');
   const generation = readRequiredWorkspaceGenerationByRef(driver, launch.workspaceGenerationRef);
   if (launch.phase !== 'activated' || launch.generationWriteState !== 'checkpointing' || !launch.quiesceId ||
       generation.phase !== 'checkpointing' || generation.quiesceId !== launch.quiesceId ||
@@ -196,6 +197,9 @@ export async function validateRetainedWorkerSeal(driver: SqliteDriver, artifacts
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; launch: WorkerLaunch; generation: WorkspaceGenerationStateV1;
 }) {
   const { launch, generation } = input;
+  if (launch.retirementKind === 'preparation') {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
+  }
   if (launch.phase !== 'retired' || launch.generationWriteState !== 'sealed' || !launch.retirementEvidenceRef || !launch.activatedAt || !launch.retiredAt ||
       generation.phase !== 'sealed' || !generation.snapshotEvidenceRef) throw new TypeError('stop has no positively sealed historical worker');
   const snapshot = decodeWorkspaceGenerationSnapshotEvidence(await readCanonicalArtifact(artifacts, generation.snapshotEvidenceRef));

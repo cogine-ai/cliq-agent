@@ -511,6 +511,9 @@ async function validateLaunchGraph(
 ): Promise<void> {
   const byRef = new Map(generations.map((generation) => [generation.generationRef, generation]));
   for (const launch of launches) {
+    if (launch.phase === 'preparing' || launch.retirementKind === 'preparation') {
+      recoveryFailure('worker preparation requires its exact resource birth and retirement closure');
+    }
     await requireRecoveryArtifacts(artifacts, [
       ['WorkerLaunch.workspaceGenerationRef', launch.workspaceGenerationRef],
       ['WorkerLaunch.containmentPlanRef', launch.containmentPlanRef],
@@ -605,6 +608,9 @@ export async function readRecoveryClosure(
     workspaceGenerations,
     childAllocations
   } = databaseCut;
+  if (databaseCut.allWorkerLaunches.some(launch => launch.preparation !== undefined)) {
+    recoveryFailure('worker preparation provenance requires its exact owning resource closure');
+  }
   requireRecoveryArtifactRef(run.specRef, 'Run.specRef');
   for (const [label, ref] of [
     ['Run.frontierRef', run.frontierRef],

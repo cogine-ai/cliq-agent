@@ -34,7 +34,8 @@ struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, re
     int anchor_root, controller_parent, controller_leaf, input_fd, child_socket, transfer[4];
     struct stat root_identity, parent_identity, leaf_identity;
     char root_path[PATH_MAX], leaf_name[64];
-    bool leaf_owned, leaf_initialized, constructor_failed, retirement_failed;
+    bool leaf_owned, leaf_initialized, controller_leaf_retired, constructor_failed, retirement_failed;
+    bool worker_creation_requested, retained_requested;
     unsigned int next_scope, pending; char token[CLIQ_WORKER_TOKEN_BYTES]; unsigned int references;
     struct native_scope *scopes, *pending_scope;
     struct cliq_worker_packet retained, reservation, reservation_inspection, inspected_reservation;
@@ -275,6 +276,7 @@ static void retire_controller_leaf(struct controller *controller) {
         controller->retirement_failed = true;
         return;
     }
+    controller->controller_leaf_retired = true;
 }
 
 static void controller_release(struct controller *controller) {
@@ -385,6 +387,10 @@ static bool begin_request(struct controller *controller, struct native_scope *sc
     if (controller->closed || !controller->ready || controller->pending != 0) return false;
     if (atomic_load(&native_retirement_failed) && request->command != CLIQ_STOP_SCOPE &&
         request->command != CLIQ_TERMINATE_RETAINED && request->command != CLIQ_INSPECT_RESERVATION) return false;
+    /* Cleanup clears scopes, but must never erase which resources this owner
+     * could have created or inspected, including a failed/partial send. */
+    if (request->command == CLIQ_CREATE_WORKER) controller->worker_creation_requested = true;
+    if (request->command == CLIQ_TERMINATE_RETAINED) controller->retained_requested = true;
     controller->pending = request->command; controller->pending_scope = scope;
     if (cliq_send(controller->socket, request, fds, count)) return true;
     (void)close_controller(controller); return false;
@@ -1090,6 +1096,57 @@ static napi_value assert_retained_retired(napi_env env, napi_callback_info info)
     napi_value result; napi_create_double(env, observed, &result); return result;
 }
 
+/* Only the original ordinary controller can prove its own preparation closed.
+ * An empty scopes list after cleanup is not evidence that no worker was born. */
+static napi_value assert_preparation_retired(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1], self; struct controller *controller; uint64_t root;
+    napi_get_cb_info(env, info, &argc, args, &self, NULL);
+    if (argc != 1 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+        !number(env, args[0], &root) || root > INT32_MAX)
+        return failure(env, "invalid controller preparation retirement owner");
+    if (controller->retirement_failed || atomic_load(&native_retirement_failed)) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "controller preparation resources did not retire"); return NULL;
+    }
+    if (!controller->closed || !controller->cleanup_done || !controller->reaped || !controller->ready ||
+        controller->constructor_failed || !controller->leaf_initialized || !controller->controller_leaf_retired ||
+        controller->worker_creation_requested || controller->inspection_only || controller->retained_requested ||
+        controller->pending != 0 || controller->pid <= 0 || !*controller->token)
+        return failure(env, "original ordinary controller preparation is not positively closed");
+    struct stat current, named; int parent = -1;
+    bool valid = private_cgroup((int)root, &current) && same_directory(&controller->root_identity, &current) &&
+        lstat(controller->root_path, &named) == 0 && same_directory(&controller->root_identity, &named);
+    if (valid) {
+        parent = openat((int)root, "controllers", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        valid = parent >= 0 && private_cgroup(parent, &current) && same_directory(&controller->parent_identity, &current) &&
+            fstatat((int)root, "controllers", &named, AT_SYMLINK_NOFOLLOW) == 0 && same_directory(&current, &named);
+    }
+    struct process_sample process;
+    valid = valid && sample_process(controller, controller->pid, &process, false) &&
+        (process.absent || strcmp(process.token, controller->token) != 0) &&
+        fstatat(parent, controller->leaf_name, &named, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT;
+    if (valid) {
+        valid = private_cgroup((int)root, &current) && same_directory(&controller->root_identity, &current) &&
+            lstat(controller->root_path, &named) == 0 && same_directory(&controller->root_identity, &named) &&
+            private_cgroup(parent, &current) && same_directory(&controller->parent_identity, &current) &&
+            fstatat((int)root, "controllers", &named, AT_SYMLINK_NOFOLLOW) == 0 && same_directory(&current, &named) &&
+            sample_process(controller, controller->pid, &process, false) &&
+            (process.absent || strcmp(process.token, controller->token) != 0) &&
+            fstatat(parent, controller->leaf_name, &named, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT;
+    }
+    if (!retire_descriptor(&parent)) controller->retirement_failed = true;
+    if (controller->retirement_failed || atomic_load(&native_retirement_failed)) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "controller preparation observation resources did not retire"); return NULL;
+    }
+    if (!valid) return failure(env, "controller preparation root, parent, process or absent leaf changed");
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0)
+        return failure(env, "controller preparation retirement observation time unavailable");
+    double observed = (double)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    if (observed <= 0 || observed > 9007199254740991.0)
+        return failure(env, "controller preparation retirement observation time invalid");
+    napi_value result; napi_create_double(env, observed, &result); return result;
+}
+
 static napi_value controller_close(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct controller *controller;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
@@ -1205,6 +1262,7 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "terminateRetained", NULL, terminate_retained, NULL, NULL, NULL, napi_default, NULL },
         { "pollRetained", NULL, poll_retained, NULL, NULL, NULL, napi_default, NULL },
         { "assertRetainedRetired", NULL, assert_retained_retired, NULL, NULL, NULL, napi_default, NULL },
+        { "assertPreparationRetired", NULL, assert_preparation_retired, NULL, NULL, NULL, napi_default, NULL },
         { "close", NULL, controller_close, NULL, NULL, NULL, napi_default, NULL }
     };
     /* All receiver allocation/branding and async ownership precede the first

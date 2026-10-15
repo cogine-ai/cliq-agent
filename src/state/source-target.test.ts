@@ -77,11 +77,27 @@ test('inline submit preserves original nested model values without weakening nor
   }
 });
 
+test('installed recipe refuses unavailable default approvals without changing generic policy modes', () => {
+  const installedRequest = (policyMode: 'default' | 'plan' | 'accept-edits' | 'yolo') => normalizeRunSubmitRequest(inlineRequest({
+    model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+      endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
+    policyMode
+  })).request;
+  const request = installedRequest('default');
+  assert.equal(request.policyMode, 'default', 'generic normalization must retain the requested approval policy');
+  assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
+  for (const mode of ['plan', 'accept-edits', 'yolo'] as const) {
+    const supported = installedRequest(mode);
+    assert.equal(supported.policyMode, mode);
+    assert.doesNotThrow(() => assertInstalledRunRecipe(supported));
+  }
+});
+
 test('installed recipe refuses insufficient process capacity before capture without changing generic resource normalization', () => {
   const installedRequest = (maxProcesses: number) => normalizeRunSubmitRequest(inlineRequest({
     model: { provider: 'openai-compatible', model: 'owned-fixture-model',
       endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
-    sandboxResources: { maxProcesses }
+    policyMode: 'accept-edits', sandboxResources: { maxProcesses }
   })).request;
   for (const maxProcesses of [1, 7]) {
     const request = installedRequest(maxProcesses);
@@ -95,7 +111,7 @@ test('installed recipe refuses oversized files before capture without clamping e
   const installedRequest = (maxSingleFileBytes: number) => normalizeRunSubmitRequest(inlineRequest({
     model: { provider: 'openai-compatible', model: 'owned-fixture-model',
       endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
-    sandboxResources: { maxSingleFileBytes }
+    policyMode: 'accept-edits', sandboxResources: { maxSingleFileBytes }
   })).request;
   for (const maxSingleFileBytes of [1_048_576, 268_435_456]) {
     const request = installedRequest(maxSingleFileBytes);
@@ -111,7 +127,8 @@ test('installed recipe refuses oversized files before capture without clamping e
 
 test('installed recipe rejects unsupported registered paths and pin counts without narrowing general endpoint registration', () => {
   const request = normalizeRunSubmitRequest(inlineRequest({ model: { provider: 'openai-compatible', model: 'owned-fixture-model',
-    endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] } })).request;
+    endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
+    policyMode: 'accept-edits' })).request;
   const registered = (basePath: string, spkiSha256Pins = ['a'.repeat(64)]) => {
     // Complete canonical data only, not registration or installed authority.
     const hash = 'a'.repeat(64), endpoint: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',

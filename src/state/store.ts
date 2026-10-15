@@ -1672,9 +1672,10 @@ export class StateStore {
   supportsInstalledRuns(): boolean { return this.schedulerStarted && this.schedulerFailure === undefined && !this.closeRequested && !this.closed; }
 
   async createInstalledSession(request: unknown, identity: AuthenticatedControlIdentity) {
-    if (!this.supportsInstalledRuns() || !this.installedRuntime)
+    if (!this.supportsInstalledRuns() || !this.installedRuntime || !this.runtimeAuthority?.sourceInspection)
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
-    return createInstalledSession(this.driver, this.artifacts, this.owner, request, identity, this.installedRuntime);
+    return createInstalledSession(this.driver, this.artifacts, this.owner, request, identity, this.installedRuntime,
+      this.runtimeAuthority.sourceInspection.controlledHome);
   }
 
   async submitInstalledRun(request: unknown, identity: AuthenticatedControlIdentity) {

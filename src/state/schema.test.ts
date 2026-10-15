@@ -8,6 +8,9 @@ import {
   applyKernelSchema,
   KERNEL_SCHEMA_SQL,
   KERNEL_SCHEMA_V1_SQL,
+  KERNEL_SCHEMA_V2_SQL,
+  KERNEL_SCHEMA_V3_SQL,
+  KERNEL_SCHEMA_V4_SQL,
   readSchemaUserVersion
 } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
@@ -23,15 +26,15 @@ test('schema version is readable within the same read-only WAL snapshot as owner
     const version = reader.readSnapshot(connection => {
       // Capture a real database cut before the concurrent writer commits.
       connection.prepare('SELECT count(*) FROM state_owners').get();
-      assert.equal(readSchemaUserVersion(connection), 4);
-      writer.transaction(other => other.exec('PRAGMA user_version=5'));
-      assert.equal(readSchemaUserVersion(connection), 4);
-      assert.throws(() => connection.exec('PRAGMA user_version=6'), /connection settings are reserved/);
+      assert.equal(readSchemaUserVersion(connection), KERNEL_STATE_SCHEMA_VERSION);
+      writer.transaction(other => other.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION + 1}`));
+      assert.equal(readSchemaUserVersion(connection), KERNEL_STATE_SCHEMA_VERSION);
+      assert.throws(() => connection.exec(`PRAGMA user_version=${KERNEL_STATE_SCHEMA_VERSION + 2}`), /connection settings are reserved/);
       return readSchemaUserVersion(connection);
     });
-    assert.equal(version, 4);
-    assert.equal(reader.readSnapshot(readSchemaUserVersion), 5);
-    assert.equal(readSchemaUserVersion(writer), 5);
+    assert.equal(version, KERNEL_STATE_SCHEMA_VERSION);
+    assert.equal(reader.readSnapshot(readSchemaUserVersion), KERNEL_STATE_SCHEMA_VERSION + 1);
+    assert.equal(readSchemaUserVersion(writer), KERNEL_STATE_SCHEMA_VERSION + 1);
   } finally {
     writer.close(); reader.close();
     await rm(stateRoot, { recursive: true, force: true });
@@ -113,6 +116,53 @@ test('schema v1 upgrades atomically to the M2 invariant layer', async () => {
     );
     applyKernelSchema(driver);
     assert.equal(readSchemaUserVersion(driver), KERNEL_STATE_SCHEMA_VERSION);
+  } finally {
+    driver.close();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test('schema v4 migration adds preparing to the same WorkerLaunch spine without changing other schema history', async () => {
+  const stateRoot = await mkdtemp(path.join(process.cwd(), '.cliq-worker-preparing-schema-'));
+  const driver = openSqliteDriver(path.join(stateRoot, 'kernel.sqlite3'));
+  const readCatalog = () => driver.prepare('SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name')
+    .all<{ type: string; name: string; tbl_name: string; sql: string | null }>();
+  try {
+    driver.transaction(connection => {
+      connection.exec(`PRAGMA application_id=${KERNEL_SQLITE_APPLICATION_ID}`);
+      connection.exec(`${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}\n${KERNEL_SCHEMA_V3_SQL}\n${KERNEL_SCHEMA_V4_SQL}`);
+      connection.exec('PRAGMA user_version=4');
+    });
+    assert.equal(readSchemaUserVersion(driver), 4);
+    const before = readCatalog();
+    const insertName = 'worker_launches_validate_insert', updateName = 'worker_launches_validate_update';
+    assert.doesNotMatch(before.find(row => row.name === insertName)!.sql!, /'preparing'/u);
+
+    // This reads the actual SQLite layout, not a launch, StateOwner or native proof.
+    applyKernelSchema(driver);
+    const after = readCatalog();
+    const insert = after.find(row => row.name === insertName)!.sql!;
+    const update = after.find(row => row.name === updateName)!.sql!;
+    assert.match(insert, /NEW\.phase NOT IN \('preparing', 'reserved', 'preactivated', 'activated', 'reconciling', 'retired'\)/u);
+    assert.match(update, /OLD\.phase = 'preparing' AND NEW\.phase IN \('preparing', 'reserved', 'retired'\)/u);
+    for (const edge of [
+      "OLD.phase = 'reserved' AND NEW.phase IN ('preactivated', 'retired')",
+      "OLD.phase = 'preactivated' AND NEW.phase IN ('activated', 'retired')",
+      "OLD.phase = 'activated' AND NEW.phase IN ('activated', 'reconciling', 'retired')",
+      "OLD.phase = 'reconciling' AND NEW.phase = 'retired'"
+    ]) assert.ok(update.includes(edge), `retained WorkerLaunch edge: ${edge}`);
+    for (const trigger of [insert, update]) assert.ok(trigger.includes("WHEN (NEW.phase = 'retired') != (NEW.retired_at IS NOT NULL)"));
+    assert.ok(update.includes('WHEN NEW.launch_id != OLD.launch_id OR NEW.run_id != OLD.run_id'));
+    assert.equal(readSchemaUserVersion(driver), 5);
+    const unchanged = (rows: ReturnType<typeof readCatalog>) => rows.filter(row => row.name !== insertName && row.name !== updateName);
+    assert.deepEqual(unchanged(after), unchanged(before), 'every table, index and other trigger must remain unchanged');
+    const unretiredIndex = after.find(row => row.name === 'worker_launches_one_unretired_per_run');
+    assert.equal(unretiredIndex?.type, 'index');
+    assert.match(unretiredIndex!.sql!, /CREATE UNIQUE INDEX worker_launches_one_unretired_per_run\s+ON worker_launches\(run_id\) WHERE retired_at IS NULL/u);
+    assert.equal(after.filter(row => row.type === 'trigger').length, 21);
+    applyKernelSchema(driver);
+    assert.deepEqual(readCatalog(), after, 'schema v5 application is idempotent');
+    assert.equal(readSchemaUserVersion(driver), 5);
   } finally {
     driver.close();
     await rm(stateRoot, { recursive: true, force: true });

@@ -92,6 +92,7 @@ export type LinuxWorkerController = Readonly<{
     signal?: AbortSignal }): Promise<NativeContainmentDeathObservation>;
   closeRetained(): Promise<NativeRetainedWorkerRetirement>;
   closePreactivation(): Promise<NativePreactivationRetirement>;
+  closePreparation(): Promise<NativeControllerPreparationRetirement>;
   close(): Promise<void>;
 }>;
 export type LinuxWorkerLauncher = Readonly<{ startController(options?: { signal?: AbortSignal }): Promise<LinuxWorkerController>; close(): Promise<void> }>;
@@ -123,11 +124,34 @@ type NativeController = { pid: number; processStartToken: string;
   pollRetained(): NativeObservation | undefined;
   assertRetainedRetired(cgroupRootFd: number): number;
   assertPreactivationRetired(cgroupRootFd: number, reservationFd: number): number;
+  assertPreparationRetired(cgroupRootFd: number): number;
   close(): Promise<void>;
 };
 export type NativeWorkerBinding = { interfaceVersion: 3; sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
   openController(helper: NativeImage, cgroupRootFd: number): NativeController };
 type NativeBinding = NativeWorkerBinding;
+
+declare const retiredControllerPreparationBrand: unique symbol;
+export type NativeControllerPreparationRetirement = Readonly<{ [retiredControllerPreparationBrand]: true }>;
+const retiredControllerPreparations = new WeakMap<NativeControllerPreparationRetirement,
+  { pid: number; processStartToken: string; assertCurrent(): number }>();
+/** Fresh closure of the original ordinary controller only. This supplies no
+ * worker no-spawn, workspace or broker retirement authority. */
+export function readNativeControllerPreparationRetirement(receipt: NativeControllerPreparationRetirement) {
+  const held = retiredControllerPreparations.get(receipt);
+  if (!held) throw new TypeError('invalid native controller preparation retirement');
+  let observed: number;
+  try { observed = held.assertCurrent(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw retirementError('controller preparation observation resources did not retire', error);
+    throw error;
+  }
+  if (!Number.isSafeInteger(observed) || observed < 1) mismatch('native controller preparation retirement time is invalid');
+  return immutableSnapshot({ pid: held.pid, processStartToken: held.processStartToken, observedAt: new Date(observed).toISOString(),
+    controllerJoined: true as const, controllerLeafAbsent: true as const, workerCreationRequested: false as const,
+    liveContainmentCount: 0 as const, activeMountCount: 0 as const });
+}
 
 declare const retiredWorkerBrand: unique symbol;
 export type NativeRetainedWorkerRetirement = Readonly<{ [retiredWorkerBrand]: true }>;
@@ -566,6 +590,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
         let preactivation: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation;
           activationNonceDigest: string; observation: NativePreactivationObservation } | undefined;
         let retiredPreactivation: NativePreactivationRetirement | undefined;
+        let retiredPreparation: NativeControllerPreparationRetirement | undefined;
         const closeController = () => {
           controllerClosed = true;
           if (!controllerClosing) {
@@ -822,6 +847,22 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
               }
               readNativePreactivationRetirement(retiredPreactivation);
               return retiredPreactivation;
+            },
+            async closePreparation() {
+              if (this !== controller) throw new TypeError('invalid controller receiver');
+              await closeController();
+              if (!retiredPreparation) {
+                const receipt = Object.freeze({}) as NativeControllerPreparationRetirement;
+                retiredControllerPreparations.set(receipt, { pid: controller.pid, processStartToken: controller.processStartToken,
+                  assertCurrent() {
+                    receiver(); let observed!: number;
+                    source.withRoot(fd => { observed = native.assertPreparationRetired(fd); });
+                    return observed;
+                  } });
+                retiredPreparation = receipt;
+              }
+              readNativeControllerPreparationRetirement(retiredPreparation);
+              return retiredPreparation;
             },
             async close() { if (this !== controller) throw new TypeError('invalid worker controller'); await closeController(); controllers.delete(native); }
           });

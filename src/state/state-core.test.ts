@@ -11,10 +11,12 @@ import {
 } from '../kernel/identity.js';
 import type {
   LocalControlChannelIdentityV1,
-  PlatformProcessIdentityV1
+  PlatformProcessIdentityV1,
+  WorkspaceGenerationIdentityV1
 } from '../kernel/types.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { KernelStorageError } from './errors.js';
+import { decodeWorkerLaunch } from './invariants.js';
 import { applyKernelSchema } from './schema.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
@@ -384,6 +386,60 @@ test('recovery closed-decodes row_json instead of trusting redundant columns', a
     await disposeFixture(fixture);
   }
 });
+
+for (const phase of ['activated', 'retired'] as const) {
+  test(`recovery rejects unverified preparation provenance on ${phase} bound history`, async () => {
+    const fixture = await createAgentFixture(`preparation-closure-${phase}`);
+    try {
+      const baseline = await fixture.store.readRecoveryClosure(fixture.runId);
+      const checkpointId = identityHash('preparation-closure-checkpoint', fixture.runId);
+      const proof = phase === 'retired' ? await quiescedToolCheckpoint(fixture, checkpointId) : undefined;
+      const current = await fixture.store.readRecoveryClosure(fixture.runId);
+      const launch = current.workerLaunches[0];
+      assert.equal(launch?.phase, 'activated');
+      const identity = await fixture.store.artifacts.readCanonical<WorkspaceGenerationIdentityV1>(fixture.generationRef);
+      // Inject untrusted schema-valid data, not controller birth or retirement proof.
+      const unverified = decodeWorkerLaunch({ ...launch, preparation: {
+        stateOwnerEpoch: fixture.store.ownerEpoch,
+        sourceCheckpointId: identity.sourceCheckpointId,
+        sourceWorkspaceStateRef: identity.sourceWorkspaceStateRef,
+        generationCreationNonceDigest: identity.creationNonceDigest,
+        generationId: identity.generationId,
+        generation: { generationRef: fixture.generationRef, generationIdentityDigest: identity.identityDigest },
+        controller: { birthIdentityRef: digest('missing-controller-birth'), birthIdentityDigest: digest('unverified-controller-birth') },
+        reservation: { deviceId: '1', fileId: '2', ownerUid: process.geteuid!() }
+      } });
+      const inspector = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+      try {
+        assert.equal(inspector.prepare('UPDATE worker_launches SET row_json = ? WHERE launch_id = ?')
+          .run(JSON.stringify(unverified), fixture.launchId).changes, 1n);
+      } finally {
+        inspector.close();
+      }
+      if (proof) {
+        const sealed = await fixture.store.sealWorkerGeneration({
+          launchId: fixture.launchId,
+          expectedRunRevision: current.run.revision,
+          expectedGenerationRowVersion: current.workspaceGenerations[0]!.rowVersion,
+          quiesceId: 'tool-test-quiesce',
+          checkpointId,
+          contextManifestRef: baseline.latestCheckpoint.contextManifestRef,
+          workspaceStateRef: baseline.latestCheckpoint.workspaceStateRef,
+          snapshotEvidenceRef: proof.checkpoint.snapshotEvidenceRef,
+          snapshotEvidenceDigest: proof.snapshot.evidenceDigest,
+          retirementEvidenceRef: proof.checkpoint.retirementEvidenceRef,
+          checkpointReason: 'auto'
+        });
+        assert.equal(sealed.launch.phase, 'retired');
+        assert.deepEqual(sealed.launch.preparation, unverified.preparation);
+      }
+      await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId),
+        (error) => error instanceof KernelStorageError && error.code === 'RECOVERY_REQUIRED');
+    } finally {
+      await disposeFixture(fixture);
+    }
+  });
+}
 
 test('fresh genesis refuses residual rows in every authority table', async () => {
   const stateRoot = await makePrivateDir('.cliq-m2-genesis-db-residue-');

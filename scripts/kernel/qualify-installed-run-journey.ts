@@ -167,14 +167,15 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const hello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'installed-run-journey',
     controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     requestedFeatureIds: ['session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel', 'supervisor.status'] };
-  const exchange = (requests: Record<string, unknown>[], connectBy = 0): Response[] => {
+  const exchange = (requests: Record<string, unknown>[], connectBy = 0, timeout = 30000): Response[] => {
     assert(connectBy === 0 || requests.length === 0, 'startup connection retry is hello-only, never a request replay');
+    assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 30000);
     const entries = [hello, ...requests].map(value => canonicalJsonBytes(value).toString('base64url'));
     const bytes = Buffer.from(JSON.stringify(entries)).toString('base64url'); assert(bytes.length < 65536);
     const remaining = connectBy ? connectBy - Date.now() : 30000;
     assert(remaining > 0, 'startup control readiness exhausted the existing recovery budget');
     const result = command(process.execPath, ['--input-type=module', '-e', clientScript,
-      path.join(recipe.stateRoot, 'runtime/control-v1.sock'), bytes, String(connectBy)], undefined, Math.min(30000, remaining));
+      path.join(recipe.stateRoot, 'runtime/control-v1.sock'), bytes, String(connectBy)], undefined, Math.min(timeout, remaining));
     assert.equal(result.status, 0, 'ordinary authenticated v1 client did not join');
     const replies = parseJsonStrict(result.stdout.trim()) as string[]; assert.equal(replies.length, entries.length);
     const parsed = replies.map(text => { const value = parseJsonStrict(text) as Response; assert.equal(text, canonicalJsonBytes(value).toString('utf8')); return value; });
@@ -277,6 +278,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   let retryPlatform: ReturnType<typeof observe> | undefined, aliasRestoreCollection: string | undefined;
   let server: Server | undefined;
   let primary: unknown, providerFailure = false, requestsReceived = 0, reflectionEnabled = false, shortRunEnabled = false;
+  let busySubmit: (Record<string, unknown> & { admissionKey: string }) | undefined;
   const socketClosures: Promise<void>[] = [];
   const processStart = async (pid: number) => {
     assert(Number.isSafeInteger(pid) && pid > 0);
@@ -378,10 +380,27 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
           assert(body.messages.some((message: any) => typeof message.content === 'string' &&
             message.content.includes('Observe the owned caf\u00e9 model failure without using a tool.')),
           'the model must receive the normalized objective, not the original NFD request spelling');
-          const bytes = Buffer.from(rejectedResponse); scanBytes(bytes);
-          outgoing.writeHead(429, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
-          report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
-            exactCredentialMatched: true, status: 429, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
+          try {
+            // The actual complete POST holds the original credential scope
+            // until this responder replies. A fresh UDS connection can refuse
+            // without that scope; never ask for queued installation/status work.
+            assert(busySubmit);
+            const reply = exchange([busySubmit], 0, 5000)[0]!;
+            const code = reply.error?.code;
+            report.credentialScopeBusy = { observedCode: !reply.ok && (code === 'RATE_LIMITED' || code === 'INVALID_REQUEST')
+              ? code : 'unrecognized', exactPayloadMatched: canonicalSha256(reply) === canonicalSha256({
+              protocolVersion: 1, ok: false, method: 'run.submit', error: { schemaVersion: 1,
+                code: 'RATE_LIMITED', retryable: true, retryAfterMs: 1000, messageCode: 'run.credential_scope_busy' } }) };
+          } catch {
+            report.credentialScopeBusy = { observedCode: 'unavailable', exactPayloadMatched: false };
+          } finally {
+            // Even the expected RED must preserve the original positively
+            // received rejection, its settlement and physical terminal drain.
+            const bytes = Buffer.from(rejectedResponse); scanBytes(bytes);
+            outgoing.writeHead(429, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
+            report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
+              exactCredentialMatched: true, status: 429, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
+          }
           return;
         }
         if (retryOnly) {
@@ -563,6 +582,11 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       budgets: runBudgets,
       verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
     const { requestDigest: _resourceDigest, ...resourceCore } = submit;
+    if (failureOnly) {
+      busySubmit = request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000123',
+        admissionKey: randomBytes(32).toString('base64url') });
+      report.credentialScopeBusy = { observedCode: 'not_observed', exactPayloadMatched: false };
+    }
     if (!failureOnly && !retryOnly) {
       const unauthorized = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000114',
         model: { ...resourceCore.model, modelCredentialGrantIds: ['installed-run-absent-credential'] } })])[0]!;
@@ -1035,6 +1059,15 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       report.sessionCreateWireIdentity.exactWireNonceConflictsPreserved = true;
       report.sessionCreateWireIdentity.normalizedIntentConflictPreserved = true;
       report.sessionCreateWireIdentity.originalSessionRunAndProviderCountUnchanged = true;
+      mark('concurrent_credential_scope_refusal');
+      assert(busySubmit);
+      const busyRunId = identityHash('cliq-run-id-v1', operation.ownerPrincipalId, 'run.submit', busySubmit.admissionKey);
+      const absentBusyRun = exchange([{ protocolVersion: 1, method: 'run.get', runId: busyRunId }])[0]!;
+      assert.equal(canonicalSha256(absentBusyRun), canonicalSha256({ protocolVersion: 1, ok: false, method: 'run.get',
+        error: { schemaVersion: 1, code: 'NOT_FOUND', retryable: false, messageCode: 'control.read_rejected' } }),
+      'concurrent credential-scope refusal must not admit another Run');
+      assert.equal(report.credentialScopeBusy.exactPayloadMatched, true,
+        'actual concurrent installed admission must return the fixed retryable RATE_LIMITED response');
     } else {
     mark('real_edit_and_ready_checkpoint');
     let current: Record<string, any> | undefined;

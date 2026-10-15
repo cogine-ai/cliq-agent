@@ -794,6 +794,7 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
     fs.readSync = originalRead; syncBuiltinESMExports();
     assert.ok(injected, `missing actual ${boundary} fault is not a passed campaign`); assert.equal(faults, 1);
     const fault = injected;
+    assert.ok(fault.launch.phase !== 'preparing' && fault.launch.retirementKind !== 'preparation');
     assert.equal(fault.physicalScope !== undefined, created);
     const failed = await checkpointBytes(store, fixture.runId);
     assertQueuedReadyCut(failed, before);
@@ -958,6 +959,7 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
     assert.notEqual(replacement.launchId, old.launchId); assert.notEqual(replacement.spawnNonceDigest, old.spawnNonceDigest);
     assert.notEqual(replacement.activationNonceDigest, old.activationNonceDigest); assert.notEqual(replacement.workspaceGenerationRef, old.workspaceGenerationRef);
     const proof = await store.artifacts.readCanonical<ProcessContainmentNoSpawnEvidenceV1 | ProcessContainmentDeathEvidenceV1>(old.retirementEvidenceRef);
+    assert.ok(old.retirementKind !== 'preparation');
     const oldPlan = frozenArtifact<ProcessContainmentPlanV1>(fixture.stateRoot, old.containmentPlanRef);
     assert.equal(proof.planRef, old.containmentPlanRef); assert.deepEqual(proof.owner, oldPlan.owner);
     assert.equal(proof.sandboxLaunchSpecRef, old.sandboxLaunchSpecRef); assert.equal(proof.launchNonceDigest, old.spawnNonceDigest);
@@ -1202,6 +1204,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       const run = readRun(connection, fixture.runId), owner = readLatestStateOwner(connection)!;
       const launches = readWorkerLaunchesForRun(connection, fixture.runId).filter(launch => launch.retiredAt === undefined);
       assert.equal(launches.length, 1); const launch = launches[0]!;
+      assert.ok(launch.phase !== 'preparing' && launch.retirementKind !== 'preparation');
       const generation = readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef);
       assert.deepEqual(run, before.closure.run); assert.deepEqual(readInvocationJournal(connection, fixture.runId), before.closure.journal);
       assert.equal(owner.state, 'active'); assert.equal(launch.supervisorInstanceId, owner.supervisorInstanceId);
@@ -2011,6 +2014,7 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
     for (const field of ['launchId', 'workspaceGenerationRef', 'spawnNonceDigest', 'activationNonceDigest'] as const) {
       assert.notEqual(replacement[field], held.launch[field]);
     }
+    assert.ok(replacement.retirementKind !== 'preparation');
     const nextGeneration = frozenArtifact<WorkspaceGenerationIdentityV1>(fixture.stateRoot, replacement.workspaceGenerationRef);
     if (nextGeneration.locator.kind !== 'linux_directory') throw new Error('retry did not create its distinct actual generation');
     assert.notEqual(nextGeneration.locator.directoryFileId, identity.locator.directoryFileId);
