@@ -92,7 +92,16 @@ async function transferPackage(filename: string, uid: number, gid: number): Prom
 // requests only. A closed connection cannot cancel or own the accepted Run.
 const clientScript = `import assert from 'node:assert/strict'; import net from 'node:net';
 const requests=JSON.parse(Buffer.from(process.argv[2],'base64url').toString('utf8'));
-const socket=net.createConnection(process.argv[1]);let input=Buffer.alloc(0),waiter,error;
+const connectBy=Number(process.argv[3]??0);assert(Number.isSafeInteger(connectBy)&&connectBy>=0);
+async function connect(){for(;;){assert(!connectBy||Date.now()<connectBy,'startup connection deadline expired');
+const socket=net.createConnection(process.argv[1]);
+const closed=new Promise(resolve=>socket.once('close',resolve));
+try{await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject);});
+assert(!connectBy||Date.now()<connectBy,'startup connection deadline expired');return socket;}
+catch(failure){socket.destroy();await closed;
+if(!connectBy||Date.now()>=connectBy||!['ENOENT','ECONNREFUSED'].includes(failure.code))throw failure;
+await new Promise(resolve=>setTimeout(resolve,50));}}}
+const socket=await connect();let input=Buffer.alloc(0),waiter,error;
 const closed=new Promise(resolve=>socket.once('close',resolve));
 socket.on('data',chunk=>{try{input=Buffer.concat([input,chunk]);assert(input.length<=1048580);
 while(input.length>=4){const count=input.readUInt32BE(0);assert(count>=1&&count<=1048576);
@@ -101,7 +110,7 @@ input=input.subarray(4+count);assert(waiter);const complete=waiter;waiter=undefi
 catch(failure){error=failure;waiter?.reject(failure);socket.destroy();}});
 socket.on('error',failure=>{error=failure;waiter?.reject(failure);});
 socket.on('close',()=>{error??=new Error('fixed installed client connection closed');waiter?.reject(error);});
-const reply=[];try{await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject);});
+const reply=[];try{
 for(const bytes of requests){assert(!waiter&&!error);const body=Buffer.from(bytes,'base64url');assert(body.length<=1048576);
 const header=Buffer.alloc(4);header.writeUInt32BE(body.length);const response=await new Promise((resolve,reject)=>{
 waiter={resolve,reject};socket.write(Buffer.concat([header,body]));});reply.push(response);}}
@@ -111,11 +120,11 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: 'signed installed Linux Run admission, native credential HTTPS transport, real private edit, ready Checkpoint, candidate worker lease maintenance, capacity-blocked queued deadline, client reconnect, Supervisor restart and explicit cancellation; not live-worker deadline, full I1, real provider/billing, I2 or macOS',
+    scope: 'signed installed Linux Run admission, native credential HTTPS transport, real private edit, ready Checkpoint, candidate retention across the original lease interval, capacity-blocked queued deadline, client reconnect, Supervisor restart and explicit cancellation; not actual lease-renewal observation, live-worker deadline, full I1, real provider/billing, I2 or macOS',
     completeI1Qualified: false, actualProviderQualified: false, actualProviderCapabilityQualified: false,
     actualProviderBillingQualified: false, artifactGetPublicUxQualified: false, exactFinalizerTimeCutsQualified: false,
     retiredScopeLiveProducerABAQualified: false, fullCrashMatrixQualified: false, macosQualified: false,
-    rebootQualified: false, I2VerifiedResultQualified: false, liveWorkerDeadlineQualified: false };
+    rebootQualified: false, I2VerifiedResultQualified: false, liveWorkerDeadlineQualified: false, candidateLeaseRenewalQualified: false };
   const secret = Buffer.from(randomBytes(32).toString('hex')), password = Buffer.from(randomBytes(32).toString('hex'));
   const scanner = createCredentialSecretScanner([secret, password], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
   const scanBytes = (bytes: Uint8Array) => { const scan = scanner.openStream(); try { scan.scan(bytes); } finally { scan.close(); } };
@@ -142,10 +151,14 @@ async function campaign(filename: string): Promise<void> {
   const hello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'installed-run-journey',
     controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     requestedFeatureIds: ['session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel', 'supervisor.status'] };
-  const exchange = (requests: Record<string, unknown>[]): Response[] => {
+  const exchange = (requests: Record<string, unknown>[], connectBy = 0): Response[] => {
+    assert(connectBy === 0 || requests.length === 0, 'startup connection retry is hello-only, never a request replay');
     const entries = [hello, ...requests].map(value => canonicalJsonBytes(value).toString('base64url'));
     const bytes = Buffer.from(JSON.stringify(entries)).toString('base64url'); assert(bytes.length < 65536);
-    const result = command(process.execPath, ['--input-type=module', '-e', clientScript, path.join(recipe.stateRoot, 'runtime/control-v1.sock'), bytes]);
+    const remaining = connectBy ? connectBy - Date.now() : 30000;
+    assert(remaining > 0, 'startup control readiness exhausted the existing recovery budget');
+    const result = command(process.execPath, ['--input-type=module', '-e', clientScript,
+      path.join(recipe.stateRoot, 'runtime/control-v1.sock'), bytes, String(connectBy)], undefined, Math.min(30000, remaining));
     assert.equal(result.status, 0, 'ordinary authenticated v1 client did not join');
     const replies = parseJsonStrict(result.stdout.trim()) as string[]; assert.equal(replies.length, entries.length);
     const parsed = replies.map(text => { const value = parseJsonStrict(text) as Response; assert.equal(text, canonicalJsonBytes(value).toString('utf8')); return value; });
@@ -163,7 +176,7 @@ async function campaign(filename: string): Promise<void> {
     assert(response.result && response.result.method === method); return response.result;
   };
   const show = (unit: string) => {
-    const result = command('/usr/bin/systemctl', ['--user', 'show', unit, '--property=Id,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,Type,Delegate,KillMode', '--no-pager']);
+    const result = command('/usr/bin/systemctl', ['--user', 'show', unit, '--property=Id,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,Type,Delegate,KillMode,Result,ExecMainCode,ExecMainStatus', '--no-pager']);
     assert.equal(result.status, 0); return Object.fromEntries(result.stdout.trim().split('\n').map(line => {
       const at = line.indexOf('='); assert(at > 0); return [line.slice(0, at), line.slice(at + 1)]; }));
   };
@@ -173,6 +186,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(value.serviceUid, ledger.uid); assert.equal(value.connectionClosed, true); return value;
   };
   let daemon: ChildProcess | undefined, daemonExit: Promise<void> | undefined, daemonPid: number | undefined, daemonStart: string | undefined;
+  let installedServices: { supervisorUnit: string; keeperUnit: string } | undefined;
   let server: Server | undefined;
   let primary: unknown, providerFailure = false, requestsReceived = 0, reflectionEnabled = false, shortRunEnabled = false;
   const socketClosures: Promise<void>[] = [];
@@ -190,6 +204,29 @@ async function campaign(filename: string): Promise<void> {
     assert(uids && uids.slice(1).every(value => Number(value) === uid));
     if (parent !== undefined) assert(ppid && Number(ppid[1]) === parent);
     assert.equal(await processStart(pid), start); return start;
+  };
+  const selectedSupervisor = async (unit: string, shown: Record<string, string>, image: string, by: number) => {
+    // Type=exec acknowledges bootstrap, not its asynchronous verified exec
+    // handoff. Keep the original PID/start pinned and spend the existing
+    // recovery budget waiting; never accept a different image or invocation.
+    const pid = Number(shown.MainPID), start = await fixtureProcess(pid, ledger.uid);
+    for (;;) {
+      assert(Date.now() < by, 'restarted bootstrap did not enter the actual selected image');
+      assert.equal(await fixtureProcess(pid, ledger.uid), start);
+      const actual = await readlink(`/proc/${pid}/exe`);
+      if (actual === image) break;
+      assert.equal(actual, path.join(recipe.stateRoot, 'runtime/bootstrap'));
+      await delay(50);
+    }
+    const actual = await stat(`/proc/${pid}/exe`, { bigint: true }), selected = await lstat(image, { bigint: true });
+    for (const key of imageFields) assert.equal(actual[key], selected[key]);
+    exchange([], by); // Only pre-connect absence/refusal may wait, not protocol failures.
+    assert(Date.now() < by, 'restarted public control readiness exhausted the existing recovery budget');
+    const confirmed = show(unit);
+    assert.equal(confirmed.MainPID, shown.MainPID); assert.equal(confirmed.ExecMainPID, shown.ExecMainPID);
+    assert.equal(confirmed.InvocationID, shown.InvocationID); assert.equal(confirmed.ActiveState, 'active');
+    assert.equal(await fixtureProcess(pid, ledger.uid), start); assert.equal(await readlink(`/proc/${pid}/exe`), image);
+    return start;
   };
   const readCas = async (ref: string): Promise<Buffer> => {
     assert.match(ref, /^[0-9a-f]{64}$/u);
@@ -317,6 +354,7 @@ async function campaign(filename: string): Promise<void> {
     const services = parseJsonStrict(setupResult.stdout.trim()) as { schemaVersion: 1; keeperUnit: string; supervisorUnit: string };
     assert.deepEqual(Object.keys(services).sort(), ['schemaVersion', 'keeperUnit', 'supervisorUnit'].sort());
     for (const unit of [services.keeperUnit, services.supervisorUnit]) assert.match(unit, /^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,240}\.service$/u);
+    installedServices = services;
     report.services = services;
     const root = await lstat(recipe.stateRoot, { bigint: true });
     const rootDigest = canonicalSha256({ schemaVersion: 1, format: 'cliq-state-root-identity-v1', platform: 'linux',
@@ -446,6 +484,7 @@ async function campaign(filename: string): Promise<void> {
       assert.equal(maintenanceStatus.queue.runningRuns, 1); assert.equal(maintenanceStatus.incompatiblePinnedRunCount, 0);
     } while (performance.now() - idleStarted < 65000);
     report.candidateLeaseMaintenance = { originalLeaseDurationMs: 60000, observedIdleMs: Math.floor(performance.now() - idleStarted),
+      leaseRenewalQualified: false, scope: 'public candidate retention only; lease version and expiry not observed',
       observations: idleObservations, sameActiveWorkerLaunch: true, sameLeaseEpoch: true, noProviderRedispatch: true,
       immutableJournalAndCheckpointPreserved: true, physicalRetirementRequiredBySubsequentRestart: true };
     mark('capacity_blocked_queued_deadline');
@@ -497,9 +536,24 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(cut.snapshot.run.budgetConsumed, originalCandidateCut.snapshot.run.budgetConsumed);
     assert.deepEqual(cut.snapshot.run.budgetReserved, originalCandidateCut.snapshot.run.budgetReserved);
     assert.equal(requestsReceived, 2);
+    // Polling can miss a short activation. Check the whole retained public
+    // history before claiming this capacity-blocked Run never ran a worker.
+    const queuedEvents = accepted(exchange([{ protocolVersion: 1, method: 'run.attach',
+      runId: queuedAdmitted.id, afterEventSeq: 0 }])[0]!, 'run.attach');
+    assert.equal(queuedEvents.earliestRetainedEventSeq, 1);
+    assert.equal(queuedEvents.nextEventSeq, queuedEvents.highWaterEventSeq);
+    assert(queuedEvents.events.length > 0);
+    for (let index = 0; index < queuedEvents.events.length; index++) {
+      const event = queuedEvents.events[index];
+      assert.equal(event.eventSeq, index + 1);
+      if (event.kind === 'state_changed') assert.notEqual(event.status, 'running', 'queued deadline must never activate a worker');
+    }
+    assert.equal(queuedEvents.events.at(-1).status, 'failed');
+    assert.equal(queuedEvents.events.at(-1).terminalReason, 'budget_exhausted');
     report.queuedDeadline = { qualified: true, scope: 'capacity-blocked queued Run only; not a live-worker deadline cut',
       runId: queuedAdmitted.id, status: 'failed', terminalReason: 'budget_exhausted', wallTimeMs: 3000,
       stopIntentRef: deadlineCut.snapshot.run.stopIntentRef, terminalDetailRef: deadlineCut.snapshot.run.terminalDetailRef,
+      attachedHighWater: queuedEvents.highWaterEventSeq, completeEventHistoryChecked: true,
       noWorkerActivated: true, noInvocationPrepared: true, noProviderRequest: true, zeroCharged: true, noResultPublished: true };
     const events = accepted(exchange([{ protocolVersion: 1, method: 'run.attach', runId: admitted.id, afterEventSeq: 0 }])[0]!, 'run.attach');
     assert(events.events.length > 0);
@@ -513,23 +567,20 @@ async function campaign(filename: string): Promise<void> {
       consumed: cut.snapshot.run.budgetConsumed, journal: cut.journal, attachedHighWater: events.highWaterEventSeq, supervisor: supervisorBefore, keeper: keeperBefore };
     mark('actual_supervisor_restart');
     const restart = command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000); assert.equal(restart.status, 0);
+    const recoverBy = Date.now() + 30000;
     const successor = show(services.supervisorUnit), retainedKeeper = show(services.keeperUnit);
     assert.equal(successor.ActiveState, 'active'); assert.notEqual(successor.InvocationID, supervisorBefore.InvocationID);
     assert.equal(successor.MainPID, successor.ExecMainPID); assert.match(successor.MainPID!, /^[1-9][0-9]*$/u);
-    const successorStart = await fixtureProcess(Number(successor.MainPID), ledger.uid);
     const successorImagePath = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
-    assert.equal(await readlink(`/proc/${successor.MainPID}/exe`), successorImagePath);
-    const actualSuccessorImage = await stat(`/proc/${successor.MainPID}/exe`, { bigint: true });
-    const namedSuccessorImage = await lstat(successorImagePath, { bigint: true });
-    for (const key of imageFields) assert.equal(actualSuccessorImage[key], namedSuccessorImage[key]);
+    const successorStart = await selectedSupervisor(services.supervisorUnit, successor, successorImagePath, recoverBy);
     assert.notEqual(successor.MainPID, supervisorBefore.MainPID); assert.equal(retainedKeeper.InvocationID, keeperBefore.InvocationID);
     assert.equal(retainedKeeper.MainPID, keeperBefore.MainPID); assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
-    const recoverBy = Date.now() + 30000;
     for (;;) {
+      assert(Date.now() < recoverBy, 'installed successor did not recover the genuine previous ready cut');
       await delay(50); current = read();
+      assert(Date.now() < recoverBy, 'installed successor did not recover the genuine previous ready cut');
       if (current.snapshot.run.revision > cut.snapshot.run.revision && current.snapshot.run.status === 'queued' &&
           current.snapshot.run.activeWorkerLaunchId === undefined && current.snapshot.run.waitingReason === undefined) break;
-      assert(Date.now() < recoverBy, 'installed successor did not recover the genuine previous ready cut');
     }
     const recovered = current!; assert.equal(recovered.snapshot.run.id, admitted.id); assert.equal(recovered.snapshot.run.specRef, admitted.specRef);
     assert.equal(recovered.snapshot.run.leaseEpoch, cut.snapshot.run.leaseEpoch);
@@ -671,21 +722,21 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(unknownEvents.nextEventSeq, unknownEvents.highWaterEventSeq);
     const nextRestart = command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000);
     assert.equal(nextRestart.status, 0);
+    const historicalBy = Date.now() + 30000;
     const afterUnknownSupervisor = show(services.supervisorUnit), afterUnknownKeeper = show(services.keeperUnit);
     assert.equal(afterUnknownSupervisor.ActiveState, 'active'); assert.equal(afterUnknownSupervisor.MainPID, afterUnknownSupervisor.ExecMainPID);
     assert.notEqual(afterUnknownSupervisor.MainPID, successor.MainPID); assert.notEqual(afterUnknownSupervisor.InvocationID, successor.InvocationID);
     assert.equal(afterUnknownKeeper.MainPID, keeperBefore.MainPID); assert.equal(afterUnknownKeeper.InvocationID, keeperBefore.InvocationID);
     assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
-    assert.equal(await readlink(`/proc/${afterUnknownSupervisor.MainPID}/exe`), successorImagePath);
-    await fixtureProcess(Number(afterUnknownSupervisor.MainPID), ledger.uid);
-    const historicalBy = Date.now() + 30000;
+    await selectedSupervisor(services.supervisorUnit, afterUnknownSupervisor, successorImagePath, historicalBy);
     let historical: Record<string, any>;
     for (;;) {
+      assert(Date.now() < historicalBy, 'successor did not recover the original unknown claim through its historical owner');
       await delay(50); assert(!providerFailure);
       historical = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: reflectionAdmitted.id }])[0]!, 'run.get');
+      assert(Date.now() < historicalBy, 'successor did not recover the original unknown claim through its historical owner');
       if (historical.snapshot.run.revision > refused.snapshot.run.revision && historical.snapshot.run.status === 'queued' &&
           historical.snapshot.run.activeWorkerLaunchId === undefined && historical.snapshot.run.waitingReason === undefined) break;
-      assert(Date.now() < historicalBy, 'successor did not recover the original unknown claim through its historical owner');
     }
     assert.equal(historical.snapshot.run.id, reflectionAdmitted.id); assert.equal(historical.snapshot.run.specRef, refused.snapshot.run.specRef);
     assert.equal(historical.snapshot.run.leaseEpoch, refused.snapshot.run.leaseEpoch);
@@ -778,11 +829,32 @@ async function campaign(filename: string): Promise<void> {
     }
   }
   finally {
+    const cleanupFailures: unknown[] = [];
     try {
       if (server) {
         server.closeAllConnections(); await bounded(new Promise<void>(resolve => server!.close(() => resolve())), 10000, 'owned HTTPS fixture did not close');
         await bounded(Promise.all(socketClosures), 10000, 'owned TLS sockets did not close'); report.httpsJoined = true;
       }
+    } catch (error) { cleanupFailures.push(error); }
+    try {
+      if (installedServices) {
+        // A stable retained-byte scan must follow real writer retirement.
+        // The outer root cleanup still independently checks all UID resources.
+        const units = [installedServices.supervisorUnit, installedServices.keeperUnit];
+        const before = units.map(unit => show(unit));
+        assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);
+        for (let index = 0; index < units.length; index++) {
+          const stopped = show(units[index]!);
+          assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');
+          assert.equal(stopped.Result, 'success'); assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
+          if (/^[1-9][0-9]*$/u.test(before[index]!.MainPID!)) {
+            await assert.rejects(lstat(`/proc/${before[index]!.MainPID}`), { code: 'ENOENT' });
+          }
+        }
+        report.installedWritersJoined = true;
+      }
+    } catch (error) { cleanupFailures.push(error); }
+    try {
       if (daemon && daemonExit) {
         if (daemonPid && daemonStart) {
           assert.equal(await fixtureProcess(daemonPid, ledger.uid, daemon.pid), daemonStart);
@@ -791,9 +863,16 @@ async function campaign(filename: string): Promise<void> {
         } else if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill('SIGTERM');
         await bounded(daemonExit, 10000, 'actual Secret Service daemon did not join'); report.daemonJoined = true;
       }
-    } catch (error) { primary = new AggregateError([primary, error].filter(Boolean), 'owned journey resources did not retire'); }
+    } catch (error) { cleanupFailures.push(error); }
+    if (cleanupFailures.length) primary = new AggregateError([primary, ...cleanupFailures].filter(Boolean), 'owned journey resources did not retire');
     if (!primary) {
-      try { report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner }); }
+      mark('secret_corpus');
+      try {
+        assert.equal(report.installedWritersJoined, true); assert.equal(report.httpsJoined, true); assert.equal(report.daemonJoined, true);
+        report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner });
+        assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, 0);
+        mark('complete');
+      }
       catch (error) { primary = error; }
     }
     if (primary) {

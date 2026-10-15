@@ -78,11 +78,14 @@ The same experiment observes that candidate's original worker for at least
 deadline with zero effects. A separate 45-second Run verifies real activation
 and cancellation. Fixture wall time covers these added experiments; existing
 phase limits, runner timeout, scan bounds and safety assertions are unchanged.
+Public status and launch identity across 65 seconds alone do not prove a lease
+was renewed. Actual lease-version/expiry observation remains unverified until
+the proposed read-only diagnostic seam is agreed and exercised.
 
 The negative endpoint response exercises native secret-reflection refusal.
 Only a real released request with joined resources can produce the existing
-exact broker ambiguity branch. Its unknown Journal retains the full reserved
-budget and uses the actual settlement timestamp. The fixed
+exact broker ambiguity branch. Its unknown Journal charges the full reservation
+to consumed budget, clears the reservation and uses the actual settlement timestamp. The fixed
 `broker_response_refused` log correlates that refusal to the actual claim; it
 contains no secret or dynamic provider diagnostic and grants no authority.
 

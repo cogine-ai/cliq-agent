@@ -87,7 +87,7 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
-      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs
+      - run: node --test scripts/kernel/testing/installed-volume-guard.test.mjs scripts/kernel/testing/installed-run-client.test.mjs
       - run: npm run build
         id: build
       - name: Install actual signed transport and worker build prerequisites
