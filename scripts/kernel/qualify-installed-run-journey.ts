@@ -734,12 +734,14 @@ async function campaign(filename: string): Promise<void> {
       assert(Date.now() < historicalBy, 'successor did not recover the original unknown claim through its historical owner');
       await delay(50); assert(!providerFailure);
       historical = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: reflectionAdmitted.id }])[0]!, 'run.get');
+      report.lastHistoricalUnknownCut = projectInstalledRunProgress(historical, { requestsReceived, providerFailure });
       assert(Date.now() < historicalBy, 'successor did not recover the original unknown claim through its historical owner');
       if (historical.snapshot.run.revision > refused.snapshot.run.revision && historical.snapshot.run.status === 'queued' &&
           historical.snapshot.run.activeWorkerLaunchId === undefined && historical.snapshot.run.waitingReason === undefined) break;
     }
     assert.equal(historical.snapshot.run.id, reflectionAdmitted.id); assert.equal(historical.snapshot.run.specRef, refused.snapshot.run.specRef);
     assert.equal(historical.snapshot.run.leaseEpoch, refused.snapshot.run.leaseEpoch);
+    assert.equal(historical.snapshot.run.frontierRef, refused.snapshot.run.frontierRef);
     assert.equal(historical.snapshot.run.latestCheckpointId, refused.snapshot.run.latestCheckpointId);
     assert.equal(historical.snapshot.run.resultRef, undefined); assert.equal(historical.snapshot.run.terminalReason, undefined);
     assert.deepEqual(historical.journal, refused.journal);
@@ -754,12 +756,20 @@ async function campaign(filename: string): Promise<void> {
       assert.equal(historicalEvents.events[index].eventSeq, unknownEvents.nextEventSeq + index + 1);
     const oldOwnerWait = historicalEvents.events.findIndex((event: any) => event.kind === 'state_changed' && event.status === 'waiting' && event.waitingReason === 'reconciliation');
     assert(oldOwnerWait >= 0);
+    const frozenWait = parseJsonStrict((await readCas(historicalEvents.events[oldOwnerWait].waitingOnRef)).toString('utf8')) as Record<string, any>;
+    assert.equal(frozenWait.runId, reflectionAdmitted.id); assert.equal(frozenWait.subject.kind, 'worker_death');
+    assert.equal(frozenWait.frontierRef, refused.snapshot.run.frontierRef);
+    assert.equal(frozenWait.subject.oldWorkerLaunchId, refused.snapshot.run.activeWorkerLaunchId);
+    assert.equal(frozenWait.subject.oldLeaseEpoch, refused.snapshot.run.leaseEpoch);
+    assert.deepEqual(frozenWait.subject.openInvocationRefs, [canonicalSha256(refused.journal[0])]);
     assert(historicalEvents.events.slice(oldOwnerWait + 1).some((event: any) => event.kind === 'state_changed' &&
       event.status === 'queued' && event.runRevision === historical.snapshot.run.revision));
     const historicalStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+    assert.equal(historicalStatus.health, 'ready'); assert.equal(historicalStatus.queue.capacity, 1);
     assert.notEqual(historicalStatus.supervisorInstanceId, successorStatus.supervisorInstanceId);
     report.reflectionRefusal.historicalOwnerRecovery = { qualified: true, sameRun: true, immutableUnknownPreserved: true,
-      fullChargePreserved: true, providerRedispatches: 0, terminalOutcomeQualified: false,
+      fullChargePreserved: true, frozenInvocationWitnessPreserved: true, sameFrontier: true,
+      providerRedispatches: 0, terminalOutcomeQualified: false,
       successorInstanceId: historicalStatus.supervisorInstanceId, supervisor: afterUnknownSupervisor,
       runRevision: historical.snapshot.run.revision, events: historicalEvents.events };
     mark('short_run_real_activation_and_cancel');

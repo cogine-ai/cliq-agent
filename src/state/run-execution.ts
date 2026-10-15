@@ -37,6 +37,7 @@ import { stopCheckpointId } from '../runtime/stop.js';
 import { retireQuarantinedGeneration } from './generation-retirement.js';
 import { observeInstalledBrokerQuiescence, type StateStore } from './store.js';
 import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from './repositories/worker-launches.js';
+import { hasOnlySettledInstalledModelUnknowns } from './worker-recovery.js';
 
 /** Trusted installation paths belong to Supervisor bootstrap, not a Run or a control frame. */
 export type RunExecutionInstallation = Pick<LinuxWorkerInstallation, 'installationRoot' | 'cgroupParent'>;
@@ -701,8 +702,13 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         if (handoff) requireEqual(handoff.run, cut.run, 'worker recovery model handoff cut');
         const candidateHandoff = handoff?.state.phase === 'completed' && handoff.disposition === 'candidate_required' &&
           handoff.prepared.request.kind === 'normal';
+        const unknownHandoff = handoff?.state.phase === 'unknown' && hasOnlySettledInstalledModelUnknowns(
+          decodeRetainedRunAssembly(await artifacts.readCanonical(cut.runSpec.assemblyRef)), cut.journal);
         const replacement = cut.workspaceGenerations.filter(row => row.phase === 'preactivated_readonly' || row.phase === 'materializing');
-        if (replacement.length === 0 && !candidateHandoff) {
+        if (unknownHandoff && replacement.length !== 0) {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'unknown model worker quarantine cannot retain an unused replacement generation');
+        }
+        if (replacement.length === 0 && !candidateHandoff && !unknownHandoff) {
           generation = await materializeRunWorkspace({ filesystem: owner.filesystem, artifacts, checkpoint: cut.latestCheckpoint, signal });
           const authority = await generation.publishMaterializedAuthority();
           // Do not insert a cancellation point between these two writes: a
@@ -716,9 +722,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         } else if (replacement.length > 0 && (replacement.length !== 1 || replacement[0]!.phase !== 'preactivated_readonly')) {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'worker recovery retains an incomplete or competing replacement');
         }
-        // An already durable normal model end retains its I2 handoff. It is
-        // neither resent nor given an unused healthy replacement generation.
-        const recovered = await completeWorkerRecoveryProbe(driver, artifacts, owner, { runId, expectedRunRevision: cut.run.revision }, death, signal);
+        // Durable handoffs retain their exact candidate or unknown. Neither
+        // is resent or given an unused healthy replacement generation. The
+        // unknown's effect is not closed by actual broker quiescence.
+        const brokerQuiescence = unknownHandoff ? observeInstalledBrokerQuiescence(executionStore!, runId) : undefined;
+        const recovered = await completeWorkerRecoveryProbe(driver, artifacts, owner,
+          { runId, expectedRunRevision: cut.run.revision }, death, signal, brokerQuiescence);
         signal.throwIfAborted();
         // The owning task joins its actual resources before returning. The
         // installed driver separately resumes quarantine retirement with

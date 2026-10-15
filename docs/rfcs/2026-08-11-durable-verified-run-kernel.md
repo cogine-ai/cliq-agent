@@ -5737,6 +5737,21 @@ settlements or abandonment retain those original witnesses; their current
 phases still come only from the Journal. Neither timestamps (which may be equal
 on both sides of the fence) nor `run_events` reconstruct this historical cut.
 
+An already fully settled installed-model broker `unknown` is still an open
+effect witness, not a releasable worker operation. The fixed signed broker
+recipe may complete only the `quarantined` worker-recovery disposition while
+retaining such witnesses when every open attempt has exact validated original
+claim/ambiguity/full-reservation settlement and ReplayClass `retry`, and the
+genuine current installed Store proves its native broker producers joined.
+That live broker quiescence must be reasserted before the physical move and in
+the final state-owner transaction alongside the unchanged Run/Journal/native
+death gates. No replacement generation may be present or created by this
+branch. Prepared, claimed, unsettled, tool/manual or other-adapter attempts
+still block it. Unknown, consumed/reserved budgets, frontier and frozen
+`openInvocationRefs` remain unchanged. This is not effect resolution, a new
+Checkpoint, terminal dispatch closure or authority to retry; later generation
+retirement still requires its own complete zero-resource proof.
+
 A new Supervisor instance never adopts or reconnects an old worker, even when its persisted lease has not yet expired. Launch claims and broker channels are bound to the old `supervisorInstanceId`; takeover revokes them, kills/proves the entire containment, quarantines/restores through a Checkpoint, and uses a fresh launch/epoch. This removes an adoption protocol and prevents two trusted processes from sharing effect authority.
 
 `quiesceGeneration` is the only route to a workspace snapshot or verifier/publication proof. It closes new dispatch, performs a worker barrier, may freeze only as a transient stop-the-world aid, then terminates/reaps and positively proves the full invocation containment empty before retirement/state release. It acquires the generation's exclusive write token, hashes and publishes artifacts while holding that token, revalidates bytes, and holds the token through the SQLite state commit. A frozen-but-live containment is never quiescent. A failure with positive death proof follows `checkpoint_failed -> quarantined`; indeterminate death follows the same atomic `fenced_reconciling` wait transition as takeover. Neither publishes a ready Checkpoint or receipt from possibly changing bytes, and a claimed attempt remains `unknown` until its own effect evidence closes.

@@ -43,6 +43,10 @@ The existing [credential acceptance gaps](i1-credential-authority.md) remain.
   broker quiescence, followed by the existing fenced SQL cut. A successor can
   resume this physical retirement for an already queued quarantine. Terminal
   stop accepts only fully validated sealed or proof-backed retired rows.
+  Fully charged installed-model unknowns can retain their exact ambiguity and
+  frozen witnesses during physical quarantine only with genuine current broker
+  quiescence rechecked before the move and at SQL commit. This branch permits
+  no replacement, retry, effect resolution, new Checkpoint or terminal closure.
 
 An ordinary provider refusal is local to its Run. Uncertain physical resource
 retirement remains a process-wide failure that retains ownership; it cannot be

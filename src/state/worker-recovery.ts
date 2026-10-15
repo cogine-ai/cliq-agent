@@ -2,7 +2,7 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { addCanonicalDuration, assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { InvocationJournalEntry, ProcessContainmentDeathEvidenceV1, ReconciliationProbeDispatchV1, ReconciliationProbeEvidenceV1,
   ReconciliationProbeTimeoutClosureV1, ReconciliationInspectorTaskClosureV1,
-  RecoveryClosureV1, SupervisorInspectorIdentityV1, WorkerDeathWait, WorkerRecoveryEvidenceV1,
+  RecoveryClosureV1, RunAssemblyV1, SupervisorInspectorIdentityV1, WorkerDeathWait, WorkerRecoveryEvidenceV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
@@ -20,6 +20,7 @@ import { readCheckpoint } from './rows.js';
 import { decodeRunSpec, decodeStateOwnerAcquisitionEvidence, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { decodeWorkspaceGenerationState } from './invariants.js';
 import { decodeWorkerContainmentPlan, decodeWorkerProcessContainment, decodeWorkerSandboxLaunchSpec } from './execution-closure.js';
+import { MODEL_BROKER_ENTRY_ID } from './model-broker-native.js';
 
 /** Immutable witnesses of existing Journal facts, not a second invocation state machine. */
 export function openWorkerInvocations(journal: readonly InvocationJournalEntry[]): InvocationJournalEntry[] {
@@ -27,6 +28,28 @@ export function openWorkerInvocations(journal: readonly InvocationJournalEntry[]
   for (const entry of journal) latest.set(`${entry.opId}\0${entry.attempt}`, entry);
   return journal.filter(entry => entry.phase === 'prepared' &&
     ['prepared', 'dispatch_claimed', 'unknown'].includes(latest.get(`${entry.opId}\0${entry.attempt}`)!.phase));
+}
+
+/** Data eligibility only, after readRecoveryClosure has validated the complete
+ * retained assembly, installed broker ambiguity history and budget settlements.
+ * This neither closes unknown effects nor proves physical quiescence: a caller
+ * must separately hold and reassert genuine InstalledBrokerQuiescence. */
+export function hasOnlySettledInstalledModelUnknowns(assembly: RunAssemblyV1,
+  journal: readonly InvocationJournalEntry[]): boolean {
+  const provider = assembly.provider;
+  if (provider.name !== 'openai-compatible' || provider.endpoint.kind !== 'registered' ||
+      provider.adapter.adapterId !== MODEL_BROKER_ENTRY_ID || provider.adapter.version !== '1' ||
+      provider.negotiation.streaming !== false) return false;
+  const open = openWorkerInvocations(journal);
+  if (open.length === 0) return false;
+  const latest = new Map<string, InvocationJournalEntry>();
+  for (const entry of journal) latest.set(`${entry.opId}\0${entry.attempt}`, entry);
+  return open.every(prepared => {
+    const current = latest.get(`${prepared.opId}\0${prepared.attempt}`)!;
+    return prepared.opKind === 'model' && prepared.replayClass === 'retry' && current.opKind === 'model' &&
+      current.phase === 'unknown' && current.replayClass === 'retry' && !!current.budgetSettlementRef &&
+      canonicalSha256(current.budgetDelta) === canonicalSha256(prepared.budgetDelta);
+  });
 }
 
 type WorkerCut = Pick<RecoveryClosureV1, 'run' | 'journal' | 'workerLaunches' | 'workspaceGenerations'>;

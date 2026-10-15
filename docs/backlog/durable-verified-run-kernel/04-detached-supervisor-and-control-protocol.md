@@ -686,6 +686,23 @@ recovery code as a crash. Incompatible candidates stay staged with
 `drain_required`; startup failure follows the existing compatible-selection
 rollback. Never adopt old workers or start an embedded runtime after UDS failure.
 
+### Physical recovery with a settled installed model unknown
+
+An already fully settled installed-model broker `unknown` remains an open
+effect witness, not a releasable worker operation. Only the fixed signed broker
+recipe with every open attempt's exact original claim, ambiguity, full
+reservation settlement and ReplayClass `retry` may use the worker recovery
+`quarantined` disposition while retaining those witnesses. The genuine current
+installed Store must prove its actual native broker producers joined and
+reassert that quiescence before the physical move and in the final state-owner
+transaction, alongside the unchanged Run/Journal/native death gates. This
+branch forbids both creating and selecting any replacement generation;
+prepared, claimed, unsettled, tool/manual and other-adapter attempts still
+block it. Unknown, budgets, frontier and frozen `openInvocationRefs` remain
+unchanged. This supplies no effect resolution, Checkpoint, terminal dispatch
+closure or retry authority. Later retirement still requires the complete
+independent zero-resource proof.
+
 ### Acceptance Criteria
 
 - [ ] Pre-admission source inspection owns its exact RFC attempt and original inline request without a provisional Run. Shutdown joins capture resources and retires exact staging plus any planned containment before owner release; a successor consumes positive owner-death evidence and the retained reservation, never recaptures or adopts the old inspector. Retired failures replay the same original error through real authenticated request binding. Captured closure enters only the existing atomic Run admission after actual runtime/model authority is ready; rollback also requires every source-inspection row retired.
