@@ -18,6 +18,7 @@ import { parseJsonStrict } from '../../src/kernel/json.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { createCredentialSecretScanner } from './testing/credential-secret-scan.js';
 import { scanCredentialSecretCorpus } from './testing/credential-secret-corpus.js';
+import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerLease } from './testing/installed-worker-lease.js';
 import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
@@ -120,7 +121,7 @@ async function campaign(filename: string): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: 'signed installed Linux Run admission, native credential HTTPS transport, real private edit, ready Checkpoint, candidate retention across the original lease interval, capacity-blocked queued deadline, client reconnect, Supervisor restart and explicit cancellation; not actual lease-renewal observation, live-worker deadline, full I1, real provider/billing, I2 or macOS',
+    scope: 'signed installed Linux Run admission, native credential HTTPS transport, real private edit, ready Checkpoint, candidate retention with read-only lease-renewal observation across the old expiry, capacity-blocked queued deadline, client reconnect, Supervisor restart and explicit cancellation; not live-worker deadline, full I1, real provider/billing, I2 or macOS',
     completeI1Qualified: false, actualProviderQualified: false, actualProviderCapabilityQualified: false,
     actualProviderBillingQualified: false, artifactGetPublicUxQualified: false, exactFinalizerTimeCutsQualified: false,
     retiredScopeLiveProducerABAQualified: false, fullCrashMatrixQualified: false, macosQualified: false,
@@ -523,12 +524,23 @@ async function campaign(filename: string): Promise<void> {
     const { requestDigest: _digest, ...changedCore } = changed;
     const conflict = exchange([request(changedCore)])[0]!; assert.equal(conflict.ok, false); assert.equal(conflict.error!.code, 'ADMISSION_KEY_CONFLICT');
     mark('candidate_worker_across_original_lease');
+    const leaseSupervisor = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+    assert.equal(leaseSupervisor.health, 'ready');
+    const leaseProcessStart = await fixtureProcess(Number(supervisorBefore.MainPID), ledger.uid);
+    const leaseExpected = { uid: ledger.uid, runId: admitted.id, launchId: cut.snapshot.run.activeWorkerLaunchId,
+      leaseEpoch: cut.snapshot.run.leaseEpoch, runRevision: cut.snapshot.run.revision,
+      supervisorInstanceId: leaseSupervisor.supervisorInstanceId, deadlineAt: cut.snapshot.run.deadlineAt };
+    // Two independent short read-only connections, not a retained snapshot,
+    // StateOwner or clock/dispatch authority. All runtime interaction stays UDS.
+    const leaseBefore = inspectInstalledWorkerLease(recipe.stateRoot, leaseExpected);
+    report.candidateLeaseMaintenance = { diagnosticOnly: true, leaseRenewalQualified: false, before: leaseBefore };
     const idleStarted = performance.now(), originalCandidateCut = cut;
     let idleObservations = 0;
     do {
       await delay(1000); assert(!providerFailure, 'candidate maintenance cannot redispatch an owned provider effect');
       cut = read(); idleObservations++;
       assert.equal(cut.snapshot.run.status, 'running');
+      assert.equal(cut.snapshot.run.revision, originalCandidateCut.snapshot.run.revision);
       assert.equal(cut.snapshot.run.activeWorkerLaunchId, originalCandidateCut.snapshot.run.activeWorkerLaunchId);
       assert.equal(cut.snapshot.run.leaseEpoch, originalCandidateCut.snapshot.run.leaseEpoch);
       assert.equal(cut.snapshot.run.latestCheckpointId, originalCandidateCut.snapshot.run.latestCheckpointId);
@@ -538,11 +550,22 @@ async function campaign(filename: string): Promise<void> {
       assert.deepEqual(cut.snapshot.run.budgetReserved, originalCandidateCut.snapshot.run.budgetReserved);
       assert.equal(requestsReceived, 2);
       const maintenanceStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+      assert.equal(maintenanceStatus.supervisorInstanceId, leaseSupervisor.supervisorInstanceId);
       assert.equal(maintenanceStatus.health, 'ready'); assert.equal(maintenanceStatus.queue.capacity, 1);
       assert.equal(maintenanceStatus.queue.runningRuns, 1); assert.equal(maintenanceStatus.incompatiblePinnedRunCount, 0);
     } while (performance.now() - idleStarted < 65000);
+    const leaseAfter = inspectInstalledWorkerLease(recipe.stateRoot, leaseExpected);
+    report.candidateLeaseMaintenance.after = leaseAfter;
+    assertInstalledWorkerLeaseRenewed(leaseBefore, leaseAfter, leaseExpected.deadlineAt);
+    const leaseServiceAfter = show(services.supervisorUnit);
+    for (const field of ['MainPID', 'ExecMainPID', 'InvocationID', 'ActiveState', 'SubState'])
+      assert.equal(leaseServiceAfter[field], supervisorBefore[field]);
+    assert.equal(await fixtureProcess(Number(supervisorBefore.MainPID), ledger.uid), leaseProcessStart);
+    report.candidateLeaseRenewalQualified = true;
     report.candidateLeaseMaintenance = { originalLeaseDurationMs: 60000, observedIdleMs: Math.floor(performance.now() - idleStarted),
-      leaseRenewalQualified: false, scope: 'public candidate retention only; lease version and expiry not observed',
+      diagnosticOnly: true, leaseRenewalQualified: true,
+      scope: 'same installed worker persisted a later lease version and expiry beyond the observed old expiry; not a physical deadline or clock-regression cut',
+      before: leaseBefore, after: leaseAfter, crossedObservedOldExpiry: true, sameSupervisorProcess: true,
       observations: idleObservations, sameActiveWorkerLaunch: true, sameLeaseEpoch: true, noProviderRedispatch: true,
       immutableJournalAndCheckpointPreserved: true, physicalRetirementRequiredBySubsequentRestart: true };
     mark('capacity_blocked_queued_deadline');

@@ -87,8 +87,15 @@ deadline with zero effects. A separate 45-second Run verifies real activation
 and cancellation. Fixture wall time covers these added experiments; existing
 phase limits, runner timeout, scan bounds and safety assertions are unchanged.
 Public status and launch identity across 65 seconds alone do not prove a lease
-was renewed. Actual lease-version/expiry observation remains unverified until
-the proposed read-only diagnostic seam is agreed and exercised.
+was renewed. The agreed diagnostic additionally takes two independent, short
+read-only SQLite cuts before and after that interval, tied to the public Run and
+its exact activated WorkerLaunch. Both the version and expiry must advance,
+the second observation must cross the first expiry while retaining a live lease,
+and the complete non-lease launch projection, database identity and Supervisor
+process must remain unchanged. The diagnostic creates no StateOwner, writes no
+database and provides no clock, dispatch or physical recovery authority. Its
+regressions do not qualify actual renewal; only an executed exact-SHA installed
+journey with these assertions establishes that narrow claim.
 
 The negative endpoint response exercises native secret-reflection refusal.
 Only a real released request with joined resources can produce the existing
@@ -132,4 +139,5 @@ to satisfy the existing acceptance criteria, including successful writer/resourc
 joins, retained-secret scanning and outer cleanup. Missing, failed or incomplete
 evidence establishes no qualification. The manifest must retain every explicitly
 unverified boundary: a passing installed-loop run does not imply complete I1,
-lease-renewal, real-provider capability/billing, macOS or I2 qualification.
+real-provider capability/billing, macOS or I2 qualification. Lease renewal requires
+the explicit read-only observations above, not public retention alone.
