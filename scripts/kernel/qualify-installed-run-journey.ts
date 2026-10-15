@@ -30,6 +30,8 @@ const environment = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 
 const hostBefore = 'before the private edit\n';
 const privateAfter = 'after the private edit\n';
 const model = 'installed-run-transport-fixture';
+const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
+type CampaignMode = '--campaign' | '--failure-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 
@@ -117,15 +119,19 @@ const header=Buffer.alloc(4);header.writeUInt32BE(body.length);const response=aw
 waiter={resolve,reject};socket.write(Buffer.concat([header,body]));});reply.push(response);}}
 finally{socket.destroy();await closed;}console.log(JSON.stringify(reply));`;
 
-async function campaign(filename: string): Promise<void> {
+async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
+  const failureOnly = mode === '--failure-campaign';
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: 'signed installed Linux Run admission, native credential HTTPS transport, real private edit, ready Checkpoint, candidate retention with read-only lease-renewal observation across the old expiry, capacity-blocked queued deadline, client reconnect, Supervisor restart and explicit cancellation; not live-worker deadline, full I1, real provider/billing, I2 or macOS',
+    scope: failureOnly
+      ? 'independent signed installed Linux Run, one positively received owned HTTP429 response, exact model-failure stop and physical terminal drain, Session publication and reconnect; not transport retry, cancellation, deadline expiry, full I1, real provider/billing, I2 or macOS'
+      : 'signed installed Linux Run admission, native credential HTTPS transport, real private edit, ready Checkpoint, candidate retention with read-only lease-renewal observation across the old expiry, capacity-blocked queued deadline, client reconnect, Supervisor restart and explicit cancellation; not live-worker deadline, full I1, real provider/billing, I2 or macOS',
     completeI1Qualified: false, actualProviderQualified: false, actualProviderCapabilityQualified: false,
     actualProviderBillingQualified: false, artifactGetPublicUxQualified: false, exactFinalizerTimeCutsQualified: false,
     retiredScopeLiveProducerABAQualified: false, fullCrashMatrixQualified: false, macosQualified: false,
-    rebootQualified: false, I2VerifiedResultQualified: false, liveWorkerDeadlineQualified: false, candidateLeaseRenewalQualified: false };
+    rebootQualified: false, I2VerifiedResultQualified: false, liveWorkerDeadlineQualified: false, candidateLeaseRenewalQualified: false,
+    receivedModelFailureQualified: false };
   const secret = Buffer.from(randomBytes(32).toString('hex')), password = Buffer.from(randomBytes(32).toString('hex'));
   const scanner = createCredentialSecretScanner([secret, password], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
   const scanBytes = (bytes: Uint8Array) => { const scan = scanner.openStream(); try { scan.scan(bytes); } finally { scan.close(); } };
@@ -331,6 +337,14 @@ async function campaign(filename: string): Promise<void> {
         assert(Array.isArray(body.messages) && Array.isArray(body.tools));
         assert.deepEqual(body.tools.map((tool: any) => tool.function.name), ['edit']);
         const ordinal = ++requestsReceived;
+        if (failureOnly) {
+          assert.equal(ordinal, 1, 'a positively received provider rejection must not be retried');
+          const bytes = Buffer.from(rejectedResponse); scanBytes(bytes);
+          outgoing.writeHead(429, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
+          report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
+            exactCredentialMatched: true, status: 429, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
+          return;
+        }
         assert(ordinal <= (shortRunEnabled ? 4 : reflectionEnabled ? 3 : 2), 'replay or restart must not redispatch the completed model attempts');
         if (ordinal === 2) {
           assert.equal(body.messages.filter((message: any) => message.role === 'tool' && message.tool_call_id === 'owned-private-edit-call').length, 1);
@@ -457,7 +471,7 @@ async function campaign(filename: string): Promise<void> {
     assert.deepEqual(exchange([sessionRequest])[0], sessionReply, 'new authenticated connection must replay the original Session response');
     const currentSession = () => accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id }])[0]!, 'session.get').snapshot.session;
     mark('public_run_submit');
-    const runBudgets = { wallTimeMs: 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
+    const runBudgets = { wallTimeMs: failureOnly ? 45000 : 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
       repairAttempts: 0, childDepth: 0, childConcurrency: 1 };
     const submit = request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000104',
       admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
@@ -467,6 +481,15 @@ async function campaign(filename: string): Promise<void> {
       budgets: runBudgets,
       verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
     const { requestDigest: _resourceDigest, ...resourceCore } = submit;
+    if (!failureOnly) {
+      const unauthorized = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000114',
+        model: { ...resourceCore.model, modelCredentialGrantIds: ['installed-run-absent-credential'] } })])[0]!;
+      assert.equal(unauthorized.ok, false, 'an absent credential cannot authorize installed Run admission');
+      assert.equal(unauthorized.error!.code, 'AUTHORIZATION_REQUIRED');
+      assert.equal(unauthorized.error!.retryable, false);
+      assert.equal(unauthorized.error!.messageCode, 'run.model_authority_refused');
+      assert.equal(requestsReceived, 0); assert.deepEqual(currentSession(), session);
+    }
     const oversized = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000113',
       sandboxResources: { maxSingleFileBytes: 2_147_483_648 } })])[0]!;
     assert.equal(oversized.ok, false, 'unsupported explicit file limits must be refused before Run admission');
@@ -476,6 +499,8 @@ async function campaign(filename: string): Promise<void> {
       sameAdmissionKeySubsequentlyAccepted: true, silentClampingAllowed: false };
     report.acceptedRun = { id: admitted.id, sessionId: admitted.sessionId, specRef: admitted.specRef, initialCheckpointId: admitted.latestCheckpointId };
     assert.equal(admitted.status, 'queued'); assert.equal(admitted.revision, 1);
+    if (!failureOnly) report.unauthorizedAdmissionRefused = { qualified: true, refusalCode: 'AUTHORIZATION_REQUIRED',
+      fixedReason: 'run.model_authority_refused', noProviderRequest: true, sameAdmissionKeySubsequentlyAccepted: true };
     // The submission client has exited and closed its actual socket. All
     // further observation uses a fresh native authenticated connection.
     const read = () => {
@@ -483,6 +508,108 @@ async function campaign(filename: string): Promise<void> {
       report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure });
       return cut;
     };
+    if (failureOnly) {
+      mark('received_model_rejection_and_terminal_drain');
+      assert.equal(Date.parse(admitted.deadlineAt) - Date.parse(admitted.createdAt), 45000);
+      const terminalBy = Date.now() + 30000;
+      let terminal: Record<string, any>;
+      for (;;) {
+        await delay(50); terminal = read(); assert(!providerFailure, 'owned HTTP429 responder observed a protocol failure');
+        if (terminal.snapshot.run.status === 'failed') break;
+        assert(!['cancelled', 'succeeded', 'completed_unverified'].includes(terminal.snapshot.run.status));
+        assert(Date.now() < terminalBy, 'positively received HTTP429 did not stop and physically join before the independent 30s bound');
+      }
+      assert(Date.now() < terminalBy);
+      const failed = terminal.snapshot.run;
+      assert.equal(failed.terminalReason, 'runtime_failed'); assert.equal(failed.cancelRequested, false);
+      assert.equal(failed.activeWorkerLaunchId, undefined); assert.equal(failed.frontierRef, undefined);
+      assert.equal(failed.resultRef, undefined); assert.equal(failed.leaseEpoch, 1);
+      assert(failed.updatedAt < failed.deadlineAt, 'received model failure must not wait for deadline expiry');
+      assert.equal(requestsReceived, 1); assert.equal(terminal.items.length, 0);
+      assert.deepEqual(terminal.journal.map((entry: any) => [entry.opKind, entry.phase, entry.attempt]),
+        [['model', 'prepared', 0], ['model', 'dispatch_claimed', 0], ['model', 'completed', 0]]);
+      const [prepared, claimed, completed] = terminal.journal;
+      for (const entry of terminal.journal) {
+        assert.equal(entry.runId, admitted.id); assert.equal(entry.opId, prepared.opId); assert.equal(entry.requestRef, prepared.requestRef);
+      }
+      assert.equal(claimed.seq, prepared.seq + 1); assert.equal(completed.seq, claimed.seq + 1);
+      const fullCharge = { modelTokens: 36864, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+      const zeroCharge = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+      for (const actual of [prepared.budgetDelta, failed.budgetConsumed]) assert.equal(canonicalSha256(actual), canonicalSha256(fullCharge));
+      assert.equal(canonicalSha256(failed.budgetReserved), canonicalSha256(zeroCharge));
+      const modelRequest = parseJsonStrict((await readCas(prepared.requestRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(modelRequest.kind, 'normal'); assert.equal(modelRequest.requestDigest, digestOmitting(modelRequest, 'requestDigest'));
+      const response = parseJsonStrict((await readCas(completed.resultRef)).toString('utf8')) as Record<string, any>;
+      assert.deepEqual(Object.keys(response).sort(), ['schemaVersion', 'format', 'runId', 'opId', 'attempt', 'request', 'provider',
+        'model', 'negotiatedMode', 'failureCode', 'observedResponse', 'observedAt', 'unusableDigest'].sort());
+      assert.equal(response.schemaVersion, 1); assert.equal(response.format, 'cliq-model-unusable-response-v1');
+      assert.equal(response.runId, admitted.id); assert.equal(response.opId, prepared.opId); assert.equal(response.attempt, 0);
+      assert.equal(response.provider, 'openai-compatible'); assert.equal(response.model, model); assert.equal(response.negotiatedMode, 'native-tools');
+      assert.equal(response.failureCode, 'provider_rejected_response'); assert.equal(response.unusableDigest, digestOmitting(response, 'unusableDigest'));
+      assert.equal(canonicalSha256(response.request), canonicalSha256({ kind: 'normal', requestRef: prepared.requestRef, requestDigest: modelRequest.requestDigest }));
+      assert.equal(canonicalSha256(response.observedResponse), canonicalSha256({ kind: 'complete', mediaType: 'application/json',
+        bytesRef: sha256Bytes(Buffer.from(rejectedResponse)), bytesDigest: sha256Bytes(Buffer.from(rejectedResponse)), byteCount: Buffer.byteLength(rejectedResponse) }));
+      assert.equal((await readCas(response.observedResponse.bytesRef)).toString('utf8'), rejectedResponse);
+      const settlement = parseJsonStrict((await readCas(completed.budgetSettlementRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(settlement.runId, admitted.id); assert.equal(settlement.opId, prepared.opId); assert.equal(settlement.attempt, 0);
+      assert.equal(settlement.preparedJournalSeq, prepared.seq); assert.equal(settlement.terminalJournalSeq, completed.seq);
+      assert.equal(settlement.terminalPhase, 'completed'); assert.equal(settlement.settlementDigest, digestOmitting(settlement, 'settlementDigest'));
+      for (const actual of [settlement.reserved, settlement.consumed]) assert.equal(canonicalSha256(actual), canonicalSha256(fullCharge));
+      assert.equal(canonicalSha256(settlement.released), canonicalSha256(zeroCharge));
+      const intent = parseJsonStrict((await readCas(failed.stopIntentRef)).toString('utf8')) as Record<string, any>;
+      assert.deepEqual(Object.keys(intent).sort(), ['schemaVersion', 'runId', 'createdAt', 'origin', 'targetStatus', 'reason',
+        'runtimeSubtype', 'failingOpId', 'runtimeFailureRef', 'runtimeFailureDigest'].sort());
+      assert.equal(intent.schemaVersion, 1); assert.equal(intent.runId, admitted.id); assert.equal(intent.origin, 'runtime');
+      assert.equal(intent.targetStatus, 'failed'); assert.equal(intent.reason, 'runtime_failed'); assert.equal(intent.runtimeSubtype, 'runtime');
+      assert.equal(intent.failingOpId, prepared.opId); assert(intent.createdAt < failed.deadlineAt);
+      const evidence = parseJsonStrict((await readCas(intent.runtimeFailureRef)).toString('utf8')) as Record<string, any>;
+      assert.deepEqual(Object.keys(evidence).sort(), ['schemaVersion', 'format', 'runId', 'frontierRef', 'frontierDigest', 'failingOpId',
+        'inspectorIdentityRef', 'inspectorIdentityDigest', 'observedAt', 'evidenceDigest', 'failureKind', 'unusableResponseRef', 'unusableResponseDigest'].sort());
+      assert.equal(evidence.schemaVersion, 1); assert.equal(evidence.format, 'cliq-runtime-failure-evidence-v1');
+      assert.equal(evidence.runId, admitted.id); assert.equal(evidence.failingOpId, prepared.opId);
+      assert.equal(evidence.failureKind, 'model_unusable_response'); assert.equal(evidence.unusableResponseRef, completed.resultRef);
+      assert.equal(evidence.unusableResponseDigest, response.unusableDigest); assert.equal(evidence.frontierRef, evidence.frontierDigest);
+      assert.equal(evidence.evidenceDigest, digestOmitting(evidence, 'evidenceDigest')); assert.equal(evidence.evidenceDigest, intent.runtimeFailureDigest);
+      assert(evidence.observedAt <= intent.createdAt && Date.parse(intent.createdAt) - Date.parse(evidence.observedAt) <= 5000);
+      const projection = parseJsonStrict((await readCas(modelRequest.promptProjectionRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(evidence.frontierRef, projection.frontierDigest);
+      const inspector = parseJsonStrict((await readCas(evidence.inspectorIdentityRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(inspector.identityDigest, evidence.inspectorIdentityDigest); assert.equal(inspector.identityDigest, digestOmitting(inspector, 'identityDigest'));
+      const failureStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+      assert.equal(failureStatus.health, 'ready'); assert.equal(inspector.supervisorInstanceId, failureStatus.supervisorInstanceId);
+      const detail = parseJsonStrict((await readCas(failed.terminalDetailRef)).toString('utf8')) as Record<string, any>;
+      assert.deepEqual(Object.keys(detail).sort(), ['schemaVersion', 'runId', 'reason', 'reasonDetail', 'primaryEvidenceRef',
+        'publicationResultItemRefs', 'abandonedRetryInvocations', 'createdAt'].sort());
+      assert.equal(detail.schemaVersion, 1);
+      assert.equal(detail.runId, admitted.id); assert.equal(detail.reason, 'runtime_failed'); assert.equal(detail.primaryEvidenceRef, intent.runtimeFailureRef);
+      assert.equal(canonicalSha256(detail.reasonDetail), canonicalSha256({ kind: 'runtime', failingOpId: prepared.opId,
+        runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest }));
+      assert.deepEqual(detail.publicationResultItemRefs, []); assert.deepEqual(detail.abandonedRetryInvocations, []);
+      const initialCheckpoint = terminal.checkpoints.find((checkpoint: any) => checkpoint.id === admitted.latestCheckpointId);
+      const terminalCheckpoint = terminal.checkpoints.find((checkpoint: any) => checkpoint.id === failed.latestCheckpointId);
+      assert(initialCheckpoint && terminalCheckpoint); assert.notEqual(terminalCheckpoint.id, initialCheckpoint.id);
+      assert.equal(terminalCheckpoint.workspaceStateRef, initialCheckpoint.workspaceStateRef); assert.equal(terminalCheckpoint.runItemSeq, 0);
+      const sessionCut = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id, afterItemSeq: session.latestItemSeq }])[0]!, 'session.get');
+      assert.equal(sessionCut.snapshot.session.contextRevision, session.contextRevision + 1);
+      assert.equal(sessionCut.snapshot.session.latestItemSeq, session.latestItemSeq + 1); assert.equal(sessionCut.items.length, 1);
+      const sessionItem = sessionCut.items[0]; assert.equal(sessionItem.kind, 'run_terminal'); assert.equal(sessionItem.itemSeq, session.latestItemSeq + 1);
+      const publication = parseJsonStrict((await readCas(sessionItem.payloadRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(canonicalSha256(publication), canonicalSha256({ schemaVersion: 1, format: 'cliq-session-run-terminal-v1', kind: 'run_terminal',
+        itemKey: `run-terminal:${admitted.id}`, runId: admitted.id, operation: 'agent', admittedSessionItemSeq: session.latestItemSeq,
+        status: 'failed', terminalReason: 'runtime_failed', terminalDetailRef: failed.terminalDetailRef }));
+      assert.deepEqual(read(), terminal, 'a fresh authenticated connection must preserve the exact terminal Run');
+      assert.deepEqual(exchange([submit])[0], submitReply, 'replaying admission must not repeat the rejected request or Session publication');
+      assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id, afterItemSeq: session.latestItemSeq }])[0]!, 'session.get'), sessionCut);
+      assert.equal(requestsReceived, 1); assert(!providerFailure);
+      for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
+      assert.equal(await readFile(source, 'utf8'), hostBefore);
+      report.receivedModelFailureQualified = true;
+      report.receivedModelFailure = { qualified: true, status: 'failed', terminalReason: 'runtime_failed', wallTimeMs: 45000,
+        stoppedBeforeDeadline: true, receivedHttpStatus: 429, ownedProviderRequests: 1, noProviderRetry: true,
+        completedResponseRef: completed.resultRef, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest,
+        terminalDetailRef: failed.terminalDetailRef, fullReservationCharged: true, noToolDispatch: true, noResultPublished: true,
+        genuineWorkerJoinRequiredByProduction: true, sessionPublishedOnce: true, reconnectAndAdmissionReplayPreserved: true };
+    } else {
     mark('real_edit_and_ready_checkpoint');
     let current: Record<string, any> | undefined;
     const completeBy = Date.now() + 90000;
@@ -907,6 +1034,7 @@ async function campaign(filename: string): Promise<void> {
       earlierUnknownNotRedispatched: true, totalOwnedProviderRequests: 4 };
     for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
     assert.equal(await readFile(source, 'utf8'), hostBefore);
+    }
     report.qualified = true; mark('run_assertions_complete');
   } catch (error) {
     primary = error;
@@ -998,5 +1126,5 @@ async function campaign(filename: string): Promise<void> {
 
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
-assert.equal(mode, '--campaign'); assert(filename && extra.length === 0);
-await campaign(filename);
+assert(mode === '--campaign' || mode === '--failure-campaign'); assert(filename && extra.length === 0);
+await campaign(filename, mode);

@@ -55,6 +55,11 @@ The public `maxSingleFileBytes` default is 256 MiB, matching the unchanged
 Linux worker recipe limit. Installed admission rejects an explicitly larger
 value before source capture or admission; it never silently clamps that intent.
 The generic 1 MiB..16 GiB input range remains available to other recipes.
+The installed broker also supports only its existing ASCII base-path subset
+(at most 4096 bytes, with no encoded characters or empty interior segments).
+Admission checks the actual registered endpoint before source capture and
+refuses unsupported paths; general endpoint registration remains wider. No
+registered path is decoded, rewritten or silently normalized to make it fit.
 After a validated terminal Run, its joined driver task closes the original
 launcher/sealed-image owners before evicting memory caches. This reclaims no
 durable history and does not treat a candidate, unknown or wait as terminal.
@@ -103,6 +108,15 @@ exact broker ambiguity branch. Its unknown Journal charges the full reservation
 to consumed budget, clears the reservation and uses the actual settlement timestamp. The fixed
 `broker_response_refused` log correlates that refusal to the actual claim; it
 contains no secret or dynamic provider diagnostic and grants no authority.
+
+An independent fresh-UID campaign requires a positively received owned HTTP429
+response to retain its exact completed model observation and full charge, then
+stop as `runtime_failed` before the Run deadline. It checks the failure wrapper,
+StopIntent, terminal detail, native terminal drain, one Session publication and
+reconnect/replay without another provider request. It shares the real installed
+setup and unchanged cleanup/scan bounds, not the full journey's secret or state.
+Only a passing complete report qualifies this case; neither a timeout nor the
+separate full journey's success does so.
 
 This document describes the implemented composition and its validation boundary;
 it does not certify a source revision. Qualification requires the exact-SHA

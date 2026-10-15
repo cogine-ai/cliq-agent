@@ -5,7 +5,8 @@ import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
+import { decodeEndpointRegistration, type EndpointRegistrationV1 } from '../kernel/credential-authority.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { SourceInspectionRetirementEvidenceV1, SourceInspectionTargetV1 } from '../kernel/execution.js';
 import type { SourceManifest, WorkspaceEntryManifest } from '../kernel/types.js';
@@ -70,6 +71,33 @@ test('installed recipe refuses oversized files before capture without clamping e
     const request = installedRequest(maxSingleFileBytes);
     assert.equal(request.sandboxResources.maxSingleFileBytes, maxSingleFileBytes);
     assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
+  }
+});
+
+test('installed recipe rejects unsupported registered paths without narrowing general endpoint registration', () => {
+  const request = normalizeRunSubmitRequest(inlineRequest({ model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+    endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] } })).request;
+  const registered = (basePath: string) => {
+    // Complete canonical data only, not registration or installed authority.
+    const hash = 'a'.repeat(64), endpoint: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
+      endpointRegistrationId: 'owned-fixture-endpoint', registrationKind: 'user', ownerPrincipalId: 'principal', purposes: ['model_endpoint'],
+      target: { scheme: 'https', hostAscii: 'endpoint.invalid', port: 443, basePath, redirectPolicy: 'reject_all' },
+      tls: { serverNameAscii: 'endpoint.invalid', minimumVersion: 'TLSv1.3', trustStoreRuntimeBundleRef: hash,
+        trustStoreRuntimeBundleManifestDigest: hash, trustStoreEntryId: 'default_https_trust_store', trustStoreRef: hash,
+        trustStoreDigest: hash, spkiSha256Pins: [hash] }, endpointIdentityDigest: '', tlsPolicyDigest: '',
+      createdAt: '2026-10-15T00:00:00.000Z', registrationDigest: '' };
+    endpoint.tlsPolicyDigest = canonicalSha256(endpoint.tls);
+    endpoint.endpointIdentityDigest = canonicalSha256({ target: endpoint.target, tlsPolicyDigest: endpoint.tlsPolicyDigest });
+    endpoint.registrationDigest = digestOmitting(endpoint, 'registrationDigest');
+    return decodeEndpointRegistration(endpoint);
+  };
+  for (const basePath of ['/api%20v1', '/api:v1', '/api;v1', '/a//b', `/${'a'.repeat(4096)}`]) {
+    const endpoint = registered(basePath);
+    assert.equal(endpoint.target.basePath, basePath);
+    assert.throws(() => assertInstalledRunRecipe(request, endpoint), { code: 'UNSUPPORTED_PLATFORM' }, basePath);
+  }
+  for (const basePath of ['/', '/v1', '/v1/', '/.well-known/api-v1_~+', `/${'a'.repeat(4095)}`]) {
+    assert.doesNotThrow(() => assertInstalledRunRecipe(request, registered(basePath)), basePath);
   }
 });
 

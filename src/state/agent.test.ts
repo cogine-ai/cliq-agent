@@ -72,6 +72,21 @@ test('real model admission binds zero-based identity, native bytes and the full 
   } finally { await disposeFixture(fixture); }
 });
 
+test('model preparation at or after the Run deadline is lease-fenced without changing retained authority', async t => {
+  const fixture = await createAgentFixture('model-prepare-deadline');
+  try {
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    let now = Date.parse(before.run.deadlineAt);
+    t.mock.method(Date, 'now', () => now);
+    for (const offset of [0, 1]) {
+      now = Date.parse(before.run.deadlineAt) + offset;
+      await assert.rejects(fixture.agent.prepareModel({ expectedRunRevision: before.run.revision,
+        leaseEpoch: fixture.leaseEpoch }), { code: 'LEASE_FENCED' });
+      assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    }
+  } finally { await disposeFixture(fixture); }
+});
+
 async function longContext(fixture: Awaited<ReturnType<typeof createAgentFixture>>, texts = ['a', 'b', 'c'].map((v) => v.repeat(28_000))) {
   for (const [index, text] of texts.entries()) {
     const admitted = await prepare(fixture);

@@ -72,14 +72,26 @@ function mismatch(message: string): never { throw new KernelStorageError('ARTIFA
 const same = (left: unknown, right: unknown) => canonicalJsonBytes(left).equals(canonicalJsonBytes(right));
 
 /** Reject unsupported fixed-recipe intent before source/instruction capture.
- * Generic normalization retains the wider resource contract for other recipes. */
-export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest): asserts request is NormalizedRunSubmitRequest & {
+ * Generic normalization and endpoint registration retain their wider contracts.
+ * The optional endpoint is the actual registered target, not a client URL. */
+export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest,
+  endpoint?: EndpointRegistrationV1): asserts request is NormalizedRunSubmitRequest & {
   model: Exclude<NormalizedRunSubmitRequest['model'], { provider: 'ollama' }>;
 } {
   if (request.model.provider !== 'openai-compatible' || request.verifiers.length || request.dependency.mode !== 'none' ||
       request.registeredMcpServerIds.length || request.skillIds.length || request.sourceIncludes.length ||
       request.sandboxResources.maxProcesses < 8 || request.sandboxResources.maxSingleFileBytes > 268_435_456)
     invalid('installed Run selects an unsupported model, execution resource, verifier, dependency, MCP, skill or source inclusion');
+  if (endpoint) {
+    // Match the current native broker's path subset and 4097-byte C buffer.
+    // Do not decode, normalize or silently alter the registered target.
+    const basePath = endpoint.target.basePath;
+    if (basePath.length > 4096 || !/^\/[A-Za-z0-9._~+\/-]*$/u.test(basePath) ||
+        basePath.split('/').some((segment, index, segments) => index > 0 &&
+          (segment === '.' || segment === '..' || (!segment && index !== segments.length - 1)))) {
+      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed model endpoint path is outside the native recipe');
+    }
+  }
 }
 
 function closeOwned(resources: readonly { close(): void }[], error?: unknown): void {
@@ -328,7 +340,7 @@ export async function assembleInstalledRun(input: {
     request: input.request, source: input.source, endpoint: decodeEndpointRegistration(input.endpoint),
     credentialBindings: input.credentialBindings.map(decodeEndpointCredentialGrantBinding) });
   if (!same(currentOriginal.request, request)) mismatch('installed producer did not receive the exact normalized current public frame');
-  assertInstalledRunRecipe(request);
+  assertInstalledRunRecipe(request, endpoint);
   const remote = request.model;
   await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
   const session = readSession(driver, request.sessionId), workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));

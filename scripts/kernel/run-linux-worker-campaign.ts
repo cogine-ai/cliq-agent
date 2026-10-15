@@ -859,6 +859,16 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
     }
     const retryCut = await checkpointBytes(store, fixture.runId);
     assertQueuedReadyCut(retryCut, before);
+    const retiredBeforeResume = inspection.readSnapshot(connection => readRequiredWorkerLaunch(connection, fault.launch.launchId));
+    assert.equal(retiredBeforeResume.phase, 'retired');
+    // Enter the same public retirement-resume step used by the installed
+    // driver. Its worker-recovery-only recipe must leave these genuine
+    // no-spawn/created-death quarantines to their original producer.
+    assert.deepEqual(await bounded(retry.resumeCurrentRetirement({ expectedRunRevision: retryCut.closure.run.revision })),
+      retryCut.closure.run);
+    assert.deepEqual(await checkpointBytes(store, fixture.runId), retryCut);
+    assert.deepEqual(inspection.readSnapshot(connection => readRequiredWorkerLaunch(connection, fault.launch.launchId)),
+      retiredBeforeResume);
     if (!created) console.log(JSON.stringify({ scenario: 'actual-transient-image-same-execution-retry', phase: 'retry',
       runId: fixture.runId, failedLaunchId: fault.launch.launchId, supervisorInstanceId: fault.launch.supervisorInstanceId,
       firstFailureCode: primary.code, actualReadFaults: faults, expectedRunRevision: retryCut.closure.run.revision,

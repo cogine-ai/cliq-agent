@@ -109,6 +109,20 @@ jobs:
           path: ${{ runner.temp }}/cliq-installed-run-journey/*.json
           if-no-files-found: warn
           retention-days: 7
+      - name: Exercise one received rejection through the actual installed terminal drain
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-failure-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-run-failure-journey"
+      - name: Retain independent received-rejection and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-run-failure-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-run-failure-journey/*.json
+          if-no-files-found: warn
+          retention-days: 7
 
   linux-supervisor-preflight:
     name: Linux Supervisor image and actual user-manager diagnostics

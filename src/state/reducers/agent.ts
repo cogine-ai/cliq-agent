@@ -319,8 +319,12 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         : model.prepare({ kind: 'normal', invocation: { runId, opId, attempt }, projectionRef: projectionArtifact.ref, projection });
       if (history.length) assertSameModelOperation(await readCanonicalArtifact<ModelRequestV1>(artifacts, history[0]!.requestRef), prepared.request);
       const target = await readModelTarget(driver, artifacts, { run: cut.run, spec, assembly });
+      const grantIssuedAt = sampleCanonicalNow();
+      if (grantIssuedAt >= cut.run.deadlineAt) {
+        throw new KernelStorageError('LEASE_FENCED', 'Run deadline elapsed before model grant preparation');
+      }
       const grant = planModelOperationGrant({ ...target, run: cut.run, spec, assembly, frontier, frontierRef: frontierPlan.ref,
-        request: prepared.request as ModelRequestV1, requestRef: prepared.requestRef }, sampleCanonicalNow(), cut.run.deadlineAt);
+        request: prepared.request as ModelRequestV1, requestRef: prepared.requestRef }, grantIssuedAt, cut.run.deadlineAt);
       const grantPlan = planCanonicalArtifact(grant, grant.format);
       const targetMetadata = await artifacts.describe(target.targetRef, 'application/json',
         target.target.format === 'cliq-endpoint-registration-v1' ? 'cliq-endpoint-registration-v1' : 'cliq-local-zero-cost-v1');

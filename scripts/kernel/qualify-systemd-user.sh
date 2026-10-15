@@ -12,16 +12,18 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 
 probe_campaign_kind=diagnostic
+probe_run_driver_mode=--campaign
 case ${1:-} in
   --installed) probe_campaign_kind=installed; shift ;;
   --installed-retirement-refusal) probe_campaign_kind=retirement; shift ;;
   --secrets) probe_campaign_kind=secrets; shift ;;
   --credentials) probe_campaign_kind=credentials; shift ;;
   --run-journey) probe_campaign_kind=run-journey; shift ;;
+  --run-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--failure-campaign; shift ;;
 esac
-readonly probe_campaign_kind
+readonly probe_campaign_kind probe_run_driver_mode
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--run-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--run-journey|--run-failure-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -714,7 +716,7 @@ elif [[ "$probe_campaign_kind" = credentials ]]; then
 elif [[ "$probe_campaign_kind" = run-journey ]]; then
   # Fixed driver, exact fresh UID and the same frozen ledger/baseline/cleanup.
   # No arbitrary driver, production pause flag or manager-policy override.
-  "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" --campaign "$probe_ledger"
+  "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger"
 else
   "$probe_node" --import "$probe_installed_loader" "$probe_secret_driver" --campaign "$probe_ledger"
   "$probe_node" --import "$probe_installed_loader" "$probe_sqlite_driver" --campaign "$probe_ledger"

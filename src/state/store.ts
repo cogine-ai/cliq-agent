@@ -1706,6 +1706,7 @@ export class StateStore {
         model.modelCredentialGrantIds, sampleCanonicalNow());
       return immutableSnapshot({ endpoint: authority.endpoint, bindings: authority.bindings });
     });
+    assertRecipe(normalized.request, authority.endpoint);
     const source = await this.captureSubmittedSource({ request, identity });
     if (source.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'Run source inspection has not completely retired');
     if (source.outcome.kind !== 'captured') {
