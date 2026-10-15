@@ -68,7 +68,7 @@ import { assertInstalledCredentialScope, installedCredentialProvenance, observeI
   type InstalledCredentialScope, type InstalledCredentialProvenance,
   withHeldInstalledRuntime, withInstalledWorkerRoot, type HeldInstalledAnchor,
   type HeldInstalledRuntime, type InstalledRuntimeBorrow } from './installed-runtime.js';
-import { withCredentialAuthorityLock, loadInstalledCredentialPlatform, loadInstalledModelBroker } from './installed-runtime.js';
+import { CredentialScopeBusyError, withCredentialAuthorityLock, loadInstalledCredentialPlatform, loadInstalledModelBroker } from './installed-runtime.js';
 import { MODEL_BROKER_ENTRY_ID, InstalledModelBrokerRefusalError, type NativeModelTransport, type ModelBrokerBinding, type ModelBrokerClosed } from './model-broker-native.js';
 import { decodeBrokerInvocationAmbiguity, type BrokerInvocationAmbiguityEvidenceV1 } from '../kernel/broker-ambiguity.js';
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
@@ -1639,7 +1639,7 @@ export class StateStore {
   private readonly installedAgents = new Map<string, AgentRunState>();
   private readonly installedAgentLoads = new Map<string, Promise<AgentRunState>>();
   private readonly installedRunFailures = new Map<string, unknown>();
-  private readonly installedPreparationRetries = new Map<string, { error: KernelStorageError; opId: string; attempt: number;
+  private readonly installedPreparationRetries = new Map<string, { error: KernelStorageError | CredentialScopeBusyError; opId: string; attempt: number;
     preparedSeq: number; failedSeq: number; requestRef: string; settlementRef: string }>();
   private schedulerStarted = false;
   private installedModelAdmissionReady = false;
@@ -2447,10 +2447,28 @@ export class StateStore {
     const frozen = await Promise.all(initial.assembly.provider.credentialGrantRefs.map(async ref =>
       decodeEndpointCredentialGrantBinding(await this.artifacts.readCanonical(ref))));
     const trustStoreBytes = await this.artifacts.readBytes(target.tls.trustStoreRef);
-    const bodyBytes = Buffer.from(attempt.prepared.outbound.bodyBytes);
-    if (sha256Bytes(bodyBytes) !== initial.request.bodyBytesRef || bodyBytes.length !== initial.request.bodyByteCount)
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'model compiled body differs from the permanent prepared request');
-    return withCredentialAuthorityLock(selected, async token => {
+    const failPreparation = async (retryError?: KernelStorageError | CredentialScopeBusyError) => {
+      const input = { runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision };
+      const evidence = { schemaVersion: 1, format: 'cliq-invocation-error-v1', runId, opId: prepared.opId, attempt: prepared.attempt,
+        requestRef: prepared.requestRef, reason: 'installed_model_preparation_refused', observedAt: sampleCanonicalNow() };
+      const artifact = await this.artifacts.publishCanonical(evidence, evidence.format);
+      const failed = await failInvocationBeforeDispatch(this.driver, this.artifacts, this.owner, { ...input, errorRef: artifact.ref });
+      if (retryError) {
+        const current = await agent.readModelAttempt();
+        const entries = readInvocationAttempt(this.driver, runId, prepared.opId, prepared.attempt);
+        if (current && current.run.status === 'running' && !current.run.stopIntentRef && current.run.activeWorkerLaunchId &&
+            canonicalSha256(current.entry) === canonicalSha256(prepared) && canonicalSha256(current.state) === canonicalSha256(failed.entry) &&
+            entries.length === 2 && entries[0]?.phase === 'prepared' && entries[1]?.phase === 'failed' &&
+            canonicalSha256(entries[0]) === canonicalSha256(prepared) && canonicalSha256(entries[1]) === canonicalSha256(failed.entry) &&
+            this.installedModelProgress(current) === 'retry') {
+          this.installedPreparationRetries.set(runId, { error: retryError, opId: prepared.opId, attempt: prepared.attempt,
+            preparedSeq: prepared.seq, failedSeq: failed.entry.seq, requestRef: prepared.requestRef, settlementRef: failed.entry.budgetSettlementRef! });
+        }
+      }
+    };
+    let callbackEntered = false;
+    const dispatch = async (token: HeldCredentialAuthorityLock) => {
+      callbackEntered = true;
       const held = checkedCredentialToken(token);
       let transport: NativeModelTransport | undefined;
       let claimed: import('../kernel/types.js').InvocationJournalEntry | undefined;
@@ -2574,29 +2592,29 @@ export class StateStore {
           // closure is never a no-release refund or a synthetic response.
           await markInstalledBrokerAmbiguity(this.driver, this.artifacts, this.owner, { ...input, evidenceRef: artifact.ref, evidenceDigest: evidence.evidenceDigest });
         } else if (last?.phase === 'prepared') {
-          const evidence = { schemaVersion: 1, format: 'cliq-invocation-error-v1', runId, opId: prepared.opId, attempt: prepared.attempt,
-            requestRef: prepared.requestRef, reason: 'installed_model_preparation_refused', observedAt: sampleCanonicalNow() };
-          const artifact = await this.artifacts.publishCanonical(evidence, evidence.format);
-          const failed = await failInvocationBeforeDispatch(this.driver, this.artifacts, this.owner, { ...input, errorRef: artifact.ref });
-          if (preparationError && preparationError === error) {
-            const current = await agent.readModelAttempt();
-            const entries = readInvocationAttempt(this.driver, runId, prepared.opId, prepared.attempt);
-            if (current && current.run.status === 'running' && !current.run.stopIntentRef && current.run.activeWorkerLaunchId &&
-                canonicalSha256(current.entry) === canonicalSha256(prepared) && canonicalSha256(current.state) === canonicalSha256(failed.entry) &&
-                entries.length === 2 && entries[0]?.phase === 'prepared' && entries[1]?.phase === 'failed' &&
-                canonicalSha256(entries[0]) === canonicalSha256(prepared) && canonicalSha256(entries[1]) === canonicalSha256(failed.entry) &&
-                this.installedModelProgress(current) === 'retry') {
-              this.installedPreparationRetries.set(runId, { error: preparationError, opId: prepared.opId, attempt: prepared.attempt,
-                preparedSeq: prepared.seq, failedSeq: failed.entry.seq, requestRef: prepared.requestRef, settlementRef: failed.entry.budgetSettlementRef! });
-            }
-          }
+          await failPreparation(preparationError === error ? preparationError : undefined);
         }
         // Before native network release, or after a positively received response,
         // this implementation cannot truthfully mint that ambiguity branch.
         // Keep the original claim/reservation explicit for causal recovery.
         throw error;
       } finally { bodyBytes.fill(0); }
-    });
+    };
+    const bodyBytes = Buffer.from(attempt.prepared.outbound.bodyBytes);
+    try {
+      if (sha256Bytes(bodyBytes) !== initial.request.bodyBytesRef || bodyBytes.length !== initial.request.bodyByteCount)
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'model compiled body differs from the permanent prepared request');
+      return await withCredentialAuthorityLock(selected, dispatch);
+    } catch (error) {
+      // Only the real non-reentrant guard can refuse before this callback
+      // enters. No native owner or permanent claim was created by this call.
+      if (!callbackEntered && error instanceof CredentialScopeBusyError && !this.modelTransports.has(runId)) {
+        const entries = readInvocationAttempt(this.driver, runId, prepared.opId, prepared.attempt);
+        if (entries.length === 1 && entries[0]?.phase === 'prepared' && canonicalSha256(entries[0]) === canonicalSha256(prepared))
+          await failPreparation(error);
+      }
+      throw error;
+    } finally { bodyBytes.fill(0); }
   }
 
   async loadRunExecution(input: LoadRunExecutionInput) {

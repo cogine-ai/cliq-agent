@@ -189,6 +189,18 @@ Even a failing test must then join the original connection and fixture children
 and preserve the host runtime namespace. This is a native lifecycle seam, not
 an installed Supervisor stop cut, queue-starvation bound or full I1 proof.
 
+The ordinary credential scope remains strictly non-reentrant. Only its fixed
+busy refusal before the model callback enters, with no native transport and
+exactly the original unclaimed prepared row, may use the existing pre-dispatch
+failure settlement. The original owner/time/revision/claim checks still decide
+the final transaction; no callback-entry error or permanent/unknown claim gains
+retry authority. Automatic wake still requires the same original error identity,
+exact prepared/failed history, actual settlement and existing ready retry policy.
+Copied request bytes are scrubbed even on digest or scope-entry refusal.
+The real signed-selection guard test proves that classification and reservation
+release without activating ambient credential authority. It does not qualify an
+actual installed concurrent finalizer-versus-prepared dispatch cut.
+
 This document describes the implemented composition and its validation boundary;
 it does not certify a source revision. Qualification requires the exact-SHA
 evidence set described below. The journey's bounded reports cover only assertions
@@ -207,6 +219,10 @@ Cancellation of an already materialized, healthy but never-launched replacement
 generation remains unsupported: there is no implemented positive no-launch
 discard-retirement branch. Completed candidate handoff avoids creating an
 unused replacement; this does not qualify that distinct cancellation case.
+Installed cancellation currently closes model transports, not the in-flight
+tool operation's abort owner. In-flight tool cancellation and terminal
+quiescence after a stop during worker recovery remain incomplete; accepted
+StopIntent alone is not evidence that those physical owners have retired.
 The 30-second native deadline bounds operation eligibility and cancellation,
 not hard real-time disappearance under arbitrary OS scheduling. Completion
 and retirement receipts still require the actual worker and callback joins.

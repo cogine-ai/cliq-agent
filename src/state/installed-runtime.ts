@@ -194,6 +194,13 @@ export function withHeldInstalledRuntime<T>(held: HeldInstalledRuntime,
   return binding.borrow(operation);
 }
 
+export class CredentialScopeBusyError extends TypeError {
+  constructor() {
+    super('ordinary credential entry cannot be called while a scope is acquiring, active or draining');
+    this.name = 'CredentialScopeBusyError';
+  }
+}
+
 /** Ordinary same-user credential-store scope. Preoccupy the whole process
  * before enqueue: recursion or a second factory cannot wait on its own tail.
  * This token carries physical ownership, not an authentication decision. */
@@ -202,7 +209,7 @@ export function withCredentialAuthorityLock<T>(held: HeldInstalledRuntime,
   const binding = heldInstalledRuntimes.get(held);
   if (!binding) mismatch('installed runtime is not a verified held selection');
   healthy();
-  if (credentialScopeReserved) throw new TypeError('ordinary credential entry cannot be called while a scope is acquiring, active or draining');
+  if (credentialScopeReserved) throw new CredentialScopeBusyError();
   if (typeof operation !== 'function') throw new TypeError('credential scope requires a callback');
   credentialScopeReserved = true;
   const release = () => { if (!retirementFailure) credentialScopeReserved = false; };
