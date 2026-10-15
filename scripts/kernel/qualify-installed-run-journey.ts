@@ -694,6 +694,97 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         sameWorkerAndEpoch: true, originalBodyAndAuthorityPreserved: true, freeFailuresFullyRefunded: true, oneFullReservationCharged: true,
         candidateRetainedWithoutResult: true, supervisorHealthRecovered: true, explicitCancelGenuineWorkerJoin: true,
         immutableJournalPreserved: true, sessionPublishedOnce: true, reconnectAndAdmissionReplayPreserved: true };
+      mark('actual_connect_refusal_after_permanent_claim');
+      assert(server?.listening);
+      const retiredServer = server;
+      retiredServer.closeAllConnections();
+      await bounded(new Promise<void>((resolve, reject) => retiredServer.close(error => error ? reject(error) : resolve())),
+        10000, 'owned HTTPS listener did not close before the independent connection refusal');
+      await bounded(Promise.all(socketClosures), 10000, 'owned TLS sockets did not join before the independent connection refusal');
+      assert.equal(retiredServer.listening, false); server = undefined; report.httpsJoined = true;
+      const connectionSession = currentSession();
+      assert.deepEqual(connectionSession, sessionCut.snapshot.session);
+      const connectionSubmit = request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000120',
+        admissionKey: randomBytes(32).toString('base64url'), expectedContextRevision: connectionSession.contextRevision,
+        objective: 'Acknowledge the owned connection-refusal observation without using a tool.' });
+      const connectionReply = exchange([connectionSubmit])[0]!, connectionAdmitted = accepted(connectionReply, 'run.submit').snapshot.run;
+      assert.equal(connectionAdmitted.status, 'queued'); assert.equal(connectionAdmitted.revision, 1);
+      assert.equal(Date.parse(connectionAdmitted.deadlineAt) - Date.parse(connectionAdmitted.createdAt), 45000);
+      report.connectionRefusal = { diagnosticOnly: true, qualified: false, runId: connectionAdmitted.id,
+        ownedListenerAndSocketsJoined: true, terminalOutcomeQualified: false, preConnectClaimGapQualified: false };
+      const readConnection = () => {
+        const value = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: connectionAdmitted.id }])[0]!, 'run.get');
+        report.lastConnectionRefusalCut = projectInstalledRunProgress(value, { requestsReceived, providerFailure });
+        return value;
+      };
+      const connectionBy = Date.now() + 15000;
+      let connectionCut: Record<string, any>;
+      for (;;) {
+        await delay(50); connectionCut = readConnection();
+        assert(Date.now() < connectionBy, 'actual post-claim connection refusal did not settle as conservative unknown');
+        assert(!providerFailure); assert.equal(requestsReceived, 1);
+        assert(!['failed', 'cancelled', 'succeeded', 'completed_unverified'].includes(connectionCut.snapshot.run.status));
+        if (connectionCut.journal.at(-1)?.phase === 'unknown') break;
+      }
+      assert.equal(connectionCut.nextJournalSeq, connectionCut.highWaterJournalSeq);
+      assert.deepEqual(connectionCut.journal.map((entry: any) => [entry.opKind, entry.phase, entry.attempt]),
+        [['model', 'prepared', 0], ['model', 'dispatch_claimed', 0], ['model', 'unknown', 0]]);
+      const [connectionPrepared, connectionClaimed, connectionUnknown] = connectionCut.journal;
+      for (const entry of connectionCut.journal) {
+        assert.equal(entry.runId, connectionAdmitted.id); assert.equal(entry.opId, connectionPrepared.opId);
+        assert.equal(entry.requestRef, connectionPrepared.requestRef); assert.equal(entry.target, connectionPrepared.target);
+      }
+      assert.equal(connectionClaimed.seq, connectionPrepared.seq + 1); assert.equal(connectionUnknown.seq, connectionClaimed.seq + 1);
+      assert.equal(connectionUnknown.dispatchId, connectionClaimed.dispatchId);
+      assert.equal(connectionUnknown.supervisorInstanceId, connectionClaimed.supervisorInstanceId);
+      assert.equal(connectionUnknown.stateOwnerEpoch, connectionClaimed.stateOwnerEpoch);
+      assert.equal(connectionUnknown.brokerFenceTokenDigest, connectionClaimed.brokerFenceTokenDigest);
+      assert.equal(connectionUnknown.resultRef, undefined); assert.equal(connectionUnknown.errorRef, undefined);
+      const connectionEvidence = parseJsonStrict((await readCas(connectionUnknown.evidenceRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(connectionEvidence.format, 'cliq-invocation-ambiguity-evidence-v1');
+      assert.equal(connectionEvidence.ambiguityKind, 'broker_channel_lost_after_claim');
+      assert.equal(connectionEvidence.failureCode, 'connection_lost_after_release_possible');
+      assert.equal(connectionEvidence.runId, connectionAdmitted.id); assert.equal(connectionEvidence.opId, connectionPrepared.opId);
+      assert.equal(connectionEvidence.attempt, 0); assert.equal(connectionEvidence.dispatchId, connectionClaimed.dispatchId);
+      assert.equal(connectionEvidence.dispatchJournalSeq, connectionClaimed.seq);
+      assert.equal(connectionEvidence.brokerFenceTokenDigest, connectionClaimed.brokerFenceTokenDigest);
+      assert.equal(connectionEvidence.claimingSupervisorInstanceId, connectionClaimed.supervisorInstanceId);
+      assert.equal(connectionEvidence.claimingStateOwnerEpoch, connectionClaimed.stateOwnerEpoch);
+      assert.equal(connectionEvidence.operationRequestRef, connectionPrepared.requestRef);
+      assert.equal(connectionEvidence.operationTargetRef, connectionPrepared.target);
+      assert.equal(connectionEvidence.operationTargetDigest, registration.registrationDigest);
+      assert.equal(connectionEvidence.frontierRef, connectionCut.snapshot.run.frontierRef);
+      assert.equal(connectionEvidence.frontierDigest, connectionEvidence.frontierRef);
+      assert.equal(connectionEvidence.durableTerminalResultAbsent, true);
+      assert.equal(connectionEvidence.observedAt, connectionUnknown.timestamp);
+      assert.equal(connectionEvidence.evidenceDigest, connectionUnknown.evidenceDigest);
+      assert.equal(connectionEvidence.evidenceDigest, digestOmitting(connectionEvidence, 'evidenceDigest'));
+      const connectionSettlement = parseJsonStrict((await readCas(connectionUnknown.budgetSettlementRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(connectionSettlement.runId, connectionAdmitted.id); assert.equal(connectionSettlement.opId, connectionPrepared.opId);
+      assert.equal(connectionSettlement.attempt, 0); assert.equal(connectionSettlement.preparedJournalSeq, connectionPrepared.seq);
+      assert.equal(connectionSettlement.terminalJournalSeq, connectionUnknown.seq); assert.equal(connectionSettlement.terminalPhase, 'unknown');
+      assert.equal(connectionSettlement.settledAt, connectionUnknown.timestamp);
+      assert.equal(connectionSettlement.settlementDigest, digestOmitting(connectionSettlement, 'settlementDigest'));
+      for (const actual of [connectionPrepared.budgetDelta, connectionUnknown.budgetDelta, connectionSettlement.reserved,
+        connectionSettlement.released, connectionSettlement.consumed, connectionSettlement.budgetReservedBefore,
+        connectionSettlement.budgetConsumedAfter, connectionCut.snapshot.run.budgetConsumed])
+        assert.equal(canonicalSha256(actual), canonicalSha256(fullCharge));
+      for (const actual of [connectionClaimed.budgetDelta, connectionSettlement.budgetConsumedBefore,
+        connectionSettlement.budgetReservedAfter, connectionCut.snapshot.run.budgetReserved])
+        assert.equal(canonicalSha256(actual), canonicalSha256(zeroCharge));
+      assert.equal(connectionCut.snapshot.run.status, 'running'); assert(connectionCut.snapshot.run.activeWorkerLaunchId);
+      assert.equal(connectionCut.snapshot.run.leaseEpoch, 1); assert.equal(connectionCut.snapshot.run.stopIntentRef, undefined);
+      assert.equal(connectionCut.snapshot.run.resultRef, undefined);
+      // Observe beyond both frozen model retry delays without authorizing a
+      // retry, cancelling this unknown or pretending it has terminal proof.
+      await delay(2500);
+      assert(Date.now() < Date.parse(connectionAdmitted.deadlineAt));
+      assert.deepEqual(readConnection(), connectionCut); assert.deepEqual(exchange([connectionSubmit])[0], connectionReply);
+      assert.deepEqual(currentSession(), connectionSession); assert.equal(requestsReceived, 1); assert(!providerFailure);
+      report.connectionRefusal = { ...report.connectionRefusal, qualified: true,
+        originalPermanentClaimPreserved: true, fullReservationCharged: true, zeroReservationRemaining: true,
+        noProviderRequestReceived: true, immutableUnknownPreserved: true, providerRedispatches: 0,
+        noResultPublished: true, scope: 'real native connection refusal after claim only; not pre-connect claim-gap recovery or terminal cancellation' };
     } else if (failureOnly) {
       mark('received_model_rejection_and_terminal_drain');
       assert.equal(Date.parse(admitted.deadlineAt) - Date.parse(admitted.createdAt), 45000);
@@ -846,6 +937,41 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       report.sourceRefusalReplay.sameNonceAndFreshNoncePreserved = true;
       report.sourceRefusalReplay.requestAndAdmissionConflictsPreserved = true;
       report.sourceRefusalReplay.noNewRunSessionMutationOrProviderRequest = true;
+      mark('session_create_original_wire_identity_and_normalized_intent');
+      const wireSessionCore = { protocolVersion: 1, method: 'session.create',
+        requestId: '019a0012-0000-7000-8000-00000000011a', admissionKey: randomBytes(32).toString('base64url'),
+        workspacePath: recipe.workspace, name: 'Installed Cafe\u0301' };
+      const wireSessionRequest = request(wireSessionCore);
+      const normalizedWireSessionRequest = request({ ...wireSessionCore, name: 'Installed Caf\u00e9' });
+      assert.notEqual(wireSessionRequest.requestDigest, normalizedWireSessionRequest.requestDigest);
+      const wireSessionReply = exchange([wireSessionRequest])[0]!;
+      const wireSession = accepted(wireSessionReply, 'session.create').snapshot.session;
+      assert.notEqual(wireSession.id, session.id); assert.equal(wireSession.name, 'Installed Caf\u00e9');
+      report.sessionCreateWireIdentity = { qualified: false, originalRequestDigest: wireSessionRequest.requestDigest,
+        normalizedSpellingRequestDigest: normalizedWireSessionRequest.requestDigest,
+        secondSessionCreated: true, normalizedSessionName: true };
+      const wireSessionReplies = exchange([wireSessionRequest, normalizedWireSessionRequest,
+        request({ ...wireSessionCore, requestId: '019a0012-0000-7000-8000-00000000011b', name: 'Installed Caf\u00e9' }),
+        request({ ...wireSessionCore, requestId: '019a0012-0000-7000-8000-00000000011b' }),
+        request({ ...wireSessionCore, requestId: '019a0012-0000-7000-8000-00000000011c', name: 'Different installed Session' })]);
+      report.sessionCreateWireIdentity.observedReplies = wireSessionReplies.map(reply => ({ ok: reply.ok,
+        code: reply.ok ? 'accepted' : ['INVALID_REQUEST', 'REQUEST_ID_CONFLICT', 'ADMISSION_KEY_CONFLICT', 'RECOVERY_REQUIRED'].includes(reply.error?.code as string)
+          ? reply.error!.code : 'unrecognized' }));
+      assert.deepEqual(wireSessionReplies[0], wireSessionReply, 'the exact original wire request must replay its first Session response');
+      for (const [index, code] of [[1, 'REQUEST_ID_CONFLICT'], [3, 'REQUEST_ID_CONFLICT'], [4, 'ADMISSION_KEY_CONFLICT']] as const) {
+        assert.equal(canonicalSha256(wireSessionReplies[index]), canonicalSha256({ protocolVersion: 1, ok: false, method: 'session.create',
+          error: { schemaVersion: 1, code, retryable: false, messageCode: 'control.mutation_refused' } }));
+      }
+      assert.deepEqual(wireSessionReplies[2], wireSessionReply, 'a fresh nonce with the same normalized intent must bind the original raw-wire Session response');
+      assert.deepEqual(currentSession(), refusalSession); assert.deepEqual(read(), terminal);
+      assert.equal(requestsReceived, 1); assert(!providerFailure);
+      for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
+      assert.equal(await readFile(source, 'utf8'), hostBefore);
+      report.sessionCreateWireIdentity.qualified = true;
+      report.sessionCreateWireIdentity.originalAndFreshNonceResponsesPreserved = true;
+      report.sessionCreateWireIdentity.exactWireNonceConflictsPreserved = true;
+      report.sessionCreateWireIdentity.normalizedIntentConflictPreserved = true;
+      report.sessionCreateWireIdentity.originalSessionRunAndProviderCountUnchanged = true;
     } else {
     mark('real_edit_and_ready_checkpoint');
     let current: Record<string, any> | undefined;

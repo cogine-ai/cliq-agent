@@ -124,6 +124,9 @@ item. Original- and fresh-nonce replay must preserve the exact refusal, while
 request-ID and admission-key conflicts remain conflicts without a new Run,
 Session change or provider request. This remains inside the existing scan cap;
 it does not add a source experiment to the full journey's near-cap corpus.
+It then creates a second real Session using an NFD name: normalized-equivalent
+intent may replay under a fresh nonce, but different original public bytes under
+the same nonce must conflict. Normalization must not replace wire identity.
 
 A second independent campaign temporarily changes only the test user's default
 Secret Service alias through the existing standard-API fixture. It requires a
@@ -134,6 +137,11 @@ explicit cancellation. This tests recovery from temporary configuration drift,
 not locked-store recovery, daemon restart or permission to resend a claimed or
 unknown invocation. The pure scheduling decision regressions grant no authority
 and cannot replace this installed observation or its final scans and cleanup.
+After genuine cancellation, this campaign closes and joins its owned HTTPS
+listener before another Run attempts the same endpoint. A real post-claim
+connection refusal must retain a fully charged `unknown`, never an unsettled
+claim, refund or resend. This does not qualify the pre-connect claim gap,
+unknown cancellation/terminal outcome, or a post-claim no-release producer.
 
 This document describes the implemented composition and its validation boundary;
 it does not certify a source revision. Qualification requires the exact-SHA
