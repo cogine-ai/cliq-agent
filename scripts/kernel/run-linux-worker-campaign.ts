@@ -18,7 +18,7 @@ import type { ProcessContainment, ProcessContainmentDeathEvidenceV1, ProcessCont
 import type { ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1 } from '../../src/kernel/reconciliation.js';
 import type { WorkerDeathWait, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1,
-  SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1 } from '../../src/kernel/types.js';
+  WorkspaceGenerationRetirementEvidenceV1, SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1 } from '../../src/kernel/types.js';
 import { openLinuxWorkerLauncher, type LinuxWorkerController, type LinuxWorkerLauncher } from '../../src/sandbox/linux-worker.js';
 import { createLinuxWorkerCampaignFixture } from '../../src/sandbox/testing/worker-campaign-fixture.js';
 import type { LocalControlConnection, LocalControlListener } from '../../src/state/control-channel.js';
@@ -31,7 +31,8 @@ import { readRequiredWorkspaceGenerationByRef } from '../../src/state/repositori
 import { readRun } from '../../src/state/rows.js';
 import { openSqliteDriver, type SqliteConnection } from '../../src/state/sqlite-driver.js';
 import { readLatestStateOwner } from '../../src/state/state-owner.js';
-import { openStateStore, type StateStore } from '../../src/state/store.js';
+import { openStateStore, publishInProcessChannel, type StateStore } from '../../src/state/store.js';
+import { uuidv7 } from '../../src/state/testing/fixtures.js';
 import type { CrashChildInput, CrashChildPaused, CrashChildQueuedPostMove, CrashChildRetirementRefused, CrashChildControllerLossRefused } from './linux-worker-crash-child.js';
 
 // This command is intentionally separate from ordinary portable unit tests.
@@ -940,12 +941,57 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
       catch (error) { successorOpeningFailed = true; throw error; }
       assert.deepEqual(await checkpointBytes(store, fixture.runId), after);
     }
+    const closingExecution = created ? retry : await store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
+    const closingAgent = await store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+      releaseKeys: fixture.signed.releaseKeys });
+    const sessionBeforeStop = store.getSession(fixture.sessionId);
+    const cancelRequest = { ...await publishInProcessChannel(store), requestId: uuidv7(), expectedRunRevision: after.closure.run.revision };
+    const cancelled = await bounded(closingAgent.cancelRun(cancelRequest));
+    assert.equal(cancelled.run.cancelRequested, true); assert.ok(cancelled.run.stopIntentRef);
+    console.log(JSON.stringify({ scenario: `actual-${boundary.replaceAll('_', '-')}-retirement-and-retry`, phase: 'terminal_drain',
+      runId: fixture.runId, oldLaunchId: old.launchId, oldGenerationRef: old.workspaceGenerationRef,
+      replacementLaunchId: replacement.launchId, replacementGenerationRef: replacement.workspaceGenerationRef,
+      originalQuarantineReason: created ? 'launch_died_before_activation' : 'launch_aborted', nativeEffectCount: 1, permanentToolClaims: 1 }));
+    // Follow the installed driver's existing queued resume, then public stop
+    // drain. The replacement's seal cannot retire the original quarantine.
+    const draining = await bounded(closingExecution.resumeCurrentRetirement({ expectedRunRevision: cancelled.run.revision }));
+    const terminal = await bounded(closingExecution.finishCurrentStop({ expectedRunRevision: draining.revision }));
+    assert.equal(terminal.status, 'cancelled'); assert.equal(terminal.terminalReason, 'cancelled_by_user');
+    assert.equal(terminal.activeWorkerLaunchId, undefined); assert.equal(terminal.resultRef, undefined);
+    assert.deepEqual(terminal.budgetConsumed, after.closure.run.budgetConsumed);
+    assert.deepEqual(terminal.budgetReserved, after.closure.run.budgetReserved);
+    const terminalCut = await checkpointBytes(store, fixture.runId);
+    assert.deepEqual(terminalCut.bytes, after.bytes); assert.deepEqual(terminalCut.closure.journal, after.closure.journal);
+    const retiredGeneration = terminalCut.closure.workspaceGenerations.find(row => row.generationRef === old.workspaceGenerationRef);
+    assert.equal(retiredGeneration?.phase, 'retired');
+    if (retiredGeneration?.phase !== 'retired' || generation.phase !== 'quarantined')
+      throw new Error('terminal preactivation recovery lacks its distinct original quarantine retirement');
+    const retirement = await store.artifacts.readCanonical<WorkspaceGenerationRetirementEvidenceV1>(retiredGeneration.retirementEvidenceRef);
+    assert.equal(retirement.fromPhase, 'quarantined');
+    if (retirement.fromPhase !== 'quarantined') throw new Error('original preactivation quarantine was replaced by a seal');
+    assert.equal(retirement.runId, fixture.runId); assert.equal(retirement.generationRef, old.workspaceGenerationRef);
+    assert.equal(retirement.generationIdentityDigest, generation.generationIdentityDigest);
+    assert.equal(retirement.quarantineEvidenceRef, generation.quarantineEvidenceRef);
+    assert.equal(retirement.quarantineEvidenceDigest, generation.quarantineEvidenceDigest);
+    assert.equal(retirement.sourceQuarantinedRowVersion, generation.rowVersion);
+    assert.equal(retirement.evidenceDigest, retiredGeneration.retirementEvidenceDigest);
+    assert.equal(retirement.evidenceDigest, digestOmitting(retirement, 'evidenceDigest'));
+    assert.deepEqual([retirement.activeRunPointerCount, retirement.nonretiredWorkerLaunchCount, retirement.liveContainmentCount,
+      retirement.activeMountCount, retirement.releasableBrokerClaimCount], [0, 0, 0, 0, 0]);
+    assert.deepEqual(inspection.readSnapshot(connection => readRequiredWorkerLaunch(connection, old.launchId)), old);
+    const terminalSession = store.getSession(fixture.sessionId);
+    assert.equal(terminalSession.contextRevision, sessionBeforeStop.contextRevision + 1);
+    assert.equal(terminalSession.latestItemSeq, sessionBeforeStop.latestItemSeq + 1);
+    assert.deepEqual(await bounded(closingExecution.finishCurrentStop({ expectedRunRevision: terminal.revision })), terminal);
+    assert.deepEqual((await bounded(closingAgent.cancelRun({ ...cancelRequest, ...await publishInProcessChannel(store) }))).response, cancelled.response);
+    assert.deepEqual(store.getSession(fixture.sessionId), terminalSession);
     console.log(JSON.stringify({ scenario: `actual-${boundary.replaceAll('_', '-')}-retirement-and-retry`, runId: fixture.runId,
       oldLaunchId: old.launchId, newLaunchId: replacement.launchId, oldGenerationRef: old.workspaceGenerationRef,
       newGenerationRef: replacement.workspaceGenerationRef,
       ...(fault.physicalScope ? { actualWorkerPid: fault.physicalScope.workerPid, actualWorkerStartToken: fault.physicalScope.workerToken } : {}),
       ...(!created ? { retryScope: 'same_live_execution', failedSealedImage: fault.sealedImage, freshSealedImage: freshImage } : {}),
-      actualReadFaults: faults, nativeEffectCount: 1, permanentToolClaims: 1 }));
+      actualReadFaults: faults, nativeEffectCount: 1, permanentToolClaims: 1, terminalStatus: terminal.status,
+      originalQuarantineRetired: true, sessionPublishedOnce: true }));
   } catch (error) { operationFailure = { error }; throw error; }
   finally {
     fs.readSync = originalRead; syncBuiltinESMExports();

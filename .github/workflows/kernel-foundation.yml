@@ -166,6 +166,7 @@ jobs:
           node --test --test-concurrency=1 --import tsx
           scripts/kernel/testing/credential-platform-queue.test.ts
           scripts/kernel/testing/credential-platform-timeout.test.ts
+          scripts/kernel/testing/model-broker-preparation-lifecycle.test.ts
       - name: Verify the bounded secret scan before collecting credential artifacts
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: >-
