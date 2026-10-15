@@ -153,7 +153,10 @@ export async function readSourceInspectionRetirement(driver: SqliteDriver, artif
   }
 }
 
-async function replay(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+/** Retained-only friend shared with installed admission. It never opens live
+ * source or starts a capture when the original attempt is absent; the same
+ * complete provenance, retirement and request-association checks apply. */
+export async function replaySubmittedSource(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   bootstrap: SourceInspectionOwnerBootstrap, request: ReturnType<typeof normalizeRunSubmitRequest>['request'],
   identity: AuthenticatedControlIdentity): Promise<SourceInspectionAttemptV1 | undefined> {
   const key = { principalId: identity.principalId, admissionKey: request.admissionKey,
@@ -302,7 +305,7 @@ export async function captureSubmittedSource(driver: SqliteDriver, artifacts: Ar
 Promise<SourceInspectionAttemptV1> {
   const normalized = normalizeRunSubmitRequest(input.request), request = normalized.request, identity = immutableSnapshot(input.identity);
   signal?.throwIfAborted(); await validateControlChannelClosure(artifacts, owner, identity); assertActiveStateOwner(driver, owner);
-  const retained = await replay(driver, artifacts, owner, bootstrap, request, identity);
+  const retained = await replaySubmittedSource(driver, artifacts, owner, bootstrap, request, identity);
   if (retained) return retained;
   signal?.throwIfAborted();
   const resources: Array<{ close(): void }> = [];

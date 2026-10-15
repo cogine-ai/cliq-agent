@@ -1694,6 +1694,30 @@ export class StateStore {
       }
       return replay;
     }
+    const { readSourceInspectionAttempt } = await import('./source-inspection.js');
+    const sourceKey = { principalId: identity.principalId, admissionKey: normalized.request.admissionKey,
+      admissionIntentDigest: runSubmitIntentDigest(identity.principalId, normalized.request) };
+    const retainedSource = readSourceInspectionAttempt(this.driver, sourceKey);
+    if (retainedSource?.phase === 'retired' && retainedSource.outcome.kind !== 'captured') {
+      // Return only an inert historical refusal before new admission preflight.
+      // The retained-only producer validates its full historical closure and
+      // binds a fresh request id; it can never fall back to recapture.
+      const { replaySubmittedSource, readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
+      assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
+      const source = await replaySubmittedSource(this.driver, this.artifacts, this.owner,
+        { bundle: this.runtimeAuthority.bundle, releaseKeys: this.runtimeAuthority.releaseKeys,
+          ...this.runtimeAuthority.sourceInspection, sandboxProfile: installedSandboxProfile(normalized.request.sandboxResources) },
+        normalized.request, identity);
+      if (!source || canonicalSha256(source) !== canonicalSha256(retainedSource))
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source refusal changed during retained replay');
+      const response = await readSourceInspectionErrorResponse(this.artifacts, source);
+      await validateControlChannelClosure(this.artifacts, this.owner, identity);
+      assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
+      const currentSource = readSourceInspectionAttempt(this.driver, sourceKey);
+      if (!currentSource || canonicalSha256(currentSource) !== canonicalSha256(retainedSource))
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source refusal changed before replay response');
+      return { response };
+    }
     const { assembleInstalledRun, assertInstalledRunRecipe, InstalledRunAuthorityError } = await import('./installed-run.js');
     if (!this.installedModelAdmissionReady) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
     const assertRecipe: typeof assertInstalledRunRecipe = assertInstalledRunRecipe;

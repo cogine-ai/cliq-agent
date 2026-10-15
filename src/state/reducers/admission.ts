@@ -263,8 +263,6 @@ export async function replayInstalledRunAdmission(
       if (!source || source.phase !== 'retired' || source.outcome.kind === 'captured' || source.outcome.errorResponseRef !== control.responseRef)
         throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run replay has neither admission nor its original source refusal');
       await readSourceInspectionErrorResponse(artifacts, source);
-      // The existing capture producer revalidates its complete historical
-      // target/request/retirement and replays this refusal without live reads.
     }
     return undefined;
   }
