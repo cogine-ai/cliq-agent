@@ -65,6 +65,10 @@ The Linux journey uses a disposable real user manager, signed installation,
 Secret Service, native broker and an owned scripted HTTPS endpoint on a free
 standard Ubuntu 22.04 runner. It calls the installed entry and existing v1 UDS,
 not private Store, native-owner or authority factories.
+For final exit-history observation only, a test observer retains the two actual
+unit objects on one continuous user-bus connection before ordinary stop/show,
+then releases both references, closes and joins. It does not change the production
+profiles or substitute for normal-exit, process-absence or secret-scan assertions.
 Its disposable HOME requires a real bounded ext4 filesystem: the native
 generation and controller gates check total filesystem capacity, not free
 space. Providing this physical limit for the experiment does not qualify an
@@ -93,10 +97,11 @@ to consumed budget, clears the reservation and uses the actual settlement timest
 `broker_response_refused` log correlates that refusal to the actual claim; it
 contains no secret or dynamic provider diagnostic and grants no authority.
 
-The journey's bounded reports are evidence only for assertions that actually
-execute. Until a successful immutable-SHA Linux run is recorded below, the new
-installed loop remains **unverified**. Pure-data codec, corruption and local
-resource tests do not establish physical Linux authority.
+This document describes the implemented composition and its validation boundary;
+it does not certify a source revision. Qualification requires the exact-SHA
+evidence set described below. The journey's bounded reports cover only assertions
+that actually execute. Pure-data codec, corruption and local resource tests do
+not establish physical Linux authority.
 
 Still unverified by this scope: real-provider capability and billing,
 streaming, macOS strong execution, cross-reboot recovery, live updates,
@@ -116,4 +121,15 @@ and retirement receipts still require the actual worker and callback joins.
 
 ## Evidence
 
-Pending final local regression and actual Linux installed-loop qualification.
+Qualification evidence is indexed in the associated complete PR's Evidence
+section and preserved in its retained evidence archive. The manifest identifies
+the exact tested source SHA, workflow run and attempt, bounded journey report,
+cleanup report and artifact SHA-256 hashes. Generated run identifiers and hashes
+are not committed back into source.
+
+A passing claim requires the matching immutable-SHA workflow and complete reports
+to satisfy the existing acceptance criteria, including successful writer/resource
+joins, retained-secret scanning and outer cleanup. Missing, failed or incomplete
+evidence establishes no qualification. The manifest must retain every explicitly
+unverified boundary: a passing installed-loop run does not imply complete I1,
+lease-renewal, real-provider capability/billing, macOS or I2 qualification.

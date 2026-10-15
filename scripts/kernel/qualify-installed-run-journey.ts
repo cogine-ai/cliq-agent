@@ -2,7 +2,7 @@
 // The owned HTTPS responder qualifies transport mechanics, never a provider,
 // model capability/billing bound, I2 result, macOS or the full I1 fault matrix.
 import assert from 'node:assert/strict';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes, X509Certificate } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chown, lstat, mkdir, open, readFile, readdir, readlink, stat, writeFile } from 'node:fs/promises';
@@ -184,6 +184,64 @@ async function campaign(filename: string): Promise<void> {
     const result = command(recipe.observer, ['list']); assert.equal(result.status, 0);
     const value = parseJsonStrict(result.stdout.trim()) as { serviceUid: number; servicePid: number; nameOwner: string; items: string[]; connectionClosed: boolean };
     assert.equal(value.serviceUid, ledger.uid); assert.equal(value.connectionClosed, true); return value;
+  };
+  // systemd may unload an inactive unreferenced unit and discard its exit
+  // history. Hold both actual unit objects on one real user-bus connection
+  // until the original stop/show assertions finish; never change the units.
+  const withRetainedUnitHistory = async (units: string[], body: () => Promise<void>): Promise<void> => {
+    assert.equal(units.length, 2);
+    const outScan = scanner.openStream();
+    let errorScan: ReturnType<typeof scanner.openStream>;
+    try { errorScan = scanner.openStream(); } catch (error) { outScan.close(); throw error; }
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn('/usr/sbin/runuser', [...prefix, recipe.observer, 'retain-systemd', ...units],
+        { env: environment, cwd: ledger.home, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (error) { outScan.close(); errorScan.close(); throw error; }
+    const retained = 'systemd_units_retained\n', released = `${retained}systemd_units_released\n`;
+    let output = '', bytes = 0, errorBytes = 0, observationError: unknown, releasing = false;
+    let readyResolve!: () => void, readyReject!: (error: unknown) => void;
+    const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+    const refuse = (error: unknown) => { observationError ??= error; readyReject(error); };
+    child.stdout.on('data', (chunk: Buffer) => {
+      try {
+        outScan.scan(chunk); bytes += chunk.length; assert(bytes <= 1024, 'unit-history observer output exceeded its bound');
+        output += chunk.toString('utf8');
+        assert(released.startsWith(output), 'unit-history observer emitted an invalid fixed frame');
+        assert(releasing || output.length <= retained.length, 'unit-history observer released before exit observation');
+        if (output === retained) readyResolve();
+      } catch (error) { refuse(error); }
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      try { errorScan.scan(chunk); errorBytes += chunk.length; assert(errorBytes <= 1024, 'unit-history observer errors exceeded their bound'); }
+      catch (error) { refuse(error); }
+    });
+    child.stdin.on('error', refuse); child.stdout.on('error', refuse); child.stderr.on('error', refuse);
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+      child.once('error', refuse);
+      child.once('close', (code, signal) => {
+        outScan.close(); errorScan.close();
+        if (!releasing) refuse(new Error('unit-history observer exited before release'));
+        resolve({ code, signal });
+      });
+    });
+    const failures: unknown[] = [];
+    try {
+      await bounded(Promise.race([ready, closed.then(() => { throw new Error('unit-history observer closed before readiness'); })]),
+        10000, 'unit-history observer did not retain the actual units');
+      await body();
+    } catch (error) { failures.push(error); }
+    finally {
+      releasing = true;
+      try {
+        child.stdin.end('R');
+        const exit = await bounded(closed, 10000, 'unit-history observer did not release and join');
+        assert.equal(exit.signal, null); assert.equal(exit.code, 0); assert.equal(observationError, undefined);
+        assert.equal(output, released); assert.equal(errorBytes, 0);
+        report.unitExitHistoryObserverJoined = true;
+      } catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new AggregateError(failures, 'actual unit exit history was not retained and joined');
   };
   let daemon: ChildProcess | undefined, daemonExit: Promise<void> | undefined, daemonPid: number | undefined, daemonStart: string | undefined;
   let installedServices: { supervisorUnit: string; keeperUnit: string } | undefined;
@@ -852,18 +910,20 @@ async function campaign(filename: string): Promise<void> {
         // The outer root cleanup still independently checks all UID resources.
         const units = [installedServices.supervisorUnit, installedServices.keeperUnit];
         const before = units.map(unit => show(unit));
-        assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);
-        const stoppedUnits = units.map(unit => show(unit));
-        report.installedServiceExit = { supervisor: projectInstalledServiceExit(stoppedUnits[0]),
-          keeper: projectInstalledServiceExit(stoppedUnits[1]) };
-        for (let index = 0; index < units.length; index++) {
-          const stopped = stoppedUnits[index]!;
-          assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');
-          assert.equal(stopped.Result, 'success'); assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
-          if (/^[1-9][0-9]*$/u.test(before[index]!.MainPID!)) {
-            await assert.rejects(lstat(`/proc/${before[index]!.MainPID}`), { code: 'ENOENT' });
+        await withRetainedUnitHistory(units, async () => {
+          assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);
+          const stoppedUnits = units.map(unit => show(unit));
+          report.installedServiceExit = { supervisor: projectInstalledServiceExit(stoppedUnits[0]),
+            keeper: projectInstalledServiceExit(stoppedUnits[1]) };
+          for (let index = 0; index < units.length; index++) {
+            const stopped = stoppedUnits[index]!;
+            assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');
+            assert.equal(stopped.Result, 'success'); assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
+            if (/^[1-9][0-9]*$/u.test(before[index]!.MainPID!)) {
+              await assert.rejects(lstat(`/proc/${before[index]!.MainPID}`), { code: 'ENOENT' });
+            }
           }
-        }
+        });
         report.installedWritersJoined = true;
       }
     } catch (error) { cleanupFailures.push(error); }
