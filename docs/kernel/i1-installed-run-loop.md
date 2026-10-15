@@ -60,6 +60,9 @@ The installed broker also supports only its existing ASCII base-path subset
 Admission checks the actual registered endpoint before source capture and
 refuses unsupported paths; general endpoint registration remains wider. No
 registered path is decoded, rewritten or silently normalized to make it fit.
+The same preflight rejects more than 64 SPKI pins, matching the native broker's
+array capacity without truncating the registered TLS policy. Generic endpoint
+registration retains its wider nonempty, unique, sorted pin-array contract.
 After a validated terminal Run, its joined driver task closes the original
 launcher/sealed-image owners before evicting memory caches. This reclaims no
 durable history and does not treat a candidate, unknown or wait as terminal.

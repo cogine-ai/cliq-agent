@@ -1,5 +1,6 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { immutableSnapshot } from '../../model/immutable.js';
+import { exactKeys } from '../../policy/runtime-authority.js';
 import {
   assertAdmissionKey,
   assertArtifactRef,
@@ -19,7 +20,8 @@ import type {
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
-import { validateControlChannelClosure } from '../control-channel.js';
+import { assertCurrentControlFrame, validateControlChannelClosure, type AuthenticatedControlIdentity } from '../control-channel.js';
+import { readCanonicalArtifact } from '../agent-context.js';
 import { decodeSessionProjection, decodeWorkspaceIdentity } from '../decoders.js';
 import { KernelStorageError } from '../errors.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
@@ -53,6 +55,49 @@ export type CreateSessionResult = {
   session: Session;
   response: SessionCreateResponse;
 };
+
+type SessionCreatePublicCore = {
+  protocolVersion: 1;
+  method: 'session.create';
+  requestId: string;
+  admissionKey: string;
+  workspacePath: string;
+  name?: string;
+};
+type InstalledSessionRequest = {
+  core: Readonly<SessionCreatePublicCore>;
+  requestDigest: string;
+  identity: AuthenticatedControlIdentity;
+};
+
+function readSessionCreatePublicRequest(request: unknown,
+  errorCode: 'INVALID_REQUEST' | 'RECOVERY_REQUIRED' = 'INVALID_REQUEST') {
+  try {
+    const value = immutableSnapshot(request) as Record<string, unknown>;
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        !exactKeys(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'admissionKey', 'workspacePath',
+          ...(Object.hasOwn(value, 'name') ? ['name'] : [])]) || value.protocolVersion !== 1 || value.method !== 'session.create' ||
+        typeof value.requestId !== 'string' || typeof value.admissionKey !== 'string' || typeof value.workspacePath !== 'string' ||
+        (Object.hasOwn(value, 'name') && typeof value.name !== 'string'))
+      throw new TypeError('session.create requires its exact public inline contract');
+    const { requestDigest, ...core } = value;
+    if (typeof requestDigest !== 'string' || requestDigest !== canonicalSha256(core))
+      throw new TypeError('session.create public request digest differs');
+    assertRequestId(value.requestId); assertAdmissionKey(value.admissionKey);
+    normalizeAbsolutePath(value.workspacePath);
+    if (value.name !== undefined) normalizeBoundedText(value.name as string, 1, 256);
+    return { core: core as SessionCreatePublicCore, requestDigest };
+  } catch (cause) {
+    throw new KernelStorageError(errorCode, 'session.create public request is invalid', { cause });
+  }
+}
+
+async function publishSessionCreatePublicCore(artifacts: ArtifactCatalog, installed: InstalledSessionRequest): Promise<PublishedArtifact> {
+  const artifact = await artifacts.publishCanonical(installed.core, 'cliq-session-create-request-core-v1');
+  if (artifact.ref !== installed.requestDigest)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'session.create original public core digest changed');
+  return artifact;
+}
 
 function sessionCreateIntent(input: {
   principalId: string;
@@ -105,7 +150,8 @@ async function replayCreateSession(
   owner: StateOwnerContext,
   input: CreateSessionInput,
   admissionIntentDigest: string,
-  requestDigest: string
+  requestDigest: string,
+  installed?: InstalledSessionRequest
 ): Promise<CreateSessionResult | undefined> {
   const existingControl = readControlRequest(driver, input.principalId, 'session.create', input.requestId);
   if (existingControl !== undefined) {
@@ -135,7 +181,17 @@ async function replayCreateSession(
     }
     const originalRequestId = existingAdmission.admissionRequestId;
     const original = readControlRequest(driver, input.principalId, 'session.create', originalRequestId);
-    if (!original || original.requestDigest !== sessionCreateRequestDigest({ ...input, requestId: originalRequestId })) {
+    if (!original) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original control request does not match');
+    }
+    if (installed) {
+      const originalCore = await readCanonicalArtifact<object>(artifacts, original.requestDigest);
+      const retained = readSessionCreatePublicRequest({ ...originalCore, requestDigest: original.requestDigest }, 'RECOVERY_REQUIRED');
+      if (retained.core.requestId !== originalRequestId || retained.core.admissionKey !== input.admissionKey ||
+          sessionCreateIntent({ principalId: input.principalId, workspacePath: normalizeAbsolutePath(retained.core.workspacePath),
+            ...(retained.core.name === undefined ? {} : { name: normalizeBoundedText(retained.core.name, 1, 256) }) }) !== admissionIntentDigest)
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original public request does not bind its intent');
+    } else if (original.requestDigest !== sessionCreateRequestDigest({ ...input, requestId: originalRequestId })) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original control request does not match');
     }
     const response = await readPublishedResponse(artifacts, original.responseRef);
@@ -144,6 +200,7 @@ async function replayCreateSession(
       throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original response names another Session');
     }
     const channel = await validateControlChannelClosure(artifacts, owner, input);
+    const requestArtifact = installed ? await publishSessionCreatePublicCore(artifacts, installed) : undefined;
     let fenceOutcome: TimeFenceAdvance | undefined;
     driver.transaction(connection => {
       const control = readControlRequest(connection, input.principalId, 'session.create', input.requestId);
@@ -159,11 +216,13 @@ async function replayCreateSession(
           canonicalSha256(currentOriginal) !== canonicalSha256(original)) {
         throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original response link changed');
       }
+      if (installed) assertCurrentControlFrame(owner, installed.identity);
       assertActiveStateOwner(connection, owner);
       const now = sampleCanonicalNow();
       fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
       if (fenceOutcome !== 'healthy') return;
       for (const artifact of channel.metadata) insertArtifactMetadata(connection, artifact, now);
+      if (requestArtifact) insertArtifactMetadata(connection, requestArtifact, now);
       insertControlRequest(connection, { principalId: input.principalId, method: 'session.create', requestId: input.requestId,
         channelIdentityRef: input.channelIdentityRef, channelIdentityDigest: input.channelIdentityDigest, requestDigest,
         responseRef: original.responseRef, committedAt: now });
@@ -183,6 +242,35 @@ export async function createSession(
   input: CreateSessionInput,
   selected?: HeldInstalledRuntime
 ): Promise<CreateSessionResult> {
+  return createSessionWithin(driver, artifacts, owner, input, selected);
+}
+
+/** Installed production friend: validates public wire identity itself, never accepts a digest override. */
+export async function createInstalledSession(
+  driver: SqliteDriver,
+  artifacts: ArtifactCatalog,
+  owner: StateOwnerContext,
+  request: unknown,
+  identity: AuthenticatedControlIdentity,
+  selected: HeldInstalledRuntime
+): Promise<CreateSessionResult> {
+  assertCurrentControlFrame(owner, identity);
+  const wire = readSessionCreatePublicRequest(request);
+  const result = await createSessionWithin(driver, artifacts, owner, { ...identity, requestId: wire.core.requestId,
+    admissionKey: wire.core.admissionKey, workspacePath: wire.core.workspacePath,
+    ...(wire.core.name === undefined ? {} : { name: wire.core.name }) }, selected, { ...wire, identity });
+  assertCurrentControlFrame(owner, identity);
+  return result;
+}
+
+async function createSessionWithin(
+  driver: SqliteDriver,
+  artifacts: ArtifactCatalog,
+  owner: StateOwnerContext,
+  input: CreateSessionInput,
+  selected?: HeldInstalledRuntime,
+  installed?: InstalledSessionRequest
+): Promise<CreateSessionResult> {
   assertRequestId(input.requestId);
   assertAdmissionKey(input.admissionKey);
   assertArtifactRef(input.channelIdentityRef);
@@ -194,14 +282,14 @@ export async function createSession(
     workspacePath,
     name
   });
-  const requestDigest = sessionCreateRequestDigest({
+  const requestDigest = installed?.requestDigest ?? sessionCreateRequestDigest({
     requestId: input.requestId,
     admissionKey: input.admissionKey,
     workspacePath,
     name
   });
 
-  const replayed = await replayCreateSession(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
+  const replayed = await replayCreateSession(driver, artifacts, owner, input, admissionIntentDigest, requestDigest, installed);
   if (replayed !== undefined) return replayed;
 
   const channelClosure = await validateControlChannelClosure(artifacts, owner, input);
@@ -210,6 +298,7 @@ export async function createSession(
   const capture = { workspacePath, ownerPrincipalId: input.principalId };
   const captured = selected ? await captureInstalledWorkspaceIdentity(selected, capture) : await captureLiveWorkspaceIdentity(capture);
   const published: PublishedArtifact[] = [...channelClosure.metadata];
+  if (installed) published.push(await publishSessionCreatePublicCore(artifacts, installed));
   let workspaceIdentity: Extract<WorkspaceIdentityV1, { kind: 'live' }> = captured.identity;
   if (captured.repository !== undefined) {
     const repositoryArtifact = await artifacts.publishCanonical(
@@ -293,6 +382,7 @@ export async function createSession(
       return;
     }
 
+    if (installed) assertCurrentControlFrame(owner, installed.identity);
     assertActiveStateOwner(connection, owner);
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch);
     if (fenceOutcome !== 'healthy') return;
@@ -337,7 +427,7 @@ export async function createSession(
     throw new KernelStorageError('INVALID_REQUEST', 'canonical clock is still in clock_regressed');
   }
   if (committed) return { replayed: false, session, response };
-  const raced = await replayCreateSession(driver, artifacts, owner, input, admissionIntentDigest, requestDigest);
+  const raced = await replayCreateSession(driver, artifacts, owner, input, admissionIntentDigest, requestDigest, installed);
   if (raced !== undefined) return raced;
   throw new KernelStorageError('RECOVERY_REQUIRED', 'session.create transaction committed no Session');
 }

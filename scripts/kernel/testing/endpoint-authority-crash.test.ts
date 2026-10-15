@@ -134,19 +134,25 @@ async function cutWriter(input: { phase: 'before' | 'after'; bootstrap: string; 
       const pids = children.trim() ? children.trim().split(/\s+/u).map(Number) : [];
       assert(pids.length <= 1, 'the tracer must own only its one actual bootstrap');
       if (pids[0]) {
-        const fields = processFields(await readFile(`/proc/${pids[0]}/stat`, 'utf8'));
-        assert.equal(fields.parent, trace.pid);
-        writer = { pid: pids[0], start: fields.start };
-      } else await pause();
+        const pid = pids[0];
+        // strace first forks short-lived ptrace-probe children. Only retain
+        // the real bootstrap after it execs the exact selected signed image.
+        try {
+          const before = processFields(await readFile(`/proc/${pid}/stat`, 'utf8'));
+          assert.equal(before.parent, trace.pid);
+          const image = await stat(`/proc/${pid}/exe`, { bigint: true });
+          if (sameObject(physical(image), input.image)) {
+            const after = processFields(await readFile(`/proc/${pid}/stat`, 'utf8'));
+            assert.equal(after.parent, trace.pid); assert.equal(after.start, before.start);
+            writer = { pid, start: before.start };
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+      if (!writer) await pause();
     }
     assert(writer, 'tracer did not acquire its exact child');
-    // Bootstrap execs the selected signed image in the same PID. Observe that
-    // transition, not merely a pathname or the tracer's own process identity.
-    while (Date.now() < deadline) {
-      const image = await stat(`/proc/${writer.pid}/exe`, { bigint: true });
-      if (sameObject(physical(image), input.image)) break;
-      await pause();
-    }
     await live(); assert.equal(await imageDigest(`/proc/${writer.pid}/exe`), input.imageDigest); await live();
     while (Date.now() < deadline) {
       assert(stdout.length <= 65536 && stderr.length <= 65536, 'writer output exceeded bound');

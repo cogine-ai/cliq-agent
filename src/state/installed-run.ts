@@ -83,6 +83,10 @@ export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest,
       request.sandboxResources.maxProcesses < 8 || request.sandboxResources.maxSingleFileBytes > 268_435_456)
     invalid('installed Run selects an unsupported model, execution resource, verifier, dependency, MCP, skill or source inclusion');
   if (endpoint) {
+    // The native broker has 64 pin slots. Registration already requires the
+    // original array to be nonempty, unique and sorted; never truncate it.
+    if (endpoint.tls.spkiSha256Pins.length > 64)
+      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed model endpoint pin count is outside the native recipe');
     // Match the current native broker's path subset and 4097-byte C buffer.
     // Do not decode, normalize or silently alter the registered target.
     const basePath = endpoint.target.basePath;

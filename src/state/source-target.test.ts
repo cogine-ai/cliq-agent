@@ -74,17 +74,17 @@ test('installed recipe refuses oversized files before capture without clamping e
   }
 });
 
-test('installed recipe rejects unsupported registered paths without narrowing general endpoint registration', () => {
+test('installed recipe rejects unsupported registered paths and pin counts without narrowing general endpoint registration', () => {
   const request = normalizeRunSubmitRequest(inlineRequest({ model: { provider: 'openai-compatible', model: 'owned-fixture-model',
     endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] } })).request;
-  const registered = (basePath: string) => {
+  const registered = (basePath: string, spkiSha256Pins = ['a'.repeat(64)]) => {
     // Complete canonical data only, not registration or installed authority.
     const hash = 'a'.repeat(64), endpoint: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
       endpointRegistrationId: 'owned-fixture-endpoint', registrationKind: 'user', ownerPrincipalId: 'principal', purposes: ['model_endpoint'],
       target: { scheme: 'https', hostAscii: 'endpoint.invalid', port: 443, basePath, redirectPolicy: 'reject_all' },
       tls: { serverNameAscii: 'endpoint.invalid', minimumVersion: 'TLSv1.3', trustStoreRuntimeBundleRef: hash,
         trustStoreRuntimeBundleManifestDigest: hash, trustStoreEntryId: 'default_https_trust_store', trustStoreRef: hash,
-        trustStoreDigest: hash, spkiSha256Pins: [hash] }, endpointIdentityDigest: '', tlsPolicyDigest: '',
+        trustStoreDigest: hash, spkiSha256Pins }, endpointIdentityDigest: '', tlsPolicyDigest: '',
       createdAt: '2026-10-15T00:00:00.000Z', registrationDigest: '' };
     endpoint.tlsPolicyDigest = canonicalSha256(endpoint.tls);
     endpoint.endpointIdentityDigest = canonicalSha256({ target: endpoint.target, tlsPolicyDigest: endpoint.tlsPolicyDigest });
@@ -99,6 +99,14 @@ test('installed recipe rejects unsupported registered paths without narrowing ge
   for (const basePath of ['/', '/v1', '/v1/', '/.well-known/api-v1_~+', `/${'a'.repeat(4095)}`]) {
     assert.doesNotThrow(() => assertInstalledRunRecipe(request, registered(basePath)), basePath);
   }
+  const pins = Array.from({ length: 65 }, (_, index) => index.toString(16).padStart(64, '0'));
+  const atLimit = registered('/v1', pins.slice(0, 64));
+  assert.equal(atLimit.tls.spkiSha256Pins.length, 64);
+  assert.doesNotThrow(() => assertInstalledRunRecipe(request, atLimit));
+  const wider = registered('/v1', pins);
+  assert.equal(wider.tls.spkiSha256Pins.length, 65, 'generic registration retains its wider unique sorted pin contract');
+  assert.throws(() => assertInstalledRunRecipe(request, wider), { code: 'UNSUPPORTED_PLATFORM' });
+  assert.throws(() => registered('/v1', [pins[0], pins[0]]), /sorted|unique/);
 });
 
 for (const outcome of ['captured', 'failed'] as const) for (const missing of ['retirement', 'inspector'] as const) {

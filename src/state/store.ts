@@ -100,7 +100,7 @@ import {
   type PrepareInvocationInput,
   type SettleInvocationInput
 } from './reducers/invocation.js';
-import { createSession, type CreateSessionInput, type CreateSessionResult } from './reducers/session.js';
+import { createInstalledSession, createSession, type CreateSessionInput, type CreateSessionResult } from './reducers/session.js';
 import {
   activateWorkerLease,
   beginGenerationCheckpoint,
@@ -1667,17 +1667,9 @@ export class StateStore {
   supportsInstalledRuns(): boolean { return this.schedulerStarted && this.schedulerFailure === undefined && !this.closeRequested && !this.closed; }
 
   async createInstalledSession(request: unknown, identity: AuthenticatedControlIdentity) {
-    if (!this.supportsInstalledRuns()) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
-    const value = immutableSnapshot(request) as Record<string, unknown>;
-    if (!value || typeof value !== 'object' || Array.isArray(value) ||
-        !exactKeys(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'admissionKey', 'workspacePath',
-          ...(Object.hasOwn(value, 'name') ? ['name'] : [])]) || value.protocolVersion !== 1 || value.method !== 'session.create')
-      throw new KernelStorageError('INVALID_REQUEST', 'session.create requires its exact public inline contract');
-    const { requestDigest, ...core } = value;
-    if (requestDigest !== canonicalSha256(core)) throw new KernelStorageError('INVALID_REQUEST', 'session.create request digest differs');
-    return createSession(this.driver, this.artifacts, this.owner, { ...identity, requestId: value.requestId as string,
-      admissionKey: value.admissionKey as string, workspacePath: value.workspacePath as string,
-      ...(Object.hasOwn(value, 'name') ? { name: value.name as string } : {}) }, this.installedRuntime);
+    if (!this.supportsInstalledRuns() || !this.installedRuntime)
+      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run composition is not ready');
+    return createInstalledSession(this.driver, this.artifacts, this.owner, request, identity, this.installedRuntime);
   }
 
   async submitInstalledRun(request: unknown, identity: AuthenticatedControlIdentity) {
@@ -2552,7 +2544,7 @@ export class StateStore {
           ...(claimed ? { dispatchId: claimed.dispatchId, dispatchJournalSeq: claimed.seq } : {}), reason: error.reason }).toString('utf8'));
         const input = { runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision };
         const last = readInvocationAttempt(this.driver, runId, prepared.opId, prepared.attempt).at(-1);
-        if (last?.phase === 'dispatch_claimed' && claimed && closure?.requestStarted && !receivedResponse) {
+        if (last?.phase === 'dispatch_claimed' && claimed && closure?.networkStarted && !receivedResponse) {
           const active = assertActiveStateOwner(this.driver, this.owner);
           token.assertHeld();
           if (active.supervisorInstanceId !== claimed.supervisorInstanceId || active.ownerEpoch !== claimed.stateOwnerEpoch)
@@ -2566,11 +2558,13 @@ export class StateStore {
             claimingSupervisorInstanceId: claimed.supervisorInstanceId!, claimingStateOwnerEpoch: claimed.stateOwnerEpoch!,
             inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest,
             observedAt: sampleCanonicalNow(), evidenceDigest: '', ambiguityKind: 'broker_channel_lost_after_claim',
-            brokerFenceTokenDigest: claimed.brokerFenceTokenDigest!, failureCode: 'response_stream_interrupted', durableTerminalResultAbsent: true };
+            brokerFenceTokenDigest: claimed.brokerFenceTokenDigest!, failureCode: closure.requestStarted
+              ? 'response_stream_interrupted' : 'connection_lost_after_release_possible', durableTerminalResultAbsent: true };
           evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest'); decodeBrokerInvocationAmbiguity(evidence);
           const artifact = await this.artifacts.publishCanonical(evidence, evidence.format);
-          // This is an actual failed response after native body release, not a
-          // no-release refund, transport-retirement proof or display diagnosis.
+          // The genuine native handle accepted the exact claim at its network
+          // release gate. A failed connection is conservatively charged too;
+          // closure is never a no-release refund or a synthetic response.
           await markInstalledBrokerAmbiguity(this.driver, this.artifacts, this.owner, { ...input, evidenceRef: artifact.ref, evidenceDigest: evidence.evidenceDigest });
         } else if (last?.phase === 'prepared') {
           const evidence = { schemaVersion: 1, format: 'cliq-invocation-error-v1', runId, opId: prepared.opId, attempt: prepared.attempt,
@@ -2590,7 +2584,7 @@ export class StateStore {
             }
           }
         }
-        // Before the second release, or after a positively received response,
+        // Before native network release, or after a positively received response,
         // this implementation cannot truthfully mint that ambiguity branch.
         // Keep the original claim/reservation explicit for causal recovery.
         throw error;
