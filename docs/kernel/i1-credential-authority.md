@@ -85,6 +85,16 @@ Integration invokes the same fixed signed `runtime/bootstrap
 base64url; raw secret bytes use fd 0 only and are never part of that envelope.
 Identity, channel, subject, core hashes and platform selectors are producer-owned.
 
+For the fixed installed model broker, fresh `model_endpoint` enroll/rotate
+input must contain 1..65536 bytes, each in `0x21..0x7e`, matching its Bearer
+representation check. The existing active record determines a rotation's
+purpose. Check the original input after the frozen-intent check and before
+subject generation, `prepared` or platform creation; do not trim, encode, hash
+or persist the secret. Other purposes still accept opaque bounded bytes.
+Committed replay still returns before reading or validating new input. This
+representation check and a platform roundtrip do not validate a real provider's
+credential, capabilities or billing.
+
 - `{schemaVersion:1,kind:'read',credentialGrantId}` returns
   `{schemaVersion:1,record}` with latest committed metadata or null.
 - `{schemaVersion:1,kind:'install_services'}` is explicit installation setup,

@@ -694,13 +694,15 @@ async function cleanupCredentialWriteRequest(held: CredentialBinding, requestId:
   return immutableSnapshot(aborted);
 }
 
-function prepareCredentialWrite(held: CredentialBinding, request: CredentialWriteRequest): CredentialAuthorityOperationV1 {
+function prepareCredentialWrite(held: CredentialBinding, request: CredentialWriteRequest, secret: Buffer): CredentialAuthorityOperationV1 {
   ensureCredentialSchema(held.database!);
   const prior = readCredentialWriteOperation(held, request);
   if (prior && (prior.phase !== 'aborted' || prior.attempt === 3))
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential preparation requires a fresh request or recoverable terminal abort');
   const intent = credentialWriteIntent(held, request), { previous, endpoint, purpose, expiresAt } = intent;
   if (prior) credentialFrozenWriteIntent(prior, intent);
+  if (purpose === 'model_endpoint' && secret.some(byte => byte < 0x21 || byte > 0x7e))
+    throw new KernelStorageError('INVALID_REQUEST', 'model credential secret is outside the installed bearer byte range');
   const now = sampleCanonicalNow();
   if ([endpoint.createdAt, held.channelIdentity.openedAt, ...(previous ? [previous.createdAt] : []),
     ...(prior ? [prior.finishedAt!, prior.commandCore.externalSubject.observedAt] : [])].some(time => parseCanonicalTime(time) > parseCanonicalTime(now)) ||
@@ -797,7 +799,7 @@ export async function writeCredentialAuthority(selected: HeldInstalledRuntime, r
         await cleanupCredentialWriteRequest(held, request.requestId, platform!);
         credentialWriteContinuation(held, request);
       }
-      const prepared = prepareCredentialWrite(held, request);
+      const prepared = prepareCredentialWrite(held, request, secret!);
       let observation: SecretServiceObservation;
       try {
         observation = decodeSecretServiceObservation(await platform!.secretService({ kind: 'create_compare',
