@@ -69,6 +69,10 @@ after replay/conflict and all authority/time guards, before inserting any Run.
 Queued, running and waiting Runs occupy capacity; terminal history does not.
 Capacity refusal neither disables the scheduler nor changes generic admission,
 and the existing strict inventory readers still reject an inconsistent overflow.
+Only this fixed capacity classification returns the RFC's
+`RESOURCE_EXHAUSTED(resourceKind='run_queue', retryable=true, retryAfterMs=1000)`;
+ordinary malformed requests remain `INVALID_REQUEST`. The delay is a retry hint,
+not a promise of capacity or permission to retry any effect.
 After a validated terminal Run, its joined driver task closes the original
 launcher/sealed-image owners before evicting memory caches. This reclaims no
 durable history and does not treat a candidate, unknown or wait as terminal.
@@ -157,6 +161,8 @@ The approved read-only SQL capacity seam uses real SQLite data to verify the
 It creates no StateOwner, installed identity or native proof. It does not
 qualify an actual installed 1000-Run load or replace the original admission
 transaction's replay/conflict, authority, time and atomicity requirements.
+It also verifies the exact canonical fixed public refusal projection reused by
+the server; it does not dynamically exercise a full-capacity installed UDS call.
 
 Preactivation quarantine retirement is covered by the existing real worker
 campaign, not inferred from a later successful worker. A joined reservation

@@ -10,6 +10,7 @@ import type { StateStore } from './store.js';
 import type { CredentialAuthorityOperationV1 } from '../kernel/credential-authority.js';
 import type { CredentialFinalizeRequest } from './installed-credential-client.js';
 import { InstalledRunAuthorityError } from './installed-run.js';
+import { InstalledRunCapacityError } from './installed-run-capacity.js';
 
 export type RuntimeBundlePublicSummaryV1 = Readonly<{
   schemaVersion: 1;
@@ -55,6 +56,7 @@ type ErrorBase = { schemaVersion: 1; messageCode: string };
 type InvalidError = ErrorBase & { code: 'INVALID_REQUEST'; retryable: false;
   issues: Array<{ path: string; issueCode: string }> };
 export type InstalledControlErrorV1 = InvalidError
+  | InstalledRunCapacityError['controlError']
   | (ErrorBase & { code: 'INCOMPATIBLE_PROTOCOL'; retryable: false;
       supportedControlRange: { min: 1; max: 1 }; supportedHeadlessRange: Range;
       upgradeAction: 'upgrade_client' | 'upgrade_supervisor' })
@@ -175,6 +177,7 @@ export function openInstalledControl(store: StateStore,
         ? 'AUTHORIZATION_REQUIRED' : 'ARTIFACT_MISMATCH', retryable: false,
       messageCode: error.refusalCode === 'MODEL_COST_UNKNOWN' ? 'run.model_cost_unknown' : error.refusalCode === 'MODEL_CAPABILITY_UNKNOWN'
         ? 'run.model_capability_unknown' : 'run.assembly_invalid' };
+    if (error instanceof InstalledRunCapacityError) return error.controlError;
     if (error instanceof TypeError || (error instanceof KernelStorageError && error.code === 'INVALID_REQUEST')) return invalid();
     if (error instanceof KernelStorageError && ['REQUEST_ID_CONFLICT', 'ADMISSION_KEY_CONFLICT', 'BUDGET_EXHAUSTED'].includes(error.code)) return {
       schemaVersion: 1, code: error.code as 'REQUEST_ID_CONFLICT' | 'ADMISSION_KEY_CONFLICT' | 'BUDGET_EXHAUSTED',

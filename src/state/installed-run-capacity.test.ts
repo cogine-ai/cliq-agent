@@ -3,8 +3,9 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { KernelStorageError } from './errors.js';
-import { assertInstalledRunAdmissionCapacity } from './installed-run-capacity.js';
+import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { parseJsonStrict } from '../kernel/json.js';
+import { assertInstalledRunAdmissionCapacity, InstalledRunCapacityError } from './installed-run-capacity.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 
 // Approved read-only SQL seam: these are data rows in a real SQLite database,
@@ -32,7 +33,17 @@ test('installed admission has room at 999 active rows and refuses a new Run at 1
   const changes = driver.prepare('SELECT total_changes() AS changes').get();
   const bytes = readFileSync(database);
   driver.exec('PRAGMA query_only=ON');
-  assert.throws(check, error => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST' && error.retryable === false);
+  assert.throws(check, error => {
+    assert(error instanceof InstalledRunCapacityError);
+    assert(Object.isFrozen(error.controlError));
+    // The server returns this exact fixed projection; this is SQL/wire data
+    // conformance, not a real installed 1000-Run UDS qualification.
+    assert.deepEqual(parseJsonStrict(canonicalJsonBytes(error.controlError).toString('utf8')), Object.assign(Object.create(null), {
+      schemaVersion: 1, code: 'RESOURCE_EXHAUSTED', retryable: true,
+      messageCode: 'run.queue_capacity', resourceKind: 'run_queue', retryAfterMs: 1000
+    }));
+    return true;
+  });
   assert.deepEqual(driver.prepare('SELECT * FROM runs ORDER BY id').all(), before);
   assert.deepEqual(driver.prepare('SELECT total_changes() AS changes').get(), changes);
   assert.deepEqual(readFileSync(database), bytes);
@@ -44,7 +55,7 @@ test('queued, running and waiting rows each occupy the same installed capacity',
     driver.exec('DELETE FROM runs');
     add(999, status); assert.doesNotThrow(check);
     add(1, status);
-    assert.throws(check, error => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST');
+    assert.throws(check, error => error instanceof InstalledRunCapacityError);
   }
 });
 
@@ -53,11 +64,11 @@ test('each terminal state releases capacity without deleting retained history', 
   add(1000, 'queued');
   for (const status of ['succeeded', 'completed_unverified', 'failed', 'cancelled']) {
     add(10, status);
-    assert.throws(check, error => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST');
+    assert.throws(check, error => error instanceof InstalledRunCapacityError);
     driver.prepare('UPDATE runs SET status=? WHERE id=1').run(status);
     assert.doesNotThrow(check);
     driver.prepare("UPDATE runs SET status='queued' WHERE id=1").run();
-    assert.throws(check, error => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST');
+    assert.throws(check, error => error instanceof InstalledRunCapacityError);
   }
   assert.equal(driver.prepare('SELECT COUNT(*) AS count FROM runs').get<{ count: bigint }>()!.count, 1040n);
 });
@@ -67,6 +78,6 @@ test('a retained inventory already beyond the bound cannot admit more work', con
   add(1001, 'waiting');
   const before = driver.prepare('SELECT * FROM runs ORDER BY id').all();
   driver.exec('PRAGMA query_only=ON');
-  assert.throws(check, error => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST');
+  assert.throws(check, error => error instanceof InstalledRunCapacityError);
   assert.deepEqual(driver.prepare('SELECT * FROM runs ORDER BY id').all(), before);
 });
