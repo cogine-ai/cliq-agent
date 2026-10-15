@@ -4,7 +4,8 @@ import type { Run, RunAssemblyV1, RunSpec, SupervisorInspectorIdentityV1, Worker
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationRetirementEvidenceV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys } from '../policy/runtime-authority.js';
-import { readNativeRetainedWorkerRetirement, type NativeRetainedWorkerRetirement } from '../sandbox/linux-worker.js';
+import { readNativePreactivationRetirement, readNativeRetainedWorkerRetirement,
+  type NativePreactivationRetirement, type NativeRetainedWorkerRetirement } from '../sandbox/linux-worker.js';
 import { readRetainedWorkspaceRetirement, type RetainedWorkspaceObservation } from '../workspace/run-workspace/generation.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from './artifacts.js';
@@ -132,11 +133,14 @@ export function assertRetiredGenerationCut(connection: SqliteConnection | Sqlite
  * stand in for any of the three independent joined native resource owners. */
 export async function retireQuarantinedGeneration(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   runId: string; expectedRunRevision: number; expectedGenerationRowVersion: number; generationRef: string;
-  workerRetirement: NativeRetainedWorkerRetirement; workspaceRetirement: RetainedWorkspaceObservation;
+  workspaceRetirement: RetainedWorkspaceObservation;
   brokerQuiescence: InstalledBrokerQuiescence;
-}): Promise<Retired> {
+} & ({ workerRetirement: NativeRetainedWorkerRetirement; preactivationRetirement?: never } |
+  { workerRetirement?: never; preactivationRetirement: NativePreactivationRetirement })): Promise<Retired> {
+  const readWorker = () => input.preactivationRetirement !== undefined
+    ? readNativePreactivationRetirement(input.preactivationRetirement) : readNativeRetainedWorkerRetirement(input.workerRetirement);
   // Consume brands before observing the remaining caller-selected metadata.
-  let worker = readNativeRetainedWorkerRetirement(input.workerRetirement);
+  let worker = readWorker();
   let workspace = readRetainedWorkspaceRetirement(owner.filesystem, input.workspaceRetirement);
   assertInstalledBrokerQuiescence(input.brokerQuiescence, driver, owner, input.runId);
   const cut = await readRecoveryClosure(driver, artifacts, input.runId), { run } = cut;
@@ -147,14 +151,29 @@ export async function retireQuarantinedGeneration(driver: SqliteDriver, artifact
       canonicalSha256(workspace.observedState) !== canonicalSha256(generation.observedState))
     throw new KernelStorageError('REVISION_CONFLICT', 'generation retirement does not own its exact validated quarantine cut');
   const quarantine = await readCanonicalArtifact<WorkspaceGenerationQuarantineEvidenceV1>(artifacts, generation.quarantineEvidenceRef);
-  if (quarantine.reason !== 'worker_recovery')
-    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'this physical retirement recipe requires its fully validated worker recovery quarantine');
   const launches = readWorkerLaunchesForRun(driver, run.id).filter(launch => launch.workspaceGenerationRef === generation.generationRef);
-  if (launches.length !== 1 || launches[0]!.phase !== 'retired' || launches[0]!.processContainmentRef !== canonicalSha256(worker.containment))
+  if (launches.length !== 1 || launches[0]!.phase !== 'retired')
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'generation retirement substitutes its closed original containment');
+  const launch = launches[0]!;
+  function requireOriginalWorker(native: ReturnType<typeof readWorker>): void {
+    if (quarantine.reason === 'worker_recovery') {
+      if ('kind' in native || launch.processContainmentRef !== canonicalSha256(native.containment))
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'worker recovery retirement substitutes its original native containment');
+    } else if (quarantine.reason === 'launch_aborted' || quarantine.reason === 'launch_died_before_activation') {
+      if (!('kind' in native) || native.workerLaunchId !== launch.launchId || quarantine.workerLaunchId !== launch.launchId ||
+          native.workspaceGenerationRef !== generation.generationRef || native.planRef !== launch.containmentPlanRef ||
+          native.sandboxLaunchSpecRef !== launch.sandboxLaunchSpecRef || native.launchNonceDigest !== launch.spawnNonceDigest ||
+          native.activationNonceDigest !== launch.activationNonceDigest ||
+          (quarantine.reason === 'launch_aborted' ? native.kind !== 'no_spawn' || launch.processContainmentRef !== undefined ||
+            launch.workerIdentityDigest !== undefined : native.kind !== 'created' || !native.containment ||
+              launch.processContainmentRef !== canonicalSha256(native.containment)))
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'preactivation retirement substitutes its exact original reservation branch');
+    } else throw new KernelStorageError('STATE_TRANSITION_INVALID', 'physical retirement requires its fully validated quarantine producer');
+  }
+  requireOriginalWorker(worker);
   // Bulk immutable-proof I/O grants no freshness. Reobserve the same genuine
   // joined resource owners after it, before proposing their final zero cut.
-  worker = readNativeRetainedWorkerRetirement(input.workerRetirement);
+  worker = readWorker(); requireOriginalWorker(worker);
   workspace = readRetainedWorkspaceRetirement(owner.filesystem, input.workspaceRetirement);
   assertInstalledBrokerQuiescence(input.brokerQuiescence, driver, owner, run.id);
   const activeOwner = assertActiveStateOwner(driver, owner), observedAt = sampleCanonicalNow();
@@ -186,10 +205,10 @@ export async function retireQuarantinedGeneration(driver: SqliteDriver, artifact
     if (currentOwner.ownerEpoch !== activeOwner.ownerEpoch || canonicalSha256(current) !== canonicalSha256(run) ||
         canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, generation.generationRef)) !== canonicalSha256(generation))
       throw new KernelStorageError('REVISION_CONFLICT', 'generation retirement current owner or source cut changed');
-    const native = readNativeRetainedWorkerRetirement(input.workerRetirement);
+    const native = readWorker(); requireOriginalWorker(native);
     const closedWorkspace = readRetainedWorkspaceRetirement(owner.filesystem, input.workspaceRetirement);
     assertInstalledBrokerQuiescence(input.brokerQuiescence, driver, owner, run.id);
-    if (canonicalSha256(native.containment) !== canonicalSha256(worker.containment) || closedWorkspace.generationRef !== generation.generationRef ||
+    if (closedWorkspace.generationRef !== generation.generationRef ||
         canonicalSha256(closedWorkspace.observedState) !== canonicalSha256(generation.observedState) ||
         connection.prepare(`SELECT 1 FROM runs r JOIN worker_launches w ON r.active_worker_launch_id = w.launch_id
           WHERE json_extract(w.row_json, '$.workspaceGenerationRef') = ? LIMIT 1`).get(generation.generationRef) ||

@@ -9,8 +9,9 @@ import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
 import { decodeRetainedRunAssembly, type RunAssemblyValidationMaterial } from '../model/run-assembly.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual, type RuntimeBundleManifest, type ReleaseTrustKey } from '../policy/runtime-authority.js';
-import { assertNativeContainmentDeath, LINUX_WORKER_RECIPE, openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher,
-  type LinuxBlockedWorker, type LinuxWorkerController, type LinuxWorkerInstallation } from '../sandbox/linux-worker.js';
+import { assertNativeContainmentDeath, assertNativePreactivationObservation, LINUX_WORKER_RECIPE,
+  openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher, type LinuxBlockedWorker, type LinuxWorkerController,
+  type LinuxWorkerInstallation, type NativePreactivationRetirement, type NativeRetainedWorkerRetirement } from '../sandbox/linux-worker.js';
 import { borrowRunWorkspaceForExecution, materializeRunWorkspace, observeRetainedRunWorkspace, reopenRunWorkspace, type RunWorkspaceGeneration } from '../workspace/run-workspace/generation.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
@@ -653,8 +654,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           if (row.phase !== 'quarantined') continue;
           signal.throwIfAborted();
           const quarantine = await artifacts.readCanonical<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(row.quarantineEvidenceRef);
-          if (quarantine.reason === 'worker_recovery') eligible.push({ row, quarantine });
-          else if (quarantine.reason !== 'launch_aborted' && quarantine.reason !== 'launch_died_before_activation') {
+          if (quarantine.reason === 'worker_recovery' || quarantine.reason === 'launch_aborted' || quarantine.reason === 'launch_died_before_activation')
+            eligible.push({ row, quarantine });
+          else {
             throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement resume has no validated recipe for this quarantine producer');
           }
         }
@@ -670,18 +672,37 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           if (launches.length !== 1) throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement resume has no unique original worker launch');
           const launch = launches[0]!;
           const closure = await readQuarantinedWorkerLaunchClosure(driver, artifacts, owner, { run: cut.run, launch, generation: row });
-          const containment = decodeWorkerProcessContainment(await artifacts.readCanonical(launch.processContainmentRef!));
-          const workerIdentity = decodeWorkerIdentity(await artifacts.readCanonical(launch.workerIdentityDigest!));
           controller = await launcher.startController({ signal });
-          const death = await controller.terminateRetained({ closure, containment, workerIdentity, signal });
-          assertNativeContainmentDeath(death);
-          const workerRetirement = await controller.closeRetained();
+          let retirement: { workerRetirement: NativeRetainedWorkerRetirement } | { preactivationRetirement: NativePreactivationRetirement };
+          if (quarantine.reason === 'worker_recovery') {
+            const containment = decodeWorkerProcessContainment(await artifacts.readCanonical(launch.processContainmentRef!));
+            const workerIdentity = decodeWorkerIdentity(await artifacts.readCanonical(launch.workerIdentityDigest!));
+            const death = await controller.terminateRetained({ closure, containment, workerIdentity, signal });
+            assertNativeContainmentDeath(death);
+            retirement = { workerRetirement: await controller.closeRetained() };
+          } else {
+            const backend = closure.plan.backend;
+            if (backend.kind !== 'linux' || !backend.nativeReservation)
+              throw new KernelStorageError('RECOVERY_REQUIRED', 'preactivation generation retirement has no exact native reservation');
+            reservation = owner.filesystem.openWorkerReservation(launch.launchId, launch.spawnNonceDigest, backend.nativeReservation);
+            const containment = launch.processContainmentRef === undefined ? undefined
+              : decodeWorkerProcessContainment(await artifacts.readCanonical(launch.processContainmentRef));
+            const workerIdentity = launch.workerIdentityDigest === undefined ? undefined
+              : decodeWorkerIdentity(await artifacts.readCanonical(launch.workerIdentityDigest));
+            const observed = await controller.inspectPreactivation({ closure, reservation, activationNonceDigest: launch.activationNonceDigest,
+              ...(containment === undefined ? {} : { containment }), ...(workerIdentity === undefined ? {} : { workerIdentity }) });
+            assertNativePreactivationObservation(observed, closure);
+            if ((quarantine.reason === 'launch_aborted') !== (observed.kind === 'no_spawn'))
+              throw new KernelStorageError('ARTIFACT_MISMATCH', 'preactivation retirement changed its original no-spawn or created branch');
+            if (observed.kind === 'created') assertNativeContainmentDeath(observed.death);
+            retirement = { preactivationRetirement: await controller.closePreactivation() };
+          }
           const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
             identity: closure.generation, sourceRowVersion: quarantine.sourceRowVersion, signal });
           signal.throwIfAborted();
           const brokerQuiescence = observeInstalledBrokerQuiescence(executionStore, runId);
           await retireQuarantinedGeneration(driver, artifacts, owner, { runId, expectedRunRevision: cut.run.revision,
-            expectedGenerationRowVersion: row.rowVersion, generationRef: row.generationRef, workerRetirement, workspaceRetirement, brokerQuiescence });
+            expectedGenerationRowVersion: row.rowVersion, generationRef: row.generationRef, ...retirement, workspaceRetirement, brokerQuiescence });
           await retireResources();
           cut = await readRecoveryClosure(driver, artifacts, runId);
         }

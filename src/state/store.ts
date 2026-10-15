@@ -73,6 +73,7 @@ import { MODEL_BROKER_ENTRY_ID, InstalledModelBrokerRefusalError, type NativeMod
 import { decodeBrokerInvocationAmbiguity, type BrokerInvocationAmbiguityEvidenceV1 } from '../kernel/broker-ambiguity.js';
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
 import { selectInstalledModelProgress } from './installed-model-progress.js';
+import { INSTALLED_RUN_INVENTORY_LIMIT } from './installed-run-capacity.js';
 import type { SupervisorHelloV1, SupervisorStatusV1 } from './installed-control.js';
 import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
@@ -1590,7 +1591,7 @@ const installedCredentialFinalizers = new WeakMap<StateStore, InstalledCredentia
 
 /** Private physical producer registry. Entries outlive ordinary caller errors
  * until every actual native preparation/release/retirement has joined. */
-type InstalledBrokerOwner = { driver: SqliteDriver; owner: StateOwnerContext; selected: HeldInstalledRuntime;
+type InstalledBrokerOwner = { driver: SqliteDriver; owner: StateOwnerContext;
   operations: Map<string, Promise<unknown>>; transports: Map<string, NativeModelTransport> };
 const installedBrokerOwners = new WeakMap<StateStore, InstalledBrokerOwner>();
 export type InstalledBrokerQuiescence = Readonly<{ assertHeld(): void }>;
@@ -1601,7 +1602,7 @@ export function assertInstalledBrokerQuiescence(receipt: InstalledBrokerQuiescen
   const observed = installedBrokerQuiescences.get(receipt);
   if (!observed || installedBrokerOwners.get(observed.store) !== observed.binding || observed.binding.driver !== driver ||
       observed.binding.owner !== owner || observed.runId !== runId)
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'broker quiescence has no original installed physical owner');
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'broker quiescence has no original physical Store owner');
   // Physical registry assertion only. The consumer checks active StateOwner
   // and row predicates through its actual transaction-scoped SQL connection.
   assertStateOwnerLock(owner.filesystem);
@@ -1612,7 +1613,7 @@ export function assertInstalledBrokerQuiescence(receipt: InstalledBrokerQuiescen
 /** No counts, callbacks, fake Store or supplied claim evidence can mint it. */
 export function observeInstalledBrokerQuiescence(store: StateStore, runId: string): InstalledBrokerQuiescence {
   const binding = installedBrokerOwners.get(store);
-  if (!binding) throw new KernelStorageError('ARTIFACT_MISMATCH', 'broker retirement requires the genuine installed Store');
+  if (!binding) throw new KernelStorageError('ARTIFACT_MISMATCH', 'broker retirement requires the genuine StateStore');
   assertActiveStateOwner(binding.driver, binding.owner); readRun(binding.driver, runId);
   const receipt: InstalledBrokerQuiescence = Object.freeze({ assertHeld() {
     if (this !== receipt) throw new TypeError('invalid broker quiescence receiver');
@@ -1656,7 +1657,9 @@ export class StateStore {
     private readonly installedRuntime?: HeldInstalledRuntime,
     private readonly installedAnchor?: HeldInstalledAnchor
   ) {
-    if (installedRuntime && installedAnchor) installedBrokerOwners.set(this, { driver, owner, selected: installedRuntime,
+    // This observes only the Store's real producer registry, including an
+    // empty tool-only Store. It grants no installed/model execution authority.
+    installedBrokerOwners.set(this, { driver, owner,
       operations: this.modelOperations, transports: this.modelTransports });
   }
 
@@ -1777,9 +1780,9 @@ export class StateStore {
     if (!recipe.hasBroker) return;
     await loadInstalledModelBroker(this.installedRuntime);
     this.installedAnchor.assertHeld(); assertActiveStateOwner(this.driver, this.owner);
-    const rows = this.driver.prepare("SELECT id FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at,id LIMIT 1001")
-      .all<{ id: string }>();
-    if (rows.length > 1000) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed scheduler retained inventory exceeds its bounded cut');
+    const rows = this.driver.prepare("SELECT id FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at,id LIMIT ?")
+      .all<{ id: string }>(INSTALLED_RUN_INVENTORY_LIMIT + 1);
+    if (rows.length > INSTALLED_RUN_INVENTORY_LIMIT) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed scheduler retained inventory exceeds its bounded cut');
     for (const row of rows) await this.retainInstalledAgent(row.id);
     this.installedModelAdmissionReady = recipe.hasDiscovery;
     this.schedulerStarted = true;
@@ -1847,9 +1850,9 @@ export class StateStore {
       if (failure?.status === 'rejected') throw new ResourceRetirementError('clock-fenced installed resources did not close cleanly', failure.reason);
       throw this.schedulerFailure;
     }
-    const rows = this.driver.prepare("SELECT id FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at,id LIMIT 1001")
-      .all<{ id: string }>();
-    if (rows.length > 1000) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed maintenance inventory exceeds its bounded cut');
+    const rows = this.driver.prepare("SELECT id FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at,id LIMIT ?")
+      .all<{ id: string }>(INSTALLED_RUN_INVENTORY_LIMIT + 1);
+    if (rows.length > INSTALLED_RUN_INVENTORY_LIMIT) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed maintenance inventory exceeds its bounded cut');
     for (const { id } of rows) {
       if (!this.supportsInstalledRuns()) return;
       try {
@@ -2200,8 +2203,8 @@ export class StateStore {
             FROM runs`).get<{ queued: unknown; running: unknown; nonterminal: unknown }>()!;
           const nonterminal = requiredSafeInteger(counts.nonterminal, 'nonterminal Run count');
           const pins = connection.prepare(`SELECT CASE WHEN length(CAST(spec_ref AS BLOB))=64 THEN spec_ref ELSE NULL END AS spec_ref
-            FROM runs WHERE status IN ('queued','running','waiting') ORDER BY id LIMIT 1001`).all<{ spec_ref: string }>();
-          if (pins.length !== nonterminal || pins.length > 1000)
+            FROM runs WHERE status IN ('queued','running','waiting') ORDER BY id LIMIT ?`).all<{ spec_ref: string }>(INSTALLED_RUN_INVENTORY_LIMIT + 1);
+          if (pins.length !== nonterminal || pins.length > INSTALLED_RUN_INVENTORY_LIMIT)
             throw new KernelStorageError('RECOVERY_REQUIRED', 'installed nonterminal pin inventory exceeds its bounded cut');
           for (const pin of pins) assertArtifactRef(pin.spec_ref);
           return { supervisorInstanceId: owner.supervisorInstanceId,
@@ -2457,11 +2460,16 @@ export class StateStore {
         const authority = currentModelAuthority(held, initial.authority.principalId, target.endpointRegistrationId,
           frozen.map(binding => binding.credentialGrantId), sampleCanonicalNow(), { endpoint: target, bindings: frozen });
         try {
-          transport = await broker.prepareModelTransport({ provider: 'openai-compatible', selector: authority.selector,
+          if (this.closeRequested || this.closed || this.released) throw new KernelStorageError('LEASE_FENCED', 'model broker is closing');
+          transport = broker.prepareModelTransport({ provider: 'openai-compatible', selector: authority.selector,
             expectedObservation: authority.observation, target: { hostAscii: target.target.hostAscii, port: target.target.port,
               basePath: target.target.basePath, serverNameAscii: target.tls.serverNameAscii, spkiSha256Pins: target.tls.spkiSha256Pins },
             trustStoreBytes, trustStoreDigest: target.tls.trustStoreRef, requestPath: '/chat/completions',
             bodyBytes, bodyBytesDigest: initial.request.bodyBytesRef });
+          // No await between acquiring and registering the real owner: stop,
+          // expiry and shutdown can revoke even an in-flight local redemption.
+          this.modelTransports.set(runId, transport);
+          await transport.ready;
         } catch (error) {
           // Only this original, joined native preparation failure can wake
           // another free attempt. Authority, claim and cleanup failures cannot.
@@ -2470,7 +2478,6 @@ export class StateStore {
           throw error;
         }
         if (this.closeRequested || this.closed) throw new KernelStorageError('LEASE_FENCED', 'model broker is closing');
-        this.modelTransports.set(runId, transport);
         token.assertHeld();
         claimed = await claimInvocationDispatch(this.driver, this.artifacts, this.owner, {
           runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision,

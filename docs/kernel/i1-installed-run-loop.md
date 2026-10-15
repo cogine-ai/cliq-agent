@@ -63,6 +63,12 @@ registered path is decoded, rewritten or silently normalized to make it fit.
 The same preflight rejects more than 64 SPKI pins, matching the native broker's
 array capacity without truncating the registered TLS policy. Generic endpoint
 registration retains its wider nonempty, unique, sorted pin-array contract.
+The installed scheduler retains at most 1000 nonterminal Runs across Sessions.
+New installed admission checks that same bound in its original write transaction,
+after replay/conflict and all authority/time guards, before inserting any Run.
+Queued, running and waiting Runs occupy capacity; terminal history does not.
+Capacity refusal neither disables the scheduler nor changes generic admission,
+and the existing strict inventory readers still reject an inconsistent overflow.
 After a validated terminal Run, its joined driver task closes the original
 launcher/sealed-image owners before evicting memory caches. This reclaims no
 durable history and does not treat a candidate, unknown or wait as terminal.
@@ -145,6 +151,37 @@ listener before another Run attempts the same endpoint. A real post-claim
 connection refusal must retain a fully charged `unknown`, never an unsettled
 claim, refund or resend. This does not qualify the pre-connect claim gap,
 unknown cancellation/terminal outcome, or a post-claim no-release producer.
+
+The approved read-only SQL capacity seam uses real SQLite data to verify the
+999/1000 boundary, all three nonterminal states and terminal capacity release.
+It creates no StateOwner, installed identity or native proof. It does not
+qualify an actual installed 1000-Run load or replace the original admission
+transaction's replay/conflict, authority, time and atomicity requirements.
+
+Preactivation quarantine retirement is covered by the existing real worker
+campaign, not inferred from a later successful worker. A joined reservation
+inspector supplies a distinct native capability, rechecking the original birth
+witness and kernel lifetimes synchronously at the retirement transaction. The
+no-spawn branch invents no containment or WorkerIdentity; the created branch
+requires its exact empty original cgroup and vanished process lifetimes. Both
+retain the workspace/broker owners, five resource-zero predicates and existing
+time/terminal gates. The campaign requires the original generation's separate
+quarantine-to-retired proof, unchanged Journal/charges/private bytes, and one
+terminal Session publication. This does not implement discard of a healthy
+generation with no WorkerLaunch reservation.
+
+The native broker returns its actual closeable owner synchronously instead of
+waiting for preparation I/O;
+both installed registries record it synchronously before awaiting `ready`.
+Shutdown cancels these owners before joining producers, without waiting for
+their credential lock. Failed/cancelled preparation cannot reject `ready`
+before its original worker, connection, timer and cleanup-hook owners join.
+The approved isolated native lifecycle test delays a real external D-Bus reply;
+within one 1500 ms window it requires ready rejection, native close and the
+external bus's actual connection disappearance, before releasing that reply.
+Even a failing test must then join the original connection and fixture children
+and preserve the host runtime namespace. This is a native lifecycle seam, not
+an installed Supervisor stop cut, queue-starvation bound or full I1 proof.
 
 This document describes the implemented composition and its validation boundary;
 it does not certify a source revision. Qualification requires the exact-SHA

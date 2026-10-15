@@ -48,6 +48,7 @@ import {
 import { KernelStorageError } from '../errors.js';
 import { readCanonicalArtifact } from '../agent-context.js';
 import { readInstalledRunAdmission, recheckInstalledRunWorkspace, type AssembledInstalledRun } from '../installed-run.js';
+import { assertInstalledRunAdmissionCapacity } from '../installed-run-capacity.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest } from '../source-target.js';
 import { readSourceInspectionAttempt, readSourceInspectionOriginalRequest } from '../source-inspection.js';
 import { readSourceInspectionErrorResponse, readSourceInspectionRetirement } from '../source-inspection-owner.js';
@@ -751,6 +752,7 @@ async function admitRunInternal(
       recheckInstalledRunWorkspace(installed.prepared, driver, owner, installed.identity, connection);
       if (freshNow < now || freshNow >= deadlineAt)
         throw new KernelStorageError('INVALID_REQUEST', 'installed admission interval is not current at its final time fence');
+      assertInstalledRunAdmissionCapacity(connection);
     }
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
 

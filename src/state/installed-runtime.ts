@@ -743,11 +743,13 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           close(this: HeldInstalledRuntime): Promise<void> {
             if (this !== selected) return Promise.reject(new KernelStorageError('ARTIFACT_MISMATCH', 'installed runtime handle receiver is not its held instance'));
             closed = true;
-            return closePromise ??= tail.then(async () => {
-              // Join producers before enumerating native handles: an in-flight
-              // local redemption may not have returned its transport yet.
-              const producers = await Promise.allSettled([...platformJobs]);
+            return closePromise ??= (async () => {
+              // Every preparation already has its actual closeable owner.
+              // Cancel before joining producers, without acquiring the
+              // credential lock those pending producers may still hold.
               const transports = await Promise.allSettled([...brokerTransports].map(transport => transport.close()));
+              await tail;
+              const producers = await Promise.allSettled([...platformJobs]);
               const remaining = await Promise.allSettled([...platformJobs]);
               const failed = [...producers, ...transports, ...remaining].find(result => result.status === 'rejected' &&
                 result.reason instanceof ResourceRetirementError);
@@ -757,7 +759,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 rememberRetirement(failure); throw failure;
               }
               await scope.close();
-            });
+            })();
           },
         });
         heldInstalledRuntimes.set(selected, {
@@ -923,8 +925,17 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 const loaded = new Module('cliq-installed-linux-model-broker');
                 process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
                 const native = loaded.exports as NativeModelBrokerBinding;
-                if (native.interfaceVersion !== 1 || typeof native.prepareModelTransport !== 'function')
+                if (native.interfaceVersion !== 2 || typeof native.prepareModelTransport !== 'function')
                   mismatch('unsupported installed model broker interface');
+                const refused = (error: unknown): never => {
+                  if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                    const failure = new ResourceRetirementError('model broker resources did not retire', undefined);
+                    rememberRetirement(failure); throw failure;
+                  }
+                  if ((error as { code?: unknown; brokerCode?: unknown } | null)?.code === 'ERR_CLIQ_MODEL_BROKER' &&
+                      (error as { brokerCode?: unknown }).brokerCode === 'broker_response_refused') throw new InstalledModelBrokerRefusalError();
+                  throw new KernelStorageError('RECOVERY_REQUIRED', 'installed model broker refused an operation');
+                };
                 const invoke = <T>(operation: () => Promise<T>, retiring = false): Promise<T> => {
                   if (closed && !retiring) mismatch('installed runtime handle is closed');
                   if (!retiring) assertSelection();
@@ -932,58 +943,58 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   // final SQL cut; do not insert a microtask before release.
                   let pending: Promise<T>;
                   try { pending = operation(); }
-                  catch { pending = Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'installed model broker refused an operation')); }
+                  catch (error) { pending = Promise.reject(error); }
                   const job = pending.then(result => {
                     if (!retiring) assertSelection(); return result;
-                  }, error => {
-                    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
-                      const failure = new ResourceRetirementError('model broker resources did not retire', undefined);
-                      rememberRetirement(failure); throw failure;
-                    }
-                    if ((error as { code?: unknown; brokerCode?: unknown } | null)?.code === 'ERR_CLIQ_MODEL_BROKER' &&
-                        (error as { brokerCode?: unknown }).brokerCode === 'broker_response_refused') throw new InstalledModelBrokerRefusalError();
-                    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed model broker refused an operation');
-                  });
+                  }, refused);
                   platformJobs.add(job);
                   void job.finally(() => platformJobs.delete(job)).catch(() => {});
                   return job;
                 };
-                modelBroker = Object.freeze({ interfaceVersion: 1 as const,
+                modelBroker = Object.freeze({ interfaceVersion: 2 as const,
                   prepareModelTransport(input) {
-                    let minted: NativeModelTransport | undefined;
-                    const prepared = invoke(async () => {
-                      const original = await native.prepareModelTransport(input);
-                      let retirement: Promise<Awaited<ReturnType<typeof original.close>>> | undefined;
-                      try { assertArtifactRef(original.brokerFenceTokenDigest); }
-                      catch { await original.close(); mismatch('native model token digest is invalid'); }
-                      const transport: typeof original = Object.freeze({
-                        brokerFenceTokenDigest: original.brokerFenceTokenDigest,
-                        connect: binding => invoke(() => original.connect(binding)),
-                        releaseBody: binding => invoke(() => original.releaseBody(binding)),
-                        close: () => retirement ??= invoke(async () => {
-                          const result = await original.close();
-                          if (!exactKeys(result, ['kind', 'brokerFenceTokenDigest', 'bodyBytesDigest', 'networkStarted', 'requestStarted',
-                            'tokenRevoked', 'matchingActiveReleaseCount']) || result.kind !== 'broker_transport_closed' ||
-                              result.brokerFenceTokenDigest !== original.brokerFenceTokenDigest || result.bodyBytesDigest !== input.bodyBytesDigest ||
-                              typeof result.networkStarted !== 'boolean' || typeof result.requestStarted !== 'boolean' ||
-                              result.tokenRevoked !== true || result.matchingActiveReleaseCount !== 0) {
-                            const failure = new ResourceRetirementError('model broker closure is incomplete', undefined);
-                            rememberRetirement(failure); throw failure;
-                          }
-                          brokerTransports.delete(transport); return result;
-                        }, true),
-                      });
-                      brokerTransports.add(transport); minted = transport; return transport;
+                    if (closed) mismatch('installed runtime handle is closed');
+                    assertSelection();
+                    let original: NativeModelTransport;
+                    try { original = native.prepareModelTransport(input); }
+                    catch (error) { return refused(error); }
+                    let transport!: NativeModelTransport;
+                    let retirement: Promise<Awaited<ReturnType<typeof original.close>>> | undefined;
+                    // Promise handlers run only after this synchronous call
+                    // has registered the owner below. In particular, no
+                    // selection check can strand a newly minted native owner.
+                    const prepared = original.ready.then(undefined, refused).then(() => {
+                      if (closed) mismatch('installed runtime handle is closed');
+                      assertSelection();
+                      assertArtifactRef(original.brokerFenceTokenDigest);
                     });
                     const owned = prepared.catch(async error => {
-                      // Post-prepare selection failure must join the genuine
-                      // minted owner before Store can observe a rejection.
-                      if (minted) await minted.close();
+                      // A validation or preparation refusal cannot expose a
+                      // free failure before its actual native owner joins.
+                      await transport.close();
                       throw error;
                     });
+                    transport = Object.freeze({
+                      brokerFenceTokenDigest: original.brokerFenceTokenDigest, ready: owned,
+                      connect: binding => invoke(() => original.connect(binding)),
+                      releaseBody: binding => invoke(() => original.releaseBody(binding)),
+                      close: () => retirement ??= invoke(async () => {
+                        const result = await original.close();
+                        if (!exactKeys(result, ['kind', 'brokerFenceTokenDigest', 'bodyBytesDigest', 'networkStarted', 'requestStarted',
+                          'tokenRevoked', 'matchingActiveReleaseCount']) || result.kind !== 'broker_transport_closed' ||
+                            result.brokerFenceTokenDigest !== original.brokerFenceTokenDigest || result.bodyBytesDigest !== input.bodyBytesDigest ||
+                            typeof result.networkStarted !== 'boolean' || typeof result.requestStarted !== 'boolean' ||
+                            result.tokenRevoked !== true || result.matchingActiveReleaseCount !== 0) {
+                          const failure = new ResourceRetirementError('model broker closure is incomplete', undefined);
+                          rememberRetirement(failure); throw failure;
+                        }
+                        brokerTransports.delete(transport); return result;
+                      }, true),
+                    });
+                    brokerTransports.add(transport);
                     platformJobs.add(owned);
                     void owned.finally(() => platformJobs.delete(owned)).catch(() => {});
-                    return owned;
+                    return transport;
                   },
                 });
               }

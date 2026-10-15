@@ -909,7 +909,7 @@ struct broker {
   napi_async_work work;
   napi_async_work unretired_work[4];
   size_t unretired_work_count;
-  napi_deferred phase_deferred, close_deferred;
+  napi_deferred ready_deferred, phase_deferred, close_deferred;
   napi_ref handle, close_promise;
   napi_async_cleanup_hook_handle cleanup_hook;
   uv_timer_t timer;
@@ -1504,7 +1504,7 @@ static napi_value broker_close_call(napi_env env, napi_callback_info info) {
   } else broker_begin_close(broker);
   return promise;
 }
-static napi_value broker_handle_value(struct broker *broker) {
+static napi_value broker_handle_value(struct broker *broker, napi_value ready) {
   napi_value handle;
   if (napi_create_object(broker->env, &handle) != napi_ok ||
       napi_type_tag_object(broker->env, handle, &broker_tag) != napi_ok ||
@@ -1514,7 +1514,8 @@ static napi_value broker_handle_value(struct broker *broker) {
     {"releaseBody", NULL, broker_release_call, NULL, NULL, NULL, napi_default, NULL},
     {"close", NULL, broker_close_call, NULL, NULL, NULL, napi_default, NULL},
   };
-  if (napi_define_properties(broker->env, handle, sizeof(methods) / sizeof(*methods), methods) != napi_ok) return NULL;
+  if (napi_define_properties(broker->env, handle, sizeof(methods) / sizeof(*methods), methods) != napi_ok ||
+      napi_set_named_property(broker->env, handle, "ready", ready) != napi_ok) return NULL;
   set_string(broker->env, handle, "brokerFenceTokenDigest", broker->token_digest);
   if (napi_create_reference(broker->env, handle, 1, &broker->handle) != napi_ok || napi_object_freeze(broker->env, handle) != napi_ok) return NULL;
   return handle;
@@ -1537,9 +1538,16 @@ static void broker_finish_close(struct broker *broker) {
     if (pthread_mutex_destroy(&broker->release_mutex)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
     else broker->mutex_ready = false;
   }
-  if (!broker->env_closing && (broker->phase_deferred || broker->close_deferred)) {
+  if (!broker->env_closing && (broker->ready_deferred || broker->phase_deferred || broker->close_deferred)) {
     napi_handle_scope scope;
     if (napi_open_handle_scope(broker->env, &scope) != napi_ok) napi_fatal_error("cliq-model-broker", NAPI_AUTO_LENGTH, "broker close scope unavailable", NAPI_AUTO_LENGTH);
+    /* Preparation refusal/cancellation is not a free-failure cut until its
+     * original worker, connection, timer and cleanup-hook owners have joined.
+     * Keep this deferred separate from both later release phases. */
+    if (broker->ready_deferred) {
+      napi_reject_deferred(broker->env, broker->ready_deferred, broker_error_value(broker));
+      broker->ready_deferred = NULL;
+    }
     if (broker->phase_deferred) {
       napi_value result = NULL;
       if (!broker->error && !broker->unsafe && broker->exchanged && broker->response) {
@@ -1601,10 +1609,18 @@ static void broker_complete(napi_env env, napi_status status, void *data) {
     broker->retired = true; broker_close_timer(broker); broker_finish_close(broker); return;
   }
   if (!broker_live(broker) || broker->closing) broker_fail(broker, "broker_cancelled_or_expired");
-  if (!broker->error && !broker->closing && broker->stage != BROKER_EXCHANGE && !broker->env_closing && broker->phase_deferred) {
+  if (!broker->error && !broker->closing && broker->stage == BROKER_PREPARE && !broker->env_closing && broker->ready_deferred) {
     napi_value result = NULL;
-    if (broker->stage == BROKER_PREPARE) { broker->prepared = true; napi_get_reference_value(env, broker->handle, &result); }
-    else if (broker->stage == BROKER_CONNECT) { broker->connected = true; napi_get_undefined(env, &result); }
+    napi_get_undefined(env, &result);
+    if (!result) broker_fail(broker, "broker_worker_unavailable");
+    else {
+      broker->prepared = true;
+      napi_resolve_deferred(env, broker->ready_deferred, result); broker->ready_deferred = NULL;
+    }
+  }
+  if (!broker->error && !broker->closing && broker->stage == BROKER_CONNECT && !broker->env_closing && broker->phase_deferred) {
+    napi_value result = NULL;
+    broker->connected = true; napi_get_undefined(env, &result);
     if (broker->error || !result) napi_reject_deferred(env, broker->phase_deferred, broker_error_value(broker));
     else napi_resolve_deferred(env, broker->phase_deferred, result);
     broker->phase_deferred = NULL;
@@ -1707,8 +1723,9 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
     napi_throw_type_error(env, NULL, "Invalid installed model broker preparation"); return NULL;
   }
   broker->platform.cancel = g_cancellable_new();
-  napi_value promise, handle = broker_handle_value(broker); uv_loop_t *loop;
-  if (!handle || napi_create_promise(env, &broker->phase_deferred, &promise) != napi_ok ||
+  napi_value ready, handle = NULL; uv_loop_t *loop;
+  if (napi_create_promise(env, &broker->ready_deferred, &ready) == napi_ok) handle = broker_handle_value(broker, ready);
+  if (!handle ||
       napi_add_async_cleanup_hook(env, broker_cleanup, broker, &broker->cleanup_hook) != napi_ok ||
       napi_get_uv_event_loop(env, &loop) != napi_ok || uv_timer_init(loop, &broker->timer)) {
     broker->unsafe = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
@@ -1717,10 +1734,12 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
   }
   broker->timer_ready = true; broker->timer.data = broker; uv_update_time(loop);
   if (uv_timer_start(&broker->timer, broker_deadline, (uint64_t)remaining(&broker->platform), 0) || !broker_queue(broker, BROKER_PREPARE)) {
-    broker_fail(broker, "broker_worker_unavailable"); napi_reject_deferred(env, broker->phase_deferred, broker_error_value(broker)); broker->phase_deferred = NULL;
+    broker_fail(broker, "broker_worker_unavailable");
     broker_begin_close(broker);
   }
-  return promise;
+  /* Publish the actual closeable owner synchronously, before the caller can
+   * await credential I/O. Even queued/executing preparation can now be closed. */
+  return handle;
 }
 static napi_value initialize_broker(napi_env env, napi_value exports) {
   if (!OPENSSL_init_ssl(OPENSSL_INIT_NO_LOAD_CONFIG, NULL)) { napi_throw_error(env, NULL, "Installed model broker TLS initialization unavailable"); return NULL; }
@@ -1728,7 +1747,7 @@ static napi_value initialize_broker(napi_env env, napi_value exports) {
     {"prepareModelTransport", NULL, broker_prepare_call, NULL, NULL, NULL, napi_default, NULL},
   };
   if (napi_define_properties(env, exports, sizeof(methods) / sizeof(*methods), methods) != napi_ok) return NULL;
-  set_number(env, exports, "interfaceVersion", 1); return exports;
+  set_number(env, exports, "interfaceVersion", 2); return exports;
 }
 NAPI_MODULE(cliq_linux_model_broker, initialize_broker)
 #endif

@@ -19,6 +19,7 @@ import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeRunSpec, decodeStateLockIdentity, decodeStateRootIdentity, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity } from './decoders.js';
 import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { validatePreactivationQuarantine } from './preactivation-retirement.js';
 
 type WorkerSpec = Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>;
 type WorkerOwner = WorkerSpec['owner'];
@@ -407,12 +408,28 @@ export async function readQuarantinedWorkerLaunchClosure(driver: SqliteDriver, a
     equal(readRequiredWorkspaceGenerationByRef(driver, generation.generationRef), generation, 'quarantined retirement current generation');
   }
   current();
+  if (generation.phase !== 'quarantined') mismatch('retirement inspection requires its exact original quarantine');
+  const quarantine = await readCanonicalArtifact<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(artifacts, generation.quarantineEvidenceRef);
+  if (quarantine.reason === 'launch_aborted' || quarantine.reason === 'launch_died_before_activation') {
+    if (run.status !== 'queued' || run.activeWorkerLaunchId !== undefined || generation.phase !== 'quarantined')
+      mismatch('preactivation quarantine inspection requires its exact lease-free queued cut');
+    await validatePreactivationQuarantine(artifacts, driver, run, generation, quarantine);
+    const plan = decodeWorkerContainmentPlan(await readCanonicalArtifact(artifacts, launch.containmentPlanRef));
+    if (quarantine.workerLaunchId !== launch.launchId) mismatch('preactivation retirement substitutes its original launch');
+    // The original plan owns this epoch and source Checkpoint. A successor
+    // may already have advanced both; never fabricate an old Run to read it.
+    const closure = await readWorkerExecutionClosure(artifacts, currentOwner, { run, ...launch }, plan.owner, generation.sourceCheckpointId);
+    if (closure.generation.identityDigest !== generation.generationIdentityDigest || closure.generation.generationId !== generation.generationId ||
+        closure.generation.sourceWorkspaceStateRef !== generation.sourceWorkspaceStateRef ||
+        closure.generation.sourceWorkspaceStateDigest !== generation.sourceWorkspaceStateDigest)
+      mismatch('preactivation retirement substitutes its immutable generation');
+    current(); return closure;
+  }
   if (run.status !== 'queued' || run.activeWorkerLaunchId !== undefined || launch.phase !== 'retired' ||
       launch.generationWriteState !== 'fenced_reconciling' || launch.runId !== run.id || !launch.leaseEpoch || launch.leaseEpoch > run.leaseEpoch ||
       !launch.workerIdentityDigest || !launch.processContainmentRef || !launch.retirementEvidenceRef ||
       generation.phase !== 'quarantined' || generation.runId !== run.id || generation.generationRef !== launch.workspaceGenerationRef)
     mismatch('retirement inspection requires its exact closed original quarantine');
-  const quarantine = await readCanonicalArtifact<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(artifacts, generation.quarantineEvidenceRef);
   if (quarantine.reason !== 'worker_recovery' || quarantine.fromPhase !== 'fenced_reconciling' ||
       quarantine.runId !== run.id || quarantine.generationRef !== generation.generationRef ||
       quarantine.generationIdentityDigest !== generation.generationIdentityDigest || quarantine.evidenceDigest !== generation.quarantineEvidenceDigest ||

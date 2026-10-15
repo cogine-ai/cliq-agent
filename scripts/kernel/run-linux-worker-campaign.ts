@@ -863,11 +863,35 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
     const retiredBeforeResume = inspection.readSnapshot(connection => readRequiredWorkerLaunch(connection, fault.launch.launchId));
     assert.equal(retiredBeforeResume.phase, 'retired');
     // Enter the same public retirement-resume step used by the installed
-    // driver. Its worker-recovery-only recipe must leave these genuine
-    // no-spawn/created-death quarantines to their original producer.
+    // driver. Only the original quarantine may advance, with a distinct
+    // fresh resource-retirement proof; no replacement seal can supply it.
     assert.deepEqual(await bounded(retry.resumeCurrentRetirement({ expectedRunRevision: retryCut.closure.run.revision })),
       retryCut.closure.run);
-    assert.deepEqual(await checkpointBytes(store, fixture.runId), retryCut);
+    const resumedCut = await checkpointBytes(store, fixture.runId);
+    const resumeSource = retryCut.closure.workspaceGenerations.find(row => row.generationRef === fault.launch.workspaceGenerationRef);
+    const retiredByResume = resumedCut.closure.workspaceGenerations.find(row => row.generationRef === fault.launch.workspaceGenerationRef);
+    assert.equal(resumeSource?.phase, 'quarantined'); assert.equal(retiredByResume?.phase, 'retired');
+    if (resumeSource?.phase !== 'quarantined' || retiredByResume?.phase !== 'retired')
+      throw new Error('preactivation resume lacks its original quarantine retirement');
+    const { phase: _phase, quarantineEvidenceRef: _quarantine, quarantineEvidenceDigest: _digest, observedState: _state, ...sourceBase } = resumeSource;
+    assert.deepEqual(retiredByResume, { ...sourceBase, phase: 'retired', rowVersion: resumeSource.rowVersion + 1,
+      updatedAt: retiredByResume.updatedAt, retirementEvidenceRef: retiredByResume.retirementEvidenceRef,
+      retirementEvidenceDigest: retiredByResume.retirementEvidenceDigest });
+    assert.ok(retiredByResume.updatedAt >= resumeSource.updatedAt);
+    const resumeProof = await store.artifacts.readCanonical<WorkspaceGenerationRetirementEvidenceV1>(retiredByResume.retirementEvidenceRef);
+    assert.equal(resumeProof.fromPhase, 'quarantined');
+    if (resumeProof.fromPhase !== 'quarantined') throw new Error('preactivation resume substituted a seal');
+    assert.equal(resumeProof.runId, fixture.runId); assert.equal(resumeProof.generationRef, resumeSource.generationRef);
+    assert.equal(resumeProof.generationIdentityDigest, resumeSource.generationIdentityDigest);
+    assert.equal(resumeProof.quarantineEvidenceRef, resumeSource.quarantineEvidenceRef);
+    assert.equal(resumeProof.quarantineEvidenceDigest, resumeSource.quarantineEvidenceDigest);
+    assert.equal(resumeProof.sourceQuarantinedRowVersion, resumeSource.rowVersion);
+    assert.equal(resumeProof.evidenceDigest, retiredByResume.retirementEvidenceDigest);
+    assert.equal(resumeProof.evidenceDigest, digestOmitting(resumeProof, 'evidenceDigest'));
+    assert.deepEqual([resumeProof.activeRunPointerCount, resumeProof.nonretiredWorkerLaunchCount, resumeProof.liveContainmentCount,
+      resumeProof.activeMountCount, resumeProof.releasableBrokerClaimCount], [0, 0, 0, 0, 0]);
+    assert.deepEqual(resumedCut, { ...retryCut, closure: { ...retryCut.closure, workspaceGenerations:
+      retryCut.closure.workspaceGenerations.map(row => row.generationRef === resumeSource.generationRef ? retiredByResume : row) } });
     assert.deepEqual(inspection.readSnapshot(connection => readRequiredWorkerLaunch(connection, fault.launch.launchId)),
       retiredBeforeResume);
     if (!created) console.log(JSON.stringify({ scenario: 'actual-transient-image-same-execution-retry', phase: 'retry',
@@ -964,6 +988,7 @@ async function preactivationRetirementRetry(boundary: 'before_spawn' | 'ready_be
     assert.deepEqual(terminalCut.bytes, after.bytes); assert.deepEqual(terminalCut.closure.journal, after.closure.journal);
     const retiredGeneration = terminalCut.closure.workspaceGenerations.find(row => row.generationRef === old.workspaceGenerationRef);
     assert.equal(retiredGeneration?.phase, 'retired');
+    assert.deepEqual(retiredGeneration, retiredByResume, 'terminal drain must retain the exact independent original retirement');
     if (retiredGeneration?.phase !== 'retired' || generation.phase !== 'quarantined')
       throw new Error('terminal preactivation recovery lacks its distinct original quarantine retirement');
     const retirement = await store.artifacts.readCanonical<WorkspaceGenerationRetirementEvidenceV1>(retiredGeneration.retirementEvidenceRef);

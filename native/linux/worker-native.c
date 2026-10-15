@@ -37,8 +37,8 @@ struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, re
     bool leaf_owned, leaf_initialized, constructor_failed, retirement_failed;
     unsigned int next_scope, pending; char token[CLIQ_WORKER_TOKEN_BYTES]; unsigned int references;
     struct native_scope *scopes, *pending_scope;
-    struct cliq_worker_packet retained, reservation, reservation_inspection;
-    bool reservation_bound, inspection_only, retained_observed;
+    struct cliq_worker_packet retained, reservation, reservation_inspection, inspected_reservation;
+    bool reservation_bound, inspection_only, retained_observed, reservation_observed;
     napi_env env; napi_async_work cleanup_work; napi_async_cleanup_hook_handle cleanup_hook;
     napi_deferred close_deferred; napi_ref close_promise;
 };
@@ -895,7 +895,7 @@ static napi_value controller_inspect_reservation(napi_env env, napi_callback_inf
         !number(env, args[1], &reservation) || reservation > INT32_MAX) return failure(env, "invalid native reservation inspector");
     struct cliq_worker_packet request = cliq_packet(CLIQ_INSPECT_RESERVATION);
     if (!reservation_projection(env, args[2], &request)) return failure(env, "invalid retained reservation binding");
-    controller->inspection_only = true; controller->reservation_inspection = request;
+    controller->inspection_only = true; controller->reservation_observed = false; controller->reservation_inspection = request;
     int descriptors[] = { (int)cgroup, (int)reservation };
     if (!begin_request(controller, NULL, &request, descriptors, 2)) return failure(env, "native reservation could not be inspected");
     return undefined(env);
@@ -922,8 +922,90 @@ static napi_value controller_poll_reservation(napi_env env, napi_callback_info i
         response.init_reaped == 1 && response.populated == 0 && response.remaining_descendants == 0) {
         result = scope_observation(env, &response); set_string(env, result, "kind", "created_dead");
     } else return failure(env, "native reservation closure observation is incomplete");
+    controller->inspected_reservation = response; controller->reservation_observed = true;
     set_number(env, result, "observedAtMs", (double)response.observed_at_ms);
     napi_object_freeze(env, result); return result;
+}
+
+/* The immutable witness remains a birth record, not a reusable death proof.
+ * This synchronous cut reopens it under an independent exclusive lock and
+ * checks the original kernel lifetimes after this inspector has joined. */
+static napi_value assert_preactivation_retired(napi_env env, napi_callback_info info) {
+    size_t argc = 2; napi_value args[2], self; struct controller *controller; uint64_t root, reservation;
+    napi_get_cb_info(env, info, &argc, args, &self, NULL);
+    if (argc != 2 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+        !controller->closed || !controller->cleanup_done || !controller->reaped || !controller->inspection_only ||
+        !controller->reservation_observed || controller->pending != 0 || controller->scopes ||
+        controller->retirement_failed || atomic_load(&native_retirement_failed) ||
+        !number(env, args[0], &root) || root > INT32_MAX ||
+        !number(env, args[1], &reservation) || reservation > INT32_MAX)
+        return failure(env, "preactivation namespace/resource owners have not positively retired");
+    const struct cliq_worker_packet *expected = &controller->inspected_reservation;
+    struct stat root_identity, original, reopened; int held = -1, scope = -1;
+    bool valid = private_cgroup((int)root, &root_identity) && same_directory(&controller->root_identity, &root_identity) &&
+        reservation_same_binding(expected, &controller->reservation_inspection) &&
+        reservation_file((int)reservation, expected, &original);
+    char descriptor[64];
+    int length = snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", (int)reservation);
+    if (valid && length > 0 && (size_t)length < sizeof(descriptor)) {
+        held = open(descriptor, O_RDONLY | O_CLOEXEC);
+        valid = held >= 0 && reservation_file(held, expected, &reopened) && original.st_size == reopened.st_size &&
+            flock(held, LOCK_EX | LOCK_NB) == 0;
+    } else valid = false;
+    bool attempted = false; struct cliq_worker_packet actual;
+    unsigned char expected_birth[CLIQ_RESERVATION_BODY], actual_birth[CLIQ_RESERVATION_BODY];
+    reservation_encode(expected_birth, expected);
+    if (valid) {
+        valid = reservation_read(held, expected, &attempted, &actual);
+        if (valid) { reservation_encode(actual_birth, &actual); valid = memcmp(expected_birth, actual_birth, sizeof(expected_birth)) == 0; }
+    }
+    const bool no_spawn = expected->reservation_observation == 1 && reservation_birth_empty(expected);
+    const bool created = expected->reservation_observation == 2 && expected->cgroup_inode != 0 &&
+        expected->pid_namespace_inode != 0 && expected->pid > 0 && expected->namespace_init_pid > 0 &&
+        expected->monitor_pid > 0 && expected->init_reaped == 1 && expected->populated == 0 && expected->remaining_descendants == 0;
+    valid = valid && no_spawn != created && attempted == created;
+    struct stat scope_identity;
+    if (valid && no_spawn) {
+        valid = fstatat((int)root, expected->cgroup_name, &scope_identity, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT;
+    } else if (valid) {
+        scope = openat((int)root, expected->cgroup_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        char events[512];
+        valid = scope >= 0 && private_cgroup(scope, &scope_identity) && scope_identity.st_dev == root_identity.st_dev &&
+            (uint64_t)scope_identity.st_dev == expected->cgroup_device && (uint64_t)scope_identity.st_ino == expected->cgroup_inode &&
+            read_bounded(controller, scope, "cgroup.events", events, sizeof(events)) &&
+            (strncmp(events, "populated 0\n", 12) == 0 || strstr(events, "\npopulated 0\n") != NULL) &&
+            !(strncmp(events, "populated 1\n", 12) == 0 || strstr(events, "\npopulated 1\n") != NULL);
+    }
+    int64_t pids[] = { expected->subreaper_pid, expected->monitor_pid, expected->namespace_init_pid, expected->pid };
+    const char *tokens[] = { expected->subreaper_start_token, expected->monitor_start_token,
+        expected->init_native_start_token, expected->start_token };
+    for (size_t i = 0; valid && i < (created ? 4U : 1U); i++) {
+        struct process_sample sample;
+        valid = pids[i] > 0 && pids[i] <= INT32_MAX && *tokens[i] && sample_process(controller, (pid_t)pids[i], &sample, false) &&
+            (sample.absent || strcmp(sample.token, tokens[i]) != 0);
+    }
+    struct stat current;
+    if (valid && no_spawn) valid = fstatat((int)root, expected->cgroup_name, &current, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT;
+    else if (valid) valid = fstat(scope, &current) == 0 && same_directory(&scope_identity, &current) &&
+        fstatat((int)root, expected->cgroup_name, &current, AT_SYMLINK_NOFOLLOW) == 0 && same_directory(&scope_identity, &current);
+    if (valid) {
+        bool current_attempted;
+        valid = private_cgroup((int)root, &current) && same_directory(&controller->root_identity, &current) &&
+            reservation_file((int)reservation, expected, &current) && reservation_read(held, expected, &current_attempted, &actual) &&
+            current_attempted == attempted;
+        if (valid) { reservation_encode(actual_birth, &actual); valid = memcmp(expected_birth, actual_birth, sizeof(expected_birth)) == 0; }
+    }
+    bool scope_closed = retire_descriptor(&scope), witness_closed = retire_descriptor(&held);
+    if (!scope_closed || !witness_closed) controller->retirement_failed = true;
+    if (controller->retirement_failed || atomic_load(&native_retirement_failed)) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "preactivation retirement inspection descriptors did not retire"); return NULL;
+    }
+    if (!valid) return failure(env, "preactivation reservation or original kernel owners are not currently closed");
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0) return failure(env, "preactivation retirement observation time unavailable");
+    double observed = (double)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    if (observed <= 0 || observed > 9007199254740991.0) return failure(env, "preactivation retirement observation time invalid");
+    napi_value result; napi_create_double(env, observed, &result); return result;
 }
 
 static napi_value terminate_retained(napi_env env, napi_callback_info info) {
@@ -1117,6 +1199,7 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "pollBound", NULL, controller_poll_bound, NULL, NULL, NULL, napi_default, NULL },
         { "inspectReservation", NULL, controller_inspect_reservation, NULL, NULL, NULL, napi_default, NULL },
         { "pollReservation", NULL, controller_poll_reservation, NULL, NULL, NULL, napi_default, NULL },
+        { "assertPreactivationRetired", NULL, assert_preactivation_retired, NULL, NULL, NULL, napi_default, NULL },
         { "createWorker", NULL, create_worker, NULL, NULL, NULL, napi_default, NULL },
         { "createInvocation", NULL, create_invocation, NULL, NULL, NULL, napi_default, NULL },
         { "terminateRetained", NULL, terminate_retained, NULL, NULL, NULL, napi_default, NULL },

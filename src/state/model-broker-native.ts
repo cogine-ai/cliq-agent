@@ -23,6 +23,9 @@ export type ModelBrokerClosed = Readonly<{
 }>;
 export type NativeModelTransport = Readonly<{
   brokerFenceTokenDigest: string;
+  /** The real owner is closeable before preparation I/O settles. A refusal or
+   * cancellation rejects only after its native resource retirement joins. */
+  ready: Promise<void>;
   connect(binding: ModelBrokerBinding): Promise<void>;
   releaseBody(binding: ModelBrokerBinding): Promise<Readonly<{
     kind: 'complete' | 'prefix_over_limit'; status: number;
@@ -31,11 +34,11 @@ export type NativeModelTransport = Readonly<{
   close(): Promise<ModelBrokerClosed>;
 }>;
 export type NativeModelBrokerBinding = Readonly<{
-  interfaceVersion: 1;
+  interfaceVersion: 2;
   prepareModelTransport(input: Readonly<{
     provider: 'openai-compatible'; selector: SecretServiceSelector; expectedObservation: SecretServiceObservation;
     target: Readonly<{ hostAscii: string; port: number; basePath: string; serverNameAscii: string; spkiSha256Pins: readonly string[] }>;
     trustStoreBytes: Buffer; trustStoreDigest: string; requestPath: '/chat/completions';
     bodyBytes: Buffer; bodyBytesDigest: string;
-  }>): Promise<NativeModelTransport>;
+  }>): NativeModelTransport;
 }>;
