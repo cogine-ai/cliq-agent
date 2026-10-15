@@ -38,7 +38,7 @@ export async function readModelTurnMaterial(artifacts: ArtifactCatalog, ref: str
 }
 
 /** Static, post-Trust instruction projection. Reads retained CAS only, never live repository files. */
-export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: RunAssemblyV1): Promise<string> {
+export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: Pick<RunAssemblyV1, 'instructions'>): Promise<string> {
   const instructions = assembly.instructions;
   const system = await readText(artifacts, instructions.systemPromptRef, instructions.systemPromptDigest);
   if (!system.utf8.trim()) throw new TypeError('system instruction is empty');

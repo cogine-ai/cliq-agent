@@ -84,6 +84,7 @@ export type LinuxWorkerController = Readonly<{
   pid: number;
   processStartToken: string;
   subreaperStartToken: string;
+  preparationBirth: NativeControllerPreparationBirth;
   bindWorkerReservation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string }): Promise<void>;
   inspectPreactivation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string;
     containment?: ProcessContainment; workerIdentity?: WorkerIdentity }): Promise<NativePreactivationObservation>;
@@ -111,6 +112,14 @@ export type NativeWorkerImage = { descriptor(): number; close(): void };
 type NativeImage = NativeWorkerImage;
 type NativeScope = { pollReady(): boolean; observe(): NativeObservation; activate(nonce: string): void; pollActivated(): boolean;
   release(): void; result(): number | undefined; stop(): void; pollStopped(): NativeObservation | undefined };
+type ControllerPreparationDirectoryIdentity = Readonly<{
+  deviceId: string; fileId: string; ownerUid: number; ownerGid: number; mode: number;
+}>;
+type NativeControllerPreparationBirthObservation = Readonly<{
+  rootPath: string; root: ControllerPreparationDirectoryIdentity; parent: ControllerPreparationDirectoryIdentity;
+  leafName: string; leaf: ControllerPreparationDirectoryIdentity; pid: number; processStartToken: string;
+  readyObservedAtMs: number; observedAtMs: number;
+}>;
 type NativeController = { pid: number; processStartToken: string;
   pollReady(): boolean;
   bindReservation(reservation: number, config: object): void;
@@ -125,16 +134,53 @@ type NativeController = { pid: number; processStartToken: string;
   assertRetainedRetired(cgroupRootFd: number): number;
   assertPreactivationRetired(cgroupRootFd: number, reservationFd: number): number;
   assertPreparationRetired(cgroupRootFd: number): number;
+  observePreparationBirth(cgroupRootFd: number): NativeControllerPreparationBirthObservation;
   close(): Promise<void>;
 };
 export type NativeWorkerBinding = { interfaceVersion: 3; sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
   openController(helper: NativeImage, cgroupRootFd: number): NativeController };
 type NativeBinding = NativeWorkerBinding;
 
+function controllerPreparationBirthIdentity(observed: NativeControllerPreparationBirthObservation) {
+  if (!Number.isSafeInteger(observed.readyObservedAtMs) || observed.readyObservedAtMs < 1 ||
+      !Number.isSafeInteger(observed.observedAtMs) || observed.observedAtMs < observed.readyObservedAtMs)
+    mismatch('native controller preparation birth time is invalid');
+  return immutableSnapshot({ rootPath: observed.rootPath, root: observed.root, parent: observed.parent,
+    leafName: observed.leafName, leaf: observed.leaf, pid: observed.pid, processStartToken: observed.processStartToken,
+    readyObservedAt: new Date(observed.readyObservedAtMs).toISOString() });
+}
+
+declare const controllerPreparationBirthBrand: unique symbol;
+export type NativeControllerPreparationBirth = Readonly<{ [controllerPreparationBirthBrand]: true }>;
+const controllerPreparationBirths = new WeakMap<NativeControllerPreparationBirth, {
+  identity: ReturnType<typeof controllerPreparationBirthIdentity>; controllerBirthDigest: string;
+  lastObservedAtMs: number; assertCurrent(): NativeControllerPreparationBirthObservation;
+}>();
+/** An authenticated HELLO birth, freshly reasserted by its original live owner.
+ * The immutable identity is data; only this opaque token retains its producer. */
+export function readNativeControllerPreparationBirth(birth: NativeControllerPreparationBirth) {
+  const held = controllerPreparationBirths.get(birth);
+  if (!held) throw new TypeError('invalid native controller preparation birth');
+  let observed: NativeControllerPreparationBirthObservation;
+  try { observed = held.assertCurrent(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+      throw retirementError('controller preparation birth observation resources did not retire', error);
+    throw error;
+  }
+  if (canonicalSha256(controllerPreparationBirthIdentity(observed)) !== held.controllerBirthDigest)
+    mismatch('native controller preparation birth identity changed');
+  if (observed.observedAtMs < held.lastObservedAtMs)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'native controller preparation birth clock regressed');
+  held.lastObservedAtMs = observed.observedAtMs;
+  return immutableSnapshot({ identity: held.identity, controllerBirthDigest: held.controllerBirthDigest,
+    observedAt: new Date(observed.observedAtMs).toISOString() });
+}
+
 declare const retiredControllerPreparationBrand: unique symbol;
 export type NativeControllerPreparationRetirement = Readonly<{ [retiredControllerPreparationBrand]: true }>;
 const retiredControllerPreparations = new WeakMap<NativeControllerPreparationRetirement,
-  { pid: number; processStartToken: string; assertCurrent(): number }>();
+  { pid: number; processStartToken: string; controllerBirthDigest: string; readyObservedAt: string; assertCurrent(): number }>();
 /** Fresh closure of the original ordinary controller only. This supplies no
  * worker no-spawn, workspace or broker retirement authority. */
 export function readNativeControllerPreparationRetirement(receipt: NativeControllerPreparationRetirement) {
@@ -148,7 +194,10 @@ export function readNativeControllerPreparationRetirement(receipt: NativeControl
     throw error;
   }
   if (!Number.isSafeInteger(observed) || observed < 1) mismatch('native controller preparation retirement time is invalid');
-  return immutableSnapshot({ pid: held.pid, processStartToken: held.processStartToken, observedAt: new Date(observed).toISOString(),
+  const observedAt = new Date(observed).toISOString();
+  if (observedAt < held.readyObservedAt)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement clock precedes original controller birth');
+  return immutableSnapshot({ pid: held.pid, processStartToken: held.processStartToken, controllerBirthDigest: held.controllerBirthDigest, observedAt,
     controllerJoined: true as const, controllerLeafAbsent: true as const, workerCreationRequested: false as const,
     liveContainmentCount: 0 as const, activeMountCount: 0 as const });
 }
@@ -613,9 +662,19 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
           });
           await awaitNative(() => native.pollReady() ? true : undefined, closeController, signal);
           controllerReceiver(); signal?.throwIfAborted();
+          const observeBirth = () => {
+            controllerReceiver(); let observed!: NativeControllerPreparationBirthObservation;
+            source.withRoot(fd => { observed = native.observePreparationBirth(fd); });
+            return observed;
+          };
+          const observedBirth = observeBirth(), birthIdentity = controllerPreparationBirthIdentity(observedBirth);
+          const controllerBirthDigest = canonicalSha256(birthIdentity);
+          const preparationBirth = Object.freeze({}) as NativeControllerPreparationBirth;
+          controllerPreparationBirths.set(preparationBirth, { identity: birthIdentity, controllerBirthDigest,
+            lastObservedAtMs: observedBirth.observedAtMs, assertCurrent: observeBirth });
           const subreaperStartToken = `linux-subreaper:${native.pid}:${native.processStartToken}`;
           const controller: LinuxWorkerController = Object.freeze({
-            pid: native.pid, processStartToken: native.processStartToken, subreaperStartToken,
+            pid: native.pid, processStartToken: native.processStartToken, subreaperStartToken, preparationBirth,
             async bindWorkerReservation({ closure, reservation, activationNonceDigest }) {
               if (this !== controller) throw new TypeError('invalid worker controller'); controllerReceiver();
               same(closure.bundle, bundle, 'reservation bundle');
@@ -853,7 +912,8 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
               await closeController();
               if (!retiredPreparation) {
                 const receipt = Object.freeze({}) as NativeControllerPreparationRetirement;
-                retiredControllerPreparations.set(receipt, { pid: controller.pid, processStartToken: controller.processStartToken,
+                retiredControllerPreparations.set(receipt, { pid: birthIdentity.pid, processStartToken: birthIdentity.processStartToken,
+                  controllerBirthDigest, readyObservedAt: birthIdentity.readyObservedAt,
                   assertCurrent() {
                     receiver(); let observed!: number;
                     source.withRoot(fd => { observed = native.assertPreparationRetired(fd); });

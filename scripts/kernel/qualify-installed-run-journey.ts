@@ -381,9 +381,13 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
           assert(body.messages.some((message: any) => typeof message.content === 'string' &&
             message.content.includes('Observe the owned caf\u00e9 model failure without using a tool.')),
           'the model must receive the normalized objective, not the original NFD request spelling');
-          assert(body.messages.some((message: any) => typeof message.content === 'string' &&
-            message.content.includes(excludedVendorInstruction)),
-          'the model must receive ordinary instructions from the source-excluded vendor subtree');
+          const instructionPrompt = canonicalJsonBytes({ format: 'cliq-workspace-instruction-prompt-v1', entries: [
+            { order: 0, canonicalRootRelativePath: 'vendor/AGENTS.md', appliesToSubtree: true,
+              instructionUtf8: excludedVendorInstruction }
+          ] }).toString('utf8');
+          assert(body.messages.some((message: any) => message.role === 'system' && typeof message.content === 'string' &&
+            message.content.endsWith(`\n\n${instructionPrompt}`)),
+          'the model must receive the exact structured ordinary instruction bytes and excluded-subtree scope');
           report.instructionMetadataExclusion.providerReceivedOrdinaryGuidance = true;
           try {
             // The actual complete POST holds the original credential scope

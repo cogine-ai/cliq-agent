@@ -39,7 +39,8 @@ export type RunWorkspaceGeneration = Readonly<{
   publishMaterializedAuthority(options?: { signal?: AbortSignal }): Promise<MaterializedGenerationAuthority>;
   close(): void;
 }>;
-const generationTrees = new WeakMap<RunWorkspaceGeneration, HeldGenerationTree>();
+const generationTrees = new WeakMap<RunWorkspaceGeneration,
+  { tree: HeldGenerationTree; lifetimeSignal?: AbortSignal }>();
 declare const workspaceBirthBrand: unique symbol;
 export type RunWorkspaceBirth = Readonly<{ [workspaceBirthBrand]: true }>;
 export type RunWorkspaceBirthData = Readonly<{
@@ -131,9 +132,10 @@ export function readRetainedWorkspaceRetirement(owner: HeldStateOwnerLock, obser
 }
 
 export function borrowRunWorkspaceForExecution(generation: RunWorkspaceGeneration): BorrowedGenerationForExecution {
-  const tree = generationTrees.get(generation);
-  if (!tree) throw new TypeError('invalid Run workspace generation');
-  return borrowGenerationForExecution(tree);
+  const held = generationTrees.get(generation);
+  if (!held) throw new TypeError('invalid Run workspace generation');
+  held.lifetimeSignal?.throwIfAborted();
+  return borrowGenerationForExecution(held.tree);
 }
 function mismatch(message: string): never { throw new KernelStorageError('ARTIFACT_MISMATCH', message); }
 /** Only pure validation of actually observed entries can mint this failure.
@@ -453,7 +455,7 @@ async function mintRunWorkspace(tree: HeldGenerationTree, filesystem: HeldStateO
     },
     close() { if (this !== generation) throw new TypeError('invalid Run workspace generation'); closeWorkspaceDescriptor(tree); }
   });
-  generationTrees.set(generation, tree);
+  generationTrees.set(generation, { tree, lifetimeSignal });
   return generation;
 }
 

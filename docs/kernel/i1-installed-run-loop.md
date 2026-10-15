@@ -118,22 +118,33 @@ The physical materialization owner now separates actual directory birth from
 copying and complete rewalk. Its synchronous factory starts no allocation;
 the installed composition can retain the owner before starting work. Close
 joins copying and every minted snapshot/CAS operation before a separate fresh
-native retirement read. This does not bind preparation into StateStore or prove
+native retirement read. Starting close synchronously refuses new execution
+borrows without closing the tree ahead of its required CAS join. This does not bind preparation into StateStore or prove
 directory quarantine, containment death or a terminal transition. Genuine
-controller birth and the owning preparation graph remain unfinished.
+controller birth now records the authenticated HELLO time in native code and
+freshly checks the original root/parent/leaf and PID/start lifetime; its opaque
+token and retirement receipt share the original identity digest. Immutable
+`e46c752` reached the exact missing-reader RED in both real native campaigns;
+the implementation still requires actual Linux GREEN. The owning preparation
+graph remains unfinished.
 
 Instruction capture uses a fixed native instruction cursor: Git metadata is
 never entered, only exact `AGENTS.md` file contents may be read, and symlink
 contents are unavailable. The ordinary source cursor still rejects selected
 nested repositories. Source exclusion does not discard ordinary instruction
 scopes; Trust, source permission and tool permission remain separate. Real
-descriptor/CAS regressions pass; the new actual installed fixture must still
-qualify its source exclusion, retained bytes and owned HTTPS projection.
+descriptor/CAS regressions pass. Both `e46c752` installed failure campaigns
+passed captured bytes and source exclusion, then the owned HTTPS fixture
+failed before qualifying the prompt or reaching Busy. Its raw-newline substring
+assertion is now replaced by an exact canonical instruction-block/scope check,
+with a real capture/CAS/production-renderer regression. Actual installed prompt
+qualification remains pending; production rendering is unchanged.
 
 Both `5bc17c1` installed failure campaigns reached the exact Busy UDS regression:
 actual `INVALID_REQUEST` instead of required `RATE_LIMITED`. The dedicated,
 immutable projection now applies only to `run.submit` scope contention; the
-non-reentrant scope guard is unchanged. Actual-source Linux GREEN is pending;
+non-reentrant scope guard is unchanged. The `e46c752` prompt-fixture failure
+prevented this assertion from executing; actual-source Linux GREEN is pending;
 the fixed retry hint does not authorize retry of an invocation or effect.
 
 ## Validation boundary

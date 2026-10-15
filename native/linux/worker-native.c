@@ -36,6 +36,7 @@ struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, re
     char root_path[PATH_MAX], leaf_name[64];
     bool leaf_owned, leaf_initialized, controller_leaf_retired, constructor_failed, retirement_failed;
     bool worker_creation_requested, retained_requested;
+    double ready_observed_at_ms;
     unsigned int next_scope, pending; char token[CLIQ_WORKER_TOKEN_BYTES]; unsigned int references;
     struct native_scope *scopes, *pending_scope;
     struct cliq_worker_packet retained, reservation, reservation_inspection, inspected_reservation;
@@ -1147,6 +1148,65 @@ static napi_value assert_preparation_retired(napi_env env, napi_callback_info in
     napi_value result; napi_create_double(env, observed, &result); return result;
 }
 
+static napi_value preparation_directory_identity(napi_env env, const struct stat *identity) {
+    napi_value result; napi_create_object(env, &result); char value[32];
+    snprintf(value, sizeof(value), "%llu", (unsigned long long)identity->st_dev);
+    set_string(env, result, "deviceId", value);
+    snprintf(value, sizeof(value), "%llu", (unsigned long long)identity->st_ino);
+    set_string(env, result, "fileId", value);
+    set_number(env, result, "ownerUid", (double)identity->st_uid);
+    set_number(env, result, "ownerGid", (double)identity->st_gid);
+    set_number(env, result, "mode", (double)identity->st_mode);
+    return result;
+}
+
+/* HELLO records birth once. Every projection must still reobserve the same
+ * held hierarchy and live process; neither a path nor cached data is a proof. */
+static napi_value observe_preparation_birth(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1], self; struct controller *controller; uint64_t root;
+    napi_get_cb_info(env, info, &argc, args, &self, NULL);
+    if (argc != 1 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+        !number(env, args[0], &root) || root > INT32_MAX)
+        return failure(env, "invalid controller preparation birth owner");
+    /* Revocation precedes the cleanup worker. Do not read its in-flight
+     * retirement fields, or borrow its closing descriptors, after this cut. */
+    if (controller->closed) return failure(env, "controller preparation birth is no longer live");
+    if (controller->retirement_failed || atomic_load(&native_retirement_failed)) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "controller preparation birth resources did not retire"); return NULL;
+    }
+    if (!controller->ready || controller->constructor_failed || !controller->leaf_initialized ||
+        controller->worker_creation_requested || controller->inspection_only || controller->retained_requested ||
+        controller->pending != 0 || controller->pid <= 0 || !*controller->token || controller->ready_observed_at_ms <= 0)
+        return failure(env, "original ordinary controller preparation birth is not ready");
+    struct stat current;
+    bool valid = private_cgroup((int)root, &current) && same_directory(&controller->root_identity, &current) &&
+        controller_placement(controller, controller->token);
+    if (controller->retirement_failed || atomic_load(&native_retirement_failed)) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "controller preparation birth observation resources did not retire"); return NULL;
+    }
+    if (!valid) return failure(env, "controller preparation birth hierarchy or process changed");
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0)
+        return failure(env, "controller preparation birth observation time unavailable");
+    double observed = (double)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    if (observed < controller->ready_observed_at_ms || observed > 9007199254740991.0)
+        return failure(env, "controller preparation birth observation time invalid");
+    napi_value result, directory; napi_create_object(env, &result);
+    set_string(env, result, "rootPath", controller->root_path);
+    directory = preparation_directory_identity(env, &controller->root_identity);
+    napi_set_named_property(env, result, "root", directory);
+    directory = preparation_directory_identity(env, &controller->parent_identity);
+    napi_set_named_property(env, result, "parent", directory);
+    set_string(env, result, "leafName", controller->leaf_name);
+    directory = preparation_directory_identity(env, &controller->leaf_identity);
+    napi_set_named_property(env, result, "leaf", directory);
+    set_number(env, result, "pid", (double)controller->pid);
+    set_string(env, result, "processStartToken", controller->token);
+    set_number(env, result, "readyObservedAtMs", controller->ready_observed_at_ms);
+    set_number(env, result, "observedAtMs", observed);
+    return result;
+}
+
 static napi_value controller_close(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct controller *controller;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
@@ -1206,6 +1266,15 @@ static napi_value controller_poll_ready(napi_env env, napi_callback_info info) {
                 controller->retirement_failed = true;
                 (void)close_controller(controller); return failure(env, "native controller identity changed");
             }
+            struct timespec now;
+            if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0) {
+                (void)close_controller(controller); return failure(env, "native controller ready time unavailable");
+            }
+            double ready_observed = (double)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+            if (ready_observed <= 0 || ready_observed > 9007199254740991.0) {
+                (void)close_controller(controller); return failure(env, "native controller ready time invalid");
+            }
+            controller->ready_observed_at_ms = ready_observed;
             memcpy(controller->token, hello.start_token, sizeof(controller->token)); controller->ready = true;
         }
     }
@@ -1263,6 +1332,7 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "pollRetained", NULL, poll_retained, NULL, NULL, NULL, napi_default, NULL },
         { "assertRetainedRetired", NULL, assert_retained_retired, NULL, NULL, NULL, napi_default, NULL },
         { "assertPreparationRetired", NULL, assert_preparation_retired, NULL, NULL, NULL, napi_default, NULL },
+        { "observePreparationBirth", NULL, observe_preparation_birth, NULL, NULL, NULL, napi_default, NULL },
         { "close", NULL, controller_close, NULL, NULL, NULL, napi_default, NULL }
     };
     /* All receiver allocation/branding and async ownership precede the first

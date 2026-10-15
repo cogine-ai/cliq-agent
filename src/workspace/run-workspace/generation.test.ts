@@ -229,6 +229,10 @@ test('a materialization close joins its minted workspace snapshot and CAS cleanu
         if (size > 0 && size < bytes.length) {
           interruptedTemporary = name;
           joined = preparing.close().then(() => { temporaryAfterJoin = readdirSync(objects).includes(name); });
+          assert.throws(() => {
+            const borrowed = borrowRunWorkspaceForExecution(generation);
+            borrowed.close();
+          }, { code: 'LEASE_FENCED' }, 'close must forbid new execution borrows before its asynchronous join');
           void joined.catch(() => {}); return;
         }
       }
@@ -421,6 +425,10 @@ test('a minted private generation cannot bypass its factory cancellation with an
   const freshSignal = new AbortController().signal;
   await assert.rejects(generation.observe({ signal: freshSignal }), error => error === reason);
   await assert.rejects(generation.publishMaterializedAuthority({ signal: freshSignal }), error => error === reason);
+  assert.throws(() => {
+    const borrowed = borrowRunWorkspaceForExecution(generation);
+    borrowed.close();
+  }, error => error === reason);
 });
 
 test('directory-only materialization yields between real entries for cancellation', async (t) => {

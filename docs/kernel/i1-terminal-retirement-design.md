@@ -2,7 +2,7 @@
 
 Status: implementation direction approved on 2026-10-16; not implemented or
 qualified by this document. Closed data types/schema, the physical materialization
-owner and a controller-only receipt have implementation; the owning preparation/retirement producers and
+owner and controller-only birth/retirement receipts have implementation; the owning preparation/retirement producers and
 their real Linux qualification remain incomplete. The owner accepted one WorkerLaunch preparation
 spine plus genuine preparation-retirement/private rollback evidence, including
 fail-closed incomplete birth. Model unknown retains the existing strictly newer

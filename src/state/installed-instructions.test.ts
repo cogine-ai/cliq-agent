@@ -4,7 +4,9 @@ import path from 'node:path';
 import { test } from 'node:test';
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import type { WorkspaceEntryManifest } from '../kernel/types.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { captureWorkspaceEntries } from '../workspace/source-capture.js';
+import { loadInstructionText } from './agent-context.js';
 import { ArtifactCatalog } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
 import { captureInstalledWorkspaceInstructions } from './installed-run.js';
@@ -45,6 +47,18 @@ for (const metadata of ['.git', '.GIT']) {
     assert.deepEqual(captured.value.entries.map(entry => entry.canonicalRootRelativePath), ['vendor/AGENTS.md']);
     const content = await artifacts.readCanonical<ModelTextV1>(captured.value.entries[0]!.contentRef);
     assert.equal(content.utf8, instructions);
+    const systemBase = { schemaVersion: 1 as const, format: 'cliq-model-text-v1' as const,
+      utf8: 'Fixed system instruction.', byteCount: Buffer.byteLength('Fixed system instruction.') };
+    const system = { ...systemBase, textDigest: canonicalSha256(systemBase) };
+    const systemRef = (await artifacts.publishCanonical(system, system.format)).ref;
+    const rendered = await loadInstructionText(artifacts, { instructions: {
+      systemPromptRef: systemRef, systemPromptDigest: system.textDigest,
+      workspaceInstructionsRef: captured.ref, workspaceInstructionsDigest: captured.value.manifestDigest, skills: [] } });
+    const instructionPrompt = canonicalJsonBytes({ format: 'cliq-workspace-instruction-prompt-v1', entries: [
+      { order: 0, canonicalRootRelativePath: 'vendor/AGENTS.md', appliesToSubtree: true, instructionUtf8: instructions }
+    ] }).toString('utf8');
+    assert.equal(rendered, `${system.utf8}\n\n${instructionPrompt}`,
+      'rendering must preserve exact instruction bytes, including their JSON-escaped newline and subtree scope');
     assert.deepEqual(await readFile(metadataPath), invalid);
     root.assertHeld();
   });

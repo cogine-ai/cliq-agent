@@ -189,7 +189,10 @@ async function controllerAnchorBirth() {
     // No reservation, scope or worker was created: this controller is the
     // complete producer set. Normal close must join it before retiring its leaf.
     const originalController = controller;
-    await bounded(controller.close(), 15_000); controller = undefined;
+    const closing = controller.close();
+    assert.throws(() => Reflect.apply(readBirth, undefined, [birth]),
+      'closing must synchronously revoke live birth observations before joining the original controller');
+    await bounded(closing, 15_000); controller = undefined;
     await assert.rejects(access(`/proc/${pid}`), { code: 'ENOENT' }, 'close must join the original controller child');
     await assert.rejects(lstat(controllerPath), { code: 'ENOENT' }, 'joined controller-only leaf must retire safely');
     assert.deepEqual(identity(await leaf.stat({ bigint: true })), identity(leafBefore), 'held leaf retains its original inode');
