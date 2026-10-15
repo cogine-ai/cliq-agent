@@ -412,7 +412,10 @@ async function campaign(filename: string): Promise<void> {
     report.privateEdit = await privateCheckpoint(toolCheckpoint);
     assert.equal(cut.snapshot.run.budgetConsumed.modelTokens, 73728); assert.equal(cut.snapshot.run.budgetConsumed.costMicros, 0);
     assert.equal(cut.snapshot.run.budgetConsumed.toolCalls, 1); assert.equal(cut.snapshot.run.budgetConsumed.repairAttempts, 0);
-    assert.deepEqual(cut.snapshot.run.budgetReserved, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+    // The strict wire decoder intentionally returns null-prototype records.
+    // Keep exact fields/values/prototypes in the assertion, including zeros.
+    const zeroBudget = Object.assign(Object.create(null), { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+    assert.deepEqual(cut.snapshot.run.budgetReserved, zeroBudget);
     assert.deepEqual(exchange([submit])[0], submitReply, 'completed work must replay original admission, never dispatch another effect');
     const { requestDigest: _submitDigest, ...submitCore } = submit;
     const freshNonceReplay = request({ ...submitCore, requestId: '019a0012-0000-7000-8000-000000000108' });
@@ -472,7 +475,6 @@ async function campaign(filename: string): Promise<void> {
     }
     assert.equal(deadlineCut.snapshot.run.terminalReason, 'budget_exhausted');
     assert.equal(deadlineCut.snapshot.run.resultRef, undefined);
-    const zeroBudget = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
     assert.deepEqual(deadlineCut.snapshot.run.budgetConsumed, zeroBudget);
     assert.deepEqual(deadlineCut.snapshot.run.budgetReserved, zeroBudget);
     const deadlineIntent = parseJsonStrict((await readCas(deadlineCut.snapshot.run.stopIntentRef)).toString('utf8')) as Record<string, any>;
@@ -484,7 +486,8 @@ async function campaign(filename: string): Promise<void> {
     const deadlineDetail = parseJsonStrict((await readCas(deadlineCut.snapshot.run.terminalDetailRef)).toString('utf8')) as Record<string, any>;
     assert.equal(deadlineDetail.runId, queuedAdmitted.id); assert.equal(deadlineDetail.reason, 'budget_exhausted');
     assert.equal(deadlineDetail.primaryEvidenceRef, deadlineCut.snapshot.run.stopIntentRef);
-    assert.deepEqual(deadlineDetail.reasonDetail, { kind: 'budget_exhausted', stopIntentRef: deadlineCut.snapshot.run.stopIntentRef });
+    assert.deepEqual(deadlineDetail.reasonDetail, Object.assign(Object.create(null),
+      { kind: 'budget_exhausted', stopIntentRef: deadlineCut.snapshot.run.stopIntentRef }));
     cut = read();
     assert.equal(cut.snapshot.run.status, 'running');
     assert.equal(cut.snapshot.run.activeWorkerLaunchId, originalCandidateCut.snapshot.run.activeWorkerLaunchId);
@@ -599,7 +602,7 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(refused.snapshot.run.budgetConsumed.modelTokens, 36864);
     assert.equal(refused.snapshot.run.budgetConsumed.costMicros, 0);
     assert.equal(refused.snapshot.run.budgetConsumed.toolCalls, 0);
-    assert.deepEqual(refused.snapshot.run.budgetReserved, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+    assert.deepEqual(refused.snapshot.run.budgetReserved, zeroBudget);
     assert.equal(refused.snapshot.run.resultRef, undefined);
     assert.equal(refused.snapshot.run.terminalReason, undefined);
     const ambiguityEntry = refused.journal[2];
@@ -731,7 +734,8 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(shortCut.snapshot.run.leaseEpoch, 1);
     assert.deepEqual(shortCut.journal.map((entry: any) => [entry.opKind, entry.phase]),
       [['model', 'prepared'], ['model', 'dispatch_claimed'], ['model', 'completed']]);
-    assert.deepEqual(shortCut.snapshot.run.budgetConsumed, { modelTokens: 36864, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+    assert.deepEqual(shortCut.snapshot.run.budgetConsumed, Object.assign(Object.create(null),
+      { modelTokens: 36864, costMicros: 0, toolCalls: 0, repairAttempts: 0 }));
     assert.deepEqual(shortCut.snapshot.run.budgetReserved, zeroBudget);
     assert.equal(shortCut.snapshot.run.resultRef, undefined);
     const shortCancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000112',
