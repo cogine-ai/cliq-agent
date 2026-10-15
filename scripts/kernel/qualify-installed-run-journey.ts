@@ -18,7 +18,7 @@ import { parseJsonStrict } from '../../src/kernel/json.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { createCredentialSecretScanner } from './testing/credential-secret-scan.js';
 import { scanCredentialSecretCorpus } from './testing/credential-secret-corpus.js';
-import { projectInstalledRunProgress, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
+import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; workspace: string; reportFile: string };
@@ -826,7 +826,7 @@ async function campaign(filename: string): Promise<void> {
       earlierUnknownNotRedispatched: true, totalOwnedProviderRequests: 4 };
     for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
     assert.equal(await readFile(source, 'utf8'), hostBefore);
-    report.qualified = true; mark('complete');
+    report.qualified = true; mark('run_assertions_complete');
   } catch (error) {
     primary = error;
     // Best-effort public observation only. Diagnostic failure cannot replace
@@ -853,8 +853,11 @@ async function campaign(filename: string): Promise<void> {
         const units = [installedServices.supervisorUnit, installedServices.keeperUnit];
         const before = units.map(unit => show(unit));
         assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);
+        const stoppedUnits = units.map(unit => show(unit));
+        report.installedServiceExit = { supervisor: projectInstalledServiceExit(stoppedUnits[0]),
+          keeper: projectInstalledServiceExit(stoppedUnits[1]) };
         for (let index = 0; index < units.length; index++) {
-          const stopped = show(units[index]!);
+          const stopped = stoppedUnits[index]!;
           assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');
           assert.equal(stopped.Result, 'success'); assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
           if (/^[1-9][0-9]*$/u.test(before[index]!.MainPID!)) {

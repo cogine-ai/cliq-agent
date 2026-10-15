@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { projectInstalledRunProgress, projectInstalledSupervisorStatus } from './installed-run-progress.js';
+import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from './installed-run-progress.js';
 
 const sensitive = 'untrusted-provider-prompt-secret-path-error';
 function cut() {
@@ -61,4 +61,25 @@ test('Supervisor status diagnostic contains only the existing closed health and 
   assert.deepEqual(projectInstalledSupervisorStatus({ ...status, health: 'recovering' }),
     { diagnosticOnly: true, kind: 'supervisor_status_projection_refused' });
   assert(!JSON.stringify(projectInstalledSupervisorStatus(status)).includes(sensitive));
+});
+
+test('installed service exit projection records observed zero and nonzero exit codes without qualifying them', () => {
+  const observed = { ActiveState: 'inactive', MainPID: '0', Result: 'success', ExecMainCode: '0', ExecMainStatus: '0',
+    Description: sensitive, InvocationID: sensitive, ExecStart: sensitive };
+  assert.deepEqual(projectInstalledServiceExit(observed), { diagnosticOnly: true, kind: 'service_exit',
+    activeState: 'inactive', hasMainProcess: false, result: 'success', exitCode: 0, exitStatus: 0 });
+  assert.deepEqual(projectInstalledServiceExit({ ...observed, ActiveState: 'failed', MainPID: '1234',
+    Result: 'signal', ExecMainCode: '2', ExecMainStatus: '15' }), { diagnosticOnly: true, kind: 'service_exit',
+    activeState: 'failed', hasMainProcess: true, result: 'signal', exitCode: 2, exitStatus: 15 });
+  assert(!JSON.stringify(projectInstalledServiceExit(observed)).includes(sensitive));
+});
+
+test('installed service exit projection refuses malformed fields without echoing Manager data', () => {
+  const observed = { ActiveState: 'inactive', MainPID: '0', Result: 'success', ExecMainCode: '1', ExecMainStatus: '0' };
+  for (const invalid of [null, [], { ...observed, ActiveState: sensitive }, { ...observed, Result: sensitive },
+    { ...observed, MainPID: '-1' }, { ...observed, MainPID: '01' }, { ...observed, MainPID: '2147483648' },
+    { ...observed, ExecMainCode: '7' }, { ...observed, ExecMainCode: 1 }, { ...observed, ExecMainStatus: '256' },
+    { ...observed, ExecMainStatus: sensitive }, { ...observed, ExecMainStatus: undefined }]) {
+    assert.deepEqual(projectInstalledServiceExit(invalid), { diagnosticOnly: true, kind: 'service_exit_projection_refused' });
+  }
 });

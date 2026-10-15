@@ -65,3 +65,21 @@ export function projectInstalledSupervisorStatus(value: unknown): unknown {
       incompatiblePinnedRunCount: counter(status.incompatiblePinnedRunCount) };
   } catch { return { diagnosticOnly: true, kind: 'supervisor_status_projection_refused' }; }
 }
+
+/** Actual Manager observations only; an exit code of zero here is not proof
+ * of CLD_EXITED (1). The caller must retain its independent exit assertions. */
+export function projectInstalledServiceExit(value: unknown): unknown {
+  try {
+    const status = record(value);
+    const integer = (value: unknown, maximum: number): number => {
+      if (typeof value !== 'string' || !/^(?:0|[1-9][0-9]{0,9})$/u.test(value) || Number(value) > maximum)
+        throw new TypeError('not a closed service counter');
+      return Number(value);
+    };
+    return { diagnosticOnly: true, kind: 'service_exit',
+      activeState: enumeration(status.ActiveState, ['active', 'reloading', 'inactive', 'failed', 'activating', 'deactivating', 'maintenance'] as const),
+      hasMainProcess: integer(status.MainPID, 2147483647) !== 0,
+      result: enumeration(status.Result, ['success', 'resources', 'timeout', 'exit-code', 'signal', 'core-dump', 'watchdog', 'start-limit-hit', 'protocol', 'oom-kill'] as const),
+      exitCode: integer(status.ExecMainCode, 6), exitStatus: integer(status.ExecMainStatus, 255) };
+  } catch { return { diagnosticOnly: true, kind: 'service_exit_projection_refused' }; }
+}
