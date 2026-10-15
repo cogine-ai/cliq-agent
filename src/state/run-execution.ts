@@ -720,21 +720,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         // neither resent nor given an unused healthy replacement generation.
         const recovered = await completeWorkerRecoveryProbe(driver, artifacts, owner, { runId, expectedRunRevision: cut.run.revision }, death, signal);
         signal.throwIfAborted();
-        const retiredWorker = await controller.closeRetained();
-        const current = await readRecoveryClosure(driver, artifacts, runId);
-        const quarantined = current.workspaceGenerations.find(row => row.generationRef === oldGeneration.generationRef);
-        if (!quarantined || quarantined.phase !== 'quarantined' || current.run.revision !== recovered.revision) {
-          throw new KernelStorageError('REVISION_CONFLICT', 'recovered generation changed before actual resource retirement');
-        }
-        const quarantine = await artifacts.readCanonical<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(quarantined.quarantineEvidenceRef);
-        const retiredWorkspace = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
-          identity: closure.generation, sourceRowVersion: quarantine.sourceRowVersion, signal });
-        if (!executionStore) throw new KernelStorageError('RECOVERY_REQUIRED', 'generation retirement has no original installed Store broker owner');
-        const brokerQuiescence = observeInstalledBrokerQuiescence(executionStore, runId);
-        await retireQuarantinedGeneration(driver, artifacts, owner, { runId, expectedRunRevision: recovered.revision,
-          expectedGenerationRowVersion: quarantined.rowVersion, generationRef: quarantined.generationRef,
-          workerRetirement: retiredWorker, workspaceRetirement: retiredWorkspace, brokerQuiescence });
-        return readRun(driver, runId);
+        // The owning task joins its actual resources before returning. The
+        // installed driver separately resumes quarantine retirement with
+        // fresh native/tree/broker observations; recovery itself stops here.
+        return recovered;
       };
       const work = (async () => {
         if (closed || isClosing()) throw new KernelStorageError('LEASE_FENCED', 'Run execution is closing');
