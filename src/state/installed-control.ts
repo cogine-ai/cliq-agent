@@ -5,7 +5,7 @@ import { parseJsonStrict } from '../kernel/json.js';
 import type { RunSnapshotV1, SessionSnapshotV1, ControlResultV1 } from '../kernel/types.js';
 import type { LocalControlConnection } from './control-channel.js';
 import { EventCursorExpiredError, type ReadControlRequest, type ReadControlResult } from './control-read.js';
-import { CredentialFinalizationTimeError, KernelStorageError, ResourceRetirementError } from './errors.js';
+import { CredentialFinalizationTimeError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError } from './errors.js';
 import type { StateStore } from './store.js';
 import type { CredentialAuthorityOperationV1 } from '../kernel/credential-authority.js';
 import type { CredentialFinalizeRequest } from './installed-credential-client.js';
@@ -168,6 +168,8 @@ export function openInstalledControl(store: StateStore,
     if (error instanceof EventCursorExpiredError) return { schemaVersion: 1, code: 'EVENT_CURSOR_EXPIRED', retryable: false,
       messageCode: 'control.event_cursor_expired', earliestEventSeq: error.earliestEventSeq,
       latestEventSeq: error.latestEventSeq, snapshot: error.snapshot };
+    if (error instanceof InstalledModelAuthorizationError) return { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED',
+      retryable: false, messageCode: 'run.model_authority_refused' };
     if (error instanceof InstalledRunAuthorityError) return { schemaVersion: 1,
       code: error.refusalCode === 'MODEL_COST_UNKNOWN' ? 'MODEL_COST_UNKNOWN' : error.refusalCode === 'MODEL_CAPABILITY_UNKNOWN'
         ? 'AUTHORIZATION_REQUIRED' : 'ARTIFACT_MISMATCH', retryable: false,

@@ -34,6 +34,15 @@ export class CredentialFinalizationTimeError extends KernelStorageError {
   }
 }
 
+/** Fixed classification of the model authority guards, not authorization
+ * evidence or a generic interpretation of every invalid state transition. */
+export class InstalledModelAuthorizationError extends KernelStorageError {
+  constructor() {
+    super('STATE_TRANSITION_INVALID', 'installed model endpoint or credential does not authorize this Run');
+    this.name = 'InstalledModelAuthorizationError';
+  }
+}
+
 /** Internal resource-retirement failure, not an inspection outcome or a
  * caller-supplied proof. It must survive operation error handling so that an
  * unsettled descriptor/process cleanup can never mint a joined receipt. */

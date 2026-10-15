@@ -63,7 +63,7 @@ import { ensureInstalledCredentialSupervisor, type CredentialFinalizeRequest } f
 import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
-import { CredentialFinalizationTimeError, KernelStorageError, ResourceRetirementError } from './errors.js';
+import { CredentialFinalizationTimeError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { assertInstalledCredentialScope, installedCredentialProvenance, observeInstalledCredentialProducer,
   type InstalledCredentialScope, type InstalledCredentialProvenance,
   withHeldInstalledRuntime, withInstalledWorkerRoot, type HeldInstalledAnchor,
@@ -72,6 +72,7 @@ import { withCredentialAuthorityLock, loadInstalledCredentialPlatform, loadInsta
 import { MODEL_BROKER_ENTRY_ID, InstalledModelBrokerRefusalError, type NativeModelTransport, type ModelBrokerBinding, type ModelBrokerClosed } from './model-broker-native.js';
 import { decodeBrokerInvocationAmbiguity, type BrokerInvocationAmbiguityEvidenceV1 } from '../kernel/broker-ambiguity.js';
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
+import { selectInstalledModelProgress } from './installed-model-progress.js';
 import type { SupervisorHelloV1, SupervisorStatusV1 } from './installed-control.js';
 import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import {
@@ -192,17 +193,17 @@ function currentModelAuthority(held: CredentialBinding, principalId: string, end
   const endpoint = readEndpointHistory(held, endpointId).at(-1);
   if (!endpoint || endpoint.state !== 'active' || !endpoint.registration.purposes.includes('model_endpoint') ||
       endpoint.registration.createdAt > now || endpoint.createdAt > now)
-    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model endpoint is not currently active');
+    throw new InstalledModelAuthorizationError();
   const history = readCredentialHistory(held, credentialIds[0]!), record = history.latest, creating = history.creating;
   if (!record || !creating || record.state !== 'active' || record.purpose !== 'model_endpoint' ||
       record.createdAt > now || (record.expiresAt !== undefined && now >= record.expiresAt) ||
       record.endpointRegistrationRef !== endpoint.expectedRegistrationArtifactRef ||
       record.endpointIdentityDigest !== endpoint.registration.endpointIdentityDigest || record.tlsPolicyDigest !== endpoint.registration.tlsPolicyDigest)
-    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model credential no longer authorizes the exact active endpoint');
+    throw new InstalledModelAuthorizationError();
   const binding = frozenModelCredential(record);
   if (frozen && (canonicalSha256(frozen.endpoint) !== endpoint.expectedRegistrationArtifactRef ||
       frozen.bindings.length !== 1 || canonicalSha256(frozen.bindings[0]) !== canonicalSha256(binding)))
-    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model frozen endpoint or credential generation was revoked or replaced');
+    throw new InstalledModelAuthorizationError();
   assertInstalledCredentialScope(held.physical);
   return { endpoint: endpoint.registration, bindings: [binding], creating,
     selector: credentialSelector(held, creating), observation: readStoredCredentialObservation(held, creating) };
@@ -1637,6 +1638,8 @@ export class StateStore {
   private readonly installedAgents = new Map<string, AgentRunState>();
   private readonly installedAgentLoads = new Map<string, Promise<AgentRunState>>();
   private readonly installedRunFailures = new Map<string, unknown>();
+  private readonly installedPreparationRetries = new Map<string, { error: KernelStorageError; opId: string; attempt: number;
+    preparedSeq: number; failedSeq: number; requestRef: string; settlementRef: string }>();
   private schedulerStarted = false;
   private installedModelAdmissionReady = false;
   private schedulerFailure: unknown;
@@ -1727,7 +1730,7 @@ export class StateStore {
       currentModelAuthority(held, identity.principalId, model.endpoint.endpointRegistrationId,
         model.modelCredentialGrantIds, sampleCanonicalNow(), authority);
       if (authority.bindings.some(binding => binding.expiresAt !== undefined && binding.expiresAt < assembled.deadlineAt))
-        throw new KernelStorageError('STATE_TRANSITION_INVALID', 'credential validity does not cover the complete requested Run interval');
+        throw new InstalledModelAuthorizationError();
       assertCurrentControlFrame(this.owner, identity); token.assertHeld();
       return admitInstalledRun(this.driver, this.artifacts, this.owner, assembled, identity);
     });
@@ -1862,6 +1865,12 @@ export class StateStore {
         run = readRun(this.driver, id);
         if (run.stopIntentRef || run.status === 'waiting' && run.waitingReason === 'reconciliation' ||
             run.status === 'queued' && !this.installedRunFailures.has(id)) this.scheduleInstalledRun(id);
+        else if (run.status === 'running' && run.nextStep === 'agent' && this.installedPreparationRetries.has(id) &&
+            !this.installedRunTasks.has(id)) {
+          const attempt = await agent.readModelAttempt();
+          if (this.matchesInstalledPreparationRetry(id, attempt) && this.installedModelProgress(attempt) === 'retry')
+            this.scheduleInstalledRun(id);
+        }
       } catch (error) {
         if (error instanceof ResourceRetirementError) throw error;
         // A changing Run cut is not permission to weaken the native gate or
@@ -1869,6 +1878,31 @@ export class StateStore {
         this.installedRunFailures.set(id, error);
       }
     }
+  }
+
+  private installedModelProgress(attempt: Awaited<ReturnType<AgentRunState['readModelAttempt']>>) {
+    if (!attempt) return selectInstalledModelProgress(undefined);
+    const entries = readInvocationAttempt(this.driver, attempt.run.id, attempt.entry.opId, attempt.entry.attempt);
+    // The asynchronous closure reader does not freeze SQL. A changed cut is
+    // retained until its actual current owner observes it again, never resent.
+    if (entries.length === 0 || canonicalSha256(readRun(this.driver, attempt.run.id)) !== canonicalSha256(attempt.run) ||
+        canonicalSha256(entries[0]) !== canonicalSha256(attempt.entry) ||
+        canonicalSha256(entries.at(-1)) !== canonicalSha256(attempt.state)) return 'retain' as const;
+    return selectInstalledModelProgress({ phase: attempt.state.phase, disposition: attempt.disposition,
+      hasDispatchClaim: entries.some(entry => entry.phase === 'dispatch_claimed'),
+      hasSettlement: attempt.state.budgetSettlementRef !== undefined, retry: attempt.retry.kind });
+  }
+
+  private matchesInstalledPreparationRetry(runId: string, attempt: Awaited<ReturnType<AgentRunState['readModelAttempt']>>): boolean {
+    const hint = this.installedPreparationRetries.get(runId);
+    if (!hint || !attempt || this.installedRunFailures.get(runId) !== hint.error || attempt.run.id !== runId ||
+        attempt.run.status !== 'running' || attempt.run.stopIntentRef || !attempt.run.activeWorkerLaunchId ||
+        attempt.entry.opId !== hint.opId || attempt.entry.attempt !== hint.attempt || attempt.entry.seq !== hint.preparedSeq ||
+        attempt.entry.requestRef !== hint.requestRef || attempt.state.phase !== 'failed' || attempt.state.seq !== hint.failedSeq ||
+        attempt.state.budgetSettlementRef !== hint.settlementRef) return false;
+    const entries = readInvocationAttempt(this.driver, runId, hint.opId, hint.attempt);
+    return entries.length === 2 && entries[0]?.phase === 'prepared' && entries[1]?.phase === 'failed' &&
+      canonicalSha256(entries[0]) === canonicalSha256(attempt.entry) && canonicalSha256(entries[1]) === canonicalSha256(attempt.state);
   }
 
   private installedWorkerSlotAvailable(runId: string): boolean {
@@ -1911,6 +1945,7 @@ export class StateStore {
     }
     this.installedAgents.delete(runId);
     this.installedRunFailures.delete(runId);
+    this.installedPreparationRetries.delete(runId);
   }
 
   private async driveInstalledRun(runId: string): Promise<void> {
@@ -1948,11 +1983,22 @@ export class StateStore {
       }
       if (current.nextStep !== 'agent') return;
       const prior = await agent.readModelAttempt();
-      if (prior?.state.phase === 'completed' || prior?.state.phase === 'dispatch_claimed' || prior?.state.phase === 'unknown') {
-        // Model end is an I2 candidate handoff, not a verified result. Unknown
-        // and previous claims are never permission to recreate/send a token.
-        return;
+      const progress = this.installedModelProgress(prior);
+      if (progress === 'stop' && prior) {
+        if (prior.prepared.request.kind === 'context_compaction') {
+          await agent.stopForResourceFailure({ expectedRunRevision: prior.run.revision });
+        } else {
+          const inspector = supervisorInspectorIdentity(assertActiveStateOwner(this.driver, this.owner));
+          const artifact = await this.artifacts.publishCanonical(inspector, inspector.format);
+          await agent.stopForModelFailure({ expectedRunRevision: prior.run.revision,
+            inspectorIdentityRef: artifact.ref, inspectorIdentityDigest: inspector.identityDigest });
+        }
+        continue;
       }
+      // Candidate ends and permanent/unknown claims stay retained. A fresh
+      // explicit/recovery drive may retry a validated free failure; only the
+      // automatic maintenance wake additionally requires its original hint.
+      if (progress === 'retain') return;
       if (current.status === 'queued') {
         current = await execution.activateCurrentWorker({ expectedRunRevision: current.revision });
       }
@@ -2390,14 +2436,23 @@ export class StateStore {
       let transport: NativeModelTransport | undefined;
       let claimed: import('../kernel/types.js').InvocationJournalEntry | undefined;
       let receivedResponse = false;
+      let preparationError: KernelStorageError | undefined;
       try {
         const authority = currentModelAuthority(held, initial.authority.principalId, target.endpointRegistrationId,
           frozen.map(binding => binding.credentialGrantId), sampleCanonicalNow(), { endpoint: target, bindings: frozen });
-        transport = await broker.prepareModelTransport({ provider: 'openai-compatible', selector: authority.selector,
-          expectedObservation: authority.observation, target: { hostAscii: target.target.hostAscii, port: target.target.port,
-            basePath: target.target.basePath, serverNameAscii: target.tls.serverNameAscii, spkiSha256Pins: target.tls.spkiSha256Pins },
-          trustStoreBytes, trustStoreDigest: target.tls.trustStoreRef, requestPath: '/chat/completions',
-          bodyBytes, bodyBytesDigest: initial.request.bodyBytesRef });
+        try {
+          transport = await broker.prepareModelTransport({ provider: 'openai-compatible', selector: authority.selector,
+            expectedObservation: authority.observation, target: { hostAscii: target.target.hostAscii, port: target.target.port,
+              basePath: target.target.basePath, serverNameAscii: target.tls.serverNameAscii, spkiSha256Pins: target.tls.spkiSha256Pins },
+            trustStoreBytes, trustStoreDigest: target.tls.trustStoreRef, requestPath: '/chat/completions',
+            bodyBytes, bodyBytesDigest: initial.request.bodyBytesRef });
+        } catch (error) {
+          // Only this original, joined native preparation failure can wake
+          // another free attempt. Authority, claim and cleanup failures cannot.
+          if (error instanceof KernelStorageError && error.code === 'RECOVERY_REQUIRED' &&
+              !(error instanceof ResourceRetirementError) && !(error instanceof InstalledModelAuthorizationError)) preparationError = error;
+          throw error;
+        }
         if (this.closeRequested || this.closed) throw new KernelStorageError('LEASE_FENCED', 'model broker is closing');
         this.modelTransports.set(runId, transport);
         token.assertHeld();
@@ -2454,8 +2509,14 @@ export class StateStore {
         reader.push(response.bodyBytes);
         const result = reader.finish(sampleCanonicalNow(), agent.resolveToolInput);
         response.bodyBytes.fill(0);
-        return await agent.completeModel({ opId: prepared.opId, attempt: prepared.attempt,
+        const completed = await agent.completeModel({ opId: prepared.opId, attempt: prepared.attempt,
           expectedRunRevision: readRun(this.driver, runId).revision, result });
+        const retry = this.installedPreparationRetries.get(runId);
+        if (retry && retry.opId === prepared.opId && retry.attempt < prepared.attempt && retry.failedSeq < prepared.seq &&
+            this.installedRunFailures.get(runId) === retry.error) {
+          this.installedPreparationRetries.delete(runId); this.installedRunFailures.delete(runId);
+        }
+        return completed;
       } catch (error) {
         // Unknown never becomes a no-release refund or a synthetic response.
         // Native closure is resource retirement only, not external-effect proof.
@@ -2491,7 +2552,19 @@ export class StateStore {
           const evidence = { schemaVersion: 1, format: 'cliq-invocation-error-v1', runId, opId: prepared.opId, attempt: prepared.attempt,
             requestRef: prepared.requestRef, reason: 'installed_model_preparation_refused', observedAt: sampleCanonicalNow() };
           const artifact = await this.artifacts.publishCanonical(evidence, evidence.format);
-          await failInvocationBeforeDispatch(this.driver, this.artifacts, this.owner, { ...input, errorRef: artifact.ref });
+          const failed = await failInvocationBeforeDispatch(this.driver, this.artifacts, this.owner, { ...input, errorRef: artifact.ref });
+          if (preparationError && preparationError === error) {
+            const current = await agent.readModelAttempt();
+            const entries = readInvocationAttempt(this.driver, runId, prepared.opId, prepared.attempt);
+            if (current && current.run.status === 'running' && !current.run.stopIntentRef && current.run.activeWorkerLaunchId &&
+                canonicalSha256(current.entry) === canonicalSha256(prepared) && canonicalSha256(current.state) === canonicalSha256(failed.entry) &&
+                entries.length === 2 && entries[0]?.phase === 'prepared' && entries[1]?.phase === 'failed' &&
+                canonicalSha256(entries[0]) === canonicalSha256(prepared) && canonicalSha256(entries[1]) === canonicalSha256(failed.entry) &&
+                this.installedModelProgress(current) === 'retry') {
+              this.installedPreparationRetries.set(runId, { error: preparationError, opId: prepared.opId, attempt: prepared.attempt,
+                preparedSeq: prepared.seq, failedSeq: failed.entry.seq, requestRef: prepared.requestRef, settlementRef: failed.entry.budgetSettlementRef! });
+            }
+          }
         }
         // Before the second release, or after a positively received response,
         // this implementation cannot truthfully mint that ambiguity branch.

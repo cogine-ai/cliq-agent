@@ -20,10 +20,11 @@ case ${1:-} in
   --credentials) probe_campaign_kind=credentials; shift ;;
   --run-journey) probe_campaign_kind=run-journey; shift ;;
   --run-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--failure-campaign; shift ;;
+  --run-retry-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--retry-campaign; shift ;;
 esac
 readonly probe_campaign_kind probe_run_driver_mode
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--run-journey|--run-failure-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--run-journey|--run-failure-journey|--run-retry-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -66,6 +67,7 @@ if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement 
   if [[ "$probe_campaign_kind" = run-journey ]]; then
     probe_typescript_driver=$probe_run_driver
     [[ -f "$probe_run_driver" && ! -L "$probe_run_driver" && -f "$probe_credential_source" && ! -L "$probe_credential_source" ]] || exit 2
+    [[ -f "$probe_credential_store_source" && ! -L "$probe_credential_store_source" ]] || exit 2
   fi
   probe_installed_loader=$("$probe_node" --input-type=module -e \
     'import { createRequire } from "node:module"; process.stdout.write(createRequire(process.argv[1]).resolve("tsx"));' \
@@ -544,7 +546,8 @@ const runJourney = mode === 'run-journey' ? {
   installerEntry: `${fixture}/run-package-build/installed-runtime-installer.mjs`,
   stateRoot: `${home}/.cliq/kernel-v1`, releaseKeysFile: `${fixture}/run-release-keys.json`,
   controlDirectory: `${home}/probe/run-secret-service-control`,
-  observer: `${fixture}/cliq-credential-journey-observer`, workspace: `${home}/probe/run-workspace`,
+  observer: `${fixture}/cliq-credential-journey-observer`, storeFixture: `${fixture}/cliq-credential-store-fixture`,
+  workspace: `${home}/probe/run-workspace`,
   reportFile: `${output}/installed-run-journey.json`,
 } : undefined;
 writeFileSync(file, JSON.stringify({ diagnosticOnly: true, fixture, fixtureIdentity, username,
@@ -608,6 +611,8 @@ if [[ "$probe_campaign_kind" = run-journey ]]; then
   read -r -a probe_gio_flags <<< "$(pkg-config --cflags --libs gio-2.0)"
   cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_credential_source" -o "$probe_fixture/cliq-credential-journey-observer" "${probe_gio_flags[@]}"
   chmod 0555 "$probe_fixture/cliq-credential-journey-observer"
+  cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_credential_store_source" -o "$probe_fixture/cliq-credential-store-fixture" "${probe_gio_flags[@]}"
+  chmod 0555 "$probe_fixture/cliq-credential-store-fixture"
 fi
 mkdir -m 0755 -- "$probe_home/.config" "$probe_home/.config/systemd" "$probe_home/.config/systemd/user"
 if [[ "$probe_campaign_kind" = credentials || "$probe_campaign_kind" = run-journey ]]; then

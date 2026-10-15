@@ -645,12 +645,26 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         let cut = await readRecoveryClosure(driver, artifacts, runId);
         signal.throwIfAborted();
         if (cut.run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'retirement resume revision changed');
-        if (!cut.workspaceGenerations.some(row => row.phase === 'quarantined')) return cut.run;
+        const eligible: Array<{ row: (typeof cut.workspaceGenerations)[number];
+          quarantine: import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1 }> = [];
+        // The recovery closure validates worker-recovery and preactivation
+        // graphs. An unsupported producer must not become a successful no-op.
+        for (const row of cut.workspaceGenerations) {
+          if (row.phase !== 'quarantined') continue;
+          signal.throwIfAborted();
+          const quarantine = await artifacts.readCanonical<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(row.quarantineEvidenceRef);
+          if (quarantine.reason === 'worker_recovery') eligible.push({ row, quarantine });
+          else if (quarantine.reason !== 'launch_aborted' && quarantine.reason !== 'launch_died_before_activation') {
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement resume has no validated recipe for this quarantine producer');
+          }
+        }
+        signal.throwIfAborted();
+        if (eligible.length === 0) return cut.run;
         if (cut.run.status !== 'queued' || cut.run.activeWorkerLaunchId !== undefined ||
             activeWorker || worker || generation || controller || reservation || ownedLaunchId !== undefined || !executionStore) {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement resume requires its lease-free queued cut and original installed resource owner');
         }
-        for (const row of cut.workspaceGenerations.filter(value => value.phase === 'quarantined')) {
+        for (const { row, quarantine } of eligible) {
           signal.throwIfAborted();
           const launches = readWorkerLaunchesForRun(driver, runId).filter(launch => launch.workspaceGenerationRef === row.generationRef);
           if (launches.length !== 1) throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement resume has no unique original worker launch');
@@ -662,7 +676,6 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           const death = await controller.terminateRetained({ closure, containment, workerIdentity, signal });
           assertNativeContainmentDeath(death);
           const workerRetirement = await controller.closeRetained();
-          const quarantine = await artifacts.readCanonical<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(row.quarantineEvidenceRef!);
           const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
             identity: closure.generation, sourceRowVersion: quarantine.sourceRowVersion, signal });
           signal.throwIfAborted();

@@ -12,7 +12,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
-import { decodeCredentialAuthorityOperation, decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
+import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRevokeOperation,
+  decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
@@ -22,7 +23,7 @@ import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerLease } from '
 import { projectInstalledRunProgress, projectInstalledServiceExit, projectInstalledSupervisorStatus } from '../../src/sandbox/testing/installed-run-progress.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
-  controlDirectory: string; observer: string; workspace: string; reportFile: string };
+  controlDirectory: string; observer: string; storeFixture: string; workspace: string; reportFile: string };
 type Ledger = { diagnosticOnly: true; fixture: string; fixtureIdentity: string; username: string;
   uid: number; gid: number; runnerUid: number; home: string; runJourney: Recipe };
 type Response = { protocolVersion: 1; ok: boolean; method?: string; result?: Record<string, any>; error?: Record<string, unknown> };
@@ -31,7 +32,7 @@ const hostBefore = 'before the private edit\n';
 const privateAfter = 'after the private edit\n';
 const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
-type CampaignMode = '--campaign' | '--failure-campaign';
+type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 
@@ -61,7 +62,7 @@ async function readLedger(filename: string): Promise<Ledger> {
   assert.equal(ledger.username, `cliq-probe-${ledger.fixture.split('.').at(-1)!.toLowerCase()}`);
   const recipe = ledger.runJourney;
   assert.deepEqual(Object.keys(recipe).sort(), ['buildFixture', 'controlDirectory', 'installerEntry', 'observer',
-    'packageRoot', 'releaseKeysFile', 'reportFile', 'stateRoot', 'workspace'].sort());
+    'packageRoot', 'releaseKeysFile', 'reportFile', 'stateRoot', 'storeFixture', 'workspace'].sort());
   assert.equal(recipe.buildFixture, path.join(ledger.fixture, 'run-package-build'));
   assert.equal(recipe.packageRoot, path.join(recipe.buildFixture, 'package'));
   assert.equal(recipe.installerEntry, path.join(recipe.buildFixture, 'installed-runtime-installer.mjs'));
@@ -69,6 +70,10 @@ async function readLedger(filename: string): Promise<Ledger> {
   assert.equal(recipe.releaseKeysFile, path.join(ledger.fixture, 'run-release-keys.json'));
   assert.equal(recipe.controlDirectory, path.join(ledger.home, 'probe/run-secret-service-control'));
   assert.equal(recipe.observer, path.join(ledger.fixture, 'cliq-credential-journey-observer'));
+  assert.equal(recipe.storeFixture, path.join(ledger.fixture, 'cliq-credential-store-fixture'));
+  const storeFixture = await lstat(recipe.storeFixture);
+  assert(storeFixture.isFile() && !storeFixture.isSymbolicLink() && storeFixture.uid === 0 && storeFixture.gid === 0 &&
+    storeFixture.nlink === 1 && (storeFixture.mode & 0o7777) === 0o555);
   assert.equal(recipe.workspace, path.join(ledger.home, 'probe/run-workspace'));
   assert(path.isAbsolute(recipe.reportFile) && path.basename(recipe.reportFile) === 'installed-run-journey.json');
   const output = await lstat(path.dirname(recipe.reportFile));
@@ -123,15 +128,18 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const failureOnly = mode === '--failure-campaign';
+  const retryOnly = mode === '--retry-campaign';
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: failureOnly
-      ? 'independent signed installed Linux Run, one positively received owned HTTP429 response, exact model-failure stop and physical terminal drain, Session publication and reconnect; not transport retry, cancellation, deadline expiry, full I1, real provider/billing, I2 or macOS'
+    scope: retryOnly
+      ? 'independent signed installed Linux Run, real default-alias drift and exact restoration on the same Secret Service lifetime, free pre-dispatch failure and one subsequent owned model response, explicit cancellation and terminal Session publication; not daemon restart, locked-store recovery, post-claim retry, full I1, real provider/billing, I2 or macOS'
+      : failureOnly
+      ? 'independent signed installed Linux Run, one positively received owned HTTP429 response, exact model-failure stop and physical terminal drain, Session publication and reconnect, then durable source-refusal replay after real credential revocation; not transport retry, cancellation, deadline expiry, full I1, real provider/billing, I2 or macOS'
       : 'signed installed Linux Run admission, native credential HTTPS transport, real private edit, ready Checkpoint, candidate retention with read-only lease-renewal observation across the old expiry, capacity-blocked queued deadline, client reconnect, Supervisor restart and explicit cancellation; not live-worker deadline, full I1, real provider/billing, I2 or macOS',
     completeI1Qualified: false, actualProviderQualified: false, actualProviderCapabilityQualified: false,
     actualProviderBillingQualified: false, artifactGetPublicUxQualified: false, exactFinalizerTimeCutsQualified: false,
     retiredScopeLiveProducerABAQualified: false, fullCrashMatrixQualified: false, macosQualified: false,
     rebootQualified: false, I2VerifiedResultQualified: false, liveWorkerDeadlineQualified: false, candidateLeaseRenewalQualified: false,
-    receivedModelFailureQualified: false };
+    receivedModelFailureQualified: false, preDispatchRetryQualified: false };
   const secret = Buffer.from(randomBytes(32).toString('hex')), password = Buffer.from(randomBytes(32).toString('hex'));
   const scanner = createCredentialSecretScanner([secret, password], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
   const scanBytes = (bytes: Uint8Array) => { const scan = scanner.openStream(); try { scan.scan(bytes); } finally { scan.close(); } };
@@ -189,8 +197,21 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   };
   const observe = () => {
     const result = command(recipe.observer, ['list']); assert.equal(result.status, 0);
-    const value = parseJsonStrict(result.stdout.trim()) as { serviceUid: number; servicePid: number; nameOwner: string; items: string[]; connectionClosed: boolean };
+    const value = parseJsonStrict(result.stdout.trim()) as { serviceUid: number; servicePid: number; nameOwner: string;
+      collection: string; items: string[]; connectionClosed: boolean };
     assert.equal(value.serviceUid, ledger.uid); assert.equal(value.connectionClosed, true); return value;
+  };
+  const storeFixture = (action: 'alias-session' | 'alias-restore', collection?: string) => {
+    assert.equal(action === 'alias-restore', collection !== undefined);
+    const result = command(recipe.storeFixture, [action, ...(collection === undefined ? [] : [collection])]);
+    assert.equal(result.status, 0, 'owned standard Secret Service alias fixture refused');
+    const value = parseJsonStrict(result.stdout.trim()) as Record<string, unknown>;
+    const field = action === 'alias-session' ? 'defaultAliasSession' : 'defaultAliasMatched';
+    assert.deepEqual(Object.keys(value).sort(), ['diagnosticOnly', 'action', 'collection', field, 'connectionClosed'].sort());
+    assert.equal(value.diagnosticOnly, true); assert.equal(value.action, action); assert.equal(value[field], true);
+    assert.equal(value.connectionClosed, true); assert.equal(typeof value.collection, 'string');
+    if (collection !== undefined) assert.equal(value.collection, collection);
+    return value;
   };
   // systemd may unload an inactive unreferenced unit and discard its exit
   // history. Hold both actual unit objects on one real user-bus connection
@@ -252,6 +273,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   };
   let daemon: ChildProcess | undefined, daemonExit: Promise<void> | undefined, daemonPid: number | undefined, daemonStart: string | undefined;
   let installedServices: { supervisorUnit: string; keeperUnit: string } | undefined;
+  let retryPlatform: ReturnType<typeof observe> | undefined, aliasRestoreCollection: string | undefined;
   let server: Server | undefined;
   let primary: unknown, providerFailure = false, requestsReceived = 0, reflectionEnabled = false, shortRunEnabled = false;
   const socketClosures: Promise<void>[] = [];
@@ -269,6 +291,19 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     assert(uids && uids.slice(1).every(value => Number(value) === uid));
     if (parent !== undefined) assert(ppid && Number(ppid[1]) === parent);
     assert.equal(await processStart(pid), start); return start;
+  };
+  const restoreRetryAlias = async () => {
+    if (aliasRestoreCollection === undefined) return;
+    // Consume this cleanup obligation once. A failed real restoration remains
+    // a failure; it is never replaced with a synthetic observation or unlock.
+    const original = aliasRestoreCollection; aliasRestoreCollection = undefined;
+    assert(retryPlatform && daemonPid && daemonStart);
+    report.retryAliasRestoration = storeFixture('alias-restore', original);
+    assert.equal(await fixtureProcess(daemonPid, ledger.uid, daemon!.pid), daemonStart);
+    const restored = observe();
+    for (const key of ['nameOwner', 'servicePid', 'serviceUid', 'collection'] as const) assert.equal(restored[key], retryPlatform[key]);
+    assert.deepEqual(restored.items, retryPlatform.items);
+    report.retryAliasRestoration.sameOriginalDaemonAndItem = true;
   };
   const selectedSupervisor = async (unit: string, shown: Record<string, string>, image: string, by: number) => {
     // Type=exec acknowledges bootstrap, not its asynchronous verified exec
@@ -343,6 +378,17 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
           outgoing.writeHead(429, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
           report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
             exactCredentialMatched: true, status: 429, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
+          return;
+        }
+        if (retryOnly) {
+          assert.equal(ordinal, 1, 'free preparation failures must lead to exactly one actual model dispatch');
+          const bytes = Buffer.from(JSON.stringify({ id: 'owned-retry-fixture-turn', object: 'chat.completion', model,
+            choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'The restored preparation is complete.' } }],
+            usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }));
+          scanBytes(bytes);
+          outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
+          report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
+            exactCredentialMatched: true, status: 200, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
           return;
         }
         assert(ordinal <= (shortRunEnabled ? 4 : reflectionEnabled ? 3 : 2), 'replay or restart must not redispatch the completed model attempts');
@@ -471,17 +517,18 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     assert.deepEqual(exchange([sessionRequest])[0], sessionReply, 'new authenticated connection must replay the original Session response');
     const currentSession = () => accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id }])[0]!, 'session.get').snapshot.session;
     mark('public_run_submit');
-    const runBudgets = { wallTimeMs: failureOnly ? 45000 : 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
+    const runBudgets = { wallTimeMs: failureOnly || retryOnly ? 45000 : 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
       repairAttempts: 0, childDepth: 0, childConcurrency: 1 };
     const submit = request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000104',
       admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
-      workspacePath: recipe.workspace, objective: 'Change example.txt from before the private edit to after the private edit, using one edit operation.',
+      workspacePath: recipe.workspace, objective: retryOnly ? 'Acknowledge restored model preparation without using a tool.'
+        : 'Change example.txt from before the private edit to after the private edit, using one edit operation.',
       model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
         modelCredentialGrantIds: [enrollment.credentialGrantId] }, policyMode: 'accept-edits',
       budgets: runBudgets,
       verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
     const { requestDigest: _resourceDigest, ...resourceCore } = submit;
-    if (!failureOnly) {
+    if (!failureOnly && !retryOnly) {
       const unauthorized = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000114',
         model: { ...resourceCore.model, modelCredentialGrantIds: ['installed-run-absent-credential'] } })])[0]!;
       assert.equal(unauthorized.ok, false, 'an absent credential cannot authorize installed Run admission');
@@ -494,12 +541,21 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       sandboxResources: { maxSingleFileBytes: 2_147_483_648 } })])[0]!;
     assert.equal(oversized.ok, false, 'unsupported explicit file limits must be refused before Run admission');
     assert.equal(oversized.error!.code, 'INVALID_REQUEST'); assert.equal(requestsReceived, 0);
+    if (retryOnly) {
+      mark('real_default_alias_drift_before_submission');
+      retryPlatform = observe(); assert.equal(retryPlatform.items.length, 1);
+      assert.match(retryPlatform.collection, /^\/org\/freedesktop\/secrets\/collection\/[A-Za-z0-9_]+$/u);
+      assert.notEqual(retryPlatform.collection, '/org/freedesktop/secrets/collection/session');
+      aliasRestoreCollection = retryPlatform.collection;
+      report.retryAliasDrift = storeFixture('alias-session');
+      assert.notEqual(report.retryAliasDrift.collection, retryPlatform.collection);
+    }
     const submitReply = exchange([submit])[0]!, admitted = accepted(submitReply, 'run.submit').snapshot.run;
     report.oversizedFileLimitRefused = { requestedBytes: 2_147_483_648, installedLimitBytes: 268_435_456,
       sameAdmissionKeySubsequentlyAccepted: true, silentClampingAllowed: false };
     report.acceptedRun = { id: admitted.id, sessionId: admitted.sessionId, specRef: admitted.specRef, initialCheckpointId: admitted.latestCheckpointId };
     assert.equal(admitted.status, 'queued'); assert.equal(admitted.revision, 1);
-    if (!failureOnly) report.unauthorizedAdmissionRefused = { qualified: true, refusalCode: 'AUTHORIZATION_REQUIRED',
+    if (!failureOnly && !retryOnly) report.unauthorizedAdmissionRefused = { qualified: true, refusalCode: 'AUTHORIZATION_REQUIRED',
       fixedReason: 'run.model_authority_refused', noProviderRequest: true, sameAdmissionKeySubsequentlyAccepted: true };
     // The submission client has exited and closed its actual socket. All
     // further observation uses a fresh native authenticated connection.
@@ -508,7 +564,135 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure });
       return cut;
     };
-    if (failureOnly) {
+    if (retryOnly) {
+      mark('real_pre_dispatch_failure_without_claim');
+      assert.equal(Date.parse(admitted.deadlineAt) - Date.parse(admitted.createdAt), 45000);
+      const fullCharge = { modelTokens: 36864, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+      const zeroCharge = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+      const failedBy = Date.now() + 10000;
+      let failedCut: Record<string, any>;
+      for (;;) {
+        await delay(50); failedCut = read(); assert(!providerFailure); assert.equal(requestsReceived, 0);
+        assert(!['failed', 'cancelled', 'succeeded', 'completed_unverified'].includes(failedCut.snapshot.run.status));
+        if (failedCut.journal.at(-1)?.phase === 'failed') break;
+        assert(Date.now() < failedBy, 'real alias drift did not settle its preparation without dispatch');
+      }
+      assert(Date.now() < failedBy);
+      const originalWorker = failedCut.snapshot.run.activeWorkerLaunchId, originalEpoch = failedCut.snapshot.run.leaseEpoch;
+      assert.equal(failedCut.snapshot.run.status, 'running'); assert(originalWorker); assert.equal(originalEpoch, 1);
+      assert.equal(failedCut.snapshot.run.stopIntentRef, undefined); assert.equal(failedCut.snapshot.run.resultRef, undefined);
+      for (const actual of [failedCut.snapshot.run.budgetConsumed, failedCut.snapshot.run.budgetReserved])
+        assert.equal(canonicalSha256(actual), canonicalSha256(zeroCharge));
+      const inspectFreeFailures = async (entries: Array<Record<string, any>>) => {
+        assert(entries.length >= 2 && entries.length % 2 === 0);
+        const first = entries[0];
+        for (let index = 0; index < entries.length; index += 2) {
+          const prepared = entries[index], failed = entries[index + 1];
+          assert.deepEqual([prepared.opKind, prepared.phase, prepared.attempt, failed.opKind, failed.phase, failed.attempt],
+            ['model', 'prepared', index / 2, 'model', 'failed', index / 2]);
+          assert.equal(prepared.runId, admitted.id); assert.equal(prepared.opId, first.opId); assert.equal(prepared.target, first.target);
+          assert.equal(failed.runId, admitted.id); assert.equal(failed.target, first.target);
+          assert.equal(failed.opId, prepared.opId); assert.equal(failed.requestRef, prepared.requestRef); assert.equal(failed.seq, prepared.seq + 1);
+          assert.equal(canonicalSha256(prepared.budgetDelta), canonicalSha256(fullCharge));
+          assert.equal(canonicalSha256(failed.budgetDelta), canonicalSha256(zeroCharge));
+          assert.equal(failed.dispatchId, undefined); assert.equal(failed.resultRef, undefined);
+          const settlement = parseJsonStrict((await readCas(failed.budgetSettlementRef)).toString('utf8')) as Record<string, any>;
+          assert.equal(settlement.runId, admitted.id); assert.equal(settlement.opId, prepared.opId); assert.equal(settlement.attempt, prepared.attempt);
+          assert.equal(settlement.preparedJournalSeq, prepared.seq); assert.equal(settlement.terminalJournalSeq, failed.seq);
+          assert.equal(settlement.terminalPhase, 'failed'); assert.equal(settlement.settlementDigest, digestOmitting(settlement, 'settlementDigest'));
+          for (const actual of [settlement.reserved, settlement.released]) assert.equal(canonicalSha256(actual), canonicalSha256(fullCharge));
+          for (const actual of [settlement.consumed, settlement.budgetConsumedBefore, settlement.budgetConsumedAfter, settlement.budgetReservedAfter])
+            assert.equal(canonicalSha256(actual), canonicalSha256(zeroCharge));
+          assert.equal(canonicalSha256(settlement.budgetReservedBefore), canonicalSha256(fullCharge));
+          const error = parseJsonStrict((await readCas(failed.errorRef)).toString('utf8')) as Record<string, any>;
+          assert.equal(error.reason, 'installed_model_preparation_refused'); assert.equal(error.requestRef, prepared.requestRef);
+        }
+      };
+      assert.equal(failedCut.nextJournalSeq, failedCut.highWaterJournalSeq); await inspectFreeFailures(failedCut.journal);
+      assert.deepEqual(currentSession(), session);
+      report.retryPreparationFailure = { qualified: true, runId: admitted.id, attempts: failedCut.journal.length / 2,
+        journalPhases: failedCut.journal.map((entry: any) => [entry.phase, entry.attempt, entry.seq]),
+        zeroConsumedAndReserved: true, noDispatchClaim: true, noProviderRequest: true,
+        originalActiveWorkerLaunchId: originalWorker, originalLeaseEpoch: originalEpoch };
+      mark('exact_alias_restoration_then_existing_scheduler_retry');
+      await restoreRetryAlias();
+      const resumedBy = Date.now() + 15000;
+      let resumed: Record<string, any>;
+      for (;;) {
+        await delay(50); resumed = read(); assert(!providerFailure);
+        assert.equal(resumed.snapshot.run.activeWorkerLaunchId, originalWorker); assert.equal(resumed.snapshot.run.leaseEpoch, originalEpoch);
+        assert.equal(resumed.snapshot.run.status, 'running'); assert.equal(resumed.snapshot.run.stopIntentRef, undefined);
+        if (resumed.journal.at(-1)?.phase === 'completed') break;
+        assert(Date.now() < resumedBy, 'restored real preparation was not rescheduled within the independent 15s bound');
+      }
+      assert(Date.now() < resumedBy);
+      assert.equal(requestsReceived, 1); assert.equal(resumed.nextJournalSeq, resumed.highWaterJournalSeq);
+      const free = resumed.journal.slice(0, -3), [prepared, claimed, completed] = resumed.journal.slice(-3);
+      await inspectFreeFailures(free); assert(free.length >= failedCut.journal.length);
+      assert.deepEqual(free.slice(0, failedCut.journal.length), failedCut.journal);
+      assert.deepEqual([prepared.opKind, prepared.phase, claimed.opKind, claimed.phase, completed.opKind, completed.phase],
+        ['model', 'prepared', 'model', 'dispatch_claimed', 'model', 'completed']);
+      assert.equal(prepared.attempt, free.length / 2);
+      for (const entry of [prepared, claimed, completed]) {
+        assert.equal(entry.runId, admitted.id); assert.equal(entry.opId, free[0].opId); assert.equal(entry.attempt, prepared.attempt);
+        assert.equal(entry.requestRef, prepared.requestRef); assert.equal(entry.target, free[0].target);
+      }
+      assert.equal(claimed.seq, prepared.seq + 1); assert.equal(completed.seq, claimed.seq + 1);
+      const originalRequest = parseJsonStrict((await readCas(free[0].requestRef)).toString('utf8')) as Record<string, any>;
+      const retriedRequest = parseJsonStrict((await readCas(prepared.requestRef)).toString('utf8')) as Record<string, any>;
+      for (const field of ['bodyBytesRef', 'bodyByteCount', 'assemblyRef', 'opId', 'runId', 'kind']) assert.equal(retriedRequest[field], originalRequest[field]);
+      assert.equal(retriedRequest.kind, 'normal'); assert.equal(retriedRequest.requestDigest, digestOmitting(retriedRequest, 'requestDigest'));
+      const turn = parseJsonStrict((await readCas(completed.resultRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(turn.format, 'cliq-agent-model-turn-v1'); assert.equal(turn.stopReason, 'end'); assert.deepEqual(turn.toolCalls, []);
+      assert.equal(turn.requestDigest, retriedRequest.requestDigest);
+      const settlement = parseJsonStrict((await readCas(completed.budgetSettlementRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(settlement.runId, admitted.id); assert.equal(settlement.opId, prepared.opId); assert.equal(settlement.attempt, prepared.attempt);
+      assert.equal(settlement.preparedJournalSeq, prepared.seq); assert.equal(settlement.terminalJournalSeq, completed.seq);
+      assert.equal(settlement.terminalPhase, 'completed'); assert.equal(settlement.settlementDigest, digestOmitting(settlement, 'settlementDigest'));
+      for (const actual of [settlement.reserved, settlement.consumed]) assert.equal(canonicalSha256(actual), canonicalSha256(fullCharge));
+      assert.equal(canonicalSha256(settlement.released), canonicalSha256(zeroCharge));
+      assert.equal(canonicalSha256(resumed.snapshot.run.budgetConsumed), canonicalSha256(fullCharge));
+      assert.equal(canonicalSha256(resumed.snapshot.run.budgetReserved), canonicalSha256(zeroCharge));
+      assert.equal(resumed.snapshot.run.resultRef, undefined); assert.deepEqual(currentSession(), session);
+      const ready = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status'); assert.equal(ready.health, 'ready');
+      const cancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000115',
+        runId: admitted.id, expectedRevision: resumed.snapshot.run.revision });
+      accepted(exchange([cancel])[0]!, 'run.cancel');
+      const cancelledBy = Date.now() + 15000;
+      let terminal: Record<string, any>;
+      for (;;) {
+        await delay(50); terminal = read(); assert(!providerFailure);
+        if (terminal.snapshot.run.status === 'cancelled') break;
+        assert(Date.now() < cancelledBy, 'restored-preparation Run did not genuinely join after explicit cancellation');
+      }
+      assert(Date.now() < cancelledBy);
+      const cancelled = terminal.snapshot.run;
+      assert.equal(cancelled.terminalReason, 'cancelled_by_user'); assert.equal(cancelled.cancelRequested, true);
+      assert.equal(cancelled.activeWorkerLaunchId, undefined); assert.equal(cancelled.resultRef, undefined);
+      assert.equal(cancelled.leaseEpoch, originalEpoch); assert(cancelled.updatedAt < cancelled.deadlineAt);
+      assert.deepEqual(terminal.journal, resumed.journal); assert.deepEqual(terminal.items, resumed.items);
+      assert.deepEqual(cancelled.budgetConsumed, resumed.snapshot.run.budgetConsumed); assert.deepEqual(cancelled.budgetReserved, resumed.snapshot.run.budgetReserved);
+      const intent = parseJsonStrict((await readCas(cancelled.stopIntentRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(intent.origin, 'user_cancel'); assert.equal(intent.reason, 'cancelled_by_user'); assert.equal(intent.requestId, cancel.requestId);
+      const sessionCut = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id, afterItemSeq: session.latestItemSeq }])[0]!, 'session.get');
+      assert.equal(sessionCut.snapshot.session.contextRevision, session.contextRevision + 1);
+      assert.equal(sessionCut.snapshot.session.latestItemSeq, session.latestItemSeq + 1); assert.equal(sessionCut.items.length, 1);
+      const publication = parseJsonStrict((await readCas(sessionCut.items[0].payloadRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(canonicalSha256(publication), canonicalSha256({ schemaVersion: 1, format: 'cliq-session-run-terminal-v1', kind: 'run_terminal',
+        itemKey: `run-terminal:${admitted.id}`, runId: admitted.id, operation: 'agent', admittedSessionItemSeq: session.latestItemSeq,
+        status: 'cancelled', terminalReason: 'cancelled_by_user', terminalDetailRef: cancelled.terminalDetailRef }));
+      assert.deepEqual(read(), terminal); assert.deepEqual(exchange([submit])[0], submitReply);
+      assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id, afterItemSeq: session.latestItemSeq }])[0]!, 'session.get'), sessionCut);
+      assert.equal(requestsReceived, 1); assert(!providerFailure);
+      for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
+      assert.equal(await readFile(source, 'utf8'), hostBefore);
+      report.preDispatchRetryQualified = true;
+      report.preDispatchRetry = { qualified: true, scope: 'temporary default-alias drift on one original Secret Service lifetime only',
+        runId: admitted.id, failedAttempts: free.length / 2, dispatchedAttempt: prepared.attempt, ownedProviderRequests: 1,
+        sameWorkerAndEpoch: true, originalBodyAndAuthorityPreserved: true, freeFailuresFullyRefunded: true, oneFullReservationCharged: true,
+        candidateRetainedWithoutResult: true, supervisorHealthRecovered: true, explicitCancelGenuineWorkerJoin: true,
+        immutableJournalPreserved: true, sessionPublishedOnce: true, reconnectAndAdmissionReplayPreserved: true };
+    } else if (failureOnly) {
       mark('received_model_rejection_and_terminal_drain');
       assert.equal(Date.parse(admitted.deadlineAt) - Date.parse(admitted.createdAt), 45000);
       const terminalBy = Date.now() + 30000;
@@ -609,6 +793,57 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         completedResponseRef: completed.resultRef, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest,
         terminalDetailRef: failed.terminalDetailRef, fullReservationCharged: true, noToolDispatch: true, noResultPublished: true,
         genuineWorkerJoinRequiredByProduction: true, sessionPublishedOnce: true, reconnectAndAdmissionReplayPreserved: true };
+      mark('durable_source_refusal_before_credential_revocation');
+      const refusalSession = currentSession();
+      const refusalCore = { ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000116',
+        admissionKey: randomBytes(32).toString('base64url'), expectedContextRevision: refusalSession.contextRevision,
+        objective: 'Observe a durable source refusal without executing a model.',
+        // Canonical inline selectors pass generic/installed admission. The
+        // existing source projection rejects duplicates after real reservation,
+        // then retires its genuine descriptors/staging before this response.
+        sourceExcludes: [{ path: 'example.txt', scope: 'entry' }, { path: 'example.txt', scope: 'entry' }] };
+      const refusalRequest = request(refusalCore), refusal = exchange([refusalRequest])[0]!;
+      assert.equal(canonicalSha256(refusal), canonicalSha256({ protocolVersion: 1, ok: false, method: 'run.submit',
+        error: { schemaVersion: 1, messageCode: 'source_capture_rejected', code: 'INVALID_REQUEST', retryable: false,
+          issues: [{ path: 'source', issueCode: 'source_changed_or_unsupported' }] } }));
+      report.sourceRefusalReplay = { qualified: false, sourceRule: 'duplicate_exclude_selectors',
+        originalResponseDigest: canonicalSha256(refusal), initialSourceRefusal: true };
+      assert.deepEqual(currentSession(), refusalSession); assert.equal(requestsReceived, 1);
+      mark('real_credential_revocation_before_source_refusal_replay');
+      assert.equal(operation.committedAuthorityRevision, 1);
+      const revocation = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'revoke',
+        requestId: '019a0012-0000-7000-8000-000000000117', credentialGrantId: enrollment.credentialGrantId,
+        expectedAuthorityRevision: operation.committedAuthorityRevision }), 'operation'));
+      assert.equal(revocation.disposition, 'revoked'); assert.equal(revocation.cleanupPhase, 'cleanup_complete');
+      assert.equal(revocation.credentialGrantId, enrollment.credentialGrantId); assert.equal(revocation.committedAuthorityRevision, 2);
+      assert.deepEqual(revocation.platformItem, operation.platformItem);
+      const revokedPlatform = observe(); assert.deepEqual(revokedPlatform.items, []);
+      assert.equal(revokedPlatform.nameOwner, platform.nameOwner); assert.equal(revokedPlatform.servicePid, platform.servicePid);
+      report.sourceRefusalReplay.credentialRevokedAndSecretDeleted = true;
+      mark('retained_source_refusal_and_conflicts_after_revocation');
+      const replays = exchange([refusalRequest,
+        request({ ...refusalCore, requestId: '019a0012-0000-7000-8000-000000000118' }),
+        request({ ...refusalCore, objective: 'A conflicting original nonce must remain a conflict.' }),
+        request({ ...refusalCore, requestId: '019a0012-0000-7000-8000-000000000119', objective: 'A conflicting admission intent must remain a conflict.' })]);
+      // Retain only closed error classes if the real replay regresses. No
+      // dynamic diagnostic, source payload or credential is copied to evidence.
+      report.sourceRefusalReplay.observedReplies = replays.map(reply => ({ ok: reply.ok,
+        code: ['INVALID_REQUEST', 'AUTHORIZATION_REQUIRED', 'REQUEST_ID_CONFLICT', 'ADMISSION_KEY_CONFLICT'].includes(reply.error?.code as string)
+          ? reply.error!.code : 'unrecognized' }));
+      assert.deepEqual(replays[0], refusal, 'original nonce must replay its durable source refusal despite current credential revocation');
+      assert.deepEqual(replays[1], refusal, 'fresh nonce must bind the same original source refusal without reauthorizing capture');
+      for (const [index, code] of [[2, 'REQUEST_ID_CONFLICT'], [3, 'ADMISSION_KEY_CONFLICT']] as const) {
+        assert.equal(canonicalSha256(replays[index]), canonicalSha256({ protocolVersion: 1, ok: false, method: 'run.submit',
+          error: { schemaVersion: 1, code, retryable: false, messageCode: 'control.mutation_refused' } }));
+      }
+      assert.deepEqual(currentSession(), refusalSession); assert.deepEqual(read(), terminal);
+      assert.equal(requestsReceived, 1); assert(!providerFailure);
+      for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
+      assert.equal(await readFile(source, 'utf8'), hostBefore);
+      report.sourceRefusalReplay.qualified = true;
+      report.sourceRefusalReplay.sameNonceAndFreshNoncePreserved = true;
+      report.sourceRefusalReplay.requestAndAdmissionConflictsPreserved = true;
+      report.sourceRefusalReplay.noNewRunSessionMutationOrProviderRequest = true;
     } else {
     mark('real_edit_and_ready_checkpoint');
     let current: Record<string, any> | undefined;
@@ -1049,6 +1284,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   }
   finally {
     const cleanupFailures: unknown[] = [];
+    try { await restoreRetryAlias(); } catch (error) { cleanupFailures.push(error); }
     try {
       if (server) {
         server.closeAllConnections(); await bounded(new Promise<void>(resolve => server!.close(() => resolve())), 10000, 'owned HTTPS fixture did not close');
@@ -1126,5 +1362,5 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
 
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
-assert(mode === '--campaign' || mode === '--failure-campaign'); assert(filename && extra.length === 0);
+assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign'); assert(filename && extra.length === 0);
 await campaign(filename, mode);

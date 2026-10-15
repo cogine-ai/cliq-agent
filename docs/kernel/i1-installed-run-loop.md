@@ -117,6 +117,23 @@ reconnect/replay without another provider request. It shares the real installed
 setup and unchanged cleanup/scan bounds, not the full journey's secret or state.
 Only a passing complete report qualifies this case; neither a timeout nor the
 separate full journey's success does so.
+After that terminal drain, the same independent campaign obtains a genuine
+retired source refusal from duplicate exclude selectors, revokes the original
+credential through the installed entry and deletes its actual Secret Service
+item. Original- and fresh-nonce replay must preserve the exact refusal, while
+request-ID and admission-key conflicts remain conflicts without a new Run,
+Session change or provider request. This remains inside the existing scan cap;
+it does not add a source experiment to the full journey's near-cap corpus.
+
+A second independent campaign temporarily changes only the test user's default
+Secret Service alias through the existing standard-API fixture. It requires a
+real unclaimed preparation failure and complete refund, restores the exact
+original collection on the same daemon and item lifetime, then requires the
+same Run/worker to dispatch once, retain its candidate and genuinely drain on
+explicit cancellation. This tests recovery from temporary configuration drift,
+not locked-store recovery, daemon restart or permission to resend a claimed or
+unknown invocation. The pure scheduling decision regressions grant no authority
+and cannot replace this installed observation or its final scans and cleanup.
 
 This document describes the implemented composition and its validation boundary;
 it does not certify a source revision. Qualification requires the exact-SHA
