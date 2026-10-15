@@ -1,5 +1,7 @@
 export type ArtifactRef = string;
 
+export type { BrokerProcessDomainDeathEvidenceV1 } from './broker-process-domain-death.js';
+
 export type {
   ProcessContainmentOwner, ProcessContainmentPlanV1, ProcessContainment,
   ProcessContainmentRef, ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentDeathEvidenceV1,

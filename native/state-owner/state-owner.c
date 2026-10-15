@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <uv.h>
 #ifdef __APPLE__
@@ -66,12 +67,15 @@ typedef struct {
     source_staging *source_stagings;
     worker_reservation *worker_reservations;
     int source_retirement_error, worker_reservation_error, generation_retirement_error;
+    int process_observation_retirement_error;
     int finalized;
 } state_lock;
 
 static const napi_type_tag lock_tag = {0x3d641bc705864cfbULL, 0xab53499f3ee988c4ULL};
 
 static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info);
+static napi_value observe_prior_process_death(napi_env env, napi_callback_info info);
+static napi_value prior_process_observation_retirement_error(napi_env env, state_lock *lock);
 static napi_value move_generation(napi_env env, napi_callback_info info);
 static napi_value open_control_listener(napi_env env, napi_callback_info info);
 static void close_lock_listeners(state_lock *lock);
@@ -107,6 +111,9 @@ static void free_lock_if_done(state_lock *lock) {
 static void finalize_lock(napi_env env, void *data, void *hint) {
     (void)env; (void)hint;
     state_lock *lock = data;
+    /* Fatal observation uncertainty cannot turn GC into a successful release.
+     * Retain this exact allocation and its OS lock until actual process death. */
+    if (lock->process_observation_retirement_error) return;
     close_lock(lock);
     lock->finalized = 1;
     free_lock_if_done(lock);
@@ -159,19 +166,21 @@ static int open_root(const char *path) {
     return open_root_with_retirement(path, NULL);
 }
 
-static int lock_is_held(state_lock *lock) {
-    if (lock->lock_fd < 0) return 0;
+static int lock_is_held_with_retirement(state_lock *lock, int *retirement_failed) {
+    if (lock->lock_fd < 0 || lock->process_observation_retirement_error) return 0;
     struct stat root, runtime, file, named;
-    int reopened = open_root(lock->path);
+    int reopened = open_root_with_retirement(lock->path, retirement_failed);
     if (reopened < 0) return 0;
     int valid = fstat(reopened, &named) == 0 && same_inode(&named, &lock->root);
-    close(reopened);
-    return valid && fstat(lock->root_fd, &root) == 0 && private_directory(&root) && same_inode(&root, &lock->root) &&
+    retire_process_fd(&reopened, retirement_failed);
+    return (!retirement_failed || !*retirement_failed) && valid &&
+        fstat(lock->root_fd, &root) == 0 && private_directory(&root) && same_inode(&root, &lock->root) &&
         fstat(lock->runtime_fd, &runtime) == 0 && private_directory(&runtime) && same_inode(&runtime, &lock->runtime) &&
         fstatat(lock->root_fd, "runtime", &named, AT_SYMLINK_NOFOLLOW) == 0 && same_inode(&named, &runtime) &&
         fstat(lock->lock_fd, &file) == 0 && private_lock_file(&file) && same_inode(&file, &lock->lock) &&
         fstatat(lock->runtime_fd, "state-owner.lock", &named, AT_SYMLINK_NOFOLLOW) == 0 && same_inode(&named, &file);
 }
+static int lock_is_held(state_lock *lock) { return lock_is_held_with_retirement(lock, NULL); }
 
 static state_lock *unwrap_lock(napi_env env, napi_callback_info info) {
     napi_value self;
@@ -189,6 +198,7 @@ static state_lock *unwrap_lock(napi_env env, napi_callback_info info) {
 static napi_value assert_held(napi_env env, napi_callback_info info) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
+    if (lock->process_observation_retirement_error) return prior_process_observation_retirement_error(env, lock);
     if (lock->generation_retirement_error) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "generation descriptors did not retire; StateOwner remains held"); return NULL;
     }
@@ -201,6 +211,7 @@ static napi_value assert_held(napi_env env, napi_callback_info info) {
 static napi_value release_lock(napi_env env, napi_callback_info info) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
+    if (lock->process_observation_retirement_error) return prior_process_observation_retirement_error(env, lock);
     int source_failed = close_lock_source_stagings(lock);
     int reservation_failed = close_lock_worker_reservations(lock);
     close_lock_trees(lock);
@@ -281,6 +292,7 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
     const napi_property_descriptor methods[] = {
         {"assertHeld", NULL, assert_held, NULL, NULL, NULL, napi_default, NULL},
         {"assertPriorProcessDead", NULL, assert_prior_process_dead, NULL, NULL, NULL, napi_default, NULL},
+        {"observePriorProcessDeath", NULL, observe_prior_process_death, NULL, NULL, NULL, napi_default, NULL},
         {"moveGeneration", NULL, move_generation, NULL, NULL, NULL, napi_default, NULL},
         {"openControlListener", NULL, open_control_listener, NULL, NULL, NULL, napi_default, NULL},
         {"createGenerationTree", NULL, create_generation_tree, NULL, NULL, NULL, napi_default, NULL},
@@ -542,10 +554,21 @@ static napi_value process_start_token(napi_env env, napi_callback_info info) {
     return result;
 }
 
-static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info) {
+static napi_value prior_process_observation_retirement_error(napi_env env, state_lock *lock) {
+    lock->process_observation_retirement_error = 1;
+    napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "prior process observation descriptors did not retire; StateOwner remains held"); return NULL;
+}
+
+static napi_value prior_process_death(napi_env env, napi_callback_info info, int sample_time) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
-    if (!lock_is_held(lock)) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
+    if (lock->process_observation_retirement_error || (sample_time && atomic_load(&current_process_retirement_failed)))
+        return prior_process_observation_retirement_error(env, lock);
+    int retirement_failed = 0;
+    int *retirement = sample_time ? &retirement_failed : NULL;
+    int held = lock_is_held_with_retirement(lock, retirement);
+    if (retirement_failed) return prior_process_observation_retirement_error(env, lock);
+    if (!held) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
     size_t argc = 2, length;
     napi_value argv[2];
     double number;
@@ -571,14 +594,32 @@ static napi_value assert_prior_process_dead(napi_env env, napi_callback_info inf
     snprintf(observed, sizeof(observed), "linux-proc-start-ticks:%llu", first);
 #endif
     if (strcmp(prior, observed) != 0) return native_error(env, "invalid prior StateOwner process start token");
-    int status = observe_process((pid_t)number, observed);
+    int status = observe_process_with_retirement((pid_t)number, observed, retirement);
+    if (retirement_failed || (sample_time && atomic_load(&current_process_retirement_failed)))
+        return prior_process_observation_retirement_error(env, lock);
     if (status < 0) return native_error(env, "prior StateOwner process observation is unavailable");
     if (status == 1 && strcmp(prior, observed) == 0) return native_error(env, "prior StateOwner process is still present");
-    if (!lock_is_held(lock)) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
+    held = lock_is_held_with_retirement(lock, retirement);
+    if (retirement_failed || (sample_time && atomic_load(&current_process_retirement_failed)))
+        return prior_process_observation_retirement_error(env, lock);
+    if (!held) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
     napi_value result;
+    if (sample_time) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0)
+            return native_error(env, "prior process death observation time unavailable");
+        double observed_at = (double)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+        if (observed_at <= 0 || observed_at > 9007199254740991.0)
+            return native_error(env, "prior process death observation time invalid");
+        return napi_create_double(env, observed_at, &result) == napi_ok ? result : NULL;
+    }
     if (napi_get_undefined(env, &result) != napi_ok) return NULL;
     return result;
 }
+static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info) { return prior_process_death(env, info, 0); }
+/* A low-level exact-lifetime fact only, not token revocation, descendant death
+ * or broker closure. The trusted owning plan binds the historical identity. */
+static napi_value observe_prior_process_death(napi_env env, napi_callback_info info) { return prior_process_death(env, info, 1); }
 
 static napi_value initialize(napi_env env, napi_value exports) {
     const napi_property_descriptor methods[] = {

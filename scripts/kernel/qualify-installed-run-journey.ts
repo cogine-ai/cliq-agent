@@ -12,6 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
+import { decodeBrokerProcessDomainDeath, decodeBrokerProcessDomainDeathDispatchClosure } from '../../src/kernel/broker-process-domain-death.js';
 import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRevokeOperation,
   decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../src/kernel/identity.js';
@@ -1543,6 +1544,199 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       earlierUnknownNotRedispatched: true, totalOwnedProviderRequests: 4 };
     for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
     assert.equal(await readFile(source, 'utf8'), hostBefore);
+    mark('closed_broker_unknown_after_restart_cancel');
+    // This broker already joined after the genuine reflection refusal. The
+    // existing real restart tests historical domain closure, not a live POST
+    // producer crash; that different physical cut remains unqualified.
+    const domainReport = report.closedBrokerProcessDomainDeath = { qualified: false,
+      scope: 'already-closed native broker unknown, real Supervisor restart and public terminal cancellation only',
+      livePostCrashQualified: false, cancelAccepted: false, terminalObserved: false, terminalWaitExpired: false,
+      lastPublicCut: projectInstalledRunProgress(retainedUnknown, { requestsReceived, providerFailure }) };
+    const beforeDomainSession = currentSession();
+    const beforeDomain = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: reflectionAdmitted.id }])[0]!, 'run.get');
+    assert.deepEqual(beforeDomain, retainedUnknown); assert.equal(requestsReceived, 4); assert(!providerFailure);
+    assert.equal(beforeDomain.nextJournalSeq, beforeDomain.highWaterJournalSeq);
+    assert.equal(beforeDomain.nextItemSeq, beforeDomain.highWaterItemSeq);
+    assert.equal(beforeDomain.nextCheckpointCursor, beforeDomain.highWaterCheckpointCursor);
+    const beforeDomainEvents = accepted(exchange([{ protocolVersion: 1, method: 'run.attach', runId: reflectionAdmitted.id,
+      afterEventSeq: 0 }])[0]!, 'run.attach');
+    assert.equal(beforeDomainEvents.earliestRetainedEventSeq, 1);
+    assert.equal(beforeDomainEvents.nextEventSeq, beforeDomainEvents.highWaterEventSeq);
+    assert.equal(beforeDomainEvents.events.length, beforeDomainEvents.highWaterEventSeq);
+    for (let index = 0; index < beforeDomainEvents.events.length; index++) assert.equal(beforeDomainEvents.events[index].eventSeq, index + 1);
+    const currentDomainSupervisor = show(services.supervisorUnit);
+    assert.equal(currentDomainSupervisor.MainPID, afterUnknownSupervisor.MainPID);
+    assert.equal(currentDomainSupervisor.InvocationID, afterUnknownSupervisor.InvocationID);
+    const currentDomainStart = await fixtureProcess(Number(currentDomainSupervisor.MainPID), ledger.uid);
+    assert.equal(await readlink(`/proc/${currentDomainSupervisor.MainPID}/exe`), successorImagePath);
+    const domainCancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000125',
+      runId: reflectionAdmitted.id, expectedRevision: beforeDomain.snapshot.run.revision });
+    const domainBy = Date.now() + 15000;
+    const domainRemaining = () => {
+      const remaining = domainBy - Date.now();
+      if (remaining <= 0) { domainReport.terminalWaitExpired = true; assert.fail('closed broker unknown did not reach proof-backed terminal cancellation within 15 seconds'); }
+      return remaining;
+    };
+    domainRemaining();
+    const domainCancelReply = exchange([domainCancel], 0, 5000)[0]!;
+    domainRemaining();
+    const domainAcknowledged = accepted(domainCancelReply, 'run.cancel').snapshot.run;
+    domainReport.cancelAccepted = true;
+    assert.equal(domainAcknowledged.cancelRequested, true); assert.equal(domainAcknowledged.id, reflectionAdmitted.id);
+    assert.equal(domainAcknowledged.revision, beforeDomain.snapshot.run.revision + 1);
+    mark('closed_broker_unknown_after_restart_wait_terminal');
+    let domainTerminal: Record<string, any>;
+    for (;;) {
+      await delay(Math.min(50, domainRemaining()));
+      domainRemaining();
+      // Keep the original 15-second observation deadline. A last-millisecond
+      // fork must still join; its separate bounded RPC time is not permission
+      // to accept a late terminal result, which domainRemaining below rejects.
+      domainTerminal = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: reflectionAdmitted.id }], 0, 5000)[0]!, 'run.get');
+      domainReport.lastPublicCut = projectInstalledRunProgress(domainTerminal, { requestsReceived, providerFailure });
+      report.lastPublicCut = domainReport.lastPublicCut;
+      assert.equal(requestsReceived, 4); assert(!providerFailure);
+      assert.deepEqual(domainTerminal.journal, beforeDomain.journal); assert.deepEqual(domainTerminal.items, beforeDomain.items);
+      assert.deepEqual(domainTerminal.snapshot.run.budgetConsumed, beforeDomain.snapshot.run.budgetConsumed);
+      assert.deepEqual(domainTerminal.snapshot.run.budgetReserved, beforeDomain.snapshot.run.budgetReserved);
+      assert.equal(domainTerminal.snapshot.run.resultRef, undefined); assert.equal(domainTerminal.snapshot.run.activeWorkerLaunchId, undefined);
+      assert.equal(domainTerminal.snapshot.run.leaseEpoch, beforeDomain.snapshot.run.leaseEpoch);
+      assert.equal(domainTerminal.snapshot.run.stopIntentRef, domainAcknowledged.stopIntentRef);
+      domainRemaining();
+      if (domainTerminal.snapshot.run.status === 'cancelled') break;
+    }
+    domainReport.terminalObserved = true;
+    assert.equal(domainTerminal.nextCheckpointCursor, domainTerminal.highWaterCheckpointCursor);
+    const domainRun = domainTerminal.snapshot.run;
+    assert.equal(domainRun.terminalReason, 'cancelled_by_user'); assert.equal(domainRun.cancelRequested, true);
+    assert.equal(domainRun.revision, domainAcknowledged.revision + 1); assert.equal(domainRun.nextStep, null);
+    assert.equal(domainRun.frontierRef, undefined); assert.equal(domainRun.waitingReason, undefined); assert.equal(domainRun.waitingOnRef, undefined);
+    const domainIntent = parseJsonStrict((await readCas(domainRun.stopIntentRef)).toString('utf8')) as Record<string, any>;
+    assert.equal(domainIntent.origin, 'user_cancel'); assert.equal(domainIntent.requestId, domainCancel.requestId);
+    assert.equal(domainIntent.runId, reflectionAdmitted.id); assert.equal(domainIntent.reason, 'cancelled_by_user');
+    const domainDetail = parseJsonStrict((await readCas(domainRun.terminalDetailRef)).toString('utf8')) as Record<string, any>;
+    assert.deepEqual(Object.keys(domainDetail).sort(), ['schemaVersion', 'runId', 'reason', 'reasonDetail', 'primaryEvidenceRef',
+      'publicationResultItemRefs', 'abandonedRetryInvocations', 'createdAt'].sort());
+    assert.equal(domainDetail.schemaVersion, 1); assert.equal(domainDetail.runId, reflectionAdmitted.id);
+    assert.equal(domainDetail.reason, 'cancelled_by_user'); assert.equal(domainDetail.primaryEvidenceRef, domainRun.stopIntentRef);
+    assert.equal(canonicalSha256(domainDetail.reasonDetail), canonicalSha256({ kind: 'cancelled', stopIntentRef: domainRun.stopIntentRef }));
+    assert.deepEqual(domainDetail.publicationResultItemRefs, []); assert.equal(domainDetail.abandonedRetryInvocations.length, 1);
+    const abandoned = domainDetail.abandonedRetryInvocations[0];
+    assert.deepEqual(Object.keys(abandoned).sort(), ['opId', 'attempt', 'unknownJournalSeq', 'budgetSettlementRef', 'dispatchFenceOrDeathEvidenceRef'].sort());
+    assert.equal(abandoned.opId, ambiguityEntry.opId); assert.equal(abandoned.attempt, ambiguityEntry.attempt);
+    assert.equal(abandoned.unknownJournalSeq, ambiguityEntry.seq); assert.equal(abandoned.budgetSettlementRef, ambiguityEntry.budgetSettlementRef);
+    const dispatchClosure = decodeBrokerProcessDomainDeathDispatchClosure(parseJsonStrict((await readCas(abandoned.dispatchFenceOrDeathEvidenceRef)).toString('utf8')));
+    assert.equal(dispatchClosure.runId, reflectionAdmitted.id); assert.equal(dispatchClosure.opId, ambiguityEntry.opId);
+    assert.equal(dispatchClosure.attempt, ambiguityEntry.attempt); assert.equal(dispatchClosure.dispatchId, ambiguityEntry.dispatchId);
+    assert.equal(dispatchClosure.unknownJournalSeq, ambiguityEntry.seq);
+    const domainDeath = decodeBrokerProcessDomainDeath(parseJsonStrict((await readCas(dispatchClosure.closure.brokerProcessDeathEvidenceRef)).toString('utf8')));
+    assert.equal(domainDeath.evidenceDigest, dispatchClosure.closure.brokerProcessDeathEvidenceDigest);
+    const originalClaim = refused.journal[1], originalPrepared = refused.journal[0];
+    assert.equal(domainDeath.runId, reflectionAdmitted.id); assert.equal(domainDeath.opId, originalClaim.opId);
+    assert.equal(domainDeath.attempt, originalClaim.attempt); assert.equal(domainDeath.dispatchId, originalClaim.dispatchId);
+    assert.equal(domainDeath.dispatchJournalSeq, originalClaim.seq); assert.equal(domainDeath.operationRequestRef, originalClaim.requestRef);
+    assert.equal(domainDeath.operationGrantRef, originalClaim.grantRef); assert.equal(domainDeath.operationTargetDigest, ambiguity.operationTargetDigest);
+    assert.equal(domainDeath.claimingSupervisorInstanceId, originalClaim.supervisorInstanceId);
+    assert.equal(domainDeath.claimingSupervisorInstanceId, successorStatus.supervisorInstanceId);
+    assert.equal(domainDeath.claimingStateOwnerEpoch, originalClaim.stateOwnerEpoch);
+    assert.equal(domainDeath.brokerFenceTokenDigest, originalClaim.brokerFenceTokenDigest);
+    const originalInspector = parseJsonStrict((await readCas(ambiguity.inspectorIdentityRef)).toString('utf8')) as Record<string, any>;
+    assert.equal(originalInspector.identityDigest, ambiguity.inspectorIdentityDigest);
+    assert.equal(originalInspector.identityDigest, digestOmitting(originalInspector, 'identityDigest'));
+    assert.equal(originalInspector.stateOwnerEpoch, originalClaim.stateOwnerEpoch);
+    assert.equal(originalInspector.supervisorInstanceId, originalClaim.supervisorInstanceId);
+    assert.equal(domainDeath.claimingProcessIdentityRef, originalInspector.processIdentityRef);
+    assert.equal(domainDeath.claimingProcessIdentityDigest, originalInspector.processIdentityDigest);
+    const claimingProcess = parseJsonStrict((await readCas(domainDeath.claimingProcessIdentityRef)).toString('utf8')) as Record<string, any>;
+    assert.equal(claimingProcess.format, 'cliq-platform-process-identity-v1'); assert.equal(claimingProcess.platform, 'linux');
+    assert.equal(claimingProcess.identityDigest, domainDeath.claimingProcessIdentityDigest);
+    assert.equal(claimingProcess.identityDigest, digestOmitting(claimingProcess, 'identityDigest'));
+    assert.equal(claimingProcess.pid, Number(successor.MainPID)); assert.equal(claimingProcess.processStartToken, `linux-proc-start-ticks:${successorStart}`);
+    assert.equal(claimingProcess.ownerUid, ledger.uid); assert.equal(claimingProcess.executableImageDigest, report.bundle.supervisorDigest);
+    let retainedProcessStart: string | undefined;
+    try { retainedProcessStart = `linux-proc-start-ticks:${await processStart(claimingProcess.pid)}`; }
+    catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ENOENT'); }
+    assert.notEqual(retainedProcessStart, claimingProcess.processStartToken, 'original broker process lifetime must be gone');
+    const domainInspector = parseJsonStrict((await readCas(domainDeath.inspectorIdentityRef)).toString('utf8')) as Record<string, any>;
+    assert.equal(domainInspector.identityDigest, domainDeath.inspectorIdentityDigest);
+    assert.equal(domainInspector.identityDigest, digestOmitting(domainInspector, 'identityDigest'));
+    assert.equal(domainInspector.stateOwnerEpoch, domainDeath.inspectorStateOwnerEpoch);
+    assert(domainInspector.stateOwnerEpoch > originalClaim.stateOwnerEpoch);
+    const domainStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+    assert.equal(domainInspector.supervisorInstanceId, domainStatus.supervisorInstanceId);
+    assert.equal(domainInspector.supervisorInstanceId, historicalStatus.supervisorInstanceId);
+    for (const inspector of [originalInspector, domainInspector]) {
+      assert.equal(inspector.runtimeBundleRef, bundleDigest); assert.equal(inspector.runtimeBundleManifestDigest, signed.bundle.manifestDigest);
+    }
+    assert.equal(domainInspector.stateLockIdentityRef, originalInspector.stateLockIdentityRef);
+    assert.equal(domainInspector.stateLockIdentityDigest, originalInspector.stateLockIdentityDigest);
+    const inspectingProcess = parseJsonStrict((await readCas(domainInspector.processIdentityRef)).toString('utf8')) as Record<string, any>;
+    assert.equal(inspectingProcess.identityDigest, domainInspector.processIdentityDigest);
+    assert.equal(inspectingProcess.identityDigest, digestOmitting(inspectingProcess, 'identityDigest'));
+    assert.equal(inspectingProcess.pid, Number(currentDomainSupervisor.MainPID)); assert.equal(inspectingProcess.processStartToken, `linux-proc-start-ticks:${currentDomainStart}`);
+    assert.equal(inspectingProcess.ownerUid, ledger.uid); assert.equal(inspectingProcess.executableImageDigest, report.bundle.supervisorDigest);
+    assert.equal(await fixtureProcess(Number(currentDomainSupervisor.MainPID), ledger.uid), currentDomainStart);
+    const domainSpec = parseJsonStrict((await readCas(domainRun.specRef)).toString('utf8')) as Record<string, any>;
+    const domainAssembly = parseJsonStrict((await readCas(domainSpec.assemblyRef)).toString('utf8')) as Record<string, any>;
+    assert.equal(domainAssembly.runtime.runtimeBundleRef, bundleDigest); assert.equal(domainAssembly.runtime.runtimeBundleManifestDigest, signed.bundle.manifestDigest);
+    assert.equal(domainAssembly.provider.adapter.adapterId, 'openai-compatible-broker-v1'); assert.equal(domainAssembly.provider.adapter.version, '1');
+    assert.equal(domainAssembly.provider.adapter.codeDigest, report.bundle.brokerDigest);
+    const unknownSettlement = parseJsonStrict((await readCas(ambiguityEntry.budgetSettlementRef)).toString('utf8')) as Record<string, any>;
+    assert.equal(unknownSettlement.settlementDigest, digestOmitting(unknownSettlement, 'settlementDigest'));
+    assert.equal(unknownSettlement.runId, reflectionAdmitted.id); assert.equal(unknownSettlement.opId, originalClaim.opId);
+    assert.equal(unknownSettlement.attempt, originalClaim.attempt); assert.equal(unknownSettlement.preparedJournalSeq, originalPrepared.seq);
+    assert.equal(unknownSettlement.terminalJournalSeq, ambiguityEntry.seq); assert.equal(unknownSettlement.terminalPhase, 'unknown');
+    for (const usage of [unknownSettlement.reserved, unknownSettlement.released, unknownSettlement.consumed]) assert.deepEqual(usage, originalPrepared.budgetDelta);
+    assert(domainDeath.observedAt >= ambiguityEntry.timestamp && domainDeath.observedAt >= domainInspector.activatedAt);
+    assert(domainDeath.observedAt <= dispatchClosure.observedAt && dispatchClosure.observedAt <= domainDetail.createdAt);
+    assert(domainDetail.createdAt <= domainRun.updatedAt && Date.parse(domainRun.updatedAt) - Date.parse(domainDeath.observedAt) <= 5000);
+    const addedDomainCheckpoints = domainTerminal.checkpoints.filter((checkpoint: any) =>
+      !beforeDomain.checkpoints.some((previous: any) => previous.id === checkpoint.id));
+    assert.equal(addedDomainCheckpoints.length, 1); assert.equal(domainTerminal.checkpoints.length, beforeDomain.checkpoints.length + 1);
+    const domainCheckpoint = addedDomainCheckpoints[0];
+    assert.equal(domainCheckpoint.id, domainRun.latestCheckpointId);
+    assert.equal(domainCheckpoint.id, identityHash('cliq-stop-checkpoint-v1', reflectionAdmitted.id, domainRun.stopIntentRef));
+    assert.equal(domainCheckpoint.createdAt, domainRun.updatedAt); assert.equal(domainCheckpoint.basedOnRunRevision, domainRun.revision - 1);
+    assert.equal(domainCheckpoint.journalSeq, domainTerminal.highWaterJournalSeq); assert.equal(domainCheckpoint.runItemSeq, domainTerminal.highWaterItemSeq);
+    assert.equal(domainCheckpoint.workspaceStateRef, beforeDomain.checkpoints.find((checkpoint: any) => checkpoint.id === beforeDomain.snapshot.run.latestCheckpointId)!.workspaceStateRef);
+    for (const checkpoint of beforeDomain.checkpoints) assert.deepEqual(domainTerminal.checkpoints.find((candidate: any) => candidate.id === checkpoint.id), checkpoint);
+    const afterDomainSession = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+      afterItemSeq: beforeDomainSession.latestItemSeq }])[0]!, 'session.get');
+    assert.equal(afterDomainSession.snapshot.session.contextRevision, beforeDomainSession.contextRevision + 1);
+    assert.equal(afterDomainSession.snapshot.session.latestItemSeq, beforeDomainSession.latestItemSeq + 1); assert.equal(afterDomainSession.items.length, 1);
+    assert.equal(afterDomainSession.nextItemSeq, afterDomainSession.highWaterItemSeq);
+    assert.equal(afterDomainSession.highWaterItemSeq, afterDomainSession.snapshot.session.latestItemSeq);
+    const domainSessionItem = afterDomainSession.items[0];
+    assert.equal(domainSessionItem.kind, 'run_terminal'); assert.equal(domainSessionItem.itemSeq, beforeDomainSession.latestItemSeq + 1);
+    const domainAdmittedContext = parseJsonStrict((await readCas(domainSpec.admittedContextRef)).toString('utf8')) as Record<string, any>;
+    const domainPublication = parseJsonStrict((await readCas(domainSessionItem.payloadRef)).toString('utf8')) as Record<string, any>;
+    assert.equal(canonicalSha256(domainPublication), canonicalSha256({ schemaVersion: 1, format: 'cliq-session-run-terminal-v1', kind: 'run_terminal',
+      itemKey: `run-terminal:${reflectionAdmitted.id}`, runId: reflectionAdmitted.id, operation: 'agent',
+      admittedSessionItemSeq: domainAdmittedContext.throughSessionItemSeq, status: 'cancelled', terminalReason: 'cancelled_by_user', terminalDetailRef: domainRun.terminalDetailRef }));
+    const domainEvents = accepted(exchange([{ protocolVersion: 1, method: 'run.attach', runId: reflectionAdmitted.id,
+      afterEventSeq: beforeDomainEvents.nextEventSeq }])[0]!, 'run.attach');
+    assert.equal(domainEvents.nextEventSeq, domainEvents.highWaterEventSeq);
+    assert.equal(domainEvents.events.length, domainEvents.highWaterEventSeq - beforeDomainEvents.nextEventSeq);
+    for (let index = 0; index < domainEvents.events.length; index++) assert.equal(domainEvents.events[index].eventSeq, beforeDomainEvents.nextEventSeq + index + 1);
+    const terminalEvents = [...beforeDomainEvents.events, ...domainEvents.events].filter((event: any) => event.kind === 'state_changed' && event.status === 'cancelled');
+    assert.equal(terminalEvents.length, 1); assert.equal(terminalEvents[0].runRevision, domainRun.revision);
+    assert.equal(terminalEvents[0].terminalDetailRef, domainRun.terminalDetailRef);
+    assert.deepEqual(exchange([domainCancel])[0], domainCancelReply);
+    assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: reflectionAdmitted.id }])[0]!, 'run.get'), domainTerminal);
+    assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+      afterItemSeq: beforeDomainSession.latestItemSeq }])[0]!, 'session.get'), afterDomainSession);
+    const domainEmptyEvents = accepted(exchange([{ protocolVersion: 1, method: 'run.attach', runId: reflectionAdmitted.id,
+      afterEventSeq: domainEvents.nextEventSeq }])[0]!, 'run.attach');
+    assert.deepEqual(domainEmptyEvents.events, []); assert.equal(domainEmptyEvents.nextEventSeq, domainEvents.nextEventSeq);
+    assert.equal(domainEmptyEvents.highWaterEventSeq, domainEvents.highWaterEventSeq); assert.equal(requestsReceived, 4); assert(!providerFailure);
+    const unchangedDomainSupervisor = show(services.supervisorUnit);
+    assert.equal(unchangedDomainSupervisor.MainPID, currentDomainSupervisor.MainPID);
+    assert.equal(unchangedDomainSupervisor.InvocationID, currentDomainSupervisor.InvocationID);
+    report.closedBrokerProcessDomainDeath = { ...domainReport, qualified: true, immutableUnknownAndFullChargePreserved: true,
+      originalClaimProcessMatched: true, strictlyNewerSameSignedRuntimeInspectorMatched: true, providerRedispatches: 0,
+      dispatchClosureRef: abandoned.dispatchFenceOrDeathEvidenceRef, processDeathEvidenceRef: dispatchClosure.closure.brokerProcessDeathEvidenceRef,
+      processDeathEvidenceDigest: domainDeath.evidenceDigest, terminalCheckpointPublishedOnce: true, sessionPublishedOnce: true,
+      cancelReplayPreserved: true, contiguousAttachPreserved: true, noResultPublished: true };
     }
     report.qualified = true; mark('run_assertions_complete');
   } catch (error) {

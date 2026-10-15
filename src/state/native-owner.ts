@@ -313,6 +313,9 @@ export type HeldStateOwnerLock = Readonly<{
   lock: DescriptorIdentity;
   assertHeld(): void;
   assertPriorProcessDead(pid: number, processStartToken: string): void;
+  /** Native time after observing the exact prior lifetime absent or replaced.
+   * This grants no broker, descendant, claim or token-revocation proof. */
+  observePriorProcessDeath(pid: number, processStartToken: string): number;
   openControlListener(onAccept: (peer: HeldControlPeer) => void, onError: (error: Error) => void): HeldControlListener;
   createGenerationTree(runId: string, generationId: string): HeldGenerationTree;
   /** A fixed recovery intent additionally permits its exact archived locator;
@@ -682,6 +685,15 @@ function wrapLock(held: NativeLock, stateRoot: string): HeldStateOwnerLock {
     root: held.root, runtime: held.runtime, lock: held.lock,
     assertHeld() { receiver(this); held.assertHeld(); },
     assertPriorProcessDead(pid, token) { receiver(this); held.assertPriorProcessDead(pid, token); },
+    observePriorProcessDeath(pid, token) {
+      receiver(this);
+      try { return held.observePriorProcessDeath(pid, token); }
+      catch (error) {
+        if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT')
+          throw new ResourceRetirementError('prior process observation descriptors did not retire', error);
+        throw error;
+      }
+    },
     openControlListener(onAccept, onError) {
       receiver(this);
       held.assertHeld();

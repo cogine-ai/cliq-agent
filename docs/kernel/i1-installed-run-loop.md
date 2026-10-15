@@ -124,9 +124,10 @@ directory quarantine, containment death or a terminal transition. Genuine
 controller birth now records the authenticated HELLO time in native code and
 freshly checks the original root/parent/leaf and PID/start lifetime; its opaque
 token and retirement receipt share the original identity digest. Immutable
-`e46c752` reached the exact missing-reader RED in both real native campaigns;
-the implementation still requires actual Linux GREEN. The owning preparation
-graph remains unfinished.
+`e46c752` reached the exact missing-reader RED in both real native campaigns.
+Immutable `bebbb45` then passed the complete controller-birth assertions and all
+25 original native scenarios in both real Linux event runs. The owning
+StateStore preparation graph remains unfinished; this is not its qualification.
 
 Instruction capture uses a fixed native instruction cursor: Git metadata is
 never entered, only exact `AGENTS.md` file contents may be read, and symlink
@@ -138,14 +139,33 @@ passed captured bytes and source exclusion, then the owned HTTPS fixture
 failed before qualifying the prompt or reaching Busy. Its raw-newline substring
 assertion is now replaced by an exact canonical instruction-block/scope check,
 with a real capture/CAS/production-renderer regression. Actual installed prompt
-qualification remains pending; production rendering is unchanged.
+qualification is now GREEN at immutable `bebbb45` in both actual installed
+failure campaigns, including exact structured guidance received by the owned
+HTTPS fixture. Production rendering is unchanged.
 
 Both `5bc17c1` installed failure campaigns reached the exact Busy UDS regression:
 actual `INVALID_REQUEST` instead of required `RATE_LIMITED`. The dedicated,
 immutable projection now applies only to `run.submit` scope contention; the
 non-reentrant scope guard is unchanged. The `e46c752` prompt-fixture failure
-prevented this assertion from executing; actual-source Linux GREEN is pending;
-the fixed retry hint does not authorize retry of an invocation or effect.
+prevented this assertion from executing; immutable `bebbb45` subsequently
+passed actual `RATE_LIMITED` and exact-payload assertions in both real installed
+failure campaigns. The fixed retry hint does not authorize retry of an
+invocation or effect. Both event workflows completed all nine jobs successfully,
+including original HTTP429/full-charge/terminal-once/replay assertions, retained
+secret scans, native joins and resource cleanup; no archive hash is inferred
+from this status statement.
+
+The approved independent `broker_process_domain_dead` contract now has pure
+closed-data decoders and a new real installed-journey target after all original
+short-Run assertions. The target reuses the already-closed reflection broker's
+unknown and actual Supervisor restart, then requests public cancellation and
+requires exact original claim/process/token, strictly newer same-signed-runtime
+inspector, immutable unknown/full charge, one terminal Checkpoint/Session item,
+cancel replay and contiguous attach. Its 15-second terminal target has not yet
+run on Linux and no production terminal consumer is qualified. This is not a
+live POST producer crash: that separate physical cut remains explicitly false.
+Full I1, owning preparation/private rollback and unexecuted crash cuts remain
+incomplete.
 
 ## Validation boundary
 

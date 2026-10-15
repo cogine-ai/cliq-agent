@@ -147,13 +147,29 @@ launch history or accepted through a permissive legacy path.
 
 ## Model unknown — preserved strict rule
 
-The existing broker_release_fenced terminal-abandonment contract requires a
-strictly newer StateOwner. Installed broker quiescence or transport.close by
-the claiming owner cannot be relabeled as that evidence. The conservative path
-keeps waiting until a genuine successor produces the existing fence proof.
-Same-process automatic terminal abandonment is outside this package. No new
-token-fence/release-mutex/native-join evidence branch is authorized by the
-approval, and physical death does not resolve provider effect or billing.
+The existing `broker_release_fenced` terminal-abandonment contract and its
+literal lock action remain unchanged. Installed broker quiescence or
+transport.close by the claiming owner cannot be relabeled as that evidence.
+
+The owner additionally approved a distinct `broker_process_domain_dead` branch
+on 2026-10-16. It binds the original permanent claim/token and historical
+process identity to a genuine fresh PID/start-lifetime death observation under
+a strictly newer StateOwner. The initial implementation is limited to the same
+verified signed installed runtime and fixed native broker recipe; this recipe
+has nontransferable creator-process release authority, including across its
+fixed fork/exec paths. Graceful release, a new Supervisor id, a missing socket,
+or a caller PID/digest are not death evidence. An old process that is still
+alive remains waiting. No token-revoked or active-release-zero observation is
+invented for a mutex that disappeared with its process.
+
+This is an approved contract, not completed production or Linux qualification.
+Pure closed-data decoders establish no native authority. The actual owning
+producer must read the original Journal/Owner/process/recipe closure itself
+and fresh-recheck native death, lineage and the five-second canonical-time cut
+at terminal commit. The original unknown and full charge remain unchanged;
+there is no retry, fabricated failed result or duplicate settlement. Same-owner
+automatic terminal abandonment remains outside this package, and process-domain
+death does not resolve provider effect or billing.
 
 ## Validation contract
 

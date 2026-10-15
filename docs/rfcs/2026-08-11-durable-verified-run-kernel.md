@@ -4447,6 +4447,68 @@ Terminal abandonment of a `retry` unknown also requires `InvocationDispatchClosu
 
 `unknown` pessimistically settles the attempt once by consuming and releasing its full reservation. A later positive-evidence `unknown -> completed|failed` fact carries zero additional budget settlement and never refunds, releases, or charges that attempt again. If it is still the highest attempt and its exact frontier/wait subject matches, the Supervisor applies the normalized op-kind reducer atomically; only a superseded attempt is audit-only.
 
+#### Independent installed broker process-domain death
+
+`InvocationDispatchClosureEvidenceV1.closure.kind='broker_process_domain_dead'`
+is a separate positive dispatch-closure branch, not a different interpretation
+of `broker_release_fenced`. It rehashes exact
+`BrokerProcessDomainDeathEvidenceV1`; the latter's `evidenceDigest` omits itself.
+Both artifacts are closed data: only plain or null-prototype records with all
+and only their own data fields are valid. Identities are nonempty Unicode
+scalar strings of at most 256 UTF-8 bytes without NUL; refs/digests are lowercase
+64-hex, `attempt` is a nonnegative safe integer (including zero), Journal
+sequences/owner epochs are positive safe integers, and times are canonical UTC
+milliseconds. The inspector epoch is strictly greater than the claiming epoch.
+Mixed lock-action/process-death fields, native booleans and forged omission
+digests are invalid. Decoding never mints native or StateOwner authority.
+
+This initial branch applies only to the fixed Linux installed native broker
+recipe. Its original RunSpec/assembly, original claiming owner and current
+verified inspector must resolve the same signed RuntimeBundle and exact native
+broker entry/code digest. The fixed domain is
+`linux_installed_native_creator_process_v1`: a private native handle is bound
+to its creating PID, Node environment and main thread; its random token is not
+importable or serializable as release authority. The complete trusted process
+creation path must preserve this property: a non-CLONE_VM child enters only the
+fixed FD-whitelisted sealed controller exec-or-exit path, never returns to Node
+or transfers a broker handle/connection; subsequent controller forks occur
+after that exec. A signed arbitrary past/future adapter or a digest by itself
+does not establish this contract. Cross-live-update qualification is not implied.
+
+Only the production owning plan holding the actual driver/current StateOwner
+may produce this evidence. It reads the exact prepared/claim/unknown Journal
+chain, request/grant/target, original stored fence-token digest and original
+StateOwner/process artifacts; it takes no caller-selected PID, process digest,
+clock or observation callback as authority. `claimingProcessIdentityRef` and
+its digest equal that historical owner's exact process pair, and the claim
+belongs to that owner's lifetime. Under the actual held StateRoot/lock, a
+genuine native observation must prove the original PID/start lifetime absent
+or its start token different, revalidate that root/lock, retire every temporary
+descriptor without uncertainty, and sample actual wall time. The final SQL
+transaction repeats the native check, exact owner/Journal/lineage CAS and
+healthy canonical-time gate; the recorded observation is not future-dated and
+is at most five seconds old. A graceful owner release alone is not death;
+graceful and crash restarts both need the exact fresh native lifetime check.
+An old process still alive, unavailable proc observation, stale evidence,
+failed retirement or runtime/claim/token mismatch remains recovery-required.
+
+The evidence asserts no old-mutex action, token-revocation time or observed
+zero active-release count. It proves only that the original nontransferable
+local release domain no longer exists; bytes already sent and remote effects
+may still exist. The original `unknown`, ambiguity evidence and full-charge
+settlement remain byte-identical: no new failed/abandoned Journal row, refund,
+second charge or retry follows from this terminal-only closure. Terminal detail
+lists every and only such unused `retry` unknown with its original settlement
+and dispatch-closure refs. Tool/MCP call origins use the existing exact
+`RetryUnknownCancelledResult`; a non-call model origin creates no fabricated
+model turn or ToolResult. Historical recovery rewalks the original claiming and
+inspecting owners, their process/root/lock/acquisition/runtime chains and the
+claim/unknown/settlement/closure edges, never a current installation lookup.
+These artifacts and their full transitive graph stay rooted while the Run or
+terminal history is retained; a missing or unsupported edge fails recovery and
+makes GC delete nothing. Real signed-installed restart/cancel evidence is
+required independently of pure decoding and data tests.
+
 ### 8.2 Meanings
 
 - `prepared`: Cliq durably recorded the exact request before dispatch.
@@ -7065,6 +7127,31 @@ type BrokerReleaseFenceEvidenceV1 = {
   evidenceDigest: string
 }
 
+type BrokerProcessDomainDeathEvidenceV1 = {
+  schemaVersion: 1
+  format: 'cliq-broker-process-domain-death-evidence-v1'
+  runId: string
+  opId: string
+  attempt: number
+  dispatchId: string
+  dispatchJournalSeq: number
+  operationRequestRef: ArtifactRef
+  operationTargetDigest: string
+  operationGrantRef: ArtifactRef
+  claimingSupervisorInstanceId: string
+  claimingStateOwnerEpoch: number
+  claimingProcessIdentityRef: ArtifactRef
+  claimingProcessIdentityDigest: string
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  inspectorStateOwnerEpoch: number
+  brokerFenceTokenDigest: string
+  authorityDomain: 'linux_installed_native_creator_process_v1'
+  processObservation: 'absent_or_start_token_mismatch'
+  observedAt: string
+  evidenceDigest: string
+}
+
 type InvocationDispatchClosureEvidenceV1 = {
   schemaVersion: 1
   format: 'cliq-invocation-dispatch-closure-evidence-v1'
@@ -7085,6 +7172,11 @@ type InvocationDispatchClosureEvidenceV1 = {
         kind: 'broker_release_fenced'
         brokerFenceEvidenceRef: ArtifactRef
         brokerFenceEvidenceDigest: string
+      }
+    | {
+        kind: 'broker_process_domain_dead'
+        brokerProcessDeathEvidenceRef: ArtifactRef
+        brokerProcessDeathEvidenceDigest: string
       }
   observedAt: string
   evidenceDigest: string
