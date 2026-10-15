@@ -120,14 +120,15 @@ async function campaign(filename: string): Promise<void> {
     catch { /* Diagnostic only. */ }
   };
   markPhase('installation');
-  // Model bearer inputs retain 256 random bits in the fixed broker's byte
-  // range; the first actual roundtrip also covers both accepted edge bytes.
-  const secret = Buffer.from(`!${randomBytes(32).toString('hex')}~`), rotatedSecret = Buffer.from(randomBytes(32).toString('hex')),
-    abandonedSecret = Buffer.from(randomBytes(32).toString('hex')), resubmittedSecret = Buffer.from(randomBytes(32).toString('hex')),
-    negativeSecret = Buffer.from(randomBytes(32).toString('hex')), password = Buffer.from(randomBytes(32).toString('hex'));
-  const capSecrets = [0, 1, 2].map(() => Buffer.from(randomBytes(32).toString('hex')));
+  // Preserve the observer and duplicate fixture's exact 32-byte contract.
+  // Model samples use printable bytes; the first actual roundtrip also
+  // covers both accepted edge bytes. These are test-only random secrets.
+  const secret = Buffer.from(`!${randomBytes(22).toString('base64url')}~`), rotatedSecret = Buffer.from(randomBytes(24).toString('base64url')),
+    abandonedSecret = Buffer.from(randomBytes(24).toString('base64url')), resubmittedSecret = Buffer.from(randomBytes(24).toString('base64url')),
+    negativeSecret = Buffer.from(randomBytes(24).toString('base64url')), password = Buffer.from(randomBytes(32).toString('hex'));
+  const capSecrets = [0, 1, 2].map(() => Buffer.from(randomBytes(24).toString('base64url')));
   const invalidModelSecrets = [0x00, 0x20, 0x7f, 0x80, 0x0a, 0x0d].map(byte => {
-    const bytes = Buffer.from(randomBytes(32).toString('hex')); bytes[32] = byte; return bytes;
+    const bytes = Buffer.from(randomBytes(24).toString('base64url')); bytes[16] = byte; return bytes;
   });
   const scanner = createCredentialSecretScanner([secret, rotatedSecret, abandonedSecret, resubmittedSecret, ...capSecrets,
     negativeSecret, password, ...invalidModelSecrets],
