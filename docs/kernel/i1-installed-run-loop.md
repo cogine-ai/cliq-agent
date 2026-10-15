@@ -47,6 +47,10 @@ The existing [credential acceptance gaps](i1-credential-authority.md) remain.
 An ordinary provider refusal is local to its Run. Uncertain physical resource
 retirement remains a process-wide failure that retains ownership; it cannot be
 turned into successful cleanup or permission to continue.
+The public `maxSingleFileBytes` default is 256 MiB, matching the unchanged
+Linux worker recipe limit. Installed admission rejects an explicitly larger
+value before source capture or admission; it never silently clamps that intent.
+The generic 1 MiB..16 GiB input range remains available to other recipes.
 After a validated terminal Run, its joined driver task closes the original
 launcher/sealed-image owners before evicting memory caches. This reclaims no
 durable history and does not treat a candidate, unknown or wait as terminal.

@@ -7,7 +7,7 @@ import { decodeSandboxProfile } from './execution-closure.js';
 // a Workspace Trust / tool permission decision.
 export const DEFAULT_SANDBOX_RESOURCES: Readonly<SandboxResourceSpec> = Object.freeze({
   maxProcesses: 256, memoryBytes: 4 * 1024 ** 3, cpuQuotaMicrosPerSecond: 400_000,
-  maxOpenFiles: 1024, maxSingleFileBytes: 2 * 1024 ** 3, maxGenerationBytes: 20 * 1024 ** 3,
+  maxOpenFiles: 1024, maxSingleFileBytes: 256 * 1024 ** 2, maxGenerationBytes: 20 * 1024 ** 3,
   maxInvocationOutputBytes: 16 * 1024 ** 2, maxIpcFrameBytes: 16 * 1024 ** 2, maxQueuedIpcBytes: 64 * 1024 ** 2,
 });
 

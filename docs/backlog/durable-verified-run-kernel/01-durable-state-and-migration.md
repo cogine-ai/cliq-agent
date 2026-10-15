@@ -1155,7 +1155,7 @@ type SandboxResourceSpec = {
   memoryBytes: number        // default 4 GiB; range 256 MiB..32 GiB, host-clamped
   cpuQuotaMicrosPerSecond: number // default 400000; range 10000..1600000
   maxOpenFiles: number       // default 1024; range 64..8192
-  maxSingleFileBytes: number // default 2 GiB; range 1 MiB..16 GiB
+  maxSingleFileBytes: number // default 256 MiB; range 1 MiB..16 GiB
   maxGenerationBytes: number // default 20 GiB; range 256 MiB..100 GiB
   maxInvocationOutputBytes: number // default 16 MiB; range 64 KiB..64 MiB
   maxIpcFrameBytes: number   // fixed 16 MiB

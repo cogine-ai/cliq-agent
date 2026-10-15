@@ -369,7 +369,14 @@ async function campaign(filename: string): Promise<void> {
         modelCredentialGrantIds: [enrollment.credentialGrantId] }, policyMode: 'accept-edits',
       budgets: runBudgets,
       verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
+    const { requestDigest: _resourceDigest, ...resourceCore } = submit;
+    const oversized = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000113',
+      sandboxResources: { maxSingleFileBytes: 2_147_483_648 } })])[0]!;
+    assert.equal(oversized.ok, false, 'unsupported explicit file limits must be refused before Run admission');
+    assert.equal(oversized.error!.code, 'INVALID_REQUEST'); assert.equal(requestsReceived, 0);
     const submitReply = exchange([submit])[0]!, admitted = accepted(submitReply, 'run.submit').snapshot.run;
+    report.oversizedFileLimitRefused = { requestedBytes: 2_147_483_648, installedLimitBytes: 268_435_456,
+      sameAdmissionKeySubsequentlyAccepted: true, silentClampingAllowed: false };
     report.acceptedRun = { id: admitted.id, sessionId: admitted.sessionId, specRef: admitted.specRef, initialCheckpointId: admitted.latestCheckpointId };
     assert.equal(admitted.status, 'queued'); assert.equal(admitted.revision, 1);
     // The submission client has exited and closed its actual socket. All

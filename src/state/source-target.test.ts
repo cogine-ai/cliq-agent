@@ -25,6 +25,7 @@ import { createSourceInspectionFixture, sourceInspectionRequest as inlineRequest
 test('inline submit normalization closes its schema and freezes defaults into intent, not request identity', () => {
   const first = normalizeRunSubmitRequest(inlineRequest());
   assert.equal(first.request.budgets.wallTimeMs, 86_400_000);
+  assert.equal(first.request.sandboxResources.maxSingleFileBytes, 268_435_456);
   assert.equal(first.request.sandboxResources.maxGenerationBytes, 20 * 1024 ** 3);
   assert.equal(first.request.maxChangedPaths, 10_000);
   assert.equal(first.request.maxChangedBytes, 512 * 1024 ** 2);
@@ -52,6 +53,24 @@ test('installed recipe refuses insufficient process capacity before capture with
     assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
   }
   for (const maxProcesses of [8, 1024]) assert.doesNotThrow(() => assertInstalledRunRecipe(installedRequest(maxProcesses)));
+});
+
+test('installed recipe refuses oversized files before capture without clamping explicit resource intent', () => {
+  const installedRequest = (maxSingleFileBytes: number) => normalizeRunSubmitRequest(inlineRequest({
+    model: { provider: 'openai-compatible', model: 'owned-fixture-model',
+      endpoint: { kind: 'registered', endpointRegistrationId: 'owned-fixture-endpoint' }, modelCredentialGrantIds: ['owned-fixture-grant'] },
+    sandboxResources: { maxSingleFileBytes }
+  })).request;
+  for (const maxSingleFileBytes of [1_048_576, 268_435_456]) {
+    const request = installedRequest(maxSingleFileBytes);
+    assert.equal(request.sandboxResources.maxSingleFileBytes, maxSingleFileBytes);
+    assert.doesNotThrow(() => assertInstalledRunRecipe(request));
+  }
+  for (const maxSingleFileBytes of [268_435_457, 2_147_483_648, 17_179_869_184]) {
+    const request = installedRequest(maxSingleFileBytes);
+    assert.equal(request.sandboxResources.maxSingleFileBytes, maxSingleFileBytes);
+    assert.throws(() => assertInstalledRunRecipe(request), { code: 'INVALID_REQUEST' });
+  }
 });
 
 for (const outcome of ['captured', 'failed'] as const) for (const missing of ['retirement', 'inspector'] as const) {

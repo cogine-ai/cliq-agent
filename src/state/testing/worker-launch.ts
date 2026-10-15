@@ -17,7 +17,7 @@ export function fixtureSandboxProfile(): SandboxProfileV1 {
     networkAtSpawn: 'none', networkAfterRelease: 'typed_broker_only', credentialReachability: 'typed_broker_only',
     stateRootReachability: 'none', inheritedHostEnvironment: false,
     resources: { maxProcesses: 256, memoryBytes: 4 * 1024 ** 3, cpuQuotaMicrosPerSecond: 400000, maxOpenFiles: 1024,
-      maxSingleFileBytes: 2 * 1024 ** 3, maxGenerationBytes: 20 * 1024 ** 3, maxInvocationOutputBytes: 16 * 1024 ** 2,
+      maxSingleFileBytes: 256 * 1024 ** 2, maxGenerationBytes: 20 * 1024 ** 3, maxInvocationOutputBytes: 16 * 1024 ** 2,
       maxIpcFrameBytes: 16 * 1024 ** 2, maxQueuedIpcBytes: 64 * 1024 ** 2 }, profileDigest: '' };
   profile.profileDigest = digestOmitting(profile, 'profileDigest');
   return profile;
