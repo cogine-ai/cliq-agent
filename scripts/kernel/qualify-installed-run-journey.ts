@@ -650,7 +650,9 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       assert.equal(settlement.preparedJournalSeq, prepared.seq); assert.equal(settlement.terminalJournalSeq, completed.seq);
       assert.equal(settlement.terminalPhase, 'completed'); assert.equal(settlement.settlementDigest, digestOmitting(settlement, 'settlementDigest'));
       for (const actual of [settlement.reserved, settlement.consumed]) assert.equal(canonicalSha256(actual), canonicalSha256(fullCharge));
-      assert.equal(canonicalSha256(settlement.released), canonicalSha256(zeroCharge));
+      // RFC: released removes the complete reservation; consumed is charged
+      // separately. Releasing reserved counters is not a model refund.
+      assert.equal(canonicalSha256(settlement.released), canonicalSha256(fullCharge));
       assert.equal(canonicalSha256(resumed.snapshot.run.budgetConsumed), canonicalSha256(fullCharge));
       assert.equal(canonicalSha256(resumed.snapshot.run.budgetReserved), canonicalSha256(zeroCharge));
       assert.equal(resumed.snapshot.run.resultRef, undefined); assert.deepEqual(currentSession(), session);
@@ -739,7 +741,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       assert.equal(settlement.preparedJournalSeq, prepared.seq); assert.equal(settlement.terminalJournalSeq, completed.seq);
       assert.equal(settlement.terminalPhase, 'completed'); assert.equal(settlement.settlementDigest, digestOmitting(settlement, 'settlementDigest'));
       for (const actual of [settlement.reserved, settlement.consumed]) assert.equal(canonicalSha256(actual), canonicalSha256(fullCharge));
-      assert.equal(canonicalSha256(settlement.released), canonicalSha256(zeroCharge));
+      assert.equal(canonicalSha256(settlement.released), canonicalSha256(fullCharge));
       const intent = parseJsonStrict((await readCas(failed.stopIntentRef)).toString('utf8')) as Record<string, any>;
       assert.deepEqual(Object.keys(intent).sort(), ['schemaVersion', 'runId', 'createdAt', 'origin', 'targetStatus', 'reason',
         'runtimeSubtype', 'failingOpId', 'runtimeFailureRef', 'runtimeFailureDigest'].sort());
