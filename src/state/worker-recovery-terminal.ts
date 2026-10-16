@@ -28,6 +28,7 @@ type Plan = {
   metadata: PublishedArtifact[]; generation: RetiredGeneration;
   rollback?: { prepared: InvocationJournalEntry; claim: InvocationJournalEntry; unknown: InvocationJournalEntry;
     evidence: PrivateToolRollbackV1; artifact: PublishedArtifact; request: ToolRequestV1 };
+  reobserve(connection: SqliteConnection): void;
   validate(connection: SqliteConnection | SqliteDriver, now: string): void;
   commit(connection: SqliteConnection, now: string): void;
 };
@@ -62,7 +63,7 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
   }
   const dispatch = wait.probeState.dispatch;
   const identity = decodeWorkspaceGenerationIdentity(await artifacts.readCanonical(generation.generationRef));
-  function nativeCut(now: string): void {
+  function observeNativeOwners(): readonly string[] {
     const native = readNativeRetainedWorkerRetirement(input.nativeRetirement);
     const workspace = readRetainedWorkspaceRetirement(owner.filesystem, input.workspaceRetirement);
     assertInstalledBrokerQuiescence(input.brokerQuiescence, driver, owner, run.id);
@@ -71,13 +72,19 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
         workspace.generationRef !== generation.generationRef || workspace.generationIdentityDigest !== generation.generationIdentityDigest ||
         canonicalSha256(workspace.observedState) !== canonicalSha256(quarantine.observedState) ||
         move.quarantineCanonicalRootRelativePath !== quarantine.quarantineCanonicalRootRelativePath ||
-        move.quarantineDeviceId !== quarantine.quarantineDeviceId || move.quarantineFileId !== quarantine.quarantineFileId ||
-        [native.observedAt, workspace.observedAt].some(time => time > now || parseCanonicalTime(now) - parseCanonicalTime(time) > 5000)) {
+        move.quarantineDeviceId !== quarantine.quarantineDeviceId || move.quarantineFileId !== quarantine.quarantineFileId) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'stopped recovery requires its original fresh joined native resource owners');
+    }
+    return Object.freeze([native.observedAt, workspace.observedAt]);
+  }
+  function assertFreshNativeOwners(observations: readonly string[], now: string): void {
+    if (observations.some(time => time > now || parseCanonicalTime(now) - parseCanonicalTime(time) > 5000)) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'stopped recovery requires its original fresh joined native resource owners');
     }
   }
+  const preparedObservations = observeNativeOwners();
   const observedAt = sampleCanonicalNow();
-  nativeCut(observedAt);
+  assertFreshNativeOwners(preparedObservations, observedAt);
   const retirement: WorkspaceGenerationRetirementEvidenceV1 = { schemaVersion: 1,
     format: 'cliq-workspace-generation-retirement-evidence-v1', runId: run.id,
     generationRef: generation.generationRef, generationIdentityDigest: generation.generationIdentityDigest,
@@ -117,7 +124,8 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
     lastVerifiedTreeDigest: generation.lastVerifiedTreeDigest, updatedAt: generation.updatedAt };
   const retired: RetiredGeneration = { ...base, phase: 'retired', rowVersion: generation.rowVersion + 2,
     retirementEvidenceRef: artifact.ref, retirementEvidenceDigest: retirement.evidenceDigest };
-  function validate(connection: SqliteConnection | SqliteDriver, now: string): void {
+  let fresh: { connection: SqliteConnection; observations: readonly string[] } | undefined;
+  function assertOriginalCut(connection: SqliteConnection | SqliteDriver): void {
     if (assertActiveStateOwner(connection, owner).ownerEpoch !== inspector.ownerEpoch ||
         canonicalSha256(readRun(connection, run.id)) !== canonicalSha256(run) ||
         canonicalSha256(readRequiredWorkerLaunch(connection, launch.launchId)) !== canonicalSha256(launch) ||
@@ -125,15 +133,31 @@ export async function prepareWorkerRecoveryTerminalPlan(driver: SqliteDriver, ar
         nextJournalSequence(connection, run.id) !== cut.journal.length + 1) {
       throw new KernelStorageError('REVISION_CONFLICT', 'stopped recovery original wait or Journal changed before terminal commit');
     }
+  }
+  function validate(connection: SqliteConnection | SqliteDriver, now: string): void {
+    assertOriginalCut(connection);
     if (now < observedAt || now >= dispatch.probeDeadlineAt ||
         parseCanonicalTime(now) - parseCanonicalTime(observedAt) > 5000) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'stopped recovery original probe or retirement observation expired');
     }
-    nativeCut(now);
+    if (!fresh || fresh.connection !== connection) {
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'stopped recovery has no original native observations for this transaction');
+    }
+    assertFreshNativeOwners(fresh.observations, now);
   }
   const token = Object.freeze({}) as WorkerRecoveryTerminalPlan;
   plans.set(token, { driver, owner, cut, metadata: [...input.metadata, artifact, ...(rollback ? [rollback.artifact] : [])],
-    generation: retired, rollback, validate,
+    generation: retired, rollback,
+    reobserve(connection) {
+      // Each real native assertion produces a new physical observation time.
+      // Finish all of them before the transaction's sole clock sample. Never
+      // reuse an earlier attempt or refresh again after that canonical cut.
+      fresh = undefined;
+      assertOriginalCut(connection);
+      const observations = observeNativeOwners();
+      fresh = { connection, observations };
+    },
+    validate,
     commit(connection, now) {
       validate(connection, now);
       const quarantined: Extract<WorkspaceGenerationStateV1, { phase: 'quarantined' }> = { ...base,

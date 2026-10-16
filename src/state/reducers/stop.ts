@@ -218,7 +218,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       if (assembly.mcpServers.length) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'MCP stop requires server-containment closure');
       // The public recovery cut already verified every sealed worker proof;
       // stop additionally forbids the preactivation and fenced branches.
-      if (readWorkerLaunchesForRun(driver, runId).some(launch => launch.phase === 'retired' && launch.generationWriteState !== 'sealed' &&
+      if (readWorkerLaunchesForRun(driver, runId).some(launch => launch.phase === 'retired' && launch.retirementKind !== 'preparation' && launch.generationWriteState !== 'sealed' &&
           !selected.workspaceGenerations.some(generation => generation.generationRef === launch.workspaceGenerationRef && generation.phase === 'retired'))) {
         throw new TypeError('terminal stop retains an unsealed retired worker');
       }
@@ -322,6 +322,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
               return;
             }
             brokerClosure.reobserve(connection);
+            workerRecovery?.reobserve(connection);
             const committedAt = sampleCanonicalNow();
             time = acceptTime(connection, committedAt);
             if (!time.accepted) return;

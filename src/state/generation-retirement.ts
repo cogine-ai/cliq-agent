@@ -1,9 +1,10 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
-import type { Run, RunAssemblyV1, RunSpec, SupervisorInspectorIdentityV1, WorkerLaunch,
+import type { Run, RunAssemblyV1, RunSpec, SupervisorInspectorIdentityV1, TerminalDetail, WorkerLaunch,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationRetirementEvidenceV1, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
-import { exactKeys } from '../policy/runtime-authority.js';
+import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
+import { agentStopDetail, decodeAgentStop, stopCheckpointId } from '../runtime/stop.js';
 import { readNativePreactivationRetirement, readNativeRetainedWorkerRetirement,
   type NativePreactivationRetirement, type NativeRetainedWorkerRetirement } from '../sandbox/linux-worker.js';
 import { readRetainedWorkspaceRetirement, type RetainedWorkspaceObservation } from '../workspace/run-workspace/generation.js';
@@ -15,13 +16,14 @@ import { readRecoveryClosure } from './recovery-closure.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readRequiredWorkspaceGenerationByRef, readWorkspaceGenerationsForRun, updateWorkspaceGeneration } from './repositories/workspace-generations.js';
-import { readRun } from './rows.js';
+import { readCheckpoint, readRun } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from './store.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
 import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
 import { validateWorkerPreparationRetirement } from './worker-preparation.js';
+import { validateRetainedWorkerQuarantines } from './worker-recovery.js';
 
 type Retired = Extract<WorkspaceGenerationStateV1, { phase: 'retired' }>;
 type Source = Extract<WorkspaceGenerationStateV1, { phase: 'sealed' | 'quarantined' }>;
@@ -110,11 +112,38 @@ export async function readRetiredGenerationSource(driver: SqliteDriver, artifact
     throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
   }
   if (launch.workspaceGenerationRef !== generation.generationRef || launch.phase !== 'retired' || !launch.retiredAt ||
-      launch.retiredAt < quarantine.observedAt || launch.retiredAt > evidence.observedAt)
+      launch.retiredAt < quarantine.observedAt)
     throw new TypeError('quarantined generation retirement has no closed source launch');
-  return { evidence, source: { ...base, rowVersion: evidence.sourceQuarantinedRowVersion, updatedAt: launch.retiredAt,
+  const source: Source = { ...base, rowVersion: evidence.sourceQuarantinedRowVersion, updatedAt: launch.retiredAt,
     phase: 'quarantined', quarantineEvidenceRef: evidence.quarantineEvidenceRef,
-    quarantineEvidenceDigest: evidence.quarantineEvidenceDigest, observedState: quarantine.observedState } };
+    quarantineEvidenceDigest: evidence.quarantineEvidenceDigest, observedState: quarantine.observedState };
+  if (launch.retiredAt > evidence.observedAt) {
+    // Ordinary retirement still observes an already-retired launch. Only the
+    // atomic stopped-recovery transaction retires both after preparing proof.
+    if (quarantine.reason !== 'worker_recovery' || !['failed', 'cancelled'].includes(run.status) ||
+        !run.stopIntentRef || !run.terminalDetailRef || run.activeWorkerLaunchId || run.waitingOnRef || run.waitingReason ||
+        run.nextStep !== null || run.frontierRef || launch.generationWriteState !== 'fenced_reconciling' ||
+        launch.leaseEpoch !== run.leaseEpoch || launch.retiredAt !== generation.updatedAt || generation.updatedAt !== run.updatedAt ||
+        quarantine.inspectorIdentityRef !== evidence.inspectorIdentityRef || quarantine.inspectorIdentityDigest !== evidence.inspectorIdentityDigest)
+      throw new TypeError('quarantined generation retirement has no atomic stopped-recovery commit');
+    const checkpoint = readCheckpoint(driver, run.latestCheckpointId);
+    const journal = readInvocationJournal(driver, run.id);
+    const intent = decodeAgentStop(await readCanonicalArtifact(artifacts, run.stopIntentRef), run);
+    const detail = await readCanonicalArtifact<TerminalDetail>(artifacts, run.terminalDetailRef);
+    if (run.status !== intent.targetStatus || run.terminalReason !== intent.reason ||
+        checkpoint.id !== stopCheckpointId(run.id, run.stopIntentRef) || checkpoint.runId !== run.id ||
+        checkpoint.basedOnRunRevision !== run.revision - 1 || checkpoint.createdAt !== run.updatedAt ||
+        checkpoint.journalSeq !== journal.length || checkpoint.workspaceStateRef !== generation.sourceWorkspaceStateRef ||
+        detail.createdAt < intent.createdAt || detail.createdAt < evidence.observedAt || detail.createdAt > run.updatedAt ||
+        !Array.isArray(detail.abandonedRetryInvocations))
+      throw new TypeError('quarantined generation retirement substitutes its atomic terminal Checkpoint or StopIntent');
+    requireEqual(detail, { ...agentStopDetail(intent, run.stopIntentRef, detail.createdAt),
+      abandonedRetryInvocations: detail.abandonedRetryInvocations }, 'atomic stopped-recovery terminal detail');
+    // Rewalk the original wait, anchor/version, wrapper, all-descendant death,
+    // inspector and quarantine graph; a terminal phase alone proves nothing.
+    await validateRetainedWorkerQuarantines(artifacts, { run, journal, workerLaunches: [launch], workspaceGenerations: [source] }, driver);
+  }
+  return { evidence, source };
 }
 
 /** SQL-only final cut over already fully validated retained proof rows. This
