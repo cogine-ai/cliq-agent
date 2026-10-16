@@ -182,11 +182,12 @@ function terminalFailure(): never {
   throw new KernelStorageError('RECOVERY_REQUIRED', 'terminal broker closure lacks its exact installed claim, owner and process-death graph');
 }
 
-/** Only still-unused unknowns. Positive resolutions retain their ordinary
- * result closure; neither old Journal rows nor their charges are rewritten. */
+/** Only still-unused model unknowns. Tool ambiguity belongs to its owning
+ * rollback/reconciliation path, never a broker process-death proof. Positive
+ * resolutions retain their ordinary result closure and immutable charges. */
 function unusedUnknowns(journal: readonly InvocationJournalEntry[]): InvocationJournalEntry[] {
   return [...stopInvocationHistory(journal).values()].map(({ entry }) => entry)
-    .filter(entry => entry.phase === 'unknown').sort((a, b) => a.seq - b.seq);
+    .filter(entry => entry.opKind === 'model' && entry.phase === 'unknown').sort((a, b) => a.seq - b.seq);
 }
 
 async function terminalFrames(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1): Promise<TerminalFrame[]> {

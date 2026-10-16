@@ -41,8 +41,11 @@ const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtime
 
 async function bounded<T>(pending: Promise<T>, milliseconds: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // Retain the actual awaiting callsite, not just the later timer callback,
+  // for the existing closed source-frame diagnostic.
+  const expired = new Error(label);
   try { return await Promise.race([pending, new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(label)), milliseconds);
+    timer = setTimeout(() => reject(expired), milliseconds);
   })]); } finally { clearTimeout(timer); }
 }
 
@@ -295,7 +298,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   };
   const observe = () => {
     const result = command(recipe.observer, ['list']); assert.equal(result.status, 0);
-    const value = parseJsonStrict(result.stdout.trim()) as { serviceUid: number; servicePid: number; nameOwner: string;
+    const value = parseJsonStrict(result.stdout.trim()) as { clientPid: number; busUniqueName: string; serviceUid: number; servicePid: number; nameOwner: string;
       collection: string; items: string[]; connectionClosed: boolean };
     assert.equal(value.serviceUid, ledger.uid); assert.equal(value.connectionClosed, true); return value;
   };
@@ -1414,7 +1417,14 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.deepEqual(decodeCredentialAuthorityOperation(finalizedReplay.operation), operation,
         'scope-busy refusal must preserve the original committed credential continuation');
       const finalizerPlatform = observe();
-      assert.deepEqual(finalizerPlatform, enrolledPlatform,
+      // Each observation owns a fresh client process/connection. Compare all
+      // actual platform fields without mistaking that observer lifetime for
+      // the original Secret Service, collection or credential item identity.
+      const { clientPid: enrolledClientPid, busUniqueName: enrolledClientName, ...enrolledAuthority } = enrolledPlatform;
+      const { clientPid: finalizerClientPid, busUniqueName: finalizerClientName, ...finalizerAuthority } = finalizerPlatform;
+      for (const pid of [enrolledClientPid, finalizerClientPid]) assert(Number.isSafeInteger(pid) && pid > 0);
+      for (const name of [enrolledClientName, finalizerClientName]) assert.match(name, /^:[0-9]+\.[0-9]+$/u);
+      assert.deepEqual(finalizerAuthority, enrolledAuthority,
         'scope-busy refusal and committed replay must preserve the same real service, collection and item');
       assert.equal(requestsReceived, 1); assert.deepEqual(read(), terminal);
       report.credentialFinalizeScopeBusy = { ...report.credentialFinalizeScopeBusy, qualified: true,
@@ -1678,7 +1688,9 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       admissionKey: randomBytes(32).toString('base64url'), expectedContextRevision: currentSession().contextRevision,
       objective: 'Remain queued behind the existing candidate worker until this Run reaches its own deadline.',
       budgets: { ...runBudgets, wallTimeMs: 3000 } });
-    const queuedAdmitted = accepted(await queuedObserverClient.send(queuedSubmit), 'run.submit').snapshot.run;
+    // Preserve the ordinary mutation's original exchange() budget; the new
+    // persistent reader's 5s default must not shorten admission to this Run.
+    const queuedAdmitted = accepted(await queuedObserverClient.send(queuedSubmit, 30000), 'run.submit').snapshot.run;
     assert.notEqual(queuedAdmitted.id, admitted.id); assert.equal(queuedAdmitted.status, 'queued');
     assert.equal(Date.parse(queuedAdmitted.deadlineAt) - Date.parse(queuedAdmitted.createdAt), 3000);
     const readQueued = async () => accepted(await queuedObserverClient!.send({ protocolVersion: 1, method: 'run.get',

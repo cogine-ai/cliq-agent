@@ -2472,6 +2472,8 @@ async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProb
     assert.equal(failed.run.budgetConsumed.toolCalls, 1, 'an indeterminate permanent claim is charged once, never refunded');
     const unknown = failed.journal.find(entry => entry.opKind === 'tool' && entry.phase === 'unknown');
     assert(unknown?.budgetSettlementRef);
+    assert.deepEqual(failed.journal.filter(entry => entry.opKind === 'model').map(entry => entry.phase),
+      ['prepared', 'dispatch_claimed', 'completed'], 'the offline model prefix is resolved; only the actual tool is unknown');
     const settlement = await fixture.store.artifacts.readCanonical<BudgetSettlementV1>(unknown.budgetSettlementRef);
     assert.equal(settlement.terminalPhase, 'unknown'); assert.equal(settlement.consumed.toolCalls, 1);
     assert.equal(failed.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'completed').length, 0);
@@ -2515,6 +2517,8 @@ async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProb
       const terminal = await bounded(recovery);
       assert.equal(terminal.status, 'cancelled'); assert.equal(terminal.terminalReason, 'cancelled_by_user');
       const closed = await fixture.store.readRecoveryClosure(fixture.runId);
+      assert.deepEqual(closed.journal.filter(entry => entry.opKind === 'model'), failed.journal.filter(entry => entry.opKind === 'model'),
+        'private tool rollback cannot manufacture a broker closure or alter the completed model prefix');
       const toolJournal = closed.journal.filter(entry => entry.opKind === 'tool');
       assert.deepEqual(toolJournal.map(entry => entry.phase), ['prepared', 'dispatch_claimed', 'unknown', 'failed']);
       assert.equal(toolJournal[3]!.budgetSettlementRef, unknown.budgetSettlementRef);
