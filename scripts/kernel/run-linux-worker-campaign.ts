@@ -2112,7 +2112,45 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
       assert.equal(receipt.inspectorIdentityDigest, proof.inspectorIdentityDigest);
     }
     const retry = await successor.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
-    await bounded(retry.executeCurrentTool({ expectedRunRevision: reopened.closure.run.revision }));
+    // Opening retires the original preactivation launch and quarantines its
+    // generation; quarantine alone must never authorize a productive retry.
+    await assert.rejects(bounded(retry.executeCurrentTool({ expectedRunRevision: reopened.closure.run.revision })),
+      { code: 'RECOVERY_REQUIRED' });
+    assert.deepEqual(await checkpointBytes(successor, fixture.runId), reopened,
+      'refused activation cannot change the retained cut or allocate a successor');
+    assert.deepEqual(await bounded(retry.resumeCurrentRetirement({ expectedRunRevision: reopened.closure.run.revision })),
+      reopened.closure.run);
+    const resumed = await checkpointBytes(successor, fixture.runId);
+    const retiredGeneration = resumed.closure.workspaceGenerations.find(row => row.generationRef === archived.generationRef);
+    assert.equal(retiredGeneration?.phase, 'retired');
+    if (retiredGeneration?.phase !== 'retired') throw new Error('successor did not positively retire the original quarantined generation');
+    const { phase: _archivedPhase, quarantineEvidenceRef: _quarantine, quarantineEvidenceDigest: _quarantineDigest,
+      observedState: _observedState, ...archivedBase } = archived;
+    assert.deepEqual(retiredGeneration, { ...archivedBase, phase: 'retired', rowVersion: archived.rowVersion + 1,
+      updatedAt: retiredGeneration.updatedAt, retirementEvidenceRef: retiredGeneration.retirementEvidenceRef,
+      retirementEvidenceDigest: retiredGeneration.retirementEvidenceDigest });
+    assert.ok(retiredGeneration.updatedAt >= archived.updatedAt);
+    const generationRetirement = await successor.artifacts.readCanonical<WorkspaceGenerationRetirementEvidenceV1>(
+      retiredGeneration.retirementEvidenceRef);
+    assert.equal(generationRetirement.fromPhase, 'quarantined');
+    if (generationRetirement.fromPhase !== 'quarantined') throw new Error('successor retirement must retain the original quarantine');
+    assert.equal(generationRetirement.runId, fixture.runId);
+    assert.equal(generationRetirement.generationRef, archived.generationRef);
+    assert.equal(generationRetirement.generationIdentityDigest, archived.generationIdentityDigest);
+    assert.equal(generationRetirement.quarantineEvidenceRef, archived.quarantineEvidenceRef);
+    assert.equal(generationRetirement.quarantineEvidenceDigest, archived.quarantineEvidenceDigest);
+    assert.equal(generationRetirement.sourceQuarantinedRowVersion, archived.rowVersion);
+    assert.equal(generationRetirement.evidenceDigest, retiredGeneration.retirementEvidenceDigest);
+    assert.equal(generationRetirement.evidenceDigest, digestOmitting(generationRetirement, 'evidenceDigest'));
+    assert.deepEqual([generationRetirement.activeRunPointerCount, generationRetirement.nonretiredWorkerLaunchCount,
+      generationRetirement.liveContainmentCount, generationRetirement.activeMountCount,
+      generationRetirement.releasableBrokerClaimCount], [0, 0, 0, 0, 0]);
+    assert.deepEqual(resumed, { ...reopened, closure: { ...reopened.closure, workspaceGenerations:
+      reopened.closure.workspaceGenerations.map(row => row.generationRef === archived.generationRef ? retiredGeneration : row) } },
+    'retirement must leave the Run, ready Checkpoint, budgets and Journal unchanged without allocating a replacement');
+    assert.deepEqual(inspection.readSnapshot(connection => readRequiredWorkerLaunch(connection, held.launch.launchId)), retired,
+      'generation retirement cannot replace or mutate the original launch retirement');
+    await bounded(retry.executeCurrentTool({ expectedRunRevision: resumed.closure.run.revision }));
     const after = await checkpointBytes(successor, fixture.runId);
     assert.deepEqual(after.bytes, Buffer.from('after\n')); assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
     assert.equal(after.closure.run.id, held.run.id); assert.equal(after.closure.run.status, 'queued');

@@ -496,7 +496,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
 try{fd=fs.openSync(process.argv[1],fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);created=true;}
 catch(error){code=error.code;}finally{if(fd!==undefined)fs.closeSync(fd);if(created)fs.unlinkSync(process.argv[1]);}
 assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringify({writeRefused:true,errorCode:code}));`, probePath]);
-      assert.equal(denied.status, 0); assert.deepEqual(parseJsonStrict(denied.stdout.trim()), { writeRefused: true, errorCode: 'EPERM' });
+      assert.equal(denied.status, 0);
+      assert.equal(canonicalSha256(parseJsonStrict(denied.stdout.trim())), canonicalSha256({ writeRefused: true, errorCode: 'EPERM' }));
       await assert.rejects(lstat(probePath), { code: 'ENOENT' }); await assertOriginal();
       report.casWriteRefusal = { qualified: false, actualUnprivilegedError: 'EPERM', originalDirectoryMode: '0700',
         originalDirectoryIdentityRetained: true, originalReadAccessRetained: true, privateBoundedExt4Only: true,
@@ -1677,7 +1678,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       admissionKey: randomBytes(32).toString('base64url'), expectedContextRevision: currentSession().contextRevision,
       objective: 'Remain queued behind the existing candidate worker until this Run reaches its own deadline.',
       budgets: { ...runBudgets, wallTimeMs: 3000 } });
-    const queuedAdmitted = accepted(exchange([queuedSubmit])[0]!, 'run.submit').snapshot.run;
+    const queuedAdmitted = accepted(await queuedObserverClient.send(queuedSubmit), 'run.submit').snapshot.run;
     assert.notEqual(queuedAdmitted.id, admitted.id); assert.equal(queuedAdmitted.status, 'queued');
     assert.equal(Date.parse(queuedAdmitted.deadlineAt) - Date.parse(queuedAdmitted.createdAt), 3000);
     const readQueued = async () => accepted(await queuedObserverClient!.send({ protocolVersion: 1, method: 'run.get',
@@ -1685,7 +1686,22 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const initialQueued = await readQueued();
     assert.equal(initialQueued.snapshot.run.status, 'queued'); assert.equal(initialQueued.snapshot.run.activeWorkerLaunchId, undefined);
     assert.deepEqual(initialQueued.journal, []); assert.equal(requestsReceived, 2);
-    const capacityStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+    const ordinaryQueued = (value: Record<string, any>) => value.snapshot.run.status === 'queued' &&
+      !value.snapshot.run.stopIntentRef && !value.snapshot.run.cancelRequested;
+    const observeQueuedImages = async (before: Record<string, any>) => {
+      if (!ordinaryQueued(before)) return;
+      const images = await queuedImages(), after = await readQueued();
+      // A stop may commit while /proc is read. Only the two actual ordinary
+      // queued cuts can classify this metadata observation as allocation-free.
+      if (!ordinaryQueued(after)) return;
+      assert.deepEqual(images, queuedImagesBefore,
+        'a capacity-blocked ordinary queued Run must not retain extra launcher images');
+      queuedImageObservations++;
+    };
+    // Observe before unrelated status round trips can consume this unchanged
+    // three-second Run budget. Every frame still authenticates the same peer.
+    await observeQueuedImages(initialQueued);
+    const capacityStatus = accepted(await queuedObserverClient.send({ protocolVersion: 1, method: 'supervisor.status' }), 'supervisor.status');
     assert.equal(capacityStatus.health, 'ready'); assert.equal(capacityStatus.queue.capacity, 1);
     assert.equal(capacityStatus.queue.runningRuns, 1); assert.equal(capacityStatus.queue.queuedRuns, 1);
     const queuedDeadlineBy = Date.now() + 30000;
@@ -1696,17 +1712,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(requestsReceived, 2);
       if (deadlineCut.snapshot.run.status === 'failed') break;
       assert.equal(deadlineCut.snapshot.run.status, 'queued');
-      if (!deadlineCut.snapshot.run.stopIntentRef && !deadlineCut.snapshot.run.cancelRequested) {
-        const observedImages = await queuedImages(), afterImages = await readQueued();
-        // A stop may commit while /proc is read. Its cleanup is allowed to
-        // open resources; only an ordinary queued cut is allocation-free.
-        if (afterImages.snapshot.run.status === 'queued' && !afterImages.snapshot.run.stopIntentRef &&
-            !afterImages.snapshot.run.cancelRequested) {
-          assert.deepEqual(observedImages, queuedImagesBefore,
-            'a capacity-blocked ordinary queued Run must not retain extra launcher images');
-          queuedImageObservations++;
-        }
-      }
+      await observeQueuedImages(deadlineCut);
       assert(Date.now() < queuedDeadlineBy, 'capacity-blocked queued Run did not reach its real deadline terminal cut');
     }
     assert.equal(deadlineCut.snapshot.run.terminalReason, 'budget_exhausted');
