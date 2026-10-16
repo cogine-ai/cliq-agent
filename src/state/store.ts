@@ -81,8 +81,6 @@ import {
   decodeLocalPrincipalIdentity,
   decodePlatformProcessIdentity,
   decodeStateLockIdentity,
-  decodeStateOwnerAcquisitionEvidence,
-  decodeStateOwnerTransitionEvidence,
   decodeStateRootIdentity
 } from './decoders.js';
 import { admitRun, type AdmitRunInput, type AdmitRunResult } from './reducers/admission.js';
@@ -127,7 +125,7 @@ import {
 import { readRecoveryClosure } from './recovery-closure.js';
 import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, type BeginWorkerRecoveryInput } from './reducers/worker-recovery.js';
 import { readRun, readSession } from './rows.js';
-import { applyKernelSchema, assertPristineKernelSchema, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
+import { applyKernelSchema, assertPristineKernelSchema, KERNEL_AUTHORITY_TABLES, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
 import { iterateNodeSqliteStatement, openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import {
   assertActiveStateOwner,
@@ -136,12 +134,12 @@ import {
   gracefullyReleaseStateOwner,
   readActiveStateOwner,
   readLatestStateOwner,
-  readStateOwner,
   insertStateOwnerArtifacts,
   terminalStateOwnerRecord,
   type StateOwnerContext
 } from './state-owner.js';
 import { hostPlatform } from './workspace-identity.js';
+import { readRetainedStateOwnerHistory, readRetainedStateOwnerProcess as readStateOwnerProcess } from './state-owner-history.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { loadRunExecution, type LoadRunExecutionInput, type RunExecutionInstallation } from './run-execution.js';
 import { retireAbandonedPreactivations } from './preactivation-retirement.js';
@@ -1343,32 +1341,8 @@ export type {
   SettleInvocationInput
 };
 
-const AUTHORITY_TABLES = [
-  'canonical_time_fence',
-  'state_owners',
-  'artifacts',
-  'sessions',
-  'items',
-  'runs',
-  'checkpoints',
-  'run_journal',
-  'run_events',
-  'worker_launches',
-  'workspace_generations',
-  'local_inference_activation_cycles',
-  'local_inference_launches',
-  'control_requests',
-  'list_read_cuts',
-  'list_read_cut_entries',
-  'child_allocations',
-  'authorization_grants',
-  'source_inspection_attempts',
-  'mcp_registrations',
-  'admin_operations'
-] as const;
-
 function assertFreshAuthorityDatabaseEmpty(connection: SqliteConnection | SqliteDriver): void {
-  for (const table of AUTHORITY_TABLES) {
+  for (const table of KERNEL_AUTHORITY_TABLES) {
     const row = connection
       .prepare(`SELECT count(*) AS count FROM ${table}`)
       .get<{ count: unknown }>();
@@ -1522,39 +1496,6 @@ async function stateOwnerContextFromArtifacts(
     filesystem,
     { ref: lockIdentity.stateRootIdentityRef, digest: lockIdentity.stateRootIdentityDigest }
   );
-}
-
-async function readStateOwnerProcess(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1): Promise<PlatformProcessIdentityV1> {
-  const processIdentity = decodePlatformProcessIdentity(
-    await artifacts.readCanonical(owner.processIdentityRef)
-  );
-  const acquisition = decodeStateOwnerAcquisitionEvidence(
-    await artifacts.readCanonical(owner.acquisitionEvidenceRef)
-  );
-  if (
-    processIdentity.identityDigest !== owner.processIdentityDigest ||
-    processIdentity.executableImageDigest !== owner.supervisorExecutableDigest ||
-    processIdentity.ownerUid !== requireEffectiveUid() ||
-    processIdentity.platform !== hostPlatform() ||
-    processIdentity.observedAt !== owner.acquiredAt ||
-    acquisition.evidenceDigest !== owner.acquisitionEvidenceDigest ||
-    acquisition.ownerEpoch !== owner.ownerEpoch ||
-    acquisition.supervisorInstanceId !== owner.supervisorInstanceId ||
-    acquisition.runtimeBundleRef !== owner.runtimeBundleRef ||
-    acquisition.runtimeBundleManifestDigest !== owner.runtimeBundleManifestDigest ||
-    acquisition.processIdentityRef !== owner.processIdentityRef ||
-    acquisition.processIdentityDigest !== owner.processIdentityDigest ||
-    acquisition.stateLockIdentityRef !== owner.stateLockIdentityRef ||
-    acquisition.stateLockIdentityDigest !== owner.stateLockIdentityDigest ||
-    acquisition.instanceNonceDigest !== owner.instanceNonceDigest ||
-    acquisition.acquiredAt !== owner.acquiredAt ||
-    (owner.ownerEpoch === 1
-      ? acquisition.kind !== 'genesis'
-      : acquisition.kind === 'genesis' || acquisition.priorOwnerEpoch !== owner.ownerEpoch - 1)
-  ) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner process/acquisition closure does not match');
-  }
-  return processIdentity;
 }
 
 // Failed opening has no Store for a caller to close. Keep uncertain resources
@@ -1805,7 +1746,7 @@ export class StateStore {
         material = await loadInstalledRunMaterial({ selected: this.installedRuntime!, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
       }
       const agent = await loadAgentRun(this.driver, this.artifacts, this.owner,
-        { runId, material, releaseKeys: this.runtimeAuthority!.releaseKeys });
+        { runId, material, releaseKeys: this.runtimeAuthority!.releaseKeys }, undefined, this.installedRuntime);
       if (['queued', 'running', 'waiting'].includes(readRun(this.driver, runId).status)) this.installedAgents.set(runId, agent);
       return agent;
     })();
@@ -2050,7 +1991,8 @@ export class StateStore {
     if (!agent) {
       const { loadInstalledRunMaterial } = await import('./installed-run.js');
       const material = await loadInstalledRunMaterial({ selected: this.installedRuntime, artifacts: this.artifacts, assemblyRef: spec.assemblyRef });
-      agent = await loadAgentRun(this.driver, this.artifacts, this.owner, { runId, material, releaseKeys: this.runtimeAuthority.releaseKeys });
+      agent = await loadAgentRun(this.driver, this.artifacts, this.owner,
+        { runId, material, releaseKeys: this.runtimeAuthority.releaseKeys }, undefined, this.installedRuntime);
       if (['queued', 'running', 'waiting'].includes(readRun(this.driver, runId).status)) this.installedAgents.set(runId, agent);
     }
     const result = await agent.cancelRun({ ...identity, requestId: value.requestId as string, expectedRunRevision: value.expectedRevision as number });
@@ -2420,7 +2362,7 @@ export class StateStore {
   }
 
   loadAgentRun(input: LoadAgentRunInput) {
-    return loadAgentRun(this.driver, this.artifacts, this.owner, input);
+    return loadAgentRun(this.driver, this.artifacts, this.owner, input, undefined, this.installedRuntime);
   }
 
   /** Production broker only. The native image owns raw credential/header bytes
@@ -3018,7 +2960,7 @@ async function acquireOrBootstrapStateOwner(
     contentDigest: canonicalSha256({
       applicationId: KERNEL_SQLITE_APPLICATION_ID,
       userVersion: stateSchemaVersion,
-      tables: AUTHORITY_TABLES.length
+      tables: KERNEL_AUTHORITY_TABLES.length
     })
   };
   const databaseArtifact = await artifacts.publishCanonical(emptyDatabase, 'cliq-kernel-empty-database-v1');
@@ -3069,7 +3011,11 @@ async function acquireOrBootstrapStateOwner(
     stateSchemaVersion,
     generationDigest: '',
     ...(installed ? { origin: 'fresh_installed' as const, runtimeBundleRef: installed.bundleDigest,
-      runtimeBundleManifestDigest: installed.bundle.manifestDigest } : { origin: 'fresh_empty' as const }),
+      runtimeBundleManifestDigest: installed.bundle.manifestDigest,
+      modelAuthoritySource: installed.modelAuthority
+        ? { kind: 'present' as const, closureRef: installed.modelAuthority.closureRef,
+          closureDigest: installed.modelAuthority.closure.closureDigest }
+        : { kind: 'none' as const } } : { origin: 'fresh_empty' as const }),
     pristineSchemaManifestRef: schemaArtifact.ref,
     pristineSchemaManifestDigest: schemaManifest.manifestDigest,
     pristineSchemaDigest: schemaDigest
@@ -3159,43 +3105,6 @@ async function acquireOrBootstrapStateOwner(
   return owner;
 }
 
-async function readStateOwnerTransition(
-  artifacts: ArtifactCatalog,
-  prior: Extract<StateOwnerRecordV1, { state: 'terminal' }>,
-  successor?: StateOwnerRecordV1
-): Promise<StateOwnerTransitionEvidenceV1> {
-  const transition = decodeStateOwnerTransitionEvidence(await artifacts.readCanonical(prior.transitionEvidenceRef));
-  if (transition.kind !== prior.terminalReason || transition.evidenceDigest !== prior.transitionEvidenceDigest ||
-      transition.priorOwnerEpoch !== prior.ownerEpoch || transition.priorSupervisorInstanceId !== prior.supervisorInstanceId ||
-      transition.priorProcessIdentityRef !== prior.processIdentityRef || transition.priorProcessIdentityDigest !== prior.processIdentityDigest ||
-      transition.stateLockIdentityRef !== prior.stateLockIdentityRef || transition.stateLockIdentityDigest !== prior.stateLockIdentityDigest ||
-      (transition.kind === 'graceful_release'
-        ? transition.releasingProcessIdentityRef !== prior.processIdentityRef || transition.releasingProcessIdentityDigest !== prior.processIdentityDigest
-        : !successor || transition.successorOwnerEpoch !== successor.ownerEpoch ||
-          transition.successorSupervisorInstanceId !== successor.supervisorInstanceId ||
-          transition.successorRuntimeBundleRef !== successor.runtimeBundleRef ||
-          transition.successorRuntimeBundleManifestDigest !== successor.runtimeBundleManifestDigest ||
-          transition.successorProcessIdentityRef !== successor.processIdentityRef ||
-          transition.successorProcessIdentityDigest !== successor.processIdentityDigest ||
-          transition.successorInstanceNonceDigest !== successor.instanceNonceDigest || transition.observedAt !== successor.acquiredAt)) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner transition evidence does not match its prior/successor');
-  }
-  return transition;
-}
-
-async function validateOwnerPredecessor(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerRecordV1): Promise<void> {
-  const acquisition = decodeStateOwnerAcquisitionEvidence(await artifacts.readCanonical(owner.acquisitionEvidenceRef));
-  if (acquisition.kind === 'genesis') return;
-  const prior = readStateOwner(driver, acquisition.priorOwnerEpoch);
-  if (!prior || prior.state !== 'terminal' || prior.rowDigest !== acquisition.priorTerminalRowDigest ||
-      prior.terminalReason !== acquisition.priorTerminalReason || prior.transitionEvidenceRef !== acquisition.priorTransitionEvidenceRef ||
-      prior.transitionEvidenceDigest !== acquisition.priorTransitionEvidenceDigest ||
-      prior.stateLockIdentityRef !== owner.stateLockIdentityRef || prior.stateLockIdentityDigest !== owner.stateLockIdentityDigest) {
-    throw new KernelStorageError('RECOVERY_REQUIRED', 'StateOwner acquisition does not match its retained predecessor');
-  }
-  await readStateOwnerTransition(artifacts, prior, owner);
-}
-
 function assertPriorProcessDead(heldLock: HeldStateOwnerLock, identity: PlatformProcessIdentityV1): void {
   try { heldLock.assertPriorProcessDead(identity.pid, identity.processStartToken); }
   catch (error) {
@@ -3212,9 +3121,8 @@ async function acquireSuccessorStateOwner(
   heldLock: HeldStateOwnerLock
 ): Promise<Extract<StateOwnerRecordV1, { state: 'active' }>> {
   await stateOwnerFilesystemFromArtifacts(stateRoot, artifacts, prior, heldLock);
-  const priorProcess = await readStateOwnerProcess(artifacts, prior);
-  await validateOwnerPredecessor(driver, artifacts, prior);
-  if (prior.state === 'terminal') await readStateOwnerTransition(artifacts, prior);
+  const history = await readRetainedStateOwnerHistory(driver, artifacts, prior.ownerEpoch);
+  const priorProcess = history.entries.at(-1)!.process;
 
   const currentFence = readTimeFence(driver);
   if (currentFence === undefined || currentFence.stateOwnerEpoch !== prior.ownerEpoch) {
@@ -3313,6 +3221,7 @@ async function acquireSuccessorStateOwner(
   driver.transaction((connection) => {
     assertStateOwnerLock(heldLock);
     assertContiguousStateOwnerHistory(connection);
+    history.assertUnchanged(connection);
     const active = readActiveStateOwner(connection);
     if (prior.state === 'active' ? active?.rowDigest !== prior.rowDigest : active !== undefined) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'another state owner acquired authority');

@@ -602,14 +602,14 @@ END;
 
 export const KERNEL_SCHEMA_SQL = `${KERNEL_SCHEMA_V1_SQL}\n${KERNEL_SCHEMA_V2_SQL}\n${KERNEL_SCHEMA_V3_SQL}\n${KERNEL_SCHEMA_V4_SQL}\n${KERNEL_SCHEMA_V5_SQL}`;
 
-const REQUIRED_TABLES = [
+/** One table inventory for pristine bootstrap and its retained birth recipe. */
+export const KERNEL_AUTHORITY_TABLES = Object.freeze([
   'canonical_time_fence',
   'state_owners',
   'artifacts',
   'sessions',
   'items',
   'runs',
-  'source_inspection_attempts',
   'checkpoints',
   'run_journal',
   'run_events',
@@ -622,9 +622,11 @@ const REQUIRED_TABLES = [
   'list_read_cut_entries',
   'child_allocations',
   'authorization_grants',
+  'source_inspection_attempts',
   'mcp_registrations',
   'admin_operations'
-] as const;
+] as const);
+const REQUIRED_TABLES = KERNEL_AUTHORITY_TABLES;
 
 function pragmaScalar(driver: SqliteConnection, name: string): unknown {
   const row = driver.prepare(`PRAGMA ${name}`).get();

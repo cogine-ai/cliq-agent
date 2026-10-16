@@ -1567,6 +1567,7 @@ export type KernelGenerationIdentityV1 = {
       pristineSchemaDigest: string;
       runtimeBundleRef?: never;
       runtimeBundleManifestDigest?: never;
+      modelAuthoritySource?: never;
       candidateRef?: never;
       candidateDigest?: never;
       migrationId?: never;
@@ -1578,6 +1579,9 @@ export type KernelGenerationIdentityV1 = {
       pristineSchemaDigest: string;
       runtimeBundleRef: ArtifactRef;
       runtimeBundleManifestDigest: string;
+      modelAuthoritySource:
+        | { kind: 'none' }
+        | { kind: 'present'; closureRef: ArtifactRef; closureDigest: string };
       candidateRef?: never;
       candidateDigest?: never;
       migrationId?: never;
@@ -1592,6 +1596,7 @@ export type KernelGenerationIdentityV1 = {
       pristineSchemaDigest?: never;
       runtimeBundleRef?: never;
       runtimeBundleManifestDigest?: never;
+      modelAuthoritySource?: never;
     }
 );
 

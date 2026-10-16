@@ -162,6 +162,13 @@ export function loadInstalledModelBroker(selected: HeldInstalledRuntime): Promis
   if (!binding) mismatch('installed runtime is not a verified held selection');
   return binding.loadModelBroker();
 }
+
+/** Supported fixed creator-process recipe only, not installation or release
+ * authority. Both live dispatch and domain-death production retain this gate. */
+export function assertInstalledModelBrokerProcess(): void {
+  if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'model broker requires the fixed signed Linux backend');
+}
 export function openInstalledControlClient(selected: HeldInstalledRuntime): Promise<HeldInstalledControlClient> {
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('installed runtime is not a verified held selection');
@@ -922,8 +929,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
           },
           loadModelBroker() {
             return enqueue(async () => {
-              if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
-                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'model broker requires the fixed signed Linux backend');
+              assertInstalledModelBrokerProcess();
               await checkedRevalidate();
               if (!modelBroker) {
                 const entry = signed.bundle.entries.find(value => value.entryId === MODEL_BROKER_ENTRY_ID);

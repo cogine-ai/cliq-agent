@@ -161,9 +161,31 @@ short-Run assertions. The target reuses the already-closed reflection broker's
 unknown and actual Supervisor restart, then requests public cancellation and
 requires exact original claim/process/token, strictly newer same-signed-runtime
 inspector, immutable unknown/full charge, one terminal Checkpoint/Session item,
-cancel replay and contiguous attach. Its 15-second terminal target has not yet
-run on Linux and no production terminal consumer is qualified. This is not a
-live POST producer crash: that separate physical cut remains explicitly false.
+cancel replay and contiguous attach. Immutable `8c56faf` reached the precise
+consumer RED in both real Linux runs: public cancel accepted, unchanged queued
+unknown with StopIntent, four provider requests and no provider failure, then
+the original 15-second terminal deadline. This was not a client/setup timeout;
+joins, scans and cleanup completed, but the later terminal assertions and full
+final corpus did not execute. The independent native prior-lifetime/time and
+close-fault/FD-reuse/GC-lock-retention regressions passed on actual Linux.
+
+The next implementation adds the genuine held-installation owning plan and
+complete retained StateOwner-prefix reader, with fresh native death and exact
+owner/Journal/settlement CAS in the terminal transaction. It is worker-free:
+unknowns with an active worker still refuse before any seal preparation.
+Generic Run loaders cannot mint this evidence; the original fixed signed
+SEA/Linux/main-thread/backend gate is shared with real broker dispatch. The
+new installed target additionally requires an actual restart after terminal
+commit, unchanged history, original cancellation replay and no extra effect.
+This implementation and the post-terminal restart still require new exact-head
+Linux qualification. It is not a live POST producer crash: that separate
+physical cut remains explicitly false.
+The owner approved retaining the original optional companion source in the same
+first StateOwner transaction. The implementation now records explicit `none` or
+`present(closureRef,closureDigest)` and rewalks the original all-and-only signed
+seed; genuine Linux installation regressions remain unqualified. Today's
+selection, CAS search and the narrower original Run-used model closure cannot
+stand in for the original whole-inventory provenance.
 Full I1, owning preparation/private rollback and unexecuted crash cuts remain
 incomplete.
 

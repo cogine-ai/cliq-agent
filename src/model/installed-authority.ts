@@ -81,8 +81,9 @@ function canonical(bytes: Buffer): unknown {
   return value;
 }
 
+type SignatureCheck = (domain: string, digest: string, signature: Buffer) => void;
 function authorityObject(kind: 'model_catalog_entry' | 'model_price_table', artifactRef: string, bytes: Buffer,
-  bundle: RuntimeBundleManifest, key: ReturnType<typeof publicKey>, signature: (reference: unknown) => Buffer) {
+  bundle: RuntimeBundleManifest, authenticate: SignatureCheck, signature: (reference: unknown) => Buffer) {
   if (!Buffer.isBuffer(bytes) || sha256Bytes(bytes) !== ref(artifactRef))
     throw new TypeError('installed model authority object bytes do not rehash');
   const catalog = kind === 'model_catalog_entry';
@@ -110,7 +111,7 @@ function authorityObject(kind: 'model_catalog_entry' | 'model_price_table', arti
     const { catalogEntryDigest: _digest, signatureRef: _signature, ...core } = value;
     const digest = ref(value.catalogEntryDigest);
     if (canonicalSha256(core) !== digest) throw new TypeError('installed model catalog semantic digest does not rehash');
-    signed('cliq-model-catalog-entry-v1', digest, signature(value.signatureRef), key);
+    authenticate('cliq-model-catalog-entry-v1', digest, signature(value.signatureRef));
   } else {
     if (value.currency !== 'USD' || value.unit !== 'micros_per_million_tokens') throw new TypeError('installed model pricing units are invalid');
     const prices = closed(value.prices, ['input', 'output', 'cacheRead', 'cacheWrite']);
@@ -121,7 +122,7 @@ function authorityObject(kind: 'model_catalog_entry' | 'model_price_table', arti
       throw new TypeError('installed model price ceiling arithmetic is invalid');
     const digest = ref(value.tableDigest);
     if (priceTableDigest(value as unknown as ModelPriceTableV1) !== digest) throw new TypeError('installed model price semantic digest does not rehash');
-    signed('cliq-model-price-table-v1', digest, signature(value.signatureRef), key);
+    authenticate('cliq-model-price-table-v1', digest, signature(value.signatureRef));
   }
   return { tuple, ref: artifactRef, value };
 }
@@ -139,8 +140,9 @@ export function verifyRetainedModelAuthorityPair(input: {
     if (sha256Bytes(bytes) !== digest) throw new TypeError('installed model authority object bytes do not rehash');
     used.add(digest); return bytes;
   };
-  const catalog = authorityObject('model_catalog_entry', input.catalogEntryRef, input.objects.get(input.catalogEntryRef)!, input.bundle, key, signature);
-  const priceTable = authorityObject('model_price_table', input.priceTableRef, input.objects.get(input.priceTableRef)!, input.bundle, key, signature);
+  const authenticate: SignatureCheck = (domain, digest, bytes) => signed(domain, digest, bytes, key);
+  const catalog = authorityObject('model_catalog_entry', input.catalogEntryRef, input.objects.get(input.catalogEntryRef)!, input.bundle, authenticate, signature);
+  const priceTable = authorityObject('model_price_table', input.priceTableRef, input.objects.get(input.priceTableRef)!, input.bundle, authenticate, signature);
   if (catalog.tuple !== priceTable.tuple) throw new TypeError('installed model authority lacks exact catalog/price pairing');
   if (input.objects.size !== used.size || [...input.objects.keys()].some(reference => !used.has(reference)))
     throw new TypeError('retained model authority contains missing or extra objects');
@@ -153,6 +155,15 @@ export function verifyRetainedModelAuthorityPair(input: {
 export function decodeInstalledModelAuthorityClosure(value: unknown,
   input: { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[] }): InstalledModelAuthorityClosureV1 {
   const key = publicKey(input.bundle, input.releaseKeys);
+  const closure = decodeRetainedInstalledModelAuthorityClosure(value, input);
+  signed('cliq-installed-model-authority-v1', closure.closureDigest, Buffer.from(closure.signature, 'base64'), key);
+  return closure;
+}
+
+/** Closed retained data only. Its caller must bind the original genesis source;
+ * this neither authenticates a release key nor creates Verified authority. */
+export function decodeRetainedInstalledModelAuthorityClosure(value: unknown,
+  input: { bundle: RuntimeBundleManifest }): InstalledModelAuthorityClosureV1 {
   const closure = closed(value, ['schemaVersion', 'format', 'publisherKeyId', 'signatureAlgorithm', 'runtimeBundleRef',
     'runtimeBundleManifestDigest', 'objects', 'closureDigest', 'signature']);
   if (closure.schemaVersion !== 1 || closure.format !== 'cliq-installed-model-authority-v1' ||
@@ -177,7 +188,6 @@ export function decodeInstalledModelAuthorityClosure(value: unknown,
     throw new TypeError('installed model authority closure digest or signature encoding is invalid');
   const signature = Buffer.from(closure.signature, 'base64');
   if (signature.toString('base64') !== closure.signature) throw new TypeError('installed model authority signature encoding is not canonical');
-  signed('cliq-installed-model-authority-v1', digest, signature, key);
   return immutableSnapshot(closure as unknown as InstalledModelAuthorityClosureV1);
 }
 
@@ -189,6 +199,25 @@ export function verifyInstalledModelAuthority(input: {
 }): VerifiedInstalledModelAuthority {
   const closure = decodeInstalledModelAuthorityClosure(input.closure, input);
   const key = publicKey(input.bundle, input.releaseKeys);
+  const models = authorityInventory({ ...input, closure }, (domain, digest, bytes) => signed(domain, digest, bytes, key));
+  return immutableSnapshot({ closureRef: canonicalSha256(closure), closure, models });
+}
+
+/** Rewalk exact original bytes and typed edges, not today's companion or keys.
+ * Deliberately returns nothing that could be consumed as execution authority. */
+export function validateRetainedInstalledModelAuthorityData(input: {
+  closure: unknown; bundle: RuntimeBundleManifest; objects: ReadonlyMap<string, Buffer>;
+}): void {
+  const closure = decodeRetainedInstalledModelAuthorityClosure(input.closure, input);
+  authorityInventory({ ...input, closure }, (_domain, _digest, bytes) => {
+    if (bytes.byteLength !== 64) throw new TypeError('retained model authority signature bytes are invalid');
+  });
+}
+
+function authorityInventory(input: {
+  closure: InstalledModelAuthorityClosureV1; bundle: RuntimeBundleManifest; objects: ReadonlyMap<string, Buffer>;
+}, authenticate: SignatureCheck): VerifiedInstalledModelAuthority['models'] {
+  const { closure } = input;
   if (input.objects.size !== closure.objects.length) throw new TypeError('installed model authority contains missing or extra objects');
   const inventory = new Map(closure.objects.map(object => [object.artifactRef, object]));
   const usedSignatures = new Set<string>();
@@ -206,7 +235,7 @@ export function verifyInstalledModelAuthority(input: {
     if (!Buffer.isBuffer(bytes) || bytes.byteLength !== object.byteCount || sha256Bytes(bytes) !== object.artifactRef)
       throw new TypeError('installed model authority object bytes do not rehash');
     if (object.kind === 'ed25519_signature') continue;
-    const { tuple, value } = authorityObject(object.kind, object.artifactRef, bytes, input.bundle, key, signature);
+    const { tuple, value } = authorityObject(object.kind, object.artifactRef, bytes, input.bundle, authenticate, signature);
     if (object.kind === 'model_catalog_entry') {
       if (catalogs.has(tuple)) throw new TypeError('installed model catalog tuple is ambiguous');
       catalogs.set(tuple, { ref: object.artifactRef, value: value as unknown as SignedModelCatalogEntryV1 });
@@ -223,5 +252,5 @@ export function verifyInstalledModelAuthority(input: {
     if (!priceTable) throw new TypeError('installed model authority lacks exact catalog/price pairing');
     return { catalog, priceTable };
   });
-  return immutableSnapshot({ closureRef: canonicalSha256(closure), closure, models });
+  return models;
 }

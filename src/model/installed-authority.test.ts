@@ -4,7 +4,8 @@ import { test } from 'node:test';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { sha256Bytes } from '../kernel/identity.js';
 import type { RuntimeBundleManifest } from '../policy/runtime-authority.js';
-import { decodeInstalledModelAuthorityClosure, verifyInstalledModelAuthority, verifyRetainedModelAuthorityPair,
+import { decodeInstalledModelAuthorityClosure, decodeRetainedInstalledModelAuthorityClosure,
+  validateRetainedInstalledModelAuthorityData, verifyInstalledModelAuthority, verifyRetainedModelAuthorityPair,
   type InstalledModelAuthorityClosureV1, type SignedModelCatalogEntryV1 } from './installed-authority.js';
 import { priceTableDigest, type ModelPriceTableV1 } from './pricing.js';
 
@@ -71,6 +72,32 @@ function fixture(options: InnerOptions = {}) {
 }
 const verify = (value: ReturnType<typeof fixture>, closure = value.closure(), objects = value.objects) =>
   verifyInstalledModelAuthority({ bundle: value.bundle, releaseKeys: value.releaseKeys, closure, objects });
+
+test('retained companion data closes its original inventory without acquiring signing authority', () => {
+  const decode = decodeRetainedInstalledModelAuthorityClosure, validate = validateRetainedInstalledModelAuthorityData;
+  const value = fixture(), closure = value.closure();
+  assert.deepEqual(decode(closure, { bundle: value.bundle }), closure);
+  assert.equal(validate({ ...value, closure }), undefined, 'retained validation returns no Verified authority');
+  const missing = new Map(value.objects); missing.delete(value.catalog.signatureRef);
+  assert.throws(() => validate({ ...value, closure, objects: missing }), /missing or extra/);
+  const changed = new Map(value.objects); changed.set(value.priceRef, Buffer.from('changed retained object'));
+  assert.throws(() => validate({ ...value, closure, objects: changed }), /do not rehash/);
+  assert.throws(() => decode({ ...closure, permission: true }, value), /closed shape/);
+  assert.throws(() => decode({ ...closure, objects: [...closure.objects].reverse() }, value), /inventory is invalid/);
+  const wrongBundle = { ...value.bundle, manifestDigest: canonicalSha256({ different: true }) };
+  assert.throws(() => decode(closure, { bundle: wrongBundle }), /signed RuntimeBundle/);
+  const mismatched = fixture({ price: price => { price.model = 'another-original-tuple'; } });
+  assert.throws(() => validate({ ...mismatched, closure: mismatched.closure() }), /exact catalog\/price pairing/);
+  const extra = new Map(value.objects), unused = Buffer.alloc(64, 7), unusedRef = sha256Bytes(unused);
+  extra.set(unusedRef, unused);
+  const unusedClosure = value.closure([...value.members, { artifactRef: unusedRef, byteCount: 64, kind: 'ed25519_signature' }]);
+  assert.throws(() => validate({ ...value, closure: unusedClosure, objects: extra }), /signature inventory is incomplete/);
+  // Structural rewalking does not authenticate keys: the genuinely held birth
+  // did that once. The live importer must STILL reject these foreign signatures.
+  const foreign = fixture({ catalogKey: generateKeyPairSync('ed25519').privateKey });
+  assert.equal(validate({ ...foreign, closure: foreign.closure() }), undefined);
+  assert.throws(() => verify(foreign), /signature is invalid/);
+});
 
 test('installed companion verifies exact signed bundle, catalog, price and executed adapter data', () => {
   const value = fixture(), verified = verify(value);

@@ -420,6 +420,17 @@ installation. Extra/missing/changed seed objects or root replacement fail closed
 original acquisition rules, never this seed exception again. No new ledger,
 execution permission or migration/cutover claim follows from this source.
 
+The same first transaction records `modelAuthoritySource` from that genuine
+held installation: exactly `{kind:'none'}` or
+`{kind:'present',closureRef,closureDigest}`. The present branch binds the original
+companion's complete-byte ref and semantic digest independently; the other
+genesis origins forbid this field. Retained history verifies the all-and-only
+original RuntimeBundle data/structured closure plus that exact companion's
+typed catalog/price/detached-signature inventory, including pairings and semantic
+digests. This data rewalk grants no signing/execution authority. Missing source,
+missing/extra/substituted members or digest mismatch requires recovery; today's
+installation, a CAS search or compatibility fallback cannot replace provenance.
+
 The canonical artifact/storage boundary is closed as follows. `src/kernel/types.ts` exports these definitions exactly as written in the RFC, and `artifact-schemas.ts` rejects unknown fields, alternate discriminator spellings, missing required fields, illegal optional members, unsafe integers, or a locally invented superset before any typed transaction uses a ref:
 
 ```ts

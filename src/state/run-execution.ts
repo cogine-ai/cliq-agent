@@ -34,7 +34,7 @@ import { decodeRunSpec, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity 
 import { retirePreactivationLaunch } from './preactivation-retirement.js';
 import type { HeldWorkerReservation } from './native-owner.js';
 import { withInstalledWorkerRoot, type HeldInstalledAnchor, type HeldInstalledRuntime } from './installed-runtime.js';
-import { stopCheckpointId } from '../runtime/stop.js';
+import { stopCheckpointId, stopInvocationHistory } from '../runtime/stop.js';
 import { retireQuarantinedGeneration } from './generation-retirement.js';
 import { observeInstalledBrokerQuiescence, type StateStore } from './store.js';
 import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from './repositories/worker-launches.js';
@@ -188,7 +188,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   }
   let agent: Awaited<ReturnType<typeof loadAgentRun>>;
   try {
-    agent = await loadAgentRun(driver, artifacts, owner, { runId, material: input.material, releaseKeys: bootstrap!.releaseKeys }, reobserveRetirement);
+    agent = await loadAgentRun(driver, artifacts, owner, { runId, material: input.material, releaseKeys: bootstrap!.releaseKeys },
+      reobserveRetirement, selectedRuntime);
     const run = readRun(driver, runId);
     if (run.parentRunId !== undefined) throw new KernelStorageError('INVALID_REQUEST', 'this installed execution recipe does not support child Runs');
     const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
@@ -609,14 +610,30 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     },
     finishCurrentStop: async value => {
       const expectedRunRevision = revision(value);
+      const selected = await readRecoveryClosure(driver, artifacts, runId);
+      // A read may yield to close or another operation. Revalidate the exact
+      // scope/revision before taking operation ownership or changing resources.
+      revision({ expectedRunRevision });
+      if (selected.run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'stop drain revision changed');
+      const stopIntentRef = selected.run.stopIntentRef;
+      if (!stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop drain requires the persisted StopIntent');
+      // Refuse BEFORE ownOperation: its failure handler intentionally performs
+      // physical recovery. An unclosed claim must not enter that lifecycle just
+      // because a terminal request is unsupported. The model-death path below
+      // is worker-free; it cannot authorize sealing an active worker.
+      if (selected.run.activeWorkerLaunchId !== undefined) {
+        for (const { entry, hasClaim } of stopInvocationHistory(selected.journal).values()) {
+          if (!['model', 'tool'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
+              (entry.phase !== 'failed' || hasClaim))) {
+            throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
+          }
+        }
+      }
       const abort = new AbortController();
       operationAbort = abort;
       const signal = abort.signal;
       const work = (async () => {
-        const selected = await readRecoveryClosure(driver, artifacts, runId);
         signal.throwIfAborted();
-        if (selected.run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'stop drain revision changed');
-        if (!selected.run.stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop drain requires the persisted StopIntent');
         if (selected.run.activeWorkerLaunchId === undefined) {
           if (activeWorker || worker || generation || controller || reservation || ownedLaunchId !== undefined) {
             throw new KernelStorageError('RECOVERY_REQUIRED', 'worker-free stop retains unresolved physical execution resources');
@@ -629,7 +646,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             selected.run.activeWorkerLaunchId !== ownedLaunchId || selected.run.activeWorkerLaunchId !== activeWorker.activated.launch.launchId) {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'stop drain cannot adopt another worker\'s retirement authority');
         }
-        const proof = await retireToCheckpoint(activeWorker, stopCheckpointId(runId, selected.run.stopIntentRef), signal);
+        const proof = await retireToCheckpoint(activeWorker, stopCheckpointId(runId, stopIntentRef), signal);
         signal.throwIfAborted();
         // commitTerminalStop checks exact settled invocation history, the
         // currently accounted workspace, and refreshes actual native death

@@ -162,14 +162,44 @@ or a caller PID/digest are not death evidence. An old process that is still
 alive remains waiting. No token-revoked or active-release-zero observation is
 invented for a mutex that disappeared with its process.
 
-This is an approved contract, not completed production or Linux qualification.
-Pure closed-data decoders establish no native authority. The actual owning
-producer must read the original Journal/Owner/process/recipe closure itself
-and fresh-recheck native death, lineage and the five-second canonical-time cut
-at terminal commit. The original unknown and full charge remain unchanged;
+Immutable `8c56faf` reached the genuine installed public-cancel terminal RED
+after the original fifteen-second deadline in both Linux runs, with unchanged
+unknown/full charge and completed joins/scans/cleanup. The next implementation
+adds the worker-free owning producer and terminal/history consumer; their new
+Linux qualification remains pending. Pure closed-data decoders establish no
+native authority. The owning plan holds the real branded signed installation
+through its terminal transaction, binds the actual current process and private
+native lock, reads the original Journal/Owner/process/recipe closure itself,
+and fresh-rechecks native death, lineage and the five-second canonical-time cut
+at terminal commit. Active-worker unknowns continue refusing before any seal
+preparation; this branch does not substitute for the whole retirement package.
+The original unknown and full charge remain unchanged;
 there is no retry, fabricated failed result or duplicate settlement. Same-owner
 automatic terminal abandonment remains outside this package, and process-domain
 death does not resolve provider effect or billing.
+
+The shared retained-owner reader walks genesis through the recorded inspector,
+including one exact successor witness if that inspector later died in a
+takeover. It does not demand today's active owner or installation and does not
+turn a graceful transition into death evidence. Its birth validation supports
+the two implemented `fresh_empty|fresh_installed` recipes at the exact current
+schema/hash; arbitrary older schemas and migrated origins remain unsupported,
+not silently accepted. A historical birth snapshot is never mistaken for a
+requirement that the now-grown business database or CAS be empty again.
+
+The owner approved closing the original companion source contract: installed
+genesis now records `modelAuthoritySource` as explicit `none` or
+`present(closureRef,closureDigest)` from the genuinely held verified installation
+in the same first StateOwner transaction. The companion is signed after the
+bundle; current installation lookup and CAS search cannot reconstruct its
+original provenance. Retained validation requires every original bundle data/
+structured edge and that exact companion's typed inventory, and refuses missing,
+extra or substituted members even when surrounding snapshot hashes are redone.
+The data-only companion validator returns no verified authority; live import
+still authenticates every signature. No legacy fallback or new ledger exists.
+Local data/history regressions and genuine Linux-only installation regressions
+are separate: the latter and the installed terminal/restart consumer must pass
+on the next immutable Linux candidate before this package is qualified.
 
 ## Validation contract
 

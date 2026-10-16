@@ -33,6 +33,7 @@ import { loadAgentStop } from './stop.js';
 import { appendRunStateEvent, assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation,
   requireHealthyFence, settleValidatedInvocation, type ClaimInvocationDispatchInput } from './invocation.js';
 import { loadInputContinuation } from './input.js';
+import type { HeldInstalledRuntime } from '../installed-runtime.js';
 
 const TOOL_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
 type ResultFields<T = Exclude<ToolResultPayloadV1, { source: 'user_input' }>> = T extends ToolResultPayloadV1
@@ -83,7 +84,7 @@ function nextFrontier(cut: ToolCut, addedItems: number): RunFrontier {
 export async function loadToolContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; contracts: ToolInputAuthority[];
   resolveToolInput: ResolveToolInput; releaseKeys?: readonly ReleaseTrustKey[];
-}, reobserve?: NativeWorkerRetirement) {
+}, reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime) {
   const { run: admittedRun, spec, assembly, contracts, resolveToolInput } = input;
   const runId = admittedRun.id;
   const session = readSession(driver, admittedRun.sessionId);
@@ -227,7 +228,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   const inputContinuation = await loadInputContinuation(driver, artifacts, owner, { ...controlAuthority, contracts }, reobserve);
 
   return {
-    ...loadAgentStop(driver, artifacts, owner, controlAuthority, reobserve),
+    ...loadAgentStop(driver, artifacts, owner, controlAuthority, reobserve, installedRuntime),
     waitForInput: inputContinuation.waitForInput,
     submitInput: inputContinuation.submitInput,
     prepareTool: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {

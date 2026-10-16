@@ -15,6 +15,7 @@ import type { SqliteDriver } from './sqlite-driver.js';
 import { readResourceStopCause } from './resource-stop.js';
 import { validateModelFailureStop } from './model-failure.js';
 import { assertRetiredGenerationCut } from './generation-retirement.js';
+import { validateInstalledBrokerTerminalHistory } from './broker-ambiguity.js';
 
 export type CancelResponse = Extract<ControlApplicationResponseV1, { ok: true }> & { result: Extract<ControlResultV1, { method: 'run.cancel' }> };
 
@@ -83,13 +84,18 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   const preparedAt = detail.createdAt;
   parseCanonicalTime(preparedAt);
   if (preparedAt < intent.createdAt || preparedAt > run.updatedAt) throw new TypeError('terminal preparation time is outside its intent and committed Checkpoint');
-  requireEqual(detail, agentStopDetail(intent, run.stopIntentRef, preparedAt), 'terminal reason closure');
+  const abandoned = await validateInstalledBrokerTerminalHistory(driver, artifacts, closure, detail);
+  requireEqual(detail, { ...agentStopDetail(intent, run.stopIntentRef, preparedAt),
+    abandonedRetryInvocations: abandoned }, 'terminal reason closure');
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
   if (assembly.format !== 'cliq-run-assembly-v1' || assembly.mcpServers.length) throw new TypeError('terminal stop lacks its typed containment closure');
   // Common recovery verified every complete seal or retirement/source graph;
   // a phase string alone cannot satisfy this final retained SQL cut.
   assertRetiredGenerationCut(driver, run, closure.workspaceGenerations);
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
+    if (entry.opKind === 'model' && entry.replayClass === 'retry' && entry.phase === 'unknown' && abandoned.some(closed =>
+      closed.opId === entry.opId && closed.attempt === entry.attempt && closed.unknownJournalSeq === entry.seq &&
+      closed.budgetSettlementRef === entry.budgetSettlementRef)) continue;
     if (!['model', 'tool'].includes(entry.opKind) || (entry.phase !== 'completed' &&
         (entry.phase !== 'failed' || hasClaim))) throw new TypeError('terminal stop retains unresolved dispatch evidence');
     if (entry.phase === 'failed' && entry.errorRef === run.stopIntentRef && entry.timestamp !== preparedAt) throw new TypeError('stop refund has no atomic terminal owner');

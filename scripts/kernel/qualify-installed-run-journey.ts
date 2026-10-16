@@ -1732,11 +1732,39 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     const unchangedDomainSupervisor = show(services.supervisorUnit);
     assert.equal(unchangedDomainSupervisor.MainPID, currentDomainSupervisor.MainPID);
     assert.equal(unchangedDomainSupervisor.InvocationID, currentDomainSupervisor.InvocationID);
+    mark('closed_broker_terminal_history_after_actual_supervisor_restart');
+    const terminalRestart = command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000);
+    assert.equal(terminalRestart.status, 0);
+    const terminalHistoryBy = Date.now() + 30000;
+    const terminalHistorySupervisor = show(services.supervisorUnit), terminalHistoryKeeper = show(services.keeperUnit);
+    assert.equal(terminalHistorySupervisor.ActiveState, 'active');
+    assert.equal(terminalHistorySupervisor.MainPID, terminalHistorySupervisor.ExecMainPID);
+    assert.notEqual(terminalHistorySupervisor.MainPID, currentDomainSupervisor.MainPID);
+    assert.notEqual(terminalHistorySupervisor.InvocationID, currentDomainSupervisor.InvocationID);
+    assert.equal(terminalHistoryKeeper.MainPID, keeperBefore.MainPID);
+    assert.equal(terminalHistoryKeeper.InvocationID, keeperBefore.InvocationID);
+    assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+    const terminalHistoryStart = await selectedSupervisor(services.supervisorUnit, terminalHistorySupervisor, successorImagePath, terminalHistoryBy);
+    const terminalHistoryStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+    assert.notEqual(terminalHistoryStatus.supervisorInstanceId, domainInspector.supervisorInstanceId);
+    // Historical recovery must retain the THEN-inspector and original charge,
+    // not substitute this new live owner or demand a new observation clock.
+    assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: reflectionAdmitted.id }])[0]!, 'run.get'), domainTerminal);
+    assert.deepEqual(exchange([domainCancel])[0], domainCancelReply);
+    assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+      afterItemSeq: beforeDomainSession.latestItemSeq }])[0]!, 'session.get'), afterDomainSession);
+    assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.attach', runId: reflectionAdmitted.id,
+      afterEventSeq: domainEvents.nextEventSeq }])[0]!, 'run.attach'), domainEmptyEvents);
+    assert.equal(requestsReceived, 4); assert(!providerFailure);
+    assert.equal(await fixtureProcess(Number(terminalHistorySupervisor.MainPID), ledger.uid), terminalHistoryStart);
+    assert.equal(await readlink(`/proc/${terminalHistorySupervisor.MainPID}/exe`), successorImagePath);
+    assert(Date.now() < terminalHistoryBy, 'terminal history did not revalidate within the original restart budget');
     report.closedBrokerProcessDomainDeath = { ...domainReport, qualified: true, immutableUnknownAndFullChargePreserved: true,
       originalClaimProcessMatched: true, strictlyNewerSameSignedRuntimeInspectorMatched: true, providerRedispatches: 0,
       dispatchClosureRef: abandoned.dispatchFenceOrDeathEvidenceRef, processDeathEvidenceRef: dispatchClosure.closure.brokerProcessDeathEvidenceRef,
       processDeathEvidenceDigest: domainDeath.evidenceDigest, terminalCheckpointPublishedOnce: true, sessionPublishedOnce: true,
-      cancelReplayPreserved: true, contiguousAttachPreserved: true, noResultPublished: true };
+      cancelReplayPreserved: true, contiguousAttachPreserved: true, noResultPublished: true,
+      terminalHistoryReopenedAfterActualSupervisorRestart: true };
     }
     report.qualified = true; mark('run_assertions_complete');
   } catch (error) {

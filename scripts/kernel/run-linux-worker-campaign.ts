@@ -392,6 +392,66 @@ async function editedCheckpoint() {
     await assert.rejects(next.executeCurrentTool({ expectedRunRevision: reopened.closure.run.revision }));
     assert.equal((await checkpointBytes(store, fixture.runId)).closure.run.budgetConsumed.toolCalls, 1);
     reconnected.close();
+
+    // The model prefix/claim are existing offline campaign facts, not a
+    // provider response or broker-death proof. The worker below is newly
+    // created by the actual execution owner; a refused stop must not begin
+    // its SQL revocation, physical death or Checkpoint preparation.
+    const active = await bounded(next.activateCurrentWorker({ expectedRunRevision: reopened.closure.run.revision }));
+    const agent = await store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+      releaseKeys: fixture.runtimeAuthority.releaseKeys });
+    const prepared = await agent.prepareModel({ expectedRunRevision: active.revision, leaseEpoch: active.leaseEpoch });
+    await store.claimInvocationDispatch({ runId: fixture.runId, expectedRunRevision: prepared.run.revision,
+      leaseEpoch: active.leaseEpoch, opId: prepared.entry.opId, attempt: prepared.entry.attempt,
+      dispatchId: identityHash('cliq-campaign-unclosed-model-dispatch-v1', fixture.runId) });
+    await agent.cancelRun({ ...await publishInProcessChannel(store), requestId: uuidv7(),
+      expectedRunRevision: store.getRun(fixture.runId).revision });
+    const refusedCut = await store.readRecoveryClosure(fixture.runId), refusedSession = store.getSession(fixture.sessionId);
+    assert.equal(refusedCut.journal.at(-1)?.phase, 'dispatch_claimed');
+    const launch = refusedCut.workerLaunches.find(row => row.launchId === refusedCut.run.activeWorkerLaunchId);
+    assert(launch?.phase === 'activated' && launch.workerIdentityDigest && launch.processContainmentRef);
+    const workerIdentity = decodeWorkerIdentity(await store.artifacts.readCanonical(launch.workerIdentityDigest));
+    const containment = decodeWorkerProcessContainment(await store.artifacts.readCanonical(launch.processContainmentRef));
+    const liveBackend = nativeBackend(containment.backend);
+    const generation = await store.artifacts.readCanonical<WorkspaceGenerationIdentityV1>(launch.workspaceGenerationRef);
+    const locator = generation.locator;
+    if (locator.kind !== 'linux_directory') throw new Error('actual stop refusal has no Linux generation');
+    const generationPath = path.join(store.stateRoot, locator.canonicalRootRelativePath);
+    const controller = /^linux-subreaper:([1-9][0-9]*):(linux-proc-start-ticks:[0-9]+)$/u.exec(liveBackend.subreaperStartToken);
+    assert(controller);
+    const controllerPid = Number(controller[1]), controllerToken = controller[2]!;
+    const physicalCut = async () => {
+      const group = await lstat(liveBackend.cgroupPath, { bigint: true });
+      assert(group.isDirectory() && !group.isSymbolicLink()); assert.equal(String(group.ino), liveBackend.cgroupId);
+      assert.match(await readFile(path.join(liveBackend.cgroupPath, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 1\n/u);
+      const members = pids(path.join(liveBackend.cgroupPath, 'worker')).sort((a, b) => a - b).map(pid => ({
+        pid, token: processToken(pid), namespacePid: namespacePid(pid) }));
+      const init = members.filter(member => member.namespacePid === 1);
+      assert.equal(init.length, 1); assert.equal(init[0]!.token, liveBackend.namespaceInitStartToken);
+      assert(members.some(member => member.pid === workerIdentity.pid && member.token === workerIdentity.processStartToken && member.namespacePid === 2));
+      const namespace = await stat(`/proc/${workerIdentity.pid}/ns/pid`, { bigint: true });
+      assert.equal(String(namespace.ino), liveBackend.pidNamespaceId);
+      assert.equal(processToken(controllerPid), controllerToken); assert(directChildren().has(controllerPid));
+      const root = await lstat(generationPath, { bigint: true });
+      assert(root.isDirectory() && !root.isSymbolicLink());
+      assert.equal(String(root.dev), locator.deviceId); assert.equal(String(root.ino), locator.directoryFileId);
+      const identity = (value: fs.BigIntStats) => ({ dev: value.dev, ino: value.ino, uid: value.uid, gid: value.gid, mode: value.mode });
+      return { group: identity(group), generation: identity(root), namespace: identity(namespace), members, controllerPid, controllerToken };
+    };
+    const physicalBefore = await physicalCut();
+    await assert.rejects(bounded(next.finishCurrentStop({ expectedRunRevision: refusedCut.run.revision })), error =>
+      error instanceof Error && Reflect.get(error, 'code') === 'STATE_TRANSITION_INVALID' && /dispatch\/reconciliation closure/u.test(error.message));
+    assert.deepEqual(await store.readRecoveryClosure(fixture.runId), refusedCut,
+      'refused stop must not begin worker/lease/generation revocation or change any Journal, budget or Checkpoint');
+    assert.deepEqual(store.getSession(fixture.sessionId), refusedSession);
+    assert.deepEqual(await physicalCut(), physicalBefore,
+      'refused stop must retain the exact live worker/init/controller, namespace, cgroup and generation');
+    assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+    assert.deepEqual((await checkpointBytes(store, fixture.runId)).bytes, Buffer.from('after\n'));
+    console.log(JSON.stringify({ scenario: 'actual-claimed-model-stop-refused-before-retirement',
+      unresolvedJournalPhase: 'dispatch_claimed', exactRefusal: true, durableCutUnchanged: true,
+      originalPhysicalWorkerAndGenerationUnchanged: true, originalSessionUnchanged: true,
+      providerOrBrokerExecutionQualified: false, unknownPhaseQualified: false }));
   } finally { await transport.close(); await store.close(); await fixture.dispose(); }
 }
 

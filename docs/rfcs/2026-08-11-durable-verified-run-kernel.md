@@ -5746,6 +5746,21 @@ StateRoot fail closed. Ordinary `fresh_empty` still requires an empty CAS; later
 clean acquisition never reinterprets a grown namespace as a new installed seed.
 This source adds no ledger, Run authority or execution permission.
 
+`fresh_installed.modelAuthoritySource` records the original optional companion
+as the closed union `{kind:'none'}` or
+`{kind:'present',closureRef,closureDigest}`. The complete-byte ref and independently
+recomputed semantic digest name that original signed companion, not the runtime
+manifest (which is signed before the companion). Only the same continuously
+held, verified installation supplies this field in the existing first StateOwner
+transaction. Other origins forbid it. Historical validation reconstructs the
+all-and-only seed from the original RuntimeBundle's data/structured-member edges
+and this exact companion's typed catalog/price/signature inventory. It rehashes
+the retained bytes and pairing/digest/closed-shape invariants without minting
+verified execution authority or trusting a key supplied by retained data. The
+owning installed gate separately authenticates release keys. Missing source,
+missing/extra/substituted members or mismatched digests fail closed; today's
+selection, a CAS search or a legacy fallback cannot supply original provenance.
+
 Every `inspectorIdentityRef` decodes only to `SupervisorInspectorIdentityV1`; `identityDigest = SHA-256(JCS(identity with identityDigest omitted))`, and the evidence repeats that digest. The referenced signed RuntimeBundle manifest must contain exactly the named executable entry with role `supervisor` and matching version/digest; its complete signed manifest rehashes to the named ref/digest. `supervisorInstanceId`, current `stateOwnerEpoch`, RuntimeBundle/entry, process identity, lock identity, and instance nonce must equal the sole active `StateOwnerRecordV1` held throughout the evidence transaction. The identity is published only after that active row commits while the process holds the exact OS lock; it becomes historical when ownership changes and cannot justify a later observation. Evidence digests omit themselves under JCS; `inspectorSupervisorInstanceId` must equal the **current** state-owning Supervisor and the decoded identity's instance, while the original spawner remains bound independently through the plan owner, WorkerLaunch/AdminOperation, and nonces. Observation time must be within the state transaction's bounded freshness window (default/max 5s). No PID exit, timeout, worker assertion, stale inspector identity, or schema-valid artifact with mismatched plan/nonce/owner/bundle is proof.
 
 `workerIdentityDigest` resolves to that versioned artifact; a PID-shaped free string is never authority. Storage requires its `launchId`, `supervisorInstanceId`, `spawnNonceDigest`, `activationNonceDigest`, and `processContainmentRef` equal the owning row, and its `intendedLeaseEpoch` equal the epoch installed by the single activation transaction; the artifact cannot be rebound to another launch, containment, or epoch. `activationDeadlineAt = createdAt + 120s` and is never extended. `generationWriteState` is the sole mutable generation-write gate: preactivation is read-only, only `active` may write, and revocation/checkpoint/seal CASes bind a unique `quiesceId`. Phase/identity changes and retirement use revisioned storage operations; only `leaseVersion`/`leaseExpiresAt` use the narrow heartbeat CAS described in section 6.
@@ -10153,6 +10168,7 @@ type KernelGenerationIdentityV1 = {
       pristineSchemaDigest: string
       runtimeBundleRef?: never
       runtimeBundleManifestDigest?: never
+      modelAuthoritySource?: never
       candidateRef?: never
       candidateDigest?: never
       migrationId?: never
@@ -10164,6 +10180,9 @@ type KernelGenerationIdentityV1 = {
       pristineSchemaDigest: string
       runtimeBundleRef: ArtifactRef
       runtimeBundleManifestDigest: string
+      modelAuthoritySource:
+        | { kind: 'none' }
+        | { kind: 'present'; closureRef: ArtifactRef; closureDigest: string }
       candidateRef?: never
       candidateDigest?: never
       migrationId?: never
@@ -10178,6 +10197,7 @@ type KernelGenerationIdentityV1 = {
       pristineSchemaDigest?: never
       runtimeBundleRef?: never
       runtimeBundleManifestDigest?: never
+      modelAuthoritySource?: never
   }
 )
 
@@ -10982,9 +11002,10 @@ directory name, WAL timestamp, SQLite row count, or partial CAS scan may supply
 one independently. A `fresh_empty` or `fresh_installed` generation additionally
 requires `pristineSchemaManifestRef|Digest` equal its decoded database image's exact
 schema-manifest pair and `pristineSchemaDigest` equal both decoded artifacts'
-`schemaDigest`. Only `fresh_installed` requires `runtimeBundleRef` and
-`runtimeBundleManifestDigest`, which bind its held signed installation and
-epoch-one acquisition; the other origins forbid both fields. A
+`schemaDigest`. Only `fresh_installed` requires `runtimeBundleRef`,
+`runtimeBundleManifestDigest` and the closed original `modelAuthoritySource`,
+which bind its held signed installation and epoch-one acquisition; the other
+origins forbid all three fields. A
 `migrated_candidate` forbids those three pristine fields and
 instead requires its candidate's decoded database image to carry the same
 signed schema manifest/digest; the candidate's literal installed/state schema

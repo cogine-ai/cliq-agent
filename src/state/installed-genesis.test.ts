@@ -47,6 +47,7 @@ test('fresh_empty genesis records the actual opened database schema, not its art
     const generation = await store.artifacts.readCanonical<Record<string, unknown>>(acquisition.kernelGenerationIdentityRef);
     assert.equal(generation.schemaVersion, 1);
     assert.equal(generation.origin, 'fresh_empty');
+    assert.equal(Object.hasOwn(generation, 'modelAuthoritySource'), false);
     const inspector = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
     let actualSchema: number;
     try { actualSchema = Number(inspector.prepare('PRAGMA user_version').get<{ user_version: unknown }>()!.user_version); }
@@ -62,7 +63,8 @@ test('fresh_empty genesis records the actual opened database schema, not its art
   }
 });
 
-if (process.platform === 'linux') test('a real signed initial installation acquires genesis without discarding its CAS payloads and reopens normally', async () => {
+for (const modelAuthority of [false, true]) if (process.platform === 'linux') test(
+  `a real signed initial installation retains ${modelAuthority ? 'present' : 'none'} companion provenance and reopens without discarding CAS payloads`, async () => {
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-genesis-')));
   await chmod(fixture, 0o700);
   const packageRoot = path.join(fixture, 'package');
@@ -70,7 +72,7 @@ if (process.platform === 'linux') test('a real signed initial installation acqui
   let selected: HeldInstalledRuntime | undefined;
   let store: StateStore | undefined;
   try {
-    const signed = await writeInstalledControlPackage(packageRoot);
+    const signed = await writeInstalledControlPackage(packageRoot, { modelAuthority });
     const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
     const installed = await runtime.installInitial({ packageRoot, stateRoot });
     selected = await runtime.openSelected(stateRoot);
@@ -80,7 +82,8 @@ if (process.platform === 'linux') test('a real signed initial installation acqui
     const cas = new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY));
     const expectedEntries = signed.seedObjects.map(({ artifactRef, bytes }) => ({ artifactRef, byteCount: bytes.byteLength }))
       .sort((left, right) => left.artifactRef < right.artifactRef ? -1 : left.artifactRef > right.artifactRef ? 1 : 0);
-    assert.equal(expectedEntries.length, 4, 'manifest, policy, PEM and acyclic root are the installed CAS seed');
+    assert.equal(expectedEntries.length, modelAuthority ? 9 : 4,
+      'base seed is manifest/policy/PEM/root; a present companion adds its root, catalog, price and two detached signatures');
     assert.deepEqual((await readdir(path.join(stateRoot, KERNEL_CAS_DIRECTORY))).sort(), expectedEntries.map(entry => entry.artifactRef));
     for (const object of signed.seedObjects) assert.deepEqual(await cas.read(object.artifactRef), object.bytes);
 
@@ -102,6 +105,9 @@ if (process.platform === 'linux') test('a real signed initial installation acqui
     assert.equal(generation.stateSchemaVersion, KERNEL_STATE_SCHEMA_VERSION);
     assert.equal(generation.runtimeBundleRef, installed.bundleDigest);
     assert.equal(generation.runtimeBundleManifestDigest, signed.bundle.manifestDigest);
+    assert.deepEqual(generation.modelAuthoritySource, signed.modelAuthority
+      ? { kind: 'present', closureRef: signed.modelAuthority.closureRef, closureDigest: signed.modelAuthority.closure.closureDigest }
+      : { kind: 'none' });
     assert.equal(generation.generationDigest, digestOmitting(generation, 'generationDigest'));
     assert.equal(acquisition.kernelGenerationIdentityDigest, generation.generationDigest);
     assert.equal(canonicalSha256(generation), acquisition.kernelGenerationIdentityRef);
@@ -112,7 +118,7 @@ if (process.platform === 'linux') test('a real signed initial installation acqui
     assert.equal(namespace.format, 'cliq-cas-namespace-manifest-v1');
     assert.equal(namespace.snapshotBoundary, 'generation_birth');
     assert.deepEqual(namespace.entries, expectedEntries);
-    assert.equal(namespace.objectCount, 4);
+    assert.equal(namespace.objectCount, expectedEntries.length);
     assert.equal(namespace.totalBytes, signed.seedObjects.reduce((total, object) => total + object.bytes.byteLength, 0));
     assert.equal(namespace.rootDigest, canonicalSha256(expectedEntries));
     assert.equal(namespace.manifestDigest, digestOmitting(namespace, 'manifestDigest'));
