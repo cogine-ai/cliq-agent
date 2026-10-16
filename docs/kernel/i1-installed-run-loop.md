@@ -351,9 +351,12 @@ atomic terminal transaction; it never exposes a transient queued replacement.
 The new 28-scenario worker campaign exercises these branches separately from
 the installed journey. They are implementation candidates, not qualified merely
 by adding tests; accepted StopIntent is not physical retirement evidence.
-The queued launcher-image allocation guard is implemented, but a new read-only
-descriptor-inventory diagnostic awaits seam confirmation and has not run. The
-existing queued-deadline assertions do not qualify absence of retained images.
+The queued launcher-image allocation guard is implemented. The approved read-only
+descriptor-inventory diagnostic pins the original Supervisor's PID/start/image,
+bounds its inventory and compares actual sealed-image identities across two
+ordinary queued cuts. Stop/cleanup is deliberately not gated. It requires an
+executed complete current-source report; the existing queued-deadline assertions
+alone do not qualify absence of retained images.
 
 Credential redemption refusal now retains exact original credential/endpoint
 records and stops an unclaimed Run as runtime_failed before its deadline, rather
@@ -373,6 +376,20 @@ unverified. A genuinely received model response is retained by its original
 settlement owner across stop-only revision races and durability retry; it is
 never re-requested. Portable CAS-race regression is not physical qualification
 of every post-response publication failure cut.
+
+An independent approved storage-failure campaign retains one original ordinary
+authenticated v1 connection before an actual POST. On its disposable bounded
+ext4 volume only, it holds the original CAS inode and temporarily sets its
+immutable flag: mode, identity and reads remain unchanged, while an actual
+unprivileged create fails with EPERM. After closing the original owned endpoint
+connection it requires the exact unsettled claim and degraded public status
+while writes remain refused; after unconditional exact flag restoration it
+requires one same-owner, fully charged unknown settlement and no additional
+accepted TCP connection, TLS connection or POST. Only then may actual successor
+restart and public cancellation close the historical ambiguity. This tests the
+common retained failed-producer owner, not storage failure while a never-CONNECT
+mutex guard is held; that distinct cut remains unverified. Neither the fixture
+nor this document is qualification without its complete exact-source report.
 The 30-second native deadline bounds operation eligibility and cancellation,
 not hard real-time disappearance under arbitrary OS scheduling. Completion
 and retirement receipts still require the actual worker and callback joins.

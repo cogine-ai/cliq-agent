@@ -13,6 +13,8 @@ import ts from 'typescript';
 const source = readFileSync(new URL('../qualify-installed-run-journey.ts', import.meta.url), 'utf8');
 const literal = /^const clientScript = (`[\s\S]*?`);/mu.exec(source)?.[1]; assert(literal);
 const clientScript = vm.runInNewContext(literal); assert.equal(typeof clientScript, 'string');
+const persistentLiteral = /^const persistentClientScript = (`[\s\S]*?`);/mu.exec(source)?.[1]; assert(persistentLiteral);
+const persistentClientScript = vm.runInNewContext(persistentLiteral); assert.equal(typeof persistentClientScript, 'string');
 const hello = { protocolVersion: 1, method: 'control.hello' };
 const mutation = { protocolVersion: 1, method: 'run.submit', requestId: 'test-request-once' };
 const helloReply = JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'control.hello' } });
@@ -71,6 +73,36 @@ async function fixture(t) {
     });
     return { result, firstConnectFailure };
   }
+  function persistent() {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', persistentClientScript, socketPath],
+      { stdio: ['pipe', 'pipe', 'pipe'] });
+    children.add(child);
+    let stdout = '', stderr = '', waiting;
+    const lines = [];
+    child.stdout.on('data', bytes => {
+      stdout += bytes.toString('utf8'); assert(stdout.length <= 65536);
+      for (;;) {
+        const at = stdout.indexOf('\n'); if (at < 0) break;
+        const line = stdout.slice(0, at); stdout = stdout.slice(at + 1);
+        if (waiting) { const resolve = waiting; waiting = undefined; resolve(line); }
+        else lines.push(line);
+      }
+    });
+    child.stderr.on('data', bytes => { stderr += bytes.toString('utf8'); assert(stderr.length <= 65536); });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+    const result = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code, signal) => {
+        clearTimeout(timer); children.delete(child); resolve({ code, signal, stderr });
+      });
+    });
+    const line = async () => {
+      if (lines.length) return lines.shift();
+      assert(!waiting); return Promise.race([new Promise(resolve => { waiting = resolve; }),
+        result.then(() => { throw new Error('persistent client exited before its next line'); })]);
+    };
+    return { child, result, line };
+  }
   t.after(async () => {
     const joins = [...children].map(child => new Promise(resolve => { child.once('close', resolve); child.kill('SIGKILL'); }));
     await Promise.all(joins);
@@ -78,7 +110,7 @@ async function fixture(t) {
     if (server) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     await rm(directory, { recursive: true, force: true });
   });
-  return { listen, client, requests, get connections() { return connections; } };
+  return { listen, client, persistent, requests, get connections() { return connections; } };
 }
 
 function respond(socket, text = helloReply) {
@@ -140,4 +172,35 @@ test('ordinary mutating requests are sent once and never replayed after a connec
   assert.equal(commands, 0);
   assert.throws(() => context.exchangeUnderTest([mutation]), /ordinary command boundary/u);
   assert.equal(commands, 1);
+});
+
+test('persistent public client reads separate cuts on its one original socket and never reconnects after refusal', { timeout: 10000 }, async t => {
+  const value = await fixture(t);
+  const get = { protocolVersion: 1, method: 'run.get', runId: 'ordinary-data-only' };
+  let gets = 0;
+  await value.listen((socket, request) => {
+    if (request.method === 'control.hello') respond(socket);
+    else if (++gets === 1) respond(socket, JSON.stringify({ protocolVersion: 1, ok: true, result: { method: 'run.get' } }));
+    else socket.destroy();
+  });
+  const original = value.persistent(); assert.equal(await original.line(), 'connected');
+  original.child.stdin.write(`${JSON.stringify(hello)}\n`);
+  assert.equal(JSON.parse(await original.line()), helloReply);
+  original.child.stdin.write(`${JSON.stringify(get)}\n`);
+  assert.equal(JSON.parse(JSON.parse(await original.line())).result.method, 'run.get');
+  original.child.stdin.write(`${JSON.stringify(get)}\n`);
+  const failed = await original.result;
+  assert.notEqual(failed.code, 0); assert.equal(failed.signal, null);
+  assert.equal(value.connections, 1); assert.deepEqual(value.requests, [hello, get, get]);
+});
+
+test('persistent public client closes and joins its original socket when its owning input ends', { timeout: 10000 }, async t => {
+  const value = await fixture(t); await value.listen(socket => respond(socket));
+  const original = value.persistent(); assert.equal(await original.line(), 'connected');
+  original.child.stdin.write(`${JSON.stringify(hello)}\n`);
+  assert.equal(JSON.parse(await original.line()), helloReply);
+  original.child.stdin.end();
+  const joined = await original.result;
+  assert.equal(joined.code, 0, joined.stderr); assert.equal(joined.signal, null); assert.equal(joined.stderr, '');
+  assert.equal(value.connections, 1); assert.deepEqual(value.requests, [hello]);
 });

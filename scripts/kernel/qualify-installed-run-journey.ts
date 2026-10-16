@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes, X509Certificate } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chown, lstat, mkdir, open, readFile, readdir, readlink, stat, writeFile } from 'node:fs/promises';
+import { chown, lstat, mkdir, open, readFile, readdir, readlink, stat, statfs, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:https';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -35,7 +35,7 @@ const privateAfter = 'after the private edit\n';
 const excludedVendorInstruction = 'Ordinary vendor instructions remain independent of source exclusion.\n';
 const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
-type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign';
+type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign' | '--storage-failure-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 
@@ -127,14 +127,38 @@ const header=Buffer.alloc(4);header.writeUInt32BE(body.length);const response=aw
 waiter={resolve,reject};socket.write(Buffer.concat([header,body]));});reply.push(response);}}
 finally{socket.destroy();await closed;}console.log(JSON.stringify(reply));`;
 
+// An ordinary persistent public client, not a private Supervisor test seam.
+// Its original authenticated connection remains usable while actual CAS
+// creation is refused; new connection identities themselves publish to CAS.
+const persistentClientScript = `import assert from 'node:assert/strict';import net from 'node:net';
+import {createInterface} from 'node:readline';
+const socket=net.createConnection(process.argv[1]);let input=Buffer.alloc(0),waiter,error,count=0;
+const closed=new Promise(resolve=>socket.once('close',resolve));
+socket.on('data',chunk=>{try{input=Buffer.concat([input,chunk]);assert(input.length<=1048580);
+while(input.length>=4){const size=input.readUInt32BE(0);assert(size>=1&&size<=1048576);if(input.length<size+4)break;
+const text=new TextDecoder('utf-8',{fatal:true}).decode(input.subarray(4,size+4));input=input.subarray(size+4);
+assert(waiter);const pending=waiter;waiter=undefined;pending.resolve(text);}}
+catch(failure){error=failure;waiter?.reject(failure);socket.destroy();}});
+socket.on('error',failure=>{error=failure;waiter?.reject(failure);});
+socket.on('close',()=>{error??=new Error('original public connection closed');waiter?.reject(error);});
+try{await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject);});
+console.log('connected');const lines=createInterface({input:process.stdin,crlfDelay:Infinity});
+for await(const line of lines){assert(++count<=1024&&!waiter&&!error);const body=Buffer.from(line);assert(body.length>=1&&body.length<=1048576);
+const header=Buffer.alloc(4);header.writeUInt32BE(body.length);const text=await new Promise((resolve,reject)=>{
+waiter={resolve,reject};socket.write(Buffer.concat([header,body]));});console.log(JSON.stringify(text));}}
+finally{socket.destroy();await closed;}`;
+
 async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const failureOnly = mode === '--failure-campaign';
   const retryOnly = mode === '--retry-campaign';
   const authorityOnly = mode === '--authority-failure-campaign';
+  const storageOnly = mode === '--storage-failure-campaign';
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: authorityOnly
+    scope: storageOnly
+      ? 'independent signed installed Linux Run, real read-preserving CAS write refusal after one actual POST, same-owner typed UNKNOWN settlement after exact restoration, no extra accepted TCP/TLS/POST, then actual successor-owner cancellation and terminal replay; not never-CONNECT guard storage-failure qualification, a provider qualification or complete I1'
+      : authorityOnly
       ? 'independent signed installed Linux Runs, real credential revocation after queued admission, exact pre-I/O refusal and terminal retirement, one Session publication per Run and actual Supervisor restart; not a provider qualification, exact finalizer cut or complete I1'
       : retryOnly
       ? 'independent signed installed Linux Run, real default-alias drift and exact restoration on the same Secret Service lifetime, free pre-dispatch failure and one subsequent owned model response, explicit cancellation and terminal Session publication; not daemon restart, locked-store recovery, post-claim retry, full I1, real provider/billing, I2 or macOS'
@@ -197,6 +221,72 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     }
     assert.equal(response.protocolVersion, 1); assert.equal(response.ok, true, `actual installed ${method} must be enabled and accepted`);
     assert(response.result && response.result.method === method); return response.result;
+  };
+  const persistentClient = async () => {
+    const outScan = scanner.openStream();
+    let errorScan: ReturnType<typeof scanner.openStream>;
+    try { errorScan = scanner.openStream(); } catch (error) { outScan.close(); throw error; }
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn('/usr/sbin/runuser', [...prefix, process.execPath, '--input-type=module', '-e', persistentClientScript,
+        path.join(recipe.stateRoot, 'runtime/control-v1.sock')], { env: environment, cwd: ledger.home, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (error) { outScan.close(); errorScan.close(); throw error; }
+    let output = '', errorBytes = 0, failure: unknown, readyResolve!: () => void, readyReject!: (error: unknown) => void;
+    let pending: { resolve(text: string): void; reject(error: unknown): void } | undefined;
+    const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+    const refuse = (error: unknown) => { failure ??= error; readyReject(error); pending?.reject(error); };
+    child.stdout.on('data', (bytes: Buffer) => {
+      try {
+        outScan.scan(bytes); output += bytes.toString('utf8'); assert(Buffer.byteLength(output) <= 2 * 1048580);
+        for (;;) {
+          const at = output.indexOf('\n'); if (at < 0) break;
+          const line = output.slice(0, at); output = output.slice(at + 1);
+          if (line === 'connected') { readyResolve(); continue; }
+          assert(pending, 'persistent client emitted an unsolicited response');
+          const text = parseJsonStrict(line); assert.equal(typeof text, 'string');
+          const original = pending; pending = undefined; original.resolve(text as string);
+        }
+      } catch (error) { refuse(error); }
+    });
+    child.stderr.on('data', (bytes: Buffer) => {
+      try { errorScan.scan(bytes); errorBytes += bytes.length; assert(errorBytes <= 65536); }
+      catch (error) { refuse(error); }
+    });
+    child.once('error', refuse); child.stdin.on('error', refuse); child.stdout.on('error', refuse); child.stderr.on('error', refuse);
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => {
+      outScan.close(); errorScan.close(); if (pending) refuse(new Error('original public client closed before its response'));
+      resolve({ code, signal });
+    }));
+    let closing: Promise<void> | undefined;
+    const close = () => closing ??= (async () => {
+      child.stdin.end();
+      let exit: Awaited<typeof closed>;
+      try { exit = await bounded(closed, 10000, 'original public client did not join'); }
+      catch (error) {
+        child.kill('SIGKILL');
+        // runuser can have an actual child holding its inherited pipes. Do
+        // not turn failed cleanup into an unbounded wait or a positive join;
+        // the outer UID-scoped coordinator still owns final child retirement.
+        try { await bounded(closed, 10000, 'original public client pipes did not join after wrapper exit'); }
+        catch (joinError) { throw new AggregateError([error, joinError], 'original public client retirement failed'); }
+        throw error;
+      }
+      assert.equal(exit.code, 0); assert.equal(exit.signal, null); assert.equal(failure, undefined); assert.equal(output, '');
+      assert.equal(errorBytes, 0); report.originalPublicClientJoined = true;
+    })();
+    const send = async (value: Record<string, unknown>, timeout = 5000): Promise<Response> => {
+      assert(!pending && !failure && !closing); const bytes = canonicalJsonBytes(value); assert(bytes.length <= 1048576);
+      const reply = new Promise<string>((resolve, reject) => { pending = { resolve, reject }; });
+      child.stdin.write(Buffer.concat([bytes, Buffer.from('\n')]));
+      const text = await bounded(reply, timeout, 'original public client request did not complete');
+      const response = parseJsonStrict(text) as Response; assert.equal(text, canonicalJsonBytes(response).toString('utf8'));
+      return response;
+    };
+    try {
+      await bounded(Promise.race([ready, closed.then(() => { throw new Error('original public client closed before readiness'); })]),
+        5000, 'original public client did not connect');
+      accepted(await send(hello), 'control.hello'); return { send, close };
+    } catch (error) { try { await close(); } catch {} throw error; }
   };
   const show = (unit: string) => {
     const result = command('/usr/bin/systemctl', ['--user', 'show', unit, '--property=Id,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,Type,Delegate,KillMode,Result,ExecMainCode,ExecMainStatus', '--no-pager']);
@@ -286,6 +376,13 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   let primary: unknown, providerFailure = false, requestsReceived = 0, reflectionEnabled = false, shortRunEnabled = false;
   let busySubmit: (Record<string, unknown> & { admissionKey: string }) | undefined;
   let busyFinalize: CredentialFinalizeRequest | undefined;
+  let storageClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
+  let queuedObserverClient: Awaited<ReturnType<typeof persistentClient>> | undefined;
+  let restoreCasWrite: (() => Promise<void>) | undefined;
+  let storagePost: { destroy(): void; closed: Promise<void> } | undefined;
+  let storagePostResolve!: () => void;
+  const storagePostEntered = new Promise<void>(resolve => { storagePostResolve = resolve; });
+  let acceptedTcpConnections = 0, acceptedTlsConnections = 0;
   const socketClosures: Promise<void>[] = [];
   const processStart = async (pid: number) => {
     assert(Number.isSafeInteger(pid) && pid > 0);
@@ -349,6 +446,64 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       assert.equal(sha256Bytes(bytes), ref); scanBytes(bytes); return bytes;
     } finally { await held.close(); }
   };
+  const refuseCasWrites = async () => {
+    assert(storageOnly && process.geteuid!() === 0 && !restoreCasWrite);
+    const name = path.join(recipe.stateRoot, 'cas');
+    const held = await open(name, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    let transferred = false;
+    try {
+      const original = await held.stat({ bigint: true }), home = await lstat(ledger.home, { bigint: true });
+      const filesystem = await statfs(name, { bigint: true });
+      assert(original.isDirectory() && original.uid === BigInt(ledger.uid) && original.gid === BigInt(ledger.gid) &&
+        original.nlink === 2n && (original.mode & 0o7777n) === 0o700n && original.dev === home.dev);
+      assert.equal(filesystem.type, 0xef53n, 'write refusal is confined to the existing disposable bounded ext4 volume');
+      assert(filesystem.bsize * filesystem.blocks > 0n && filesystem.bsize * filesystem.blocks <= 1024n ** 3n);
+      const assertOriginal = async () => {
+        const current = await held.stat({ bigint: true }), named = await lstat(name, { bigint: true });
+        assert(current.isDirectory() && named.isDirectory() && !named.isSymbolicLink());
+        for (const field of ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink'] as const) {
+          assert.equal(current[field], original[field]); assert.equal(named[field], original[field]);
+        }
+      };
+      const attributes = (action: 'read' | 'refuse' | 'restore') => {
+        // Only the original held CAS inode is inherited as fd3. The final
+        // '.' keeps e2fsprogs' O_NOFOLLOW guard intact; no user path is an RPC.
+        const result = spawnSync(action === 'read' ? '/usr/bin/lsattr' : '/usr/bin/chattr',
+          action === 'read' ? ['-d', '--', '/proc/self/fd/3/.'] : [action === 'refuse' ? '+i' : '-i', '--', '/proc/self/fd/3/.'],
+          { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 65536, stdio: ['ignore', 'pipe', 'pipe', held.fd] });
+        assert(Buffer.isBuffer(result.stdout) && Buffer.isBuffer(result.stderr)); scanBytes(result.stdout); scanBytes(result.stderr);
+        assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, 0, 'owned CAS attribute operation refused');
+        if (action !== 'read') { assert.equal(result.stdout.length, 0); assert.equal(result.stderr.length, 0); return ''; }
+        const match = /^([A-Za-z-]{1,64})\s+\/proc\/self\/fd\/3\/\.$/u.exec(result.stdout.toString('utf8').trim());
+        assert(match && result.stderr.length === 0); return match[1]!;
+      };
+      await assertOriginal(); const originalFlags = attributes('read'); assert(!originalFlags.includes('i'));
+      let restoration: Promise<void> | undefined;
+      restoreCasWrite = () => restoration ??= (async () => {
+        await assertOriginal(); attributes('restore'); await assertOriginal();
+        assert.equal(attributes('read'), originalFlags, 'restore exactly the original CAS flags');
+        await held.close(); report.casWritesRestored = true;
+      })();
+      transferred = true; // Even a partial set failure owes unconditional restoration.
+      attributes('refuse'); await assertOriginal();
+      const refusedFlags = attributes('read');
+      assert(refusedFlags.includes('i')); assert.equal(refusedFlags.replace('i', '-'), originalFlags);
+      const probeName = `.cliq-write-refusal-${randomBytes(16).toString('hex')}.tmp`;
+      const probePath = path.join(name, probeName);
+      await assert.rejects(lstat(probePath), { code: 'ENOENT' });
+      const denied = command(process.execPath, ['--input-type=module', '-e',
+        `import assert from 'node:assert/strict';import fs from 'node:fs';let fd,created=false,code;
+try{fd=fs.openSync(process.argv[1],fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);created=true;}
+catch(error){code=error.code;}finally{if(fd!==undefined)fs.closeSync(fd);if(created)fs.unlinkSync(process.argv[1]);}
+assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringify({writeRefused:true,errorCode:code}));`, probePath]);
+      assert.equal(denied.status, 0); assert.deepEqual(parseJsonStrict(denied.stdout.trim()), { writeRefused: true, errorCode: 'EPERM' });
+      await assert.rejects(lstat(probePath), { code: 'ENOENT' }); await assertOriginal();
+      report.casWriteRefusal = { qualified: false, actualUnprivilegedError: 'EPERM', originalDirectoryMode: '0700',
+        originalDirectoryIdentityRetained: true, originalReadAccessRetained: true, privateBoundedExt4Only: true,
+        probeObjectAbsent: true, productionAttemptWitnessed: false };
+      return async () => { await assertOriginal(); assert.equal(attributes('read'), refusedFlags); };
+    } finally { if (!transferred) await held.close(); }
+  };
   const privateCheckpoint = async (checkpoint: Record<string, any>) => {
     // Diagnostic-only immutable bytes selected by the actual public snapshot.
     // Never writes CAS/SQL, mints native authority or creates a Checkpoint.
@@ -382,6 +537,16 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         assert(Array.isArray(body.messages) && Array.isArray(body.tools));
         assert.deepEqual(body.tools.map((tool: any) => tool.function.name), ['edit']);
         const ordinal = ++requestsReceived;
+        if (storageOnly) {
+          assert.equal(ordinal, 1, 'the retained original failure must never redispatch provider I/O');
+          assert.equal(storagePost, undefined);
+          const socket = incoming.socket;
+          storagePost = { destroy() { incoming.destroy(); outgoing.destroy(); },
+            closed: new Promise<void>(resolve => socket.once('close', () => resolve())) };
+          report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
+            exactCredentialMatched: true, responseWithheld: true, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
+          storagePostResolve(); return;
+        }
         if (failureOnly) {
           assert.equal(ordinal, 1, 'a positively received provider rejection must not be retried');
           assert(body.messages.some((message: any) => typeof message.content === 'string' &&
@@ -463,8 +628,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
           exactCredentialMatched: true, latestBodyDigest: sha256Bytes(bodyBytes), latestBodyBytes: bodyBytes.length };
       } catch { providerFailure = true; incoming.destroy(); outgoing.destroy(); }
     });
-    server.on('connection', socket => { socketClosures.push(new Promise(resolve => socket.once('close', resolve))); });
-    server.on('secureConnection', socket => { if (socket.getProtocol() !== 'TLSv1.3') { providerFailure = true; socket.destroy(); } });
+    server.on('connection', socket => { acceptedTcpConnections++; socketClosures.push(new Promise(resolve => socket.once('close', resolve))); });
+    server.on('secureConnection', socket => { acceptedTlsConnections++; if (socket.getProtocol() !== 'TLSv1.3') { providerFailure = true; socket.destroy(); } });
     server.on('tlsClientError', () => { providerFailure = true; });
     await new Promise<void>((resolve, reject) => { server!.once('error', reject); server!.listen(0, '127.0.0.1', resolve); });
     key.fill(0);
@@ -613,7 +778,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       repairAttempts: 0, childDepth: 0, childConcurrency: 1 };
     const submit = request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000104',
       admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
-      workspacePath: recipe.workspace, objective: authorityOnly ? 'Retain one candidate without using a tool until the user cancels.'
+      workspacePath: recipe.workspace, objective: storageOnly ? 'Observe exactly one interrupted model transport without executing a tool.'
+        : authorityOnly ? 'Retain one candidate without using a tool until the user cancels.'
         : retryOnly ? 'Acknowledge restored model preparation without using a tool.'
         : failureOnly ? 'Observe the owned cafe\u0301 model failure without using a tool.'
           : 'Change example.txt from before the private edit to after the private edit, using one edit operation.',
@@ -659,6 +825,12 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       report.retryAliasDrift = storeFixture('alias-session');
       assert.notEqual(report.retryAliasDrift.collection, retryPlatform.collection);
     }
+    if (storageOnly) {
+      storageClient = await persistentClient();
+      const beforeStorage = accepted(await storageClient.send({ protocolVersion: 1, method: 'supervisor.status' }), 'supervisor.status');
+      assert.equal(beforeStorage.health, 'ready');
+      report.storageInitialSupervisorInstanceId = beforeStorage.supervisorInstanceId;
+    }
     const submitReply = exchange([submit])[0]!, admitted = accepted(submitReply, 'run.submit').snapshot.run;
     report.defaultPolicyRefused = { qualified: true, refusalCode: 'INVALID_REQUEST', noProviderRequest: true,
       sessionUnchanged: true, permissionsAutoAllowed: false, sameAdmissionKeySubsequentlyAccepted: true };
@@ -689,7 +861,136 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure });
       return cut;
     };
-    if (authorityOnly) {
+    if (storageOnly) {
+      mark('actual_post_and_original_permanent_claim_before_cas_refusal');
+      await bounded(storagePostEntered, 15000, 'the original native POST did not reach its owned external server');
+      assert(storageClient && storagePost); assert.equal(requestsReceived, 1); assert(!providerFailure);
+      const publicRead = async () => accepted(await storageClient!.send({ protocolVersion: 1, method: 'run.get', runId: admitted.id }), 'run.get');
+      const beforeFault = await publicRead();
+      assert.deepEqual(beforeFault.journal.map((entry: any) => entry.phase), ['prepared', 'dispatch_claimed']);
+      const [prepared, claim] = beforeFault.journal;
+      assert.equal(beforeFault.snapshot.run.status, 'running'); assert(beforeFault.snapshot.run.activeWorkerLaunchId);
+      assert.equal(prepared.attempt, 0); assert.equal(claim.brokerFenceTokenDigest.length, 64);
+      assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1);
+      assert.deepEqual(currentSession(), session);
+      mark('real_read_preserving_cas_write_refusal');
+      const assertCasRefused = await refuseCasWrites();
+      let refusedCut: Record<string, any>, refusedStatus: Record<string, any>;
+      try {
+        assert.deepEqual((await publicRead()).journal, beforeFault.journal, 'the actual existing public connection retains CAS read access');
+        await assertCasRefused();
+        storagePost.destroy();
+        await bounded(storagePost.closed, 10000, 'the original owned HTTPS socket did not close');
+        mark('failed_settlement_retains_original_claim_while_cas_write_is_refused');
+        const refusalBy = Date.now() + 10000;
+        for (;;) {
+          // This real installation borrow runs only after the original model
+          // credential callback yielded. A degraded health cut with the exact
+          // unsettled claim proves its genuine failure path returned while
+          // publication remained physically refused, not a guessed delay.
+          refusedStatus = accepted(await storageClient.send({ protocolVersion: 1, method: 'supervisor.status' }), 'supervisor.status');
+          refusedCut = await publicRead(); await assertCasRefused();
+          assert.deepEqual(refusedCut.journal, beforeFault.journal);
+          assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
+          if (refusedStatus.health === 'degraded') break;
+          assert(Date.now() < refusalBy, 'the original callback did not expose its genuine failed settlement'); await delay(50);
+        }
+        assert(Date.now() < refusalBy);
+        assert.equal(refusedStatus.supervisorInstanceId, report.storageInitialSupervisorInstanceId);
+        assert.equal(refusedCut.snapshot.run.activeWorkerLaunchId, beforeFault.snapshot.run.activeWorkerLaunchId);
+        assert.equal(refusedCut.snapshot.run.leaseEpoch, beforeFault.snapshot.run.leaseEpoch);
+        assert.equal(refusedCut.snapshot.run.frontierRef, beforeFault.snapshot.run.frontierRef);
+        assert.equal(canonicalSha256(refusedCut.snapshot.run.budgetReserved), canonicalSha256(prepared.budgetDelta));
+        report.casWriteRefusal.productionAttemptWitnessed = true;
+      } finally { await restoreCasWrite!(); }
+      mark('same_owner_typed_settlement_after_exact_cas_restoration');
+      const settledBy = Date.now() + 15000;
+      let settled: Record<string, any>;
+      for (;;) {
+        await delay(50); settled = await publicRead();
+        assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
+        if (settled.journal.at(-1)?.phase === 'unknown') break;
+        assert.deepEqual(settled.journal, beforeFault.journal);
+        assert(Date.now() < settledBy, 'restored CAS did not allow the original same-owner typed settlement');
+      }
+      assert(Date.now() < settledBy);
+      assert.deepEqual(settled.journal.slice(0, 2), beforeFault.journal); assert.equal(settled.journal.length, 3);
+      const unknown = settled.journal[2]; assert.equal(unknown.dispatchId, claim.dispatchId); assert.equal(unknown.brokerFenceTokenDigest, claim.brokerFenceTokenDigest);
+      assert.equal(unknown.stateOwnerEpoch, claim.stateOwnerEpoch); assert.equal(unknown.supervisorInstanceId, claim.supervisorInstanceId);
+      const ambiguity = parseJsonStrict((await readCas(unknown.evidenceRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(ambiguity.format, 'cliq-invocation-ambiguity-evidence-v1'); assert.equal(ambiguity.ambiguityKind, 'broker_channel_lost_after_claim');
+      assert.equal(ambiguity.failureCode, 'response_stream_interrupted'); assert.equal(ambiguity.dispatchId, claim.dispatchId);
+      assert.equal(ambiguity.claimingStateOwnerEpoch, claim.stateOwnerEpoch); assert.equal(ambiguity.evidenceDigest, unknown.evidenceDigest);
+      assert.equal(ambiguity.evidenceDigest, digestOmitting(ambiguity, 'evidenceDigest'));
+      const charge = parseJsonStrict((await readCas(unknown.budgetSettlementRef)).toString('utf8')) as Record<string, any>;
+      for (const usage of [charge.reserved, charge.released, charge.consumed, settled.snapshot.run.budgetConsumed])
+        assert.equal(canonicalSha256(usage), canonicalSha256(prepared.budgetDelta));
+      const zero = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+      assert.equal(canonicalSha256(settled.snapshot.run.budgetReserved), canonicalSha256(zero));
+      const sameSupervisor = show(services.supervisorUnit);
+      assert.equal(sameSupervisor.MainPID, supervisorBefore.MainPID); assert.equal(sameSupervisor.InvocationID, supervisorBefore.InvocationID);
+      assert.equal(accepted(await storageClient.send({ protocolVersion: 1, method: 'supervisor.status' }), 'supervisor.status').supervisorInstanceId,
+        report.storageInitialSupervisorInstanceId);
+      assert.deepEqual((await publicRead()).journal, settled.journal); assert.deepEqual(currentSession(), session);
+      await storageClient.close(); storageClient = undefined;
+      mark('settled_unknown_actual_successor_then_public_cancellation');
+      assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
+      const successor = show(services.supervisorUnit), recoverBy = Date.now() + 30000;
+      assert.notEqual(successor.MainPID, sameSupervisor.MainPID); assert.notEqual(successor.InvocationID, sameSupervisor.InvocationID);
+      const retainedKeeper = show(services.keeperUnit);
+      assert.equal(retainedKeeper.MainPID, keeperBefore.MainPID); assert.equal(retainedKeeper.InvocationID, keeperBefore.InvocationID);
+      await selectedSupervisor(services.supervisorUnit, successor, path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'), recoverBy);
+      let recovered: Record<string, any>;
+      for (;;) {
+        await delay(50); recovered = read(); assert.deepEqual(recovered.journal, settled.journal);
+        if (recovered.snapshot.run.status === 'queued' && !recovered.snapshot.run.activeWorkerLaunchId) break;
+        assert(Date.now() < recoverBy, 'the successor did not physically retire the original worker');
+      }
+      const successorStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+      assert.notEqual(successorStatus.supervisorInstanceId, claim.supervisorInstanceId);
+      const cancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000131',
+        runId: admitted.id, expectedRevision: recovered.snapshot.run.revision });
+      const cancelReply = exchange([cancel])[0]!; accepted(cancelReply, 'run.cancel');
+      const terminalBy = Date.now() + 15000;
+      let terminal: Record<string, any>;
+      for (;;) {
+        await delay(50); terminal = read(); assert.deepEqual(terminal.journal, settled.journal);
+        assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
+        if (terminal.snapshot.run.status === 'cancelled') break;
+        assert(Date.now() < terminalBy, 'the successor could not complete proof-backed cancellation');
+      }
+      assert(Date.now() < terminalBy); assert.equal(terminal.snapshot.run.terminalReason, 'cancelled_by_user');
+      assert.equal(terminal.snapshot.run.activeWorkerLaunchId, undefined); assert.equal(terminal.snapshot.run.resultRef, undefined);
+      const detail = parseJsonStrict((await readCas(terminal.snapshot.run.terminalDetailRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(detail.abandonedRetryInvocations.length, 1);
+      const closure = decodeBrokerProcessDomainDeathDispatchClosure(parseJsonStrict((await readCas(detail.abandonedRetryInvocations[0].dispatchFenceOrDeathEvidenceRef)).toString('utf8')));
+      const death = decodeBrokerProcessDomainDeath(parseJsonStrict((await readCas(closure.closure.brokerProcessDeathEvidenceRef)).toString('utf8')));
+      assert.equal(death.claimingStateOwnerEpoch, claim.stateOwnerEpoch); assert.equal(death.claimingSupervisorInstanceId, claim.supervisorInstanceId);
+      assert(death.inspectorStateOwnerEpoch > claim.stateOwnerEpoch);
+      const sessionCut = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id, afterItemSeq: session.latestItemSeq }])[0]!, 'session.get');
+      assert.equal(sessionCut.items.length, 1); assert.equal(sessionCut.items[0].kind, 'run_terminal');
+      const publication = parseJsonStrict((await readCas(sessionCut.items[0].payloadRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(publication.runId, admitted.id); assert.equal(publication.status, 'cancelled');
+      assert.equal(sessionCut.snapshot.session.contextRevision, session.contextRevision + 1);
+      assert.equal(sessionCut.snapshot.session.latestItemSeq, session.latestItemSeq + 1);
+      assert.deepEqual(exchange([cancel])[0], cancelReply); assert.deepEqual(exchange([submit])[0], submitReply);
+      assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
+      const terminalSupervisor = show(services.supervisorUnit), terminalReadyBy = Date.now() + 30000;
+      assert.notEqual(terminalSupervisor.MainPID, successor.MainPID); assert.notEqual(terminalSupervisor.InvocationID, successor.InvocationID);
+      await selectedSupervisor(services.supervisorUnit, terminalSupervisor,
+        path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'), terminalReadyBy);
+      assert.deepEqual(read(), terminal); assert.deepEqual(exchange([cancel])[0], cancelReply);
+      assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+        afterItemSeq: session.latestItemSeq }])[0]!, 'session.get'), sessionCut);
+      assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
+      for (const field of imageFields) assert.equal((await lstat(source, { bigint: true }))[field], sourceBefore[field]);
+      assert.equal(await readFile(source, 'utf8'), hostBefore);
+      report.casWriteRefusal = { ...report.casWriteRefusal, qualified: true, sameOwnerSettlementRetried: true,
+        originalClaimPreserved: true, originalClaimSettlementRetriedWithoutRedispatch: true, fullUnknownChargePreserved: true,
+        settlements: 1, acceptedTcpConnections: 1, acceptedTlsConnections: 1, providerRequests: 1,
+        successorOwnerTerminalAndHistoryReplayed: true, sessionPublishedOnce: true,
+        nativeObjectIdentityDirectlyObserved: false, exactNeverConnectGuardStorageFailureQualified: false, fullI1Qualified: false };
+    } else if (authorityOnly) {
       mark('candidate_holds_real_worker_slot');
       const candidateBy = Date.now() + 15000;
       let candidate: Record<string, any>;
@@ -1337,6 +1638,41 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       observations: idleObservations, sameActiveWorkerLaunch: true, sameLeaseEpoch: true, noProviderRedispatch: true,
       immutableJournalAndCheckpointPreserved: true, physicalRetirementRequiredBySubsequentRestart: true };
     mark('capacity_blocked_queued_deadline');
+    queuedObserverClient = await persistentClient();
+    const queuedSupervisorPid = Number(supervisorBefore.MainPID);
+    const queuedImages = async () => {
+      // Read-only OS observation of the already authenticated original
+      // Supervisor, never execution, retirement or native authority evidence.
+      assert.equal(await fixtureProcess(queuedSupervisorPid, ledger.uid), leaseProcessStart);
+      assert.equal(await readlink(`/proc/${queuedSupervisorPid}/exe`),
+        path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'));
+      const directory = `/proc/${queuedSupervisorPid}/fd`, descriptors = await readdir(directory);
+      assert(descriptors.length <= 4096, 'Supervisor descriptor observation exceeded its bounded inventory');
+      const images: string[] = [];
+      for (const descriptor of descriptors) {
+        assert.match(descriptor, /^(?:0|[1-9][0-9]*)$/u);
+        const filename = path.join(directory, descriptor);
+        try {
+          const target = await readlink(filename);
+          if (target !== '/memfd:cliq-runtime-image (deleted)') continue;
+          const before = await stat(filename, { bigint: true });
+          assert(before.isFile() && before.uid === BigInt(ledger.uid));
+          assert.equal(await readlink(filename), target);
+          const after = await stat(filename, { bigint: true });
+          for (const field of imageFields) assert.equal(after[field], before[field]);
+          images.push(`${before.dev}:${before.ino}:${before.size}`);
+        } catch (error) {
+          // Unrelated transient descriptors may close during a read-only
+          // directory walk. Every retained image is compared again below.
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+      assert.equal(await fixtureProcess(queuedSupervisorPid, ledger.uid), leaseProcessStart);
+      return images.sort();
+    };
+    const queuedImagesBefore = await queuedImages();
+    assert(queuedImagesBefore.length >= 2, 'the original live worker must retain its actual launcher images');
+    let queuedImageObservations = 0;
     const queuedSubmit = request({ ...submitCore, requestId: '019a0012-0000-7000-8000-000000000110',
       admissionKey: randomBytes(32).toString('base64url'), expectedContextRevision: currentSession().contextRevision,
       objective: 'Remain queued behind the existing candidate worker until this Run reaches its own deadline.',
@@ -1344,8 +1680,9 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     const queuedAdmitted = accepted(exchange([queuedSubmit])[0]!, 'run.submit').snapshot.run;
     assert.notEqual(queuedAdmitted.id, admitted.id); assert.equal(queuedAdmitted.status, 'queued');
     assert.equal(Date.parse(queuedAdmitted.deadlineAt) - Date.parse(queuedAdmitted.createdAt), 3000);
-    const readQueued = () => accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: queuedAdmitted.id }])[0]!, 'run.get');
-    const initialQueued = readQueued();
+    const readQueued = async () => accepted(await queuedObserverClient!.send({ protocolVersion: 1, method: 'run.get',
+      runId: queuedAdmitted.id }), 'run.get');
+    const initialQueued = await readQueued();
     assert.equal(initialQueued.snapshot.run.status, 'queued'); assert.equal(initialQueued.snapshot.run.activeWorkerLaunchId, undefined);
     assert.deepEqual(initialQueued.journal, []); assert.equal(requestsReceived, 2);
     const capacityStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
@@ -1354,11 +1691,22 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     const queuedDeadlineBy = Date.now() + 30000;
     let deadlineCut: Record<string, any>;
     for (;;) {
-      await delay(50); deadlineCut = readQueued(); assert(!providerFailure);
+      await delay(50); deadlineCut = await readQueued(); assert(!providerFailure);
       assert.deepEqual(deadlineCut.journal, []); assert.equal(deadlineCut.snapshot.run.activeWorkerLaunchId, undefined);
       assert.equal(requestsReceived, 2);
       if (deadlineCut.snapshot.run.status === 'failed') break;
       assert.equal(deadlineCut.snapshot.run.status, 'queued');
+      if (!deadlineCut.snapshot.run.stopIntentRef && !deadlineCut.snapshot.run.cancelRequested) {
+        const observedImages = await queuedImages(), afterImages = await readQueued();
+        // A stop may commit while /proc is read. Its cleanup is allowed to
+        // open resources; only an ordinary queued cut is allocation-free.
+        if (afterImages.snapshot.run.status === 'queued' && !afterImages.snapshot.run.stopIntentRef &&
+            !afterImages.snapshot.run.cancelRequested) {
+          assert.deepEqual(observedImages, queuedImagesBefore,
+            'a capacity-blocked ordinary queued Run must not retain extra launcher images');
+          queuedImageObservations++;
+        }
+      }
       assert(Date.now() < queuedDeadlineBy, 'capacity-blocked queued Run did not reach its real deadline terminal cut');
     }
     assert.equal(deadlineCut.snapshot.run.terminalReason, 'budget_exhausted');
@@ -1399,11 +1747,16 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     }
     assert.equal(queuedEvents.events.at(-1).status, 'failed');
     assert.equal(queuedEvents.events.at(-1).terminalReason, 'budget_exhausted');
+    assert(queuedImageObservations > 0, 'ordinary queued launcher ownership must be observed before its real deadline');
     report.queuedDeadline = { qualified: true, scope: 'capacity-blocked queued Run only; not a live-worker deadline cut',
       runId: queuedAdmitted.id, status: 'failed', terminalReason: 'budget_exhausted', wallTimeMs: 3000,
       stopIntentRef: deadlineCut.snapshot.run.stopIntentRef, terminalDetailRef: deadlineCut.snapshot.run.terminalDetailRef,
       attachedHighWater: queuedEvents.highWaterEventSeq, completeEventHistoryChecked: true,
+      launcherImageObservation: { diagnosticOnly: true, sameOriginalSupervisor: true,
+        ordinaryQueuedObservations: queuedImageObservations, originalRetainedImages: queuedImagesBefore.length,
+        noAdditionalLauncherImagesAtObservedQueuedCuts: true, stopCleanupNotGated: true },
       noWorkerActivated: true, noInvocationPrepared: true, noProviderRequest: true, zeroCharged: true, noResultPublished: true };
+    await queuedObserverClient.close(); queuedObserverClient = undefined;
     const events = accepted(exchange([{ protocolVersion: 1, method: 'run.attach', runId: admitted.id, afterEventSeq: 0 }])[0]!, 'run.attach');
     assert(events.events.length > 0);
     for (let index = 0; index < events.events.length; index++) assert.equal(events.events[index].eventSeq, index + 1);
@@ -1911,6 +2264,9 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   }
   finally {
     const cleanupFailures: unknown[] = [];
+    // Restore the one original held CAS inode before any production writer,
+    // credential daemon, bounded volume or fixture cleanup can run.
+    try { await restoreCasWrite?.(); } catch (error) { cleanupFailures.push(error); }
     try { await restoreRetryAlias(); } catch (error) { cleanupFailures.push(error); }
     try {
       if (server) {
@@ -1918,6 +2274,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         await bounded(Promise.all(socketClosures), 10000, 'owned TLS sockets did not close'); report.httpsJoined = true;
       }
     } catch (error) { cleanupFailures.push(error); }
+    try { await storageClient?.close(); } catch (error) { cleanupFailures.push(error); }
+    try { await queuedObserverClient?.close(); } catch (error) { cleanupFailures.push(error); }
     try {
       if (installedServices) {
         // A stable retained-byte scan must follow real writer retirement.
@@ -1989,5 +2347,5 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
 
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
-assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign'); assert(filename && extra.length === 0);
+assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign' || mode === '--storage-failure-campaign'); assert(filename && extra.length === 0);
 await campaign(filename, mode);

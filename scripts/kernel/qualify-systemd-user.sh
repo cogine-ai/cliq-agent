@@ -22,10 +22,11 @@ case ${1:-} in
   --run-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--failure-campaign; shift ;;
   --run-retry-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--retry-campaign; shift ;;
   --run-authority-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--authority-failure-campaign; shift ;;
+  --run-storage-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--storage-failure-campaign; shift ;;
 esac
 readonly probe_campaign_kind probe_run_driver_mode
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--run-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--run-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   exit 2
 fi
 readonly probe_node=$1

@@ -104,6 +104,39 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  linux-installed-settlement-storage:
+    name: Linux installed original-claim settlement after actual CAS refusal
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-run-client.test.mjs
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and bounded ext4 prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Refuse real CAS publication and settle the same original claim after exact restoration
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-storage-failure-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-settlement-storage"
+      - name: Retain exact-source storage refusal and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-settlement-storage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-settlement-storage/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-installed-run:
     name: Linux signed installed Run closed-loop diagnostics
     # Real installed/manager/native transport mechanics, not complete I1 or a
