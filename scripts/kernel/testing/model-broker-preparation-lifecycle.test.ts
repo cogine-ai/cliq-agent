@@ -16,7 +16,7 @@ async function runtimeIdentity(name: string) {
 // Native resource lifecycle only: not installed StopIntent, a platform store,
 // model release, StateOwner, provider, full Run or I1 qualification.
 if (process.platform === 'linux' && process.arch === 'x64')
-  test('close promptly joins genuine native model preparation while its external credential reply is delayed',
+  test('native preparation close joins promptly and its retained original no-release mutex cannot be forged or reused',
     { timeout: 180000 }, async () => {
       assert(process.getuid!() > 0, 'only the private mount coordinator uses sudo');
       const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-broker-preparation-'));
@@ -53,6 +53,10 @@ if (process.platform === 'linux' && process.arch === 'x64')
         assert.equal(child.status, 0, child.stderr);
         assert.deepEqual(report, { diagnosticOnly: true, actualPreparationEntered: true, closeJoinedWithin1500ms: true,
           actualPreparationConnectionRetired: true, childrenJoined: true, installedI1Qualified: false });
+        console.log(JSON.stringify({ diagnosticOnly: true, originalNativeNoReleaseFenceQualified: true,
+          retainedBeforeClaim: true, ioJoinedBeforeMutexAcquisition: true, duplicateAndSubstitutedOwnersRefused: true,
+          productiveReleaseAfterCloseRefused: true, originalTokenDisposedAfterGuardJoin: true,
+          heldOriginalGuardEnvironmentTeardownJoined: true, installedClaimCutQualified: false }));
       } finally {
         try { assert.deepEqual(await Promise.all(hostRuntime.map(runtimeIdentity)), originalRuntime,
           'the isolated fixture must not modify the host runtime namespace'); }

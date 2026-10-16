@@ -21,11 +21,20 @@ export type ModelBrokerClosed = Readonly<{
   kind: 'broker_transport_closed'; brokerFenceTokenDigest: string; bodyBytesDigest: string;
   networkStarted: boolean; requestStarted: boolean; tokenRevoked: true; matchingActiveReleaseCount: 0;
 }>;
+/** Native opaque guard. Structural values are never accepted by the installed
+ * friend validator; the same original release mutex remains held until close. */
+export type NativeModelNoReleaseFence = Readonly<{ assertHeld(): void; close(): void }>;
 export type NativeModelTransport = Readonly<{
   brokerFenceTokenDigest: string;
   /** The real owner is closeable before preparation I/O settles. A refusal or
    * cancellation rejects only after its native resource retirement joins. */
   ready: Promise<void>;
+  /** Retain the original private release domain before a permanent claim. */
+  retainDispatchFence(): void;
+  /** Only after original resource joins; never from a closed-data boolean. */
+  acquireNoReleaseFence(binding: ModelBrokerBinding): NativeModelNoReleaseFence;
+  /** Last retirement step, after every actual guard has joined. */
+  releaseDispatchFence(): void;
   connect(binding: ModelBrokerBinding): Promise<void>;
   releaseBody(binding: ModelBrokerBinding): Promise<Readonly<{
     kind: 'complete' | 'prefix_over_limit'; status: number;
@@ -34,7 +43,7 @@ export type NativeModelTransport = Readonly<{
   close(): Promise<ModelBrokerClosed>;
 }>;
 export type NativeModelBrokerBinding = Readonly<{
-  interfaceVersion: 2;
+  interfaceVersion: 3;
   prepareModelTransport(input: Readonly<{
     provider: 'openai-compatible'; selector: SecretServiceSelector; expectedObservation: SecretServiceObservation;
     target: Readonly<{ hostAscii: string; port: number; basePath: string; serverNameAscii: string; spkiSha256Pins: readonly string[] }>;

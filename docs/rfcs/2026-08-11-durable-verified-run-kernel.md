@@ -3474,8 +3474,11 @@ type RuntimeFailureEvidenceV1 = RuntimeFailureEvidenceBaseV1 & (
       credentialAuthorityRecordDigest: string
       authorityRevision: number
       credentialServiceRevision: number
-      failureCode: 'expired' | 'revoked' | 'platform_item_absent' | 'platform_store_unavailable'
-    }
+      } & (
+        | { failureCode: 'expired' | 'revoked' | 'credential_binding_changed' | 'platform_item_absent' | 'platform_store_unavailable'
+            endpointAuthorityRecordDigest?: never; endpointAuthorityRevision?: never }
+        | { failureCode: 'endpoint_revoked'; endpointAuthorityRecordDigest: string; endpointAuthorityRevision: number }
+      )
   | {
       failureKind: 'retry_unknown_exhausted'
       retryUnknownResultRef: ArtifactRef
@@ -3661,7 +3664,7 @@ The status/reason mapping is exact: `succeeded -> verified`; `completed_unverifi
 
 Stop-to-**reason-detail** derivation is total and one-to-one; `StopIntentBase` deliberately has no generic evidence ref. The terminal primary-evidence matrix is exact and acyclic: verifier/dependency integrity use `integrityEvidenceRef`; parent cancellation uses `sourceStopIntentRef`; local-inference failure uses `failureDetailRef`; direct verifier/delivery/dependency policy denial uses `policyChannelEvidenceRef`; generic runtime uses `runtimeFailureRef`; manual abandon uses `attestationRef`; every user cancellation, deadline/budget, verification, context-compaction/window, delivery-merge, or delivery-publication branch uses the winning `stopIntentRef` itself after that immutable artifact has been published. The corresponding `TerminalReasonDetail` copies the exact branch fields; its `stopIntentRef|evidenceRef` where present equals that same selected primary ref. Each `origin='runtime'` variant maps only to the detail with identical `runtimeSubtype`; generic runtime requires its exact `RuntimeFailureEvidenceV1` ref/digest and matching `failingOpId`. Storage rejects a subtype/detail mismatch, missing field, alternate primary ref, or caller-selected reason projection. This post-publication pointer creates no content hash cycle because the StopIntent contains no self ref. The surrounding publication/manual/retry closure fields are a separate deterministic projection of authoritative Journal/items at terminal quiescence; they may close facts learned after the winning intent without changing its reason. Candidate, diagnostic, verifier-receipt, and child-result facts remain in their already ordered typed Run-item/Journal graph and are not copied into implementation-selected TerminalDetail lists.
 
-`RuntimeFailureEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/failing op/current-inspector fields equal the proposed Run and the inspector is fresh under the canonical five-second rule. `model_unusable_response` rehashes the exact `ModelUnusableResponseV1` that is the completed Journal result for that op. `model_attempts_exhausted` names the final contiguous failed model attempt, exact normal/compaction request, Journal sequence, and literal `transport_exhausted`; that failed row must satisfy the ordinary pre-dispatch or exact post-claim-no-release closure and therefore cannot claim a provider response. `credential_redemption_failed` is produced while holding the credential-authority lock before target I/O; its immutable binding/endpoint equal the Run assembly, and its latest authority-record digest/revisions plus canonical time or platform-store observation prove exactly expired, revoked, absent item, or unavailable store. `retry_unknown_exhausted` rehashes exact `RetryUnknownCancelledResult` and its Journal/settlement/dispatch-closure chain. `dependency_acquisition_failed` equals the current candidate plan and final acquisition Journal attempt/sequence with one closed failure code. `local_service_identity_mismatch` rehashes the assembly provenance/service spec plus the current boundary evidence that failed the active-launch/stable-identity gate before provider release. No branch accepts another branch's members, generic diagnostic text, a provider/worker boolean, or an untyped Journal error. The StopIntent and TerminalDetail repeat the same evidence ref/digest/failing op, and storage re-walks the named Journal/request/authority graph before terminal commit.
+`RuntimeFailureEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/failing op/current-inspector fields equal the proposed Run and the inspector is fresh under the canonical five-second rule. `model_unusable_response` rehashes the exact `ModelUnusableResponseV1` that is the completed Journal result for that op. `model_attempts_exhausted` names the final contiguous failed model attempt, exact normal/compaction request, Journal sequence, and literal `transport_exhausted`; that failed row must satisfy the ordinary pre-dispatch or exact post-claim-no-release closure and therefore cannot claim a provider response. `credential_redemption_failed` is produced while holding the credential-authority lock before target I/O; its immutable binding/endpoint equal the Run assembly, and its latest authority-record digest/revisions plus canonical time or platform-store observation prove exactly expired, revoked, changed frozen credential binding, revoked endpoint, absent item, or unavailable store. `credential_binding_changed` requires a later active authority revision/generation that differs from the frozen original binding, without relabeling it as revoked. `endpoint_revoked` additionally binds the exact latest endpoint authority record digest/revision while the credential itself may remain active. Missing or corrupt history and noncausal time require recovery, not a synthetic authorization failure. `retry_unknown_exhausted` rehashes exact `RetryUnknownCancelledResult` and its Journal/settlement/dispatch-closure chain. `dependency_acquisition_failed` equals the current candidate plan and final acquisition Journal attempt/sequence with one closed failure code. `local_service_identity_mismatch` rehashes the assembly provenance/service spec plus the current boundary evidence that failed the active-launch/stable-identity gate before provider release. No branch accepts another branch's members, generic diagnostic text, a provider/worker boolean, or an untyped Journal error. The StopIntent and TerminalDetail repeat the same evidence ref/digest/failing op, and storage re-walks the named Journal/request/authority graph before terminal commit.
 
 Kernel-integrity stop evidence is one closed chain. `KernelIntegrityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; its Run/source projection/generation/current inspector match the exact Journal claim and frozen RunSpec. Canonical target paths are NFC admitted-root-relative paths with no empty/`.`/`..` component. An `audited_write_attempt` is emitted only by the strong sandbox filesystem or trusted broker at the blocked syscall/request boundary, repeats the exact request/containment/SandboxLaunch, has `sourceBeforeRef === sourceAfterRef` and equal digests, and proves no byte changed. A `source_digest_drift` rehashes two exact SourceManifests, requires unequal digests and a nonempty unique byte-sorted list of the changed WorkspaceEntry digests. Its source XOR either forbids both containment/spec refs for a trusted Supervisor rehash outside a child process, or requires both and matches them to the same owning Journal claim and actual containment; ref-only or spec-only drift is invalid. The verifier subject matches one verifier Journal op/attempt/result source, while dependency matches the exact candidate plan and acquisition op/attempt. For both kernel-integrity StopIntent variants, branch `integrityEvidenceRef` and digest name this same artifact; `TerminalReasonDetail` and `primaryEvidenceRef` copy the identical ref/digest. A verifier `source_mutation` receipt requires both violation fields and the verifier form of this artifact; every other outcome forbids both. The audited branch requires equal receipt source digests, the drift branch requires unequal ones. Dependency completion/ready state is forbidden and its integrity StopIntent uses the dependency form. A generic CAS ref, verifier text, caught un-audited read-only error, or adapter assertion cannot win kernel-integrity precedence.
 
@@ -3973,6 +3976,7 @@ type WorkspaceGenerationQuarantineEvidenceV1 = {
   sourceRowVersion: number
   observedState:
     | { kind: 'complete_tree'; treeDigest: string }
+    | { kind: 'unverified_preparation' }
     | {
         kind: 'unreadable_partial'
         failureCode: 'descriptor_io_failed' | 'artifact_missing_or_corrupt' | 'path_or_entry_invalid' | 'git_closure_invalid'
@@ -3988,6 +3992,13 @@ type WorkspaceGenerationQuarantineEvidenceV1 = {
   observedAt: string
   evidenceDigest: string
 } & (
+  | {
+      reason: 'preparation_retired'
+      fromPhase: 'materializing' | 'preactivated_readonly'
+      workerLaunchId: string
+      preparationRetirementEvidenceRef: ArtifactRef
+      preparationRetirementEvidenceDigest: string
+    }
   | {
       reason: 'materialization_failed'
       fromPhase: 'materializing'
@@ -4407,13 +4418,27 @@ Phase/op-kind validation is closed at storage, not left to adapters:
 - `prepared` requires immutable request, target, ReplayClass, original epoch, applicable grant, and the complete four-counter reservation in `budgetDelta`; it forbids dispatch/result/receipt/error evidence ref/digest and a settlement ref. The sole zero-reservation form is a typed abort-directory recovery-maintenance request admitted by `claimRecoveryMaintenance`'s preconditions.
 - `dispatch_claimed` requires the one matching prepared row, `dispatchId`, trusted Supervisor instance plus exact active `stateOwnerEpoch`, the broker-token-digest XOR above, the complete four-counter zero value in `budgetDelta`, and no terminal fields, evidence pair, or budget settlement.
 - `completed` requires the matching claim, exact `budgetSettlementRef`, plus an op-kind result: exact usable `AgentModelTurn` or exact `ModelUnusableResponseV1` for `model`, under their closed XOR; result artifact for `tool|mcp`; exact `McpServerInstanceIdentityV1` result plus `McpServerLaunchReceiptV1` for `mcp-server`; a passed/assertion/source-mutation verification receipt for `verifier`; or exact `PublicationProofV1(kind='terminal_receipt')` for `publish`.
-- `failed` is a closed XOR. `pre_dispatch` requires the exact prepared row, error, settlement, and zero consumed `budgetDelta`, while forbidding dispatch/Supervisor/owner/token/result/receipt/evidence pair/attestation fields; the absence of any claim under the universal dispatch gate is itself authoritative proof that no target capability or request byte was released. `post_claim` repeats the exact claim and is legal only in two forms: its `evidenceRef/evidenceDigest` decodes exact `PostClaimNoReleaseEvidenceV1`, or an `opKind='verifier'` infrastructure failure carries its cross-field-valid `infra_failed` receipt plus exact containment-death closure and forbids the generic pair. The first form consumes zero and proves the same live owner closed the second gate before any release/spawn; the verifier form consumes its exact attempt usage. Every other claimed failure with no typed result is `unknown`, while a typed negative target response is `completed` with its exact result artifact. A verifier stopped by Run cancel/deadline has a `VerifierStopItem` and no receipt. A malformed response received from an executed/billable provider is `completed` with an unusable-response artifact, not a false no-effect failure.
+- `failed` is a closed XOR. `pre_dispatch` requires the exact prepared row, error, settlement, and zero consumed `budgetDelta`, while forbidding dispatch/Supervisor/owner/token/result/receipt/evidence pair/attestation fields; the absence of any claim under the universal dispatch gate is itself authoritative proof that no target capability or request byte was released. `post_claim` repeats the exact claim and is legal only in three closed forms: its `evidenceRef/evidenceDigest` decodes exact `PostClaimNoReleaseEvidenceV1`, or an `opKind='verifier'` infrastructure failure carries its cross-field-valid `infra_failed` receipt plus exact containment-death closure and forbids the generic pair; or the sole stopped-recovery terminal transaction resolves a previously fully charged private edit unknown with exact `PrivateToolRollbackV1`, preserving that original settlement. The first form consumes zero and proves the same live owner closed the second gate before any release/spawn; the verifier form consumes its exact attempt usage. Private rollback appends zero additional budget, never a refund or another settlement. Every other claimed failure with no typed result is `unknown`, while a typed negative target response is `completed` with its exact result artifact. A verifier stopped by Run cancel/deadline has a `VerifierStopItem` and no receipt. A malformed response received from an executed/billable provider is `completed` with an unusable-response artifact, not a false no-effect failure.
 - `unknown` requires the matching claim, an `evidenceRef/evidenceDigest` pair decoding exact `InvocationAmbiguityEvidenceV1`, and the exact conservative full `budgetSettlementRef`.
 - `abandoned` requires an existing `unknown` whose ReplayClass is exactly `manual`, repeats that unknown row's settlement ref with zero additional delta, carries the local-principal attestation described below, forbids its own evidence pair, fabricates no result, and has the terminal-only identity-matched `ToolAbandonedItem` when the invocation originated from a tool/MCP call. It is administrative closure, not completion/failure evidence.
 
 Every Journal evidence ref is accompanied by its digest or both are absent; the phase/op-kind decoder fixes the only legal artifact type. `InvocationAmbiguityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/op/kind/attempt/dispatch/claim sequence, immutable request and target pairs, claiming Supervisor/StateOwner epoch, current inspector, and observation time equal the exact claimed attempt and the frontier transaction entering `unknown`; no caller/worker payload is accepted. `claim_owner_lost` rehashes exact `StateOwnerAcquisitionEvidenceV1(takeover_after_owner_death)` for the historical claim owner and requires the inspector to be that strictly newer active owner. `broker_channel_lost_after_claim` is limited to a claim that stored the same broker fence-token digest; the same still-live owner records one closed deadline/connection/stream failure after the second release gate and proves the Journal has no durable terminal result. `sandbox_channel_lost_after_claim` rehashes the claim's exact SandboxLaunchSpec and actual containment; its same-owner live branch requires `observedAt >= responseDeadlineAt`, an authenticated channel-close time, and no result, while its death branch rehashes exact all-descendant `ProcessContainmentDeathEvidenceV1` and proves no terminal result was durably received before death. `publication_path_ambiguous` rehashes only the same claim's exact `PublicationProofV1(kind='path_ambiguity')`. Any other kind/mechanism combination, free error string, missing pair, current-owner mismatch, or evidence that instead proves completion/failure is invalid. The `unknown` row repeats this exact pair; a later `ManualAbandonAttestationV1` must repeat the same pair byte-for-byte, not substitute newer display or probe evidence.
 
-`PostClaimNoReleaseEvidenceV1.evidenceDigest` omits itself. Its Run/op/attempt/dispatch/claim sequence, request/target/grant, claiming Supervisor/owner epoch, and current inspector ref/digest equal the prepared/claim rows and current `SupervisorInspectorIdentityV1`; the inspector is the same still-live owner and the observation is within five seconds. The broker branch is legal iff the claim stored that exact fence-token digest: while holding the broker release mutex, the same owner revokes the still-unreleased token, observes zero matching active release, publishes the artifact, and appends post-claim failed plus zero-consumption settlement in one transaction before dropping the mutex. The process branch is legal iff the claim's exact SandboxLaunchSpec has not spawned; its ref and `ProcessContainmentNoSpawnEvidenceV1` rehash the same plan/spec/nonce and positively prove zero matching process. It likewise commits with the failed row before spawn authority can be released. A restart, owner change, absent live token, observed process/release, partial rollback, generic death, adapter assertion, or inline boolean cannot produce this artifact and therefore routes the claim to `unknown` unless the verifier-specific receipt/death form applies. No other op-specific post-claim failed evidence is admitted in v1.
+`PostClaimNoReleaseEvidenceV1.evidenceDigest` omits itself. Its Run/op/attempt/dispatch/claim sequence, request/target/grant, claiming Supervisor/owner epoch, and current inspector ref/digest equal the prepared/claim rows and current `SupervisorInspectorIdentityV1`; the inspector is the same still-live owner and the observation is within five seconds. The broker branch is legal iff the claim stored that exact fence-token digest: while holding the broker release mutex, the same owner revokes the still-unreleased token, observes zero matching active release, publishes the artifact, and appends post-claim failed plus zero-consumption settlement in one transaction before dropping the mutex. The process branch is legal iff the claim's exact SandboxLaunchSpec has not spawned; its ref and `ProcessContainmentNoSpawnEvidenceV1` rehash the same plan/spec/nonce and positively prove zero matching process. It likewise commits with the failed row before spawn authority can be released. A restart, owner change, absent live token, observed process/release, partial rollback, generic death, adapter assertion, or inline boolean cannot produce this artifact and therefore routes the claim to `unknown` unless the verifier-specific receipt/death form applies. The separate `PrivateToolRollbackV1` exception resolves an already charged unknown only after positive rollback/retirement of the original fixed private edit domain; it is never this no-release evidence or permission to retry.
+`PrivateToolRollbackV1` is terminal-stop-only and limited to the original signed
+Linux fixed builtin edit recipe whose native boundary permits effects only in
+its exact private generation. The original replay class remains `manual`; no
+retry authority is added. Its request/target/grant, claim, worker launch/epoch,
+generation identity, preceding ready Checkpoint and exact whole-domain death,
+quarantine and retirement graph must all agree. The original UNKNOWN remains
+fully charged; the added failed row reuses its immutable BudgetSettlement and
+has zero additional budget. The same sole terminal transaction closes the
+original worker-death wait/probe nonce/anchor, appends the explicit
+`private_effect_rolled_back` error result and only the undispatched suffix,
+and publishes one terminal Checkpoint and Session item. A real received result
+instead retains its actual outcome and post-effect Checkpoint. External manual
+effects, generic death, partial rollback and caller booleans cannot enter this
+branch; they remain under their existing reconciliation/manual wait.
 
 Every `completed|unknown|abandoned` row and every post-claim `failed` row binds exactly one claim and immutable request. Only pre-dispatch `failed` binds the prepared row while proving claim absence and forbidding claim identity. Fields forbidden by the relevant phase/op-kind combination are rejected. These constraints apply equally to importer and test helpers, so no generic insert can fabricate a receipt or completion.
 
@@ -5672,32 +5697,111 @@ type WorkerIdentity = {
   processContainmentRef: ArtifactRef
 }
 
-type WorkerLaunch = {
-  schemaVersion: 1
-  launchId: string
-  runId: string
-  plannedRunRevision: number
-  supervisorInstanceId: string
-  spawnNonceDigest: string
-  activationNonceDigest: string
-  phase: 'reserved' | 'preactivated' | 'activated' | 'reconciling' | 'retired'
-  workspaceGenerationRef: ArtifactRef
-  containmentPlanRef: ArtifactRef
-  sandboxLaunchSpecRef: ArtifactRef
-  workerIdentityDigest?: string
-  processContainmentRef?: ArtifactRef
-  leaseEpoch?: number
-  leaseVersion: number
-  leaseExpiresAt?: string
-  generationWriteState: 'preactivated_readonly' | 'active' | 'revoking' | 'checkpointing' | 'fenced_reconciling' | 'sealed'
-  quiesceId?: string
-  createdAt: string
-  activationDeadlineAt: string
-  activatedAt?: string
-  retiredAt?: string
-  retirementEvidenceRef?: ArtifactRef
-}
+/** Logical intent only. A schema-valid value is not a resource birth witness. */
+type WorkerPreparation = {
+  stateOwnerEpoch: number;
+  sourceCheckpointId: string;
+  sourceWorkspaceStateRef: ArtifactRef;
+  generationCreationNonceDigest: string;
+  generationId: string;
+  generation?: { generationRef: ArtifactRef; generationIdentityDigest: string };
+  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string };
+  reservation?: { deviceId: string; fileId: string; ownerUid: number };
+};
+
+type BoundWorkerPreparation = WorkerPreparation & Required<Pick<WorkerPreparation, 'generation' | 'controller' | 'reservation'>>;
+
+type WorkerLaunchIdentity = {
+  schemaVersion: 1;
+  launchId: string;
+  runId: string;
+  plannedRunRevision: number;
+  supervisorInstanceId: string;
+  spawnNonceDigest: string;
+  activationNonceDigest: string;
+  createdAt: string;
+  activationDeadlineAt: string;
+};
+
+type WorkerLaunchWithoutExecution = {
+  workspaceGenerationRef?: never;
+  containmentPlanRef?: never;
+  sandboxLaunchSpecRef?: never;
+  workerIdentityDigest?: never;
+  processContainmentRef?: never;
+  leaseEpoch?: never;
+  leaseVersion?: never;
+  leaseExpiresAt?: never;
+  generationWriteState?: never;
+  quiesceId?: never;
+  activatedAt?: never;
+};
+
+type PreparingWorkerLaunch = WorkerLaunchIdentity & WorkerLaunchWithoutExecution & {
+  phase: 'preparing';
+  preparation: WorkerPreparation;
+  retirementKind?: never;
+  retiredAt?: never;
+  retirementEvidenceRef?: never;
+};
+
+type RetiredWorkerPreparation = WorkerLaunchIdentity & WorkerLaunchWithoutExecution & {
+  phase: 'retired';
+  retirementKind: 'preparation';
+  preparation: WorkerPreparation;
+  retiredAt: string;
+  retirementEvidenceRef: ArtifactRef;
+};
+
+type BoundWorkerLaunch = WorkerLaunchIdentity & {
+  phase: 'reserved' | 'preactivated' | 'activated' | 'reconciling' | 'retired';
+  retirementKind?: never;
+  preparation?: BoundWorkerPreparation;
+  workspaceGenerationRef: ArtifactRef;
+  containmentPlanRef: ArtifactRef;
+  sandboxLaunchSpecRef: ArtifactRef;
+  workerIdentityDigest?: string;
+  processContainmentRef?: ArtifactRef;
+  leaseEpoch?: number;
+  leaseVersion: number;
+  leaseExpiresAt?: string;
+  generationWriteState:
+    | 'preactivated_readonly'
+    | 'active'
+    | 'revoking'
+    | 'checkpointing'
+    | 'fenced_reconciling'
+    | 'sealed';
+  quiesceId?: string;
+  activatedAt?: string;
+  retiredAt?: string;
+  retirementEvidenceRef?: ArtifactRef;
+};
+
+type WorkerLaunch = PreparingWorkerLaunch | RetiredWorkerPreparation | BoundWorkerLaunch;
 ```
+
+`preparing` is the same unique unretired WorkerLaunch spine, committed before
+physical allocation. It contains only logical ownership and fixed locators;
+it has no worker, lease, launch spec, broker release or private-write authority.
+The original owner registers the actual generation identity and materializing
+row before copying, then the actual controller and reservation births. Only a
+complete readonly snapshot, reproduced plan/spec and genuine original BIND
+allow promotion to `reserved`, without resetting the preparation deadline.
+An interrupted or substituted birth is recovery-required, never backfilled.
+
+Preparation retirement uses the closed `cliq-worker-preparation-retirement-evidence-v1`
+union. Its `born` branch binds the original preparing row, generation birth,
+all original workspace/controller/reservation joins, exact no-replace quarantine
+anchor, inspector and fresh canonical time. The preparation-only quarantine has
+reason `preparation_retired` and observed state `unverified_preparation`: it makes
+no complete-tree, payload or Git-closure claim and is forbidden for every other
+quarantine reason. The generation's materializing/readonly → quarantined →
+retired changes and preparing → retired commit atomically. Its `unallocated`
+branch accepts only the still-held original materialization owner's joined
+receipt whose allocation-request latch was never entered. A failed native
+allocation attempt, absent path, row count or owner loss cannot mint that
+receipt. Neither branch is worker no-spawn, preactivation failure or sealing.
 
 The immutable identity binds PID/start token/spawn/activation nonce **and** an immutable `ProcessContainmentRef` whose backend identity covers every descendant for the lifetime of the activation. The containment owner is a closed union: a worker identity must reference `worker_activation` matching its Run/epoch/launch; an invocation containment must reference `run_invocation` matching the exact durable claim and a parent containment in the same Run activation; an admin row must reference `admin_probe` matching its operation/attempt/principal/method/request/target/Supervisor and may not contain Run/lease/worker fields; a local-inference launch must reference `local_inference_service` matching the exact service/launch/principal/spec/Supervisor row and may not contain Run, Journal, or admin fields; a source inspection must reference `source_inspection` matching its sole attempt/principal/target/original Supervisor and has no Run, worker, Journal, admin or service fields. Worker activations use `run-generation`; admin probes, local inference and source inspection use `isolated-empty-root`; invocation bindings follow the frozen tool contract. A top-level worker, admin, local-inference or source-inspection containment has no parent, while a run invocation's parent chain must terminate at its exact worker activation.
 
@@ -7080,6 +7184,17 @@ type InvocationAmbiguityEvidenceV1 = InvocationAmbiguityEvidenceBaseV1 & (
       publicationProofDigest: string
     }
 )
+
+type PrivateToolRollbackV1 = {
+  schemaVersion: 1; format: 'cliq-private-tool-rollback-v1'; code: 'TOOL_EXECUTION_FAILED';
+  failureKind: 'private_effect_rolled_back'; runId: string; opId: string; attempt: number; dispatchId: string;
+  preparedJournalSeq: number; claimJournalSeq: number; unknownJournalSeq: number;
+  requestRef: string; targetRef: string; grantRef: string; sandboxLaunchSpecRef: string;
+  workerLaunchId: string; leaseEpoch: number; generationRef: string; generationIdentityDigest: string;
+  checkpointId: string; workspaceStateRef: string; quarantineEvidenceRef: string; quarantineEvidenceDigest: string;
+  retirementEvidenceRef: string; retirementEvidenceDigest: string; inspectorIdentityRef: string; inspectorIdentityDigest: string;
+  observedAt: string; evidenceDigest: string;
+};
 
 type PostClaimNoReleaseEvidenceV1 = {
   schemaVersion: 1

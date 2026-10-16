@@ -4,9 +4,45 @@ import test from 'node:test';
 import type { InstalledControlErrorV1 } from './installed-control.js';
 import { decodeInstalledCredentialControlResult } from './installed-credential-client.js';
 import { KernelStorageError } from './errors.js';
+import { CredentialScopeBusyError } from './installed-runtime.js';
 
 // Pure wire-data conformance only. These values create no authenticated peer,
 // installed handle, credential scope or finalization authority.
+test('installed credential client preserves the fixed retryable finalizer scope-busy refusal', () => {
+  assert.throws(() => decodeInstalledCredentialControlResult({
+    protocolVersion: 1, ok: false, method: 'credential.finalize',
+    error: { schemaVersion: 1, code: 'RATE_LIMITED', retryable: true,
+      retryAfterMs: 1000, messageCode: 'run.credential_scope_busy' }
+  }, 'credential.finalize'), error => {
+    assert(error instanceof CredentialScopeBusyError);
+    assert.deepEqual(error.controlError, { schemaVersion: 1, code: 'RATE_LIMITED', retryable: true,
+      retryAfterMs: 1000, messageCode: 'run.credential_scope_busy' });
+    assert.equal(Object.hasOwn(error, 'cause'), false);
+    return true;
+  });
+});
+
+const busyRefusal = { protocolVersion: 1, ok: false, method: 'credential.finalize',
+  error: { schemaVersion: 1, code: 'RATE_LIMITED', retryable: true,
+    retryAfterMs: 1000, messageCode: 'run.credential_scope_busy' } };
+for (const { name, response, method = 'credential.finalize' } of [
+  { name: 'busy hello', response: { ...busyRefusal, method: 'control.hello' }, method: 'control.hello' },
+  { name: 'wrong protocol', response: { ...busyRefusal, protocolVersion: 2 } },
+  { name: 'wrong schema', response: { ...busyRefusal, error: { ...busyRefusal.error, schemaVersion: 2 } } },
+  { name: 'nonretryable busy', response: { ...busyRefusal, error: { ...busyRefusal.error, retryable: false } } },
+  { name: 'another busy reason', response: { ...busyRefusal, error: { ...busyRefusal.error, messageCode: 'untrusted-remote-message' } } },
+  ...[0, 999, 1001, Number.MAX_SAFE_INTEGER, '1000', null].map(retryAfterMs => ({
+    name: `unsupported busy delay ${JSON.stringify(retryAfterMs)}`,
+    response: { ...busyRefusal, error: { ...busyRefusal.error, retryAfterMs } }
+  })),
+  { name: 'extra busy error data', response: { ...busyRefusal, error: { ...busyRefusal.error, payload: 'untrusted-remote-data' } } },
+  { name: 'extra busy envelope data', response: { ...busyRefusal, payload: 'untrusted-remote-data' } }
+] as Array<{ name: string; response: unknown; method?: 'control.hello' | 'credential.finalize' }>) {
+  test(`installed credential client rejects ${name} instead of importing retry advice`, () => {
+    assert.throws(() => decodeInstalledCredentialControlResult(response, method), TypeError);
+  });
+}
+
 test('installed credential client recognizes a closed request-id conflict as a refusal', () => {
   assert.throws(() => decodeInstalledCredentialControlResult({
     protocolVersion: 1, ok: false, method: 'credential.finalize',

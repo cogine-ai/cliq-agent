@@ -96,14 +96,16 @@ model unknown. Its closed data union distinguishes non-executing `preparing`,
 bound launches and retired preparation without fictional generation, worker,
 lease or write fields. Schema V5 extends the existing phase triggers; it does
 not add a ledger, backfill birth history or remove the unique unretired index.
-The eventual promotion reducer must retain complete actual birth bindings;
-the decoder alone cannot enforce transition history.
-
-Data decoding and migration do not implement that physical lifecycle. The
-preparation producer, its historical closure and private-tool rollback are not
-complete; recovery explicitly refuses every launch carrying preparation,
-including promoted and retired bound history, until its owning proof validation
-exists. No prepared shape can release a slot or grant execution.
+The promotion reducer retains complete actual birth bindings; the decoder alone
+cannot enforce transition history. The preparation producer now registers that
+same spine before allocating resources, binds actual births before copying,
+and promotes only after genuine BIND without resetting its original deadline.
+Its owning history validator rewalks both promotion and preparation retirement;
+missing, incomplete or substituted births still require recovery. An unverified
+preparation quarantine is accepted only inside the complete historical retirement
+closure, never as a standalone current quarantined row. No prepared shape can
+release a slot or grant execution. These implementations require new exact-head
+Linux qualification; earlier data/schema evidence does not qualify them.
 The new native controller-only retirement receipt requires the original
 authenticated ordinary controller, original join and actual leaf removal;
 each read rechecks the held root/parent, original process lifetime and absent
@@ -119,15 +121,16 @@ copying and complete rewalk. Its synchronous factory starts no allocation;
 the installed composition can retain the owner before starting work. Close
 joins copying and every minted snapshot/CAS operation before a separate fresh
 native retirement read. Starting close synchronously refuses new execution
-borrows without closing the tree ahead of its required CAS join. This does not bind preparation into StateStore or prove
-directory quarantine, containment death or a terminal transition. Genuine
+borrows without closing the tree ahead of its required CAS join. The installed
+owner now binds that lifetime into StateStore; the materialization receipt alone
+still does not prove directory quarantine, containment death or terminality. Genuine
 controller birth now records the authenticated HELLO time in native code and
 freshly checks the original root/parent/leaf and PID/start lifetime; its opaque
 token and retirement receipt share the original identity digest. Immutable
 `e46c752` reached the exact missing-reader RED in both real native campaigns.
 Immutable `bebbb45` then passed the complete controller-birth assertions and all
 25 original native scenarios in both real Linux event runs. The owning
-StateStore preparation graph remains unfinished; this is not its qualification.
+StateStore preparation graph was not exercised by those historical runs.
 
 Instruction capture uses a fixed native instruction cursor: Git metadata is
 never entered, only exact `AGENTS.md` file contents may be read, and symlink
@@ -186,8 +189,9 @@ first StateOwner transaction. The implementation now records explicit `none` or
 seed; genuine Linux installation regressions remain unqualified. Today's
 selection, CAS search and the narrower original Run-used model closure cannot
 stand in for the original whole-inventory provenance.
-Full I1, owning preparation/private rollback and unexecuted crash cuts remain
-incomplete.
+Full I1 and unexecuted crash cuts remain incomplete. The owning preparation,
+private rollback and atomic stopped-recovery implementations below must pass
+their independent current-source Linux campaigns before being qualified.
 
 ## Validation boundary
 
@@ -335,14 +339,40 @@ legacy default path is not cut over or used as a fallback for this entry.
 The queued deadline experiment does not qualify a live worker's exact deadline
 or a clock-regression-during-release cut; those remain unverified.
 
-Cancellation of an already materialized, healthy but never-launched replacement
-generation remains unsupported: there is no implemented positive no-launch
-discard-retirement branch. Completed candidate handoff avoids creating an
-unused replacement; this does not qualify that distinct cancellation case.
-Installed cancellation currently closes model transports, not the in-flight
-tool operation's abort owner. In-flight tool cancellation and terminal
-quiescence after a stop during worker recovery remain incomplete; accepted
-StopIntent alone is not evidence that those physical owners have retired.
+New replacements are now created lazily only after genuine predecessor
+retirement and a fresh productive cut. A current preparing generation has its
+own original materialization/controller/reservation join and typed retirement;
+old unpaired generations are not retroactively granted fictional birth history.
+Installed cancellation now revokes the original tool controller and retains its
+join. An authentic already-received result is retained; otherwise the original
+unknown/full charge precedes genuine private rollback, with no refund or retry.
+Stopped worker recovery retains the exact wait/nonce/anchor until its unique
+atomic terminal transaction; it never exposes a transient queued replacement.
+The new 28-scenario worker campaign exercises these branches separately from
+the installed journey. They are implementation candidates, not qualified merely
+by adding tests; accepted StopIntent is not physical retirement evidence.
+The queued launcher-image allocation guard is implemented, but a new read-only
+descriptor-inventory diagnostic awaits seam confirmation and has not run. The
+existing queued-deadline assertions do not qualify absence of retained images.
+
+Credential redemption refusal now retains exact original credential/endpoint
+records and stops an unclaimed Run as runtime_failed before its deadline, rather
+than keeping the only lane until expiry. A new independent signed installed
+campaign revokes a real credential after queued admission, requires zero provider
+release and complete terminal/restart history. The original installed Busy
+campaign additionally checks credential.finalize and an explicit continuation
+replay after drain; its RATE_LIMITED hint grants no effect-retry permission.
+Neither campaign is qualified until a complete current-source report passes.
+
+After claim but before CONNECT, only the original native token/release mutex,
+actual I/O join and a held opaque no-release guard can produce the existing
+same-owner zero-consumption settlement. A closed transport report alone cannot.
+The native lifecycle regression exercises that retained mutex and environment
+teardown, not the exact installed SQL claim-to-CONNECT cut, which remains
+unverified. A genuinely received model response is retained by its original
+settlement owner across stop-only revision races and durability retry; it is
+never re-requested. Portable CAS-race regression is not physical qualification
+of every post-response publication failure cut.
 The 30-second native deadline bounds operation eligibility and cancellation,
 not hard real-time disappearance under arbitrary OS scheduling. Completion
 and retirement receipts still require the actual worker and callback joins.

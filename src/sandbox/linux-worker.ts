@@ -79,13 +79,14 @@ export type LinuxBlockedWorker = Readonly<{
   activateCommitted(launch: WorkerLaunch): Promise<void>;
   createInvocation(closure: BuiltinEditLaunchClosure): Promise<LinuxBlockedInvocation>;
   stop(): Promise<NativeContainmentDeathObservation>;
+  closeAfterControllerJoin(): Promise<void>;
 }>;
 export type LinuxWorkerController = Readonly<{
   pid: number;
   processStartToken: string;
   subreaperStartToken: string;
   preparationBirth: NativeControllerPreparationBirth;
-  bindWorkerReservation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string }): Promise<void>;
+  bindWorkerReservation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string }): Promise<NativeWorkerReservationBinding>;
   inspectPreactivation(input: { closure: WorkerLaunchClosure; reservation: HeldWorkerReservation; activationNonceDigest: string;
     containment?: ProcessContainment; workerIdentity?: WorkerIdentity }): Promise<NativePreactivationObservation>;
   launchWorker(input: { closure: WorkerLaunchClosure; generation: RunWorkspaceGeneration; activationNonceDigest: string }): Promise<LinuxBlockedWorker>;
@@ -175,6 +176,23 @@ export function readNativeControllerPreparationBirth(birth: NativeControllerPrep
   held.lastObservedAtMs = observed.observedAtMs;
   return immutableSnapshot({ identity: held.identity, controllerBirthDigest: held.controllerBirthDigest,
     observedAt: new Date(observed.observedAtMs).toISOString() });
+}
+
+declare const workerReservationBindingBrand: unique symbol;
+export type NativeWorkerReservationBinding = Readonly<{ [workerReservationBindingBrand]: true }>;
+type WorkerReservationBindingData = Readonly<{ runId: string; launchId: string; generationRef: string;
+  containmentPlanRef: string; sandboxLaunchSpecRef: string; spawnNonceDigest: string; activationNonceDigest: string;
+  controllerBirthDigest: string; reservation: HeldWorkerReservation['identity'] }>;
+const workerReservationBindings = new WeakMap<NativeWorkerReservationBinding,
+  { data: WorkerReservationBindingData; assertCurrent(): void }>();
+
+/** The original controller's durable BIND acknowledgement, not a phase string
+ * or a caller's assertion that its reservation file was written. */
+export function readNativeWorkerReservationBinding(receipt: NativeWorkerReservationBinding): WorkerReservationBindingData {
+  const held = workerReservationBindings.get(receipt);
+  if (!held) throw new TypeError('invalid native worker reservation binding');
+  held.assertCurrent();
+  return held.data;
 }
 
 declare const retiredControllerPreparationBrand: unique symbol;
@@ -687,6 +705,16 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                 borrowed.assertHeld(); native.bindReservation(borrowed.fd, config);
                 await awaitNative(() => native.pollBound() ? true : undefined, closeController);
                 controllerReceiver(); borrowed.assertHeld(); reservation.assertHeld();
+                const receipt = Object.freeze({}) as NativeWorkerReservationBinding;
+                workerReservationBindings.set(receipt, { data: immutableSnapshot({ runId: closure.spec.owner.runId,
+                  launchId: closure.spec.owner.workerLaunchId, generationRef: closure.workspaceGenerationRef,
+                  containmentPlanRef: closure.containmentPlanRef, sandboxLaunchSpecRef: closure.sandboxLaunchSpecRef,
+                  spawnNonceDigest: closure.plan.launchNonceDigest, activationNonceDigest, controllerBirthDigest,
+                  reservation: reservation.identity }), assertCurrent() {
+                  controllerReceiver(); reservation.assertHeld(); readNativeControllerPreparationBirth(preparationBirth);
+                  if (!native.pollBound()) mismatch('original native reservation BIND acknowledgement is unavailable');
+                } });
+                return receipt;
               } catch (error) { primary = { error }; throw error; }
               finally { retireBorrow(borrowed, primary); }
             },
@@ -831,6 +859,12 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                       // retired generation duplicate is never reopened/reused.
                       if (!borrowRetired) { retireBorrow(borrowed); borrowRetired = true; }
                     }
+                  },
+                  async closeAfterControllerJoin() {
+                    if (this !== worker) throw new TypeError('invalid blocked worker');
+                    active = false;
+                    await closeController();
+                    if (!borrowRetired) { retireBorrow(borrowed); borrowRetired = true; }
                   }
                 });
                 return worker;

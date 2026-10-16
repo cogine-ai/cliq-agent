@@ -7,12 +7,62 @@ import type { WorkspaceGenerationRetirementEvidenceV1, WorkspaceGenerationStateV
 import { KernelStorageError } from './errors.js';
 import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
-import { digest, disposeFixture } from './testing/fixtures.js';
+import { createQueuedFixture, digest, disposeFixture, prepareFixtureGeneration } from './testing/fixtures.js';
 
 function withDb<T>(root: string, operation: (driver: SqliteDriver) => T): T {
   const driver = openSqliteDriver(path.join(root, KERNEL_DATABASE_FILENAME));
   try { return operation(driver); } finally { driver.close(); }
 }
+
+test('recovery refuses current preparation quarantine edges without legitimizing offline data', async () => {
+  // The genuine preparation producer commits quarantine and retirement in one
+  // transaction. This existing offline corruption seam creates no native proof.
+  const fixture = await createQueuedFixture('preparation-quarantine-corruption');
+  let original: { phase: string; row_version: bigint; row_json: string } | undefined;
+  let generationId: string | undefined;
+  try {
+    const prepared = await prepareFixtureGeneration(fixture, 'preparation-quarantine-corruption');
+    generationId = prepared.generationId;
+    const before = await fixture.store.readRecoveryClosure(fixture.runId), generation = before.workspaceGenerations[0]!;
+    original = withDb(fixture.stateRoot, driver => driver.prepare('SELECT phase, row_version, row_json FROM workspace_generations WHERE generation_id = ?')
+      .get<{ phase: string; row_version: bigint; row_json: string }>(generation.generationId)!);
+    withDb(fixture.stateRoot, driver => driver.exec('DROP TRIGGER workspace_generations_validate_update'));
+    const { phase: _phase, snapshotEvidenceRef: _snapshot, snapshotEvidenceDigest: _snapshotDigest, ...base } = generation;
+    const candidates = [
+      { reason: 'preparation_retired', observedState: { kind: 'unverified_preparation' } },
+      { reason: 'preparation_retired', observedState: { kind: 'complete_tree', treeDigest: generation.lastVerifiedTreeDigest } },
+      { reason: 'materialization_failed', observedState: { kind: 'unverified_preparation' } },
+      { reason: 'preactivation_failed', observedState: { kind: 'unverified_preparation' } }
+    ];
+    for (const candidate of candidates) {
+      const quarantine = { schemaVersion: 1, format: 'cliq-workspace-generation-quarantine-evidence-v1',
+        runId: fixture.runId, generationRef: generation.generationRef, generationIdentityDigest: generation.generationIdentityDigest,
+        sourceRowVersion: generation.rowVersion, fromPhase: 'preactivated_readonly', ...candidate,
+        workerLaunchId: 'absent-preparation', preparationRetirementEvidenceRef: digest('absent-preparation-retirement'),
+        preparationRetirementEvidenceDigest: digest('absent-preparation-retirement-digest'), evidenceDigest: '' };
+      quarantine.evidenceDigest = digestOmitting(quarantine, 'evidenceDigest');
+      const artifact = await fixture.store.artifacts.publishCanonical(quarantine, quarantine.format);
+      const corrupted = { ...base, phase: 'quarantined', rowVersion: generation.rowVersion + 1,
+        quarantineEvidenceRef: artifact.ref, quarantineEvidenceDigest: quarantine.evidenceDigest, observedState: candidate.observedState };
+      const inspect = () => withDb(fixture.stateRoot, driver => driver.prepare('SELECT * FROM workspace_generations WHERE generation_id = ?')
+        .get(generation.generationId));
+      withDb(fixture.stateRoot, driver => driver.prepare("UPDATE workspace_generations SET phase = 'quarantined', row_version = ?, row_json = ? WHERE generation_id = ?")
+        .run(BigInt(corrupted.rowVersion), JSON.stringify(corrupted), generation.generationId));
+      const row = inspect();
+      await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), error =>
+        error instanceof KernelStorageError && error.code === 'RECOVERY_REQUIRED', `${candidate.reason}/${candidate.observedState.kind}`);
+      assert.deepEqual(inspect(), row, 'inspection cannot repair or legitimize a current preparation quarantine');
+      assert.deepEqual(fixture.store.getRun(fixture.runId), before.run);
+    }
+    withDb(fixture.stateRoot, driver => driver.prepare('UPDATE workspace_generations SET phase = ?, row_version = ?, row_json = ? WHERE generation_id = ?')
+      .run(original!.phase, original!.row_version, original!.row_json, generation.generationId));
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+  } finally {
+    if (original && generationId) withDb(fixture.stateRoot, driver => driver.prepare('UPDATE workspace_generations SET phase = ?, row_version = ?, row_json = ? WHERE generation_id = ?')
+      .run(original!.phase, original!.row_version, original!.row_json, generationId!));
+    await disposeFixture(fixture);
+  }
+});
 
 test('recovery inspects retired rows and refuses missing, malformed or nonzero retirement evidence without mutation', async () => {
   // This corrupts retained offline data through the existing Store fixture.

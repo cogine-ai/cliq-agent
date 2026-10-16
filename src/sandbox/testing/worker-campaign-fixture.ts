@@ -25,13 +25,13 @@ import { publishOfflineModelEndpoint } from '../../state/testing/model-endpoint.
  * The later StateStore.loadRunExecution path must create and inspect the real
  * signed processes, generation, edit effect and complete containment death. */
 export async function createLinuxWorkerCampaignFixture(input: {
-  installationRoot: string; cgroupParent: string; stateVolume: string; label: string;
+  installationRoot: string; cgroupParent: string; stateVolume: string; label: string; paddingBytes?: number;
 }) {
   if (process.platform !== 'linux') throw new Error('Linux worker campaign requires Linux; no skipped qualification');
   const stateRoot = await mkdtemp(path.join(input.stateVolume, 's-'));
   const workspace = await mkdtemp(path.join(input.stateVolume, 'w-'));
   await chmod(stateRoot, 0o700); await chmod(workspace, 0o700);
-  const original = Buffer.from('before\n');
+  const original = Buffer.concat([Buffer.from('before\n'), Buffer.alloc(input.paddingBytes ?? 0, 0x78)]);
   await writeFile(path.join(workspace, 'a'), original, { mode: 0o644 });
   const authority = testFixture();
   const builtin = builtinInputContracts.edit;

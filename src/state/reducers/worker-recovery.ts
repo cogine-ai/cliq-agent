@@ -6,7 +6,7 @@ import type { ProcessContainmentDeathEvidenceV1, ReconciliationProbeEvidenceV1, 
 import { immutableSnapshot } from '../../model/immutable.js';
 import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
 import { exactKeys } from '../../policy/runtime-authority.js';
-import { assertNativeContainmentDeath, type NativeContainmentDeathObservation } from '../../sandbox/linux-worker.js';
+import { assertNativeContainmentDeath, type NativeContainmentDeathObservation, type NativeRetainedWorkerRetirement } from '../../sandbox/linux-worker.js';
 import { observeRetainedRunWorkspace, readRetainedWorkspaceObservation } from '../../workspace/run-workspace/generation.js';
 import { insertArtifactMetadata, type ArtifactCatalog } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
@@ -23,6 +23,8 @@ import { hasOnlySettledInstalledModelUnknowns, openWorkerInvocations, readWorker
 import { assertWorkerRecoveryTaskReceipt, type WorkerRecoveryTaskReceipt } from '../worker-recovery-task.js';
 import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from '../store.js';
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
+import { prepareWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from '../worker-recovery-terminal.js';
+import { hasOnlySettledPrivateToolUnknowns } from '../private-tool-rollback.js';
 
 export type BeginWorkerRecoveryInput = { runId: string; expectedRunRevision: number };
 
@@ -255,7 +257,8 @@ export const beginWorkerRecovery = stateOperation('RECOVERY_REQUIRED', async (
 /** Internal owning reducer. A control client cannot supply proof, a path or a tree observation. */
 export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', async (
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: BeginWorkerRecoveryInput,
-  death: NativeContainmentDeathObservation, signal?: AbortSignal, brokerQuiescence?: InstalledBrokerQuiescence
+  death: NativeContainmentDeathObservation, signal?: AbortSignal, brokerQuiescence?: InstalledBrokerQuiescence,
+  stoppedOwner?: { retire(): Promise<NativeRetainedWorkerRetirement>; finish(plan: WorkerRecoveryTerminalPlan): Promise<Run> }
 ): Promise<Run> => {
   input = immutableSnapshot(input);
   signal?.throwIfAborted();
@@ -265,9 +268,9 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     throw new KernelStorageError('INVALID_REQUEST', 'worker recovery completion requires a Run id and expected revision');
   }
   const inspectingOwner = assertActiveStateOwner(driver, owner);
-  const cut = await readRecoveryClosure(driver, artifacts, input.runId);
+  let cut = await readRecoveryClosure(driver, artifacts, input.runId);
   signal?.throwIfAborted();
-  const { run } = cut;
+  let { run } = cut;
   if (run.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery completion Run revision changed');
   if (run.status !== 'waiting' || run.waitingReason !== 'reconciliation' || !run.waitingOnRef) {
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker recovery completion has no installed inspection');
@@ -279,12 +282,15 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker recovery completion cannot resolve another inspection nonce');
   }
   const open = openWorkerInvocations(cut.journal);
+  const privateRollback = !!run.stopIntentRef && hasOnlySettledPrivateToolUnknowns(cut.journal);
+  const undispatched = !!run.stopIntentRef && open.every(prepared => cut.journal.filter(entry =>
+    entry.opId === prepared.opId && entry.attempt === prepared.attempt).length === 1);
   if (open.length !== 0) {
     // Effect ambiguity is not physical release authority. Only this exact
     // fully validated, fully charged broker branch may remain unknown while
     // its worker is quarantined; every other open invocation still blocks.
     const assembly = decodeRetainedRunAssembly(await artifacts.readCanonical(cut.runSpec.assemblyRef));
-    if (!hasOnlySettledInstalledModelUnknowns(assembly, cut.journal) || !brokerQuiescence) {
+    if ((!hasOnlySettledInstalledModelUnknowns(assembly, cut.journal) && !privateRollback && !undispatched) || !brokerQuiescence) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'open worker invocations require their typed settlement or explicit manual-risk wait before quarantine');
     }
     assertInstalledBrokerQuiescence(brokerQuiescence, driver, owner, run.id);
@@ -292,7 +298,8 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
       throw new KernelStorageError('RECOVERY_REQUIRED', 'unknown model worker quarantine cannot select an existing replacement generation');
     }
   }
-  if (run.stopIntentRef || run.cancelRequested || sampleCanonicalNow() >= run.deadlineAt) {
+  let stopping = !!run.stopIntentRef || run.cancelRequested || sampleCanonicalNow() >= run.deadlineAt;
+  if (stopping && (!stoppedOwner || !run.stopIntentRef || !brokerQuiescence)) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'stopped worker recovery requires its terminal quiescence reducer');
   }
   const launch = cut.workerLaunches[0]!;
@@ -306,8 +313,9 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
       death.observedAt < wait.probeState.dispatch.probeStartedAt || death.observedAt > wait.probeState.dispatch.probeDeadlineAt) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'native worker death does not observe this persisted inspection');
   }
-  const observation = readRetainedWorkspaceObservation(await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
-    identity: closure.generation, sourceRowVersion: intent.sourceRowVersion, signal }));
+  const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
+    identity: closure.generation, sourceRowVersion: intent.sourceRowVersion, signal });
+  const observation = readRetainedWorkspaceObservation(workspaceRetirement);
   signal?.throwIfAborted();
   if (observation.generationRef !== generation.generationRef || observation.generationIdentityDigest !== generation.generationIdentityDigest ||
       observation.observedAt < death.observedAt || observation.observedAt > wait.probeState.dispatch.probeDeadlineAt) {
@@ -332,7 +340,16 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
         throw new KernelStorageError('REVISION_CONFLICT', 'unknown model worker quarantine acquired a competing replacement generation');
       }
     }
-    if (canonicalSha256(readRun(connection, run.id)) !== canonicalSha256(run) ||
+    const currentRun = readRun(connection, run.id);
+    if (canonicalSha256(currentRun) !== canonicalSha256(run) && currentRun.revision > run.revision && currentRun.stopIntentRef) {
+      const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...data }: Run) => data;
+      if (canonicalSha256(stable(currentRun)) === canonicalSha256(stable(run)) && stoppedOwner && brokerQuiescence) {
+        // Stop changes no worker subject, probe nonce, frontier or budget. The
+        // same original inspector may close that newer authority-reducing cut.
+        run = currentRun; cut = { ...cut, run }; stopping = true;
+      }
+    }
+    if (canonicalSha256(currentRun) !== canonicalSha256(run) ||
         canonicalSha256(readRequiredWorkerLaunch(connection, launch.launchId)) !== canonicalSha256(launch) ||
         canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, generation.generationRef)) !== canonicalSha256(generation) ||
         (replacement && canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, replacement.generationRef)) !== canonicalSha256(replacement)) ||
@@ -340,7 +357,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
       throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery completion cut changed');
     }
     const now = sampleCanonicalNow();
-    if (now >= probeDeadlineAt || now >= run.deadlineAt) {
+    if (now >= probeDeadlineAt || (!stopping && now >= run.deadlineAt)) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'worker recovery inspection expired before its exact completion cut');
     }
     return now;
@@ -400,6 +417,16 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   const wrapperArtifact = await artifacts.publishCanonical(wrapper, wrapper.format);
   signal?.throwIfAborted();
   const metadata = [inspectorArtifact, deathArtifact, recoveryArtifact, quarantineArtifact, wrapperArtifact];
+  requireCurrentCut(driver);
+  if (stopping) {
+    if (launch.phase !== 'reconciling') throw new KernelStorageError('RECOVERY_REQUIRED', 'stopped recovery lost its original reconciling launch');
+    const nativeRetirement = await stoppedOwner!.retire();
+    requireCurrentCut(driver);
+    const plan = await prepareWorkerRecoveryTerminalPlan(driver, artifacts, owner, { cut, wait, launch, generation,
+      quarantine, quarantineArtifact, wrapperArtifact, metadata, nativeRetirement, workspaceRetirement,
+      brokerQuiescence: brokerQuiescence! });
+    return stoppedOwner!.finish(plan);
+  }
   let outcome: TimeFenceAdvance | undefined, updated!: Run;
   driver.transaction(connection => {
     const now = requireCurrentCut(connection);

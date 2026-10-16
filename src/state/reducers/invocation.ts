@@ -43,6 +43,7 @@ import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
 import { assertModelGrantDispatch, readModelGrantClosure } from '../model-grant.js';
 import { prepareInstalledBrokerAmbiguity } from '../broker-ambiguity.js';
 import { MODEL_BROKER_ENTRY_ID } from '../model-broker-native.js';
+import { readWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from '../worker-recovery-terminal.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -863,4 +864,29 @@ export async function abandonUnknownInvocation(
   });
   requireHealthyFence(fenceOutcome);
   return abandoned;
+}
+
+/** Sole terminal transaction only. Positive original private-domain rollback
+ * resolves the unknown without replacing its pessimistic BudgetSettlement. */
+export function resolvePrivateRollbackInvocation(connection: SqliteConnection, driver: SqliteDriver,
+  owner: StateOwnerContext, token: WorkerRecoveryTerminalPlan, runId: string, now: string): InvocationJournalEntry {
+  const plan = readWorkerRecoveryTerminalPlan(driver, owner, token, runId), rollback = plan.rollback;
+  assertActiveStateOwner(connection, owner);
+  if (!rollback) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'private rollback has no original unknown producer');
+  const entries = readInvocationAttempt(connection, runId, rollback.prepared.opId, rollback.prepared.attempt);
+  const generation = readRequiredWorkspaceGenerationByRef(connection, plan.generation.generationRef);
+  const current = readRun(connection, runId);
+  if (current.revision !== plan.cut.run.revision || current.waitingOnRef !== plan.cut.run.waitingOnRef ||
+      generation.phase !== 'retired' || generation.retirementEvidenceRef !== rollback.evidence.retirementEvidenceRef ||
+      readHighestPreparedAttempt(connection, runId, rollback.prepared.opId)?.attempt !== rollback.prepared.attempt ||
+      entries.length !== 3 || entries[0]?.seq !== rollback.prepared.seq || entries[1]?.seq !== rollback.claim.seq ||
+      entries[2]?.phase !== 'unknown' || entries[2].seq !== rollback.unknown.seq ||
+      entries[2].budgetSettlementRef !== rollback.unknown.budgetSettlementRef ||
+      nextJournalSequence(connection, runId) !== plan.cut.journal.length + 1 || now < rollback.evidence.observedAt)
+    throw new KernelStorageError('REVISION_CONFLICT', 'private rollback original claim, retirement or immutable settlement changed');
+  const failed: InvocationJournalEntry = { ...rollback.claim, seq: nextJournalSequence(connection, runId), phase: 'failed',
+    budgetDelta: ZERO_BUDGET, budgetSettlementRef: rollback.unknown.budgetSettlementRef, errorRef: rollback.artifact.ref,
+    evidenceRef: rollback.artifact.ref, evidenceDigest: rollback.evidence.evidenceDigest, timestamp: now };
+  appendInvocationJournalEntry(connection, failed);
+  return failed;
 }

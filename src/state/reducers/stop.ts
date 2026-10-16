@@ -31,7 +31,10 @@ import { readToolCut } from '../tool-cut.js';
 import { assertRetiredGenerationCut } from '../generation-retirement.js';
 import { withInstalledBrokerTerminalClosure } from '../broker-ambiguity.js';
 import type { HeldInstalledRuntime } from '../installed-runtime.js';
-import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
+import { readWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from '../worker-recovery-terminal.js';
+import { planPrivateRollbackResult } from '../private-tool-rollback.js';
+import { validateInstalledModelNoReleaseHistory } from '../broker-no-release.js';
+import { appendRunStateEvent, requireHealthyFence, resolvePrivateRollbackInvocation } from './invocation.js';
 
 /** Loaded authority only. Cancellation fences immediately; terminal drain independently proves the entire current cut. */
 export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, authority: {
@@ -191,12 +194,13 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       const selected = await cut(input.expectedRunRevision);
       return commitDerivedStop(selected, async (now) => {
         if (now >= selected.run.deadlineAt) return { intent: deadlineIntent(now) };
-        return prepareModelFailureStop(artifacts, assertActiveStateOwner(driver, owner), assembly, selected, {
+        return prepareModelFailureStop(driver, artifacts, assertActiveStateOwner(driver, owner), assembly, selected, {
           inspectorIdentityRef: input.inspectorIdentityRef, inspectorIdentityDigest: input.inspectorIdentityDigest
         }, now);
       });
     }),
-    commitTerminalStop: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number; checkpoint?: ToolCheckpointProof }) => {
+    commitTerminalStop: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number; checkpoint?: ToolCheckpointProof },
+      recovery?: WorkerRecoveryTerminalPlan) => {
       input = immutableSnapshot(input);
       if (!exactKeys(input, ['expectedRunRevision', ...(input.checkpoint === undefined ? [] : ['checkpoint'])])) throw new TypeError('unknown terminal stop field');
       assertActiveStateOwner(driver, owner);
@@ -206,8 +210,10 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           [recovered.run.revision, recovered.latestCheckpoint.basedOnRunRevision].includes(input.expectedRunRevision)) {
         return immutableSnapshot({ run: recovered.run });
       }
-      const selected = await cut(input.expectedRunRevision);
+      const workerRecovery = recovery === undefined ? undefined : readWorkerRecoveryTerminalPlan(driver, owner, recovery, runId);
+      const selected = await cut(input.expectedRunRevision, workerRecovery !== undefined);
       const { run, latestCheckpoint: checkpoint } = selected;
+      if (workerRecovery) requireEqual(selected, workerRecovery.cut, 'terminal original worker recovery cut');
       if (!run.stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal drain requires a persisted StopIntent');
       if (assembly.mcpServers.length) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'MCP stop requires server-containment closure');
       // The public recovery cut already verified every sealed worker proof;
@@ -226,13 +232,17 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       if (frontier.kind === 'tool') await readToolCut(driver, artifacts, runId, authority.resolveToolInput);
       const prepared: InvocationJournalEntry[] = [];
       const unknowns: InvocationJournalEntry[] = [];
+      const rollback = workerRecovery?.rollback;
+      const noRelease = await validateInstalledModelNoReleaseHistory(driver, artifacts, selected);
       for (const { entry, hasClaim } of stopInvocationHistory(selected.journal).values()) {
+        if (rollback && entry.opKind === 'tool' && entry.phase === 'unknown' && entry.seq === rollback.unknown.seq) continue;
         if (installedRuntime && entry.opKind === 'model' && entry.replayClass === 'retry' && entry.phase === 'unknown') {
           unknowns.push(entry);
           continue;
         }
         if (!['model', 'tool'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
-            (entry.phase !== 'failed' || hasClaim))) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
+            (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq)))))
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
         if (entry.phase === 'prepared') prepared.push(entry);
       }
       // This installed closure path is worker-free. An unresolved model
@@ -241,7 +251,11 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
       }
       if (pending && pending.batch.calls.slice(pending.next).some((call) => selected.journal.some((entry) =>
-          entry.opId === toolOperationId(runId, pending.batch.itemId, call.callId) && entry.phase === 'dispatch_claimed'))) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'an already dispatched call needs its real result');
+          entry.opId === toolOperationId(runId, pending.batch.itemId, call.callId) && entry.phase === 'dispatch_claimed' &&
+          !(rollback && entry.seq === rollback.claim.seq)))) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'an already dispatched call needs its real result');
+      if (rollback && (!pending || rollback.request.batchItemId !== pending.batch.itemId || rollback.request.callIndex !== pending.next ||
+          rollback.request.callId !== pending.batch.calls[pending.next]?.callId))
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'private rollback is not the current ordered stopped call');
       let seal: Awaited<ReturnType<typeof prepareToolCheckpoint>> | undefined;
       if (run.activeWorkerLaunchId) {
         if (!input.checkpoint || !exactKeys(input.checkpoint, ['workspaceStateRef', 'snapshotEvidenceRef', 'retirementEvidenceRef']) ||
@@ -265,7 +279,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           for (const entry of prepared.sort((a, b) => a.seq - b.seq)) {
             const remaining = subtractBudget(reserved, entry.budgetDelta, 'stop refund');
             const settlement: BudgetSettlementV1 = { schemaVersion: 1, format: 'cliq-budget-settlement-v1', runId, opId: entry.opId,
-              attempt: entry.attempt, preparedJournalSeq: entry.seq, terminalJournalSeq: selected.journal.length + refunds.length + 1,
+              attempt: entry.attempt, preparedJournalSeq: entry.seq, terminalJournalSeq: selected.journal.length + (rollback ? 1 : 0) + refunds.length + 1,
               terminalPhase: 'failed', reserved: entry.budgetDelta, consumed: ZERO_BUDGET, released: entry.budgetDelta,
               budgetConsumedBefore: run.budgetConsumed, budgetConsumedAfter: run.budgetConsumed,
               budgetReservedBefore: reserved, budgetReservedAfter: remaining, settledAt: now, settlementDigest: '' };
@@ -276,12 +290,14 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
             reserved = remaining;
           }
           if (!isZeroBudget(reserved)) throw new TypeError('stop retains an unexplained reservation');
-          const cancelled = pending ? pending.batch.calls.slice(pending.next).map((_, index) => cancelledCall(pending.batch, pending.next + index, run.stopIntentRef!, now)) : [];
+          const rollbackResult = rollback ? planPrivateRollbackResult(rollback.request, rollback.evidence, now) : undefined;
+          const nextCancelled = (pending?.next ?? 0) + (rollback ? 1 : 0);
+          const cancelled = pending ? pending.batch.calls.slice(nextCancelled).map((_, index) => cancelledCall(pending.batch, nextCancelled + index, run.stopIntentRef!, now)) : [];
           const detail = planCanonicalArtifact({ ...agentStopDetail(intent, run.stopIntentRef!, now),
             abandonedRetryInvocations: abandoned }, 'cliq-terminal-detail-v1');
           const continuation = await prepareContinuationCommit(artifacts, { context: decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef)),
-            existingItems: items, items: cancelled.map(({ item }) => item), frontier, checkpointId, workspaceStateRef: checkpoint.workspaceStateRef,
-            artifacts: [detail, ...refunds.map(({ artifact }) => artifact), ...cancelled.flatMap(({ artifacts }) => artifacts)] });
+            existingItems: items, items: [...(rollbackResult ? [rollbackResult.item] : []), ...cancelled.map(({ item }) => item)], frontier, checkpointId, workspaceStateRef: checkpoint.workspaceStateRef,
+            artifacts: [detail, ...(rollbackResult?.artifacts ?? []), ...refunds.map(({ artifact }) => artifact), ...cancelled.flatMap(({ artifacts }) => artifacts)] });
           const session = readSession(driver, run.sessionId);
           const projection = decodeSessionProjection(await readCanonicalArtifact(artifacts, session.contextProjectionRef));
           if (projection.sessionId !== session.id || projection.contextRevision !== session.contextRevision || projection.throughItemSeq !== session.latestItemSeq) throw new TypeError('Session stop projection is not current');
@@ -315,16 +331,21 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
               throw new KernelStorageError('RECOVERY_REQUIRED', 'broker terminal closure preparation is stale; reobserve the original claim');
             }
             brokerClosure.validate(connection, run, committedAt);
+            workerRecovery?.validate(connection, committedAt);
+            for (const artifact of workerRecovery?.metadata ?? []) insertArtifactMetadata(connection, artifact, committedAt);
+            workerRecovery?.commit(connection, committedAt);
+            if (rollback) resolvePrivateRollbackInvocation(connection, driver, owner, recovery!, runId, now);
             if (connection.prepare("SELECT 1 FROM worker_launches WHERE run_id = ? AND phase != 'retired' AND launch_id != ? LIMIT 1")
               .get(runId, run.activeWorkerLaunchId ?? '')) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop cannot retain a pending worker launch');
             for (const artifact of [...continuation.metadata, ...(seal?.metadata ?? []), ...brokerClosure.metadata, terminalArtifact, projectionArtifact]) insertArtifactMetadata(connection, artifact, committedAt);
             seal?.commit(connection, run, committedAt);
             if (connection.prepare("SELECT 1 FROM workspace_generations WHERE run_id = ? AND phase NOT IN ('sealed','retired') LIMIT 1").get(runId)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop requires every workspace generation sealed or positively retired');
             assertRetiredGenerationCut(connection, run, selected.workspaceGenerations.map(generation =>
+              workerRecovery?.generation.generationRef === generation.generationRef ||
               seal && generation.generationRef === readRequiredWorkerLaunch(connection, run.activeWorkerLaunchId!).workspaceGenerationRef
                 ? readRequiredWorkspaceGenerationByRef(connection, generation.generationRef) : generation));
             for (const refund of refunds) appendInvocationJournalEntry(connection, refund.entry);
-            continuation.commit(connection, run, selected.journal.length + refunds.length, committedAt);
+            continuation.commit(connection, run, selected.journal.length + (rollback ? 1 : 0) + refunds.length, committedAt);
             connection.prepare(`UPDATE runs SET status = ?, next_step = NULL, frontier_ref = NULL, waiting_reason = NULL, waiting_on_ref = NULL,
               active_worker_launch_id = NULL, budget_reserved_json = ?, terminal_reason = ?, terminal_detail_ref = ?, revision = revision + 1, updated_at = ? WHERE id = ?`)
               .run(intent.targetStatus, JSON.stringify(ZERO_BUDGET), intent.reason, detail.ref, committedAt, runId);

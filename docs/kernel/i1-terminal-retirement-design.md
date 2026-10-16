@@ -1,9 +1,9 @@
 # I1 coherent terminal retirement — implementation contract
 
-Status: implementation direction approved on 2026-10-16; not implemented or
-qualified by this document. Closed data types/schema, the physical materialization
-owner and controller-only birth/retirement receipts have implementation; the owning preparation/retirement producers and
-their real Linux qualification remain incomplete. The owner accepted one WorkerLaunch preparation
+Status: implementation direction approved on 2026-10-16; the owning preparation,
+private rollback and atomic stopped-recovery implementation is now present, but
+requires new exact-source Linux qualification. This document itself qualifies
+nothing. The owner accepted one WorkerLaunch preparation
 spine plus genuine preparation-retirement/private rollback evidence, including
 fail-closed incomplete birth. Model unknown retains the existing strictly newer
 StateOwner rule. Normative RFC/WP amendments and implementation must ship
@@ -21,18 +21,18 @@ BudgetSettlement, Checkpoint, Session publication and the sole terminal reducer.
 The default CLI, Workspace Trust, per-tool permission and OS sandbox remain
 independent. No new productive dispatch or permission is allowed after stop.
 
-## Confirmed gaps
+## Confirmed gaps addressed by the implementation candidate
 
-- Installed cancel currently closes model transports, not the tool operation
+- Installed cancel previously closed model transports, not the tool operation
   owner. Native invocation result polling has no cancellation input.
-- The driver submits a tool result with its pre-cancel Run revision, although
+- The driver previously submitted a tool result with its pre-cancel Run revision, although
   the existing tool reducer can accept genuine evidence at the current stopped
   cut. Cancellation must not make a real result disappear.
-- Worker recovery deliberately rejects stop/expiry because its terminal
+- Worker recovery previously rejected stop/expiry because its terminal
   quiescence branch is absent. Removing that check would incorrectly requeue.
-- Activation creates a generation and controller before WorkerLaunch reservation.
+- Activation previously created a generation and controller before WorkerLaunch reservation.
   Closing their descriptors is not positive durable retirement of either tree.
-- Recovery eagerly creates a replacement before retiring the predecessor,
+- Recovery previously eagerly created a replacement before retiring the predecessor,
   leaving an unused generation when cancellation wins.
 - Claimed private edits need typed rollback closure when no genuine result is
   available; ordinary no-dispatch cancellation cannot close that claim.

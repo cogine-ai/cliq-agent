@@ -17,6 +17,7 @@ import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRevokeOper
   decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
+import type { CredentialFinalizeRequest } from '../../src/state/installed-credential-client.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
 import { createCredentialSecretScanner } from './testing/credential-secret-scan.js';
 import { scanCredentialSecretCorpus } from './testing/credential-secret-corpus.js';
@@ -34,7 +35,7 @@ const privateAfter = 'after the private edit\n';
 const excludedVendorInstruction = 'Ordinary vendor instructions remain independent of source exclusion.\n';
 const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
-type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign';
+type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 
@@ -131,8 +132,11 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const failureOnly = mode === '--failure-campaign';
   const retryOnly = mode === '--retry-campaign';
+  const authorityOnly = mode === '--authority-failure-campaign';
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: retryOnly
+    scope: authorityOnly
+      ? 'independent signed installed Linux Runs, real credential revocation after queued admission, exact pre-I/O refusal and terminal retirement, one Session publication per Run and actual Supervisor restart; not a provider qualification, exact finalizer cut or complete I1'
+      : retryOnly
       ? 'independent signed installed Linux Run, real default-alias drift and exact restoration on the same Secret Service lifetime, free pre-dispatch failure and one subsequent owned model response, explicit cancellation and terminal Session publication; not daemon restart, locked-store recovery, post-claim retry, full I1, real provider/billing, I2 or macOS'
       : failureOnly
       ? 'independent signed installed Linux Run, one positively received owned HTTP429 response, exact model-failure stop and physical terminal drain, Session publication and reconnect, then durable source-refusal replay after real credential revocation; not transport retry, cancellation, deadline expiry, full I1, real provider/billing, I2 or macOS'
@@ -168,7 +172,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     ({ ...body, requestDigest: canonicalSha256(body) });
   const hello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'installed-run-journey',
     controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
-    requestedFeatureIds: ['session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel', 'supervisor.status'] };
+    requestedFeatureIds: ['session.create', 'session.get', 'run.submit', 'run.get', 'run.attach', 'run.cancel', 'supervisor.status', 'credential.finalize'] };
   const exchange = (requests: Record<string, unknown>[], connectBy = 0, timeout = 30000): Response[] => {
     assert(connectBy === 0 || requests.length === 0, 'startup connection retry is hello-only, never a request replay');
     assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 30000);
@@ -281,6 +285,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   let server: Server | undefined;
   let primary: unknown, providerFailure = false, requestsReceived = 0, reflectionEnabled = false, shortRunEnabled = false;
   let busySubmit: (Record<string, unknown> & { admissionKey: string }) | undefined;
+  let busyFinalize: CredentialFinalizeRequest | undefined;
   const socketClosures: Promise<void>[] = [];
   const processStart = async (pid: number) => {
     assert(Number.isSafeInteger(pid) && pid > 0);
@@ -394,15 +399,23 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
             // The actual complete POST holds the original credential scope
             // until this responder replies. A fresh UDS connection can refuse
             // without that scope; never ask for queued installation/status work.
-            assert(busySubmit);
-            const reply = exchange([busySubmit], 0, 5000)[0]!;
+            assert(busySubmit && busyFinalize);
+            const [reply, finalized] = exchange([busySubmit, busyFinalize], 0, 5000);
+            assert(reply && finalized);
             const code = reply.error?.code;
             report.credentialScopeBusy = { observedCode: !reply.ok && (code === 'RATE_LIMITED' || code === 'INVALID_REQUEST')
               ? code : 'unrecognized', exactPayloadMatched: canonicalSha256(reply) === canonicalSha256({
               protocolVersion: 1, ok: false, method: 'run.submit', error: { schemaVersion: 1,
                 code: 'RATE_LIMITED', retryable: true, retryAfterMs: 1000, messageCode: 'run.credential_scope_busy' } }) };
+            const finalizeCode = finalized.error?.code;
+            report.credentialFinalizeScopeBusy = { observedCode: !finalized.ok &&
+              (finalizeCode === 'RATE_LIMITED' || finalizeCode === 'INVALID_REQUEST') ? finalizeCode : 'unrecognized',
+              exactPayloadMatched: canonicalSha256(finalized) === canonicalSha256({
+                protocolVersion: 1, ok: false, method: 'credential.finalize', error: { schemaVersion: 1,
+                  code: 'RATE_LIMITED', retryable: true, retryAfterMs: 1000, messageCode: 'run.credential_scope_busy' } }) };
           } catch {
             report.credentialScopeBusy = { observedCode: 'unavailable', exactPayloadMatched: false };
+            report.credentialFinalizeScopeBusy = { observedCode: 'unavailable', exactPayloadMatched: false };
           } finally {
             // Even the expected RED must preserve the original positively
             // received rejection, its settlement and physical terminal drain.
@@ -413,8 +426,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
           }
           return;
         }
-        if (retryOnly) {
-          assert.equal(ordinal, 1, 'free preparation failures must lead to exactly one actual model dispatch');
+        if (retryOnly || authorityOnly) {
+          assert.equal(ordinal, 1, 'this independent candidate campaign must release exactly one actual model request');
           const bytes = Buffer.from(JSON.stringify({ id: 'owned-retry-fixture-turn', object: 'chat.completion', model,
             choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'The restored preparation is complete.' } }],
             usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }));
@@ -526,7 +539,10 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId, secretSubmissionId: 'installed-run-fixture-secret', expiresAt: '2099-01-01T00:00:00.000Z' };
     const operation = decodeCredentialAuthorityOperation(success(credential(enrollment, secret), 'operation'));
     assert.equal(operation.phase, 'committed'); assert.equal(operation.ownerPrincipalId, principal); assert.equal(operation.attempt, 1);
-    assert.equal(observe().items.length, 1); report.credentialEnrolled = true;
+    busyFinalize = { protocolVersion: 1, method: 'credential.finalize', requestId: operation.requestId,
+      operationId: operation.operationId, attempt: operation.attempt, commandDigest: operation.requestDigest };
+    const enrolledPlatform = observe();
+    assert.equal(enrolledPlatform.items.length, 1); report.credentialEnrolled = true;
     const keeperBefore = show(services.keeperUnit), supervisorBefore = show(services.supervisorUnit);
     for (const state of [keeperBefore, supervisorBefore]) {
       assert.equal(state.ActiveState, 'active'); assert.equal(state.SubState, 'running'); assert.equal(state.MainPID, state.ExecMainPID);
@@ -593,11 +609,12 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     assert.deepEqual(exchange([sessionRequest])[0], sessionReply, 'new authenticated connection must replay the original Session response');
     const currentSession = () => accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id }])[0]!, 'session.get').snapshot.session;
     mark('public_run_submit');
-    const runBudgets = { wallTimeMs: failureOnly || retryOnly ? 45000 : 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
+    const runBudgets = { wallTimeMs: failureOnly || retryOnly || authorityOnly ? 45000 : 300000, modelTokens: 2000000, costMicros: 10000000, toolCalls: 1000,
       repairAttempts: 0, childDepth: 0, childConcurrency: 1 };
     const submit = request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000104',
       admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
-      workspacePath: recipe.workspace, objective: retryOnly ? 'Acknowledge restored model preparation without using a tool.'
+      workspacePath: recipe.workspace, objective: authorityOnly ? 'Retain one candidate without using a tool until the user cancels.'
+        : retryOnly ? 'Acknowledge restored model preparation without using a tool.'
         : failureOnly ? 'Observe the owned cafe\u0301 model failure without using a tool.'
           : 'Change example.txt from before the private edit to after the private edit, using one edit operation.',
       model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
@@ -611,6 +628,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       busySubmit = request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000123',
         admissionKey: randomBytes(32).toString('base64url') });
       report.credentialScopeBusy = { observedCode: 'not_observed', exactPayloadMatched: false };
+      report.credentialFinalizeScopeBusy = { observedCode: 'not_observed', exactPayloadMatched: false };
     }
     if (!failureOnly && !retryOnly) {
       const unauthorized = exchange([request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000114',
@@ -671,7 +689,97 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure });
       return cut;
     };
-    if (retryOnly) {
+    if (authorityOnly) {
+      mark('candidate_holds_real_worker_slot');
+      const candidateBy = Date.now() + 15000;
+      let candidate: Record<string, any>;
+      for (;;) {
+        await delay(50); candidate = read(); assert(!providerFailure);
+        if (candidate.journal.at(-1)?.phase === 'completed') break;
+        assert(Date.now() < candidateBy, 'the original actual worker did not retain its candidate');
+      }
+      assert.equal(candidate.snapshot.run.status, 'running'); assert(candidate.snapshot.run.activeWorkerLaunchId);
+      assert.equal(requestsReceived, 1); assert.deepEqual(currentSession(), session);
+      const queuedRequest = request({ ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000125',
+        admissionKey: randomBytes(32).toString('base64url'), expectedContextRevision: currentSession().contextRevision,
+        objective: 'Stop truthfully if the original model credential is revoked before dispatch.' });
+      const queuedReply = exchange([queuedRequest])[0]!, queued = accepted(queuedReply, 'run.submit').snapshot.run;
+      const readQueued = () => accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: queued.id }])[0]!, 'run.get');
+      const beforeRevoke = readQueued();
+      assert.equal(beforeRevoke.snapshot.run.status, 'queued'); assert.equal(beforeRevoke.snapshot.run.activeWorkerLaunchId, undefined);
+      assert.deepEqual(beforeRevoke.journal, []); assert.equal(requestsReceived, 1);
+      mark('revoke_real_credential_after_admission_before_dispatch');
+      const revoked = decodeCredentialAuthorityRevokeOperation(success(credential({ schemaVersion: 1, kind: 'revoke',
+        requestId: '019a0012-0000-7000-8000-000000000126', credentialGrantId: enrollment.credentialGrantId,
+        expectedAuthorityRevision: operation.committedAuthorityRevision }), 'operation'));
+      assert.equal(revoked.disposition, 'revoked'); assert.equal(revoked.cleanupPhase, 'cleanup_complete');
+      const revokedPlatform = observe(); assert.deepEqual(revokedPlatform.items, []);
+      assert.equal(revokedPlatform.nameOwner, enrolledPlatform.nameOwner); assert.equal(revokedPlatform.servicePid, enrolledPlatform.servicePid);
+      const cancel = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000127',
+        runId: admitted.id, expectedRevision: read().snapshot.run.revision });
+      const cancelReply = exchange([cancel])[0]!; accepted(cancelReply, 'run.cancel');
+      mark('refused_queued_run_drains_without_provider_release');
+      const terminalBy = Date.now() + 30000;
+      let firstTerminal: Record<string, any>, refusedTerminal: Record<string, any>;
+      for (;;) {
+        await delay(50); firstTerminal = read(); refusedTerminal = readQueued();
+        assert(!providerFailure); assert.equal(requestsReceived, 1, 'a revoked credential must never reach the provider');
+        if (firstTerminal.snapshot.run.status === 'cancelled' && refusedTerminal.snapshot.run.status === 'failed') break;
+        assert(Date.now() < terminalBy, 'authority refusal retained the only execution lane instead of retiring');
+      }
+      assert(Date.now() < terminalBy);
+      const refused = refusedTerminal.snapshot.run;
+      assert.equal(refused.terminalReason, 'runtime_failed'); assert.equal(refused.cancelRequested, false);
+      assert.equal(refused.activeWorkerLaunchId, undefined); assert.equal(refused.resultRef, undefined);
+      assert(refused.updatedAt < refused.deadlineAt, 'authorization refusal must not wait for Run expiry');
+      assert.deepEqual(refusedTerminal.journal.map((entry: any) => entry.phase), ['prepared', 'failed']);
+      const [prepared, failed] = refusedTerminal.journal;
+      assert.equal(failed.requestRef, prepared.requestRef); assert.equal(failed.opId, prepared.opId); assert.equal(failed.attempt, 0);
+      for (const entry of refusedTerminal.journal) {
+        assert.equal(entry.dispatchId, undefined); assert.equal(entry.brokerFenceTokenDigest, undefined);
+      }
+      const zero = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+      assert.equal(canonicalSha256(refused.budgetReserved), canonicalSha256(zero));
+      assert.equal(canonicalSha256(refused.budgetConsumed), canonicalSha256(zero));
+      const refusal = parseJsonStrict((await readCas(failed.errorRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(refusal.format, 'cliq-credential-redemption-refusal-v1');
+      assert.equal(refusal.credentialAuthorityRecord.state, 'revoked');
+      assert.equal(refusal.refusalDigest, digestOmitting(refusal, 'refusalDigest'));
+      const intent = parseJsonStrict((await readCas(refused.stopIntentRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(intent.reason, 'runtime_failed'); assert.equal(intent.runtimeSubtype, 'runtime'); assert.equal(intent.failingOpId, prepared.opId);
+      const evidence = parseJsonStrict((await readCas(intent.runtimeFailureRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(evidence.failureKind, 'credential_redemption_failed'); assert.equal(evidence.failureCode, 'revoked');
+      assert.equal(evidence.evidenceDigest, digestOmitting(evidence, 'evidenceDigest')); assert.equal(evidence.evidenceDigest, intent.runtimeFailureDigest);
+      const sessionCut = accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+        afterItemSeq: session.latestItemSeq }])[0]!, 'session.get');
+      assert.equal(sessionCut.snapshot.session.contextRevision, session.contextRevision + 2);
+      assert.equal(sessionCut.snapshot.session.latestItemSeq, session.latestItemSeq + 2);
+      assert.deepEqual(sessionCut.items.map((item: any) => item.kind), ['run_terminal', 'run_terminal']);
+      const published = await Promise.all(sessionCut.items.map(async (item: any) =>
+        parseJsonStrict((await readCas(item.payloadRef)).toString('utf8')) as Record<string, any>));
+      assert.deepEqual(published.map(item => [item.runId, item.status]), [[admitted.id, 'cancelled'], [queued.id, 'failed']]);
+      assert.deepEqual(exchange([queuedRequest])[0], queuedReply); assert.deepEqual(exchange([cancel])[0], cancelReply);
+      mark('revoked_credential_terminal_history_after_real_restart');
+      assert.equal(command('/usr/bin/systemctl', ['--user', 'restart', services.supervisorUnit], undefined, 30000).status, 0);
+      const successor = show(services.supervisorUnit), retainedKeeper = show(services.keeperUnit), recoverBy = Date.now() + 30000;
+      assert.notEqual(successor.MainPID, supervisorBefore.MainPID); assert.notEqual(successor.InvocationID, supervisorBefore.InvocationID);
+      assert.equal(retainedKeeper.MainPID, keeperBefore.MainPID); assert.equal(retainedKeeper.InvocationID, keeperBefore.InvocationID);
+      await selectedSupervisor(services.supervisorUnit, successor,
+        path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'), recoverBy);
+      assert.deepEqual(read(), firstTerminal); assert.deepEqual(readQueued(), refusedTerminal);
+      assert.deepEqual(exchange([queuedRequest])[0], queuedReply); assert.deepEqual(exchange([cancel])[0], cancelReply);
+      assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: session.id,
+        afterItemSeq: session.latestItemSeq }])[0]!, 'session.get'), sessionCut);
+      assert.equal(accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status').health, 'ready');
+      assert.equal(requestsReceived, 1); assert(!providerFailure);
+      for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
+      assert.equal(await readFile(source, 'utf8'), hostBefore);
+      report.credentialAuthorizationFailure = { qualified: true, revokedAfterAdmission: true, actualPlatformItemRemoved: true,
+        originalCandidateCancelled: true, refusedRunStatus: 'failed', terminalReason: 'runtime_failed', failureCode: 'revoked',
+        noClaimOrProviderRequest: true, zeroConsumptionAndReservation: true, stoppedBeforeDeadline: true,
+        terminalRunAndCredentialHistoryReopenedAfterActualSupervisorRestart: true, sessionPublishedOncePerRun: true,
+        originalNativeJoinRequiredByProduction: true, providerRequests: 1, fullI1Qualified: false };
+    } else if (retryOnly) {
       mark('real_pre_dispatch_failure_without_claim');
       assert.equal(Date.parse(admitted.deadlineAt) - Date.parse(admitted.createdAt), 45000);
       const fullCharge = { modelTokens: 36864, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
@@ -996,6 +1104,21 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         completedResponseRef: completed.resultRef, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest,
         terminalDetailRef: failed.terminalDetailRef, fullReservationCharged: true, noToolDispatch: true, noResultPublished: true,
         genuineWorkerJoinRequiredByProduction: true, sessionPublishedOnce: true, reconnectAndAdmissionReplayPreserved: true };
+      mark('credential_finalizer_replay_after_scope_drain');
+      assert(busyFinalize);
+      assert.equal(report.credentialFinalizeScopeBusy.exactPayloadMatched, true,
+        'actual concurrent installed finalization must return the fixed retryable RATE_LIMITED response');
+      const finalizedReplay = accepted(exchange([busyFinalize])[0]!, 'credential.finalize');
+      assert.deepEqual(decodeCredentialAuthorityOperation(finalizedReplay.operation), operation,
+        'scope-busy refusal must preserve the original committed credential continuation');
+      const finalizerPlatform = observe();
+      assert.deepEqual(finalizerPlatform, enrolledPlatform,
+        'scope-busy refusal and committed replay must preserve the same real service, collection and item');
+      assert.equal(requestsReceived, 1); assert.deepEqual(read(), terminal);
+      report.credentialFinalizeScopeBusy = { ...report.credentialFinalizeScopeBusy, qualified: true,
+        originalCommittedContinuationPreserved: true, originalPlatformItemPreserved: true,
+        providerRequestsUnchanged: true, terminalRunUnchanged: true,
+        singleExplicitBusyRequest: true, manualReplayAfterScopeDrain: true };
       mark('durable_source_refusal_before_credential_revocation');
       const refusalSession = currentSession();
       const refusalCore = { ...resourceCore, requestId: '019a0012-0000-7000-8000-000000000116',
@@ -1866,5 +1989,5 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
 
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
-assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign'); assert(filename && extra.length === 0);
+assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign'); assert(filename && extra.length === 0);
 await campaign(filename, mode);

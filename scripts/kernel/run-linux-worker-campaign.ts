@@ -2320,8 +2320,9 @@ function frozenArtifact<T>(stateRoot: string, ref: string): T {
   } finally { fs.closeSync(fd); }
 }
 
-async function parentLossBeforeRelease() {
-  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'parent-loss' });
+async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProbe = false) {
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: retireAfterStop ? 'parent-loss-stop' : 'parent-loss',
+    ...(cancelDuringProbe ? { paddingBytes: 8 * 1024 ** 2 } : {}) });
   const before = await fixture.store.readRecoveryClosure(fixture.runId);
   const execution = await fixture.store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
   // Read-only metadata inspection is an OS test boundary, not an execution
@@ -2429,17 +2430,83 @@ async function parentLossBeforeRelease() {
         assert.deepEqual(fs.readFileSync(file), fixture.original, 'blocked native edit must not change even its private generation');
       } finally { fs.closeSync(file); }
     } finally { fs.closeSync(root); }
-    assert.equal(failed.run.budgetReserved.toolCalls, 1);
-    assert.equal(failed.run.budgetConsumed.toolCalls, 0);
+    assert.equal(failed.run.budgetReserved.toolCalls, 0);
+    assert.equal(failed.run.budgetConsumed.toolCalls, 1, 'an indeterminate permanent claim is charged once, never refunded');
+    const unknown = failed.journal.find(entry => entry.opKind === 'tool' && entry.phase === 'unknown');
+    assert(unknown?.budgetSettlementRef);
+    const settlement = await fixture.store.artifacts.readCanonical<BudgetSettlementV1>(unknown.budgetSettlementRef);
+    assert.equal(settlement.terminalPhase, 'unknown'); assert.equal(settlement.consumed.toolCalls, 1);
     assert.equal(failed.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'completed').length, 0);
     await assert.rejects(execution.executeCurrentTool({ expectedRunRevision: failed.run.revision }));
     const replay = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(replay.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed').length, 1);
-    assert.equal(replay.run.budgetReserved.toolCalls, 1, 'unknown claim keeps its conservative reservation');
+    assert.equal(replay.run.budgetReserved.toolCalls, 0); assert.equal(replay.run.budgetConsumed.toolCalls, 1);
     assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+    if (retireAfterStop) {
+      fs.readSync = originalRead; syncBuiltinESMExports();
+      const agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+        releaseKeys: fixture.runtimeAuthority.releaseKeys });
+      const sessionBefore = fixture.store.getSession(fixture.sessionId);
+      const cancelled = await agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
+        expectedRunRevision: replay.run.revision });
+      assert.equal(cancelled.run.waitingOnRef, failed.run.waitingOnRef, 'cancel must retain the exact original worker subject');
+      await execution.requestStop();
+      const recovery = execution.recoverWorker({ expectedRunRevision: cancelled.run.revision });
+      let recoveryFinished = false, observedProbeNonce: string | undefined;
+      void recovery.then(() => { recoveryFinished = true; }, () => { recoveryFinished = true; });
+      if (cancelDuringProbe) {
+        const until = performance.now() + 30_000;
+        let dispatched: { run: Run; wait: WorkerDeathWait } | undefined;
+        while (!recoveryFinished && !dispatched && performance.now() < until) {
+          const current = readRun(metadata, fixture.runId);
+          if (current.waitingOnRef) {
+            const wait = frozenArtifact<WorkerDeathWait>(fixture.stateRoot, current.waitingOnRef);
+            if (wait.probeState.phase === 'automatic_in_flight') dispatched = { run: current, wait };
+          }
+          if (!dispatched) await delay(1);
+        }
+        assert(dispatched && dispatched.wait.probeState.phase === 'automatic_in_flight',
+          'the real inspector must own its durable nonce before this cancellation');
+        observedProbeNonce = dispatched.wait.probeState.dispatch.probeNonceDigest;
+        const during = await agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
+          expectedRunRevision: dispatched.run.revision });
+        assert.equal(recoveryFinished, false, 'cancellation must commit while the original actual inspector is still running');
+        assert.equal(during.run.waitingOnRef, dispatched.run.waitingOnRef, 'stop must preserve the exact in-flight wait and nonce');
+        assert.deepEqual(frozenArtifact<WorkerDeathWait>(fixture.stateRoot, during.run.waitingOnRef!).subject, dispatched.wait.subject);
+      }
+      const terminal = await bounded(recovery);
+      assert.equal(terminal.status, 'cancelled'); assert.equal(terminal.terminalReason, 'cancelled_by_user');
+      const closed = await fixture.store.readRecoveryClosure(fixture.runId);
+      const toolJournal = closed.journal.filter(entry => entry.opKind === 'tool');
+      assert.deepEqual(toolJournal.map(entry => entry.phase), ['prepared', 'dispatch_claimed', 'unknown', 'failed']);
+      assert.equal(toolJournal[3]!.budgetSettlementRef, unknown.budgetSettlementRef);
+      assert.deepEqual(toolJournal[3]!.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+      assert.equal(closed.run.budgetConsumed.toolCalls, 1); assert.equal(closed.run.budgetReserved.toolCalls, 0);
+      assert.equal(closed.workspaceGenerations.find(row => row.generationRef === generationRef)?.phase, 'retired');
+      assert.equal(closed.workspaceGenerations.filter(row => row.phase === 'materializing' || row.phase === 'preactivated_readonly').length, 0);
+      assert.deepEqual((await checkpointBytes(fixture.store, fixture.runId)).bytes, fixture.original);
+      const rollback = await fixture.store.artifacts.readCanonical<{ failureKind: string; dispatchId: string }>(toolJournal[3]!.errorRef!);
+      assert.equal(rollback.failureKind, 'private_effect_rolled_back'); assert.equal(rollback.dispatchId, claim.dispatchId);
+      const session = fixture.store.getSession(fixture.sessionId);
+      assert.equal(session.latestItemSeq, sessionBefore.latestItemSeq + 1);
+      assert.deepEqual((await agent.commitTerminalStop({ expectedRunRevision: terminal.revision })).run, terminal);
+      assert.deepEqual(fixture.store.getSession(fixture.sessionId), session);
+      await fixture.store.close();
+      const successor = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+      try {
+        assert.deepEqual(await successor.readRecoveryClosure(fixture.runId), closed);
+        assert.deepEqual(successor.getSession(fixture.sessionId), session);
+      } finally { await successor.close(); }
+      console.log(JSON.stringify({ scenario: cancelDuringProbe ? 'actual-worker-recovery-inflight-stop' : 'actual-private-tool-stop-recovery-retirement', waitingSubjectRef: failed.run.waitingOnRef,
+        generationRef, originalDispatchId: claim.dispatchId, originalUnknownSettlementRef: unknown.budgetSettlementRef,
+        ...(observedProbeNonce ? { observedProbeNonce, cancellationCommittedDuringOriginalProbe: true } : {}),
+        permanentToolClaims: 1, nativeEffectCount: 0, toolCharges: 1, terminalSessionPublications: 1,
+        note: 'real parent loss before release; actual joined death/quarantine/rollback and terminal restart; not an in-flight write cut' }));
+      return;
+    }
     console.log(JSON.stringify({ scenario: 'actual-parent-loss-before-release', ...fault,
       waitingSubjectRef: failed.run.waitingOnRef, permanentToolClaims: 1, nativeEffectCount: 0,
-      remainingBudgetReservation: 1, note: 'worker_death wait preserved; manual/unknown settlement is not qualified' }));
+      remainingBudgetReservation: 0, pessimisticToolCharge: 1, note: 'worker_death wait and fully charged unknown preserved; terminal closure not exercised by this case' }));
   } finally {
     fs.readSync = originalRead; syncBuiltinESMExports();
     metadata.close();
@@ -2632,10 +2699,15 @@ async function noOpenInvocationRecovery(cancelInspection = false) {
     assert.equal(physicalArchive.dev, fault.originalDevice); assert.equal(physicalArchive.ino, fault.originalInode);
     assert.equal(receipt.quarantineDeviceId, String(fault.originalDevice)); assert.equal(receipt.quarantineFileId, String(fault.originalInode));
     await assert.rejects(access(fault.originalPath), { code: 'ENOENT' });
-    assert.equal(restored.workspaceGenerations.filter(row => row.phase === 'preactivated_readonly').length, 1);
+    assert.equal(restored.workspaceGenerations.filter(row => row.phase === 'preactivated_readonly').length, 0,
+      'recovery must not allocate an unused successor before actual predecessor retirement');
     assert.deepEqual((await checkpointBytes(store, fixture.runId)).bytes, fixture.original);
     assert.match(await readFile(path.join(fault.scope, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
     assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+    await bounded(execution.resumeCurrentRetirement({ expectedRunRevision: recovered.revision }));
+    const retiredPredecessor = await store.readRecoveryClosure(fixture.runId);
+    assert.equal(retiredPredecessor.workspaceGenerations.find(row => row.generationRef === originalGenerationRef)?.phase, 'retired');
+    assert.equal(retiredPredecessor.workspaceGenerations.filter(row => row.phase === 'preactivated_readonly' || row.phase === 'materializing').length, 0);
     const productive = await bounded(execution.executeCurrentTool({ expectedRunRevision: recovered.revision }));
     assert.equal(productive.status, 'queued');
     const final = await checkpointBytes(store, fixture.runId);
@@ -2797,9 +2869,11 @@ async function supervisorCrashAfterMove() {
     const reobserved = await lstat(archivePath, { bigint: true }); assert.ok(reobserved.isDirectory() && !reobserved.isSymbolicLink());
     assert.equal(reobserved.dev, physical.dev); assert.equal(reobserved.ino, physical.ino);
     assert.equal(recoveredCut.latestCheckpoint.id, before.latestCheckpoint.id);
-    assert.equal(recoveredCut.workspaceGenerations.filter(row => row.phase === 'preactivated_readonly').length, 1);
+    assert.equal(recoveredCut.workspaceGenerations.filter(row => row.phase === 'preactivated_readonly').length, 0,
+      'successor preparation must remain lazy even after a real move-before-commit restart');
     assert.deepEqual(recoveredCut.journal, retained.journal);
     assert.deepEqual((await checkpointBytes(successor, fixture.runId)).bytes, fixture.original);
+    await bounded(execution.resumeCurrentRetirement({ expectedRunRevision: recovered.revision }));
     await bounded(execution.executeCurrentTool({ expectedRunRevision: recovered.revision }));
     const final = await checkpointBytes(successor, fixture.runId);
     assert.deepEqual(final.bytes, Buffer.from('after\n')); assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
@@ -2908,6 +2982,102 @@ async function retirementFailureKeepsOwner(fault: NonNullable<CrashChildInput['r
   }
 }
 
+/** This observes an actual private-file effect, not a claim/timer as a proxy
+ * for native release. Either legitimate result/revocation ordering must close
+ * the original producer once; the unknown branch must prove real rollback. */
+async function actualEffectCancellation() {
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: 'actual-effect-cancel', paddingBytes: 8 * 1024 ** 2 });
+  let store = fixture.store;
+  const metadata = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const before = await store.readRecoveryClosure(fixture.runId), sessionBefore = store.getSession(fixture.sessionId);
+    const agent = await store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+      releaseKeys: fixture.runtimeAuthority.releaseKeys });
+    const execution = await store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
+    let finished = false;
+    const work = execution.executeCurrentTool({ expectedRunRevision: before.run.revision });
+    void work.then(() => { finished = true; }, () => { finished = true; });
+    let observed: { generationRef: string; dispatchId: string } | undefined;
+    const until = performance.now() + 30_000;
+    while (!finished && !observed && performance.now() < until) {
+      const cut = metadata.readSnapshot(connection => {
+        const run = readRun(connection, fixture.runId);
+        const claim = readInvocationJournal(connection, fixture.runId).find(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed');
+        return run.activeWorkerLaunchId && claim
+          ? { launch: readRequiredWorkerLaunch(connection, run.activeWorkerLaunchId), claim } : undefined;
+      });
+      if (cut?.launch.phase === 'activated') {
+        const identity = frozenArtifact<WorkspaceGenerationIdentityV1>(fixture.stateRoot, cut.launch.workspaceGenerationRef);
+        if (identity.locator.kind !== 'linux_directory') throw new Error('actual effect cancellation requires its real Linux generation');
+        const root = fs.openSync(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath),
+          fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+        try {
+          const actual = fs.fstatSync(root, { bigint: true });
+          assert.equal(String(actual.dev), identity.locator.deviceId); assert.equal(String(actual.ino), identity.locator.directoryFileId);
+          const file = fs.openSync(`/proc/self/fd/${root}/a`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+          try {
+            const bytes = Buffer.alloc(6), count = fs.readSync(file, bytes, 0, bytes.length, 0);
+            if (count === 6 && bytes.equals(Buffer.from('after\n'))) observed = {
+              generationRef: cut.launch.workspaceGenerationRef, dispatchId: cut.claim.dispatchId! };
+          } finally { fs.closeSync(file); }
+        } finally { fs.closeSync(root); }
+      }
+      if (!observed) await delay(1);
+    }
+    assert(observed, 'the campaign must observe real edited bytes while the original producer still owns its operation');
+    assert.equal(finished, false);
+    const command = { ...await publishInProcessChannel(store), requestId: uuidv7(),
+      expectedRunRevision: store.getRun(fixture.runId).revision };
+    const cancelled = await agent.cancelRun(command);
+    assert.equal(finished, false, 'this case must commit cancellation before the original effect/Checkpoint producer completes');
+    await execution.requestStop();
+    await bounded(work.catch(() => undefined));
+    let cut = await store.readRecoveryClosure(fixture.runId);
+    if (cut.run.status === 'waiting') await bounded(execution.recoverWorker({ expectedRunRevision: cut.run.revision }));
+    else await bounded(execution.finishCurrentStop({ expectedRunRevision: cut.run.revision }));
+    cut = await store.readRecoveryClosure(fixture.runId);
+    assert.equal(cut.run.status, 'cancelled'); assert.equal(cut.run.terminalReason, 'cancelled_by_user');
+    const journal = cut.journal.filter(entry => entry.opKind === 'tool');
+    assert.equal(journal.filter(entry => entry.phase === 'dispatch_claimed').length, 1);
+    assert.equal(journal[1]!.dispatchId, observed.dispatchId);
+    assert.equal(cut.run.budgetReserved.toolCalls, 0); assert.equal(cut.run.budgetConsumed.toolCalls, 1);
+    const known = journal.at(-1)?.phase === 'completed';
+    if (known) {
+      assert.deepEqual(journal.map(entry => entry.phase), ['prepared', 'dispatch_claimed', 'completed']);
+      const expected = Buffer.concat([Buffer.from('after\n'), fixture.original.subarray(7)]);
+      assert.deepEqual((await checkpointBytes(store, fixture.runId)).bytes, expected);
+    } else {
+      assert.deepEqual(journal.map(entry => entry.phase), ['prepared', 'dispatch_claimed', 'unknown', 'failed']);
+      assert.equal(journal[2]!.budgetSettlementRef, journal[3]!.budgetSettlementRef);
+      const proof = await store.artifacts.readCanonical<{ failureKind: string }>(journal[3]!.errorRef!);
+      assert.equal(proof.failureKind, 'private_effect_rolled_back');
+      assert.equal(cut.workspaceGenerations.find(row => row.generationRef === observed.generationRef)?.phase, 'retired');
+      assert.deepEqual((await checkpointBytes(store, fixture.runId)).bytes, fixture.original);
+    }
+    assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original, 'live source stays unchanged in either actual result race');
+    const session = store.getSession(fixture.sessionId);
+    assert.equal(session.latestItemSeq, sessionBefore.latestItemSeq + 1);
+    assert.deepEqual((await agent.commitTerminalStop({ expectedRunRevision: cut.run.revision })).run, cut.run);
+    assert.deepEqual(store.getSession(fixture.sessionId), session);
+    await store.close(); store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+    assert.deepEqual(await store.readRecoveryClosure(fixture.runId), cut);
+    assert.deepEqual(store.getSession(fixture.sessionId), session);
+    const reloaded = await store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+      releaseKeys: fixture.runtimeAuthority.releaseKeys });
+    assert.deepEqual((await reloaded.cancelRun({ ...command, ...await publishInProcessChannel(store) })).response, cancelled.response);
+    assert.deepEqual(store.getSession(fixture.sessionId), session);
+    console.log(JSON.stringify({ scenario: 'actual-private-effect-cancellation', actualPrivateEffectObserved: true,
+      generationRef: observed.generationRef, originalDispatchId: observed.dispatchId, originalProducerJoined: true,
+      settlementOutcome: known ? 'genuine_result_retained' : 'unknown_then_proven_private_rollback',
+      permanentToolClaims: 1, toolCharges: 1, terminalSessionPublications: 1,
+      note: 'observed actual edit, not a precise pre-result cut; the other result/revocation ordering is not qualified by this case' }));
+  } finally {
+    metadata.close();
+    if (store !== fixture.store) await store.close();
+    await fixture.dispose();
+  }
+}
+
 for (const [scenario, run] of [
   ['controller-anchor-birth', controllerAnchorBirth],
   ['before-spawn-retirement-retry', () => preactivationRetirementRetry('before_spawn')],
@@ -2927,6 +3097,9 @@ for (const [scenario, run] of [
   ['expired-final-death-publication', expiredFinalDeathPublication],
   ['slow-tool-seal-reobserves-paused-controller', slowToolSealReobservesPausedController],
   ['parent-loss-before-release', parentLossBeforeRelease],
+  ['private-tool-stop-recovery-retirement', () => parentLossBeforeRelease(true)],
+  ['worker-recovery-inflight-stop', () => parentLossBeforeRelease(true, true)],
+  ['actual-effect-cancellation', actualEffectCancellation],
   ['no-open-invocation-recovery', () => noOpenInvocationRecovery()],
   ['cancelled-recovery', () => noOpenInvocationRecovery(true)],
   ['supervisor-crash-after-move', supervisorCrashAfterMove],

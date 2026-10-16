@@ -3,6 +3,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { decodeCredentialAuthorityRecord, decodeEndpointAuthorityRecord, type EndpointCredentialGrantBinding,
+  type EndpointRegistrationV1 } from '../kernel/credential-authority.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { ModelResponseFailureEvidenceV1 } from '../kernel/stop.js';
 import type { SupervisorInspectorIdentityV1, TerminalDetail } from '../kernel/types.js';
@@ -25,6 +27,124 @@ const claim = (fixture: Fixture, prepared: Prepared) => fixture.store.claimInvoc
   dispatchId: `dispatch:${prepared.entry.opId}:${prepared.entry.attempt}` });
 const stop = async (fixture: Fixture) => fixture.agent.stopForModelFailure({ expectedRunRevision: revision(fixture),
   ...(await fixtureInspector(fixture)).identity });
+
+// Retained data at the existing reducer/history seam, not a live authority
+// scope, platform credential or installation qualification.
+async function credentialFailure(fixture: Fixture, prepared: Prepared,
+  failure: 'revoked' | 'expired' | 'credential_binding_changed' | 'endpoint_revoked' = 'revoked') {
+  const credentialGrantRef = fixture.authority.assembly.provider.credentialGrantRefs[0]!;
+  const binding = await fixture.store.artifacts.readCanonical<EndpointCredentialGrantBinding>(credentialGrantRef);
+  const endpoint = await fixture.store.artifacts.readCanonical<EndpointRegistrationV1>(binding.endpointRegistrationRef);
+  const observedAt = sampleCanonicalNow(), { bindingDigest: _, ...recordBody } = binding;
+  const latest = { ...recordBody,
+    ...(failure === 'endpoint_revoked' ? {} : { authorityRevision: binding.authorityRevision + 1 }),
+    ...(['expired', 'credential_binding_changed'].includes(failure) ? { secretGeneration: binding.secretGeneration + 1 } : {}),
+    ...(failure === 'expired' ? { expiresAt: observedAt } : {}),
+    platformItem: { kind: 'linux_secret_service', schema: 'org.freedesktop.Secret.Generic', collection: 'default', itemId: 'offline-test-item' },
+    state: failure === 'revoked' ? 'revoked' : 'active',
+    ...(failure === 'revoked' ? { revokedAt: observedAt, revokedByRequestId: uuidv7(), revokedByRequestDigest: canonicalSha256('offline-revoke') } : {}),
+    recordDigest: '' };
+  latest.recordDigest = digestOmitting(latest, 'recordDigest');
+  const record = decodeCredentialAuthorityRecord(latest);
+  const endpointBody = { schemaVersion: 1, endpointRegistrationId: endpoint.endpointRegistrationId,
+    authorityRevision: failure === 'endpoint_revoked' ? 2 : 1,
+    ownerPrincipalId: endpoint.ownerPrincipalId, sourceRequestId: uuidv7(), sourceRequestDigest: canonicalSha256('offline-endpoint'),
+    registration: endpoint, expectedRegistrationArtifactRef: binding.endpointRegistrationRef,
+    createdAt: endpoint.createdAt, state: failure === 'endpoint_revoked' ? 'revoked' : 'active',
+    ...(failure === 'endpoint_revoked' ? { revokedAt: observedAt, revokedByRequestId: uuidv7(),
+      revokedByRequestDigest: canonicalSha256('offline-endpoint-revoke') } : {}), recordDigest: '' };
+  endpointBody.recordDigest = digestOmitting(endpointBody, 'recordDigest');
+  const endpointRecord = decodeEndpointAuthorityRecord(endpointBody);
+  const refusal = { schemaVersion: 1, format: 'cliq-credential-redemption-refusal-v1', runId: fixture.runId,
+    opId: prepared.entry.opId, attempt: prepared.entry.attempt, requestRef: prepared.entry.requestRef,
+    credentialGrantRef, endpointRegistrationRef: binding.endpointRegistrationRef,
+    credentialAuthorityRecord: record, endpointAuthorityRecord: endpointRecord, observedAt, refusalDigest: '' };
+  refusal.refusalDigest = digestOmitting(refusal, 'refusalDigest');
+  return { refusal, binding };
+}
+
+for (const failure of ['revoked', 'expired', 'credential_binding_changed', 'endpoint_revoked'] as const)
+test(`a retained ${failure} credential refusal drains once without a claim, charge, response or retry after restart`, async () => {
+  const fixture = await createAgentFixture(`credential-failure-${failure}`, undefined, { mode: 'plan' });
+  try {
+    const prepared = await prepare(fixture), { refusal, binding } = await credentialFailure(fixture, prepared, failure);
+    const artifact = await fixture.store.artifacts.publishCanonical(refusal, 'cliq-invocation-error-v1');
+    await fixture.store.failInvocationBeforeDispatch({ runId: fixture.runId, expectedRunRevision: revision(fixture),
+      opId: prepared.entry.opId, attempt: prepared.entry.attempt, errorRef: artifact.ref });
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const stopped = await stop(fixture);
+    const intent = await fixture.store.artifacts.readCanonical<ModelFailureStopIntent>(stopped.run.stopIntentRef!);
+    const evidence = await fixture.store.artifacts.readCanonical<Record<string, unknown>>(intent.runtimeFailureRef);
+    assert.equal(evidence.failureKind, 'credential_redemption_failed'); assert.equal(evidence.failureCode, failure);
+    assert.equal(evidence.credentialGrantRef, refusal.credentialGrantRef); assert.equal(evidence.credentialGrantDigest, binding.bindingDigest);
+    assert.equal(evidence.credentialAuthorityRecordDigest, refusal.credentialAuthorityRecord.recordDigest);
+    assert.equal(evidence.authorityRevision, refusal.credentialAuthorityRecord.authorityRevision);
+    if (failure === 'endpoint_revoked') {
+      assert.equal(refusal.credentialAuthorityRecord.state, 'active');
+      assert.equal(evidence.endpointAuthorityRevision, 2);
+      assert.equal(evidence.endpointAuthorityRecordDigest, refusal.endpointAuthorityRecord.recordDigest);
+    } else assert.equal(Object.hasOwn(evidence, 'endpointAuthorityRecordDigest'), false);
+    assert.deepEqual(before.journal.map(entry => entry.phase), ['prepared', 'failed']);
+    assert.deepEqual(before.run.budgetConsumed, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+    await assert.rejects(prepare(fixture), { code: 'LEASE_FENCED' });
+    await reopen(fixture);
+    const proof = await quiescedToolCheckpoint(fixture, stopped.checkpointId);
+    const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture), checkpoint: proof.checkpoint });
+    assert.equal(terminal.run.status, 'failed'); assert.equal(terminal.run.terminalReason, 'runtime_failed');
+    const after = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(after.journal, before.journal); assert.deepEqual(after.run.budgetConsumed, before.run.budgetConsumed);
+    assert.equal(fixture.store.getSession(terminal.run.sessionId).latestItemSeq, 1);
+    await reopen(fixture);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('credential refusal data cannot substitute Journal, authority revision, frozen grant, endpoint or failure branch', async () => {
+  const fixture = await createAgentFixture('credential-failure-corruption', undefined, { mode: 'plan' });
+  const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const prepared = await prepare(fixture), { refusal } = await credentialFailure(fixture, prepared);
+    const artifact = await fixture.store.artifacts.publishCanonical(refusal, 'cliq-invocation-error-v1');
+    await fixture.store.failInvocationBeforeDispatch({ runId: fixture.runId, expectedRunRevision: revision(fixture),
+      opId: prepared.entry.opId, attempt: prepared.entry.attempt, errorRef: artifact.ref });
+    const stopped = await stop(fixture);
+    const intent = await fixture.store.artifacts.readCanonical<ModelFailureStopIntent>(stopped.run.stopIntentRef!);
+    const evidence = await fixture.store.artifacts.readCanonical<Record<string, unknown>>(intent.runtimeFailureRef);
+    for (const change of [
+      { credentialGrantRef: canonicalSha256('other-grant') }, { credentialGrantDigest: canonicalSha256('other-binding') },
+      { endpointRegistrationRef: canonicalSha256('other-endpoint') }, { endpointRegistrationDigest: canonicalSha256('other-target') },
+      { credentialAuthorityRecordDigest: canonicalSha256('other-record') }, { authorityRevision: 1 }, { credentialServiceRevision: 2 },
+      { failureCode: 'platform_item_absent' }, { failureCode: 'platform_store_unavailable' },
+      { failureCode: 'endpoint_revoked', endpointAuthorityRecordDigest: refusal.endpointAuthorityRecord.recordDigest, endpointAuthorityRevision: 2 },
+      { unusableResponseRef: canonicalSha256('not-a-response') }
+    ]) {
+      const forged = { ...evidence, ...change, evidenceDigest: '' };
+      forged.evidenceDigest = digestOmitting(forged, 'evidenceDigest');
+      const falseEvidence = await fixture.store.artifacts.publishCanonical(forged, 'cliq-runtime-failure-evidence-v1');
+      const falseIntent = await fixture.store.artifacts.publishCanonical({ ...intent,
+        runtimeFailureRef: falseEvidence.ref, runtimeFailureDigest: forged.evidenceDigest }, 'cliq-stop-intent-v1');
+      fault.prepare('UPDATE runs SET stop_intent_ref = ? WHERE id = ?').run(falseIntent.ref, fixture.runId);
+      try { await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' }); }
+      finally { fault.prepare('UPDATE runs SET stop_intent_ref = ? WHERE id = ?').run(stopped.run.stopIntentRef!, fixture.runId); }
+    }
+    await fixture.store.readRecoveryClosure(fixture.runId);
+  } finally { fault.close(); await disposeFixture(fixture); }
+});
+
+test('a future-dated credential refusal cannot become a runtime StopIntent', async () => {
+  const fixture = await createAgentFixture('credential-failure-future', undefined, { mode: 'plan' });
+  try {
+    const prepared = await prepare(fixture), { refusal } = await credentialFailure(fixture, prepared);
+    const future = { ...refusal, observedAt: new Date(Date.parse(refusal.observedAt) + 60_000).toISOString(), refusalDigest: '' };
+    future.refusalDigest = digestOmitting(future, 'refusalDigest');
+    const artifact = await fixture.store.artifacts.publishCanonical(future, 'cliq-invocation-error-v1');
+    await fixture.store.failInvocationBeforeDispatch({ runId: fixture.runId, expectedRunRevision: revision(fixture),
+      opId: prepared.entry.opId, attempt: prepared.entry.attempt, errorRef: artifact.ref });
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    await assert.rejects(stop(fixture), { code: 'INVALID_REQUEST' });
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+  } finally { await disposeFixture(fixture); }
+});
+
 async function reopen(fixture: Fixture) {
   await fixture.store.close();
   fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);

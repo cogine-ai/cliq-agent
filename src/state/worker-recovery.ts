@@ -353,7 +353,7 @@ export async function validateRetainedWorkerQuarantines(artifacts: ArtifactCatal
     if (generation.observedState.kind === 'complete_tree') {
       if (!exactKeys(generation.observedState, ['kind', 'treeDigest'])) throw new TypeError('quarantine tree is not closed');
       assertArtifactRef(generation.observedState.treeDigest);
-    } else if (!exactKeys(generation.observedState, ['kind', 'failureCode']) ||
+    } else if (generation.observedState.kind !== 'unreadable_partial' || !exactKeys(generation.observedState, ['kind', 'failureCode']) ||
         !['descriptor_io_failed', 'artifact_missing_or_corrupt', 'path_or_entry_invalid', 'git_closure_invalid'].includes(generation.observedState.failureCode)) {
       throw new TypeError('quarantine failure is not closed');
     }

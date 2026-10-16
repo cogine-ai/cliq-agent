@@ -44,6 +44,8 @@ import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
 import { readRetiredGenerationSource } from './generation-retirement.js';
 import { validateInstalledBrokerAmbiguityHistory } from './broker-ambiguity.js';
+import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
+import { validateWorkerPreparationHistory } from './worker-preparation.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -511,9 +513,10 @@ async function validateLaunchGraph(
 ): Promise<void> {
   const byRef = new Map(generations.map((generation) => [generation.generationRef, generation]));
   for (const launch of launches) {
-    if (launch.phase === 'preparing' || launch.retirementKind === 'preparation') {
-      recoveryFailure('worker preparation requires its exact resource birth and retirement closure');
-    }
+    // Its owning history validator checked the logical intent, actual recorded
+    // births and original live owner. No execution fields exist in this branch.
+    if (launch.phase === 'preparing') continue;
+    if (launch.retirementKind === 'preparation') recoveryFailure('retired preparation is not an unretired launch');
     await requireRecoveryArtifacts(artifacts, [
       ['WorkerLaunch.workspaceGenerationRef', launch.workspaceGenerationRef],
       ['WorkerLaunch.containmentPlanRef', launch.containmentPlanRef],
@@ -608,9 +611,10 @@ export async function readRecoveryClosure(
     workspaceGenerations,
     childAllocations
   } = databaseCut;
-  if (databaseCut.allWorkerLaunches.some(launch => launch.preparation !== undefined)) {
-    recoveryFailure('worker preparation provenance requires its exact owning resource closure');
-  }
+  try {
+    await validateWorkerPreparationHistory(driver, artifacts, { run, launches: databaseCut.allWorkerLaunches,
+      generations: workspaceGenerations });
+  } catch (error) { recoveryFailure(`worker preparation history is invalid: ${(error as Error).message}`, error); }
   requireRecoveryArtifactRef(run.specRef, 'Run.specRef');
   for (const [label, ref] of [
     ['Run.frontierRef', run.frontierRef],
@@ -757,7 +761,10 @@ export async function readRecoveryClosure(
     workspaceGenerations,
     childAllocations
   };
-  try { await validateStopRecovery(driver, artifacts, closure); }
+  try {
+    await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
+    await validateStopRecovery(driver, artifacts, closure);
+  }
   catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error); }
   return closure;
 }

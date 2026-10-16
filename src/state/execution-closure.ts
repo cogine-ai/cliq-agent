@@ -104,6 +104,10 @@ function filesystemBinding(value: unknown): void {
 export function decodeWorkerContainmentPlan(value: unknown): ProcessContainmentPlanV1 & { owner: WorkerOwner } {
   return decodeLinuxContainmentPlan(value, 'worker_activation') as ProcessContainmentPlanV1 & { owner: WorkerOwner };
 }
+/** Retained data only; this cannot mint a native launch closure. */
+export function decodeBuiltinEditContainmentPlan(value: unknown): ProcessContainmentPlanV1 {
+  return decodeLinuxContainmentPlan(value, 'run_invocation');
+}
 function decodeLinuxContainmentPlan(value: unknown, purpose: 'worker_activation' | 'run_invocation'): ProcessContainmentPlanV1 {
   const plan = record(value, ['schemaVersion', 'format', 'owner', 'filesystemBinding', 'launchNonceDigest', 'backend', 'createdAt', 'planDigest',
     ...(purpose === 'run_invocation' ? ['parentContainmentRef'] : [])], 'containment plan');
@@ -229,6 +233,10 @@ function mounts(value: unknown, allowGenerationWrites: boolean): SandboxMountV1[
 
 export function decodeWorkerSandboxLaunchSpec(value: unknown): WorkerSpec {
   return decodeLinuxLaunchSpec(value, 'worker_activation') as WorkerSpec;
+}
+/** Retained data only; productive creation still requires the branded closure. */
+export function decodeBuiltinEditSandboxLaunchSpec(value: unknown): EditSpec {
+  return decodeLinuxLaunchSpec(value, 'tool') as EditSpec;
 }
 function decodeLinuxLaunchSpec(value: unknown, purpose: 'worker_activation' | 'tool'): WorkerSpec | EditSpec {
   const spec = record(value, ['schemaVersion', 'format', 'runtime', 'executable', 'environment', 'filesystem', 'mounts', 'mountsDigest',

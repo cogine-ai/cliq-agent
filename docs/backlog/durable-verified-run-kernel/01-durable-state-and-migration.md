@@ -1301,8 +1301,11 @@ type RuntimeFailureEvidenceV1 = RuntimeFailureEvidenceBaseV1 & (
       credentialAuthorityRecordDigest: string
       authorityRevision: number
       credentialServiceRevision: number
-      failureCode: 'expired' | 'revoked' | 'platform_item_absent' | 'platform_store_unavailable'
-    }
+      } & (
+        | { failureCode: 'expired' | 'revoked' | 'credential_binding_changed' | 'platform_item_absent' | 'platform_store_unavailable'
+            endpointAuthorityRecordDigest?: never; endpointAuthorityRevision?: never }
+        | { failureCode: 'endpoint_revoked'; endpointAuthorityRecordDigest: string; endpointAuthorityRevision: number }
+      )
   | {
       failureKind: 'retry_unknown_exhausted'
       retryUnknownResultRef: ArtifactRef
@@ -1913,6 +1916,7 @@ type WorkspaceGenerationQuarantineEvidenceV1 = {
   sourceRowVersion: number
   observedState:
     | { kind: 'complete_tree'; treeDigest: string }
+    | { kind: 'unverified_preparation' }
     | {
         kind: 'unreadable_partial'
         failureCode: 'descriptor_io_failed' | 'artifact_missing_or_corrupt' | 'path_or_entry_invalid' | 'git_closure_invalid'
@@ -1928,6 +1932,13 @@ type WorkspaceGenerationQuarantineEvidenceV1 = {
   observedAt: string
   evidenceDigest: string
 } & (
+  | {
+      reason: 'preparation_retired'
+      fromPhase: 'materializing' | 'preactivated_readonly'
+      workerLaunchId: string
+      preparationRetirementEvidenceRef: ArtifactRef
+      preparationRetirementEvidenceDigest: string
+    }
   | {
       reason: 'materialization_failed'
       fromPhase: 'materializing'
@@ -3560,3 +3571,33 @@ Import legacy state once only on supported macOS/Linux with proven quiescence, c
 Do not add a generic Run mutation API, Run-owned lease identity, optional initial Checkpoint, event-sourced reducer, JSON/SQLite dual write, Windows importer, synthetic legacy Run, or marker-first restore.
 
 Done means every acceptance criterion and validation item in the local spec passes, including `npm run build`, `npm test`, `npm run test:state`, `npm run test:migration`, and `npm run test:state-fault`.
+
+## I1 coherent retirement and review corrections
+
+Preparation uses the existing unique WorkerLaunch spine: non-executing intent
+before native allocation, actual generation birth registration before copying,
+and actual controller/reservation BIND before promotion without a new deadline.
+The canonical `WorkerPreparation`, `PreparingWorkerLaunch`,
+`RetiredWorkerPreparation` and `BoundWorkerLaunch` types are defined in the RFC.
+Only the original joined native preparation owner may retire it; incomplete
+birth after owner loss remains recovery-required. Preparation quarantine's
+`unverified_preparation` claims no payload/tree and is legal only with
+`reason='preparation_retired'` and its exact joined preparation evidence.
+
+The sole stopped-recovery terminal transaction may consume exact
+`PrivateToolRollbackV1` for the fixed private-only edit, preserving the original
+UNKNOWN/full charge and BudgetSettlement while appending zero additional
+budget and an explicit rolled-back error result. It cannot refund, retry or
+resolve an external manual effect. Wait/nonce/anchor, launch/generation
+retirement, Checkpoint and one Session publication commit atomically.
+
+Credential runtime failure retains the exact original locked pre-I/O authority
+snapshot, including distinct `credential_binding_changed` and `endpoint_revoked`
+branches. Historical reads never substitute today's credential store or label
+an active rotated credential as revoked. Native model no-release evidence still
+requires the same original live held mutex/token through its settlement CAS;
+closed booleans and transport disappearance grant no refund.
+
+These are implementation contracts, not qualification evidence. The exact-SHA
+Linux reports must independently pass; unexecuted cuts and full I1 remain
+explicitly unqualified.

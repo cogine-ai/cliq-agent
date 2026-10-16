@@ -72,6 +72,9 @@ async function retainedRecipe(artifacts: ArtifactCatalog, run: Run, spec: RunSpe
       catalog.validThrough !== capability.validThrough || capability.validThrough < run.deadlineAt) invalid();
 }
 
+/** Shared immutable recipe closure; neither a live native token nor permission to release. */
+export { retainedRecipe as validateRetainedInstalledBrokerRecipe };
+
 type Frame = { run: Run; spec: RunSpec; assembly: RunAssemblyV1; principalId: string;
   prepared: InvocationJournalEntry; claim: InvocationJournalEntry; evidence: BrokerInvocationAmbiguityEvidenceV1 };
 

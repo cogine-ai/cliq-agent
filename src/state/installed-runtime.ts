@@ -21,7 +21,7 @@ import { checkCanonicalBytes, validateBundle, validateTrustStore, validateInstal
 import { decodeInstalledModelAuthorityClosure, verifyInstalledModelAuthority,
   type VerifiedInstalledModelAuthority } from '../model/installed-authority.js';
 import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH, InstalledModelBrokerRefusalError,
-  type NativeModelBrokerBinding, type NativeModelTransport } from './model-broker-native.js';
+  type ModelBrokerBinding, type NativeModelBrokerBinding, type NativeModelTransport, type NativeModelNoReleaseFence } from './model-broker-native.js';
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
 import type { NativeWorkerBinding, NativeWorkerImage } from '../sandbox/linux-worker.js';
 import type { NativeCredentialPlatformBinding } from './credential-platform.js';
@@ -58,6 +58,30 @@ type CredentialPhysicalBinding = { native: NativeStateOwner;
   pid: number; processStartToken: string; generation: string; active: boolean;
   provenance: InstalledCredentialProvenance };
 const credentialPhysicalScopes = new WeakMap<InstalledCredentialScope, CredentialPhysicalBinding>();
+const installedModelNoReleaseFences = new WeakMap<NativeModelNoReleaseFence, {
+  native: NativeModelNoReleaseFence; bindingDigest: string; active: boolean; processId: number;
+  selected: HeldInstalledRuntime; bundleDigest: string; manifestDigest: string; assertSelection(): void;
+}>();
+
+/** Friend validation only. A structural object, closed report or token digest
+ * is not the original signed native owner's continuously held release mutex. */
+export function assertInstalledModelNoReleaseFence(fence: NativeModelNoReleaseFence, binding: ModelBrokerBinding,
+  expected?: { selected: HeldInstalledRuntime; runtimeBundleRef: string; runtimeBundleManifestDigest: string }): void {
+  const held = installedModelNoReleaseFences.get(fence);
+  if (!held || !held.active || held.processId !== process.pid || held.bindingDigest !== canonicalSha256(binding))
+    mismatch('installed model no-release fence is not the original held claim owner');
+  if (expected && (held.selected !== expected.selected || held.bundleDigest !== expected.runtimeBundleRef ||
+      held.manifestDigest !== expected.runtimeBundleManifestDigest)) mismatch('installed model no-release fence belongs to another signed selection');
+  held.assertSelection();
+  try { held.native.assertHeld(); }
+  catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+      const failure = new ResourceRetirementError('model no-release mutex owner has uncertain retirement', error);
+      rememberRetirement(failure); throw failure;
+    }
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed model no-release mutex is no longer held');
+  }
+}
 
 function checkedCredentialPhysicalScope(physical: InstalledCredentialScope): CredentialPhysicalBinding {
   const held = credentialPhysicalScopes.get(physical);
@@ -940,7 +964,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 const loaded = new Module('cliq-installed-linux-model-broker');
                 process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
                 const native = loaded.exports as NativeModelBrokerBinding;
-                if (native.interfaceVersion !== 2 || typeof native.prepareModelTransport !== 'function')
+                if (native.interfaceVersion !== 3 || typeof native.prepareModelTransport !== 'function')
                   mismatch('unsupported installed model broker interface');
                 const refused = (error: unknown): never => {
                   if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
@@ -966,7 +990,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   void job.finally(() => platformJobs.delete(job)).catch(() => {});
                   return job;
                 };
-                modelBroker = Object.freeze({ interfaceVersion: 2 as const,
+                modelBroker = Object.freeze({ interfaceVersion: 3 as const,
                   prepareModelTransport(input) {
                     if (closed) mismatch('installed runtime handle is closed');
                     assertSelection();
@@ -975,6 +999,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                     catch (error) { return refused(error); }
                     let transport!: NativeModelTransport;
                     let retirement: Promise<Awaited<ReturnType<typeof original.close>>> | undefined;
+                    let fenceRetained = false, resourcesJoined = false;
+                    const fences = new Set<NativeModelNoReleaseFence>();
                     // Promise handlers run only after this synchronous call
                     // has registered the owner below. In particular, no
                     // selection check can strand a newly minted native owner.
@@ -991,6 +1017,44 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                     });
                     transport = Object.freeze({
                       brokerFenceTokenDigest: original.brokerFenceTokenDigest, ready: owned,
+                      retainDispatchFence() {
+                        if (closed) mismatch('installed runtime handle is closed'); assertSelection();
+                        try { original.retainDispatchFence(); fenceRetained = true; }
+                        catch (error) { return refused(error); }
+                      },
+                      acquireNoReleaseFence(binding) {
+                        if (!fenceRetained || !resourcesJoined) mismatch('installed model no-release fence lacks its original joined resource owner');
+                        binding = immutableSnapshot(binding);
+                        let nativeFence: NativeModelNoReleaseFence;
+                        try { nativeFence = original.acquireNoReleaseFence(binding); }
+                        catch (error) { return refused(error); }
+                        let fence!: NativeModelNoReleaseFence;
+                        const held = { native: nativeFence, bindingDigest: canonicalSha256(binding), active: true, processId: process.pid,
+                          selected, bundleDigest: signed.bundleDigest, manifestDigest: signed.bundle.manifestDigest, assertSelection };
+                        fence = Object.freeze({
+                          assertHeld() { assertInstalledModelNoReleaseFence(fence, binding); },
+                          close() {
+                            if (!held.active) return;
+                            try { nativeFence.close(); }
+                            catch (error) {
+                              const failure = new ResourceRetirementError('model no-release mutex owner did not retire', error);
+                              rememberRetirement(failure); throw failure;
+                            }
+                            held.active = false; fences.delete(fence);
+                          },
+                        });
+                        installedModelNoReleaseFences.set(fence, held); fences.add(fence); return fence;
+                      },
+                      releaseDispatchFence() {
+                        if (fences.size) {
+                          const failure = new ResourceRetirementError('model no-release mutex still has an owning guard', undefined);
+                          rememberRetirement(failure); throw failure;
+                        }
+                        try { original.releaseDispatchFence(); }
+                        catch (error) { return refused(error); }
+                        fenceRetained = false;
+                        if (resourcesJoined) brokerTransports.delete(transport);
+                      },
                       connect: binding => invoke(() => original.connect(binding)),
                       releaseBody: binding => invoke(() => original.releaseBody(binding)),
                       close: () => retirement ??= invoke(async () => {
@@ -1003,7 +1067,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                           const failure = new ResourceRetirementError('model broker closure is incomplete', undefined);
                           rememberRetirement(failure); throw failure;
                         }
-                        brokerTransports.delete(transport); return result;
+                        resourcesJoined = true;
+                        if (!fenceRetained) brokerTransports.delete(transport); return result;
                       }, true),
                     });
                     brokerTransports.add(transport);

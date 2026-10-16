@@ -14,13 +14,14 @@ import { KernelStorageError } from './errors.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from './repositories/worker-launches.js';
-import { readRequiredWorkspaceGenerationByRef, updateWorkspaceGeneration } from './repositories/workspace-generations.js';
+import { readRequiredWorkspaceGenerationByRef, readWorkspaceGenerationsForRun, updateWorkspaceGeneration } from './repositories/workspace-generations.js';
 import { readRun } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from './store.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
 import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
+import { validateWorkerPreparationRetirement } from './worker-preparation.js';
 
 type Retired = Extract<WorkspaceGenerationStateV1, { phase: 'retired' }>;
 type Source = Extract<WorkspaceGenerationStateV1, { phase: 'sealed' | 'quarantined' }>;
@@ -97,6 +98,13 @@ export async function readRetiredGenerationSource(driver: SqliteDriver, artifact
     launch = readRequiredWorkerLaunch(driver, recovery.oldWorkerLaunchId);
   } else if (quarantine.reason === 'launch_aborted' || quarantine.reason === 'launch_died_before_activation') {
     launch = readRequiredWorkerLaunch(driver, quarantine.workerLaunchId);
+  } else if (quarantine.reason === 'preparation_retired') {
+    launch = readRequiredWorkerLaunch(driver, quarantine.workerLaunchId);
+    if (launch.retirementKind !== 'preparation') throw new TypeError('preparation quarantine substitutes its original lifecycle branch');
+    await validateWorkerPreparationRetirement(driver, artifacts, launch, run, [generation]);
+    return { evidence, source: { ...base, rowVersion: evidence.sourceQuarantinedRowVersion, updatedAt: launch.retiredAt,
+      phase: 'quarantined', quarantineEvidenceRef: evidence.quarantineEvidenceRef,
+      quarantineEvidenceDigest: evidence.quarantineEvidenceDigest, observedState: quarantine.observedState } };
   } else throw new TypeError('generation retirement requires an implemented closed quarantine producer');
   if (launch.retirementKind === 'preparation') {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
@@ -116,9 +124,11 @@ function assertClosedGenerationPointers(connection: SqliteConnection | SqliteDri
   for (const generation of generations.filter(value => value.phase === 'retired')) {
     if (canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, generation.generationRef)) !== canonicalSha256(generation) ||
         connection.prepare(`SELECT 1 FROM runs r JOIN worker_launches w ON r.active_worker_launch_id = w.launch_id
-          WHERE json_extract(w.row_json, '$.workspaceGenerationRef') = ? LIMIT 1`).get(generation.generationRef) ||
+          WHERE COALESCE(json_extract(w.row_json, '$.workspaceGenerationRef'),
+            json_extract(w.row_json, '$.preparation.generation.generationRef')) = ? LIMIT 1`).get(generation.generationRef) ||
         connection.prepare(`SELECT 1 FROM worker_launches WHERE phase != 'retired'
-          AND json_extract(row_json, '$.workspaceGenerationRef') = ? LIMIT 1`).get(generation.generationRef))
+          AND COALESCE(json_extract(row_json, '$.workspaceGenerationRef'),
+            json_extract(row_json, '$.preparation.generation.generationRef')) = ? LIMIT 1`).get(generation.generationRef))
       throw new TypeError('retired generation again has a live Run/launch or a changed proof pointer');
   }
 }
@@ -129,7 +139,17 @@ export function assertRetiredGenerationCut(connection: SqliteConnection | Sqlite
   const byRef = new Map(generations.map(value => [value.generationRef, value]));
   for (const launch of readWorkerLaunchesForRun(connection, run.id)) {
     if (launch.retirementKind === 'preparation') {
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'preparation retirement requires its exact owning resource closure');
+      if (!launch.preparation.generation) {
+        if (readWorkspaceGenerationsForRun(connection, run.id).some(value => value.generationId === launch.preparation.generationId))
+          throw new TypeError('unallocated terminal preparation has an actual generation');
+        continue;
+      }
+      const generation = launch.preparation.generation && byRef.get(launch.preparation.generation.generationRef);
+      if (!generation || generation.phase !== 'retired' || generation.generationId !== launch.preparation.generationId ||
+          generation.generationIdentityDigest !== launch.preparation.generation!.generationIdentityDigest ||
+          generation.updatedAt !== launch.retiredAt)
+        throw new TypeError('terminal preparation has no complete proof-backed retired generation');
+      continue;
     }
     if (launch.phase !== 'retired') throw new TypeError('terminal stop has no proof-backed closed generation for every worker');
     const generation = byRef.get(launch.workspaceGenerationRef);
@@ -221,9 +241,11 @@ export async function retireQuarantinedGeneration(driver: SqliteDriver, artifact
     if (closedWorkspace.generationRef !== generation.generationRef ||
         canonicalSha256(closedWorkspace.observedState) !== canonicalSha256(generation.observedState) ||
         connection.prepare(`SELECT 1 FROM runs r JOIN worker_launches w ON r.active_worker_launch_id = w.launch_id
-          WHERE json_extract(w.row_json, '$.workspaceGenerationRef') = ? LIMIT 1`).get(generation.generationRef) ||
+          WHERE COALESCE(json_extract(w.row_json, '$.workspaceGenerationRef'),
+            json_extract(w.row_json, '$.preparation.generation.generationRef')) = ? LIMIT 1`).get(generation.generationRef) ||
         connection.prepare(`SELECT 1 FROM worker_launches WHERE phase != 'retired'
-          AND json_extract(row_json, '$.workspaceGenerationRef') = ? LIMIT 1`).get(generation.generationRef))
+          AND COALESCE(json_extract(row_json, '$.workspaceGenerationRef'),
+            json_extract(row_json, '$.preparation.generation.generationRef')) = ? LIMIT 1`).get(generation.generationRef))
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'generation retirement still has a physical or durable resource owner');
     // SQL release predicates and the genuine native registry must both be
     // closed; an old claimed/unknown effect remains accounted, never refunded.

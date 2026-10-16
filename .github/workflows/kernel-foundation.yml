@@ -72,6 +72,38 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  linux-installed-authority-stop:
+    name: Linux installed post-admission credential refusal and retirement
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Revoke the real admitted credential and require truthful retirement and restart
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-authority-failure-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-authority-stop"
+      - name: Retain exact-source refusal and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-authority-stop-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-authority-stop/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-installed-run:
     name: Linux signed installed Run closed-loop diagnostics
     # Real installed/manager/native transport mechanics, not complete I1 or a

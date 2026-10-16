@@ -78,6 +78,8 @@ test('a registered materialization owner separates real birth from ready private
   assert.equal(typeof create, 'function', 'real materialization requires its synchronous resource owner');
   const readBirth = Reflect.get(producer, 'readRunWorkspaceBirth');
   assert.equal(typeof readBirth, 'function');
+  const publishBirth = Reflect.get(producer, 'publishRunWorkspaceBirthIdentity');
+  assert.equal(typeof publishBirth, 'function', 'a real directory birth must be bindable before any payload copy');
   const root = await mkdtemp(path.join(await realpath(tmpdir()), '.cliq-generation-birth-'));
   await chmod(root, 0o700);
   const held = (await loadNativeStateOwner()).acquireLock(root, true);
@@ -113,6 +115,17 @@ test('a registered materialization owner separates real birth from ready private
   assert(Date.parse(observed.createdAt) >= beforeBirth && Date.parse(observed.createdAt) <= afterBirth);
   assert.equal(new Date(observed.createdAt).toISOString(), observed.createdAt);
   assert.deepEqual(await readdir(directory), [], 'birth must precede every payload write');
+  let bornAuthority: { generationRef: string; generationIdentityDigest: string } | undefined;
+  if (process.platform === 'linux') {
+    bornAuthority = await publishBirth(held, artifacts, birth);
+    const identity = await artifacts.readCanonical<WorkspaceGenerationIdentityV1>(bornAuthority!.generationRef);
+    assert.equal(identity.identityDigest, bornAuthority!.generationIdentityDigest);
+    assert.equal(identity.createdAt, observed.createdAt); assert.equal(identity.generationId, observed.generationId);
+    assert.equal(identity.locator.kind, 'linux_directory');
+    if (identity.locator.kind !== 'linux_directory') throw new Error('Linux birth must retain a directory locator');
+    assert.equal(identity.locator.directoryFileId, actual.ino.toString());
+    assert.deepEqual(await readdir(directory), [], 'publishing a real birth must not copy payload or claim a ready snapshot');
+  } else await assert.rejects(publishBirth(held, artifacts, birth), { code: 'UNSUPPORTED_PLATFORM' });
   assert.throws(() => Reflect.apply(borrowRunWorkspaceForExecution, undefined, [preparing]), /invalid Run workspace generation/);
   assert.throws(() => Reflect.apply(borrowRunWorkspaceForExecution, undefined, [birth]), /invalid Run workspace generation/);
   assert.equal(await preparing.birth(), birth, 'birth must retain one actual tree, not allocate a replacement');
@@ -127,6 +140,7 @@ test('a registered materialization owner separates real birth from ready private
   assert.equal(borrowed.identity.fileId, observed.directoryIdentity.fileId);
   if (process.platform === 'linux') {
     const authority = await generation.publishMaterializedAuthority();
+    assert.equal(authority.generationRef, bornAuthority!.generationRef);
     const identity = await artifacts.readCanonical<WorkspaceGenerationIdentityV1>(authority.generationRef);
     assert.equal(identity.createdAt, observed.createdAt); assert.equal(identity.creationNonceDigest, generationCreationNonceDigest);
   } else await assert.rejects(generation.publishMaterializedAuthority(), { code: 'UNSUPPORTED_PLATFORM' });
@@ -279,6 +293,9 @@ test('a fixed materialization intent rejects invalid nonces and never adopts an 
   const birth = await original.birth(), observed = producer.readRunWorkspaceBirth(held, birth);
   const duplicate = producer.createRunWorkspaceMaterialization(input); materializations.push(duplicate);
   await assert.rejects(duplicate.birth(), /absent.*locator|overwrite|adoption/u);
+  await duplicate.close();
+  assert.throws(() => producer.readUnallocatedRunWorkspaceRetirement(held, duplicate), { code: 'RECOVERY_REQUIRED' },
+    'a failed native allocation request cannot become a no-allocation receipt');
   assert.deepEqual(producer.readRunWorkspaceBirth(held, birth), observed);
 });
 
@@ -304,6 +321,38 @@ test('external cancellation preserves actual birth for registration but forbids 
   assert.deepEqual(await readdir(path.join(root, 'runs', checkpoint.runId, 'generations', original.generationId)), []);
   await materialization.close();
   assert.equal(producer.readRunWorkspaceBirthRetirement(held, birth).resourcesRetired, true);
+});
+
+test('a joined original materialization can distinguish no allocation request from a closed real birth', async (t) => {
+  const readUnallocated = Reflect.get(producer, 'readUnallocatedRunWorkspaceRetirement');
+  assert.equal(typeof readUnallocated, 'function', 'no-allocation retirement must come from the original joined producer');
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), '.cliq-generation-unallocated-'));
+  await chmod(root, 0o700);
+  const held = (await loadNativeStateOwner()).acquireLock(root, true);
+  const owners: producer.RunWorkspaceMaterialization[] = [];
+  t.after(async () => { for (const owner of owners) await owner.close(); held.close(); await rm(root, { recursive: true, force: true }); });
+  await mkdir(path.join(root, 'objects'), { mode: 0o700 });
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(root, 'objects')));
+  const entries: WorkspaceEntryManifest = { schemaVersion: 1, format: 'cliq-workspace-entries-v1',
+    entries: [], entryCount: 0, byteCount: 0, treeDigest: '' };
+  entries.treeDigest = canonicalSha256({ schemaVersion: 1, format: entries.format, entries: [] });
+  const checkpoint = await symlinkCheckpoint(artifacts, entries), cancellation = new AbortController();
+  const reason = new Error('stop before any native directory allocation'); cancellation.abort(reason);
+  const owner = producer.createRunWorkspaceMaterialization({ filesystem: held, artifacts, checkpoint, signal: cancellation.signal });
+  owners.push(owner);
+  assert.throws(() => readUnallocated(held, owner), { code: 'RECOVERY_REQUIRED' });
+  await assert.rejects(owner.birth(), error => error === reason);
+  await owner.close();
+  const observed = readUnallocated(held, owner);
+  assert.equal(observed.runId, checkpoint.runId); assert.equal(observed.sourceCheckpointId, checkpoint.id);
+  assert.equal(observed.sourceWorkspaceStateRef, checkpoint.workspaceStateRef);
+  assert.equal(observed.allocationRequested, false); assert.equal(observed.operationsJoined, true);
+  await assert.rejects(lstat(path.join(root, 'runs', checkpoint.runId)), { code: 'ENOENT' });
+  assert.throws(() => readUnallocated(held, { ...owner }), { code: 'ARTIFACT_MISMATCH' });
+  const born = producer.createRunWorkspaceMaterialization({ filesystem: held, artifacts, checkpoint }); owners.push(born);
+  await born.birth(); await born.close();
+  assert.throws(() => readUnallocated(held, born), { code: 'RECOVERY_REQUIRED' },
+    'joined descriptors cannot rewrite a real allocation request into no allocation');
 });
 
 test('cancelling a real streaming materialization closes its scope before rejecting', async (t) => {

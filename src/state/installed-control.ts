@@ -245,7 +245,7 @@ export function openInstalledControl(store: StateStore,
         return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
       } catch (error) {
-        if (method === 'run.submit' && error instanceof CredentialScopeBusyError) {
+        if ((method === 'run.submit' || method === 'credential.finalize') && error instanceof CredentialScopeBusyError) {
           return { protocolVersion: 1, ok: false, method: knownMethod, error: error.controlError } satisfies InstalledControlResponseV1;
         }
         if (error instanceof KernelStorageError && error.code === 'REVISION_CONFLICT') {

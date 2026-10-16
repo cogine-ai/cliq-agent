@@ -10,6 +10,23 @@ export type ModelResponseFailureEvidenceV1 = {
   failureKind: 'model_unusable_response'; unusableResponseRef: ArtifactRef; unusableResponseDigest: string;
 };
 
+/** Pre-I/O refusal, never a model response, dispatch permission or a retry hint. */
+export type CredentialRedemptionFailureEvidenceV1 = {
+  schemaVersion: 1; format: 'cliq-runtime-failure-evidence-v1'; runId: string;
+  frontierRef: ArtifactRef; frontierDigest: string; failingOpId: string;
+  inspectorIdentityRef: ArtifactRef; inspectorIdentityDigest: string; observedAt: string; evidenceDigest: string;
+  failureKind: 'credential_redemption_failed'; credentialGrantRef: ArtifactRef; credentialGrantDigest: string;
+  endpointRegistrationRef: ArtifactRef; endpointRegistrationDigest: string;
+  credentialAuthorityRecordDigest: string; authorityRevision: number; credentialServiceRevision: number;
+} & (
+  | { failureCode: 'expired' | 'revoked' | 'credential_binding_changed' | 'platform_item_absent' | 'platform_store_unavailable';
+      endpointAuthorityRecordDigest?: never; endpointAuthorityRevision?: never }
+  | { failureCode: 'endpoint_revoked'; endpointAuthorityRecordDigest: string; endpointAuthorityRevision: number }
+);
+
+/** Implemented closed branches; other RFC runtime failures still need their owners. */
+export type RuntimeFailureEvidenceV1 = ModelResponseFailureEvidenceV1 | CredentialRedemptionFailureEvidenceV1;
+
 /** RFC stop authority. Individual reducers accept only the branches whose evidence they can prove. */
 export type StopIntent = StopIdentity & (
   | { origin: 'kernel_integrity'; targetStatus: 'failed'; reason: 'verifier_mutated_source';

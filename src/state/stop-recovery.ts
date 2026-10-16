@@ -16,6 +16,8 @@ import { readResourceStopCause } from './resource-stop.js';
 import { validateModelFailureStop } from './model-failure.js';
 import { assertRetiredGenerationCut } from './generation-retirement.js';
 import { validateInstalledBrokerTerminalHistory } from './broker-ambiguity.js';
+import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
+import { validatePrivateToolRollbackHistory } from './private-tool-rollback.js';
 
 export type CancelResponse = Extract<ControlApplicationResponseV1, { ok: true }> & { result: Extract<ControlResultV1, { method: 'run.cancel' }> };
 
@@ -92,10 +94,14 @@ export async function validateStopRecovery(driver: SqliteDriver, artifacts: Arti
   // Common recovery verified every complete seal or retirement/source graph;
   // a phase string alone cannot satisfy this final retained SQL cut.
   assertRetiredGenerationCut(driver, run, closure.workspaceGenerations);
+  const modelNoRelease = await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
+  const privateRollbacks = await validatePrivateToolRollbackHistory(driver, artifacts, closure);
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
     if (entry.opKind === 'model' && entry.replayClass === 'retry' && entry.phase === 'unknown' && abandoned.some(closed =>
       closed.opId === entry.opId && closed.attempt === entry.attempt && closed.unknownJournalSeq === entry.seq &&
       closed.budgetSettlementRef === entry.budgetSettlementRef)) continue;
+    if (entry.phase === 'failed' && (entry.opKind === 'model' && modelNoRelease.has(entry.seq) ||
+        entry.opKind === 'tool' && privateRollbacks.has(entry.seq))) continue;
     if (!['model', 'tool'].includes(entry.opKind) || (entry.phase !== 'completed' &&
         (entry.phase !== 'failed' || hasClaim))) throw new TypeError('terminal stop retains unresolved dispatch evidence');
     if (entry.phase === 'failed' && entry.errorRef === run.stopIntentRef && entry.timestamp !== preparedAt) throw new TypeError('stop refund has no atomic terminal owner');

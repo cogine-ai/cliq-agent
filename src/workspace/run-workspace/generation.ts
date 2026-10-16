@@ -56,6 +56,11 @@ export type RunWorkspaceMaterialization = Readonly<{
   finish(): Promise<RunWorkspaceGeneration>;
   close(): Promise<void>;
 }>;
+export type UnallocatedRunWorkspaceRetirement = Readonly<{ runId: string; generationId: string;
+  sourceCheckpointId: string; sourceWorkspaceStateRef: string; creationNonceDigest: string;
+  allocationRequested: false; operationsJoined: true; observedAt: string }>;
+const unallocatedMaterializations = new WeakMap<RunWorkspaceMaterialization,
+  { filesystem: HeldStateOwnerLock; read(): UnallocatedRunWorkspaceRetirement }>();
 type WorkspaceOperations = { pending: Set<Promise<unknown>>; retirementFailure?: ResourceRetirementError };
 const workspaceBirths = new WeakMap<RunWorkspaceBirth,
   { filesystem: HeldStateOwnerLock; tree: HeldGenerationTree; data: RunWorkspaceBirthData;
@@ -81,6 +86,37 @@ export function readRunWorkspaceBirth(filesystem: HeldStateOwnerLock, birth: Run
   }
   filesystem.assertHeld(); held.tree.assertHeld();
   return held.data;
+}
+/** Program-domain closure only: the exact original producer joined before it
+ * ever requested a native allocation. This is not a filesystem absence scan. */
+export function readUnallocatedRunWorkspaceRetirement(filesystem: HeldStateOwnerLock,
+  materialization: RunWorkspaceMaterialization): UnallocatedRunWorkspaceRetirement {
+  const held = unallocatedMaterializations.get(materialization);
+  if (!held || held.filesystem !== filesystem)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'unallocated workspace retirement requires its original physical producer');
+  filesystem.assertHeld();
+  return held.read();
+}
+/** Bind the actual empty directory before payload I/O. This identity is not a
+ * materialization snapshot, a mount grant or permission to execute the tree. */
+export async function publishRunWorkspaceBirthIdentity(filesystem: HeldStateOwnerLock, artifacts: ArtifactCatalog,
+  birth: RunWorkspaceBirth): Promise<Pick<MaterializedGenerationAuthority, 'generationRef' | 'generationIdentityDigest'>> {
+  const data = readRunWorkspaceBirth(filesystem, birth);
+  if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'preparation requires its implemented Linux directory birth');
+  const identity: WorkspaceGenerationIdentityV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-identity-v1',
+    generationId: data.generationId, runId: data.runId, workspaceIdentityDigest: data.workspaceIdentityDigest,
+    sourceCheckpointId: data.sourceCheckpointId, sourceWorkspaceStateRef: data.sourceWorkspaceStateRef,
+    sourceWorkspaceStateDigest: data.sourceWorkspaceStateDigest, sourceTreeDigest: data.sourceTreeDigest,
+    creationNonceDigest: data.creationNonceDigest, createdAt: data.createdAt,
+    locator: { kind: 'linux_directory', stateRootIdentityRef: canonicalSha256(data.stateRootIdentity),
+      stateRootIdentityDigest: data.stateRootIdentity.identityDigest,
+      canonicalRootRelativePath: `runs/${data.runId}/generations/${data.generationId}`,
+      deviceId: data.directoryIdentity.deviceId, directoryFileId: data.directoryIdentity.fileId,
+      ownerUid: data.directoryIdentity.ownerUid, mode: 448 }, identityDigest: '' };
+  identity.identityDigest = digestOmitting(identity, 'identityDigest');
+  const artifact = await artifacts.publishCanonical(identity, identity.format);
+  readRunWorkspaceBirth(filesystem, birth);
+  return Object.freeze({ generationRef: artifact.ref, generationIdentityDigest: identity.identityDigest });
 }
 /** Physical resource retirement only. Directory quarantine, containment death
  * and a committed lifecycle transition require their separate producers. */
@@ -555,7 +591,7 @@ export function createRunWorkspaceMaterialization(input: {
   let tree: HeldGenerationTree | undefined, opening: Promise<RunWorkspaceBirth> | undefined;
   let frozen: Awaited<ReturnType<typeof readFrozenWorkspace>> | undefined, born: RunWorkspaceBirth | undefined;
   let finishing: Promise<RunWorkspaceGeneration> | undefined;
-  let closed = false, closing: Promise<void> | undefined;
+  let closed = false, joined = false, allocationRequested = false, closing: Promise<void> | undefined;
   const materialization: RunWorkspaceMaterialization = Object.freeze({
     birth() {
       if (this !== materialization) throw new TypeError('invalid workspace materialization owner');
@@ -565,6 +601,9 @@ export function createRunWorkspaceMaterialization(input: {
         frozen = await readFrozenWorkspace(artifacts, checkpoint.workspaceStateRef, signal);
         signal.throwIfAborted();
         if (frozen.sourceState.runId !== checkpoint.runId) mismatch('ready Checkpoint belongs to a different Run');
+        // Never reset this latch, even if the native creator throws before it
+        // can return birth facts. Such a cut cannot prove no allocation.
+        allocationRequested = true;
         tree = filesystem.createGenerationTree(checkpoint.runId, generationId);
         tree.assertHeld();
         // Canonical registration sampled after actual create/fstat, not an
@@ -606,10 +645,18 @@ export function createRunWorkspaceMaterialization(input: {
         if (failed?.status === 'rejected') throw failed.reason;
         if (operations.retirementFailure) throw operations.retirementFailure;
         if (born) workspaceBirths.get(born)!.joined = true;
+        joined = true;
       })();
       return closing;
     }
   });
+  unallocatedMaterializations.set(materialization, { filesystem, read() {
+    if (!closed || !joined || allocationRequested || born || tree || operations.pending.size || operations.retirementFailure)
+      throw operations.retirementFailure ?? new KernelStorageError('RECOVERY_REQUIRED', 'workspace allocation absence is not positively joined');
+    return Object.freeze({ runId: checkpoint.runId, generationId, sourceCheckpointId: checkpoint.id,
+      sourceWorkspaceStateRef: checkpoint.workspaceStateRef, creationNonceDigest: nonce,
+      allocationRequested: false, operationsJoined: true, observedAt: new Date().toISOString() });
+  } });
   return materialization;
 }
 

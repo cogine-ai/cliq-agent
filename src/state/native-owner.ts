@@ -26,7 +26,7 @@ type DescriptorIdentity = Readonly<{ deviceId: string; fileId: string; ownerUid:
 export type HeldWorkerReservation = Readonly<{ identity: DescriptorIdentity; assertHeld(): void; close(): void }>;
 type NativeWorkerReservation = HeldWorkerReservation & { borrow(): Readonly<{ fd: number; identity: DescriptorIdentity; assertHeld(): void; close(): void }> };
 const workerReservations = new WeakMap<HeldWorkerReservation,
-  { lock: HeldStateOwnerLock; native: NativeWorkerReservation; launchId: string; spawnNonceDigest: string }>();
+  { lock: HeldStateOwnerLock; native: NativeWorkerReservation; launchId: string; spawnNonceDigest: string; closed: boolean }>();
 function checkedWorkerReservation(launchId: string, spawnNonceDigest: string): string {
   if (!/^[A-Za-z0-9_-]{43}$/u.test(launchId) || !/^[0-9a-f]{64}$/u.test(spawnNonceDigest)) {
     throw new KernelStorageError('INVALID_REQUEST', 'worker reservation requires the exact launch and spawn nonce');
@@ -49,10 +49,10 @@ function wrapWorkerReservation(lock: HeldStateOwnerLock, native: NativeWorkerRes
     },
     close() {
       if (this !== handle) throw new TypeError('invalid worker reservation');
-      try { native.close(); } catch (error) { workerReservationError(error); }
+      try { native.close(); workerReservations.get(handle)!.closed = true; } catch (error) { workerReservationError(error); }
     }
   });
-  workerReservations.set(handle, { lock, native, launchId, spawnNonceDigest });
+  workerReservations.set(handle, { lock, native, launchId, spawnNonceDigest, closed: false });
   return handle;
 }
 /** Internal descriptor bridge between the two installed native modules. */
@@ -64,6 +64,17 @@ export function borrowWorkerReservationForExecution(reservation: HeldWorkerReser
   }
   reservation.assertHeld();
   try { return held.native.borrow(); } catch (error) { workerReservationError(error); }
+}
+/** Only the exact original native close can set this joined state. It closes
+ * every duplicate before returning, and any error keeps the StateOwner held. */
+export function readWorkerReservationRetirement(lock: HeldStateOwnerLock, reservation: HeldWorkerReservation,
+  launchId: string, spawnNonceDigest: string): DescriptorIdentity {
+  const held = workerReservations.get(reservation);
+  if (!held || held.lock !== lock || held.launchId !== launchId || held.spawnNonceDigest !== spawnNonceDigest)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'reservation retirement substitutes its exact original physical owner');
+  lock.assertHeld();
+  if (!held.closed) throw new KernelStorageError('RECOVERY_REQUIRED', 'original worker reservation descriptors are not joined');
+  return reservation.identity;
 }
 export type SourceInspectionStagingIdentity = DescriptorIdentity & Readonly<{ mode: 448 }>;
 /** Physical source-inspection reservation only, never a Run or execution FD. */

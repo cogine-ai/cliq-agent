@@ -673,7 +673,8 @@ static napi_value scope_release(napi_env env, napi_callback_info info) {
 static napi_value scope_result(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct native_scope *scope;
     napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
-    if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->invocation || !scope->released || scope->controller->closed)
+    if (!tagged(env, self, &SCOPE_TAG, (void **)&scope) || !scope->invocation || !scope->released ||
+        (scope->controller->closed && !scope->result_received))
         return failure(env, "native invocation outcome is indeterminate");
     if (!scope->result_received) {
         int observed = poll_response(scope->controller, scope, CLIQ_WRITE_RESULT, &scope->result);
@@ -1213,6 +1214,26 @@ static napi_value controller_close(napi_env env, napi_callback_info info) {
     if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller)) return failure(env, "invalid held controller");
     napi_value promise;
     if (controller->close_promise) { napi_get_reference_value(env, controller->close_promise, &promise); return promise; }
+    /* Productive revocation must not erase a genuine result already delivered
+     * to this original authenticated channel. Do not wait for one, invent an
+     * outcome, issue another request or leave release authority live. A missing
+     * or invalid reply stays indeterminate after the irreversible close. */
+    struct native_scope *scope = controller->pending_scope;
+    if (!controller->closed && controller->pending == CLIQ_RELEASE_WRITE && scope && scope->invocation && scope->released) {
+        struct cliq_worker_packet response;
+        int descriptors[5]; size_t count = 0;
+        bool received = cliq_receive_flags(controller->socket, &response, descriptors, &count, MSG_DONTWAIT);
+        if (received) {
+            for (size_t i = 0; i < count; i++) {
+                if (!retire_descriptor(&descriptors[i])) controller->retirement_failed = true;
+            }
+            if (count == 0 && response.status == 0 && response.command == CLIQ_WRITE_RESULT &&
+                response.scope == scope->id && response.exit_status <= 1) {
+                scope->result = response; scope->result_received = true;
+                controller->pending = 0; controller->pending_scope = NULL;
+            }
+        }
+    }
     if (napi_create_promise(env, &controller->close_deferred, &promise) != napi_ok) {
         (void)close_controller(controller); return failure(env, "controller close promise unavailable");
     }

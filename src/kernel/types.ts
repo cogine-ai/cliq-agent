@@ -787,6 +787,7 @@ export type WorkspaceGenerationQuarantineEvidenceBaseV1 = {
   sourceRowVersion: number;
   observedState:
     | { kind: 'complete_tree'; treeDigest: string }
+    | { kind: 'unverified_preparation' }
     | {
         kind: 'unreadable_partial';
         failureCode:
@@ -810,6 +811,13 @@ export type WorkspaceGenerationQuarantineEvidenceBaseV1 = {
 export type WorkspaceGenerationQuarantineEvidenceV1 =
   WorkspaceGenerationQuarantineEvidenceBaseV1 &
     (
+      | {
+          reason: 'preparation_retired';
+          fromPhase: 'materializing' | 'preactivated_readonly';
+          workerLaunchId: string;
+          preparationRetirementEvidenceRef: ArtifactRef;
+          preparationRetirementEvidenceDigest: string;
+        }
       | {
           reason: 'materialization_failed';
           fromPhase: 'materializing';

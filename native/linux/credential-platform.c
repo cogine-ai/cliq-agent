@@ -917,8 +917,9 @@ struct broker {
   bool closing, retired, env_closing, network_started, request_started, bound, close_finished;
   atomic_bool cancelled, unsafe;
   pthread_mutex_t release_mutex;
-  bool mutex_ready, token_revoked;
-  unsigned active_releases;
+  bool mutex_ready, token_revoked, fence_locked, finalize_requested;
+  atomic_bool fence_retained;
+  unsigned active_releases, fence_borrows;
   pid_t creator_pid;
   enum broker_stage stage;
   struct broker_binding binding;
@@ -938,6 +939,10 @@ struct broker {
   struct broker *unretired_next;
 };
 static const napi_type_tag broker_tag = { UINT64_C(0x59689d0f2ac42b76), UINT64_C(0xac3d70697537de41) };
+static const napi_type_tag broker_fence_tag = { UINT64_C(0x385c79f2d1954ea6), UINT64_C(0xa3e8d76b24c1095f) };
+struct broker_fence {
+  struct broker *broker; napi_env env; napi_ref original; struct broker_binding binding; pid_t creator_pid; bool active;
+};
 static struct broker *unretired_brokers;
 static void broker_begin_close(struct broker *broker);
 static bool broker_queue(struct broker *broker, enum broker_stage stage);
@@ -1406,7 +1411,6 @@ static void broker_retire(struct broker *broker) {
   if (broker->platform.secret) { wipe(broker->platform.secret, broker->platform.secret_size); free(broker->platform.secret); broker->platform.secret = NULL; }
   if (broker->body) { wipe(broker->body, broker->body_size); free(broker->body); broker->body = NULL; }
   if (broker->trust) { wipe(broker->trust, broker->trust_size); free(broker->trust); broker->trust = NULL; }
-  wipe(broker->token, sizeof(broker->token));
   ERR_clear_error();
 }
 
@@ -1429,18 +1433,23 @@ static napi_value broker_closed_value(struct broker *broker) {
   set_number(broker->env, result, "matchingActiveReleaseCount", 0);
   napi_object_freeze(broker->env, result); return result;
 }
-static void broker_finalize(napi_env env, void *data, void *hint) {
-  (void)hint; struct broker *broker = data;
+static void broker_free(napi_env env, struct broker *broker) {
   /* A referenced handle cannot finalize before retirement. Uncertainty keeps
    * its owning C allocation until process death rather than forgetting it. */
   if (!broker->retired || broker->unsafe) return;
-  if (broker->close_promise) napi_delete_reference(env, broker->close_promise);
+  if (broker->close_promise && !broker->env_closing) napi_delete_reference(env, broker->close_promise);
   if (broker->response) { wipe(broker->response, BROKER_BODY_CAP + 1); free(broker->response); }
   if (broker->mutex_ready && pthread_mutex_destroy(&broker->release_mutex)) {
     atomic_store(&retirement_failed, true); broker->unsafe = true;
     broker->unretired_next = unretired_brokers; unretired_brokers = broker; return;
   }
   wipe(broker, sizeof(*broker)); free(broker);
+}
+static void broker_finalize(napi_env env, void *data, void *hint) {
+  (void)hint; struct broker *broker = data; broker->finalize_requested = true;
+  /* N-API teardown does not promise reference/finalizer ordering. The native
+   * allocation outlives every actual guard borrow, even after JS is gone. */
+  if (!broker->fence_borrows) broker_free(env, broker);
 }
 static struct broker *broker_receiver(napi_env env, napi_callback_info info, size_t *argc, napi_value *args) {
   napi_value receiver; bool tagged = false; struct broker *broker = NULL;
@@ -1504,6 +1513,143 @@ static napi_value broker_close_call(napi_env env, napi_callback_info info) {
   } else broker_begin_close(broker);
   return promise;
 }
+static napi_value broker_retain_fence_call(napi_env env, napi_callback_info info) {
+  napi_value args[1]; size_t argc = 1; struct broker *broker = broker_receiver(env, info, &argc, args);
+  if (!broker) return NULL;
+  if (argc || !broker->prepared || broker->working || broker->closing || broker->retired || broker->unsafe ||
+      !broker->mutex_ready || atomic_load(&broker->fence_retained) || broker->fence_locked || !broker_live(broker)) {
+    napi_throw_type_error(env, NULL, "Installed model broker original fence cannot be retained"); return NULL;
+  }
+  if (pthread_mutex_lock(&broker->release_mutex)) {
+    broker->unsafe = true; atomic_store(&retirement_failed, true); napi_throw(env, broker_error_value(broker)); return NULL;
+  }
+  bool valid = !broker->token_revoked && !broker->active_releases && !broker->network_started && !broker->request_started;
+  if (valid) atomic_store(&broker->fence_retained, true);
+  if (pthread_mutex_unlock(&broker->release_mutex)) {
+    broker->unsafe = true; atomic_store(&retirement_failed, true); napi_throw(env, broker_error_value(broker)); return NULL;
+  }
+  if (!valid) { napi_throw_type_error(env, NULL, "Installed model broker original fence is already released"); return NULL; }
+  napi_value result; napi_get_undefined(env, &result); return result;
+}
+static bool broker_fence_live(struct broker_fence *fence) {
+  struct broker *broker = fence->broker; char digest[65];
+  bool valid = fence->active && broker && fence->creator_pid == getpid() && syscall(SYS_gettid) == getpid() &&
+    !broker->unsafe && !broker->env_closing && !atomic_load(&retirement_failed) && broker->creator_pid == getpid() &&
+    broker->retired && broker->close_finished && !broker->working && broker->mutex_ready && broker->fence_locked &&
+    atomic_load(&broker->fence_retained) && broker->token_revoked && !broker->active_releases &&
+    !broker->network_started && !broker->request_started && broker->bound &&
+    !memcmp(&broker->binding, &fence->binding, sizeof(fence->binding)) &&
+    digest_hex(broker->token, sizeof(broker->token), digest) && !strcmp(digest, fence->binding.token_digest);
+  if (!valid) return false;
+  int locked = pthread_mutex_trylock(&broker->release_mutex);
+  if (locked == EBUSY) return true;
+  if (!locked) (void)pthread_mutex_unlock(&broker->release_mutex);
+  broker->unsafe = true; atomic_store(&retirement_failed, true); return false;
+}
+static bool broker_fence_drop(struct broker_fence *fence) {
+  if (!fence->active) return true;
+  struct broker *broker = fence->broker;
+  if (!broker || fence->creator_pid != getpid() || syscall(SYS_gettid) != getpid() ||
+      (!(broker->env_closing && !broker->fence_locked) &&
+        (!broker->fence_locked || pthread_mutex_unlock(&broker->release_mutex)))) {
+    if (broker) broker->unsafe = true;
+    atomic_store(&retirement_failed, true); return false;
+  }
+  broker->fence_locked = false;
+  if (fence->original && !broker->env_closing && napi_delete_reference(fence->env, fence->original) != napi_ok) {
+    broker->unsafe = true; atomic_store(&retirement_failed, true); return false;
+  }
+  fence->original = NULL; fence->active = false; fence->broker = NULL;
+  if (!broker->fence_borrows) { broker->unsafe = true; atomic_store(&retirement_failed, true); return false; }
+  broker->fence_borrows--;
+  if (broker->finalize_requested && !broker->fence_borrows) broker_free(fence->env, broker);
+  return true;
+}
+static void broker_fence_finalize(napi_env env, void *data, void *hint) {
+  (void)env; (void)hint; struct broker_fence *fence = data;
+  if (!broker_fence_drop(fence)) return; /* uncertainty retains its native owner */
+  wipe(fence, sizeof(*fence)); free(fence);
+}
+static struct broker_fence *broker_fence_receiver(napi_env env, napi_callback_info info) {
+  napi_value receiver; size_t argc = 1; napi_value args[1]; bool tagged = false; struct broker_fence *fence = NULL;
+  if (napi_get_cb_info(env, info, &argc, args, &receiver, NULL) != napi_ok || argc ||
+      napi_check_object_type_tag(env, receiver, &broker_fence_tag, &tagged) != napi_ok || !tagged ||
+      napi_unwrap(env, receiver, (void **)&fence) != napi_ok || !fence || fence->env != env ||
+      fence->creator_pid != getpid() || syscall(SYS_gettid) != getpid()) {
+    napi_throw_type_error(env, NULL, "Invalid installed model no-release fence owner"); return NULL;
+  }
+  return fence;
+}
+static napi_value broker_fence_assert_call(napi_env env, napi_callback_info info) {
+  struct broker_fence *fence = broker_fence_receiver(env, info); if (!fence) return NULL;
+  if (fence->broker && (fence->broker->unsafe || atomic_load(&retirement_failed))) {
+    fence->broker->unsafe = true; napi_throw(env, broker_error_value(fence->broker)); return NULL;
+  }
+  if (!broker_fence_live(fence)) {
+    if (fence->broker && fence->broker->unsafe) napi_throw(env, broker_error_value(fence->broker));
+    else napi_throw_type_error(env, NULL, "Installed model no-release fence is not held");
+    return NULL;
+  }
+  napi_value result; napi_get_undefined(env, &result); return result;
+}
+static napi_value broker_fence_close_call(napi_env env, napi_callback_info info) {
+  struct broker_fence *fence = broker_fence_receiver(env, info); if (!fence) return NULL;
+  if (!broker_fence_drop(fence)) {
+    napi_value text, error; napi_create_string_utf8(env, "Installed model no-release fence did not retire", NAPI_AUTO_LENGTH, &text);
+    napi_create_error(env, NULL, text, &error); set_string(env, error, "code", "ERR_CLIQ_RESOURCE_RETIREMENT"); napi_throw(env, error); return NULL;
+  }
+  napi_value result; napi_get_undefined(env, &result); return result;
+}
+static napi_value broker_acquire_fence_call(napi_env env, napi_callback_info info) {
+  napi_value args[2]; size_t argc = 2; struct broker_binding binding = {0};
+  struct broker *broker = broker_receiver(env, info, &argc, args); if (!broker) return NULL;
+  if (argc != 1 || !broker->retired || !broker->close_finished || broker->working || broker->unsafe || broker->env_closing || atomic_load(&retirement_failed) ||
+      !broker->mutex_ready || !atomic_load(&broker->fence_retained) || broker->fence_locked ||
+      broker->network_started || broker->request_started || !broker_binding_value(env, args[0], &binding) ||
+      strcmp(binding.token_digest, broker->token_digest)) {
+    napi_throw_type_error(env, NULL, "Installed model no-release fence is unavailable or mismatched"); return NULL;
+  }
+  if (pthread_mutex_lock(&broker->release_mutex)) {
+    broker->unsafe = true; atomic_store(&retirement_failed, true); napi_throw(env, broker_error_value(broker)); return NULL;
+  }
+  char digest[65];
+  bool valid = broker->token_revoked && !broker->active_releases && !broker->network_started && !broker->request_started &&
+    digest_hex(broker->token, sizeof(broker->token), digest) && !strcmp(digest, binding.token_digest) &&
+    (!broker->bound || !memcmp(&binding, &broker->binding, sizeof(binding)));
+  struct broker_fence *fence = valid ? calloc(1, sizeof(*fence)) : NULL; napi_value value = NULL, original;
+  if (fence) {
+    broker->fence_locked = true; broker->bound = true; broker->binding = binding; broker->fence_borrows++;
+    fence->broker = broker; fence->env = env; fence->binding = binding; fence->creator_pid = getpid(); fence->active = true;
+    const napi_property_descriptor methods[] = {
+      {"assertHeld", NULL, broker_fence_assert_call, NULL, NULL, NULL, napi_default, NULL},
+      {"close", NULL, broker_fence_close_call, NULL, NULL, NULL, napi_default, NULL},
+    };
+    if (napi_get_reference_value(env, broker->handle, &original) != napi_ok || napi_create_reference(env, original, 1, &fence->original) != napi_ok ||
+        napi_create_object(env, &value) != napi_ok || napi_type_tag_object(env, value, &broker_fence_tag) != napi_ok ||
+        napi_wrap(env, value, fence, broker_fence_finalize, NULL, NULL) != napi_ok ||
+        napi_define_properties(env, value, sizeof(methods) / sizeof(*methods), methods) != napi_ok || napi_object_freeze(env, value) != napi_ok) {
+      if (!broker_fence_drop(fence)) { napi_throw(env, broker_error_value(broker)); return NULL; }
+      /* A successfully wrapped allocation is owned by its finalizer. */
+      void *wrapped = NULL;
+      if (!value || napi_unwrap(env, value, &wrapped) != napi_ok || wrapped != fence) { wipe(fence, sizeof(*fence)); free(fence); }
+      value = NULL;
+    }
+  } else if (pthread_mutex_unlock(&broker->release_mutex)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+  if (!value) { napi_throw_type_error(env, NULL, "Installed model no-release fence could not be acquired"); return NULL; }
+  return value;
+}
+static napi_value broker_release_fence_call(napi_env env, napi_callback_info info) {
+  napi_value args[1]; size_t argc = 1; struct broker *broker = broker_receiver(env, info, &argc, args); if (!broker) return NULL;
+  if (argc || !broker->retired || !broker->close_finished || broker->fence_locked) {
+    napi_throw_type_error(env, NULL, "Installed model original fence still has an owning guard or unfinished join"); return NULL;
+  }
+  if (broker->unsafe) {
+    broker->unsafe = true; atomic_store(&retirement_failed, true); napi_throw(env, broker_error_value(broker)); return NULL;
+  }
+  atomic_store(&broker->fence_retained, false); broker_finish_close(broker);
+  if (broker->unsafe) { napi_throw(env, broker_error_value(broker)); return NULL; }
+  napi_value result; napi_get_undefined(env, &result); return result;
+}
 static napi_value broker_handle_value(struct broker *broker, napi_value ready) {
   napi_value handle;
   if (napi_create_object(broker->env, &handle) != napi_ok ||
@@ -1513,6 +1659,9 @@ static napi_value broker_handle_value(struct broker *broker, napi_value ready) {
     {"connect", NULL, broker_connect_call, NULL, NULL, NULL, napi_default, NULL},
     {"releaseBody", NULL, broker_release_call, NULL, NULL, NULL, napi_default, NULL},
     {"close", NULL, broker_close_call, NULL, NULL, NULL, napi_default, NULL},
+    {"retainDispatchFence", NULL, broker_retain_fence_call, NULL, NULL, NULL, napi_default, NULL},
+    {"acquireNoReleaseFence", NULL, broker_acquire_fence_call, NULL, NULL, NULL, napi_default, NULL},
+    {"releaseDispatchFence", NULL, broker_release_fence_call, NULL, NULL, NULL, napi_default, NULL},
   };
   if (napi_define_properties(broker->env, handle, sizeof(methods) / sizeof(*methods), methods) != napi_ok ||
       napi_set_named_property(broker->env, handle, "ready", ready) != napi_ok) return NULL;
@@ -1525,19 +1674,29 @@ static void broker_timer_closed(uv_handle_t *timer) {
 }
 static void broker_finish_close(struct broker *broker) {
   if (!broker->retired || (broker->timer_ready && !broker->timer_closed)) return;
-  if (broker->close_finished) return;
+  bool retained = atomic_load(&broker->fence_retained);
+  if (broker->env_closing && !broker->fence_locked) { atomic_store(&broker->fence_retained, false); retained = false; }
+  if (!retained && broker->mutex_ready) {
+    wipe(broker->token, sizeof(broker->token));
+    if (pthread_mutex_destroy(&broker->release_mutex)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+    else broker->mutex_ready = false;
+  }
+  if (!retained && broker->cleanup_hook) {
+    if (napi_remove_async_cleanup_hook(broker->cleanup_hook) != napi_ok) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+    else broker->cleanup_hook = NULL;
+  }
+  if (broker->close_finished) {
+    if (!retained && !broker->unsafe && broker->handle) {
+      if (broker->env_closing) broker->handle = NULL; /* environment owns reference teardown */
+      else if (napi_delete_reference(broker->env, broker->handle) != napi_ok) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+      else broker->handle = NULL;
+    }
+    return;
+  }
   broker->close_finished = true;
   /* No worker can still borrow the cancellable. Its wakeup owner is retired
    * on this main-thread cut, never concurrently with a later close call. */
   if (broker->platform.cancel && !broker->unsafe) { g_object_unref(broker->platform.cancel); broker->platform.cancel = NULL; }
-  if (broker->cleanup_hook) {
-    if (napi_remove_async_cleanup_hook(broker->cleanup_hook) != napi_ok) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
-    else broker->cleanup_hook = NULL;
-  }
-  if (broker->mutex_ready) {
-    if (pthread_mutex_destroy(&broker->release_mutex)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
-    else broker->mutex_ready = false;
-  }
   if (!broker->env_closing && (broker->ready_deferred || broker->phase_deferred || broker->close_deferred)) {
     napi_handle_scope scope;
     if (napi_open_handle_scope(broker->env, &scope) != napi_ok) napi_fatal_error("cliq-model-broker", NAPI_AUTO_LENGTH, "broker close scope unavailable", NAPI_AUTO_LENGTH);
@@ -1572,8 +1731,9 @@ static void broker_finish_close(struct broker *broker) {
   if (broker->response) { wipe(broker->response, BROKER_BODY_CAP + 1); free(broker->response); broker->response = NULL; }
   if (broker->unsafe) {
     broker->unretired_next = unretired_brokers; unretired_brokers = broker;
-  } else if (broker->handle) {
-    napi_delete_reference(broker->env, broker->handle); broker->handle = NULL;
+  } else if (!retained && broker->handle) {
+    if (!broker->env_closing) napi_delete_reference(broker->env, broker->handle);
+    broker->handle = NULL;
   }
 }
 static void broker_close_timer(struct broker *broker) {
@@ -1662,7 +1822,14 @@ static void broker_begin_close(struct broker *broker) {
 }
 static void broker_deadline(uv_timer_t *timer) { broker_begin_close(timer->data); }
 static void broker_cleanup(napi_async_cleanup_hook_handle handle, void *data) {
-  (void)handle; struct broker *broker = data; broker->env_closing = true; broker_begin_close(broker);
+  (void)handle; struct broker *broker = data; broker->env_closing = true;
+  /* No JavaScript continuation can commit after environment teardown. Retire
+   * this original mutex without inventing a no-release database fact. */
+  if (broker->fence_locked) {
+    if (pthread_mutex_unlock(&broker->release_mutex)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+    else broker->fence_locked = false;
+  }
+  atomic_store(&broker->fence_retained, false); broker_begin_close(broker); broker_finish_close(broker);
 }
 static bool broker_input(napi_env env, napi_value input, struct broker *broker) {
   const char *keys[] = {"provider", "selector", "expectedObservation", "target", "trustStoreBytes", "trustStoreDigest", "requestPath", "bodyBytes", "bodyBytesDigest"};
@@ -1708,6 +1875,7 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
   if (!broker) { napi_throw_error(env, NULL, "Installed model broker preparation is unavailable"); return NULL; }
   broker->env = env; broker->creator_pid = getpid(); broker->platform.runtime_fd = -1;
   atomic_init(&broker->cancelled, false); atomic_init(&broker->unsafe, false); atomic_init(&broker->error, NULL);
+  atomic_init(&broker->fence_retained, false);
   bool valid = current_user(&broker->platform.uid, &broker->platform.gid, broker->platform.home) &&
     broker_input(env, args[0], broker) && RAND_bytes(broker->token, sizeof(broker->token)) == 1 &&
     clock_gettime(CLOCK_MONOTONIC, &broker->platform.deadline) == 0;
@@ -1747,7 +1915,7 @@ static napi_value initialize_broker(napi_env env, napi_value exports) {
     {"prepareModelTransport", NULL, broker_prepare_call, NULL, NULL, NULL, napi_default, NULL},
   };
   if (napi_define_properties(env, exports, sizeof(methods) / sizeof(*methods), methods) != napi_ok) return NULL;
-  set_number(env, exports, "interfaceVersion", 2); return exports;
+  set_number(env, exports, "interfaceVersion", 3); return exports;
 }
 NAPI_MODULE(cliq_linux_model_broker, initialize_broker)
 #endif

@@ -31,6 +31,8 @@ import {
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
 import { readWorkerCheckpointProof, prepareWorkerRetirement, type NativeWorkerRetirement } from '../tool-checkpoint.js';
+import { assertWorkerPreparationPromotion } from '../worker-preparation.js';
+import type { NativeWorkerReservationBinding } from '../../sandbox/linux-worker.js';
 
 const ACTIVATION_DEADLINE_MS = 120_000;
 const MAX_LEASE_EXTENSION_MS = 60_000;
@@ -110,7 +112,8 @@ export async function reserveWorkerLaunch(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   owner: StateOwnerContext,
-  input: ReserveWorkerLaunchInput
+  input: ReserveWorkerLaunchInput,
+  preparationBinding?: NativeWorkerReservationBinding
 ): Promise<BoundWorkerLaunch> {
   input = immutableSnapshot(input);
   for (const ref of [
@@ -139,8 +142,16 @@ export async function reserveWorkerLaunch(
     if (fenceOutcome !== 'healthy') return;
     const run = readRun(connection, input.runId);
     assertRunCanActivate(run, now, input.expectedRunRevision);
-    if (readWorkerLaunchesForRun(connection, input.runId, true).length !== 0) {
+    const retained = readWorkerLaunchesForRun(connection, input.runId, true);
+    const preparation = retained.length === 1 && retained[0]!.phase === 'preparing' ? retained[0] : undefined;
+    if (retained.length !== 0 && !preparation) {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run already has an unretired worker launch');
+    }
+    if (preparation) {
+      assertWorkerPreparationPromotion(connection, owner, preparation, input, preparationBinding);
+      if (now > preparation.activationDeadlineAt) throw new KernelStorageError('LEASE_FENCED', 'original worker preparation deadline elapsed');
+    } else if (preparationBinding) {
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'native BIND acknowledgement has no original preparation intent');
     }
     const generation = readRequiredWorkspaceGeneration(connection, identity.generationId);
     if (
@@ -165,11 +176,13 @@ export async function reserveWorkerLaunch(
       sandboxLaunchSpecRef: input.sandboxLaunchSpecRef,
       leaseVersion: 0,
       generationWriteState: 'preactivated_readonly',
-      createdAt: now,
-      activationDeadlineAt: addCanonicalDuration(now, ACTIVATION_DEADLINE_MS)
+      createdAt: preparation?.createdAt ?? now,
+      activationDeadlineAt: preparation?.activationDeadlineAt ?? addCanonicalDuration(now, ACTIVATION_DEADLINE_MS),
+      ...(preparation ? { preparation: preparation.preparation as import('../../kernel/types.js').BoundWorkerPreparation } : {})
     };
     for (const artifact of authorityMetadata) insertArtifactMetadata(connection, artifact, now);
-    insertWorkerLaunch(connection, reserved);
+    if (preparation) updateWorkerLaunch(connection, preparation, reserved);
+    else insertWorkerLaunch(connection, reserved);
   });
   requireHealthyFence(fenceOutcome);
   return reserved;
