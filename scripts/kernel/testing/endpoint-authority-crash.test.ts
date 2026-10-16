@@ -147,7 +147,9 @@ async function cutWriter(input: { phase: 'before' | 'after'; bootstrap: string; 
             writer = { pid, start: before.start };
           }
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          // A short-lived tracer probe can disappear after enumeration.
+          // Neither absence code binds a writer or satisfies a crash cut.
+          if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
         }
       }
       if (!writer) await pause();
