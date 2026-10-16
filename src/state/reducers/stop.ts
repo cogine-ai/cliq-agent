@@ -305,7 +305,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
               if (seal) throw new KernelStorageError('REVISION_CONFLICT', 'terminal Session changed after sealed completion preparation');
               return;
             }
-            brokerClosure.reobserve();
+            brokerClosure.reobserve(connection);
             const committedAt = sampleCanonicalNow();
             time = acceptTime(connection, committedAt);
             if (!time.accepted) return;

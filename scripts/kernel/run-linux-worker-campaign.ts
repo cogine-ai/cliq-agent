@@ -420,6 +420,10 @@ async function editedCheckpoint() {
     const controller = /^linux-subreaper:([1-9][0-9]*):(linux-proc-start-ticks:[0-9]+)$/u.exec(liveBackend.subreaperStartToken);
     assert(controller);
     const controllerPid = Number(controller[1]), controllerToken = controller[2]!;
+    const namespaceOwners = /^linux-namespace-init:([1-9][0-9]*):([0-9]+):monitor:([1-9][0-9]*):([0-9]+)$/u.exec(liveBackend.namespaceInitStartToken);
+    assert(namespaceOwners, 'actual containment must retain its exact native init/monitor lifetime contract');
+    const initPid = Number(namespaceOwners[1]), initToken = `linux-proc-start-ticks:${namespaceOwners[2]}`;
+    const monitorPid = Number(namespaceOwners[3]), monitorToken = `linux-proc-start-ticks:${namespaceOwners[4]}`;
     const physicalCut = async () => {
       const group = await lstat(liveBackend.cgroupPath, { bigint: true });
       assert(group.isDirectory() && !group.isSymbolicLink()); assert.equal(String(group.ino), liveBackend.cgroupId);
@@ -427,8 +431,12 @@ async function editedCheckpoint() {
       const members = pids(path.join(liveBackend.cgroupPath, 'worker')).sort((a, b) => a - b).map(pid => ({
         pid, token: processToken(pid), namespacePid: namespacePid(pid) }));
       const init = members.filter(member => member.namespacePid === 1);
-      assert.equal(init.length, 1); assert.equal(init[0]!.token, liveBackend.namespaceInitStartToken);
+      assert.equal(init.length, 1); assert.equal(init[0]!.pid, initPid); assert.equal(init[0]!.token, initToken);
       assert(members.some(member => member.pid === workerIdentity.pid && member.token === workerIdentity.processStartToken && member.namespacePid === 2));
+      assert(members.some(member => member.pid === monitorPid && member.token === monitorToken));
+      const monitorStatus = (await readFile(`/proc/${monitorPid}/stat`, 'utf8'));
+      const monitorParent = Number(monitorStatus.slice(monitorStatus.lastIndexOf(')') + 2).trim().split(/\s+/u)[1]);
+      assert.equal(processToken(monitorPid), monitorToken); assert.equal(monitorParent, controllerPid);
       const namespace = await stat(`/proc/${workerIdentity.pid}/ns/pid`, { bigint: true });
       assert.equal(String(namespace.ino), liveBackend.pidNamespaceId);
       assert.equal(processToken(controllerPid), controllerToken); assert(directChildren().has(controllerPid));
@@ -436,7 +444,8 @@ async function editedCheckpoint() {
       assert(root.isDirectory() && !root.isSymbolicLink());
       assert.equal(String(root.dev), locator.deviceId); assert.equal(String(root.ino), locator.directoryFileId);
       const identity = (value: fs.BigIntStats) => ({ dev: value.dev, ino: value.ino, uid: value.uid, gid: value.gid, mode: value.mode });
-      return { group: identity(group), generation: identity(root), namespace: identity(namespace), members, controllerPid, controllerToken };
+      return { group: identity(group), generation: identity(root), namespace: identity(namespace), members,
+        initPid, initToken, monitorPid, monitorToken, monitorParent, controllerPid, controllerToken };
     };
     const physicalBefore = await physicalCut();
     await assert.rejects(bounded(next.finishCurrentStop({ expectedRunRevision: refusedCut.run.revision })), error =>

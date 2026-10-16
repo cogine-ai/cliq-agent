@@ -249,7 +249,7 @@ function abandonment(frame: TerminalFrame, closureRef: string): Abandonments[num
 export type InstalledBrokerTerminalClosurePlan = Readonly<{
   metadata: PublishedArtifact[]; abandonedRetryInvocations: Abandonments;
   /** Repeats genuine observations; must precede the transaction's one clock sample. */
-  reobserve(): void;
+  reobserve(connection: SqliteConnection): void;
   validate(connection: SqliteConnection, currentRun: Run, committedAt: string): void;
 }>;
 
@@ -319,8 +319,8 @@ export async function withInstalledBrokerTerminalClosure<T>(driver: SqliteDriver
     }
     let fresh: number[] | undefined;
     return operation(Object.freeze({ metadata: immutableSnapshot(metadata), abandonedRetryInvocations: immutableSnapshot(abandonedRetryInvocations),
-      reobserve() {
-        assertActiveStateOwner(driver, owner);
+      reobserve(connection) {
+        assertActiveStateOwner(connection, owner);
         fresh = observations.map(({ process }) => owner.filesystem.observePriorProcessDeath(process.pid, process.processStartToken));
       },
       validate(connection, currentRun, committedAt) {
