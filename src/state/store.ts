@@ -1587,6 +1587,12 @@ export class StateStore {
   private readonly installedModelCompletions = new Map<string, {
     prepared: InvocationJournalEntry; claimed: InvocationJournalEntry; result: ModelAttemptResult;
   }>();
+  // Original joined transports remain owned until their typed failure
+  // settlement commits. A storage refusal never disposes the only live fence.
+  private readonly installedModelClosures = new Map<string, {
+    prepared: InvocationJournalEntry; claimed: InvocationJournalEntry; transport: NativeModelTransport;
+    closure?: ModelBrokerClosed; initial: Awaited<ReturnType<typeof readModelClaimCut>>;
+  }>();
   private readonly installedRunTasks = new Map<string, Promise<void>>();
   private readonly installedAgents = new Map<string, AgentRunState>();
   private readonly installedAgentLoads = new Map<string, Promise<AgentRunState>>();
@@ -1837,7 +1843,8 @@ export class StateStore {
         run = readRun(this.driver, id);
         if (run.stopIntentRef || run.status === 'waiting' && run.waitingReason === 'reconciliation' ||
             run.status === 'queued' && !this.installedRunFailures.has(id)) this.scheduleInstalledRun(id);
-        else if (run.status === 'running' && run.nextStep === 'agent' && this.installedModelCompletions.has(id) &&
+        else if (run.status === 'running' && run.nextStep === 'agent' &&
+            (this.installedModelCompletions.has(id) || this.installedModelClosures.has(id)) &&
             !this.installedRunTasks.has(id)) this.scheduleInstalledRun(id);
         else if (run.status === 'running' && run.nextStep === 'agent' && this.installedPreparationRetries.has(id) &&
             !this.installedRunTasks.has(id)) {
@@ -1962,6 +1969,10 @@ export class StateStore {
       if (!this.supportsInstalledRuns()) return;
       let current = readRun(this.driver, runId);
       if (!['queued', 'running', 'waiting'].includes(current.status)) return;
+      if (this.installedModelClosures.has(runId)) {
+        await this.settleInstalledModelClosure(runId);
+        continue;
+      }
       if (this.installedModelCompletions.has(runId)) {
         await this.settleInstalledModelCompletion(runId, agent);
         continue;
@@ -2418,6 +2429,49 @@ export class StateStore {
     void operation.then(() => release(), release); return operation;
   }
 
+  private async settleInstalledModelClosure(runId: string) {
+    const observation = this.installedModelClosures.get(runId);
+    if (!observation || !this.installedRuntime)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'model failure lost its original joined transport owner');
+    const { prepared, claimed, transport, initial } = observation;
+    // Closing is authority reducing. Retain its owner before this join or
+    // any SQL/token read can fail; failure cannot fall back to disposal.
+    const closure = observation.closure ??= await transport.close();
+    const active = assertActiveStateOwner(this.driver, this.owner);
+    const entries = readInvocationAttempt(this.driver, runId, prepared.opId, prepared.attempt);
+    if (active.supervisorInstanceId !== claimed.supervisorInstanceId || active.ownerEpoch !== claimed.stateOwnerEpoch ||
+        entries.length !== 2 || canonicalSha256(entries[0]) !== canonicalSha256(prepared) ||
+        canonicalSha256(entries[1]) !== canonicalSha256(claimed))
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'model failure no longer owns its exact permanent claim');
+    if (!closure.networkStarted) {
+      const { failInstalledModelClaimWithoutRelease } = await import('./broker-no-release.js');
+      await failInstalledModelClaimWithoutRelease(this.driver, this.artifacts, this.owner, this.installedRuntime,
+        { transport, prepared, claim: claimed });
+    } else {
+      const inspector = supervisorInspectorIdentity(active), inspectorArtifact = await this.artifacts.publishCanonical(inspector, inspector.format);
+      const evidence: BrokerInvocationAmbiguityEvidenceV1 = { schemaVersion: 1, format: 'cliq-invocation-ambiguity-evidence-v1',
+        runId, frontierRef: initial.authority.grant.frontierRef, frontierDigest: initial.authority.grant.frontierRef,
+        opId: claimed.opId, opKind: 'model', attempt: claimed.attempt, dispatchId: claimed.dispatchId!, dispatchJournalSeq: claimed.seq,
+        operationRequestRef: claimed.requestRef, operationRequestDigest: initial.request.requestDigest,
+        operationTargetRef: initial.authority.targetRef, operationTargetDigest: initial.authority.targetDigest,
+        claimingSupervisorInstanceId: claimed.supervisorInstanceId!, claimingStateOwnerEpoch: claimed.stateOwnerEpoch!,
+        inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest,
+        observedAt: sampleCanonicalNow(), evidenceDigest: '', ambiguityKind: 'broker_channel_lost_after_claim',
+        brokerFenceTokenDigest: claimed.brokerFenceTokenDigest!, failureCode: closure.requestStarted
+          ? 'response_stream_interrupted' : 'connection_lost_after_release_possible', durableTerminalResultAbsent: true };
+      evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest'); decodeBrokerInvocationAmbiguity(evidence);
+      const artifact = await this.artifacts.publishCanonical(evidence, evidence.format);
+      // This is the original genuine closed producer, not permission to
+      // repeat network I/O. Every released outcome remains fully charged.
+      await markInstalledBrokerAmbiguity(this.driver, this.artifacts, this.owner, {
+        runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision,
+        evidenceRef: artifact.ref, evidenceDigest: evidence.evidenceDigest });
+    }
+    transport.releaseDispatchFence();
+    if (this.installedModelClosures.get(runId) === observation) this.installedModelClosures.delete(runId);
+    if (this.modelTransports.get(runId) === transport) this.modelTransports.delete(runId);
+  }
+
   private async settleInstalledModelCompletion(runId: string, agent: AgentRunState) {
     const observation = this.installedModelCompletions.get(runId);
     if (!observation) throw new KernelStorageError('RECOVERY_REQUIRED', 'received model result lost its original settlement owner');
@@ -2570,40 +2624,25 @@ export class StateStore {
       } catch (error) {
         // Unknown never becomes a no-release refund or a synthetic response.
         // Native closure is resource retirement only, not external-effect proof.
-        let closure: ModelBrokerClosed | undefined;
-        if (transport) { closure = await transport.close(); this.modelTransports.delete(runId); }
+        const pendingClosure = claimed && transport && !receivedResponse
+          ? { prepared, claimed, transport, initial } : undefined;
+        if (pendingClosure) {
+          this.installedModelClosures.set(runId, pendingClosure);
+          this.modelTransports.set(runId, pendingClosure.transport);
+        }
+        if (transport) {
+          await transport.close();
+          if (!pendingClosure) this.modelTransports.delete(runId);
+        }
         if (error instanceof ResourceRetirementError) throw error;
         if (error instanceof InstalledModelBrokerRefusalError) console.error(canonicalJsonBytes({ diagnosticOnly: true,
           scope: 'installed-model-broker', runId, opId: prepared.opId, attempt: prepared.attempt,
           ...(claimed ? { dispatchId: claimed.dispatchId, dispatchJournalSeq: claimed.seq } : {}), reason: error.reason }).toString('utf8'));
-        const input = { runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision };
         const last = readInvocationAttempt(this.driver, runId, prepared.opId, prepared.attempt).at(-1);
-        if (last?.phase === 'dispatch_claimed' && claimed && closure?.networkStarted && !receivedResponse) {
-          const active = assertActiveStateOwner(this.driver, this.owner);
+        if (pendingClosure) {
           token.assertHeld();
-          if (active.supervisorInstanceId !== claimed.supervisorInstanceId || active.ownerEpoch !== claimed.stateOwnerEpoch)
-            throw new KernelStorageError('LEASE_FENCED', 'broker ambiguity cannot substitute its live claiming owner');
-          const inspector = supervisorInspectorIdentity(active), inspectorArtifact = await this.artifacts.publishCanonical(inspector, inspector.format);
-          const evidence: BrokerInvocationAmbiguityEvidenceV1 = { schemaVersion: 1, format: 'cliq-invocation-ambiguity-evidence-v1',
-            runId, frontierRef: initial.authority.grant.frontierRef, frontierDigest: initial.authority.grant.frontierRef,
-            opId: claimed.opId, opKind: 'model', attempt: claimed.attempt, dispatchId: claimed.dispatchId!, dispatchJournalSeq: claimed.seq,
-            operationRequestRef: claimed.requestRef, operationRequestDigest: initial.request.requestDigest,
-            operationTargetRef: initial.authority.targetRef, operationTargetDigest: initial.authority.targetDigest,
-            claimingSupervisorInstanceId: claimed.supervisorInstanceId!, claimingStateOwnerEpoch: claimed.stateOwnerEpoch!,
-            inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest,
-            observedAt: sampleCanonicalNow(), evidenceDigest: '', ambiguityKind: 'broker_channel_lost_after_claim',
-            brokerFenceTokenDigest: claimed.brokerFenceTokenDigest!, failureCode: closure.requestStarted
-              ? 'response_stream_interrupted' : 'connection_lost_after_release_possible', durableTerminalResultAbsent: true };
-          evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest'); decodeBrokerInvocationAmbiguity(evidence);
-          const artifact = await this.artifacts.publishCanonical(evidence, evidence.format);
-          // The genuine native handle accepted the exact claim at its network
-          // release gate. A failed connection is conservatively charged too;
-          // closure is never a no-release refund or a synthetic response.
-          await markInstalledBrokerAmbiguity(this.driver, this.artifacts, this.owner, { ...input, evidenceRef: artifact.ref, evidenceDigest: evidence.evidenceDigest });
-        } else if (last?.phase === 'dispatch_claimed' && claimed && transport && closure && !closure.networkStarted && !receivedResponse) {
-          const { failInstalledModelClaimWithoutRelease } = await import('./broker-no-release.js');
-          await failInstalledModelClaimWithoutRelease(this.driver, this.artifacts, this.owner, selected,
-            { transport, prepared, claim: claimed });
+          await this.settleInstalledModelClosure(runId);
+          fenceRetained = false;
         } else if (last?.phase === 'prepared') {
           if (error instanceof InstalledModelAuthorizationError) {
             const { publishInstalledCredentialRedemptionRefusal } = await import('./credential-redemption-failure.js');
@@ -2622,7 +2661,7 @@ export class StateStore {
         throw error;
       } finally {
         bodyBytes.fill(0);
-        if (fenceRetained && transport) {
+        if (fenceRetained && transport && !this.installedModelClosures.has(runId)) {
           await transport.close();
           transport.releaseDispatchFence();
         }
@@ -2823,6 +2862,8 @@ export class StateStore {
       const producerJoins = await Promise.allSettled([...this.modelOperations.values(), ...this.installedAgentLoads.values()]);
       const driverJoins = await Promise.allSettled([...this.installedRunTasks.values()]);
       const maintenanceJoins = await Promise.allSettled(this.installedMaintenance ? [this.installedMaintenance] : []);
+      const closureJoins = await Promise.allSettled([...this.installedModelClosures.keys()]
+        .map(runId => this.settleInstalledModelClosure(runId)));
       const completionJoins = await Promise.allSettled([...this.installedModelCompletions.keys()].map(async runId => {
         // Retain StateOwner and the observed result rather than discarding it
         // on shutdown after a failed durable settlement. A close retry may
@@ -2857,7 +2898,7 @@ export class StateStore {
       // A failed broker join cannot skip independent listener/source/worker
       // revocation. Every owner is joined, but StateOwner stays held on any
       // retirement uncertainty; neither failure becomes a positive receipt.
-      const failure = [...brokerJoins, ...completionJoins, ...producerJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
+      const failure = [...brokerJoins, ...closureJoins, ...completionJoins, ...producerJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...driverJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...maintenanceJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError), ...results]
         .find(result => result.status === 'rejected');

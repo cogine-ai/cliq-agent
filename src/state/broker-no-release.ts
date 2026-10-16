@@ -18,13 +18,21 @@ import { KernelStorageError } from './errors.js';
 import { assertInstalledModelNoReleaseFence, type HeldInstalledRuntime } from './installed-runtime.js';
 import { isZeroBudget } from './invariants.js';
 import { readModelGrantClosure } from './model-grant.js';
-import type { ModelBrokerBinding, NativeModelTransport } from './model-broker-native.js';
+import type { ModelBrokerBinding, NativeModelNoReleaseFence, NativeModelTransport } from './model-broker-native.js';
 import { readModelClaimCut, settleValidatedInvocation } from './reducers/invocation.js';
 import { readInvocationAttempt } from './repositories/journal.js';
 import { readRun, ZERO_BUDGET } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { readSupervisorInspector, supervisorInspectorIdentity } from './supervisor-inspector.js';
+
+type PendingNoReleaseSettlement = {
+  fence: NativeModelNoReleaseFence; driver: SqliteDriver; artifacts: ArtifactCatalog;
+  owner: StateOwnerContext; selected: HeldInstalledRuntime; frameDigest: string; bindingDigest: string; active: boolean;
+};
+// This is the same original mutex owner, not a recipe for reacquiring one.
+// Publication/SQL failure must retain it until that exact claim settles.
+const pendingNoReleaseSettlements = new WeakMap<NativeModelTransport, PendingNoReleaseSettlement>();
 
 function originalClaim(prepared: InvocationJournalEntry, claim: InvocationJournalEntry) {
   if (prepared.phase !== 'prepared' || prepared.opKind !== 'model' || claim.phase !== 'dispatch_claimed' || claim.opKind !== 'model' ||
@@ -42,20 +50,53 @@ export async function failInstalledModelClaimWithoutRelease(driver: SqliteDriver
   }) {
   const prepared = immutableSnapshot(input.prepared), claim = immutableSnapshot(input.claim);
   originalClaim(prepared, claim);
-  // This producer already owns the credential scope. The original branded
-  // fence retains its signed image/root descriptors; never enqueue a second
-  // runtime borrow behind the callback that is waiting for this settlement.
-  const initial = await readModelClaimCut(driver, artifacts, prepared);
-  await validateRetainedInstalledBrokerRecipe(artifacts, initial.run, initial.spec, initial.assembly);
-  const binding: ModelBrokerBinding = immutableSnapshot({ runId: claim.runId, opId: claim.opId, attempt: claim.attempt,
-    dispatchId: claim.dispatchId!, dispatchJournalSeq: claim.seq, requestRef: prepared.requestRef, requestDigest: initial.request.requestDigest,
-    targetRef: initial.authority.targetRef, targetDigest: initial.authority.targetDigest, grantRef: prepared.grantRef!,
-    supervisorInstanceId: claim.supervisorInstanceId!, stateOwnerEpoch: claim.stateOwnerEpoch!, leaseEpoch: claim.leaseEpoch,
-    brokerFenceTokenDigest: claim.brokerFenceTokenDigest! });
-  const fence = input.transport.acquireNoReleaseFence(binding);
-  const installation = { selected, runtimeBundleRef: initial.assembly.runtime.runtimeBundleRef,
-    runtimeBundleManifestDigest: initial.assembly.runtime.runtimeBundleManifestDigest };
+  const frameDigest = canonicalSha256({ prepared, claim, errorRef: input.errorRef ?? null });
+  let pending = pendingNoReleaseSettlements.get(input.transport);
+  if (pending) {
+    if (pending.driver !== driver || pending.artifacts !== artifacts || pending.owner !== owner || pending.selected !== selected ||
+        pending.frameDigest !== frameDigest)
+      throw new KernelStorageError('LEASE_FENCED', 'model no-release retry substitutes its original resource or claim owner');
+    if (pending.active) throw new KernelStorageError('REVISION_CONFLICT', 'model no-release settlement is already active');
+    pending.active = true;
+  }
   try {
+    const activeOwner = assertActiveStateOwner(driver, owner);
+    if (activeOwner.supervisorInstanceId !== claim.supervisorInstanceId || activeOwner.ownerEpoch !== claim.stateOwnerEpoch)
+      throw new KernelStorageError('LEASE_FENCED', 'model no-release settlement requires its original live claiming owner');
+    // This producer already owns the original signed image/root descriptors.
+    // Never enqueue a runtime borrow behind the callback awaiting settlement.
+    const initial = await readModelClaimCut(driver, artifacts, prepared);
+    await validateRetainedInstalledBrokerRecipe(artifacts, initial.run, initial.spec, initial.assembly);
+    const binding: ModelBrokerBinding = immutableSnapshot({ runId: claim.runId, opId: claim.opId, attempt: claim.attempt,
+      dispatchId: claim.dispatchId!, dispatchJournalSeq: claim.seq, requestRef: prepared.requestRef, requestDigest: initial.request.requestDigest,
+      targetRef: initial.authority.targetRef, targetDigest: initial.authority.targetDigest, grantRef: prepared.grantRef!,
+      supervisorInstanceId: claim.supervisorInstanceId!, stateOwnerEpoch: claim.stateOwnerEpoch!, leaseEpoch: claim.leaseEpoch,
+      brokerFenceTokenDigest: claim.brokerFenceTokenDigest! });
+    if (!pending) {
+      // Another callback may have acquired the original guard during the
+      // immutable reads above. Reuse only its completed, same-owner attempt.
+      const raced = pendingNoReleaseSettlements.get(input.transport);
+      if (raced) {
+        if (raced.driver !== driver || raced.artifacts !== artifacts || raced.owner !== owner || raced.selected !== selected ||
+            raced.frameDigest !== frameDigest)
+          throw new KernelStorageError('LEASE_FENCED', 'model no-release retry substitutes its original resource or claim owner');
+        if (raced.active) throw new KernelStorageError('REVISION_CONFLICT', 'model no-release settlement is already active');
+        raced.active = true; pending = raced;
+      } else {
+        // No asynchronous cut separates this exact unsettled claim from
+        // original guard acquisition/registration. An already committed
+        // parallel settlement must not mint a fresh held guard.
+        requireEqual(readInvocationAttempt(driver, claim.runId, claim.opId, claim.attempt), [prepared, claim], 'model no-release acquisition claim');
+        const fence = input.transport.acquireNoReleaseFence(binding);
+        pending = { fence, driver, artifacts, owner, selected, frameDigest, bindingDigest: canonicalSha256(binding), active: true };
+        pendingNoReleaseSettlements.set(input.transport, pending);
+      }
+    }
+    if (pending.bindingDigest !== canonicalSha256(binding))
+      throw new KernelStorageError('LEASE_FENCED', 'model no-release retry changes its original held native binding');
+    const fence = pending.fence;
+    const installation = { selected, runtimeBundleRef: initial.assembly.runtime.runtimeBundleRef,
+      runtimeBundleManifestDigest: initial.assembly.runtime.runtimeBundleManifestDigest };
     assertInstalledModelNoReleaseFence(fence, binding, installation);
     const error = input.errorRef ? await artifacts.describe(input.errorRef, 'application/json', 'cliq-invocation-error-v1') :
       await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-invocation-error-v1', runId: claim.runId,
@@ -86,7 +127,7 @@ export async function failInstalledModelClaimWithoutRelease(driver: SqliteDriver
       const artifact = await artifacts.publishCanonical(evidence, evidence.format);
       assertInstalledModelNoReleaseFence(fence, binding, installation);
       try {
-        return await settleValidatedInvocation(driver, artifacts, owner, { runId: claim.runId, opId: claim.opId,
+        const settled = await settleValidatedInvocation(driver, artifacts, owner, { runId: claim.runId, opId: claim.opId,
           attempt: claim.attempt, expectedRunRevision: cut.run.revision }, { phase: 'failed', errorRef: error.ref,
           evidenceRef: artifact.ref, evidenceDigest: evidence.evidenceDigest, consumed: ZERO_BUDGET, requireClaim: true }, async () => ({
             metadata: [error, artifact, inspectorArtifact],
@@ -101,6 +142,12 @@ export async function failInstalledModelClaimWithoutRelease(driver: SqliteDriver
                 throw new KernelStorageError('LEASE_FENCED', 'model no-release evidence is not fresh under its exact live owner');
             },
           }));
+        // Only the successful zero-settlement commit consumes this original
+        // guard. Any publication, storage or CAS error leaves it continuously
+        // held for same-owner settlement retry, never productive transport.
+        fence.close();
+        pendingNoReleaseSettlements.delete(input.transport);
+        return settled;
       } catch (error) {
         if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT') throw error;
         const current = readRun(driver, claim.runId);
@@ -115,7 +162,7 @@ export async function failInstalledModelClaimWithoutRelease(driver: SqliteDriver
       }
     }
     throw new KernelStorageError('REVISION_CONFLICT', 'model no-release stop cut did not stabilize');
-  } finally { fence.close(); }
+  } finally { if (pending) pending.active = false; }
 }
 
 /** Full retained closure, not acceptance of an arbitrary failed+claimed row. */
