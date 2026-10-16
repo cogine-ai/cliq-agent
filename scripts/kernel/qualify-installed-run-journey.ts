@@ -1175,7 +1175,15 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     let idleObservations = 0;
     do {
       await delay(1000); assert(!providerFailure, 'candidate maintenance cannot redispatch an owned provider effect');
-      cut = read(); idleObservations++;
+      // Both read-only frames share this round's fresh authenticated client;
+      // their per-connection identity is published once, not once per query.
+      const [maintenanceRun, maintenanceSupervisor] = exchange([
+        { protocolVersion: 1, method: 'run.get', runId: admitted.id },
+        { protocolVersion: 1, method: 'supervisor.status' },
+      ]);
+      cut = accepted(maintenanceRun!, 'run.get');
+      report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure });
+      idleObservations++;
       assert.equal(cut.snapshot.run.status, 'running');
       assert.equal(cut.snapshot.run.revision, originalCandidateCut.snapshot.run.revision);
       assert.equal(cut.snapshot.run.activeWorkerLaunchId, originalCandidateCut.snapshot.run.activeWorkerLaunchId);
@@ -1186,7 +1194,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       assert.deepEqual(cut.snapshot.run.budgetConsumed, originalCandidateCut.snapshot.run.budgetConsumed);
       assert.deepEqual(cut.snapshot.run.budgetReserved, originalCandidateCut.snapshot.run.budgetReserved);
       assert.equal(requestsReceived, 2);
-      const maintenanceStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
+      const maintenanceStatus = accepted(maintenanceSupervisor!, 'supervisor.status');
       assert.equal(maintenanceStatus.supervisorInstanceId, leaseSupervisor.supervisorInstanceId);
       assert.equal(maintenanceStatus.health, 'ready'); assert.equal(maintenanceStatus.queue.capacity, 1);
       assert.equal(maintenanceStatus.queue.runningRuns, 1); assert.equal(maintenanceStatus.incompatiblePinnedRunCount, 0);
