@@ -365,6 +365,9 @@ campaign revokes a real credential after queued admission, requires zero provide
 release and complete terminal/restart history. The original installed Busy
 campaign additionally checks credential.finalize and an explicit continuation
 replay after drain; its RATE_LIMITED hint grants no effect-retry permission.
+The verified installed credential facade refuses scope contention before
+enqueueing installation work, so it cannot wait behind the very native callback
+whose Busy condition it must report. Original held-identity checks remain.
 Neither campaign is qualified until a complete current-source report passes.
 
 After claim but before CONNECT, only the original native token/release mutex,
@@ -374,8 +377,11 @@ The native lifecycle regression exercises that retained mutex and environment
 teardown, not the exact installed SQL claim-to-CONNECT cut, which remains
 unverified. A genuinely received model response is retained by its original
 settlement owner across stop-only revision races and durability retry; it is
-never re-requested. Portable CAS-race regression is not physical qualification
-of every post-response publication failure cut.
+never re-requested. The portable concurrent public-operations regression accepts
+either genuine CAS winner and verifies the single original completion and charge;
+a stale cancellation must conflict before a fresh-revision cancellation. It does
+not force a publication interleaving or physically qualify every post-response
+publication failure cut.
 
 An independent approved storage-failure campaign retains one original ordinary
 authenticated v1 connection before an actual POST. On its disposable bounded

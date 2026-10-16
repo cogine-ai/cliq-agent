@@ -87,25 +87,48 @@ test('model preparation at or after the Run deadline is lease-fenced without cha
   } finally { await disposeFixture(fixture); }
 });
 
-test('a received model result survives concurrent cancellation without a second claim or charge', async () => {
+test('a received model result survives revision-checked concurrent cancellation without a second claim or charge', async () => {
   const fixture = await createAgentFixture('model-result-cancel-race', undefined, { mode: 'plan' });
   try {
     const admitted = await prepare(fixture);
     const result = response(fixture, admitted, [], 'The original response.');
     const channel = await publishInProcessChannel(fixture.store);
-    const expectedRunRevision = fixture.store.getRun(fixture.runId).revision;
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const expectedRunRevision = before.run.revision;
     // Both producers use their real public operations and actual CAS I/O.
-    // Cancellation has already entered before completion starts publishing;
-    // neither an internal collaborator nor a settlement proof is substituted.
-    const cancellation = fixture.agent.cancelRun({ ...channel, requestId: uuidv7(), expectedRunRevision });
+    // Starting cancellation first does not decide which revision CAS wins;
+    // an uncommitted cancellation must reject a revision changed by completion.
+    const cancelRequest = { ...channel, requestId: uuidv7(), expectedRunRevision };
+    const cancellation = fixture.agent.cancelRun(cancelRequest);
     const completion = fixture.agent.completeModel({ opId: admitted.entry.opId, attempt: 0, expectedRunRevision, result });
-    const [cancelled, completed] = await Promise.all([cancellation, completion]);
+    const [cancelOutcome, completionOutcome] = await Promise.allSettled([cancellation, completion]);
+    assert.equal(completionOutcome.status, 'fulfilled');
+    const completed = completionOutcome.value;
+    let cancelled: Awaited<ReturnType<typeof fixture.agent.cancelRun>>;
+    if (cancelOutcome.status === 'fulfilled') {
+      cancelled = cancelOutcome.value;
+      assert.equal(completed.run.stopIntentRef, cancelled.run.stopIntentRef);
+    } else {
+      assert.ok(cancelOutcome.reason instanceof KernelStorageError);
+      assert.equal(cancelOutcome.reason.code, 'REVISION_CONFLICT');
+      const beforeCancellation = await fixture.store.readRecoveryClosure(fixture.runId);
+      assert.deepEqual(beforeCancellation.run, completed.run);
+      assert.equal(beforeCancellation.run.stopIntentRef, undefined);
+      assert.equal(beforeCancellation.run.cancelRequested, false);
+      // The failed request committed no response: its same id may now submit
+      // the current revision without a request-id conflict or lost result.
+      cancelled = await fixture.agent.cancelRun({ ...cancelRequest, expectedRunRevision: completed.run.revision });
+      assert.equal(cancelled.replayed, false);
+    }
     assert.equal(cancelled.run.cancelRequested, true);
     assert.equal(completed.entry.phase, 'completed');
     const closure = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(closure.run.stopIntentRef, cancelled.run.stopIntentRef);
     assert.equal(closure.run.cancelRequested, true);
+    assert.equal(closure.run.revision, expectedRunRevision + 2);
     assert.deepEqual(closure.journal.map(entry => entry.phase), ['prepared', 'dispatch_claimed', 'completed']);
+    assert.deepEqual(closure.journal.slice(0, 2), before.journal);
+    assert.deepEqual(closure.journal[2], completed.entry);
     assert.deepEqual(closure.run.budgetConsumed, admitted.entry.budgetDelta);
     assert.deepEqual(closure.run.budgetReserved, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
     const item = await fixture.store.artifacts.readCanonical<ContinuationItem>(closure.items[0]!.payloadRef);

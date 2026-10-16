@@ -179,6 +179,11 @@ export function loadInstalledWorkerNative(selected: HeldInstalledRuntime): Promi
 export function loadInstalledCredentialPlatform(selected: HeldInstalledRuntime): Promise<NativeCredentialPlatformBinding> {
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('installed runtime is not a verified held selection');
+  healthy();
+  // Ordinary callers load before acquiring the credential scope. Enqueueing
+  // here during a scope would wait behind its own pending native operation,
+  // preventing the public caller from ever reaching the existing Busy gate.
+  if (credentialScopeReserved) throw new CredentialScopeBusyError();
   return binding.loadCredentialPlatform();
 }
 export function loadInstalledModelBroker(selected: HeldInstalledRuntime): Promise<NativeModelBrokerBinding> {
