@@ -4,7 +4,7 @@ import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:f
 import os from 'node:os';
 import path from 'node:path';
 
-import type { ModelClient } from '../model/types.js';
+import type { ModelClient, ModelCompletion, ModelRequestMode } from '../model/types.js';
 import type { RuntimeEventEnvelope } from './contract.js';
 import { runHeadless } from './run.js';
 
@@ -47,12 +47,35 @@ async function writeWorkspaceHook(cwd: string, name: string, source: string) {
   return commandFor(scriptPath);
 }
 
+function typedCompletion(
+  content: string,
+  provider: 'ollama' = 'ollama',
+  overrides?: { mode?: ModelRequestMode; streaming?: boolean }
+): ModelCompletion {
+  const mode = overrides?.mode ?? 'text-action';
+  const streaming = overrides?.streaming ?? false;
+  return {
+    provider,
+    model: 'test-model',
+    content,
+    effectiveRequest: {
+      provider,
+      model: 'test-model',
+      mode,
+      streaming,
+      baseInstructionChars: 0,
+      inputItemCount: 0,
+      toolNames: []
+    }
+  };
+}
+
 function finalModel(message = 'done'): ModelClient {
   return {
     async complete(_messages, options) {
       await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
       await options?.onEvent?.({ type: 'end' });
-      return { provider: 'ollama', model: 'test-model', content: JSON.stringify({ message }) };
+      return typedCompletion(JSON.stringify({ message }));
     }
   };
 }
@@ -60,7 +83,7 @@ function finalModel(message = 'done'): ModelClient {
 function bashLoopModel(): ModelClient {
   return {
     async complete() {
-      return { provider: 'ollama', model: 'test-model', content: JSON.stringify({ bash: 'pwd' }) };
+      return typedCompletion(JSON.stringify({ bash: 'pwd' }));
     }
   };
 }
@@ -345,7 +368,7 @@ process.stdin.on('end', () => {
           modelSawSessionStart = JSON.parse(await readFile(markerPath, 'utf8')).hookEventName === 'SessionStart';
           await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
           await options?.onEvent?.({ type: 'end' });
-          return { provider: 'ollama', model: 'test-model', content: JSON.stringify({ message: 'done' }) };
+          return typedCompletion(JSON.stringify({ message: 'done' }));
         }
       }
     }
@@ -388,7 +411,7 @@ test('runHeadless fails closed for required SessionStart infrastructure errors b
       modelClient: {
         async complete() {
           modelCalls += 1;
-          return { provider: 'ollama', model: 'test-model', content: JSON.stringify({ message: 'done' }) };
+          return typedCompletion(JSON.stringify({ message: 'done' }));
         }
       }
     }
@@ -439,11 +462,9 @@ process.stdin.on('end', () => {
           calls += 1;
           await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
           await options?.onEvent?.({ type: 'end' });
-          return {
-            provider: 'ollama',
-            model: 'test-model',
-            content: calls === 1 ? JSON.stringify({ bash: 'pwd' }) : JSON.stringify({ message: 'done' })
-          };
+          return typedCompletion(
+            calls === 1 ? JSON.stringify({ bash: 'pwd' }) : JSON.stringify({ message: 'done' })
+          );
         }
       }
     }
@@ -490,14 +511,11 @@ test('runHeadless falls back to workspace permissions.preset when request.policy
           calls += 1;
           await options?.onEvent?.({ type: 'start', provider: 'ollama', model: 'test-model', streaming: false });
           await options?.onEvent?.({ type: 'end' });
-          return {
-            provider: 'ollama',
-            model: 'test-model',
-            content:
-              calls === 1
-                ? JSON.stringify({ edit: { path: 'README.md', old_text: 'a', new_text: 'b' } })
-                : JSON.stringify({ message: 'gave up' })
-          };
+          return typedCompletion(
+            calls === 1
+              ? JSON.stringify({ edit: { path: 'README.md', old_text: 'a', new_text: 'b' } })
+              : JSON.stringify({ message: 'gave up' })
+          );
         }
       },
       onEvent(event) {
@@ -595,17 +613,9 @@ process.stdin.on('end', () => {
           // let a "session was silently upgraded to workspace" regression
           // slip through.
           if (calls === 1 || calls === 2) {
-            return {
-              provider: 'ollama',
-              model: 'test-model',
-              content: JSON.stringify({ bash: 'pwd' })
-            };
+            return typedCompletion(JSON.stringify({ bash: 'pwd' }));
           }
-          return {
-            provider: 'ollama',
-            model: 'test-model',
-            content: JSON.stringify({ message: 'done' })
-          };
+          return typedCompletion(JSON.stringify({ message: 'done' }));
         }
       }
     }
