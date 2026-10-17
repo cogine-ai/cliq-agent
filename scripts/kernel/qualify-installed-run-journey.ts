@@ -17,6 +17,7 @@ import { decodeCredentialAuthorityOperation, decodeCredentialAuthorityRevokeOper
   decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../src/kernel/credential-authority.js';
 import { digestOmitting, identityHash, sha256Bytes } from '../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../src/kernel/json.js';
+import { buildModelRequestWire, estimatePromptTokens, type ModelVisiblePromptV1 } from '../../src/model/request.js';
 import type { CredentialFinalizeRequest } from '../../src/state/installed-credential-client.js';
 import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH } from '../../src/state/model-broker-native.js';
 import { buildInstalledSupervisorPackage } from './testing/installed-supervisor-package.js';
@@ -40,7 +41,7 @@ const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
 type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign' |
   '--storage-failure-campaign' | '--shutdown-admission-campaign' | '--shutdown-session-campaign' | '--shutdown-preparation-campaign' |
-  '--shutdown-received-tool-campaign' | '--shutdown-pending-model-campaign' | '--shutdown-startup-campaign';
+  '--shutdown-received-tool-campaign' | '--shutdown-pending-model-campaign' | '--shutdown-startup-campaign' | '--request-resource-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 const receivedToolBefore = 'owned received-tool OLD token';
@@ -165,6 +166,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const retryOnly = mode === '--retry-campaign';
   const authorityOnly = mode === '--authority-failure-campaign';
   const storageOnly = mode === '--storage-failure-campaign';
+  const requestResourceOnly = mode === '--request-resource-campaign';
   const shutdownAdmissionOnly = mode === '--shutdown-admission-campaign';
   const shutdownSessionOnly = mode === '--shutdown-session-campaign';
   const shutdownPreparationOnly = mode === '--shutdown-preparation-campaign';
@@ -172,8 +174,62 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const shutdownStartupOnly = mode === '--shutdown-startup-campaign';
   const shutdownPendingModelOnly = mode === '--shutdown-pending-model-campaign' || shutdownStartupOnly;
   const shutdownEffectsOnly = shutdownReceivedToolOnly || shutdownPendingModelOnly;
+  const requestResource = requestResourceOnly ? (() => {
+    const contextLimit = 1048576, outputLimit = 262144, responseLimit = 1048576, textBytes = 700 * 1024;
+    const compactObjective = 'Qualify owned whole-prefix request-byte compaction. ' + 'c'.repeat(32768);
+    const exhaustedObjective = 'Qualify owned protected request-byte exhaustion. ' + 'e'.repeat(32768);
+    const followerObjective = 'Acknowledge genuine queued successor progress without using a tool.';
+    const first = 'A'.repeat(textBytes), second = 'B'.repeat(textBytes), unknown = 'owned_unavailable_tool';
+    const message = (content: string, callId?: string) => ({ role: 'assistant', content,
+      ...(callId === undefined ? {} : { tool_calls: [{ id: callId, type: 'function', function: { name: unknown, arguments: '{}' } }] }) });
+    const payload = (ordinal: number, content: string, callId?: string) => ({ id: `owned-resource-turn-${ordinal}`,
+      object: 'chat.completion', model, choices: [{ index: 0, finish_reason: callId === undefined ? 'stop' : 'tool_calls',
+        message: message(content, callId) }], usage: { prompt_tokens: 10, completion_tokens: Math.ceil(Buffer.byteLength(content) / 3),
+        total_tokens: 10 + Math.ceil(Buffer.byteLength(content) / 3) } });
+    // Escaping must not turn the RESPONSE into an over-limit refusal. Keep
+    // 8 KiB of complete-response headroom; the genuine 32 KiB objective is
+    // request-only context and makes the NEXT request exceed the fixed cap.
+    const ordinary = Buffer.byteLength(JSON.stringify(payload(5, 'x'.repeat(textBytes), 'resource-escaped')));
+    const escapes = responseLimit - 8192 - ordinary; assert(escapes > 0 && escapes < textBytes);
+    const escaped = '"\\'.repeat(Math.floor(escapes / 2)) + (escapes % 2 ? '"' : '') + 'x'.repeat(textBytes - escapes);
+    assert.equal(Buffer.byteLength(escaped), textBytes);
+    const responses = [payload(1, first, 'resource-first'), payload(2, second, 'resource-second'),
+      payload(3, '# Retained summary\nThe first unknown call was rejected; preserve the objective and continue.'),
+      payload(4, 'The owned compaction continuation is complete.'), payload(5, escaped, 'resource-escaped'),
+      payload(6, 'The genuine queued successor reached the owned endpoint.')];
+    const bytes = responses.map(value => Buffer.from(JSON.stringify(value)));
+    for (const value of bytes) assert(value.length < responseLimit);
+    assert.equal(bytes[4]!.length, responseLimit - 8192);
+    return { contextLimit, outputLimit, responseLimit, textBytes, compactObjective, exhaustedObjective, followerObjective,
+      first, second, escaped, responses, bytes, requestTokenCeiling: {
+        inputTokens: contextLimit, outputTokens: outputLimit, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+  })() : undefined;
+  const resourceRequests: Array<{ ordinal: number; kind: 'normal' | 'context_compaction'; bodyBytes: number; bodyDigest: string;
+    predictedNext?: { requestBodyBytes: number; nextPromptTokens: number; modelVisiblePromptDigest: string } }> = [];
+  const predictNextResourceRequest = (body: Record<string, any>, response: Record<string, any>) => {
+    const next: Record<string, any> = { ...body, messages: [...body.messages, response.choices[0].message,
+      { role: 'tool', tool_call_id: response.choices[0].message.tool_calls[0].id, content: '{"code":"TOOL_NOT_FOUND"}' }] };
+    // A pure projection of actual HTTP messages and the genuine next reply,
+    // not a Run, invocation, admitted assembly or authority factory.
+    const prompt: ModelVisiblePromptV1 = { format: 'cliq-model-visible-prompt-v1',
+      responseContract: { mode: 'native-tools', toolCallsAllowed: true },
+      messages: next.messages.map((entry: Record<string, any>) => entry.role === 'assistant'
+        ? { role: 'assistant', contentUtf8: entry.content ?? '', toolCalls: (entry.tool_calls ?? []).map((call: Record<string, any>, index: number) => ({
+          callId: call.id, index, toolName: call.function.name, arguments: { encoding: 'utf8_json_fragment', utf8: call.function.arguments } })) }
+        : entry.role === 'tool' ? { role: 'tool', toolCallId: entry.tool_call_id, contentUtf8: entry.content }
+          : { role: entry.role, contentUtf8: entry.content }),
+      tools: next.tools.map((tool: Record<string, any>, index: number) => ({ index, name: tool.function.name, description: tool.function.description,
+        inputSchema: tool.function.parameters })) };
+    const wire = buildModelRequestWire({ provider: 'openai-compatible', model, streaming: false,
+      contextLimitTokens: requestResource!.contextLimit }, prompt, requestResource!.outputLimit, 'native-tools');
+    assert.deepEqual(wire.bodyBytes, canonicalJsonBytes(next));
+    return { requestBodyBytes: wire.bodyBytes.length, nextPromptTokens: estimatePromptTokens(prompt),
+      modelVisiblePromptDigest: canonicalSha256(prompt) };
+  };
   const report: Record<string, any> = { diagnosticOnly: true, qualified: false, phase: 'installation',
-    scope: shutdownStartupOnly
+    scope: requestResourceOnly
+      ? 'independent signed installed Linux request-byte admission with owned HTTPS replies, whole-prefix compaction, proof-backed resource terminal retirement and genuine queued successor progress; not an actual provider, billing or complete I1 qualification'
+      : shutdownStartupOnly
       ? 'independent signed installed Linux startup SIGTERM after the actual successor StateOwner and selected native broker executable mapping exist but before v1 control opens, with one genuinely retained unknown model claim, unchanged two-second policy and exact third-owner terminal recovery; not an exact retained-Run loader instruction, provider or complete I1 qualification'
       : shutdownReceivedToolOnly
       ? 'independent signed installed Linux SIGTERM after positively observed original received-tool snapshot progress, unchanged two-second service timeout, original executed result and ready Checkpoint, then successor continuation and terminal cancellation; not an exact private close gate, provider or complete I1 qualification'
@@ -730,6 +786,44 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         const bodyBytes = Buffer.concat(chunks); scanBytes(bodyBytes);
         assert.equal(Number(incoming.headers['content-length']), bodyBytes.length);
         const body = parseJsonStrict(bodyBytes.toString('utf8')) as Record<string, any>;
+        if (requestResource) {
+          report.requestResourceResponderStage = 'request_shape';
+          const ordinal = ++requestsReceived;
+          assert(ordinal >= 1 && ordinal <= 6, 'resource replay or restart cannot redispatch an owned response');
+          assert.equal(body.model, model); assert.equal(body.stream, false); assert(Array.isArray(body.messages));
+          const compact = ordinal === 3;
+          assert.equal(body.max_tokens, compact ? 8192 : requestResource.outputLimit);
+          if (compact) {
+            assert.equal(body.tools, undefined); assert.equal(body.tool_choice, undefined);
+            report.requestResourceResponderStage = 'whole_prefix';
+            assert.equal(body.messages.length, 2);
+            assert.equal(body.messages[0].content, 'Summarize the recorded context faithfully; return Markdown and no tool calls.');
+            assert.equal(body.messages[1].content.split(requestResource.first).length - 1, 1);
+            assert.equal(body.messages[1].content.includes(requestResource.second), false);
+            assert(bodyBytes.length < 1048576, 'whole selected compaction source must fit the unchanged wire cap');
+          } else {
+            assert(Array.isArray(body.tools)); assert.deepEqual(body.tools.map((tool: any) => tool.function.name), ['edit']);
+            const objective = ordinal <= 4 ? requestResource.compactObjective
+              : ordinal === 5 ? requestResource.exhaustedObjective : requestResource.followerObjective;
+            assert(body.messages.some((entry: any) => entry.role === 'user' && entry.content.includes(objective)));
+          }
+          const observed = { ordinal, kind: compact ? 'context_compaction' as const : 'normal' as const,
+            bodyBytes: bodyBytes.length, bodyDigest: sha256Bytes(bodyBytes),
+            ...(ordinal === 2 || ordinal === 5 ? { predictedNext: predictNextResourceRequest(body, requestResource.responses[ordinal - 1]!) } : {}) };
+          resourceRequests.push(observed);
+          if (observed.predictedNext) {
+            assert(observed.predictedNext.nextPromptTokens < Math.floor(7 * requestResource.contextLimit / 10));
+            assert(observed.predictedNext.requestBodyBytes > 1048576);
+          }
+          report.requestResourceResponderStage = 'response_shape';
+          const bytes = requestResource.bytes[ordinal - 1]!; assert(bytes.length < 1048576); scanBytes(bytes);
+          outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(bytes.length), Connection: 'close' }); outgoing.end(bytes);
+          report.requestResourceResponderStage = 'response_sent';
+          report.providerRequests = { received: ordinal, method: 'POST', requestPath: '/v1/chat/completions', tls13: true,
+            exactCredentialMatched: true, latestBodyBytes: bodyBytes.length, latestBodyDigest: observed.bodyDigest };
+          report.requestResourceRequests = resourceRequests;
+          return;
+        }
         assert.equal(body.model, model); assert.equal(body.stream, false); assert.equal(body.max_tokens, 4096);
         assert(Array.isArray(body.messages) && Array.isArray(body.tools));
         assert.deepEqual(body.tools.map((tool: any) => tool.function.name), ['edit']);
@@ -839,8 +933,10 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
     const signed = await buildInstalledSupervisorPackage(recipe.buildFixture, 'complete', { provider: 'openai-compatible', model,
       target: { hostAscii: '127.0.0.1', port: address.port, basePath: '/v1' },
       tls: { serverNameAscii: 'installed-run-fixture.invalid', caPem: cert, spkiSha256Pins: [pin] },
-      claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false, contextLimitTokens: 32768, maxOutputTokens: 4096 },
-      requestTokenCeiling, validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() });
+      claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false,
+        contextLimitTokens: requestResource?.contextLimit ?? 32768, maxOutputTokens: requestResource?.outputLimit ?? 4096 },
+      requestTokenCeiling: requestResource?.requestTokenCeiling ?? requestTokenCeiling,
+      validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() });
     const staged = await build({ entryPoints: [fileURLToPath(new URL('./testing/installed-runtime-installer.ts', import.meta.url))],
       outfile: recipe.installerEntry, bundle: true, platform: 'node', format: 'esm', target: 'node22.13', metafile: true, write: false });
     assert(Object.values(staged.metafile!.outputs).flatMap(value => value.imports).every(value => value.external && value.path.startsWith('node:')));
@@ -1002,7 +1098,245 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         revisionConflictBeforeTerminal: true, terminalCode: 'RUN_TERMINAL', fixedNonretryableRefusal: true,
         runJournalSessionEventsUnchanged: true, noProductiveRedispatch: true, freshConnectionQualified: true };
     };
-    if (shutdownEffectsOnly) {
+    if (requestResource) {
+      mark('request_resource_signed_admission');
+      const resource = report.requestResources = { qualified: false, diagnosticOnly: true,
+        actualProviderQualified: false, independentlyObservedWorkerRetirementQualified: false,
+        contextLimitTokens: requestResource.contextLimit, maximumOutputTokens: requestResource.outputLimit,
+        requestBodyLimitBytes: 1048576, responseBodyLimitBytes: 1048576,
+        largeResponseTextBytes: requestResource.textBytes, escapedResponseBytes: requestResource.bytes[4]!.length } as Record<string, any>;
+      shutdownClient = await persistentClient(); let client = shutdownClient;
+      const send = async (value: Record<string, unknown>, method: string, milliseconds = 5000) =>
+        accepted(await client.send(value, milliseconds), method);
+      const get = (runId: string) => send({ protocolVersion: 1, method: 'run.get', runId }, 'run.get');
+      const sessionGet = (sessionId: string) => send({ protocolVersion: 1, method: 'session.get', sessionId }, 'session.get');
+      const createSession = async (requestId: string) => (await send(request({ protocolVersion: 1, method: 'session.create',
+        requestId, admissionKey: randomBytes(32).toString('base64url'), workspacePath: recipe.workspace,
+        name: 'Owned request-resource case' }), 'session.create', 30000)).snapshot.session;
+      const exhaustedSession = await createSession('019a0012-0000-7000-8000-000000000201');
+      const followerSession = await createSession('019a0012-0000-7000-8000-000000000202');
+      const budgets = { wallTimeMs: 300000, modelTokens: 10000000, costMicros: 10000000, toolCalls: 1000,
+        repairAttempts: 0, childDepth: 0, childConcurrency: 1 };
+      const submission = (target: Record<string, any>, objective: string, requestId: string) => request({ protocolVersion: 1,
+        method: 'run.submit', requestId, admissionKey: randomBytes(32).toString('base64url'), sessionId: target.id,
+        expectedContextRevision: target.contextRevision, workspacePath: recipe.workspace, objective,
+        model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
+          modelCredentialGrantIds: [enrollment.credentialGrantId] }, policyMode: 'accept-edits', budgets, verifiers: [],
+        dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
+      const compactSubmit = submission(session, requestResource.compactObjective, '019a0012-0000-7000-8000-000000000203');
+      const compactReply = await client.send(compactSubmit, 30000), compactRun = accepted(compactReply, 'run.submit').snapshot.run;
+      report.acceptedRun = { runId: compactRun.id, specRef: compactRun.specRef };
+      const zero = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+      const modelCharge = requestResource.contextLimit + requestResource.outputLimit;
+      const budget = (actual: unknown, count: number) => assert.equal(canonicalSha256(actual),
+        canonicalSha256({ ...zero, modelTokens: modelCharge * count }));
+      const completeModels = (cut: Record<string, any>) => cut.journal.filter((entry: any) => entry.opKind === 'model' && entry.phase === 'completed');
+      const wait = async (runId: string, predicate: (cut: Record<string, any>) => boolean, label: string) => {
+        const by = Date.now() + 90000;
+        for (;;) {
+          assert(!providerFailure, 'owned resource responder refused its fixed contract');
+          const cut = await get(runId); report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure });
+          if (predicate(cut)) return cut;
+          assert(Date.now() < by, label); await delay(50);
+        }
+      };
+      const assertHistory = async (cut: Record<string, any>, kinds: string[], offset: number) => {
+        assert.equal(cut.nextJournalSeq, cut.highWaterJournalSeq); assert.equal(cut.nextItemSeq, cut.highWaterItemSeq);
+        assert.equal(cut.nextCheckpointCursor, cut.highWaterCheckpointCursor);
+        assert.deepEqual(cut.journal.map((entry: any) => [entry.opKind, entry.phase, entry.attempt]),
+          kinds.flatMap(() => [['model', 'prepared', 0], ['model', 'dispatch_claimed', 0], ['model', 'completed', 0]]));
+        for (const [index, kind] of kinds.entries()) {
+          const [prepared, claimed, completed] = cut.journal.slice(index * 3, index * 3 + 3);
+          assert.equal(prepared.seq, index * 3 + 1); assert.equal(claimed.seq, index * 3 + 2); assert.equal(completed.seq, index * 3 + 3);
+          const requestValue = parseJsonStrict((await readCas(prepared.requestRef)).toString('utf8')) as Record<string, any>;
+          assert.equal(requestValue.kind, kind); assert.equal(requestValue.runId, cut.snapshot.run.id);
+          assert.equal(requestValue.opId, prepared.opId); assert.equal(requestValue.requestDigest, digestOmitting(requestValue, 'requestDigest'));
+          const actual = resourceRequests[offset + index]!; assert(actual);
+          assert.equal(requestValue.bodyBytesRef, actual.bodyDigest); assert.equal(requestValue.bodyByteCount, actual.bodyBytes);
+          assert.equal((await readCas(requestValue.bodyBytesRef)).length, actual.bodyBytes);
+          for (const field of ['runId', 'opId', 'opKind', 'attempt', 'leaseEpoch', 'requestRef', 'target']) {
+            assert.equal(claimed[field], prepared[field]); assert.equal(completed[field], prepared[field]);
+          }
+          for (const field of ['dispatchId', 'supervisorInstanceId', 'stateOwnerEpoch', 'brokerFenceTokenDigest'])
+            assert.equal(completed[field], claimed[field]);
+          budget(prepared.budgetDelta, 1); budget(claimed.budgetDelta, 0); budget(completed.budgetDelta, 1);
+          const settlement = parseJsonStrict((await readCas(completed.budgetSettlementRef)).toString('utf8')) as Record<string, any>;
+          assert.equal(settlement.format, 'cliq-budget-settlement-v1'); assert.equal(settlement.runId, cut.snapshot.run.id);
+          assert.equal(settlement.opId, prepared.opId); assert.equal(settlement.attempt, 0);
+          assert.equal(settlement.preparedJournalSeq, prepared.seq); assert.equal(settlement.terminalJournalSeq, completed.seq);
+          assert.equal(settlement.terminalPhase, 'completed'); assert.equal(settlement.settledAt, completed.timestamp);
+          assert.equal(settlement.settlementDigest, digestOmitting(settlement, 'settlementDigest'));
+          for (const value of [settlement.reserved, settlement.released, settlement.budgetReservedBefore]) budget(value, 1);
+          budget(settlement.consumed, 1); budget(settlement.budgetReservedAfter, 0);
+          budget(settlement.budgetConsumedBefore, index); budget(settlement.budgetConsumedAfter, index + 1);
+          const turn = parseJsonStrict((await readCas(completed.resultRef)).toString('utf8')) as Record<string, any>;
+          assert.equal(turn.format, 'cliq-agent-model-turn-v1'); assert.equal(turn.requestDigest, requestValue.requestDigest);
+          const text = parseJsonStrict((await readCas(turn.textRef)).toString('utf8')) as Record<string, any>;
+          assert.equal(text.byteCount, Buffer.byteLength(text.utf8)); assert.equal(text.textDigest, digestOmitting(text, 'textDigest'));
+          assert.equal(text.utf8, requestResource.responses[offset + index]!.choices[0]!.message.content);
+        }
+        budget(cut.snapshot.run.budgetConsumed, kinds.length); budget(cut.snapshot.run.budgetReserved, 0);
+      };
+      const assertAssembly = async (run: Record<string, any>) => {
+        const spec = parseJsonStrict((await readCas(run.specRef)).toString('utf8')) as Record<string, any>;
+        const assembly = parseJsonStrict((await readCas(spec.assemblyRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(assembly.assemblyDigest, digestOmitting(assembly, 'assemblyDigest'));
+        assert.equal(assembly.context.contextLimitTokens, requestResource.contextLimit);
+        assert.equal(assembly.context.reservedOutputTokens, requestResource.outputLimit);
+        assert.equal(assembly.context.triggerThresholdTokens, Math.floor(7 * requestResource.contextLimit / 10));
+        assert.equal(assembly.provider.negotiation.maxOutputTokens, requestResource.outputLimit);
+        assert.equal(spec.budgets.modelTokens, 10000000);
+        const table = parseJsonStrict((await readCas(assembly.provider.pricing.priceTableRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(canonicalSha256(table.requestTokenCeiling), canonicalSha256(requestResource.requestTokenCeiling));
+        return assembly;
+      };
+      mark('request_resource_whole_prefix_compaction');
+      const compactCut = await wait(compactRun.id, cut => completeModels(cut).length === 4 && cut.snapshot.run.status === 'running',
+        'real byte-triggered compaction did not reach its ordinary candidate');
+      assert.equal(requestsReceived, 4); assert(compactCut.snapshot.run.activeWorkerLaunchId);
+      assert.equal(compactCut.snapshot.run.resultRef, undefined); assert.equal(compactCut.snapshot.run.stopIntentRef, undefined);
+      await assertHistory(compactCut, ['normal', 'normal', 'context_compaction', 'normal'], 0);
+      const assembly = await assertAssembly(compactCut.snapshot.run);
+      const predictedCompact = resourceRequests[1]!.predictedNext!;
+      assert(predictedCompact.nextPromptTokens < assembly.context.triggerThresholdTokens && predictedCompact.requestBodyBytes > 1048576);
+      const compactRequest = parseJsonStrict((await readCas(compactCut.journal[6].requestRef)).toString('utf8')) as Record<string, any>;
+      const plan = parseJsonStrict((await readCas(compactRequest.compactionPlanRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(plan.runId, compactRun.id); assert.equal(plan.compactFromItemSeq, 1); assert.equal(plan.compactThroughItemSeq, 3);
+      assert(plan.sourceProjectedTokens <= plan.sourceInputTokenCap); assert(compactRequest.bodyByteCount < 1048576);
+      const compactItems = await Promise.all(compactCut.items.map(async (row: Record<string, any>) => ({ row,
+        value: parseJsonStrict((await readCas(row.payloadRef)).toString('utf8')) as Record<string, any> })));
+      assert.deepEqual(compactItems.slice(0, 3).map((item: any) => item.value.kind), ['model_turn', 'assistant_tool_batch', 'tool_result']);
+      assert.equal(plan.sourceItemsDigest, canonicalSha256(compactItems.slice(0, 3).map((item: any) => ({ itemSeq: item.row.itemSeq,
+        kind: item.value.kind, payloadRef: item.row.payloadRef }))));
+      const compactControl = compactItems.filter((item: any) => item.value.kind === 'context_compaction'); assert.equal(compactControl.length, 1);
+      assert.equal(compactControl[0]!.value.coveredFromItemSeq, 1); assert.equal(compactControl[0]!.value.coveredThroughItemSeq, 3);
+      assert.equal(compactControl[0]!.value.sourceItemsDigest, plan.sourceItemsDigest);
+      const compactCheckpoint = compactCut.checkpoints.find((value: any) => value.id === compactCut.snapshot.run.latestCheckpointId); assert(compactCheckpoint);
+      const context = parseJsonStrict((await readCas(compactCheckpoint.contextManifestRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(context.segments[0].kind, 'summary'); assert.equal(context.segments[0].throughItemSeq, 3);
+      assert(context.segments.some((segment: any) => segment.kind === 'raw' && segment.items.some((item: any) => item.itemRef === compactItems[3]!.row.payloadRef)));
+      resource.compaction = { qualified: true, runId: compactRun.id, predictedNormal: predictedCompact,
+        completeSelectedPrefix: true, compactionPlanRef: compactRequest.compactionPlanRef, sourceItemsDigest: plan.sourceItemsDigest,
+        compactThroughItemSeq: 3, actualCompactionBodyBytes: compactRequest.bodyByteCount,
+        originalRecentSegmentPreserved: true, actualNormalContinuationObserved: true, ownedPosts: 4 };
+      // A planned reconnect between completed phases, never a retry after a
+      // connected failure. Keep the existing per-client frame inventory.
+      await client.close(); shutdownClient = await persistentClient(); client = shutdownClient;
+      assert.deepEqual(await get(compactRun.id), compactCut);
+      mark('request_resource_genuine_blocked_queue');
+      const exhaustedSubmit = submission(exhaustedSession, requestResource.exhaustedObjective, '019a0012-0000-7000-8000-000000000204');
+      const followerSubmit = submission(followerSession, requestResource.followerObjective, '019a0012-0000-7000-8000-000000000205');
+      const exhaustedReply = await client.send(exhaustedSubmit, 30000), exhaustedRun = accepted(exhaustedReply, 'run.submit').snapshot.run;
+      const followerReply = await client.send(followerSubmit, 30000), followerRun = accepted(followerReply, 'run.submit').snapshot.run;
+      for (const run of [exhaustedRun, followerRun]) {
+        const queued = await get(run.id); assert.equal(queued.snapshot.run.status, 'queued');
+        assert.equal(queued.snapshot.run.activeWorkerLaunchId, undefined); assert.deepEqual(queued.journal, []);
+        budget(queued.snapshot.run.budgetConsumed, 0); budget(queued.snapshot.run.budgetReserved, 0);
+      }
+      const queue = await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status');
+      assert.equal(queue.health, 'ready'); assert.equal(queue.queue.capacity, 1); assert.equal(queue.queue.runningRuns, 1); assert.equal(queue.queue.queuedRuns, 2);
+      assert.equal(requestsReceived, 4);
+      const cancelCandidate = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000206',
+        runId: compactRun.id, expectedRevision: compactCut.snapshot.run.revision });
+      const candidateCancelReply = await client.send(cancelCandidate); accepted(candidateCancelReply, 'run.cancel');
+      const compactTerminal = await wait(compactRun.id, cut => cut.snapshot.run.status === 'cancelled', 'compaction candidate did not retire through real cancellation');
+      assert.equal(compactTerminal.snapshot.run.activeWorkerLaunchId, undefined); assert.deepEqual(compactTerminal.journal, compactCut.journal);
+      budget(compactTerminal.snapshot.run.budgetConsumed, 4); budget(compactTerminal.snapshot.run.budgetReserved, 0);
+      mark('request_resource_proof_backed_terminal');
+      const exhausted = await wait(exhaustedRun.id, cut => cut.snapshot.run.status === 'failed', 'request-byte exhaustion did not physically drain its resource terminal');
+      assert.equal(exhausted.snapshot.run.terminalReason, 'runtime_failed'); assert.equal(exhausted.snapshot.run.activeWorkerLaunchId, undefined);
+      assert.equal(exhausted.snapshot.run.resultRef, undefined); await assertHistory(exhausted, ['normal'], 4); await assertAssembly(exhausted.snapshot.run);
+      const intent = parseJsonStrict((await readCas(exhausted.snapshot.run.stopIntentRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(intent.origin, 'runtime'); assert.equal(intent.runtimeSubtype, 'context_window_exhausted');
+      assert.equal(intent.reason, 'runtime_failed'); assert.equal(intent.targetStatus, 'failed'); assert.equal(intent.runId, exhaustedRun.id);
+      const predictedExhausted = resourceRequests[4]!.predictedNext!;
+      for (const field of ['requestBodyBytes', 'nextPromptTokens', 'modelVisiblePromptDigest']) assert.equal(intent[field], predictedExhausted[field as keyof typeof predictedExhausted]);
+      assert.equal(intent.trigger, 'request_body_bytes'); assert.equal(intent.requestBodyLimitBytes, 1048576);
+      assert(intent.nextPromptTokens < intent.triggerThresholdTokens); assert(intent.requestBodyBytes > 1048576);
+      const detail = parseJsonStrict((await readCas(exhausted.snapshot.run.terminalDetailRef)).toString('utf8')) as Record<string, any>;
+      assert.equal(detail.reason, 'runtime_failed'); assert.equal(detail.primaryEvidenceRef, exhausted.snapshot.run.stopIntentRef);
+      assert.equal(detail.reasonDetail.kind, 'context_window_exhausted');
+      for (const field of ['trigger', 'modelVisiblePromptDigest', 'requestBodyBytes', 'requestBodyLimitBytes', 'contextManifestRef',
+        'nextPromptTokens', 'triggerThresholdTokens', 'hardPromptTokens', 'protectedTokens', 'sourceInputTokenCap'])
+        assert.equal(detail.reasonDetail[field], intent[field]);
+      resource.exhaustion = { qualified: true, runId: exhaustedRun.id, predictedNormal: predictedExhausted,
+        stopIntentRef: exhausted.snapshot.run.stopIntentRef, terminalDetailRef: exhausted.snapshot.run.terminalDetailRef,
+        contextManifestRef: intent.contextManifestRef,
+        trigger: 'request_body_bytes', completeValidResponseRetained: true, noExtraModelPreparationOrClaim: true,
+        publicTerminalWorkerPointerCleared: true, independentlyObservedWorkerRetirementQualified: false, ownedPosts: 1 };
+      mark('request_resource_original_queued_successor_progress');
+      const follower = await wait(followerRun.id, cut => completeModels(cut).length === 1 && cut.snapshot.run.status === 'running',
+        'the genuinely queued follower did not progress after resource retirement');
+      assert(follower.snapshot.run.activeWorkerLaunchId); await assertHistory(follower, ['normal'], 5);
+      assert.equal(requestsReceived, 6); assert.equal(acceptedTcpConnections, 6); assert.equal(acceptedTlsConnections, 6); assert(!providerFailure);
+      const cancelFollower = request({ protocolVersion: 1, method: 'run.cancel', requestId: '019a0012-0000-7000-8000-000000000207',
+        runId: followerRun.id, expectedRevision: follower.snapshot.run.revision });
+      const followerCancelReply = await client.send(cancelFollower); accepted(followerCancelReply, 'run.cancel');
+      const followerTerminal = await wait(followerRun.id, cut => cut.snapshot.run.status === 'cancelled', 'real follower cancellation did not join');
+      assert.equal(followerTerminal.snapshot.run.activeWorkerLaunchId, undefined); assert.deepEqual(followerTerminal.journal, follower.journal);
+      budget(followerTerminal.snapshot.run.budgetConsumed, 1); budget(followerTerminal.snapshot.run.budgetReserved, 0);
+      const records = [
+        { run: compactTerminal, submit: compactSubmit, reply: compactReply, target: session, cancel: cancelCandidate, cancelReply: candidateCancelReply },
+        { run: exhausted, submit: exhaustedSubmit, reply: exhaustedReply, target: exhaustedSession },
+        { run: followerTerminal, submit: followerSubmit, reply: followerReply, target: followerSession, cancel: cancelFollower, cancelReply: followerCancelReply }
+      ];
+      const retainedSessions: Record<string, any>[] = [];
+      const retainedEvents: Record<string, any>[] = [];
+      for (const record of records) {
+        const value = await sessionGet(record.target.id); retainedSessions.push(value);
+        assert.equal(value.snapshot.session.contextRevision, record.target.contextRevision + 1);
+        assert.equal(value.snapshot.session.latestItemSeq, record.target.latestItemSeq + 1); assert.equal(value.items.length, 1);
+        assert.equal(value.nextItemSeq, value.highWaterItemSeq); assert.equal(value.highWaterItemSeq, value.snapshot.session.latestItemSeq);
+        const publication = parseJsonStrict((await readCas(value.items[0].payloadRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(publication.runId, record.run.snapshot.run.id); assert.equal(publication.kind, 'run_terminal');
+        const events = await send({ protocolVersion: 1, method: 'run.attach', runId: record.run.snapshot.run.id, afterEventSeq: 0 }, 'run.attach');
+        retainedEvents.push(events); assert.equal(events.earliestRetainedEventSeq, 1); assert.equal(events.nextEventSeq, events.highWaterEventSeq);
+        assert.equal(events.events.length, events.highWaterEventSeq);
+        for (const [index, event] of events.events.entries()) assert.equal(event.eventSeq, index + 1);
+        const terminalEvents = events.events.filter((event: any) => event.kind === 'state_changed' && ['failed', 'cancelled'].includes(event.status));
+        assert.equal(terminalEvents.length, 1); assert.equal(terminalEvents[0].status, record.run.snapshot.run.status);
+        assert.equal(terminalEvents[0].terminalDetailRef, record.run.snapshot.run.terminalDetailRef);
+      }
+      await client.close(); shutdownClient = undefined;
+      const reconnect = () => {
+        for (const [index, record] of records.entries()) {
+          assert.deepEqual(exchange([record.submit])[0], record.reply);
+          assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: record.run.snapshot.run.id }])[0]!, 'run.get'), record.run);
+          assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'session.get', sessionId: record.target.id }])[0]!, 'session.get'), retainedSessions[index]);
+          assert.deepEqual(accepted(exchange([{ protocolVersion: 1, method: 'run.attach', runId: record.run.snapshot.run.id, afterEventSeq: 0 }])[0]!, 'run.attach'), retainedEvents[index]);
+          if (record.cancel) assert.deepEqual(exchange([record.cancel])[0], record.cancelReply);
+        }
+        assert.equal(requestsReceived, 6); assert.equal(acceptedTcpConnections, 6); assert.equal(acceptedTlsConnections, 6); assert(!providerFailure);
+      };
+      reconnect(); mark('request_resource_actual_restart_without_redispatch');
+      const previous = show(services.supervisorUnit), image = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
+      const keeper = show(services.keeperUnit);
+      await withRetainedUnitHistory([services.supervisorUnit], async () => {
+        assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]).status, 0);
+        const stopped = show(services.supervisorUnit); assert.equal(stopped.TimeoutStopUSec, '2s');
+        assert.equal(stopped.Result, 'success'); assert.equal(stopped.ExecMainCode, '1'); assert.equal(stopped.ExecMainStatus, '0');
+        assert.equal(stopped.ActiveState, 'inactive'); assert.equal(stopped.MainPID, '0');
+      });
+      assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
+      const successor = show(services.supervisorUnit); assert.notEqual(successor.MainPID, previous.MainPID);
+      assert.notEqual(successor.InvocationID, previous.InvocationID); await selectedSupervisor(services.supervisorUnit, successor, image, Date.now() + 30000);
+      assert.equal(show(services.keeperUnit).InvocationID, keeper.InvocationID);
+      const ownerProof: Record<string, unknown> = {};
+      const history = await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle,
+        imageDigest: report.bundle.supervisorDigest, report: ownerProof });
+      assert.equal(history.owners.length, 2);
+      resource.ownerHistory = { qualified: true, owners: history.owners.map(owner => ({ ownerEpoch: owner.ownerEpoch,
+        supervisorInstanceId: owner.supervisorInstanceId, state: owner.state, rowDigest: owner.rowDigest,
+        processIdentityRef: owner.processIdentityRef, acquisitionEvidenceRef: owner.acquisitionEvidenceRef,
+        ...(owner.state === 'terminal' ? { terminalReason: owner.terminalReason, transitionEvidenceRef: owner.transitionEvidenceRef } : {}) })) };
+      reconnect();
+      for (const key of imageFields) assert.equal((await lstat(source, { bigint: true }))[key], sourceBefore[key]);
+      assert.equal(await readFile(source, 'utf8'), hostBefore);
+      resource.successor = { qualified: true, runId: followerRun.id, previouslyObservedQueuedWithoutWorkerOrJournal: true, actualOwnedPostObserved: true,
+        ownedPosts: 1, originalSourceUnchanged: true, sessionPublications: 3, actualSupervisorRestart: true,
+        originalClaimsAndChargesReopened: true, noExtraTcpTlsOrPost: true };
+      resource.qualified = true;
+    } else if (shutdownEffectsOnly) {
       const effect: Record<string, any> = { diagnosticOnly: true, qualified: false, standardStopTimeoutMs: 2000,
         exactPrivateCloseGateQualified: false, exactNativeMutexOrderQualified: false, completeI1Qualified: false };
       report[shutdownStartupOnly ? 'shutdownStartup' : shutdownReceivedToolOnly ? 'shutdownReceivedTool' : 'shutdownPendingModel'] = effect;
@@ -3758,5 +4092,6 @@ assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
 assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign' ||
   mode === '--storage-failure-campaign' || mode === '--shutdown-admission-campaign' || mode === '--shutdown-session-campaign' || mode === '--shutdown-preparation-campaign' ||
-  mode === '--shutdown-received-tool-campaign' || mode === '--shutdown-pending-model-campaign' || mode === '--shutdown-startup-campaign'); assert(filename && extra.length === 0);
+  mode === '--shutdown-received-tool-campaign' || mode === '--shutdown-pending-model-campaign' || mode === '--shutdown-startup-campaign' ||
+  mode === '--request-resource-campaign'); assert(filename && extra.length === 0);
 await campaign(filename, mode);

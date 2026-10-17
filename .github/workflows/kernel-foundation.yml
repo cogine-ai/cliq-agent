@@ -317,6 +317,41 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  linux-installed-request-resources:
+    name: Linux installed request-byte compaction and terminal retirement
+    # A separate fresh disposable UID keeps the original full journey and its
+    # unchanged 4096-stream/512-MiB secret scan independent of this workload.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: node --test scripts/kernel/testing/installed-run-client.test.mjs
+      - run: npm run build
+        id: build
+      - name: Install actual signed transport and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap e2fsprogs
+      - name: Exercise byte-triggered whole-prefix compaction and genuine queued successor progress
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-request-resource-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-request-resources"
+      - name: Retain only bounded closed resource and unchanged-runner feedback
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-request-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-request-resources/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-installed-run:
     name: Linux signed installed Run closed-loop diagnostics
     # Real installed/manager/native transport mechanics, not complete I1 or a
