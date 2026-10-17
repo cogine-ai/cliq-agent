@@ -384,7 +384,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     } catch (error) { try { await close(); } catch {} throw error; }
   };
   const show = (unit: string) => {
-    const result = command('/usr/bin/systemctl', ['--user', 'show', unit, '--property=Id,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,Type,Delegate,KillMode,Result,ExecMainCode,ExecMainStatus', '--no-pager']);
+    const result = command('/usr/bin/systemctl', ['--user', 'show', unit, '--property=Id,ActiveState,SubState,MainPID,ExecMainPID,InvocationID,ControlGroup,Type,Delegate,KillMode,Result,ExecMainCode,ExecMainStatus,TimeoutStopUSec', '--no-pager']);
     assert.equal(result.status, 0); return Object.fromEntries(result.stdout.trim().split('\n').map(line => {
       const at = line.indexOf('='); assert(at > 0); return [line.slice(0, at), line.slice(at + 1)]; }));
   };
@@ -404,7 +404,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     const result = spawnSync('/usr/bin/journalctl', ['--no-pager', '--output=cat', '--lines=16',
       `_UID=${ledger.uid}`, `_SYSTEMD_USER_UNIT=${unit}`, `_PID=${pid}`],
     { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 65536 });
-    const refusals: Array<{ code: string; origin: string; nativeReply?: number[]; observedWaitMs?: number }> = [];
+    const refusals: Array<{ code: string; origin: string }> = [];
     try {
       if (Buffer.isBuffer(result.stdout)) scanBytes(result.stdout);
       if (Buffer.isBuffer(result.stderr)) scanBytes(result.stderr);
@@ -415,32 +415,6 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         try {
           const value = parseJsonStrict(line) as Record<string, unknown>;
           if (value?.diagnosticOnly !== true) continue;
-          if (value.scope === 'installed-shutdown-retirement' && value.debugTag === '[DEBUG-shutdown-retirement]' &&
-              ['preparation', 'retirement', 'worker_join', 'tool_before_result'].includes(value.stage as string) &&
-              ['unregistered_controller_birth', 'unregistered_reservation_birth', 'materialization_join_pending',
-                'joined_generation_birth_mismatch', 'native_generation_retirement', 'quarantine_identity',
-                'worker_stop_channel_fenced', 'preparation_materialization_join', 'preparation_controller_join',
-                'preparation_reservation_join', 'preparation_commit', 'preparation_logical_identity',
-                'preparation_run_changed', 'preparation_broker_owner', 'preparation_history', 'preparation_logical_cut',
-                'preparation_generation_identity', 'preparation_recovery_closure', 'preparation_controller_birth',
-                'preparation_resource_assertion', 'preparation_quarantine_move', 'preparation_resource_refresh',
-                'preparation_evidence_publication', 'preparation_transaction', 'tool_input', 'tool_grant', 'tool_live_cut',
-                'tool_launch_closure', 'tool_invocation_create', 'tool_process_observation', 'tool_release', 'tool_result',
-                'unclassified'].includes(value.reason as string)) {
-            const code = ['ARTIFACT_MISMATCH', 'LEASE_FENCED', 'RECOVERY_REQUIRED', 'REVISION_CONFLICT', 'INVALID_REQUEST'].includes(value.code as string)
-              ? value.code as string : 'diagnostic_only';
-            const numbers = value.nativeReply;
-            const nativeReply = Array.isArray(numbers) && numbers.length === 10 &&
-              numbers.every(number => Number.isSafeInteger(number) && number >= 0) &&
-              [0, 2, 4].every(index => numbers[index] <= 13) && [1, 3, 5].every(index => numbers[index] < 16) &&
-              numbers[6] <= 4_294_967_295 && numbers[7] <= 5 && numbers[8] <= 4095 && [1, 2, 3].includes(numbers[9])
-              ? numbers as number[] : undefined;
-            const wait = value.observedWaitMs;
-            const observedWaitMs = Number.isSafeInteger(wait) && (wait as number) >= 0 && (wait as number) <= 3_600_000
-              ? wait as number : undefined;
-            refusals.push({ code, origin: `${value.stage}.${value.reason}`,
-              ...(nativeReply ? { nativeReply } : {}), ...(observedWaitMs === undefined ? {} : { observedWaitMs }) }); continue;
-          }
           if (value.scope !== 'installed-read-startup') continue;
           const code = ['RECOVERY_REQUIRED', 'LEASE_FENCED', 'ARTIFACT_MISMATCH', 'STATE_TRANSITION_INVALID'].includes(value.code as string)
             ? value.code as string : 'unclassified';
@@ -1465,8 +1439,6 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
           return undefined;
         };
         const toolCut = (cut: Record<string, any>) => {
-          if (cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'unknown'))
-            effect.originalToolRefusal = observeShutdownRefusal(services.supervisorUnit, String(originalPid));
           const completed = cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'completed');
           if (completed) { effect.observedCutLost = true; assert.fail('the original received-tool cut completed before positive shutdown observation'); }
           assert.equal(cut.snapshot.run.status, 'running'); assert(cut.snapshot.run.activeWorkerLaunchId);

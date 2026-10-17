@@ -477,60 +477,6 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   async function retireToCheckpoint(current: ActiveWorker, checkpointId: string, signal: AbortSignal) {
     return checkpointRetirement(current, checkpointId, signal)();
   }
-  // Temporary source-only diagnosis for the actual installed SIGTERM campaign.
-  // Remove [DEBUG-shutdown-retirement] after its real failure is resolved.
-  function reportShutdownRetirement(stage: 'preparation' | 'retirement' | 'worker_join' | 'tool_before_result', failure: unknown,
-    point = 'unclassified', observedWaitMs?: number): void {
-    try {
-      if (stage !== 'tool_before_result' && !closed && !isClosing()) return;
-      const message = failure instanceof Error ? Object.getOwnPropertyDescriptor(failure, 'message')?.value : undefined;
-      let reason = point;
-      switch (message) {
-        case 'preparation retirement controller has no registered actual birth': reason = 'unregistered_controller_birth'; break;
-        case 'preparation retirement reservation has no registered actual birth': reason = 'unregistered_reservation_birth'; break;
-        case 'workspace materialization has not completely joined': reason = 'materialization_join_pending'; break;
-        case 'preparation retirement substitutes its exact original joined directory birth': reason = 'joined_generation_birth_mismatch'; break;
-        case 'generation native resource owners are not retired':
-        case 'generation resources did not retire under their original StateOwner':
-        case 'private workspace descriptor retirement failed': reason = 'native_generation_retirement'; break;
-        case 'generation quarantine requires the exact host, StateRoot, generation locator and source version':
-        case 'invalid generation quarantine identity':
-        case 'generation quarantine requires private same-device no-follow parent descriptors':
-        case 'generation quarantine source identity differs or is unreadable':
-        case 'generation quarantine target requires private same-device no-follow parent descriptors':
-        case 'generation quarantine requires exactly one original or exact target; refusing conflict or identity drift':
-        case 'generation quarantine parent or source descriptor identity changed':
-        case 'generation quarantine parent fsync failed; retry the exact locator pair':
-        case 'generation quarantine no-replace rename failed; no overwrite or copy fallback is allowed':
-        case 'generation quarantine post-move descriptor identity or original absence changed': reason = 'quarantine_identity'; break;
-        case 'worker controller scope is closed':
-        case 'controller preparation birth is no longer live':
-        case 'invalid native stop scope':
-        case 'invalid native death observation': reason = 'worker_stop_channel_fenced'; break;
-        case 'preparation retirement original live logical producer differs from retained authority': reason = 'preparation_logical_identity'; break;
-        case 'preparation retirement selected Run differs from retained authority': reason = 'preparation_run_changed'; break;
-        case 'generation retains an original native model transport owner': reason = 'preparation_broker_owner'; break;
-      }
-      if (typeof message === 'string' && message.startsWith('worker preparation history is invalid: ')) reason = 'preparation_history';
-      const ownCode = failure instanceof Error ? Object.getOwnPropertyDescriptor(failure, 'code')?.value : undefined;
-      const code = typeof ownCode === 'string' &&
-        ['ARTIFACT_MISMATCH', 'LEASE_FENCED', 'RECOVERY_REQUIRED', 'REVISION_CONFLICT', 'INVALID_REQUEST'].includes(ownCode)
-        ? ownCode : 'other';
-      // Existing native poll_failure metadata only: request/requestScope,
-      // expected/expectedScope, received/receivedScope, status/fds/errno/boundary.
-      // No message, path, token, payload, stderr or arbitrary nested cause.
-      const match = stage === 'tool_before_result' && point === 'tool_result' && typeof message === 'string'
-        ? /^native controller reply failed: request=(\d{1,2}) requestScope=(\d{1,2}) expected=(\d{1,2}) expectedScope=(\d{1,2}) received=(\d{1,2}) receivedScope=(\d{1,2}) status=(\d{1,10}) fds=(\d) receiveErrno=(\d{1,4}) boundary=([1-3])$/u.exec(message) : null;
-      const numbers = match?.slice(1).map(Number);
-      const nativeReply = numbers && numbers.every(Number.isSafeInteger) &&
-        [0, 2, 4].every(index => numbers[index]! <= 13) && [1, 3, 5].every(index => numbers[index]! < 16) &&
-        numbers[6]! <= 4_294_967_295 && numbers[7]! <= 5 && numbers[8]! <= 4095 ? numbers : undefined;
-      const wait = Number.isSafeInteger(observedWaitMs) && observedWaitMs! >= 0 && observedWaitMs! <= 3_600_000
-        ? observedWaitMs : undefined;
-      console.error(JSON.stringify({ debugTag: '[DEBUG-shutdown-retirement]', diagnosticOnly: true,
-        scope: 'installed-shutdown-retirement', stage, reason, code, nativeReply, observedWaitMs: wait }));
-    } catch { /* Diagnosis cannot replace the original retirement failure. */ }
-  }
   function ownOperation(work: Promise<Run>, abort: AbortController, retainWorker = false): Promise<Run> {
     let operationFailure: { error: unknown } | undefined;
     let retainedCompletion = false;
@@ -546,7 +492,6 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       }
       if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
       let retiringPreparation = false;
-      let retirementPoint = 'unclassified';
       try {
         const run = readRun(driver, runId);
         if (preparation && readRequiredWorkerLaunch(driver, preparation.launchId).phase === 'preparing') {
@@ -555,14 +500,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           // preparation retirement has committed. Descriptor close alone is
           // not a durable proof of either tree or controller retirement.
           const original = preparation, birth = workspaceBirth;
-          retirementPoint = 'preparation_materialization_join';
           await materialization?.close();
-          retirementPoint = 'preparation_controller_join';
           const controllerRetirement = controller ? await controller.closePreparation() : undefined;
-          retirementPoint = 'preparation_reservation_join';
           reservation?.close();
           if ((!birth && !materialization) || !executionStore) throw new ResourceRetirementError('worker preparation has no complete original birth/retirement closure', error);
-          retirementPoint = 'preparation_commit';
           await retireWorkerPreparation(driver, artifacts, owner, { preparation: original,
             expectedRunRevision: readRun(driver, runId).revision,
             ...(birth ? { workspaceBirth: birth } : { unallocatedWorkspace: materialization! }),
@@ -579,7 +520,6 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           worker = undefined;
         }
       } catch (failure) {
-        reportShutdownRetirement(retiringPreparation ? 'preparation' : 'retirement', failure, retirementPoint);
         // Losing the state fence cannot bypass actual resource retirement or
         // be mistaken for a graceful owner release.
         cleanupFailure ??= retiringPreparation
@@ -587,7 +527,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       } finally {
         if (worker) {
           try { const death = activeWorker ? await observeOriginalWorkerDeath(activeWorker) : await worker.stop(); assertNativeContainmentDeath(death); }
-          catch (failure) { reportShutdownRetirement('worker_join', failure); cleanupFailure ??= failure; }
+          catch (failure) { cleanupFailure ??= failure; }
         }
       }
       throw error;
@@ -757,8 +697,6 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const signal = abort.signal;
       toolPhase = 'preparing';
       let claimedTool: Awaited<ReturnType<typeof agent.claimTool>> | undefined;
-      let resultPoint = 'tool_input';
-      let resultStartedAt: number | undefined;
       const work = (async () => {
         signal.throwIfAborted();
         const selected = await readToolCut(driver, artifacts, runId, agent.resolveToolInput);
@@ -819,22 +757,14 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         claimedTool = claimed;
         toolPhase = 'claimed';
         const call = await artifacts.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(claimed.request.inputRef);
-        resultPoint = 'tool_grant';
         const grant = await artifacts.readCanonical<import('../kernel/tool-authorization.js').ToolOperationGrantV1>(claimed.entry.grantRef!);
-        resultPoint = 'tool_live_cut';
         const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, activated.run.leaseEpoch, sampleCanonicalNow());
-        resultPoint = 'tool_launch_closure';
         const edit = await readBuiltinEditLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...live, prepared: prepared.entry,
           request: claimed.request, target: claimed.target, call, grant, dispatchId, sandboxLaunchSpecRef });
-        resultPoint = 'tool_invocation_create';
         const invocation = await currentWorker.createInvocation(edit);
-        resultPoint = 'tool_process_observation';
         await invocation.observeProcess();
         signal.throwIfAborted();
-        resultPoint = 'tool_release';
         await claimed.release(invocation);
-        resultPoint = 'tool_result';
-        resultStartedAt = performance.now();
         const result = await invocation.result();
         toolPhase = 'received';
         const observedAt = sampleCanonicalNow();
@@ -888,8 +818,6 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         return receivedTool.finish();
       })().catch(async error => {
         if (claimedTool && toolPhase !== 'received') {
-          reportShutdownRetirement('tool_before_result', error, resultPoint,
-            resultStartedAt === undefined ? undefined : Math.round(performance.now() - resultStartedAt));
           // A permanent claim is possibly dispatched even when cancellation
           // wins before the blocked child/RELEASE handshake. Join the actual
           // producer, preserve uncertainty and charge once; only the separate

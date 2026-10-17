@@ -219,8 +219,11 @@ continuations. The PR received-tool control instead encountered the original
 attempt's tool UNKNOWN before its target snapshot; that negative cut remains
 unqualified. Preparation diagnostics now narrow failure to the retirement
 call expression after the resource joins, not yet a particular reducer check.
-Temporary inner fixed-point diagnostics must identify the failing boundary
-before any lifecycle or proof predicate is changed.
+Subsequent fixed-point diagnostics narrowed the original failure without
+changing lifecycle or proof predicates. After both matching real received-tool
+campaigns passed, the temporary diagnostics were removed together; those
+historical negative reports remain retained. The diagnostic-free source still
+needs its own matching complete Linux evidence.
 
 The installed finalizer's setup is separate from its inspection cut. The normal
 signed enrollment at `e8500dd` took 26.308 seconds; the early fixture's ten-second

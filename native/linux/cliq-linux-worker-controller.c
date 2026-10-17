@@ -762,35 +762,10 @@ static int controller(void) {
                 scope_process_current(&scopes[scope->parent]) && scope_process_current(scope)) {
                 scope->released = true;
                 int extra[5]; size_t extras;
-                /* Temporary [DEBUG-shutdown-retirement]: these fixed failing
-                 * statuses diagnose only this original RELEASE. They grant no
-                 * retry, time extension, successful result or death receipt. */
-                if (!cliq_send(scope->channel, &request, NULL, 0)) response.status = 4001;
-                else {
-                    struct pollfd observed = { .fd = scope->channel, .events = POLLIN };
-                    int ready;
-                    do { ready = poll(&observed, 1, OBSERVATION_TIMEOUT_MS); }
-                    while (ready < 0 && errno == EINTR && !shutdown_requested);
-                    if (ready == 0) {
-                        response.status = 4002;
-                        /* Temporary [DEBUG-shutdown-retirement]: non-consuming,
-                         * bounded observation of the signed edit's last fixed
-                         * boundary. It may advance after poll returns; this is
-                         * not proof of where time was spent or any success. */
-                        int saved = errno;
-                        unsigned char boundary;
-                        ssize_t observed_bytes = pread(scope->stderr_fd, &boundary, 1, 0);
-                        errno = saved;
-                        if (observed_bytes == 1 && boundary >= '1' && boundary <= '9')
-                            response.status = 4100 + (uint32_t)(boundary - '0');
-                    }
-                    else if (ready < 0) response.status = 4003;
-                    else if ((observed.revents & POLLIN) == 0) response.status = 4004;
-                    else if (!cliq_receive(scope->channel, &response, extra, &extras)) response.status = 4005;
-                    else if (extras != 0 || response.command != CLIQ_WRITE_RESULT) {
-                        for (size_t i = 0; i < extras; i++) close(extra[i]);
-                        response.status = extras != 0 ? 4006 : 4007;
-                    } else ok = true;
+                if (cliq_send(scope->channel, &request, NULL, 0) && readable(scope->channel, OBSERVATION_TIMEOUT_MS) &&
+                    cliq_receive(scope->channel, &response, extra, &extras)) {
+                    ok = extras == 0 && response.command == CLIQ_WRITE_RESULT;
+                    for (size_t i = 0; i < extras; i++) close(extra[i]);
                 }
             }
         } else if (request.command == CLIQ_STOP_SCOPE && count == 0) ok = stop_scope(request.scope, &response);

@@ -378,20 +378,19 @@ release another effect. The existing exhausted-freshness recovery assertions
 remain unchanged. Current-source Linux GREEN is still required; neither these
 implementation changes nor the normal received-tool SIGTERM campaign qualifies
 the post-result failure-recovery cut.
-The original-release timeout remains under temporary fixed-stage diagnosis.
-Statuses 4101..4109 are still timeout refusals: they indicate only the last
-observed edit boundary (validation/read/decode/search/compose/write/fsync/cleanup/
-return) in the original private stderr memfd. A single-byte non-consuming read
-may observe progress after the five-second poll; it does not prove where time
-was spent, grant more time, change an outcome or supply retirement evidence.
-Absent or unreadable stage data retains the original 4002 refusal. These tagged
-diagnostics must be removed after genuine root-cause GREEN, not on a hypothesis.
+The original-release timeout's retained negative reports include temporary
+fixed-stage observations. Their last observed boundary never proves phase
+duration, a sole cause or retirement. The tagged logs, single-byte stderr
+observations and temporary refusal statuses were removed only after both
+matching Linux received-tool campaigns passed with the unchanged five-second
+poll, 64 MiB target and two-second stop. All historical negative evidence stays
+retained; the diagnostic-free source still requires fresh matching validation.
 The decoder now counts and copies binary-safe ASCII spans in bulk while keeping
 the original replacement decoding, UTF-16 counts and exact output bound for
 mixed or invalid UTF-8. The portable text contract includes word boundaries,
 embedded NUL and the unchanged 64 MiB received-tool size. This optimization is
-not evidence that the original five-second Linux timeout is resolved; that
-still requires the matching complete installed report.
+not physical authority or a real-time guarantee under arbitrary OS scheduling;
+the matching complete installed report remains the acceptance boundary.
 Stopped worker recovery retains the exact wait/nonce/anchor until its unique
 atomic terminal transaction; it never exposes a transient queued replacement.
 The real worker campaign exercises these branches separately from
@@ -458,6 +457,8 @@ Linux report passes. Independent observation of the original retired worker is
 explicitly unqualified; clearing the public worker pointer is not that evidence.
 Its restart observation retains both original unit histories, while stopping
 only Supervisor. The original two-unit runtime assertion remains in force.
+The read-only property query explicitly includes `TimeoutStopUSec`; an omitted
+property cannot stand in for checking the actual unchanged two-second policy.
 The 30-second native deadline bounds operation eligibility and cancellation,
 not hard real-time disappearance under arbitrary OS scheduling. Completion
 and retirement receipts still require the actual worker and callback joins.

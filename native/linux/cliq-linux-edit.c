@@ -10,15 +10,6 @@
 struct text { unsigned char *bytes; size_t length; };
 struct parser { const unsigned char *cursor, *end; };
 
-/* Temporary [DEBUG-shutdown-retirement]: one fixed byte in the existing
- * private stderr memfd, never fd3, a path, payload or result. This records only
- * the last boundary observed after a timeout, not elapsed time or authority. */
-static void diagnostic_edit_boundary(unsigned char boundary) {
-    int saved = errno;
-    (void)pwrite(STDERR_FILENO, &boundary, 1, 0);
-    errno = saved;
-}
-
 static int hex_digit(unsigned char value) {
     if (value >= '0' && value <= '9') return value - '0';
     if (value >= 'a' && value <= 'f') return value - 'a' + 10;
@@ -105,7 +96,6 @@ static bool decode_input(int fd, struct text *path, struct text *old, struct tex
 }
 
 static int edit_target(const struct text *path, const struct text *old, const struct text *replacement, size_t maximum) {
-    diagnostic_edit_boundary('1'); /* target validation */
     if (path->length == 0 || path->length >= CLIQ_WORKER_PATH_BYTES || strlen((char *)path->bytes) != path->length ||
         path->bytes[0] == '/' || memchr(path->bytes, '\\', path->length)) return 1;
     char *copy = strdup((char *)path->bytes); if (!copy) return 1;
@@ -128,20 +118,17 @@ static int edit_target(const struct text *path, const struct text *old, const st
     size_t size = (size_t)before.st_size;
     unsigned char *contents = malloc(size + 1);
     if (!contents) { close(target); goto error; }
-    diagnostic_edit_boundary('2'); /* source read */
     size_t read_bytes = 0;
     while (read_bytes < size) {
         ssize_t bytes = pread(target, contents + read_bytes, size - read_bytes, (off_t)read_bytes);
         if (bytes <= 0) { free(contents); close(target); goto error; } read_bytes += (size_t)bytes;
     }
     unsigned char *decoded = NULL; size_t decoded_size = 0, utf16_units = 0;
-    diagnostic_edit_boundary('3'); /* replacement UTF-8 decoding */
     if (!cliq_decode_utf8(contents, size, maximum, &decoded, &decoded_size, &utf16_units)) {
         free(contents); close(target); goto error;
     }
     free(contents); contents = decoded; size = decoded_size;
     size_t match = 0, matches = 0;
-    diagnostic_edit_boundary('4'); /* exact-span search */
     if (old->length != 0) {
         const unsigned char *first = memmem(contents, size, old->bytes, old->length);
         if (first != NULL) {
@@ -162,14 +149,12 @@ static int edit_target(const struct text *path, const struct text *old, const st
         free(contents); close(target); goto error;
     }
     size_t result_size = size - old->length + replacement->length;
-    diagnostic_edit_boundary('5'); /* result allocation and composition */
     unsigned char *result = malloc(result_size + 1);
     if (!result) { free(contents); close(target); goto error; }
     memcpy(result, contents, match);
     memcpy(result + match, replacement->bytes, replacement->length);
     memcpy(result + match + replacement->length, contents + match + old->length, size - match - old->length);
     free(contents);
-    diagnostic_edit_boundary('6'); /* private target write */
     bool ok = ftruncate(target, (off_t)result_size) == 0;
     size_t written = 0;
     while (ok && written < result_size) {
@@ -177,11 +162,7 @@ static int edit_target(const struct text *path, const struct text *old, const st
         if (bytes < 0 && errno == EINTR) continue;
         if (bytes <= 0) { ok = false; break; } written += (size_t)bytes;
     }
-    if (ok) {
-        diagnostic_edit_boundary('7'); /* file and directory fsync */
-        ok = fsync(target) == 0 && fsync(directory) == 0;
-    }
-    diagnostic_edit_boundary('8'); /* local resource cleanup */
+    if (ok) ok = fsync(target) == 0 && fsync(directory) == 0;
     free(result); close(target); close(directory); free(copy); return ok ? 0 : 1;
 error:
     close(directory); free(copy); return 1;
@@ -205,7 +186,6 @@ int main(int argc, char **argv) {
         strcmp(release.nonce, request.nonce) != 0) return 70;
     size_t maximum = request.max_file_bytes > MAX_EDIT_FILE_BYTES ? MAX_EDIT_FILE_BYTES : (size_t)request.max_file_bytes;
     int outcome = edit_target(&path, &old, &replacement, maximum);
-    diagnostic_edit_boundary('9'); /* return to the original result channel */
     free(path.bytes); free(old.bytes); free(replacement.bytes);
     struct cliq_worker_packet result = cliq_packet(CLIQ_WRITE_RESULT); result.exit_status = (uint32_t)outcome;
     return cliq_send(3, &result, NULL, 0) ? outcome : 70;
