@@ -26,12 +26,14 @@ import { publishOfflineModelEndpoint } from '../../state/testing/model-endpoint.
  * signed processes, generation, edit effect and complete containment death. */
 export async function createLinuxWorkerCampaignFixture(input: {
   installationRoot: string; cgroupParent: string; stateVolume: string; label: string; paddingBytes?: number;
+  edit?: { contents: Uint8Array; oldText: string; newText: string };
 }) {
   if (process.platform !== 'linux') throw new Error('Linux worker campaign requires Linux; no skipped qualification');
   const stateRoot = await mkdtemp(path.join(input.stateVolume, 's-'));
   const workspace = await mkdtemp(path.join(input.stateVolume, 'w-'));
   await chmod(stateRoot, 0o700); await chmod(workspace, 0o700);
-  const original = Buffer.concat([Buffer.from('before\n'), Buffer.alloc(input.paddingBytes ?? 0, 0x78)]);
+  const original = Buffer.concat([input.edit ? Buffer.from(input.edit.contents) : Buffer.from('before\n'),
+    Buffer.alloc(input.paddingBytes ?? 0, 0x78)]);
   await writeFile(path.join(workspace, 'a'), original, { mode: 0o644 });
   const authority = testFixture();
   const builtin = builtinInputContracts.edit;
@@ -151,7 +153,8 @@ export async function createLinuxWorkerCampaignFixture(input: {
     const active = await activateFixtureWorker(queued, `offline-${input.label}`);
     const agent = await store.loadAgentRun({ runId: queued.runId, material: authority.material, releaseKeys: signed.releaseKeys });
     const fixture = { ...queued, ...active, authority, agent, signed };
-    await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'before', new_text: 'after' } }]);
+    await batch(fixture, [{ name: 'edit', input: { path: 'a',
+      old_text: input.edit?.oldText ?? 'before', new_text: input.edit?.newText ?? 'after' } }]);
     const beforeSeal = await store.readRecoveryClosure(queued.runId);
     const checkpointId = identityHash('cliq-offline-campaign-prefix-checkpoint-v1', queued.runId);
     const prefixProof = await quiescedToolCheckpoint(fixture, checkpointId);

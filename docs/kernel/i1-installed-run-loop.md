@@ -357,16 +357,27 @@ old unpaired generations are not retroactively granted fictional birth history.
 Installed cancellation now revokes the original tool controller and retains its
 join. An authentic already-received result is retained; otherwise the original
 unknown/full charge precedes genuine private rollback, with no refund or retry.
-This result preservation currently covers the uninterrupted completion path,
-not a failed post-result publication or settlement. That remaining defect must
-retain the original result and physical owner across recoverable durability
-failure, including already committed revocation/checkpointing stages. Retrying
+The `ac7d167` push and PR native campaigns both reached an actual edit, original
+worker death and checkpointing before injecting one joined CAS write ENOSPC.
+Both then failed the unchanged original-owner assertion (`waiting` instead of
+`running`): this is genuine post-result durability RED, not installation setup
+failure or full-disk qualification. The current repair candidate retains the
+original result and physical owner across positively joined CAS write failure
+or an actual native SQL mutation failure followed by successful rollback,
+including already committed revocation/checkpointing stages. Retrying
 the effect, converting its known result to unknown, rebuilding a prepared
 completion to reset its three final-death observations, or treating failed CAS
 temporary cleanup as recoverable publication are not acceptable substitutes.
-The existing exhausted-freshness recovery assertions remain unchanged. A real
-native/CAS-boundary regression is being prepared; neither a proposed owner nor
-the normal received-tool SIGTERM campaign qualifies this failure-recovery cut.
+The same private completion keeps its selected cut, immutable settlement and
+continuation graph, partial publications and cumulative three-observation death
+budget. Only an exactly validated monotonic StopIntent change can rebind its
+revision; the first conflicting public call still refuses. Failed temporary,
+descriptor or rollback cleanup cannot grant a retry classification. Maintenance
+and close may resume only this original persistence owner, never prepare or
+release another effect. The existing exhausted-freshness recovery assertions
+remain unchanged. Current-source Linux GREEN is still required; neither these
+implementation changes nor the normal received-tool SIGTERM campaign qualifies
+the post-result failure-recovery cut.
 Stopped worker recovery retains the exact wait/nonce/anchor until its unique
 atomic terminal transaction; it never exposes a transient queued replacement.
 The new 28-scenario worker campaign exercises these branches separately from

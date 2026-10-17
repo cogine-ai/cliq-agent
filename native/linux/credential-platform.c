@@ -1149,6 +1149,11 @@ static bool broker_read_key(struct broker *broker) {
   bool valid = !strcmp(session, task->session) && !g_variant_n_children(parameters) && size > 0 && size <= MAX_SECRET &&
     (!strcmp(content_type, "application/octet-stream") || !strcmp(content_type, "text/plain"));
   for (size_t index = 0; valid && index < size; index++) valid = secret[index] >= 0x21 && secret[index] <= 0x7e;
+  static const char *const protocol_literals[] = {"{", "}", "\"", ":", "application/json"};
+  for (size_t index = 0; valid && index < sizeof(protocol_literals) / sizeof(protocol_literals[0]); index++) {
+    const char *literal = protocol_literals[index];
+    if (memmem(literal, strlen(literal), secret, size) != NULL) valid = false;
+  }
   if (valid) {
     task->secret = malloc(size);
     valid = task->secret != NULL;

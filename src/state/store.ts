@@ -703,6 +703,9 @@ function prepareCredentialWrite(held: CredentialBinding, request: CredentialWrit
   if (prior) credentialFrozenWriteIntent(prior, intent);
   if (purpose === 'model_endpoint' && secret.some(byte => byte < 0x21 || byte > 0x7e))
     throw new KernelStorageError('INVALID_REQUEST', 'model credential secret is outside the installed bearer byte range');
+  if (purpose === 'model_endpoint' && secret.length > 0 &&
+      ['{', '}', '"', ':', 'application/json'].some(literal => Buffer.from(literal, 'ascii').includes(secret)))
+    throw new KernelStorageError('INVALID_REQUEST', 'model credential secret conflicts with the installed protocol');
   const now = sampleCanonicalNow();
   if ([endpoint.createdAt, held.channelIdentity.openedAt, ...(previous ? [previous.createdAt] : []),
     ...(prior ? [prior.finishedAt!, prior.commandCore.externalSubject.observedAt] : [])].some(time => parseCanonicalTime(time) > parseCanonicalTime(now)) ||
@@ -1881,7 +1884,8 @@ export class StateStore {
           }
         }
         run = readRun(this.driver, id);
-        if (run.stopIntentRef || run.status === 'waiting' && run.waitingReason === 'reconciliation' ||
+        if (this.loadedExecutionScopes.get(id)?.execution.hasPendingToolCompletion() ||
+            run.stopIntentRef || run.status === 'waiting' && run.waitingReason === 'reconciliation' ||
             run.status === 'queued' && !this.installedRunFailures.has(id)) this.scheduleInstalledRun(id);
         else if (run.status === 'running' && run.nextStep === 'agent' &&
             (this.installedModelCompletions.has(id) || this.installedModelClosures.has(id)) &&
@@ -2009,6 +2013,13 @@ export class StateStore {
       if (!this.supportsInstalledRuns()) return;
       let current = readRun(this.driver, runId);
       if (!['queued', 'running', 'waiting'].includes(current.status)) return;
+      if (execution.hasPendingToolCompletion()) {
+        const failure = this.installedRunFailures.get(runId);
+        const completingFailure = execution.hasPendingToolCompletion(failure);
+        await execution.executeCurrentTool({ expectedRunRevision: current.revision });
+        if (completingFailure && this.installedRunFailures.get(runId) === failure) this.installedRunFailures.delete(runId);
+        continue;
+      }
       if (this.installedModelClosures.has(runId)) {
         await this.settleInstalledModelClosure(runId);
         continue;

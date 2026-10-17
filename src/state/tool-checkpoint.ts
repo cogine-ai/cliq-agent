@@ -1,4 +1,5 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { planCanonicalArtifact, type PlannedArtifact } from '../kernel/artifact-plan.js';
 import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { Run, RunAssemblyV1, RunSpec, StateOwnerRecordV1, SupervisorInspectorIdentityV1, WorkerLaunch, WorkspaceGenerationStateV1 } from '../kernel/types.js';
 import type { ToolCheckpointProof } from '../kernel/tool-authorization.js';
@@ -119,29 +120,35 @@ export function prepareWorkerRetirement(artifacts: ArtifactCatalog,
   proof: Awaited<ReturnType<typeof readWorkerCheckpointProof>>, retirementEvidenceRef: string,
   reobserve?: NativeWorkerRetirement) {
   let observedAt = proof.deathObservedAt, finalRef = retirementEvidenceRef, attempts = 0;
+  let pending: { observedAt: string; artifact: PlannedArtifact } | undefined;
   return {
     metadata: proof.metadata,
     get retirementEvidenceRef() { return finalRef; },
     async refresh() {
       if (!reobserve) return;
-      while (attempts < 3) {
-        attempts++;
-        const observation = await reobserve();
-        assertNativeContainmentDeath(observation);
-        if (canonicalSha256(observation.containment) !== proof.quiescence.containmentRef) {
-          throw new KernelStorageError('LEASE_FENCED', 'native retirement observation belongs to another containment');
+      while (pending || attempts < 3) {
+        if (!pending) {
+          attempts++;
+          const observation = await reobserve();
+          assertNativeContainmentDeath(observation);
+          if (canonicalSha256(observation.containment) !== proof.quiescence.containmentRef) {
+            throw new KernelStorageError('LEASE_FENCED', 'native retirement observation belongs to another containment');
+          }
+          parseCanonicalTime(observation.observedAt);
+          if (observation.observedAt < proof.snapshot.observedAt) {
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement proof predates the prepared snapshot');
+          }
+          const death = { ...proof.quiescence, observedAt: observation.observedAt, evidenceDigest: '' };
+          death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
+          pending = { observedAt: death.observedAt, artifact: planCanonicalArtifact(death, 'cliq-process-containment-death-evidence-v1') };
         }
-        parseCanonicalTime(observation.observedAt);
-        if (observation.observedAt < proof.snapshot.observedAt) {
-          throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement proof predates the prepared snapshot');
-        }
-        const death = { ...proof.quiescence, observedAt: observation.observedAt, evidenceDigest: '' };
-        death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
-        const artifact = await artifacts.publishCanonical(death, 'cliq-process-containment-death-evidence-v1');
+        const candidate = pending;
+        const artifact = await artifacts.publishBytes(candidate.artifact.bytes, candidate.artifact.mediaType, candidate.artifact.schemaKind);
         const now = sampleCanonicalNow();
-        if (now < death.observedAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement proof is in the future');
-        if (parseCanonicalTime(now) - parseCanonicalTime(death.observedAt) > 5_000) continue;
-        finalRef = artifact.ref; observedAt = death.observedAt; proof.metadata.push(artifact);
+        if (now < candidate.observedAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'native retirement proof is in the future');
+        pending = undefined;
+        if (parseCanonicalTime(now) - parseCanonicalTime(candidate.observedAt) > 5_000) continue;
+        finalRef = artifact.ref; observedAt = candidate.observedAt; proof.metadata.push(artifact);
         return;
       }
       throw new KernelStorageError('RECOVERY_REQUIRED', 'worker retirement proof is stale after bounded native reobservation');

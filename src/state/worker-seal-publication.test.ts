@@ -137,5 +137,66 @@ test('a cancellation during settlement publication preserves the winning cut wit
     assert.deepEqual(after.items, before.items);
     assert.deepEqual(after.workerLaunches, before.workerLaunches);
     assert.deepEqual(after.workspaceGenerations, before.workspaceGenerations);
+    const resumed = await fixture.agent.completeTool({ opId: prepared.entry.opId, attempt: prepared.entry.attempt,
+      expectedRunRevision: after.run.revision, observationRef: proof.observationRef });
+    assert.deepEqual(resumed.settlement, settlements[0], 'explicit StopIntent-only rebinding retains the original settlement bytes and timestamp');
+    const settled = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal(settled.run.stopIntentRef, winning.run.stopIntentRef); assert.equal(settled.run.cancelRequested, true);
+    assert.equal(settled.run.revision, winning.run.revision + 1);
+    assert.equal(settled.run.budgetConsumed.toolCalls, 1); assert.equal(settled.run.budgetReserved.toolCalls, 0);
+    assert.deepEqual(settled.journal.filter(entry => entry.opId === prepared.entry.opId).map(entry => entry.phase),
+      ['prepared', 'dispatch_claimed', 'completed']);
+    assert.deepEqual(settled.workerLaunches, []); assert.equal(settled.latestCheckpoint.id, prepared.checkpointId);
   } finally { await disposeFixture(fixture); t.mock.restoreAll(); }
+});
+
+test('a joined result-graph publication refusal resumes the same completion without restaging its settlement', async t => {
+  let clock = Date.now();
+  t.mock.method(Date, 'now', () => clock);
+  const fixture = await createAgentFixture('seal-publication-resume', undefined, { mode: 'accept-edits', tools: ['edit'] });
+  try {
+    // The existing real SQLite/CAS and FileHandle seam is used here. Its
+    // offline containment graph is neither native death nor full-disk proof.
+    await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } }]);
+    const prepared = await prepareTool(fixture), claimed = await claimTool(fixture, prepared);
+    const raw = await observation(fixture, claimed, { changed: true });
+    const proof = await postEffectObservation(fixture, raw, prepared.checkpointId);
+    const input = { opId: prepared.entry.opId, attempt: prepared.entry.attempt,
+      expectedRunRevision: prepared.run.revision, observationRef: proof.observationRef };
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const sample = await fs.open(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, proof.observationRef), 'r');
+    const prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] };
+    const writeFile = prototype.writeFile; await sample.close();
+    const failure = Object.assign(new Error('joined completion graph publication refused'), { code: 'ENOSPC' });
+    const settlements: BudgetSettlementV1[] = [], payloads: Buffer[] = [];
+    let injected = false;
+    const writer = t.mock.method(prototype, 'writeFile', async function(this: FileHandle, ...args: unknown[]) {
+      await Reflect.apply(writeFile, this, args);
+      if (!Buffer.isBuffer(args[0])) return;
+      const bytes = args[0], text = bytes.toString('utf8');
+      if (!text.includes('"format":"cliq-budget-settlement-v1"') && !text.includes('"format":"cliq-tool-result-payload-v1"')) return;
+      const value = JSON.parse(text) as { format?: string; runId?: string; opId?: string };
+      if (value.runId !== fixture.runId || value.opId !== prepared.entry.opId) return;
+      if (value.format === 'cliq-budget-settlement-v1') settlements.push(value as BudgetSettlementV1);
+      if (value.format !== 'cliq-tool-result-payload-v1') return;
+      payloads.push(Buffer.from(bytes));
+      if (!injected) { injected = true; throw failure; }
+    });
+    await assert.rejects(fixture.agent.completeTool(input), error => error === failure);
+    assert(injected); assert.equal(settlements.length, 1); assert.equal(payloads.length, 1);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    await assert.rejects(fixture.agent.completeTool({ ...input, observationRef: raw }), { code: 'REVISION_CONFLICT' });
+    clock += 1_000;
+    const completed = await fixture.agent.completeTool(input);
+    writer.mock.restore();
+    assert.equal(settlements.length, 1, 'the successful settlement publication is not repeated');
+    assert.deepEqual(completed.settlement, settlements[0]);
+    assert.equal(payloads.length, 2); assert.deepEqual(payloads[1], payloads[0], 'only the same failed artifact is republished');
+    const after = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal(after.run.budgetConsumed.toolCalls, 1); assert.equal(after.run.budgetReserved.toolCalls, 0);
+    assert.equal(after.latestCheckpoint.id, prepared.checkpointId); assert.deepEqual(after.workerLaunches, []);
+    assert.deepEqual(after.journal.filter(entry => entry.opId === prepared.entry.opId).map(entry => entry.phase),
+      ['prepared', 'dispatch_claimed', 'completed']);
+    assert.deepEqual(after.journal.slice(0, -1), before.journal);
+  } finally { t.mock.restoreAll(); await disposeFixture(fixture); }
 });

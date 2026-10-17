@@ -109,6 +109,19 @@ supporting an in-flight model operation is not fenced in this phase. Any narrow
 received-tool drain after the closed gate must retain the exact original worker
 and physical owner; it does not reopen dispatch, lease or grant authority.
 
+After the actual tool result arrives, its original owner also retains unfinished
+checkpoint and completion publications. A positively joined CAS write ENOSPC or
+an actual SQL mutation failure with successful original rollback may resume the
+same immutable settlement, not rebuild its graph or reset native freshness
+attempts. Original claim, worker, generation, checkpoint, journal, items and
+budgets must still match. Only an exactly validated monotonic StopIntent change
+can rebind the revision; the public conflicting call still refuses first.
+Other execution and model-release entries stay fenced while this result is
+retained. Final close first attempts that same completion and retains StateOwner
+and its installation on failure. Joined I/O classification is not an execution,
+retirement or retry capability. The candidate's real Linux fault regressions
+remain distinct from a full-disk or precise installed crash qualification.
+
 Final close joins complete handlers and producers while StateOwner and the
 installation remain held, settles original model outcomes, then performs the
 existing worker fencing/death/retirement and descriptor joins. Only successful

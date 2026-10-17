@@ -1,4 +1,5 @@
 import { digestOmitting, modelOperationId, parseCanonicalTime } from '../../kernel/identity.js';
+import { planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
 import type {
   BudgetSettlementV1,
   BudgetUsage,
@@ -510,6 +511,44 @@ export async function settleValidatedInvocation(
   terminal: InitialSettlementKind,
   continuation?: SettlementContinuation
 ): Promise<{ entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run }> {
+  return settleInitialInvocation(driver, artifacts, owner, input, terminal, continuation);
+}
+
+type RetainedSettlement = {
+  validateSnapshot(connection: SqliteConnection, run: Run): void;
+  settlement?: BudgetSettlementV1;
+  plan?: PlannedArtifact;
+  artifact?: PublishedArtifact;
+  continuation?: Awaited<ReturnType<SettlementContinuation>>;
+  rebind?: { error: KernelStorageError; revision: number };
+};
+
+/** Internal owner of one already validated completion, not a StateStore
+ * admission or a transferable execution/retirement capability. */
+export function prepareValidatedInvocationSettlement(
+  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  input: SettleInvocationInput, terminal: InitialSettlementKind, continuation: SettlementContinuation,
+  validateSnapshot: RetainedSettlement['validateSnapshot']
+) {
+  const retained: RetainedSettlement = { validateSnapshot };
+  return { settle(expectedRunRevision: number) {
+    return settleInitialInvocation(driver, artifacts, owner, { ...input, expectedRunRevision }, terminal, continuation, retained);
+  }, acceptRevisionConflict(error: unknown, expectedRunRevision: number) {
+    const permit = retained.rebind;
+    if (!permit || permit.error !== error || permit.revision !== expectedRunRevision) return false;
+    const current = readRun(driver, input.runId);
+    if (current.revision !== expectedRunRevision) return false;
+    retained.validateSnapshot(driver, current);
+    retained.rebind = undefined;
+    return true;
+  } };
+}
+
+async function settleInitialInvocation(
+  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  input: SettleInvocationInput, terminal: InitialSettlementKind, continuation?: SettlementContinuation,
+  retained?: RetainedSettlement
+): Promise<{ entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run }> {
   const artifactRefs = terminal.phase === 'completed'
     ? [terminal.resultRef, terminal.receiptRef]
     : terminal.phase === 'failed'
@@ -537,8 +576,14 @@ export async function settleValidatedInvocation(
   for (let retry = 0; retry < SETTLEMENT_RETRY_LIMIT; retry += 1) {
     const snapshotRun = readRun(driver, input.runId);
     if (snapshotRun.revision !== input.expectedRunRevision) {
-      throw new KernelStorageError('REVISION_CONFLICT', 'Run revision changed before invocation settlement');
+      const error = new KernelStorageError('REVISION_CONFLICT', 'Run revision changed before invocation settlement');
+      if (retained && snapshotRun.revision > input.expectedRunRevision && snapshotRun.stopIntentRef) {
+        retained.validateSnapshot(driver, snapshotRun);
+        retained.rebind = { error, revision: snapshotRun.revision };
+      }
+      throw error;
     }
+    retained?.validateSnapshot(driver, snapshotRun);
     const entries = readInvocationAttempt(driver, input.runId, input.opId, input.attempt);
     const prepared = entries.find((entry) => entry.phase === 'prepared');
     const claim = entries.find((entry) => entry.phase === 'dispatch_claimed');
@@ -571,39 +616,47 @@ export async function settleValidatedInvocation(
     const released = prepared.budgetDelta;
     const reservedAfter = subtractBudget(snapshotRun.budgetReserved, prepared.budgetDelta, 'Run reserved settlement');
     const consumedAfter = addBudget(snapshotRun.budgetConsumed, consumed, 'Run consumed settlement');
-    const fence = readTimeFence(driver);
-    if (fence === undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence is missing');
-    const sampled = sampleCanonicalNow();
-    const settledAt = sampled >= fence.lastAcceptedAt ? sampled : fence.lastAcceptedAt;
-    const terminalSequence = entries.length === 0
-      ? 0
-      : Number(
-          driver
-            .prepare('SELECT COALESCE(max(seq), 0) + 1 AS seq FROM run_journal WHERE run_id = ?')
-            .get<{ seq: unknown }>(input.runId)?.seq
-        );
-    const settlement: BudgetSettlementV1 = {
-      schemaVersion: 1,
-      format: 'cliq-budget-settlement-v1',
-      runId: input.runId,
-      opId: input.opId,
-      attempt: input.attempt,
-      preparedJournalSeq: prepared.seq,
-      terminalJournalSeq: terminalSequence,
-      terminalPhase: terminal.phase,
-      reserved: prepared.budgetDelta,
-      consumed,
-      released,
-      budgetConsumedBefore: snapshotRun.budgetConsumed,
-      budgetConsumedAfter: consumedAfter,
-      budgetReservedBefore: snapshotRun.budgetReserved,
-      budgetReservedAfter: reservedAfter,
-      settledAt,
-      settlementDigest: ''
-    };
-    settlement.settlementDigest = digestOmitting(settlement, 'settlementDigest');
-    const settlementArtifact = await artifacts.publishCanonical(settlement, 'cliq-budget-settlement-v1');
-    const continuationPlan = await continuation?.({ run: snapshotRun, prepared, settlement });
+    const settlement = retained?.settlement ?? (() => {
+      const fence = readTimeFence(driver);
+      if (fence === undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence is missing');
+      const sampled = sampleCanonicalNow();
+      const settledAt = sampled >= fence.lastAcceptedAt ? sampled : fence.lastAcceptedAt;
+      const terminalSequence = entries.length === 0
+        ? 0
+        : Number(
+            driver
+              .prepare('SELECT COALESCE(max(seq), 0) + 1 AS seq FROM run_journal WHERE run_id = ?')
+              .get<{ seq: unknown }>(input.runId)?.seq
+          );
+      const settlement: BudgetSettlementV1 = {
+        schemaVersion: 1,
+        format: 'cliq-budget-settlement-v1',
+        runId: input.runId,
+        opId: input.opId,
+        attempt: input.attempt,
+        preparedJournalSeq: prepared.seq,
+        terminalJournalSeq: terminalSequence,
+        terminalPhase: terminal.phase,
+        reserved: prepared.budgetDelta,
+        consumed,
+        released,
+        budgetConsumedBefore: snapshotRun.budgetConsumed,
+        budgetConsumedAfter: consumedAfter,
+        budgetReservedBefore: snapshotRun.budgetReserved,
+        budgetReservedAfter: reservedAfter,
+        settledAt,
+        settlementDigest: ''
+      };
+      settlement.settlementDigest = digestOmitting(settlement, 'settlementDigest');
+      return settlement;
+    })();
+    if (retained) retained.settlement = settlement;
+    const settlementPlan = retained?.plan ?? planCanonicalArtifact(settlement, 'cliq-budget-settlement-v1');
+    if (retained) retained.plan = settlementPlan;
+    const settlementArtifact = retained?.artifact ?? await artifacts.publishBytes(settlementPlan.bytes, settlementPlan.mediaType, settlementPlan.schemaKind);
+    if (retained) retained.artifact = settlementArtifact;
+    const continuationPlan = retained?.continuation ?? await continuation?.({ run: snapshotRun, prepared, settlement });
+    if (retained) retained.continuation = continuationPlan;
     if (continuationPlan?.unknownEvidence && terminal.phase !== 'unknown') {
       throw new KernelStorageError('INVALID_REQUEST', 'only a protected unknown settlement can restage its evidence');
     }
@@ -622,11 +675,23 @@ export async function settleValidatedInvocation(
         settlementArtifact,
         [...terminalMetadata, ...(continuationPlan?.metadata ?? [])],
         continuationPlan?.commit,
-        continuationPlan?.validate
+        (connection, run, committedAt) => {
+          retained?.validateSnapshot(connection, run);
+          continuationPlan?.validate?.(connection, run, committedAt);
+        }
       );
     } catch (error) {
       if (error instanceof ReducerSnapshotChanged) {
-        if (continuationPlan) throw new KernelStorageError('REVISION_CONFLICT', 'prepared continuation cut changed before settlement');
+        const changed = new KernelStorageError('REVISION_CONFLICT', 'prepared continuation cut changed before settlement');
+        if (retained) {
+          const current = readRun(driver, input.runId);
+          retained.validateSnapshot(driver, current);
+          // This private exception escaped transaction() only after its
+          // successful rollback. The changed StopIntent is not SQL failure
+          // permission and never rebuilds the original completion plan.
+          if (current.revision > input.expectedRunRevision && current.stopIntentRef) retained.rebind = { error: changed, revision: current.revision };
+        }
+        if (continuationPlan || retained) throw changed;
         continue;
       }
       throw error;
