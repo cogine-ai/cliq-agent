@@ -1225,7 +1225,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         // campaign client's pending request, nor does it take credential scope.
         const active = accepted(exchange([{ protocolVersion: 1, method: 'run.get', runId: exhaustedRun.id }])[0]!, 'run.get');
         const run = active.snapshot.run;
-        assert.equal(run.status, 'running'); assert(run.activeWorkerLaunchId);
+        assert.equal(run.id, exhaustedRun.id); assert.equal(run.status, 'running'); assert(run.activeWorkerLaunchId);
         assert.deepEqual(active.journal.map((entry: any) => entry.phase), ['prepared', 'dispatch_claimed']);
         const original = inspectInstalledWorkerIdentity(recipe.stateRoot, { uid: ledger.uid, runId: run.id,
           launchId: run.activeWorkerLaunchId, leaseEpoch: run.leaseEpoch, runRevision: run.revision,

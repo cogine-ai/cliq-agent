@@ -215,6 +215,18 @@ export function inspectInstalledWorkerRetirement(stateRoot: string, uid: number,
       requireValue(backend.kind === 'linux' && identityKeys.every(key => typeof backend[key] === 'string' &&
         (backend[key] as string).length > 0 && (backend[key] as string).length <= 4096) &&
         backend.cgroupPopulated === 0 && backend.namespaceInitDeadAndReaped === true && backend.remainingTrackedDescendants === 0);
+      const containment = readCas(original.processContainmentRef);
+      closedRecord(containment, ['schemaVersion', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner',
+        'filesystemBinding', 'launchNonceDigest', 'backend', 'createdAt']);
+      requireValue(containment.schemaVersion === 1 && containment.planRef === death.planRef &&
+        containment.sandboxLaunchSpecRef === death.sandboxLaunchSpecRef && containment.sandboxLaunchSpecDigest === death.sandboxLaunchSpecDigest &&
+        containment.launchNonceDigest === death.launchNonceDigest && canonicalSha256(containment.owner) === canonicalSha256(death.owner) &&
+        canonicalSha256(containment.filesystemBinding) === canonicalSha256({ kind: 'run-generation', generationRef: original.workspaceGenerationRef }));
+      closedRecord(containment.backend, ['kind', ...identityKeys]);
+      requireValue(containment.backend.kind === backend.kind && identityKeys.every(key =>
+        (containment.backend as Record<string, unknown>)[key] === backend[key]));
+      requireValue(typeof containment.createdAt === 'string'); parseCanonicalTime(containment.createdAt);
+      requireValue(containment.createdAt <= original.activatedAt);
       requireValue(typeof death.observedAt === 'string'); parseCanonicalTime(death.observedAt);
       requireValue(death.observedAt >= snapshot.observedAt && death.observedAt <= launch.retiredAt);
       return Object.freeze({ ...current, phase: 'retired', generationWriteState: 'sealed', generationPhase: 'sealed',

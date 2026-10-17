@@ -68,6 +68,14 @@ async function workerFixture(t: TestContext) {
   const value = await fixture(t), hash = 'a'.repeat(64);
   const cas = path.join(value.stateRoot, KERNEL_CAS_DIRECTORY);
   await mkdir(cas, { mode: 0o700 });
+  const containment = { schemaVersion: 1, planRef: value.launch.containmentPlanRef, sandboxLaunchSpecRef: value.launch.sandboxLaunchSpecRef,
+    sandboxLaunchSpecDigest: hash, owner: { kind: 'worker_activation', runId: value.expected.runId, intendedLeaseEpoch: 1, workerLaunchId: value.expected.launchId },
+    filesystemBinding: { kind: 'run-generation', generationRef: value.launch.workspaceGenerationRef }, launchNonceDigest: value.launch.spawnNonceDigest,
+    backend: { kind: 'linux', pidNamespaceReservationId: 'fixture-reservation', pidNamespaceId: 'fixture-namespace',
+      cgroupPath: '/fixture/cgroup', cgroupId: 'fixture-cgroup', namespaceInitStartToken: 'fixture-init', subreaperStartToken: 'fixture-subreaper' },
+    createdAt: value.launch.createdAt };
+  value.launch.processContainmentRef = canonicalSha256(containment);
+  await writeFile(path.join(cas, value.launch.processContainmentRef), canonicalJsonBytes(containment), { mode: 0o400 });
   const worker: WorkerIdentity = { schemaVersion: 1, executableRealpath: '/fixture/worker', executableDigest: hash,
     pid: 12345, processStartToken: 'linux-proc-start-ticks:67890', spawnNonceDigest: value.launch.spawnNonceDigest,
     activationNonceDigest: value.launch.activationNonceDigest, intendedLeaseEpoch: 1, launchId: value.launch.launchId,
@@ -86,7 +94,7 @@ async function workerFixture(t: TestContext) {
     database.prepare('INSERT INTO workspace_generations VALUES(?, ?, ?, ?, ?)')
       .run(generation.generationId, generation.runId, generation.phase, generation.rowVersion, JSON.stringify(generation));
   });
-  return { ...value, cas, worker, workerFilename, generation };
+  return { ...value, cas, containment, worker, workerFilename, generation };
 }
 
 test('active identity diagnostic fixes the original worker PID/start and generation without creating authority', async t => {
@@ -115,9 +123,7 @@ async function retireFixture(value: Awaited<ReturnType<typeof workerFixture>>) {
     owner: { kind: 'worker_activation', runId: value.expected.runId, intendedLeaseEpoch: 1, workerLaunchId: value.expected.launchId },
     launchNonceDigest: value.launch.spawnNonceDigest, inspectorSupervisorInstanceId: value.expected.supervisorInstanceId,
     inspectorIdentityRef: hash, inspectorIdentityDigest: hash,
-    backend: { kind: 'linux', pidNamespaceReservationId: 'fixture-reservation', pidNamespaceId: 'fixture-namespace',
-      cgroupPath: '/fixture/cgroup', cgroupId: 'fixture-cgroup', namespaceInitStartToken: 'fixture-init',
-      subreaperStartToken: 'fixture-subreaper', cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 },
+    backend: { ...value.containment.backend, cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 },
     observedAt: time(500), evidenceDigest: '' };
   death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
   const retirementEvidenceRef = await publishFixture(value, death);
@@ -262,6 +268,11 @@ const retirementChanges: Array<[string, (value: Awaited<ReturnType<typeof worker
   }],
   ['nonzero descendant declaration', async (value, retired) => {
     const death = { ...retired.death, backend: { ...retired.death.backend, remainingTrackedDescendants: 1 } };
+    death.evidenceDigest = digestOmitting(death, 'evidenceDigest'); const ref = await publishFixture(value, death);
+    update(value.filename, db => db.prepare('UPDATE worker_launches SET row_json=?').run(JSON.stringify({ ...retired.retiredLaunch, retirementEvidenceRef: ref })));
+  }],
+  ['foreign containment backend with the original ref', async (value, retired) => {
+    const death = { ...retired.death, backend: { ...retired.death.backend, cgroupId: 'successor-cgroup' } };
     death.evidenceDigest = digestOmitting(death, 'evidenceDigest'); const ref = await publishFixture(value, death);
     update(value.filename, db => db.prepare('UPDATE worker_launches SET row_json=?').run(JSON.stringify({ ...retired.retiredLaunch, retirementEvidenceRef: ref })));
   }],
