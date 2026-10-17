@@ -1299,7 +1299,8 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const successorStart = await selectedSupervisor(services.supervisorUnit, successor, selectedImage, recoverBy);
       const links: Record<string, unknown> = {};
       const history = await qualifyInstalledOwnerLinks({ stateRoot: recipe.stateRoot, uid: ledger.uid, bundle: signed.bundle,
-        imageDigest: report.bundle.supervisorDigest, report: links });
+        imageDigest: report.bundle.supervisorDigest, report: links,
+        ...(shutdownStartupOnly ? { scenario: 'startup_shutdown' as const } : {}) });
       assert.equal(links.qualified, true); assert.equal(history.owners.length, precedingOwners.length + 1);
       assert.deepEqual(history.owners.slice(0, -1), precedingOwners);
       const successorOwner = history.owners.at(-1)!; assert.equal(successorOwner.state, 'active');
