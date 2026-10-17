@@ -446,11 +446,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   }
   // Temporary source-only diagnosis for the actual installed SIGTERM campaign.
   // Remove [DEBUG-shutdown-retirement] after its real failure is resolved.
-  function reportShutdownRetirement(stage: 'preparation' | 'retirement' | 'worker_join', failure: unknown): void {
+  function reportShutdownRetirement(stage: 'preparation' | 'retirement' | 'worker_join', failure: unknown,
+    point = 'unclassified'): void {
     try {
       if (!closed && !isClosing()) return;
       const message = failure instanceof Error ? Object.getOwnPropertyDescriptor(failure, 'message')?.value : undefined;
-      let reason = 'unclassified';
+      let reason = point;
       switch (message) {
         case 'preparation retirement controller has no registered actual birth': reason = 'unregistered_controller_birth'; break;
         case 'preparation retirement reservation has no registered actual birth': reason = 'unregistered_reservation_birth'; break;
@@ -473,7 +474,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         case 'controller preparation birth is no longer live':
         case 'invalid native stop scope':
         case 'invalid native death observation': reason = 'worker_stop_channel_fenced'; break;
+        case 'preparation retirement original live logical producer differs from retained authority': reason = 'preparation_logical_identity'; break;
+        case 'preparation retirement selected Run differs from retained authority': reason = 'preparation_run_changed'; break;
+        case 'generation retains an original native model transport owner': reason = 'preparation_broker_owner'; break;
       }
+      if (typeof message === 'string' && message.startsWith('worker preparation history is invalid: ')) reason = 'preparation_history';
       console.error(JSON.stringify({ debugTag: '[DEBUG-shutdown-retirement]', diagnosticOnly: true,
         scope: 'installed-shutdown-retirement', stage, reason }));
     } catch { /* Diagnosis cannot replace the original retirement failure. */ }
@@ -484,6 +489,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       operationFailure = { error };
       if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
       let retiringPreparation = false;
+      let retirementPoint = 'unclassified';
       try {
         const run = readRun(driver, runId);
         if (preparation && readRequiredWorkerLaunch(driver, preparation.launchId).phase === 'preparing') {
@@ -492,10 +498,14 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           // preparation retirement has committed. Descriptor close alone is
           // not a durable proof of either tree or controller retirement.
           const original = preparation, birth = workspaceBirth;
+          retirementPoint = 'preparation_materialization_join';
           await materialization?.close();
+          retirementPoint = 'preparation_controller_join';
           const controllerRetirement = controller ? await controller.closePreparation() : undefined;
+          retirementPoint = 'preparation_reservation_join';
           reservation?.close();
           if ((!birth && !materialization) || !executionStore) throw new ResourceRetirementError('worker preparation has no complete original birth/retirement closure', error);
+          retirementPoint = 'preparation_commit';
           await retireWorkerPreparation(driver, artifacts, owner, { preparation: original,
             expectedRunRevision: readRun(driver, runId).revision,
             ...(birth ? { workspaceBirth: birth } : { unallocatedWorkspace: materialization! }),
@@ -512,7 +522,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           worker = undefined;
         }
       } catch (failure) {
-        reportShutdownRetirement(retiringPreparation ? 'preparation' : 'retirement', failure);
+        reportShutdownRetirement(retiringPreparation ? 'preparation' : 'retirement', failure, retirementPoint);
         // Losing the state fence cannot bypass actual resource retirement or
         // be mistaken for a graceful owner release.
         cleanupFailure ??= retiringPreparation

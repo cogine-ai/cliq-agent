@@ -115,6 +115,7 @@ async function campaign(filename: string): Promise<void> {
     };
     const check = () => { if (failure) throw failure; };
     const text = () => { check(); return Buffer.concat(stdout).toString('utf8'); };
+    let waitFailure: 'deadline_reached' | 'service_exited' | undefined;
     const waitEvent = async (event: string) => {
       const deadline = Date.now() + 10000;
       const frames = role === 'unit-history' ? ['systemd_units_retained', 'systemd_units_released']
@@ -124,10 +125,58 @@ async function campaign(filename: string): Promise<void> {
       for (;;) {
         check(); const output = text(); assert(complete.startsWith(output), 'owned fixture emitted an invalid fixed frame');
         if (output.split('\n').slice(0, -1).includes(event)) return;
-        assert(!done && Date.now() < deadline, 'actual external service event was not observed'); await delay(10);
+        if (done) { waitFailure = 'service_exited'; throw new Error('actual external service exited before its event'); }
+        if (Date.now() >= deadline) { waitFailure = 'deadline_reached'; throw new Error('actual external service event deadline was reached'); }
+        await delay(10);
       }
     };
     const join = async () => { const exit = await bounded(joined, 10000); await bounded(closed, 5000); check(); return exit; };
+    const diagnostic = () => {
+      check();
+      const output = Buffer.concat(stdout).toString('utf8'), errors = Buffer.concat(stderr).toString('utf8');
+      const sourceStages = ['alias-default', 'alias-session', 'caller-other', 'caller-original', 'search-absent', 'search-present',
+        'open-session', 'create-item', 'item-created', 'get-secret', 'secret-returned', 'collections', 'collection-locked', 'collection-items',
+        'item-attributes', 'item-locked', 'original-identity-refused', 'method-refused', 'property-refused', 'fixture-refused'];
+      const externalStages: string[] = [];
+      let externalOtherOutput = false;
+      for (const line of errors.trim().split('\n').filter(Boolean)) {
+        const stage = sourceStages.find(candidate => line === `finalizer-stage:${candidate}`);
+        if (stage && !externalStages.includes(stage)) externalStages.push(stage);
+        else externalOtherOutput = true;
+      }
+      let entryCodeClass = errors.length ? 'unclassified' : 'absent', entryMessageClass = errors.length ? 'unclassified' : 'absent';
+      if (errors.length && Buffer.byteLength(errors) <= 2048) try {
+        const value = parseJsonStrict(errors.trim()) as Record<string, unknown>;
+        if (value.diagnosticOnly === true && value.scope === 'installed-read-startup' &&
+            Object.keys(value).every(key => ['diagnosticOnly', 'scope', 'code', 'message', 'path'].includes(key))) {
+          const codes = ['RECOVERY_REQUIRED', 'INVALID_REQUEST', 'STATE_TRANSITION_INVALID', 'ARTIFACT_MISMATCH',
+            'UNSUPPORTED_PLATFORM', 'ERR_CLIQ_CREDENTIAL_BUSY'] as const;
+          entryCodeClass = codes.find(code => value.code === code) ?? 'other';
+          const messages = [
+            ['credential store did not complete a fresh secret round-trip', 'create_roundtrip_refused'],
+            ['credential scope could not hold its original physical bindings', 'credential_bindings_refused'],
+            ['installed Supervisor refused the authenticated credential operation', 'finalizer_refused'],
+            ['installed Supervisor hello is incompatible with credential finalization', 'hello_incompatible'],
+            ['installed service dependencies differ from the fixed profiles', 'service_dependencies_refused'],
+            ['installed service effective configuration drifted; explicit installation remediation is required', 'service_profile_refused'],
+            ['installed credential services are not in a current running invocation', 'service_invocation_refused'],
+            ['installed Supervisor startup did not reach authenticated readiness', 'supervisor_readiness_refused'],
+          ] as const;
+          entryMessageClass = messages.find(([message]) => value.message === message)?.[1] ?? 'other';
+        }
+      } catch { /* Unknown entry output remains a fixed class, never retained bytes. */ }
+      let returnedOperationPhase = output.length ? 'unclassified' : 'absent';
+      if (output.length && Buffer.byteLength(output) <= 65536) try {
+        const value = parseJsonStrict(output.trim()) as Record<string, unknown>;
+        if (value.schemaVersion === 1 && Object.keys(value).sort().join(',') === 'operation,schemaVersion')
+          returnedOperationPhase = decodeCredentialAuthorityOperation(value.operation).phase;
+      } catch { /* No arbitrary returned payload becomes evidence. */ }
+      return { exited: done, exitCode: child.exitCode, signal: child.signalCode === null ? 'none'
+        : ['SIGTERM', 'SIGKILL'].includes(child.signalCode) ? child.signalCode : 'other',
+        stdoutBytes: Buffer.byteLength(output), stderrBytes: Buffer.byteLength(errors), returnedOperationPhase,
+        entryCodeClass, entryMessageClass, externalStages, externalFixtureRefused: externalStages.includes('fixture-refused'),
+        externalOtherOutput, waitFailure: waitFailure ?? 'none' };
+    };
     const retire = async () => {
       let retirementFailure: unknown;
       try {
@@ -149,7 +198,8 @@ async function campaign(filename: string): Promise<void> {
       if (retirementFailure) throw retirementFailure;
       check();
     };
-    const value = { child, observe, waitEvent, text, join, retire, result: () => ({ status: child.exitCode, stdout: text(), stderr: Buffer.concat(stderr).toString('utf8') }) };
+    const value = { child, observe, waitEvent, text, join, retire, diagnostic,
+      result: () => ({ status: child.exitCode, stdout: text(), stderr: Buffer.concat(stderr).toString('utf8') }) };
     owned.push(value); return value;
   }
   let services: { keeperUnit: string; supervisorUnit: string } | undefined, primary: unknown;
@@ -248,7 +298,14 @@ async function campaign(filename: string): Promise<void> {
     service.child.stdin!.write(`arm ${originalPid} ${identity.processStartToken.slice('linux-proc-start-ticks:'.length)}\n`);
     await service.waitEvent('armed');
     const enrollment = spawnOwned(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')], secret);
-    await enrollment.observe(); await service.waitEvent('inspection-started');
+    await enrollment.observe();
+    try { await service.waitEvent('inspection-started'); }
+    catch (error) {
+      // This is a refused/unreached cut, never a SIGTERM result. Preserve only
+      // fixed stage classes and independently observed child exit facts.
+      report.unreachedInspection = { enrollment: enrollment.diagnostic(), externalService: service.diagnostic() };
+      throw error;
+    }
     const launcher = await enrollment.observe();
     const children = await readFile(`/proc/${launcher.pid}/task/${launcher.pid}/children`, 'utf8');
     const childPids = children.trim().split(/\s+/u).map(Number); assert.equal(childPids.length, 1);

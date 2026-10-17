@@ -160,6 +160,36 @@ cancel-and-join assertion fails; the other three component cases and subsequent
 not qualify the installed finalizer. The new ABI2 owner must pass that same real
 component test and the independent signed installed finalizer stop scenario.
 
+The `e8500dd` preparation reports reached the positive original writer/public
+queued cut and ordinary SIGTERM, then recorded `exit-code`, status 1, rather
+than a forced kill. The first fixed diagnostic classified preparation only as
+`unclassified`; this is still unresolved retirement, not graceful release.
+The native cancellation component step succeeds, but installed finalizer
+qualification separately failed before observing the original inspection.
+Only bounded source-enum/independent child-exit diagnostics may distinguish that
+unreached cut; extending the probe deadline or manually manufacturing a
+continuation cannot qualify it.
+
+The push effect probes reached genuine snapshot progress and an unanswered
+complete POST, respectively, but failed their strict retained exit-history
+assertion before owner validation. Their observer was started before admission;
+submit-to-stop lasted 24.646 and 11.907 seconds, beyond its unchanged ten-second
+input deadline. Retain the actual unit only after the first positive cut,
+recheck the same original effect, and then stop. Keep the original exit-code
+assertion, two-second service policy and observer deadline. Record every
+observer independently so successful cleanup cannot overwrite an earlier
+failed target observation. Lost cuts remain negative.
+
+The same close package must own `session.create` as well as `run.submit`.
+Its existing Trust scanner yields per entry but the installed Session path
+currently supplies no abort signal or whole-handler registry entry. First
+exercise the unchanged production path through the signed entry: a real
+controlled-home Trust-directory cursor must advance while the original public
+Session request is pending and its Session is absent, before ordinary SIGTERM.
+An opaque directory cookie is an enumeration observation, not a byte or entry
+count and not an exact private precommit cut. A legitimate raced commit must
+retain its original response; absence alone does not prove an exact abort cut.
+
 ## Tool result and settlement rules
 
 | Actual cut | Required behavior |

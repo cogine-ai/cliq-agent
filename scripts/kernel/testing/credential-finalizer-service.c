@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,12 +31,31 @@ struct installed_fixture {
   char sender[256], command[128];
   size_t used;
   guint input, interrupted, deadline;
+  uint64_t diagnosed;
 };
+
+enum diagnostic_stage { ALIAS_DEFAULT, ALIAS_SESSION, CALLER_OTHER, CALLER_ORIGINAL, SEARCH_ABSENT, SEARCH_PRESENT,
+  OPEN_SESSION, CREATE_ITEM, ITEM_CREATED, GET_SECRET, SECRET_RETURNED, COLLECTIONS, COLLECTION_LOCKED, COLLECTION_ITEMS,
+  ITEM_ATTRIBUTES, ITEM_LOCKED, ORIGINAL_IDENTITY_REFUSED, METHOD_REFUSED, PROPERTY_REFUSED, FIXTURE_REFUSED };
+static void diagnose(struct installed_fixture *fixture, enum diagnostic_stage stage) {
+  static const char *const stages[] = {"alias-default", "alias-session", "caller-other", "caller-original", "search-absent", "search-present",
+    "open-session", "create-item", "item-created", "get-secret", "secret-returned", "collections", "collection-locked", "collection-items",
+    "item-attributes", "item-locked", "original-identity-refused", "method-refused", "property-refused", "fixture-refused"};
+  uint64_t bit = UINT64_C(1) << stage;
+  if (!(fixture->diagnosed & bit)) {
+    fixture->diagnosed |= bit;
+    /* Closed test-only stage names, never method arguments, selectors,
+     * attributes, secrets, paths or remote error text. Diagnostic only. */
+    (void)fprintf(stderr, "finalizer-stage:%s\n", stages[stage]);
+  }
+}
 
 static bool announce(const char *event) {
   return fputs(event, stdout) != EOF && fflush(stdout) == 0;
 }
-static void installed_fail(struct installed_fixture *fixture) { fixture->failed = true; if (fixture->loop) g_main_loop_quit(fixture->loop); }
+static void installed_fail(struct installed_fixture *fixture) {
+  diagnose(fixture, FIXTURE_REFUSED); fixture->failed = true; if (fixture->loop) g_main_loop_quit(fixture->loop);
+}
 static bool original_supervisor(struct installed_fixture *fixture, const char *sender) {
   GError *error = NULL;
   GVariant *pid = g_dbus_connection_call_sync(fixture->bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
@@ -43,7 +63,8 @@ static bool original_supervisor(struct installed_fixture *fixture, const char *s
     G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000, NULL, &error);
   if (!pid) { g_clear_error(&error); return false; }
   guint32 actual_pid; g_variant_get(pid, "(u)", &actual_pid); g_variant_unref(pid);
-  if (actual_pid != (guint32)fixture->supervisor) return false;
+  if (actual_pid != (guint32)fixture->supervisor) { diagnose(fixture, CALLER_OTHER); return false; }
+  diagnose(fixture, CALLER_ORIGINAL);
   GVariant *uid = g_dbus_connection_call_sync(fixture->bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
     "org.freedesktop.DBus", "GetConnectionUnixUser", g_variant_new("(s)", sender), G_VARIANT_TYPE("(u)"),
     G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000, NULL, &error);
@@ -74,6 +95,7 @@ static bool original_supervisor(struct installed_fixture *fixture, const char *s
       selected.st_dev != current.st_dev || selected.st_ino != current.st_ino || selected.st_size != current.st_size) goto failed;
   return true;
 failed:
+  diagnose(fixture, ORIGINAL_IDENTITY_REFUSED);
   installed_fail(fixture); return false;
 }
 static void installed_method(GDBusConnection *bus, const gchar *sender, const gchar *object_path, const gchar *interface,
@@ -83,6 +105,7 @@ static void installed_method(GDBusConnection *bus, const gchar *sender, const gc
   if (!strcmp(interface, "org.freedesktop.Secret.Service") && !strcmp(method, "ReadAlias")) {
     const char *alias; g_variant_get(parameters, "(&s)", &alias);
     if (strcmp(alias, "default") && strcmp(alias, "session")) goto failed;
+    diagnose(fixture, !strcmp(alias, "default") ? ALIAS_DEFAULT : ALIAS_SESSION);
     if (!strcmp(alias, "default") && fixture->armed && !fixture->inspected && original_supervisor(fixture, sender)) {
       if (!fixture->secret.created || fixture->unanswered) goto failed;
       fixture->inspected = true; strcpy(fixture->sender, sender);
@@ -94,19 +117,35 @@ static void installed_method(GDBusConnection *bus, const gchar *sender, const gc
     g_dbus_method_invocation_return_value(invocation, g_variant_new("(o)", !strcmp(alias, "default")
       ? SECRET_COLLECTION : SECRET_ROOT "/collection/session")); return;
   }
+  if (!strcmp(interface, "org.freedesktop.Secret.Service") && !strcmp(method, "SearchItems"))
+    diagnose(fixture, fixture->secret.created ? SEARCH_PRESENT : SEARCH_ABSENT);
+  else if (!strcmp(interface, "org.freedesktop.Secret.Service") && !strcmp(method, "OpenSession")) diagnose(fixture, OPEN_SESSION);
+  else if (!strcmp(interface, "org.freedesktop.Secret.Collection") && !strcmp(method, "CreateItem")) diagnose(fixture, CREATE_ITEM);
+  else if (!strcmp(interface, "org.freedesktop.Secret.Item") && !strcmp(method, "GetSecret")) diagnose(fixture, GET_SECRET);
   if (!strcmp(interface, "org.freedesktop.Secret.Item") && !strcmp(method, "Delete") && fixture->secret.created) {
     fixture_secret_clear(&fixture->secret);
     g_dbus_method_invocation_return_value(invocation, g_variant_new("(o)", "/")); return;
   }
   (void)bus; (void)object_path;
-  if (fixture_secret_method(&fixture->secret, interface, method, parameters, invocation)) return;
+  if (fixture_secret_method(&fixture->secret, interface, method, parameters, invocation)) {
+    if (!strcmp(method, "CreateItem")) diagnose(fixture, ITEM_CREATED);
+    else if (!strcmp(method, "GetSecret")) diagnose(fixture, SECRET_RETURNED);
+    return;
+  }
 failed:
+  diagnose(fixture, METHOD_REFUSED);
   g_dbus_method_invocation_return_dbus_error(invocation, "org.cliq.Test.Refused", "fixture request refused"); installed_fail(fixture);
 }
 static GVariant *installed_property(GDBusConnection *bus, const gchar *sender, const gchar *object_path,
   const gchar *interface, const gchar *property, GError **error, gpointer data) {
   (void)bus; (void)sender; (void)object_path; struct installed_fixture *fixture = data;
+  if (!strcmp(interface, "org.freedesktop.Secret.Service") && !strcmp(property, "Collections")) diagnose(fixture, COLLECTIONS);
+  else if (!strcmp(interface, "org.freedesktop.Secret.Collection") && !strcmp(property, "Locked")) diagnose(fixture, COLLECTION_LOCKED);
+  else if (!strcmp(interface, "org.freedesktop.Secret.Collection") && !strcmp(property, "Items")) diagnose(fixture, COLLECTION_ITEMS);
+  else if (!strcmp(interface, "org.freedesktop.Secret.Item") && !strcmp(property, "Attributes")) diagnose(fixture, ITEM_ATTRIBUTES);
+  else if (!strcmp(interface, "org.freedesktop.Secret.Item") && !strcmp(property, "Locked")) diagnose(fixture, ITEM_LOCKED);
   GVariant *value = fixture_secret_property(&fixture->secret, interface, property); if (value) return value;
+  diagnose(fixture, PROPERTY_REFUSED);
   g_set_error_literal(error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY, "fixture property refused"); installed_fail(fixture); return NULL;
 }
 static void installed_name_changed(GDBusConnection *bus, const gchar *sender, const gchar *object_path, const gchar *interface,

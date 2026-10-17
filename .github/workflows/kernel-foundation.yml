@@ -173,7 +173,7 @@ jobs:
 
   linux-installed-shutdown:
     name: Linux installed SIGTERM during admission
-    # Independent ordinary instruction-capture cut. Keep the production
+    # Independent ordinary Run-instruction and Session-Trust cuts. Keep the production
     # two-second service policy and the original full-journey scan bounds.
     runs-on: ubuntu-22.04
     timeout-minutes: 20
@@ -197,12 +197,27 @@ jobs:
         run: |
           probe_node=$(realpath "$(command -v node)")
           sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-admission-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-admission"
+      - name: Stop the real Supervisor during positively observed Session Trust enumeration
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-shutdown-session-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-shutdown-session"
       - name: Retain bounded shutdown and unchanged-runner cleanup evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: installed-shutdown-admission-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cliq-installed-shutdown-admission/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Retain bounded Session shutdown and unchanged-runner cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-shutdown-session-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-shutdown-session/*.json
           if-no-files-found: warn
           retention-days: 7
 

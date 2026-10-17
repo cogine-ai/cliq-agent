@@ -38,7 +38,7 @@ const excludedVendorInstruction = 'Ordinary vendor instructions remain independe
 const model = 'installed-run-transport-fixture';
 const rejectedResponse = '{"error":{"message":"Owned fixture rejected this request."}}';
 type CampaignMode = '--campaign' | '--failure-campaign' | '--retry-campaign' | '--authority-failure-campaign' |
-  '--storage-failure-campaign' | '--shutdown-admission-campaign' | '--shutdown-preparation-campaign' |
+  '--storage-failure-campaign' | '--shutdown-admission-campaign' | '--shutdown-session-campaign' | '--shutdown-preparation-campaign' |
   '--shutdown-received-tool-campaign' | '--shutdown-pending-model-campaign';
 const requestTokenCeiling = { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const imageFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
@@ -165,6 +165,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   const authorityOnly = mode === '--authority-failure-campaign';
   const storageOnly = mode === '--storage-failure-campaign';
   const shutdownAdmissionOnly = mode === '--shutdown-admission-campaign';
+  const shutdownSessionOnly = mode === '--shutdown-session-campaign';
   const shutdownPreparationOnly = mode === '--shutdown-preparation-campaign';
   const shutdownReceivedToolOnly = mode === '--shutdown-received-tool-campaign';
   const shutdownPendingModelOnly = mode === '--shutdown-pending-model-campaign';
@@ -176,6 +177,8 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       ? 'independent signed installed Linux SIGTERM with one complete owned model POST awaiting a response, unchanged two-second service timeout, original socket join and fully charged UNKNOWN before durable worker fencing, then strict successor terminal cancellation; not an exact native mutex, provider or complete I1 qualification'
       : shutdownPreparationOnly
       ? 'independent signed installed Linux scheduler SIGTERM after actual original Supervisor writes to a queued Run generation, unchanged two-second service timeout, graceful owner join and exact successor cancellation/history; the ordinary observation-to-gate race is retained, not an exact preparing-only, controller, received-tool, provider or complete I1 qualification'
+      : shutdownSessionOnly
+      ? 'independent signed installed Linux Supervisor SIGTERM during an original pending session.create and positively observed native Trust-directory enumeration, unchanged two-second service timeout, graceful owner join and exact successor replay; not an exact private precommit-abort, Run, provider or complete I1 qualification'
       : shutdownAdmissionOnly
       ? 'independent signed installed Linux Supervisor SIGTERM during positively observed ordinary instruction capture for an in-flight public Run admission, unchanged two-second service timeout, graceful owner join and successor preservation of absence or a legitimately committed admission; not an exact precommit-abort, source-payload, worker-preparation, received-tool, provider or complete I1 qualification'
       : storageOnly
@@ -356,7 +359,9 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
               ['preparation', 'retirement', 'worker_join'].includes(value.stage as string) &&
               ['unregistered_controller_birth', 'unregistered_reservation_birth', 'materialization_join_pending',
                 'joined_generation_birth_mismatch', 'native_generation_retirement', 'quarantine_identity',
-                'worker_stop_channel_fenced', 'unclassified'].includes(value.reason as string)) {
+                'worker_stop_channel_fenced', 'preparation_materialization_join', 'preparation_controller_join',
+                'preparation_reservation_join', 'preparation_commit', 'preparation_logical_identity',
+                'preparation_run_changed', 'preparation_broker_owner', 'preparation_history', 'unclassified'].includes(value.reason as string)) {
             refusals.push({ code: 'diagnostic_only', origin: `${value.stage}.${value.reason}` }); continue;
           }
           if (value.scope !== 'installed-read-startup') continue;
@@ -389,8 +394,15 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
   // systemd may unload an inactive unreferenced unit and discard its exit
   // history. Hold both actual unit objects on one real user-bus connection
   // until the original stop/show assertions finish; never change the units.
-  const withRetainedUnitHistory = async (units: string[], body: () => Promise<void>): Promise<void> => {
+  const withRetainedUnitHistory = async (units: string[], body: (assertRetained: () => void) => Promise<void>): Promise<void> => {
     assert.equal(units.length, 2);
+    const observers: Record<string, unknown>[] = report.unitExitHistoryObservers ??= [];
+    assert(observers.length < 8, 'unit-history observations exceed their fixed diagnostic bound');
+    const diagnostic: Record<string, unknown> = { diagnosticOnly: true, ordinal: observers.length + 1,
+      phaseWhenStarted: report.phase, fixedInputDeadlineMs: 10000, retainedFrameObserved: false,
+      exitObservedBeforeRelease: false, releaseInputRefused: false, processAndPipesJoined: false, qualified: false };
+    observers.push(diagnostic);
+    report.unitExitHistoryObserverJoined = false;
     const outScan = scanner.openStream();
     let errorScan: ReturnType<typeof scanner.openStream>;
     try { errorScan = scanner.openStream(); } catch (error) { outScan.close(); throw error; }
@@ -400,7 +412,7 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         { env: environment, cwd: ledger.home, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (error) { outScan.close(); errorScan.close(); throw error; }
     const retained = 'systemd_units_retained\n', released = `${retained}systemd_units_released\n`;
-    let output = '', bytes = 0, errorBytes = 0, observationError: unknown, releasing = false;
+    let output = '', bytes = 0, errorBytes = 0, errorText = '', observationError: unknown, releasing = false;
     let readyResolve!: () => void, readyReject!: (error: unknown) => void;
     const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
     const refuse = (error: unknown) => { observationError ??= error; readyReject(error); };
@@ -410,11 +422,17 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         output += chunk.toString('utf8');
         assert(released.startsWith(output), 'unit-history observer emitted an invalid fixed frame');
         assert(releasing || output.length <= retained.length, 'unit-history observer released before exit observation');
-        if (output === retained) readyResolve();
+        if (output === retained) { diagnostic.retainedFrameObserved = true; readyResolve(); }
       } catch (error) { refuse(error); }
     });
     child.stderr.on('data', (chunk: Buffer) => {
-      try { errorScan.scan(chunk); errorBytes += chunk.length; assert(errorBytes <= 1024, 'unit-history observer errors exceeded their bound'); }
+      try {
+        errorScan.scan(chunk); errorBytes += chunk.length; assert(errorBytes <= 1024, 'unit-history observer errors exceeded their bound');
+        // Retain only this fixed source-owned classification, never stderr.
+        errorText += chunk.toString('utf8');
+        if (errorText.includes('secret-service-probe: phase=observer-systemd-release-input errorDomain='))
+          diagnostic.releaseInputRefused = true;
+      }
       catch (error) { refuse(error); }
     });
     child.stdin.on('error', refuse); child.stdout.on('error', refuse); child.stderr.on('error', refuse);
@@ -422,6 +440,10 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
       child.once('error', refuse);
       child.once('close', (code, signal) => {
         outScan.close(); errorScan.close();
+        diagnostic.exitCode = code;
+        diagnostic.signal = signal === null || signal === 'SIGTERM' || signal === 'SIGKILL' ? signal : 'other';
+        diagnostic.exitObservedBeforeRelease = !releasing;
+        diagnostic.processAndPipesJoined = true;
         if (!releasing) refuse(new Error('unit-history observer exited before release'));
         resolve({ code, signal });
       });
@@ -430,7 +452,11 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     try {
       await bounded(Promise.race([ready, closed.then(() => { throw new Error('unit-history observer closed before readiness'); })]),
         10000, 'unit-history observer did not retain the actual units');
-      await body();
+      await body(() => {
+        assert.equal(observationError, undefined, 'original unit-history observer must remain healthy before stop');
+        assert.equal(child.exitCode, null); assert.equal(child.signalCode, null);
+        assert.equal(output, retained); assert.equal(errorBytes, 0);
+      });
     } catch (error) { failures.push(error); }
     finally {
       releasing = true;
@@ -439,8 +465,10 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
         const exit = await bounded(closed, 10000, 'unit-history observer did not release and join');
         assert.equal(exit.signal, null); assert.equal(exit.code, 0); assert.equal(observationError, undefined);
         assert.equal(output, released); assert.equal(errorBytes, 0);
-        report.unitExitHistoryObserverJoined = true;
+        diagnostic.qualified = true;
       } catch (error) { failures.push(error); }
+      report.unitExitHistoryObserverJoined = observers.every(observation => observation.qualified === true);
+      errorText = '';
     }
     if (failures.length) throw new AggregateError(failures, 'actual unit exit history was not retained and joined');
   };
@@ -1003,117 +1031,141 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         }
         report.lastPublicCut = projectInstalledRunProgress(cut, { requestsReceived, providerFailure }); return cut;
       };
-      await withRetainedUnitHistory([services.supervisorUnit, services.keeperUnit], async () => {
-        mark('public_effect_run_submit'); submitReply = await shutdownClient!.send(submit, 30000);
-        admitted = accepted(submitReply, 'run.submit').snapshot.run;
-        assert.equal(admitted.status, 'queued'); assert.equal(admitted.revision, 1);
-        report.acceptedRun = { id: admitted.id, sessionId: admitted.sessionId, specRef: admitted.specRef, initialCheckpointId: admitted.latestCheckpointId };
-        if (shutdownReceivedToolOnly) {
-          mark('original_received_tool_snapshot_progress');
-          let target: Record<string, any> | undefined, selectedClaim: Record<string, any> | undefined, selectedLaunchId: string | undefined;
-          type SnapshotRead = { descriptor: string; device: bigint; inode: bigint; position: bigint };
-          const snapshotRead = async (same?: SnapshotRead): Promise<SnapshotRead | undefined> => {
-            assert(target); await assertOriginalSupervisor();
-            const directory = path.join(recipe.stateRoot, 'runs', admitted.id, 'generations', target.generationId);
-            const names = await readdir(`/proc/${originalPid}/fd`); assert(names.length <= 4096);
-            for (const descriptor of names) {
-              assert.match(descriptor, /^(?:0|[1-9][0-9]*)$/u); if (same && descriptor !== same.descriptor) continue;
-              try {
-                const fd = `/proc/${originalPid}/fd/${descriptor}`, filename = path.join(directory, 'payload.txt');
-                if (await readlink(fd) !== filename) continue;
-                const info = await readFile(`/proc/${originalPid}/fdinfo/${descriptor}`, 'utf8'); assert(info.length <= 65536);
-                const flags = info.match(/^flags:\s+([0-7]+)$/mu), position = info.match(/^pos:\s+([0-9]+)$/mu); assert(flags && position);
-                const access = Number.parseInt(flags[1]!, 8), progress = BigInt(position[1]!);
-                if ((access & 3) !== constants.O_RDONLY || !(access & constants.O_NONBLOCK) || progress <= 0n || progress >= BigInt(fileBytes)) continue;
-                for (const parent of [path.join(recipe.stateRoot, 'runs'), path.join(recipe.stateRoot, 'runs', admitted.id),
-                  path.dirname(directory), directory]) {
-                  const actual = await lstat(parent, { bigint: true });
-                  assert(actual.isDirectory() && !actual.isSymbolicLink() && actual.uid === BigInt(ledger.uid) && (actual.mode & 0o7777n) === 0o700n);
-                }
-                const parent = await lstat(directory, { bigint: true }), named = await lstat(filename, { bigint: true }), actual = await stat(fd, { bigint: true });
-                assert.equal(parent.dev.toString(), target.locator.deviceId); assert.equal(parent.ino.toString(), target.locator.directoryFileId);
-                assert(actual.isFile() && named.isFile() && !named.isSymbolicLink() && actual.uid === BigInt(ledger.uid) &&
-                  actual.nlink === 1n && actual.size === BigInt(fileBytes) && (actual.mode & 0o7777n) === 0o644n);
-                for (const field of imageFields) assert.equal(actual[field], named[field]);
-                assert.equal(actual.dev, parent.dev);
-                if (same) { assert.equal(actual.dev, same.device); assert.equal(actual.ino, same.inode); assert(progress >= same.position); }
-                if (await readlink(fd) !== filename) continue;
-                await assertOriginalSupervisor(); return { descriptor, device: actual.dev, inode: actual.ino, position: progress };
-              } catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
-            }
-            return undefined;
-          };
-          const toolCut = (cut: Record<string, any>) => {
-            const completed = cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'completed');
-            if (completed) { effect.observedCutLost = true; assert.fail('the original received-tool cut completed before positive shutdown observation'); }
-            assert.equal(cut.snapshot.run.status, 'running'); assert(cut.snapshot.run.activeWorkerLaunchId);
-            assert.equal(cut.snapshot.run.activeWorkerLaunchId, selectedLaunchId); assert.equal(cut.snapshot.run.leaseEpoch, selectedClaim!.leaseEpoch);
-            assert.equal(cut.snapshot.run.specRef, admitted.specRef);
-            assert.equal(cut.snapshot.run.cancelRequested, false); assert.equal(cut.snapshot.run.stopIntentRef, undefined);
-            assert.deepEqual(cut.journal.map((entry: any) => [entry.opKind, entry.phase, entry.attempt]),
-              [['model', 'prepared', 0], ['model', 'dispatch_claimed', 0], ['model', 'completed', 0], ['tool', 'prepared', 0], ['tool', 'dispatch_claimed', 0]]);
-            assert.equal(canonicalSha256(cut.journal[4]), canonicalSha256(selectedClaim));
-          };
-          const observeBy = Date.now() + 30000;
-          let observed: SnapshotRead | undefined;
-          while (!observed) {
-            assert(Date.now() < observeBy, 'the real original received-tool snapshot was not positively observed');
-            const cut = await publicRead();
-            if (cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'completed')) {
-              effect.observedCutLost = true; assert.fail('the received-tool snapshot finished before its shutdown cut was observed');
-            }
-            const claims = cut.journal.filter((entry: any) => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed');
-            if (!claims.length) { assert(!providerFailure); await delay(1); continue; }
-            assert.equal(claims.length, 1);
-            if (!selectedClaim) {
-              selectedClaim = claims[0];
-              const launch = parseJsonStrict((await readCas(selectedClaim!.sandboxLaunchSpecRef)).toString('utf8')) as Record<string, any>;
-              assert.equal(launch.owner.runId, admitted.id); assert.equal(launch.owner.workerLaunchId, cut.snapshot.run.activeWorkerLaunchId);
-              selectedLaunchId = launch.owner.workerLaunchId; originalGenerationRef = launch.filesystem.generationRef;
-              assert.equal(launch.owner.opId, selectedClaim!.opId); assert.equal(launch.owner.dispatchId, selectedClaim!.dispatchId);
-              target = parseJsonStrict((await readCas(launch.filesystem.generationRef)).toString('utf8')) as Record<string, any>;
-              assert.equal(target.format, 'cliq-workspace-generation-identity-v1'); assert.equal(target.identityDigest, digestOmitting(target, 'identityDigest'));
-              assert.equal(target.runId, admitted.id); assert.equal(target.locator.kind, 'linux_directory');
-              assert.match(target.generationId, /^[A-Za-z0-9_-]{43}$/u);
-              assert.equal(target.locator.canonicalRootRelativePath, `runs/${admitted.id}/generations/${target.generationId}`);
-            }
-            toolCut(cut); const before = await snapshotRead(); if (!before) continue;
-            toolCut(await publicRead()); const bracketed = await snapshotRead(before); if (!bracketed) continue;
-            assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
-            observed = await snapshotRead(bracketed); beforeStop = cut;
+      mark('public_effect_run_submit'); submitReply = await shutdownClient!.send(submit, 30000);
+      admitted = accepted(submitReply, 'run.submit').snapshot.run;
+      assert.equal(admitted.status, 'queued'); assert.equal(admitted.revision, 1);
+      report.acceptedRun = { id: admitted.id, sessionId: admitted.sessionId, specRef: admitted.specRef, initialCheckpointId: admitted.latestCheckpointId };
+      let recheckOriginalEffect!: () => Promise<void>;
+      if (shutdownReceivedToolOnly) {
+        mark('original_received_tool_snapshot_progress');
+        let target: Record<string, any> | undefined, selectedClaim: Record<string, any> | undefined, selectedLaunchId: string | undefined;
+        type SnapshotRead = { descriptor: string; device: bigint; inode: bigint; position: bigint };
+        const snapshotRead = async (same?: SnapshotRead): Promise<SnapshotRead | undefined> => {
+          assert(target); await assertOriginalSupervisor();
+          const directory = path.join(recipe.stateRoot, 'runs', admitted.id, 'generations', target.generationId);
+          const names = await readdir(`/proc/${originalPid}/fd`); assert(names.length <= 4096);
+          for (const descriptor of names) {
+            assert.match(descriptor, /^(?:0|[1-9][0-9]*)$/u); if (same && descriptor !== same.descriptor) continue;
+            try {
+              const fd = `/proc/${originalPid}/fd/${descriptor}`, filename = path.join(directory, 'payload.txt');
+              if (await readlink(fd) !== filename) continue;
+              const info = await readFile(`/proc/${originalPid}/fdinfo/${descriptor}`, 'utf8'); assert(info.length <= 65536);
+              const flags = info.match(/^flags:\s+([0-7]+)$/mu), position = info.match(/^pos:\s+([0-9]+)$/mu); assert(flags && position);
+              const access = Number.parseInt(flags[1]!, 8), progress = BigInt(position[1]!);
+              if ((access & 3) !== constants.O_RDONLY || !(access & constants.O_NONBLOCK) || progress <= 0n || progress >= BigInt(fileBytes)) continue;
+              for (const parent of [path.join(recipe.stateRoot, 'runs'), path.join(recipe.stateRoot, 'runs', admitted.id),
+                path.dirname(directory), directory]) {
+                const actual = await lstat(parent, { bigint: true });
+                assert(actual.isDirectory() && !actual.isSymbolicLink() && actual.uid === BigInt(ledger.uid) && (actual.mode & 0o7777n) === 0o700n);
+              }
+              const parent = await lstat(directory, { bigint: true }), named = await lstat(filename, { bigint: true }), actual = await stat(fd, { bigint: true });
+              assert.equal(parent.dev.toString(), target.locator.deviceId); assert.equal(parent.ino.toString(), target.locator.directoryFileId);
+              assert(actual.isFile() && named.isFile() && !named.isSymbolicLink() && actual.uid === BigInt(ledger.uid) &&
+                actual.nlink === 1n && actual.size === BigInt(fileBytes) && (actual.mode & 0o7777n) === 0o644n);
+              for (const field of imageFields) assert.equal(actual[field], named[field]);
+              assert.equal(actual.dev, parent.dev);
+              if (same) { assert.equal(actual.dev, same.device); assert.equal(actual.ino, same.inode); assert(progress >= same.position); }
+              if (await readlink(fd) !== filename) continue;
+              await assertOriginalSupervisor(); return { descriptor, device: actual.dev, inode: actual.ino, position: progress };
+            } catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
           }
-          effect.originalSnapshotProgress = { qualified: true, sameOriginalSupervisor: true, publicToolClaimBracketed: true,
-            workerLaunchId: selectedLaunchId, generationId: target!.generationId, generationRef: originalGenerationRef,
-            generationIdentityDigest: target!.identityDigest,
-            generationDeviceId: target!.locator.deviceId,
-            generationDirectoryFileId: target!.locator.directoryFileId, position: observed.position.toString(), byteCount: fileBytes };
-        } else {
-          mark('original_whole_post_awaiting_response');
-          await bounded(storagePostEntered, 15000, 'the actual complete pending POST was not received');
-          assert(storagePost); storagePost.assertPending(); beforeStop = await publicRead();
-          assert.deepEqual(beforeStop.journal.map((entry: any) => [entry.opKind, entry.phase, entry.attempt]),
-            [['model', 'prepared', 0], ['model', 'dispatch_claimed', 0]]);
-          assert.equal(beforeStop.snapshot.run.status, 'running'); assert(beforeStop.snapshot.run.activeWorkerLaunchId);
-          assert.equal(beforeStop.snapshot.run.cancelRequested, false); assert.equal(beforeStop.snapshot.run.stopIntentRef, undefined);
-          assert.equal(beforeStop.snapshot.run.specRef, admitted.specRef);
-          assert.equal(beforeStop.journal[1].supervisorInstanceId, originalOwner.supervisorInstanceId);
-          assert.equal(beforeStop.journal[1].stateOwnerEpoch, originalOwner.ownerEpoch);
+          return undefined;
+        };
+        const toolCut = (cut: Record<string, any>) => {
+          const completed = cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'completed');
+          if (completed) { effect.observedCutLost = true; assert.fail('the original received-tool cut completed before positive shutdown observation'); }
+          assert.equal(cut.snapshot.run.status, 'running'); assert(cut.snapshot.run.activeWorkerLaunchId);
+          assert.equal(cut.snapshot.run.activeWorkerLaunchId, selectedLaunchId); assert.equal(cut.snapshot.run.leaseEpoch, selectedClaim!.leaseEpoch);
+          assert.equal(cut.snapshot.run.specRef, admitted.specRef);
+          assert.equal(cut.snapshot.run.cancelRequested, false); assert.equal(cut.snapshot.run.stopIntentRef, undefined);
+          assert.deepEqual(cut.journal.map((entry: any) => [entry.opKind, entry.phase, entry.attempt]),
+            [['model', 'prepared', 0], ['model', 'dispatch_claimed', 0], ['model', 'completed', 0], ['tool', 'prepared', 0], ['tool', 'dispatch_claimed', 0]]);
+          assert.equal(canonicalSha256(cut.journal[4]), canonicalSha256(selectedClaim));
+        };
+        const observeBy = Date.now() + 30000;
+        let observed: SnapshotRead | undefined;
+        while (!observed) {
+          assert(Date.now() < observeBy, 'the real original received-tool snapshot was not positively observed');
+          const cut = await publicRead();
+          if (cut.journal.some((entry: any) => entry.opKind === 'tool' && entry.phase === 'completed')) {
+            effect.observedCutLost = true; assert.fail('the received-tool snapshot finished before its shutdown cut was observed');
+          }
+          const claims = cut.journal.filter((entry: any) => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed');
+          if (!claims.length) { assert(!providerFailure); await delay(1); continue; }
+          assert.equal(claims.length, 1);
+          if (!selectedClaim) {
+            selectedClaim = claims[0];
+            const launch = parseJsonStrict((await readCas(selectedClaim!.sandboxLaunchSpecRef)).toString('utf8')) as Record<string, any>;
+            assert.equal(launch.owner.runId, admitted.id); assert.equal(launch.owner.workerLaunchId, cut.snapshot.run.activeWorkerLaunchId);
+            selectedLaunchId = launch.owner.workerLaunchId; originalGenerationRef = launch.filesystem.generationRef;
+            assert.equal(launch.owner.opId, selectedClaim!.opId); assert.equal(launch.owner.dispatchId, selectedClaim!.dispatchId);
+            target = parseJsonStrict((await readCas(launch.filesystem.generationRef)).toString('utf8')) as Record<string, any>;
+            assert.equal(target.format, 'cliq-workspace-generation-identity-v1'); assert.equal(target.identityDigest, digestOmitting(target, 'identityDigest'));
+            assert.equal(target.runId, admitted.id); assert.equal(target.locator.kind, 'linux_directory');
+            assert.match(target.generationId, /^[A-Za-z0-9_-]{43}$/u);
+            assert.equal(target.locator.canonicalRootRelativePath, `runs/${admitted.id}/generations/${target.generationId}`);
+          }
+          toolCut(cut); const before = await snapshotRead(); if (!before) continue;
+          toolCut(await publicRead()); const bracketed = await snapshotRead(before); if (!bracketed) continue;
           assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
-          await assertOriginalSupervisor(); storagePost.assertPending(); effect.completeOriginalPostPending = true;
+          observed = await snapshotRead(bracketed); beforeStop = cut;
         }
+        effect.originalSnapshotProgress = { qualified: true, sameOriginalSupervisor: true, publicToolClaimBracketed: true,
+          workerLaunchId: selectedLaunchId, generationId: target!.generationId, generationRef: originalGenerationRef,
+          generationIdentityDigest: target!.identityDigest,
+          generationDeviceId: target!.locator.deviceId,
+          generationDirectoryFileId: target!.locator.directoryFileId, position: observed.position.toString(), byteCount: fileBytes };
+        const originalSnapshot = observed;
+        recheckOriginalEffect = async () => {
+          toolCut(await publicRead());
+          const current = await snapshotRead(originalSnapshot);
+          if (!current) effect.observedCutLost = true;
+          assert(current, 'the same original snapshot descriptor must remain in progress after unit retention and immediately before SIGTERM');
+          assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
+          effect.originalSnapshotProgress.postRetainSameDescriptorMatched = true;
+          effect.originalSnapshotProgress.postRetainPosition = current.position.toString();
+        };
+      } else {
+        mark('original_whole_post_awaiting_response');
+        await bounded(storagePostEntered, 15000, 'the actual complete pending POST was not received');
+        assert(storagePost); storagePost.assertPending(); beforeStop = await publicRead();
+        assert.deepEqual(beforeStop.journal.map((entry: any) => [entry.opKind, entry.phase, entry.attempt]),
+          [['model', 'prepared', 0], ['model', 'dispatch_claimed', 0]]);
+        assert.equal(beforeStop.snapshot.run.status, 'running'); assert(beforeStop.snapshot.run.activeWorkerLaunchId);
+        assert.equal(beforeStop.snapshot.run.cancelRequested, false); assert.equal(beforeStop.snapshot.run.stopIntentRef, undefined);
+        assert.equal(beforeStop.snapshot.run.specRef, admitted.specRef);
+        assert.equal(beforeStop.journal[1].supervisorInstanceId, originalOwner.supervisorInstanceId);
+        assert.equal(beforeStop.journal[1].stateOwnerEpoch, originalOwner.ownerEpoch);
+        assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
+        await assertOriginalSupervisor(); storagePost.assertPending(); effect.completeOriginalPostPending = true;
+        recheckOriginalEffect = async () => {
+          const current = await publicRead();
+          assert.deepEqual(current.journal, beforeStop.journal);
+          for (const field of ['status', 'activeWorkerLaunchId', 'leaseEpoch', 'specRef', 'cancelRequested', 'stopIntentRef'])
+            assert.equal(current.snapshot.run[field], beforeStop.snapshot.run[field]);
+          await assertOriginalSupervisor(); storagePost!.assertPending();
+          assert.equal(requestsReceived, 1); assert.equal(acceptedTcpConnections, 1); assert.equal(acceptedTlsConnections, 1); assert(!providerFailure);
+          effect.originalPendingPostRecheckedAfterUnitRetention = true;
+        };
+      }
+      // RefUnit's original ten-second input budget is for observing one stop,
+      // not source capture/materialization/model latency. Retain only after a
+      // real cut exists, then recheck that SAME producer; a lost cut is failure.
+      await withRetainedUnitHistory([services.supervisorUnit, services.keeperUnit], async assertRetained => {
+        await recheckOriginalEffect(); assertRetained();
         mark('ordinary_sigterm_with_original_effect_producer');
         const stopped = command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]), exit = show(services.supervisorUnit);
         effect.serviceExit = projectInstalledServiceExit(exit);
         if (exit.Result !== 'success' || exit.ExecMainStatus !== '0') effect.shutdownRefusal = observeShutdownRefusal(services.supervisorUnit, exit.ExecMainPID);
         assert.equal(stopped.status, 0); assert.equal(exit.ActiveState, 'inactive'); assert.equal(exit.MainPID, '0');
         assert.equal(exit.Result, 'success'); assert.equal(exit.ExecMainCode, '1'); assert.equal(exit.ExecMainStatus, '0');
-        if (shutdownPendingModelOnly) {
-          await bounded(storagePost!.closed, 5000, 'the original native model socket did not join before harness cleanup');
-          effect.originalSocketJoinedWithoutTestDestroy = true;
-        }
-        await shutdownClient!.close(); shutdownClient = undefined;
-        await assert.rejects(lstat(`/proc/${originalPid}`), { code: 'ENOENT' });
       });
+      if (shutdownPendingModelOnly) {
+        await bounded(storagePost!.closed, 5000, 'the original native model socket did not join before harness cleanup');
+        effect.originalSocketJoinedWithoutTestDestroy = true;
+      }
+      await shutdownClient!.close(); shutdownClient = undefined;
+      await assert.rejects(lstat(`/proc/${originalPid}`), { code: 'ENOENT' });
       const releasedOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
       assert.equal(releasedOwners.length, 1); const releasedOwner = releasedOwners[0]!; assert.equal(releasedOwner.state, 'terminal');
       if (releasedOwner.state !== 'terminal') throw new Error('effect shutdown did not release its original StateOwner');
@@ -1631,19 +1683,23 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         originalSessionCreateResponsePreserved: true, successorCancellationTerminal: true, sessionPublishedOnce: true,
         noDuplicateProductiveClaim: true, cancelRevisionConflicts: revisionConflicts,
         immutableTerminalPublicCutPreserved: true, sourceUnchanged: true, fullI1Qualified: false };
-    } else if (shutdownAdmissionOnly) {
-      mark('owned_instruction_inventory_before_shutdown_admission');
-      const inventory = path.join(recipe.workspace, 'shutdown-instructions'), instruction = path.join(inventory, 'AGENTS.md');
-      await mkdir(inventory, { mode: 0o700 }); await chown(inventory, ledger.uid, ledger.gid);
-      const instructionBytes = Buffer.from('Ordinary shutdown qualification guidance.\n');
-      await writeFile(instruction, instructionBytes, { flag: 'wx', mode: 0o644 }); await chown(instruction, ledger.uid, ledger.gid);
+    } else if (shutdownAdmissionOnly || shutdownSessionOnly) {
+      mark(shutdownSessionOnly ? 'owned_trust_inventory_before_shutdown_session' : 'owned_instruction_inventory_before_shutdown_admission');
+      const inventory = shutdownSessionOnly ? path.dirname(trustDirectory) : path.join(recipe.workspace, 'shutdown-instructions');
+      const instruction = shutdownSessionOnly ? trustPath : path.join(inventory, 'AGENTS.md');
+      const instructionBytes = shutdownSessionOnly ? await readFile(trustPath) : Buffer.from('Ordinary shutdown qualification guidance.\n');
+      if (!shutdownSessionOnly) {
+        await mkdir(inventory, { mode: 0o700 }); await chown(inventory, ledger.uid, ledger.gid);
+        await writeFile(instruction, instructionBytes, { flag: 'wx', mode: 0o644 }); await chown(instruction, ledger.uid, ledger.gid);
+      }
       const seeds = [path.join(inventory, 'ordinary-a.txt'), path.join(inventory, 'ordinary-b.txt')];
       for (const seed of seeds) {
         await writeFile(seed, 'ordinary excluded metadata\n', { flag: 'wx', mode: 0o644 }); await chown(seed, ledger.uid, ledger.gid);
       }
       // Ordinary metadata only: never a blocked special file, linked AGENTS,
-      // invalid scan bound or a production pause. The source prunes this one
-      // subtree; independent instruction capture must still enumerate it.
+      // invalid scan bound or a production pause. Session Trust enumerates
+      // its actual controlled-home directory; Run source prunes the ordinary
+      // subtree, but independent instruction capture must still enumerate it.
       const metadataEntries = 80_000;
       for (let offset = 0; offset < metadataEntries; offset += 64) {
         await Promise.all(Array.from({ length: Math.min(64, metadataEntries - offset) }, (_, index) => {
@@ -1654,6 +1710,9 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const instructionBefore = await lstat(instruction, { bigint: true });
       assert(instructionBefore.isFile() && instructionBefore.nlink === 1n && instructionBefore.uid === BigInt(ledger.uid));
       assert.equal(instructionBefore.size, BigInt(instructionBytes.length));
+      const inventoryBefore = await lstat(inventory, { bigint: true });
+      assert(inventoryBefore.isDirectory() && !inventoryBefore.isSymbolicLink() && inventoryBefore.uid === BigInt(ledger.uid));
+      assert.equal(inventoryBefore.mode & 0o7777n, 0o700n);
       const originalPid = Number(supervisorBefore.MainPID), originalStart = await fixtureProcess(originalPid, ledger.uid);
       const selectedImage = path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor');
       const signedImage = await lstat(selectedImage, { bigint: true });
@@ -1663,25 +1722,40 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         const actual = await stat(`/proc/${originalPid}/exe`, { bigint: true });
         for (const key of imageFields) assert.equal(actual[key], signedImage[key]);
       };
-      const heldInstruction = async (only?: string) => {
+      type AdmissionResource = { descriptor: string; position?: string };
+      const resourcePath = shutdownSessionOnly ? inventory : instruction;
+      const resourceBefore = shutdownSessionOnly ? inventoryBefore : instructionBefore;
+      const heldAdmissionResource = async (only?: AdmissionResource): Promise<AdmissionResource | undefined> => {
         await assertOriginalSupervisor();
-        const descriptors = only ? [only] : await readdir(`/proc/${originalPid}/fd`);
+        const descriptors = only ? [only.descriptor] : await readdir(`/proc/${originalPid}/fd`);
         assert(descriptors.length <= 4096, 'actual Supervisor descriptor inventory exceeded its fixed observation bound');
         for (const descriptor of descriptors) {
           assert.match(descriptor, /^(?:0|[1-9][0-9]*)$/u);
           try {
             const fd = `/proc/${originalPid}/fd/${descriptor}`;
-            if (await readlink(fd) !== instruction) continue;
+            if (await readlink(fd) !== resourcePath) continue;
             const actual = await stat(fd, { bigint: true });
-            for (const key of imageFields) assert.equal(actual[key], instructionBefore[key]);
-            await assertOriginalSupervisor(); return descriptor;
+            for (const key of imageFields) assert.equal(actual[key], resourceBefore[key]);
+            let position: string | undefined;
+            if (shutdownSessionOnly) {
+              const info = await readFile(`/proc/${originalPid}/fdinfo/${descriptor}`, 'utf8'); assert(info.length <= 65536);
+              const flags = info.match(/^flags:\s+([0-7]+)$/mu), observed = info.match(/^pos:\s+([0-9]+)$/mu); assert(flags && observed);
+              const access = Number.parseInt(flags[1]!, 8);
+              if ((access & 3) !== constants.O_RDONLY || !(access & constants.O_DIRECTORY)) continue;
+              position = observed[1]!; assert.match(position, /^(?:0|[1-9][0-9]{0,19})$/u);
+            }
+            if (await readlink(fd) !== resourcePath) continue;
+            await assertOriginalSupervisor(); return { descriptor, ...(position === undefined ? {} : { position }) };
           } catch (error) {
             if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
           }
         }
         await assertOriginalSupervisor(); return undefined;
       };
-      const admission = request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000130',
+      const admission: Record<string, any> = shutdownSessionOnly
+        ? request({ protocolVersion: 1, method: 'session.create', requestId: '019a0012-0000-7000-8000-000000000136',
+          admissionKey: randomBytes(32).toString('base64url'), workspacePath: recipe.workspace, name: 'Original Session Trust shutdown' })
+        : request({ protocolVersion: 1, method: 'run.submit', requestId: '019a0012-0000-7000-8000-000000000130',
         admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
         workspacePath: recipe.workspace, objective: 'Qualify ordinary instruction capture shutdown without executing a model or tool.',
         model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
@@ -1691,10 +1765,14 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [],
         sourceExcludes: [{ path: 'shutdown-instructions', scope: 'subtree' }],
         registeredMcpServerIds: [], skillIds: [], allowUnverified: true });
-      const runId = identityHash('cliq-run-id-v1', principal, 'run.submit', admission.admissionKey);
-      const absent = { protocolVersion: 1, ok: false, method: 'run.get', error: { schemaVersion: 1,
+      const admittedId = identityHash(shutdownSessionOnly ? 'cliq-session-id-v1' : 'cliq-run-id-v1', principal,
+        admission.method, admission.admissionKey);
+      const readAdmission = shutdownSessionOnly ? { protocolVersion: 1, method: 'session.get', sessionId: admittedId }
+        : { protocolVersion: 1, method: 'run.get', runId: admittedId };
+      const absent = { protocolVersion: 1, ok: false, method: readAdmission.method, error: { schemaVersion: 1,
         code: 'NOT_FOUND', retryable: false, messageCode: 'control.read_rejected' } };
-      assert.equal(canonicalSha256(exchange([{ protocolVersion: 1, method: 'run.get', runId }])[0]), canonicalSha256(absent));
+      const assertAbsent = () => assert.equal(canonicalSha256(exchange([readAdmission])[0]), canonicalSha256(absent));
+      assertAbsent();
       const originalStatus = accepted(exchange([{ protocolVersion: 1, method: 'supervisor.status' }])[0]!, 'supervisor.status');
       assert.equal(originalStatus.health, 'ready');
       const originalOwners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
@@ -1706,22 +1784,36 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       const pendingAdmission = shutdownClient.send(admission, 120000).then(response => {
         requestFinished = true; return { kind: 'response' as const, response };
       }, () => { requestFinished = true; return { kind: 'disconnected' as const }; });
-      mark('actual_instruction_descriptor_owned_by_original_pending_admission');
+      mark(shutdownSessionOnly ? 'actual_trust_cursor_progress_owned_by_original_pending_session'
+        : 'actual_instruction_descriptor_owned_by_original_pending_admission');
       const observeBy = Date.now() + 30000;
-      let descriptor: string | undefined;
-      while (!descriptor) {
-        assert(!requestFinished, 'instruction phase was not positively observed before the admission completed');
-        assert(Date.now() < observeBy, 'actual original instruction descriptor was not observed');
-        descriptor = await heldInstruction();
-        if (!descriptor) await delay(1);
+      let resource: AdmissionResource | undefined, firstCursor: AdmissionResource | undefined;
+      while (!resource) {
+        assert(!requestFinished, 'the actual producer must remain pending until its original resource is positively observed');
+        assert(Date.now() < observeBy, 'the actual original admission resource/progress was not positively observed');
+        const current = await heldAdmissionResource(firstCursor);
+        if (!current) { firstCursor = undefined; await delay(1); continue; }
+        if (shutdownSessionOnly) {
+          // source-walk.c uses fdopendir/readdir on this distinct open file
+          // description. Its fdinfo position is an opaque getdents cookie,
+          // not a file byte offset, percentage or count of validated entries.
+          // A changed cookie on the same held directory proves enumeration
+          // advanced; merely seeing a pinned directory would prove no work.
+          if (!firstCursor) { firstCursor = current; assertAbsent(); continue; }
+          if (current.position === firstCursor.position) { await delay(1); continue; }
+        }
+        resource = current;
       }
-      assert.equal(canonicalSha256(exchange([{ protocolVersion: 1, method: 'run.get', runId }])[0]), canonicalSha256(absent));
-      assert.equal(await heldInstruction(descriptor), descriptor, 'the exact original instruction owner must remain in flight at the signal cut');
+      assertAbsent();
+      assert(await heldAdmissionResource(resource), 'the exact original resource must remain held at the signal cut');
       assert.equal(requestFinished, false); assert.equal(requestsReceived, 0); assert(!providerFailure);
       report.shutdownAdmission = { qualified: false, diagnosticOnly: true,
-        originalPendingPublicRequest: true, originalInstructionDescriptorMatched: true,
-        originalSupervisorProcessMatched: true, metadataEntries, instructionDocuments: 1, instructionBytes: instructionBytes.length,
-        sourceSubtreeExcluded: true, inFlightSourcePayloadQualified: false, workerPreparationQualified: false,
+        publicMethod: admission.method, originalPendingPublicRequest: true,
+        ...(shutdownSessionOnly ? { originalTrustDirectoryMatched: true, originalNativeEnumerationAdvanced: true,
+          trustDirectoryDeviceId: inventoryBefore.dev.toString(), trustDirectoryFileId: inventoryBefore.ino.toString(),
+          firstDirectoryCookie: firstCursor!.position, laterDirectoryCookie: resource.position, directoryCookiesAreEntryCounts: false }
+          : { originalInstructionDescriptorMatched: true, instructionDocuments: 1, instructionBytes: instructionBytes.length, sourceSubtreeExcluded: true }),
+        originalSupervisorProcessMatched: true, metadataEntries, inFlightSourcePayloadQualified: false, workerPreparationQualified: false,
         receivedToolQualified: false, immutableResultOrClaimQualified: false };
       const contract = command('/usr/bin/systemctl', ['--user', 'show', services.supervisorUnit,
         '--property=TimeoutStopUSec,KillSignal,FinalKillSignal,SendSIGKILL', '--no-pager']);
@@ -1730,10 +1822,10 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       assert.equal(stopPolicy.TimeoutStopUSec, '2s'); assert.equal(stopPolicy.KillSignal, '15');
       assert.equal(stopPolicy.FinalKillSignal, '9'); assert.equal(stopPolicy.SendSIGKILL, 'yes');
       report.shutdownAdmission.standardStopTimeoutMs = 2000;
-      mark('ordinary_systemd_sigterm_during_instruction_capture');
+      mark(shutdownSessionOnly ? 'ordinary_systemd_sigterm_during_session_trust_enumeration' : 'ordinary_systemd_sigterm_during_instruction_capture');
       let originalAdmissionResponse: Response | undefined;
       await withRetainedUnitHistory([services.supervisorUnit, services.keeperUnit], async () => {
-        assert.equal(await heldInstruction(descriptor), descriptor);
+        assert(await heldAdmissionResource(resource));
         assert.equal(requestFinished, false);
         const stopped = command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]);
         const exit = show(services.supervisorUnit);
@@ -1788,15 +1880,34 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       // The descriptor observation precedes systemctl and the Store's private
       // gate. An admission may legitimately commit in that unobserved gap;
       // SIGTERM is not run.cancel and must not erase that durable response.
-      const outcome = exchange([{ protocolVersion: 1, method: 'run.get', runId }])[0]!;
+      const outcome = exchange([readAdmission])[0]!;
       if (!outcome.ok) {
         assert.equal(canonicalSha256(outcome), canonicalSha256(absent));
         assert.notEqual(originalAdmissionResponse?.ok, true, 'an acknowledged admission cannot disappear during graceful stop');
         assert.deepEqual(currentSession(), session); assert.equal(requestsReceived, 0);
         report.shutdownAdmission.acceptedBeforeGateRace = false;
-        report.shutdownAdmission.noAcceptedRunObservedAfterRestart = true;
+        report.shutdownAdmission[shutdownSessionOnly ? 'noAcceptedSessionObservedAfterRestart' : 'noAcceptedRunObservedAfterRestart'] = true;
         report.shutdownAdmission.sessionUnchanged = true;
+      } else if (shutdownSessionOnly) {
+        const cut = accepted(outcome, 'session.get'), created = cut.snapshot.session;
+        assert.equal(created.id, admittedId); assert.equal(created.name, admission.name);
+        assert.equal(created.contextRevision, 1); assert.equal(created.latestItemSeq, 0); assert.deepEqual(cut.items, []);
+        const workspace = parseJsonStrict((await readCas(created.workspaceIdentityRef)).toString('utf8')) as Record<string, any>;
+        assert.equal(workspace.kind, 'live'); assert.equal(workspace.canonicalRootPath, recipe.workspace);
+        assert.equal(workspace.ownerPrincipalId, principal); assert.equal(workspace.identityDigest, digestOmitting(workspace, 'identityDigest'));
+        const replay = exchange([admission, admission]); assert.deepEqual(replay[1], replay[0]);
+        if (originalAdmissionResponse) assert.deepEqual(replay[0], originalAdmissionResponse);
+        assert.deepEqual(accepted(replay[0]!, 'session.create').snapshot.session, created);
+        assert.deepEqual(exchange([admission])[0], replay[0], 'the exact original Session response must survive a fresh connection');
+        assert.deepEqual(accepted(exchange([readAdmission])[0]!, 'session.get').snapshot.session, created);
+        assert.deepEqual(currentSession(), session); assert.equal(requestsReceived, 0);
+        assert.equal(acceptedTcpConnections, 0); assert.equal(acceptedTlsConnections, 0);
+        report.shutdownAdmission.acceptedBeforeGateRace = true;
+        report.shutdownAdmission.acceptedAdmissionReplayPreserved = true;
+        report.shutdownAdmission.sameOriginalSessionOnRepeatedReplay = true;
+        report.shutdownAdmission.noRunOrProductiveRequest = true;
       } else {
+        const runId = admittedId;
         const cut = accepted(outcome, 'run.get'), run = cut.snapshot.run;
         assert.equal(run.id, runId); assert.equal(run.sessionId, session.id);
         const spec = parseJsonStrict((await readCas(run.specRef)).toString('utf8')) as Record<string, any>;
@@ -1836,8 +1947,10 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
       }
       assert.equal(await readFile(source, 'utf8'), hostBefore); assert.deepEqual(await readFile(instruction), instructionBytes);
       report.shutdownAdmission = { ...report.shutdownAdmission, qualified: true, gracefulExitZero: true,
-        genuineSuccessorPublicOwner: true, sameKeeper: true, originalSessionCreateResponsePreserved: true,
-        sourceAndInstructionUnchanged: true, precommitAbortCutQualified: false,
+        genuineSuccessorPublicOwner: true, sameKeeper: true,
+        ...(shutdownSessionOnly ? { baselineSessionCreateResponsePreserved: true, sourceAndTrustDecisionUnchanged: true }
+          : { originalSessionCreateResponsePreserved: true, sourceAndInstructionUnchanged: true }),
+        precommitAbortCutQualified: false,
         fullI1Qualified: false };
     } else {
     mark('public_run_submit');
@@ -3433,6 +3546,6 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
 assert(mode === '--campaign' || mode === '--failure-campaign' || mode === '--retry-campaign' || mode === '--authority-failure-campaign' ||
-  mode === '--storage-failure-campaign' || mode === '--shutdown-admission-campaign' || mode === '--shutdown-preparation-campaign' ||
+  mode === '--storage-failure-campaign' || mode === '--shutdown-admission-campaign' || mode === '--shutdown-session-campaign' || mode === '--shutdown-preparation-campaign' ||
   mode === '--shutdown-received-tool-campaign' || mode === '--shutdown-pending-model-campaign'); assert(filename && extra.length === 0);
 await campaign(filename, mode);
