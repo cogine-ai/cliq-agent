@@ -196,7 +196,9 @@ test('bashCommandHasUnsafeAllowSyntax inspects compound syntax inside shell -c s
     'env --split-string=\'bash -c "git status && rm -rf /"\'',
     'env -S\'bash -c "git status && rm -rf /"\'',
     'env -iS \'bash -c "git status && rm -rf /"\'',
-    'env -iS\'bash -c "git status && rm -rf /"\''
+    'env -iS\'bash -c "git status && rm -rf /"\'',
+    'csh -c "git status && rm -rf /"',
+    'tcsh -c "git status && rm -rf /"'
   ]) {
     assert.equal(bashCommandHasUnsafeAllowSyntax(command), true, command);
   }
